@@ -1,14 +1,16 @@
 #!/bin/sh
-# Mirrors the PR title check: type(optional scope): lowercase summary.
-# CI runs this on every commit in a PR, because each one lands on main.
-# Git's own Merge and Revert subjects pass through.
+# Checks a commit subject, or a PR title in CI: type(scope): summary, with a
+# summary that does not start with a capital letter. The subjects git
+# generates for merges and reverts pass through.
 subject=$(head -n 1 "$1")
 case "$subject" in
-  "Merge "* | "Revert "*) exit 0 ;;
+  "Merge branch '"* | "Merge remote-tracking branch '"* | 'Revert "'*) exit 0 ;;
 esac
-pattern='^(feat|fix|docs|refactor|test|chore|ci|build|perf)(\([a-z0-9-]+\))?!?: [^A-Z].*'
-if ! printf '%s' "$subject" | grep -Eq "$pattern"; then
-  echo "commit-msg: subject must be 'type(scope): summary' with a lowercase summary" >&2
-  echo "commit-msg: types: feat fix docs refactor test chore ci build perf" >&2
+types='feat|fix|docs|refactor|test|chore|ci|build|perf'
+scopes='server|web|ci|deps|docs'
+if ! printf '%s' "$subject" | grep -Eq "^($types)(\(($scopes)\))?!?: [^A-Z]"; then
+  echo "commit-msg: subject must be 'type(scope): summary', the summary not starting with a capital" >&2
+  echo "commit-msg: types: $types" >&2
+  echo "commit-msg: scopes: $scopes" >&2
   exit 1
 fi
