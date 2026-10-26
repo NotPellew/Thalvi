@@ -29,6 +29,8 @@ export interface CollapseInput {
   readonly voice: boolean;
   readonly display: DisplayState;
   readonly atBottom: boolean;
+  /** A message's start is pinned: the user is following, not scrolled away. */
+  readonly startPinned: boolean;
   readonly composerFocused: boolean;
   readonly keyboardOpen: boolean;
   readonly latestTall: boolean;
@@ -41,7 +43,7 @@ export function shouldCollapse(input: CollapseInput): boolean {
   return !(
     input.voice &&
     LIVE_DISPLAYS.includes(input.display) &&
-    input.atBottom &&
+    (input.atBottom || input.startPinned) &&
     !input.composerFocused &&
     !input.keyboardOpen &&
     !input.latestTall
@@ -51,6 +53,8 @@ export function shouldCollapse(input: CollapseInput): boolean {
 export interface ScrollInput {
   readonly nearBottom: boolean;
   readonly latestTall: boolean;
+  /** Some message's start is pinned and the user has not scrolled since. */
+  readonly pinned: boolean;
   /** The latest message already had its start pinned, even if the user has scrolled since. */
   readonly latestHandled: boolean;
   /** The latest message's start is pinned and the user has not scrolled since. */
@@ -60,7 +64,7 @@ export interface ScrollInput {
 /** Follow the bottom, but keep the start of a message taller than the viewport in view. */
 export function scrollTarget(input: ScrollInput): "start" | "bottom" | "stay" {
   if (input.latestPinned) return "start";
-  if (!input.nearBottom) return "stay";
+  if (!input.nearBottom && !input.pinned) return "stay";
   return input.latestTall && !input.latestHandled ? "start" : "bottom";
 }
 
@@ -299,6 +303,7 @@ export function createView(root: HTMLElement) {
       voice: lastState.voice,
       display: displayState(lastState),
       atBottom,
+      startPinned,
       composerFocused,
       keyboardOpen,
       latestTall,
@@ -420,11 +425,13 @@ export function createView(root: HTMLElement) {
       syncSend();
       const target = scrollTarget({
         nearBottom,
-        latestTall: latest instanceof HTMLElement && latest.offsetHeight > scroller.clientHeight,
+        latestTall,
+        pinned: startPinned,
         latestHandled: latest !== null && latest === handledLatest,
         latestPinned: latest !== null && latest === handledLatest && startPinned,
       });
       if (target === "bottom") {
+        startPinned = false;
         scroller.scrollTop = scroller.scrollHeight;
       } else if (target === "start" && latest instanceof HTMLElement) {
         handledLatest = latest;

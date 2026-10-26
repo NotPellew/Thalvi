@@ -5,6 +5,7 @@ const live: CollapseInput = {
   voice: true,
   display: "listening",
   atBottom: true,
+  startPinned: false,
   composerFocused: false,
   keyboardOpen: false,
   latestTall: false,
@@ -22,6 +23,7 @@ describe("shouldCollapse", () => {
     ["reconnecting collapses", { ...live, display: "reconnecting" }, true],
     ["thinking without voice collapses", { ...live, display: "thinking", voice: false }, true],
     ["scrolled up to read collapses", { ...live, atBottom: false }, true],
+    ["a pinned message start does not count as scrolling up", { ...live, atBottom: false, startPinned: true }, false],
     ["composer focused collapses", { ...live, composerFocused: true }, true],
     ["keyboard open collapses", { ...live, keyboardOpen: true }, true],
     ["tall latest message collapses", { ...live, latestTall: true }, true],
@@ -32,12 +34,14 @@ describe("shouldCollapse", () => {
 });
 
 describe("scrollTarget", () => {
-  const following: ScrollInput = { nearBottom: true, latestTall: false, latestHandled: false, latestPinned: false };
+  const following: ScrollInput = { nearBottom: true, latestTall: false, pinned: false, latestHandled: false, latestPinned: false };
   const cases: [string, ScrollInput, string][] = [
     ["follows the bottom while the latest message is short", following, "bottom"],
     ["keeps the start of a latest message that has just grown taller than the viewport", { ...following, latestTall: true }, "start"],
-    ["keeps the start in view while the pinned message keeps growing", { ...following, latestTall: true, latestHandled: true, latestPinned: true }, "start"],
+    ["keeps the start in view while the pinned message keeps growing", { ...following, nearBottom: false, pinned: true, latestTall: true, latestHandled: true, latestPinned: true }, "start"],
     ["follows the bottom once the user scrolled down to a message already pinned", { ...following, latestTall: true, latestHandled: true }, "bottom"],
+    ["follows the bottom into the next turn after a pinned reply", { ...following, nearBottom: false, pinned: true }, "bottom"],
+    ["pins the start of a tall next turn after a pinned reply", { ...following, nearBottom: false, pinned: true, latestTall: true }, "start"],
     ["leaves a user who scrolled up where they are", { ...following, nearBottom: false, latestTall: true, latestHandled: true }, "stay"],
     ["leaves a user who scrolled up from a short message", { ...following, nearBottom: false }, "stay"],
   ];
