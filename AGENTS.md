@@ -30,8 +30,11 @@ directing you.
 
 - Latency our code adds is a bug. Keep the path from input to response short,
   use results as they stream in instead of waiting for whole responses, and
-  move work that can wait off that path. Model and network latency are outside
-  this project's control; don't build machinery to hide them.
+  move work that can wait off that path. Tricks that make waiting on a model
+  feel shorter (starting early, a quick acknowledgement) are welcome when the
+  recordings show they help, but numbers stay honest: report a model's real
+  latency and the latency the user perceives separately, never one as the
+  other.
 - The user can always tell what Thalvi is doing, and can interrupt or cancel
   it at any moment.
 - When something fails, the user is told what happened in plain words and the
