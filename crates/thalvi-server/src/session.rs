@@ -15,6 +15,7 @@ use tracing::Instrument;
 
 use crate::model::{ChatMessage, ChatModel};
 use crate::recognizer::{Recognizer, RecognizerEvent, RecognizerFactory};
+use crate::recorder::{AudioBuffer, Recorder, RecordingConfig, start_recording};
 use crate::sentence::SentenceSplitter;
 use crate::store::SessionStore;
 use crate::tts::Tts;
@@ -38,12 +39,72 @@ enum RecognizerMessage {
 
 struct ActiveReply {
     handle: JoinHandle<()>,
+    turn: u64,
     started_at: Instant,
     sent_sentences: Vec<String>,
     text: String,
     speaking_sent: bool,
+    first_delta_at: Option<Instant>,
+    first_sentence_at: Option<Instant>,
     first_audio_at: Option<Instant>,
     audio_bytes: usize,
+}
+
+#[derive(Default)]
+struct PendingVoice {
+    start_ms: Option<u64>,
+    end_ms: Option<u64>,
+}
+
+/// Maps recognizer-processed audio time to when that audio was forwarded.
+#[derive(Default)]
+struct ForwardClock {
+    forwarded_ms: u64,
+    marks: Vec<(u64, Instant)>,
+}
+
+impl ForwardClock {
+    fn reset(&mut self) {
+        self.forwarded_ms = 0;
+        self.marks.clear();
+    }
+
+    fn push(&mut self, bytes: usize, at: Instant) {
+        self.forwarded_ms += u64::try_from(bytes).unwrap_or(u64::MAX) / 48;
+        self.marks.push((self.forwarded_ms, at));
+    }
+
+    fn instant_for(&self, processed_ms: u64) -> Option<Instant> {
+        self.marks
+            .iter()
+            .find(|(mark_ms, _)| *mark_ms >= processed_ms)
+            .map(|(_, at)| *at)
+    }
+}
+
+impl TurnLog {
+    fn new(recorder: Recorder, next_turn: u64) -> Self {
+        Self {
+            recorder,
+            pending: std::collections::HashMap::new(),
+            audio: AudioBuffer::default(),
+            forward_clock: ForwardClock::default(),
+            next_turn,
+            last_reply_turn: 0,
+            last_reply_audio_bytes: 0,
+        }
+    }
+}
+
+/// Per-session recording state: pending voice turns and forwarded audio.
+struct TurnLog {
+    recorder: Recorder,
+    pending: std::collections::HashMap<String, PendingVoice>,
+    audio: AudioBuffer,
+    forward_clock: ForwardClock,
+    next_turn: u64,
+    last_reply_turn: u64,
+    last_reply_audio_bytes: usize,
 }
 
 struct RecognizerHandle {
@@ -63,6 +124,7 @@ pub async fn handle_session<F, M, T>(
     tts: Arc<T>,
     store: Arc<SessionStore>,
     resume: Option<String>,
+    recording_config: RecordingConfig,
 ) where
     F: RecognizerFactory + Send + Sync + 'static,
     F::Rec: Send + 'static,
@@ -71,19 +133,22 @@ pub async fn handle_session<F, M, T>(
 {
     let (mut sink, mut stream) = socket.split();
     let factory = Arc::new(factory);
-    let (session_id, mut history) = resume
+    let session_started = Instant::now();
+    let resumed = resume.as_deref().is_some_and(|id| store.contains(id));
+    let (session_id, mut history, restored_next_turn) = resume
         .as_deref()
-        .and_then(|id| store.take(id).map(|history| (id.to_string(), history)))
-        .unwrap_or_else(|| (store.new_id(), Vec::new()));
-    let turns: Vec<serde_json::Value> = history
-        .iter()
-        .map(|message| json!({"role": message.role, "text": message.content}))
-        .collect();
-    send_json(
-        &mut sink,
-        &json!({"type": "session", "id": session_id.clone(), "turns": turns}),
-    )
-    .await;
+        .and_then(|id| {
+            store
+                .take(id)
+                .map(|(history, next_turn)| (id.to_string(), history, next_turn))
+        })
+        .unwrap_or_else(|| (store.new_id(), Vec::new(), 0));
+    let recording = start_recording(recording_config, session_id.clone());
+    let mut turn_log = TurnLog::new(recording.recorder.clone(), restored_next_turn);
+    turn_log
+        .recorder
+        .emit("session_open", json!({"resumed": resumed}));
+    send_session_opening(&mut sink, &session_id, &history).await;
     send_state(&mut sink, "idle").await;
     tracing::info!("session opened");
 
@@ -114,31 +179,17 @@ pub async fn handle_session<F, M, T>(
                     Some(Ok(Message::Binary(audio))) => {
                         let forwarded = recognizer.as_ref().is_some_and(|handle| handle.ready)
                             && recognizer.as_ref().is_some_and(|handle| handle.audio_tx.try_send(audio.to_vec()).is_ok());
-                        if !forwarded {
+                        if forwarded {
+                            turn_log.forward_clock.push(audio.len(), Instant::now());
+                            if turn_log.recorder.audio_enabled() {
+                                turn_log.audio.push(&audio);
+                            }
+                        } else {
                             tracing::debug!("mic frame dropped");
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
-                        match parse_client_text(&text) {
-                            ClientText::Cancel => {
-                                interrupt(&mut sink, &mut history, &mut reply, &mut reply_rx, &mut playing_until, voice_on, "cancel").await;
-                            }
-                            ClientText::Voice(on) => {
-                                voice_on = on;
-                                set_voice(on, &mut sink, &mut recognizer, &mut rec_rx, &factory, &voice, reply.is_some(), &mut playing_until).await;
-                            }
-                            ClientText::Text(raw) => {
-                                match validate_text(&raw) {
-                                    Ok(text) => {
-                                        begin_turn(&mut sink, &mut history, &mut reply, &mut reply_rx, &mut playing_until, &model, &tts, &voice, voice_on, text).await;
-                                    }
-                                    Err(message) => {
-                                        send_json(&mut sink, &json!({"type": "error", "message": message})).await;
-                                    }
-                                }
-                            }
-                            ClientText::Other => {}
-                        }
+                        handle_client_text(&text, &mut sink, &mut recognizer, &mut rec_rx, &factory, &voice, &mut voice_on, &mut history, &mut reply, &mut reply_rx, &mut playing_until, &model, &tts, &mut turn_log).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
@@ -149,14 +200,14 @@ pub async fn handle_session<F, M, T>(
                 }
             }
             recognizer_message = recognizer_event => {
-                handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut history, &mut reply, &mut reply_rx, &mut playing_until, &model, &tts, &voice, voice_on).await;
+                handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut history, &mut reply, &mut reply_rx, &mut playing_until, &model, &tts, &voice, voice_on, &mut turn_log).await;
             }
             event = reply_event => {
                 let Some(event) = event else {
                     reply_rx = None;
                     continue;
                 };
-                handle_reply_event(event, &mut sink, &mut history, &mut reply, &mut reply_rx, &mut playing_until, voice_on).await;
+                handle_reply_event(event, &mut sink, &mut history, &mut reply, &mut reply_rx, &mut playing_until, voice_on, &mut turn_log).await;
             }
         }
     }
@@ -168,7 +219,96 @@ pub async fn handle_session<F, M, T>(
         handle.task.abort();
     }
     tracing::info!("session closed");
-    store.save(session_id, history);
+    let next_turn = turn_log.next_turn;
+    store.save(session_id, history, next_turn);
+    drop(turn_log);
+    recording
+        .finish(u64::try_from(session_started.elapsed().as_millis()).unwrap_or(u64::MAX))
+        .await;
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session state is passed explicitly rather than bundled into a context type"
+)]
+async fn handle_client_text<F, M, T>(
+    text: &str,
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    recognizer: &mut Option<RecognizerHandle>,
+    rec_rx: &mut Option<mpsc::Receiver<RecognizerMessage>>,
+    factory: &Arc<F>,
+    voice: &Arc<AtomicBool>,
+    voice_on: &mut bool,
+    history: &mut Vec<ChatMessage>,
+    reply: &mut Option<ActiveReply>,
+    reply_rx: &mut Option<mpsc::Receiver<ReplyEvent>>,
+    playing_until: &mut Option<Instant>,
+    model: &Arc<M>,
+    tts: &Arc<T>,
+    turn_log: &mut TurnLog,
+) where
+    F: RecognizerFactory + Send + Sync + 'static,
+    F::Rec: Send + 'static,
+    M: ChatModel + 'static,
+    T: Tts + 'static,
+{
+    match parse_client_text(text) {
+        ClientText::Cancel => {
+            interrupt(
+                sink,
+                history,
+                reply,
+                reply_rx,
+                playing_until,
+                *voice_on,
+                "cancel",
+                turn_log,
+            )
+            .await;
+        }
+        ClientText::Voice(on) => {
+            *voice_on = on;
+            set_voice(
+                on,
+                sink,
+                recognizer,
+                rec_rx,
+                factory,
+                voice,
+                reply.is_some(),
+                playing_until,
+                turn_log.recorder.clone(),
+            )
+            .await;
+        }
+        ClientText::Text(raw) => match validate_text(&raw) {
+            Ok(text) => {
+                let turn = begin_turn(
+                    sink,
+                    history,
+                    reply,
+                    reply_rx,
+                    playing_until,
+                    model,
+                    tts,
+                    voice,
+                    *voice_on,
+                    text.clone(),
+                    turn_log,
+                )
+                .await;
+                let mut fields = json!({"turn": turn, "source": "text"});
+                if turn_log.recorder.text_enabled() {
+                    fields["text"] = json!(text);
+                }
+                turn_log.recorder.emit("turn", fields);
+            }
+            Err(message) => {
+                send_json(sink, &json!({"type": "error", "message": message})).await;
+            }
+        },
+        ClientText::Other => {}
+    }
 }
 
 #[expect(
@@ -187,6 +327,7 @@ async fn handle_recognizer_message<M, T>(
     tts: &Arc<T>,
     voice: &Arc<AtomicBool>,
     voice_on: bool,
+    turn_log: &mut TurnLog,
 ) where
     M: ChatModel + 'static,
     T: Tts + 'static,
@@ -195,7 +336,17 @@ async fn handle_recognizer_message<M, T>(
         tracing::debug!(?event, "recognizer event");
     }
     match recognizer_message {
-        Some(RecognizerMessage::Event(RecognizerEvent::SpeechStart)) => {
+        Some(RecognizerMessage::Event(RecognizerEvent::SpeechStart {
+            turn_id,
+            audio_processed_ms,
+        })) => {
+            turn_log.pending.insert(
+                turn_id,
+                PendingVoice {
+                    start_ms: audio_processed_ms,
+                    end_ms: None,
+                },
+            );
             interrupt(
                 sink,
                 history,
@@ -204,15 +355,24 @@ async fn handle_recognizer_message<M, T>(
                 playing_until,
                 voice_on,
                 "speech start",
+                turn_log,
             )
             .await;
+        }
+        Some(RecognizerMessage::Event(RecognizerEvent::SpeechEnd {
+            turn_id,
+            audio_processed_ms,
+        })) => {
+            let pending = turn_log.pending.entry(turn_id).or_default();
+            pending.end_ms = audio_processed_ms;
         }
         Some(RecognizerMessage::Event(RecognizerEvent::Partial { text })) => {
             send_json(sink, &json!({"type": "partial", "text": text})).await;
         }
-        Some(RecognizerMessage::Event(RecognizerEvent::SpeechComplete { text })) => {
+        Some(RecognizerMessage::Event(RecognizerEvent::SpeechComplete { turn_id, text })) => {
             if !text.trim().is_empty() {
-                begin_turn(
+                let pending = turn_log.pending.remove(&turn_id).unwrap_or_default();
+                let turn = begin_turn(
                     sink,
                     history,
                     reply,
@@ -222,9 +382,11 @@ async fn handle_recognizer_message<M, T>(
                     tts,
                     voice,
                     voice_on,
-                    text,
+                    text.clone(),
+                    turn_log,
                 )
                 .await;
+                record_voice_turn(turn_log, turn, &pending, &text);
             }
         }
         Some(RecognizerMessage::Event(RecognizerEvent::Error { message })) => {
@@ -255,6 +417,8 @@ async fn handle_recognizer_message<M, T>(
             }
         }
         Some(RecognizerMessage::Ready) => {
+            turn_log.audio.reset();
+            turn_log.forward_clock.reset();
             if let Some(handle) = recognizer {
                 handle.ready = true;
             }
@@ -266,15 +430,65 @@ async fn handle_recognizer_message<M, T>(
     }
 }
 
-fn spawn_recognizer<F>(factory: &Arc<F>) -> (RecognizerHandle, mpsc::Receiver<RecognizerMessage>)
+fn record_voice_turn(turn_log: &mut TurnLog, turn: u64, pending: &PendingVoice, text: &str) {
+    let recorder = &turn_log.recorder;
+    let mut fields = json!({"turn": turn, "source": "voice"});
+    if let (Some(start), Some(end)) = (pending.start_ms, pending.end_ms) {
+        fields["speech_ms"] = json!(end.saturating_sub(start));
+    }
+    if let Some(end_ms) = pending.end_ms
+        && let Some(forwarded_at) = turn_log.forward_clock.instant_for(end_ms)
+    {
+        fields["endpoint_lag_ms"] =
+            json!(u64::try_from(forwarded_at.elapsed().as_millis()).unwrap_or(u64::MAX));
+    }
+    if recorder.text_enabled() {
+        fields["text"] = json!(text);
+    }
+    if recorder.audio_enabled() {
+        let start = pending.start_ms.unwrap_or(0);
+        let end = pending.end_ms.unwrap_or_else(|| turn_log.audio.end_ms());
+        let pcm = turn_log.audio.cut(start, end, 300);
+        if !pcm.is_empty() {
+            recorder.emit_wav(turn, pcm);
+            if recorder.metrics_enabled() || recorder.text_enabled() {
+                fields["audio"] = json!(format!("{turn}.wav"));
+            }
+        }
+        turn_log.audio.prune(end.saturating_sub(300));
+    }
+    recorder.emit("turn", fields);
+}
+
+async fn send_session_opening(
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    session_id: &str,
+    history: &[ChatMessage],
+) {
+    let turns: Vec<serde_json::Value> = history
+        .iter()
+        .map(|message| json!({"role": message.role, "text": message.content}))
+        .collect();
+    send_json(
+        sink,
+        &json!({"type": "session", "id": session_id, "turns": turns}),
+    )
+    .await;
+}
+
+fn spawn_recognizer<F>(
+    factory: &Arc<F>,
+    recorder: Recorder,
+) -> (RecognizerHandle, mpsc::Receiver<RecognizerMessage>)
 where
     F: RecognizerFactory + Send + Sync + 'static,
     F::Rec: Send + 'static,
 {
     let (audio_tx, audio_rx) = mpsc::channel::<Vec<u8>>(32);
     let (rec_tx, rec_rx) = mpsc::channel::<RecognizerMessage>(32);
-    let task =
-        tokio::spawn(run_recognizer(Arc::clone(factory), audio_rx, rec_tx).in_current_span());
+    let task = tokio::spawn(
+        run_recognizer(Arc::clone(factory), audio_rx, rec_tx, recorder).in_current_span(),
+    );
     (
         RecognizerHandle {
             audio_tx,
@@ -299,6 +513,7 @@ async fn set_voice<F>(
     voice: &Arc<AtomicBool>,
     reply_active: bool,
     playing_until: &mut Option<Instant>,
+    recorder: Recorder,
 ) where
     F: RecognizerFactory + Send + Sync + 'static,
     F::Rec: Send + 'static,
@@ -310,7 +525,7 @@ async fn set_voice<F>(
             if let Some(old) = recognizer.take() {
                 old.task.abort();
             }
-            let (handle, receiver) = spawn_recognizer(factory);
+            let (handle, receiver) = spawn_recognizer(factory, recorder.clone());
             *recognizer = Some(handle);
             *rec_rx = Some(receiver);
             send_state(sink, "starting").await;
@@ -383,7 +598,9 @@ async fn begin_turn<M, T>(
     voice: &Arc<AtomicBool>,
     voice_on: bool,
     text: String,
-) where
+    turn_log: &mut TurnLog,
+) -> u64
+where
     M: ChatModel + 'static,
     T: Tts + 'static,
 {
@@ -397,9 +614,12 @@ async fn begin_turn<M, T>(
             playing_until,
             voice_on,
             "new turn",
+            turn_log,
         )
         .await;
     }
+    turn_log.next_turn += 1;
+    let turn = turn_log.next_turn;
     *playing_until = None;
     history.push(ChatMessage::user(text.clone()));
     send_json(sink, &json!({"type": "user", "text": text})).await;
@@ -409,9 +629,12 @@ async fn begin_turn<M, T>(
         Arc::clone(tts),
         Arc::clone(voice),
         history.clone(),
+        turn,
+        turn_log.recorder.clone(),
     );
     *reply = Some(active);
     *reply_rx = Some(events_rx);
+    turn
 }
 
 fn start_reply<M, T>(
@@ -419,6 +642,8 @@ fn start_reply<M, T>(
     tts: Arc<T>,
     voice: Arc<AtomicBool>,
     history: Vec<ChatMessage>,
+    turn: u64,
+    recorder: Recorder,
 ) -> (ActiveReply, mpsc::Receiver<ReplyEvent>)
 where
     M: ChatModel + 'static,
@@ -426,17 +651,26 @@ where
 {
     let (events_tx, events_rx) = mpsc::channel::<ReplyEvent>(64);
     let active = ActiveReply {
-        handle: tokio::spawn(run_reply(model, tts, voice, history, events_tx).in_current_span()),
+        handle: tokio::spawn(
+            run_reply(model, tts, voice, history, events_tx, turn, recorder).in_current_span(),
+        ),
+        turn,
         started_at: Instant::now(),
         sent_sentences: Vec::new(),
         text: String::new(),
         speaking_sent: false,
+        first_delta_at: None,
+        first_sentence_at: None,
         first_audio_at: None,
         audio_bytes: 0,
     };
     (active, events_rx)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session state is passed explicitly rather than bundled into a context type"
+)]
 async fn handle_reply_event(
     event: ReplyEvent,
     sink: &mut (impl SinkExt<Message> + Unpin),
@@ -445,16 +679,23 @@ async fn handle_reply_event(
     reply_rx: &mut Option<mpsc::Receiver<ReplyEvent>>,
     playing_until: &mut Option<Instant>,
     voice_on: bool,
+    turn_log: &mut TurnLog,
 ) {
     match event {
         ReplyEvent::Delta(text) => {
             if let Some(active) = reply {
+                if active.first_delta_at.is_none() {
+                    active.first_delta_at = Some(Instant::now());
+                }
                 active.text.push_str(&text);
             }
             send_json(sink, &json!({"type": "reply", "text": text})).await;
         }
         ReplyEvent::Sentence(sentence) => {
             if let Some(active) = reply {
+                if active.first_sentence_at.is_none() {
+                    active.first_sentence_at = Some(Instant::now());
+                }
                 active.sent_sentences.push(sentence);
             }
         }
@@ -481,22 +722,63 @@ async fn handle_reply_event(
                     "reply finished"
                 );
                 record_assistant_history(history, &active);
+                turn_log.last_reply_turn = active.turn;
+                turn_log.last_reply_audio_bytes = active.audio_bytes;
+                emit_reply_record(&turn_log.recorder, &active, "done", None);
                 *playing_until = playback_deadline(&active);
             }
             *reply_rx = None;
+            send_json(sink, &json!({"type": "reply_end"})).await;
             send_state(sink, if voice_on { "listening" } else { "idle" }).await;
         }
         ReplyEvent::Failed(message) => {
             tracing::warn!(%message, "reply failed");
             if let Some(active) = reply.take() {
                 record_assistant_history(history, &active);
+                emit_reply_record(&turn_log.recorder, &active, "failed", Some(&message));
             }
             *reply_rx = None;
             *playing_until = None;
+            send_json(sink, &json!({"type": "reply_end"})).await;
             send_json(sink, &json!({"type": "error", "message": message})).await;
             send_state(sink, if voice_on { "listening" } else { "idle" }).await;
         }
     }
+}
+
+fn emit_reply_record(
+    recorder: &Recorder,
+    active: &ActiveReply,
+    outcome: &str,
+    error: Option<&str>,
+) {
+    let ms_since = |at: Option<Instant>| {
+        at.map(|at| {
+            u64::try_from(at.duration_since(active.started_at).as_millis()).unwrap_or(u64::MAX)
+        })
+    };
+    let mut fields = json!({
+        "turn": active.turn,
+        "model": recorder.llm_model(),
+        "reasoning_effort": recorder.reasoning_effort(),
+        "first_token_ms": ms_since(active.first_delta_at),
+        "first_sentence_ms": ms_since(active.first_sentence_at),
+        "model_ms": u64::try_from(active.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "tts_model": recorder.tts_model(),
+        "voice": recorder.tts_voice(),
+        "first_audio_ms": ms_since(active.first_audio_at),
+        "sentences": active.sent_sentences.len(),
+        "audio_ms": u64::try_from(active.audio_bytes).unwrap_or(u64::MAX) * 1000 / 48_000,
+        "outcome": outcome,
+        "error": error,
+    });
+    if recorder.text_enabled() {
+        fields["text"] = json!(active.text.trim());
+        if outcome == "interrupted" {
+            fields["tts_text"] = json!(active.sent_sentences.join(" "));
+        }
+    }
+    recorder.emit("reply", fields);
 }
 
 fn playback_deadline(active: &ActiveReply) -> Option<Instant> {
@@ -524,6 +806,10 @@ fn record_assistant_history(history: &mut Vec<ChatMessage>, active: &ActiveReply
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session state is passed explicitly rather than bundled into a context type"
+)]
 async fn interrupt(
     sink: &mut (impl SinkExt<Message> + Unpin),
     history: &mut Vec<ChatMessage>,
@@ -532,6 +818,7 @@ async fn interrupt(
     playing_until: &mut Option<Instant>,
     voice_on: bool,
     reason: &'static str,
+    turn_log: &mut TurnLog,
 ) {
     let reply_active = reply.is_some();
     let audio_playing = playing_until.is_some_and(|until| until > Instant::now());
@@ -539,16 +826,36 @@ async fn interrupt(
         *playing_until = None;
         return;
     }
+    let (turn, audio_bytes) = match reply.as_ref() {
+        Some(active) => (active.turn, active.audio_bytes),
+        None => (turn_log.last_reply_turn, turn_log.last_reply_audio_bytes),
+    };
+    turn_log.recorder.emit(
+        "interrupt",
+        json!({
+            "turn": turn,
+            "reason": reason,
+            "audio_sent_ms": u64::try_from(audio_bytes).unwrap_or(u64::MAX) * 1000 / 48_000,
+        }),
+    );
     if let Some(mut active) = reply.take() {
         active.handle.abort();
         if let Some(receiver) = reply_rx.as_mut() {
             while let Ok(event) = receiver.try_recv() {
-                if let ReplyEvent::Sentence(sentence) = event {
-                    active.sent_sentences.push(sentence);
+                match event {
+                    ReplyEvent::Sentence(sentence) => {
+                        if active.first_sentence_at.is_none() {
+                            active.first_sentence_at = Some(Instant::now());
+                        }
+                        active.sent_sentences.push(sentence);
+                    }
+                    ReplyEvent::Delta(text) => active.text.push_str(&text),
+                    _ => {}
                 }
             }
         }
         record_assistant_history(history, &active);
+        emit_reply_record(&turn_log.recorder, &active, "interrupted", None);
     }
     *reply_rx = None;
     *playing_until = None;
@@ -579,6 +886,8 @@ async fn run_reply<M, T>(
     voice: Arc<AtomicBool>,
     history: Vec<ChatMessage>,
     events: mpsc::Sender<ReplyEvent>,
+    turn: u64,
+    recorder: Recorder,
 ) where
     M: ChatModel,
     T: Tts,
@@ -611,14 +920,16 @@ async fn run_reply<M, T>(
             return;
         }
         for sentence in splitter.push(&delta) {
-            if voice.load(Ordering::Relaxed) && !speak_sentence(&tts, &events, &sentence).await {
+            if voice.load(Ordering::Relaxed)
+                && !speak_sentence(&tts, &events, &sentence, turn, &recorder).await
+            {
                 return;
             }
         }
     }
     if let Some(tail) = splitter.finish()
         && voice.load(Ordering::Relaxed)
-        && !speak_sentence(&tts, &events, &tail).await
+        && !speak_sentence(&tts, &events, &tail, turn, &recorder).await
     {
         return;
     }
@@ -630,7 +941,12 @@ async fn speak_sentence<T: Tts>(
     tts: &Arc<T>,
     events: &mpsc::Sender<ReplyEvent>,
     sentence: &str,
+    turn: u64,
+    recorder: &Recorder,
 ) -> bool {
+    let tts_started = Instant::now();
+    let mut first_byte_at: Option<Instant> = None;
+    let mut audio_bytes: usize = 0;
     if events
         .send(ReplyEvent::Sentence(sentence.to_string()))
         .await
@@ -652,6 +968,10 @@ async fn speak_sentence<T: Tts>(
     while let Some(chunk) = audio.next().await {
         match chunk {
             Ok(chunk) => {
+                if first_byte_at.is_none() {
+                    first_byte_at = Some(Instant::now());
+                }
+                audio_bytes += chunk.len();
                 if events.send(ReplyEvent::Audio(chunk)).await.is_err() {
                     return false;
                 }
@@ -666,6 +986,19 @@ async fn speak_sentence<T: Tts>(
             }
         }
     }
+    let ms_since = |at: Option<Instant>| {
+        at.map(|at| u64::try_from(at.duration_since(tts_started).as_millis()).unwrap_or(u64::MAX))
+    };
+    recorder.emit(
+        "tts_sentence",
+        json!({
+            "turn": turn,
+            "chars": sentence.chars().count(),
+            "first_byte_ms": ms_since(first_byte_at),
+            "total_ms": u64::try_from(tts_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "audio_ms": u64::try_from(audio_bytes).unwrap_or(u64::MAX) * 1000 / 48_000,
+        }),
+    );
     true
 }
 
@@ -676,7 +1009,9 @@ async fn note_disconnect(
     backoff: &mut Duration,
     reconnect_at: &mut Option<Instant>,
     fatal: &mut bool,
+    recorder: &Recorder,
 ) {
+    recorder.emit("stt_disconnect", json!({"reason": message}));
     let _ = events
         .send(RecognizerMessage::Disconnected {
             message,
@@ -691,6 +1026,10 @@ async fn note_disconnect(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "recognizer state is passed explicitly rather than bundled into a context type"
+)]
 async fn attempt_reconnect<F>(
     factory: &F,
     recognizer: &mut Option<F::Rec>,
@@ -698,18 +1037,34 @@ async fn attempt_reconnect<F>(
     reconnect_at: &mut Option<Instant>,
     events: &mpsc::Sender<RecognizerMessage>,
     fatal: &mut bool,
+    recorder: &Recorder,
+    attempt: &mut u64,
 ) where
     F: RecognizerFactory,
 {
+    *attempt += 1;
+    let started = Instant::now();
     match factory.connect().await {
         Ok(rec) => {
+            emit_stt_connect(recorder, started, "ok", *attempt);
             *recognizer = Some(rec);
             *backoff = INITIAL_BACKOFF;
             let _ = events.send(RecognizerMessage::Ready).await;
         }
         Err(error) => {
+            emit_stt_connect(
+                recorder,
+                started,
+                if error.is_fatal() {
+                    "fatal"
+                } else {
+                    "retryable"
+                },
+                *attempt,
+            );
             if error.is_fatal() {
                 *fatal = true;
+                recorder.emit("stt_disconnect", json!({"reason": error.to_string()}));
                 let _ = events
                     .send(RecognizerMessage::Disconnected {
                         message: error.to_string(),
@@ -724,22 +1079,49 @@ async fn attempt_reconnect<F>(
     }
 }
 
+fn emit_stt_connect(recorder: &Recorder, started: Instant, outcome: &str, attempt: u64) {
+    recorder.emit(
+        "stt_connect",
+        json!({
+            "model": recorder.stt_model(),
+            "ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "outcome": outcome,
+            "attempt": attempt,
+        }),
+    );
+}
+
 async fn initial_connect<F>(
     factory: &F,
     events: &mpsc::Sender<RecognizerMessage>,
     backoff: &mut Duration,
     reconnect_at: &mut Option<Instant>,
     fatal: &mut bool,
+    recorder: &Recorder,
+    attempt: &mut u64,
 ) -> Option<F::Rec>
 where
     F: RecognizerFactory,
 {
+    *attempt += 1;
+    let started = Instant::now();
     match factory.connect().await {
         Ok(rec) => {
+            emit_stt_connect(recorder, started, "ok", *attempt);
             let _ = events.send(RecognizerMessage::Ready).await;
             Some(rec)
         }
         Err(error) => {
+            emit_stt_connect(
+                recorder,
+                started,
+                if error.is_fatal() {
+                    "fatal"
+                } else {
+                    "retryable"
+                },
+                *attempt,
+            );
             let is_fatal = error.is_fatal();
             note_disconnect(
                 events,
@@ -748,6 +1130,7 @@ where
                 backoff,
                 reconnect_at,
                 fatal,
+                recorder,
             )
             .await;
             None
@@ -759,6 +1142,7 @@ async fn run_recognizer<F>(
     factory: Arc<F>,
     mut audio_rx: mpsc::Receiver<Vec<u8>>,
     events: mpsc::Sender<RecognizerMessage>,
+    recorder: Recorder,
 ) where
     F: RecognizerFactory,
     F::Rec: Send,
@@ -767,12 +1151,15 @@ async fn run_recognizer<F>(
     let mut reconnect_at: Option<Instant> = None;
     let mut fatal = false;
 
+    let mut attempt: u64 = 0;
     let mut recognizer = initial_connect(
         &*factory,
         &events,
         &mut backoff,
         &mut reconnect_at,
         &mut fatal,
+        &recorder,
+        &mut attempt,
     )
     .await;
 
@@ -814,6 +1201,7 @@ async fn run_recognizer<F>(
                         &mut backoff,
                         &mut reconnect_at,
                         &mut fatal,
+                        &recorder,
                     )
                     .await;
                 }
@@ -828,28 +1216,20 @@ async fn run_recognizer<F>(
                             return;
                         }
                     }
-                    Some(Err(error)) => {
+                    other => {
                         recognizer = None;
-                        let is_fatal = error.is_fatal();
+                        let (message, is_fatal) = match other {
+                            Some(Err(error)) => (error.to_string(), error.is_fatal()),
+                            _ => ("recognizer connection closed".to_string(), false),
+                        };
                         note_disconnect(
                             &events,
-                            error.to_string(),
+                            message,
                             is_fatal,
                             &mut backoff,
                             &mut reconnect_at,
                             &mut fatal,
-                        )
-                        .await;
-                    }
-                    None => {
-                        recognizer = None;
-                        note_disconnect(
-                            &events,
-                            "recognizer connection closed".to_string(),
-                            false,
-                            &mut backoff,
-                            &mut reconnect_at,
-                            &mut fatal,
+                            &recorder,
                         )
                         .await;
                     }
@@ -857,8 +1237,32 @@ async fn run_recognizer<F>(
             }
             () = reconnect_sleep => {
                 reconnect_at = None;
-                attempt_reconnect(&*factory, &mut recognizer, &mut backoff, &mut reconnect_at, &events, &mut fatal).await;
+                attempt_reconnect(&*factory, &mut recognizer, &mut backoff, &mut reconnect_at, &events, &mut fatal, &recorder, &mut attempt).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ForwardClock;
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    #[test]
+    fn forward_clock_maps_processed_time_to_when_it_was_forwarded() {
+        let base = Instant::now();
+        let mut clock = ForwardClock::default();
+        clock.push(3840, base);
+        clock.push(3840, base + Duration::from_millis(150));
+        assert_eq!(clock.instant_for(0), Some(base));
+        assert_eq!(clock.instant_for(80), Some(base));
+        assert_eq!(
+            clock.instant_for(100),
+            Some(base + Duration::from_millis(150))
+        );
+        assert_eq!(clock.instant_for(10_000), None);
+        clock.reset();
+        assert_eq!(clock.instant_for(0), None);
     }
 }

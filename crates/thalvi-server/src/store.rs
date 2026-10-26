@@ -15,6 +15,7 @@ pub const RETENTION: Duration = Duration::from_mins(10);
 #[derive(Debug)]
 struct Saved {
     history: Vec<ChatMessage>,
+    next_turn: u64,
     expires_at: Instant,
 }
 
@@ -59,19 +60,21 @@ impl SessionStore {
         format!("s{count:x}-{nanos:x}")
     }
 
-    /// Takes the saved history for `id`, if present and not expired.
-    pub fn take(&self, id: &str) -> Option<Vec<ChatMessage>> {
+    /// Takes the saved history and next turn number for `id`, if present
+    /// and not expired.
+    pub fn take(&self, id: &str) -> Option<(Vec<ChatMessage>, u64)> {
         let mut saved = self.saved.lock().ok()?;
         let entry = saved.remove(id)?;
         if entry.expires_at > Instant::now() {
-            Some(entry.history)
+            Some((entry.history, entry.next_turn))
         } else {
             None
         }
     }
 
-    /// Saves `history` under `id` for the retention period.
-    pub fn save(&self, id: String, history: Vec<ChatMessage>) {
+    /// Saves `history` and the next turn number under `id` for the
+    /// retention period.
+    pub fn save(&self, id: String, history: Vec<ChatMessage>, next_turn: u64) {
         if let Ok(mut saved) = self.saved.lock() {
             let now = Instant::now();
             saved.retain(|_, entry| entry.expires_at > now);
@@ -79,6 +82,7 @@ impl SessionStore {
                 id,
                 Saved {
                     history,
+                    next_turn,
                     expires_at: Instant::now() + self.ttl,
                 },
             );
@@ -108,16 +112,21 @@ mod tests {
         store.save(
             "known".to_string(),
             vec![ChatMessage::user("hi".to_string())],
+            3,
         );
         assert_eq!(
             store.take("known"),
-            Some(vec![ChatMessage::user("hi".to_string())])
+            Some((vec![ChatMessage::user("hi".to_string())], 3))
         );
         assert_eq!(store.take("known"), None);
         assert_eq!(store.take("unknown"), None);
 
         let expired = SessionStore::with_ttl(Duration::ZERO);
-        expired.save("old".to_string(), vec![ChatMessage::user("hi".to_string())]);
+        expired.save(
+            "old".to_string(),
+            vec![ChatMessage::user("hi".to_string())],
+            1,
+        );
         assert_eq!(expired.take("old"), None);
         assert!(!expired.contains("old"));
     }

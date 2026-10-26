@@ -14,6 +14,7 @@ use tracing::Instrument;
 use crate::config::Config;
 use crate::model::OpenAiChatModel;
 use crate::recognizer::MetaRecognizerFactory;
+use crate::recorder::RecordingConfig;
 use crate::session::handle_session;
 use crate::store::SessionStore;
 use crate::tts::OpenAiTts;
@@ -27,6 +28,7 @@ pub struct AppState {
     model: Arc<OpenAiChatModel>,
     tts: Arc<OpenAiTts>,
     store: Arc<SessionStore>,
+    recording: RecordingConfig,
 }
 
 /// Builds the router from validated configuration.
@@ -50,6 +52,15 @@ pub fn router(config: &Config) -> Router {
             config.tts_api_key.clone(),
         )),
         store: Arc::new(SessionStore::new()),
+        recording: RecordingConfig {
+            kinds: config.record,
+            data_dir: config.data_dir.clone(),
+            stt_model: config.stt_model.clone(),
+            llm_model: config.llm_model.clone(),
+            reasoning_effort: config.llm_reasoning_effort.clone(),
+            tts_model: config.tts_model.clone(),
+            tts_voice: config.tts_voice.clone(),
+        },
     };
     Router::new()
         .route("/session", get(session_upgrade))
@@ -72,6 +83,7 @@ async fn session_upgrade(
             state.tts,
             state.store,
             resume,
+            state.recording,
         )
         .instrument(tracing::info_span!("session", id))
     })

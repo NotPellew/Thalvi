@@ -3,6 +3,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use crate::recorder::RecordKinds;
+
 /// Validated server configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -32,6 +34,10 @@ pub struct Config {
     pub tts_voice: String,
     /// Speech API key; empty means no Authorization header.
     pub tts_api_key: String,
+    /// Which recording kinds are enabled (`THALVI_RECORD`).
+    pub record: RecordKinds,
+    /// Directory recordings are written under (`THALVI_DATA_DIR`).
+    pub data_dir: PathBuf,
 }
 
 impl Config {
@@ -73,6 +79,11 @@ impl Config {
         let tts_model = required(&lookup, "TTS_MODEL", false)?;
         let tts_voice = required(&lookup, "TTS_VOICE", false)?;
         let tts_api_key = required(&lookup, "TTS_API_KEY", true)?;
+        let record = parse_record_kinds(lookup("THALVI_RECORD"))?;
+        let data_dir = lookup("THALVI_DATA_DIR")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "data".to_string());
         Ok(Self {
             addr,
             web_dir: PathBuf::from(web_dir),
@@ -87,8 +98,34 @@ impl Config {
             tts_model,
             tts_voice,
             tts_api_key,
+            record,
+            data_dir: PathBuf::from(data_dir),
         })
     }
+}
+
+fn parse_record_kinds(raw: Option<String>) -> Result<RecordKinds, String> {
+    let mut kinds = RecordKinds::default();
+    let Some(raw) = raw else {
+        return Ok(kinds);
+    };
+    for value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        match value {
+            "metrics" => kinds.metrics = true,
+            "text" => kinds.text = true,
+            "audio" => kinds.audio = true,
+            other => {
+                return Err(format!(
+                    "THALVI_RECORD contains an unknown value: {other:?} (expected a comma-separated subset of metrics, text, audio)"
+                ));
+            }
+        }
+    }
+    Ok(kinds)
 }
 
 fn required(
@@ -159,6 +196,57 @@ mod tests {
             vars.insert("LLM_REASONING_EFFORT", value.to_string());
             let config = Config::from_lookup(|name| vars.get(name).cloned());
             assert_eq!(config.map(|c| c.llm_reasoning_effort), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn record_kinds_parse_subsets_and_reject_unknown_values() {
+        use crate::recorder::RecordKinds;
+        let none = RecordKinds::default();
+        let cases: Vec<(Option<&str>, Result<RecordKinds, ()>)> = vec![
+            (None, Ok(none)),
+            (Some(""), Ok(none)),
+            (
+                Some("metrics"),
+                Ok(RecordKinds {
+                    metrics: true,
+                    ..none
+                }),
+            ),
+            (
+                Some("text, audio"),
+                Ok(RecordKinds {
+                    text: true,
+                    audio: true,
+                    ..none
+                }),
+            ),
+            (
+                Some("metrics,text,audio"),
+                Ok(RecordKinds {
+                    metrics: true,
+                    text: true,
+                    audio: true,
+                }),
+            ),
+            (Some("video"), Err(())),
+            (Some("metrics,video"), Err(())),
+        ];
+        for (value, expected) in cases {
+            let mut vars = full();
+            if let Some(value) = value {
+                vars.insert("THALVI_RECORD", value.to_string());
+            }
+            let result = Config::from_lookup(|name| vars.get(name).cloned()).map(|c| c.record);
+            if let Ok(kinds) = expected {
+                assert_eq!(result, Ok(kinds), "value={value:?}");
+            } else {
+                let err = result.unwrap_err();
+                assert!(
+                    err.contains("THALVI_RECORD") && err.contains("video"),
+                    "error should name the unknown value: {err}"
+                );
+            }
         }
     }
 

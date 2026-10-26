@@ -80,6 +80,7 @@ async fn meta_recognizer_handshake_events_audio_and_policy_close() {
     assert_eq!(
         second,
         RecognizerEvent::SpeechComplete {
+            turn_id: "1".to_string(),
             text: "hello".to_string()
         }
     );

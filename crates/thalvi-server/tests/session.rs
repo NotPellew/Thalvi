@@ -19,6 +19,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use thalvi_server::model::{ChatMessage, ChatModel, DeltaStream, ModelError};
 use thalvi_server::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerFactory};
+use thalvi_server::recorder::{RecordKinds, RecordingConfig};
 use thalvi_server::session::handle_session;
 use thalvi_server::store::SessionStore;
 use thalvi_server::tts::{AudioStream, Tts, TtsError};
@@ -60,10 +61,15 @@ impl FakeFactory {
         let _ = sender.send(item);
     }
 
+    fn latest_connection(&self) -> usize {
+        self.inner.connections.lock().unwrap().len() - 1
+    }
+
     fn complete_turn(&self, connection: usize, text: &str) {
         self.push(
             connection,
             Ok(RecognizerEvent::SpeechComplete {
+                turn_id: "turn-1".to_string(),
                 text: text.to_string(),
             }),
         );
@@ -272,6 +278,10 @@ async fn read_session_opening(client: &mut ClientSocket) -> (String, Value) {
 }
 
 async fn start() -> Harness {
+    start_with_recording(RecordingConfig::disabled()).await
+}
+
+async fn start_with_recording(recording: RecordingConfig) -> Harness {
     let factory = FakeFactory::default();
     let model = FakeModel::default();
     let tts = FakeTts::default();
@@ -282,6 +292,7 @@ async fn start() -> Harness {
         tts.clone(),
         Arc::clone(&store),
     );
+    let recording2 = recording.clone();
     let app = Router::new().route(
         "/session",
         get(
@@ -295,6 +306,7 @@ async fn start() -> Harness {
                     tts2.clone(),
                     Arc::clone(&store2),
                 );
+                let recording = recording2.clone();
                 async move {
                     let resume = query.get("resume").cloned();
                     upgrade.on_upgrade(move |socket: WebSocket| {
@@ -305,6 +317,7 @@ async fn start() -> Harness {
                             Arc::new(tts),
                             store,
                             resume,
+                            recording,
                         )
                     })
                 }
@@ -477,6 +490,10 @@ async fn completed_turn_streams_first_sentence_audio_while_model_is_still_open()
     .await;
     assert_eq!(reply_text(&rest), "How are you?");
     assert_eq!(audios(&rest), vec![Bytes::from("AUDIO:How are you?")]);
+    assert!(
+        has_type(&rest, "reply_end"),
+        "finished reply must end with reply_end: {rest:?}"
+    );
     harness.server.abort();
 }
 
@@ -508,7 +525,13 @@ async fn speech_start_and_cancel_each_interrupt_the_reply() {
                 .await
                 .unwrap();
         } else {
-            harness.factory.push(0, Ok(RecognizerEvent::SpeechStart));
+            harness.factory.push(
+                0,
+                Ok(RecognizerEvent::SpeechStart {
+                    turn_id: "turn-1".to_string(),
+                    audio_processed_ms: None,
+                }),
+            );
         }
         let received = collect_until(&mut harness.client, |item| {
             matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
@@ -781,6 +804,7 @@ async fn text_turn_is_answered_and_interrupts_a_reply_without_voice() {
         .iter()
         .any(|item| matches!(item, Received::Json(v) if v["type"] == "user" && v["text"] == "second question")));
     assert_eq!(reply_text(&received), "Second answer.");
+    assert!(has_type(&received, "reply_end"));
     assert!(!has_state(&received, "listening"));
 
     assert_eq!(
@@ -924,4 +948,318 @@ async fn empty_or_oversized_text_is_an_error_and_is_ignored() {
     .await;
     assert_eq!(reply_text(&received), "Ok.");
     harness.server.abort();
+}
+
+fn recording_config(kinds: RecordKinds, tag: &str) -> RecordingConfig {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    RecordingConfig {
+        kinds,
+        data_dir: std::env::temp_dir().join(format!("thalvi-record-test-{tag}-{nanos}")),
+        stt_model: "fake-stt".to_string(),
+        llm_model: "fake-llm".to_string(),
+        reasoning_effort: Some("minimal".to_string()),
+        tts_model: "fake-tts".to_string(),
+        tts_voice: "fake-voice".to_string(),
+    }
+}
+
+fn find_session_files(data_dir: &std::path::Path, session: &str) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let recordings = data_dir.join("recordings");
+    let Ok(dates) = std::fs::read_dir(&recordings) else {
+        return found;
+    };
+    for date in dates.flatten() {
+        let jsonl = date.path().join(format!("{session}.jsonl"));
+        if jsonl.exists() {
+            found.push(jsonl);
+        }
+        let session_dir = date.path().join(session);
+        if let Ok(entries) = std::fs::read_dir(&session_dir) {
+            for entry in entries.flatten() {
+                found.push(entry.path());
+            }
+        }
+    }
+    found
+}
+
+async fn run_voice_turn(harness: &mut Harness) {
+    voice_on(harness).await;
+    let already = harness.factory.audio_received().len();
+    for _ in 0..10 {
+        harness
+            .client
+            .send(ClientMessage::Binary(vec![3_u8; 3840].into()))
+            .await
+            .unwrap();
+    }
+    wait_until(|| harness.factory.audio_received().len() == already + 10).await;
+    let connection = harness.factory.latest_connection();
+    harness.factory.push(
+        connection,
+        Ok(RecognizerEvent::SpeechStart {
+            turn_id: "turn-1".to_string(),
+            audio_processed_ms: Some(100),
+        }),
+    );
+    harness.factory.push(
+        connection,
+        Ok(RecognizerEvent::SpeechEnd {
+            turn_id: "turn-1".to_string(),
+            audio_processed_ms: Some(500),
+        }),
+    );
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Hello there.".to_string())]);
+    harness.factory.complete_turn(connection, "hello thalvi");
+    let _ = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+    })
+    .await;
+}
+
+async fn recorded_session(kinds: RecordKinds, tag: &str) -> (std::path::PathBuf, String) {
+    let config = recording_config(kinds, tag);
+    let data_dir = config.data_dir.clone();
+    let mut harness = start_with_recording(config).await;
+    run_voice_turn(&mut harness).await;
+    let session = harness.session_id.clone();
+    harness.client.close(None).await.unwrap();
+    wait_until(|| harness.store.contains(&session)).await;
+    harness.server.abort();
+    (data_dir, session)
+}
+
+#[tokio::test]
+async fn recording_writes_nothing_metrics_text_or_all_kinds() {
+    // Nothing enabled: no files at all.
+    let (data_dir, session) = recorded_session(RecordKinds::default(), "none").await;
+    assert!(
+        find_session_files(&data_dir, &session).is_empty(),
+        "no recording files should be written when THALVI_RECORD is empty"
+    );
+
+    // Metrics only: events present, no text fields, no wav.
+    let kinds = RecordKinds {
+        metrics: true,
+        text: false,
+        audio: false,
+    };
+    let (data_dir, session) = recorded_session(kinds, "metrics").await;
+    wait_until(|| {
+        std::fs::read_to_string(
+            find_session_files(&data_dir, &session)
+                .into_iter()
+                .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+                .unwrap_or_default(),
+        )
+        .is_ok_and(|content| content.contains("session_close"))
+    })
+    .await;
+    let lines = read_recorded_lines_blocking(&data_dir, &session);
+    assert_events(
+        &lines,
+        &[
+            "session_open",
+            "stt_connect",
+            "turn",
+            "reply",
+            "tts_sentence",
+            "session_close",
+        ],
+    );
+    assert!(lines.iter().all(|line| line.get("text").is_none()));
+    let turn = lines.iter().find(|line| line["event"] == "turn").unwrap();
+    assert_eq!(turn["source"], "voice");
+    assert_eq!(turn["speech_ms"], 400);
+    let connect = lines
+        .iter()
+        .find(|line| line["event"] == "stt_connect")
+        .unwrap();
+    assert_eq!(connect["outcome"], "ok");
+    assert_eq!(connect["model"], "fake-stt");
+    assert!(
+        find_session_files(&data_dir, &session)
+            .iter()
+            .all(|path| path.extension().is_none_or(|ext| ext != "wav")),
+        "metrics-only recording must not write wav files"
+    );
+
+    // Text only: only turn and reply lines, carrying text.
+    let kinds = RecordKinds {
+        metrics: false,
+        text: true,
+        audio: false,
+    };
+    let (data_dir, session) = recorded_session(kinds, "text").await;
+    wait_until(|| !read_recorded_lines_blocking(&data_dir, &session).is_empty()).await;
+    let lines = read_recorded_lines_blocking(&data_dir, &session);
+    assert_ne!(lines.len(), 0);
+    assert!(
+        lines
+            .iter()
+            .all(|line| matches!(line["event"].as_str(), Some("turn" | "reply"))),
+        "text-only recording must write only turn and reply events: {lines:?}"
+    );
+    let turn = lines.iter().find(|line| line["event"] == "turn").unwrap();
+    assert_eq!(turn["text"], "hello thalvi");
+    let reply = lines.iter().find(|line| line["event"] == "reply").unwrap();
+    assert_eq!(reply["text"], "Hello there.");
+
+    // All three: the wav exists and its length matches the cut turn audio.
+    let kinds = RecordKinds {
+        metrics: true,
+        text: true,
+        audio: true,
+    };
+    let (data_dir, session) = recorded_session(kinds, "all").await;
+    wait_until(|| {
+        find_session_files(&data_dir, &session)
+            .iter()
+            .any(|path| path.extension().is_some_and(|ext| ext == "wav"))
+    })
+    .await;
+    let wav = find_session_files(&data_dir, &session)
+        .into_iter()
+        .find(|path| path.extension().is_some_and(|ext| ext == "wav"))
+        .unwrap();
+    let wav_len = std::fs::metadata(&wav).unwrap().len();
+    assert_eq!(
+        wav_len,
+        44 + 38_400,
+        "100..500 ms speech plus 300 ms padding each side"
+    );
+    let lines = read_recorded_lines_blocking(&data_dir, &session);
+    let turn = lines.iter().find(|line| line["event"] == "turn").unwrap();
+    assert!(turn["endpoint_lag_ms"].is_number());
+    assert_eq!(turn["audio"], "1.wav");
+    assert_eq!(turn["text"], "hello thalvi");
+}
+
+fn assert_events(lines: &[Value], expected: &[&str]) {
+    let events: Vec<&str> = lines
+        .iter()
+        .filter_map(|line| line["event"].as_str())
+        .collect();
+    for event in expected {
+        assert!(events.contains(event), "missing {event} in {events:?}");
+    }
+}
+
+fn read_recorded_lines_blocking(data_dir: &std::path::Path, session: &str) -> Vec<Value> {
+    let jsonl = find_session_files(data_dir, session)
+        .into_iter()
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"));
+    let Some(jsonl) = jsonl else {
+        return Vec::new();
+    };
+    std::fs::read_to_string(&jsonl)
+        .map(|content| {
+            content
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn endpoint_lag_is_measured_from_when_the_end_audio_was_forwarded() {
+    let kinds = RecordKinds {
+        metrics: true,
+        text: false,
+        audio: false,
+    };
+    let config = recording_config(kinds, "lag");
+    let data_dir = config.data_dir.clone();
+    let mut harness = start_with_recording(config).await;
+    voice_on(&mut harness).await;
+    for _ in 0..10 {
+        harness
+            .client
+            .send(ClientMessage::Binary(vec![3_u8; 3840].into()))
+            .await
+            .unwrap();
+    }
+    wait_until(|| harness.factory.audio_received().len() == 10).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(300)).await;
+    let connection = harness.factory.latest_connection();
+    harness.factory.push(
+        connection,
+        Ok(RecognizerEvent::SpeechStart {
+            turn_id: "turn-1".to_string(),
+            audio_processed_ms: Some(100),
+        }),
+    );
+    harness.factory.push(
+        connection,
+        Ok(RecognizerEvent::SpeechEnd {
+            turn_id: "turn-1".to_string(),
+            audio_processed_ms: Some(500),
+        }),
+    );
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Hello there.".to_string())]);
+    harness.factory.complete_turn(connection, "hello thalvi");
+    let session = harness.session_id.clone();
+    wait_until(|| {
+        read_recorded_lines_blocking(&data_dir, &session)
+            .iter()
+            .any(|line| line["event"] == "turn")
+    })
+    .await;
+    tokio::time::resume();
+    harness.client.close(None).await.unwrap();
+    wait_until(|| harness.store.contains(&session)).await;
+    harness.server.abort();
+    let lines = read_recorded_lines_blocking(&data_dir, &session);
+    let turn = lines.iter().find(|line| line["event"] == "turn").unwrap();
+    let lag = turn["endpoint_lag_ms"].as_u64().unwrap();
+    assert!(
+        lag >= 250,
+        "lag should reach back to when the speech-end audio was forwarded, got {lag} ms"
+    );
+}
+
+#[tokio::test]
+async fn resumed_session_continues_turn_numbering_and_keeps_both_wavs() {
+    let kinds = RecordKinds {
+        metrics: true,
+        text: true,
+        audio: true,
+    };
+    let config = recording_config(kinds, "resume");
+    let data_dir = config.data_dir.clone();
+    let mut harness = start_with_recording(config).await;
+    run_voice_turn(&mut harness).await;
+    let session = harness.session_id.clone();
+    harness.client.close(None).await.unwrap();
+    wait_until(|| harness.store.contains(&session)).await;
+
+    let turns = harness.reconnect(Some(&session)).await;
+    assert_eq!(turns.as_array().map(Vec::len), Some(2));
+    run_voice_turn(&mut harness).await;
+    harness.client.close(None).await.unwrap();
+    wait_until(|| harness.store.contains(&session)).await;
+    harness.server.abort();
+
+    wait_until(|| {
+        let files = find_session_files(&data_dir, &session);
+        files.iter().any(|path| path.ends_with("1.wav"))
+            && files.iter().any(|path| path.ends_with("2.wav"))
+    })
+    .await;
+    let lines = read_recorded_lines_blocking(&data_dir, &session);
+    let turn_numbers: Vec<u64> = lines
+        .iter()
+        .filter(|line| line["event"] == "turn")
+        .filter_map(|line| line["turn"].as_u64())
+        .collect();
+    assert_eq!(turn_numbers, vec![1, 2]);
 }

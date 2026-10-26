@@ -12,7 +12,19 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecognizerEvent {
     /// The user started speaking.
-    SpeechStart,
+    SpeechStart {
+        /// Recognizer turn identifier.
+        turn_id: String,
+        /// Milliseconds of audio the recognizer had processed.
+        audio_processed_ms: Option<u64>,
+    },
+    /// The user stopped speaking.
+    SpeechEnd {
+        /// Recognizer turn identifier.
+        turn_id: String,
+        /// Milliseconds of audio the recognizer had processed.
+        audio_processed_ms: Option<u64>,
+    },
     /// A cumulative partial transcript; replaces the previous partial.
     Partial {
         /// The partial transcript text.
@@ -20,6 +32,8 @@ pub enum RecognizerEvent {
     },
     /// A completed user turn.
     SpeechComplete {
+        /// Recognizer turn identifier.
+        turn_id: String,
         /// The completed transcript text.
         text: String,
     },
@@ -253,8 +267,21 @@ pub fn parse_recognizer_text(text: &str) -> Option<Result<RecognizerEvent, Recog
             ))));
         }
     };
+    let turn_id = value
+        .get("turnId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let audio_processed_ms = value.get("audioProcessedMs").and_then(Value::as_u64);
     match value.get("type").and_then(Value::as_str) {
-        Some("speechStart") => Some(Ok(RecognizerEvent::SpeechStart)),
+        Some("speechStart") => Some(Ok(RecognizerEvent::SpeechStart {
+            turn_id,
+            audio_processed_ms,
+        })),
+        Some("speechEnd") => Some(Ok(RecognizerEvent::SpeechEnd {
+            turn_id,
+            audio_processed_ms,
+        })),
         Some("transcript") => Some(Ok(RecognizerEvent::Partial {
             text: value
                 .get("transcript")
@@ -263,6 +290,7 @@ pub fn parse_recognizer_text(text: &str) -> Option<Result<RecognizerEvent, Recog
                 .to_string(),
         })),
         Some("speechComplete") => Some(Ok(RecognizerEvent::SpeechComplete {
+            turn_id,
             text: value
                 .get("transcript")
                 .and_then(Value::as_str)
@@ -310,8 +338,18 @@ mod tests {
     fn parses_events_and_ignores_progress_frames() {
         let cases: Vec<(&str, Option<RecognizerEvent>)> = vec![
             (
-                r#"{"type":"speechStart","turnId":"1"}"#,
-                Some(RecognizerEvent::SpeechStart),
+                r#"{"type":"speechStart","turnId":"1","audioProcessedMs":120}"#,
+                Some(RecognizerEvent::SpeechStart {
+                    turn_id: "1".to_string(),
+                    audio_processed_ms: Some(120),
+                }),
+            ),
+            (
+                r#"{"type":"speechEnd","turnId":"1","audioProcessedMs":640}"#,
+                Some(RecognizerEvent::SpeechEnd {
+                    turn_id: "1".to_string(),
+                    audio_processed_ms: Some(640),
+                }),
             ),
             (
                 r#"{"type":"transcript","transcript":"hel","final":false}"#,
@@ -322,6 +360,7 @@ mod tests {
             (
                 r#"{"type":"speechComplete","turnId":"1","transcript":"hello"}"#,
                 Some(RecognizerEvent::SpeechComplete {
+                    turn_id: "1".to_string(),
                     text: "hello".to_string(),
                 }),
             ),
@@ -331,7 +370,6 @@ mod tests {
                     message: "boom".to_string(),
                 }),
             ),
-            (r#"{"type":"speechEnd","turnId":"1"}"#, None),
             (r#"{"type":"audioProgress"}"#, None),
         ];
         for (frame, expected) in cases {
