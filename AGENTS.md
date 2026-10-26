@@ -46,8 +46,12 @@ directing you.
   output, config), and trust the typed value inside.
 - Fix root causes: trace a bug to where it starts. A guard is a fix only when
   the state it handles is legitimate.
-- Tests check behavior a caller can observe, not internals. A bug fix adds a
-  test that fails without it. A test that needs a sleep or timeout is wrong.
+- Tests: full coverage, no bloat. Every behavior is tested, with as few tests
+  as that takes: one test per behavior, not per function, and table-driven
+  cases instead of near-copies. Test what a caller can observe, not
+  internals, and only failures that can really happen, not invented or
+  far-fetched ones. A bug fix adds a test that fails without it. Tests never
+  wait on the wall clock; use a paused or fake clock.
 - Comments: none inline, in tests too. Rust `///` states an item's contract
   and any non-obvious reason; every module starts with a `//!` line saying
   what it owns. A comment that restates the code is deleted.
