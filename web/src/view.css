@@ -65,13 +65,14 @@
   --orb: min(58vw, 26dvh, 300px);
   position: relative; flex: none; display: flex; flex-direction: column; align-items: center;
   text-align: center; padding: 8px 16px 0; overflow: hidden;
+  animation: o-enter 0.2s ease-out;
 }
 .o-stage::before {
   content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0.035;
   background: repeating-linear-gradient(180deg, transparent 0 3px, var(--fg) 3px 4px);
 }
 .o-hud {
-  position: absolute; z-index: 1; inset: -17px; pointer-events: none;
+  position: absolute; z-index: 1; inset: -12px; pointer-events: none;
 }
 .o-corner { position: absolute; width: 24px; height: 24px; border: 0 solid var(--neon); opacity: 0.85; }
 .o-corner.tl { top: 0; left: 0; border-top-width: 2px; border-left-width: 2px; }
@@ -82,38 +83,41 @@
 
 .o-orb {
   position: relative; z-index: 1; width: var(--orb); aspect-ratio: 1; display: block;
-  border-radius: 50%; color: var(--st-fg); flex: none;
-  box-shadow: 0 0 34px color-mix(in srgb, var(--st-bg) 55%, transparent), 0 0 10px color-mix(in srgb, var(--neon) 30%, transparent);
+  color: var(--st-fg); flex: none;
 }
 .o-orb:not(:disabled):active .o-core { transform: scale(0.96); }
 .o-orb-art, .o-orb-art .o-svg { display: block; width: 100%; height: 100%; }
 .o-svg { overflow: visible; }
-.o-core { fill: var(--st-bg); stroke: var(--neon); stroke-width: 1.5; transform-box: fill-box; transform-origin: center; transition: transform 0.1s; }
+.o-core { fill: var(--st-bg); stroke: var(--neon); stroke-width: 3; stroke-linejoin: miter; transform-box: fill-box; transform-origin: center; transition: transform 0.1s; }
 .orb-app[data-state="speaking"] .o-core { stroke: light-dark(#007a43, #2bff88); }
 .orb-app[data-state="reconnecting"] .o-core { stroke: var(--warn); }
 .o-core-ic { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; pointer-events: none; color: var(--st-fg); }
-.o-core-ic .o-ic { width: 30%; height: 30%; stroke-width: 2; }
+.o-core-ic .o-ic { width: 30%; height: 30%; stroke-width: 2; stroke-linecap: square; stroke-linejoin: miter; }
 .o-lab { font-family: var(--mono); font-size: clamp(15px, 4.4vw, 22px); font-weight: 700; line-height: 1; letter-spacing: 0.12em; text-transform: uppercase; }
-.o-orb.o-is-stop { --orb: min(62vw, 28dvh, 320px); box-shadow: 0 0 42px color-mix(in srgb, var(--st-bg) 65%, transparent), 0 0 14px color-mix(in srgb, var(--neon) 40%, transparent); }
+.o-orb.o-is-stop { --orb: min(62vw, 28dvh, 320px); }
 
 .o-tick { stroke: var(--neon); stroke-width: 2; opacity: 0.55; }
+.o-ticks { transform-origin: 140px 140px; }
+.orb-app[data-state="thinking"] .o-ticks { animation: o-step 3.2s steps(24) infinite; }
 .orb-app[data-state="reconnecting"] .o-tick { stroke: var(--warn); }
-.o-ring { fill: none; stroke: var(--neon); stroke-width: 3; transform-box: fill-box; transform-origin: center; opacity: 0.5; animation: o-pulse 2.4s ease-out infinite; }
-.o-ring.r2 { animation-delay: 0.8s; opacity: 0.35; }
-.o-ring.r3 { animation-delay: 1.6s; opacity: 0.2; }
-.o-scan { fill: none; stroke: var(--neon); stroke-width: 5; stroke-linecap: round; stroke-dasharray: 90 539; transform-origin: 140px 140px; animation: o-spin 2.2s linear infinite; }
-.o-track { fill: none; stroke: var(--blue); stroke-width: 3; opacity: 0.45; }
-.o-orbit { fill: var(--neon); transform-origin: 140px 140px; animation: o-spin 1.8s linear infinite; }
-.o-dash { fill: none; stroke: var(--warn); stroke-width: 6; stroke-dasharray: 4 16; stroke-linecap: round; transform-origin: 140px 140px; animation: o-spin 14s linear infinite; }
-.orb-app[data-state="connecting"] .o-dash { stroke: var(--mut); animation-duration: 6s; }
-.o-idle-ring { fill: none; stroke: var(--blue); stroke-width: 3; opacity: 0.5; }
-.o-bar { fill: var(--neon); transform-box: fill-box; transform-origin: 50% 100%; animation: o-bar 0.55s ease-in-out infinite alternate; }
+.o-seg { fill: none; stroke: var(--blue); stroke-width: 6; stroke-linecap: square; opacity: 0.6; }
+.orb-app[data-state="starting"] .o-seg, .orb-app[data-state="listening"] .o-seg, .orb-app[data-state="speaking"] .o-seg { stroke: var(--neon); opacity: 0.9; }
+.orb-app[data-state="thinking"] .o-seg, .orb-app[data-state="connecting"] .o-seg, .orb-app[data-state="reconnecting"] .o-seg {
+  stroke: var(--neon); opacity: 0.2; animation: o-chase 1.6s steps(1, end) infinite; animation-delay: calc(var(--i) * -0.2s);
+}
+.orb-app[data-state="connecting"] .o-seg { stroke: var(--mut); animation-duration: 3.2s; animation-delay: calc(var(--i) * -0.4s); }
+.orb-app[data-state="reconnecting"] .o-seg { stroke: var(--warn); }
+.o-cross { fill: none; stroke: var(--neon); stroke-width: 3; opacity: 0.8; }
+.orb-app[data-state="reconnecting"] .o-cross { stroke: var(--warn); }
+.o-sweep { transform-origin: 140px 140px; animation: o-step 2.4s steps(24) infinite; }
+.o-sweep line { stroke: var(--neon); stroke-width: 3; }
+.o-bar { fill: var(--neon); transform-box: fill-box; transform-origin: 50% 100%; animation: o-bar 0.55s steps(4, end) infinite alternate; }
 
 .o-glitching .o-hud, .o-glitching .o-orb { animation: o-glitch 0.28s steps(2, end); }
 .o-glitching .o-state { animation: o-glitch-t 0.28s steps(2, end); }
 
 .o-state {
-  position: relative; z-index: 1; margin-top: 10px;
+  position: relative; z-index: 1; margin-top: 22px;
   font-family: var(--mono); font-size: clamp(30px, 8.6vw, 38px); font-weight: 700;
   line-height: 1.05; letter-spacing: 0.04em; text-transform: uppercase; color: var(--st-ink);
   text-shadow: 0 0 18px color-mix(in srgb, var(--st-ink) 45%, transparent);
@@ -138,16 +142,18 @@
   display: flex; flex-direction: column; padding: 14px calc(20px + env(safe-area-inset-right)) 6px calc(20px + env(safe-area-inset-left));
   -webkit-mask-image: linear-gradient(to bottom, transparent, #000 26px); mask-image: linear-gradient(to bottom, transparent, #000 26px);
 }
-.o-flow { margin-top: auto; text-align: center; }
-.o-empty { color: var(--mut); font-size: 16px; display: grid; gap: 8px; padding: 8px 0 16px; }
+.o-flow { margin-top: auto; }
+.o-empty { color: var(--mut); font-size: 16px; display: grid; gap: 8px; padding: 8px 0 16px; text-align: center; }
 .o-empty[hidden] { display: none; }
-.o-turn { margin: 0 auto 14px; max-width: 34em; overflow-wrap: anywhere; }
+.o-turn { margin: 0 auto 16px; max-width: 46em; text-align: left; overflow-wrap: anywhere; }
 .o-turn[hidden] { display: none; }
 .o-who { display: block; margin-bottom: 3px; font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: var(--mut); }
 .o-turn.o-user .o-text { font-size: 15px; font-weight: 600; color: var(--mut); }
 .o-turn.o-user .o-text::before { content: "“"; }
 .o-turn.o-user .o-text::after { content: "”"; }
-.o-turn.o-assistant .o-text { font-size: 16px; line-height: 1.4; font-weight: 500; white-space: pre-wrap; }
+.o-text { white-space: pre-wrap; }
+.o-text a { color: var(--neon); text-decoration: underline; text-underline-offset: 3px; }
+.o-turn.o-assistant .o-text { font-size: 16px; line-height: 1.4; font-weight: 500; }
 .o-turn.o-assistant.o-latest .o-text { font-size: clamp(18px, 5vw, 20px); line-height: 1.38; font-weight: 650; }
 .o-live-text { font-size: 16px; font-weight: 600; font-style: italic; color: var(--st-ink); }
 .o-turn.o-live .o-who { color: var(--st-ink); }
@@ -175,13 +181,27 @@
 .o-send { width: 50px; height: 50px; border-radius: 8px; background: var(--neon); color: light-dark(#fff, #02120a); display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 0 14px color-mix(in srgb, var(--neon) 35%, transparent); }
 .o-send .o-ic { width: 24px; height: 24px; }
 
-@keyframes o-pulse { from { transform: scale(1); opacity: 0.55; } to { transform: scale(1.55); opacity: 0; } }
-@keyframes o-spin { to { transform: rotate(360deg); } }
+@keyframes o-enter { from { opacity: 0; transform: translateY(-8px); } }
+@keyframes o-enter-compact { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes o-chase { 0% { opacity: 1; } 12.5% { opacity: 0.2; } }
+@keyframes o-step { to { transform: rotate(360deg); } }
 @keyframes o-bar { from { transform: scaleY(0.35); } to { transform: scaleY(1); } }
 @keyframes o-blink { to { visibility: hidden; } }
 @keyframes o-bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
 @keyframes o-glitch { 0% { transform: translate(0); opacity: 1; } 25% { transform: translate(-4px, 1px); opacity: 0.65; } 55% { transform: translate(3px, -1px); opacity: 0.85; } 100% { transform: translate(0); opacity: 1; } }
 @keyframes o-glitch-t { 0% { transform: translate(0); opacity: 1; } 25% { transform: translate(3px, 0); opacity: 0.6; } 55% { transform: translate(-2px, 0); opacity: 0.9; } 100% { transform: translate(0); opacity: 1; } }
+
+.orb-app.o-collapsed .o-stage {
+  --orb: 52px; flex-direction: row; justify-content: flex-start; gap: 14px; text-align: left;
+  padding: 6px calc(16px + env(safe-area-inset-right)) 6px calc(24px + env(safe-area-inset-left));
+  animation-name: o-enter-compact;
+}
+.orb-app.o-collapsed .o-orb.o-is-stop { --orb: 52px; }
+.orb-app.o-collapsed :is(.o-hud, .o-hint, .o-lab, .o-tick, .o-bar, .o-cross) { display: none; }
+.orb-app.o-collapsed .o-state { margin: 0; font-size: 20px; }
+.orb-app.o-collapsed .o-seg { stroke-width: 12; }
+.orb-app.o-collapsed .o-core { stroke-width: 8; }
+.orb-app.o-collapsed .o-core-ic .o-ic { width: 42%; height: 42%; }
 
 @media (min-width: 900px) {
   .o-layout { flex-direction: row; }
@@ -196,6 +216,9 @@
   .o-turn.o-user .o-text { font-size: 16px; }
   .o-foot { padding: 6px 40px calc(20px + env(safe-area-inset-bottom)); }
   .o-notice { margin-inline: 40px; }
+  .orb-app.o-collapsed .o-layout { flex-direction: column; }
+  .orb-app.o-collapsed .o-stage { flex: none; justify-content: flex-start; padding: 6px 40px; }
+  .orb-app.o-collapsed .o-right { border-left: 0; }
   .o-top { padding-inline: calc(24px + env(safe-area-inset-left)) calc(24px + env(safe-area-inset-right)); }
 }
 
@@ -216,8 +239,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .orb-app *, .orb-app *::before, .orb-app *::after { animation: none !important; transition: none !important; }
-  .orb-app .o-ring.r1 { transform: scale(1.12); }
-  .orb-app .o-ring.r2 { transform: scale(1.3); }
-  .orb-app .o-ring.r3 { transform: scale(1.5); }
+  .orb-app[data-state] .o-seg { opacity: 0.9; }
   .orb-app .o-growing .o-text::after { visibility: visible; }
 }

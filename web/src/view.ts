@@ -5,11 +5,11 @@ import type { Turn } from "./protocol.ts";
 const STATES: Record<DisplayState, { label: string; hint: string }> = {
   connecting: { label: "Connecting", hint: "Reaching the server." },
   reconnecting: { label: "Reconnecting", hint: "Voice is paused. Trying again." },
-  idle: { label: "Idle", hint: "Tap the circle to start talking, or type below." },
+  idle: { label: "Idle", hint: "Tap the reticle to start talking, or type below." },
   starting: { label: "Starting", hint: "Getting ready to listen." },
   listening: { label: "Listening", hint: "Go ahead, I am listening." },
-  thinking: { label: "Thinking", hint: "Working on your answer. Tap the circle to stop." },
-  speaking: { label: "Speaking", hint: "Reading the answer aloud. Tap the circle to stop." },
+  thinking: { label: "Thinking", hint: "Working on your answer. Tap the reticle to stop." },
+  speaking: { label: "Speaking", hint: "Reading the answer aloud. Tap the reticle to stop." },
 };
 
 const PATHS = {
@@ -18,12 +18,58 @@ const PATHS = {
   send: '<path d="M4 12h15M13 6l6 6-6 6"/>',
   wait: '<path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/>',
   listening:
-    '<circle cx="12" cy="12" r="2.4" fill="currentColor"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="10"/>',
+    '<path d="M12 3v5M12 16v5M3 12h5M16 12h5"/><rect x="10" y="10" width="4" height="4" fill="currentColor"/>',
   thinking:
     '<circle cx="5" cy="12" r="2.2" fill="currentColor"/><circle cx="12" cy="12" r="2.2" fill="currentColor"/><circle cx="19" cy="12" r="2.2" fill="currentColor"/>',
   speaking: '<path d="M4 10v4"/><path d="M8 6v12"/><path d="M12 3v18"/><path d="M16 7v10"/><path d="M20 10v4"/>',
   alert: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17.5v.5"/>',
 } as const;
+
+export interface CollapseInput {
+  readonly voice: boolean;
+  readonly display: DisplayState;
+  readonly atBottom: boolean;
+  readonly composerFocused: boolean;
+  readonly keyboardOpen: boolean;
+  readonly latestTall: boolean;
+}
+
+const LIVE_DISPLAYS: readonly DisplayState[] = ["starting", "listening", "thinking", "speaking"];
+
+/** The big orb stays only for a live voice exchange read at the bottom; anything else collapses it. */
+export function shouldCollapse(input: CollapseInput): boolean {
+  return !(
+    input.voice &&
+    LIVE_DISPLAYS.includes(input.display) &&
+    input.atBottom &&
+    !input.composerFocused &&
+    !input.keyboardOpen &&
+    !input.latestTall
+  );
+}
+
+export type TextSegment =
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "link"; readonly text: string; readonly href: string };
+
+const URL_PATTERN = /(?:https?:\/\/|www\.)[^\s<>"']+/g;
+const TRAILING = /[.,;:!?)\]}]+$/;
+
+/** Splits message text into plain and tappable-link segments; no markup is ever built from the text. */
+export function splitLinks(text: string): TextSegment[] {
+  const segments: TextSegment[] = [];
+  let last = 0;
+  for (const match of text.matchAll(URL_PATTERN)) {
+    const raw = match[0];
+    const trimmed = raw.replace(TRAILING, "");
+    const href = trimmed.startsWith("www.") ? `https://${trimmed}` : trimmed;
+    if (match.index > last) segments.push({ kind: "text", text: text.slice(last, match.index) });
+    segments.push({ kind: "link", text: trimmed, href });
+    last = match.index + trimmed.length;
+  }
+  if (last < text.length) segments.push({ kind: "text", text: text.slice(last) });
+  return segments;
+}
 
 type IconName = keyof typeof PATHS;
 
@@ -48,34 +94,51 @@ function coreIcon(display: DisplayState): IconName {
   }
 }
 
+type Point = readonly [number, number];
+
+/** Corner `k` of the octagon with flat sides facing up, down, left and right. */
+function corner(radius: number, k: number): Point {
+  const angle = ((22.5 + 45 * k) * Math.PI) / 180;
+  return [140 + radius * Math.cos(angle), 140 + radius * Math.sin(angle)];
+}
+
+function at(point: Point): string {
+  return `${point[0].toFixed(1)} ${point[1].toFixed(1)}`;
+}
+
 function orbSvg(display: DisplayState): string {
-  let ticks = "";
-  for (let i = 0; i < 24; i += 1) {
-    const long = i % 6 === 0;
-    ticks += `<line class="o-tick" x1="140" y1="${long ? "6" : "12"}" x2="140" y2="20" transform="rotate(${String(i * 15)} 140 140)"/>`;
+  const core = Array.from({ length: 8 }, (_, k) => at(corner(84, k)).replace(" ", ",")).join(" ");
+  let segments = "";
+  for (let k = 0; k < 8; k += 1) {
+    const [x1, y1] = corner(118, k);
+    const [x2, y2] = corner(118, k + 1);
+    const from: Point = [x1 + (x2 - x1) * 0.16, y1 + (y2 - y1) * 0.16];
+    const to: Point = [x1 + (x2 - x1) * 0.84, y1 + (y2 - y1) * 0.84];
+    segments += `<path class="o-seg" style="--i:${String(k)}" d="M${at(from)}L${at(to)}"/>`;
   }
-  let ornament = ticks;
-  if (display === "listening" || display === "starting") {
-    ornament +=
-      '<circle class="o-ring r1" cx="140" cy="140" r="84"/><circle class="o-ring r2" cx="140" cy="140" r="84"/><circle class="o-ring r3" cx="140" cy="140" r="84"/><circle class="o-scan" cx="140" cy="140" r="100"/>';
-  } else if (display === "thinking") {
-    ornament =
-      '<circle class="o-track" cx="140" cy="140" r="112"/><g class="o-orbit"><circle cx="140" cy="28" r="10"/><circle cx="140" cy="28" r="10" transform="rotate(120 140 140)"/><circle cx="140" cy="28" r="10" transform="rotate(240 140 140)"/></g>';
-  } else if (display === "connecting" || display === "reconnecting") {
-    ornament = '<circle class="o-dash" cx="140" cy="140" r="112"/>';
-  } else if (display === "idle") {
-    ornament = '<circle class="o-idle-ring" cx="140" cy="140" r="112"/>';
-  } else {
-    for (let i = 0; i < 40; i += 1) {
-      const h = Math.round(14 + 20 * Math.abs(Math.sin(i * 0.9) * Math.cos(i * 0.37)));
-      ornament += `<g transform="rotate(${String(i * 9)} 140 140)"><rect class="o-bar" style="animation-delay:${String((i % 8) * -0.13)}s" x="138" y="${String(40 - h)}" width="5" height="${String(h)}" rx="2.5"/></g>`;
+  let ornament = "";
+  if (display === "speaking") {
+    for (let i = 0; i < 32; i += 1) {
+      const h = Math.round(6 + 10 * Math.abs(Math.sin(i * 0.9) * Math.cos(i * 0.37)));
+      ornament += `<g transform="rotate(${String(i * 11.25)} 140 140)"><rect class="o-bar" style="animation-delay:${String((i % 8) * -0.13)}s" x="138" y="${String(18 - h)}" width="4" height="${String(h)}"/></g>`;
     }
+  } else {
+    let ticks = "";
+    for (let i = 0; i < 24; i += 1) {
+      ticks += `<line class="o-tick" x1="140" y1="${i % 6 === 0 ? "6" : "12"}" x2="140" y2="20" transform="rotate(${String(i * 15)} 140 140)"/>`;
+    }
+    ornament = `<g class="o-ticks">${ticks}</g>`;
   }
-  return `<svg class="o-svg" viewBox="0 0 280 280" aria-hidden="true">${ornament}<circle class="o-core" cx="140" cy="140" r="78"/></svg>`;
+  const sweep =
+    display === "listening" || display === "starting"
+      ? '<g class="o-sweep"><line x1="140" y1="140" x2="140" y2="34"/></g>'
+      : "";
+  const cross = '<path class="o-cross" d="M140 42v18M140 220v18M42 140h18M220 140h18"/>';
+  return `<svg class="o-svg" viewBox="0 0 280 280" aria-hidden="true">${ornament}${segments}${sweep}${cross}<polygon class="o-core" points="${core}"/></svg>`;
 }
 
 const MARKUP = `
-  <div class="orb-app">
+  <div class="orb-app o-collapsed">
     <header class="o-top">
       <span class="o-brand">Thalvi</span>
       <button class="o-voice" type="button" aria-pressed="false">${icon("mic")}<span class="o-voice-text">Voice off</span></button>
@@ -132,6 +195,25 @@ function turnElement(turn: Turn): HTMLParagraphElement {
   return line;
 }
 
+function renderMessageText(text: HTMLSpanElement, value: string): void {
+  if (text.dataset["text"] === value) return;
+  text.dataset["text"] = value;
+  const nodes: Node[] = [];
+  for (const segment of splitLinks(value)) {
+    if (segment.kind === "link") {
+      const anchor = document.createElement("a");
+      anchor.href = segment.href;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      anchor.textContent = segment.text;
+      nodes.push(anchor);
+    } else {
+      nodes.push(document.createTextNode(segment.text));
+    }
+  }
+  text.replaceChildren(...nodes);
+}
+
 function syncTurns(list: HTMLElement, turns: readonly Turn[], growing: boolean): void {
   while (list.children.length > turns.length) list.lastElementChild?.remove();
   turns.forEach((turn, index) => {
@@ -144,10 +226,7 @@ function syncTurns(list: HTMLElement, turns: readonly Turn[], growing: boolean):
       line = fresh;
     }
     const text = find(line, ".o-text", HTMLSpanElement);
-    if (text.dataset["text"] !== turn.text) {
-      text.dataset["text"] = turn.text;
-      text.textContent = turn.text;
-    }
+    renderMessageText(text, turn.text);
     line.classList.toggle(
       "o-growing",
       growing && index === turns.length - 1 && turn.role === "assistant",
@@ -189,13 +268,53 @@ export function createView(root: HTMLElement) {
   let online = false;
   let shownState: DisplayState | null = null;
   let orbAction: "stop" | "voice" | "none" = "none";
+  let lastState: SessionState | null = null;
+  let atBottom = true;
+  let composerFocused = false;
+  let keyboardOpen = false;
+  let latestTall = false;
+  let collapsed = true;
+
+  const applyCollapse = (): void => {
+    if (!lastState) return;
+    const want = shouldCollapse({
+      voice: lastState.voice,
+      display: displayState(lastState),
+      atBottom,
+      composerFocused,
+      keyboardOpen,
+      latestTall,
+    });
+    if (want === collapsed) return;
+    const topBefore = scroller.getBoundingClientRect().top;
+    const scrollBefore = scroller.scrollTop;
+    collapsed = want;
+    page.classList.toggle("o-collapsed", want);
+    scroller.scrollTop = scrollBefore + (scroller.getBoundingClientRect().top - topBefore);
+    if (!want && atBottom) scroller.scrollTop = scroller.scrollHeight;
+  };
+
+  scroller.addEventListener("scroll", () => {
+    atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 96;
+    applyCollapse();
+  }, { passive: true });
+  composer.addEventListener("focus", () => {
+    composerFocused = true;
+    applyCollapse();
+  });
+  composer.addEventListener("blur", () => {
+    composerFocused = false;
+    applyCollapse();
+  });
 
   const viewport = window.visualViewport;
   if (viewport) {
     const fit = (): void => {
       page.style.setProperty("--o-height", `${String(viewport.height)}px`);
       page.style.setProperty("--o-top", `${String(viewport.offsetTop)}px`);
+      keyboardOpen = window.innerHeight - viewport.height > 120;
       window.scrollTo(0, 0);
+      applyCollapse();
     };
     viewport.addEventListener("resize", fit);
     viewport.addEventListener("scroll", fit);
@@ -222,9 +341,11 @@ export function createView(root: HTMLElement) {
 
   return {
     render(s: SessionState) {
+      lastState = s;
       const display = displayState(s);
       const nearBottom =
         scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 96;
+      atBottom = nearBottom;
       page.dataset["state"] = display;
       online = s.link === "online";
 
@@ -263,14 +384,24 @@ export function createView(root: HTMLElement) {
       voice.disabled = voiceBusy;
 
       empty.hidden = s.turns.length > 0 || s.partial !== "";
+      const turnsBefore = list.children.length;
       syncTurns(list, s.turns, s.replyOpen);
       pending.hidden = display !== "thinking" || s.turns.at(-1)?.role !== "user";
       live.hidden = s.partial === "";
       liveText.textContent = s.partial;
 
+      const latest = list.lastElementChild;
+      latestTall = latest instanceof HTMLElement && latest.offsetHeight > window.innerHeight;
+      applyCollapse();
+
       composer.disabled = !online;
       syncSend();
-      if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+      if (!nearBottom) return;
+      if (latest instanceof HTMLElement && list.children.length > turnsBefore && latest.offsetHeight > scroller.clientHeight) {
+        scroller.scrollTop += latest.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 26;
+      } else {
+        scroller.scrollTop = scroller.scrollHeight;
+      }
     },
     setVoiceBusy(busy: boolean) {
       voiceBusy = busy;
