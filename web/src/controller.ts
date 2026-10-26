@@ -1,41 +1,58 @@
-import { CANCEL_MESSAGE, parseServerMessage } from "./protocol.ts";
-import { reduce, IDLE, type SessionEvent, type SessionState } from "./session.ts";
+import {
+  CANCEL_MESSAGE,
+  MAX_TEXT_LENGTH,
+  parseServerMessage,
+  textMessage,
+  voiceMessage,
+} from "./protocol.ts";
+import { INITIAL, reduce, type SessionEvent, type SessionState } from "./session.ts";
 
 export interface ControllerPorts {
   send(text: string): void;
   playback: { enqueue(bytes: ArrayBuffer): void; flush(): void };
+  remember(sessionId: string): void;
   onChange(state: SessionState): void;
 }
 
 export class Controller {
-  state: SessionState = IDLE;
+  state: SessionState = INITIAL;
   private readonly ports: ControllerPorts;
 
   constructor(ports: ControllerPorts) {
     this.ports = ports;
   }
 
-  begin(): void {
-    this.apply({ type: "begin" });
-  }
-
-  end(): void {
-    this.ports.playback.flush();
-    this.apply({ type: "end" });
-  }
-
-  failed(notice: string): void {
-    this.ports.playback.flush();
-    this.apply({ type: "failed", notice });
-  }
-
   opened(): void {
     this.apply({ type: "opened" });
+    if (this.state.voice) this.ports.send(voiceMessage(true));
   }
 
   lost(): void {
     this.ports.playback.flush();
     this.apply({ type: "lost" });
+  }
+
+  /** `notice` explains why voice went off by itself; null for the user's own choice. */
+  setVoice(on: boolean, notice: string | null = null): void {
+    this.ports.send(voiceMessage(on));
+    if (!on) this.ports.playback.flush();
+    this.apply({ type: "voice", on, notice });
+  }
+
+  notify(notice: string): void {
+    this.apply({ type: "notice", notice });
+  }
+
+  /** Returns whether the text was sent, so the caller knows to clear the composer. */
+  sendText(raw: string): boolean {
+    const text = raw.trim();
+    if (text === "") return false;
+    if (text.length > MAX_TEXT_LENGTH) {
+      this.notify(`That message is too long. The limit is ${String(MAX_TEXT_LENGTH)} characters.`);
+      return false;
+    }
+    this.ports.send(textMessage(text));
+    return true;
   }
 
   stop(): void {
@@ -57,6 +74,7 @@ export class Controller {
     const message = parseServerMessage(data);
     if (!message) return;
     if (message.type === "interrupted") this.ports.playback.flush();
+    if (message.type === "session") this.ports.remember(message.id);
     this.apply({ type: "server", message });
   }
 

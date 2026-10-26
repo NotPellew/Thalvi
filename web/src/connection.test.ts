@@ -26,16 +26,19 @@ class FakeSocket implements Socket {
 
 describe("Connection", () => {
   const sockets: FakeSocket[] = [];
+  const urls: string[] = [];
   const events: string[] = [];
+  let resumeId: string | null = null;
   const connection = () =>
     new Connection(
-      "ws://x/session",
+      () => sessionUrl({ protocol: "http:", host: "x" }, resumeId),
       {
         onOpen: () => events.push("open"),
         onLost: () => events.push("lost"),
         onMessage: (data) => events.push(`message ${String(data)}`),
       },
-      () => {
+      (url) => {
+        urls.push(url);
         const socket = new FakeSocket();
         sockets.push(socket);
         return socket;
@@ -45,7 +48,9 @@ describe("Connection", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     sockets.length = 0;
+    urls.length = 0;
     events.length = 0;
+    resumeId = null;
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -94,6 +99,15 @@ describe("Connection", () => {
     expect(events).toEqual(["open", "lost"]);
   });
 
+  it("rejoins with the latest session id on every connect", () => {
+    const conn = connection();
+    conn.connect();
+    resumeId = "s1";
+    sockets[0]?.drop();
+    vi.advanceTimersByTime(500);
+    expect(urls).toEqual(["ws://x/session", "ws://x/session?resume=s1"]);
+  });
+
   it("does not report a loss when the user closes the session", () => {
     const conn = connection();
     conn.connect();
@@ -123,9 +137,11 @@ describe("reconnectDelay", () => {
 
 describe("sessionUrl", () => {
   it.each([
-    ["https:", "wss://phone.ts.net/session"],
-    ["http:", "ws://phone.ts.net/session"],
-  ])("uses the page's scheme for %s", (protocol, url) => {
-    expect(sessionUrl({ protocol, host: "phone.ts.net" })).toBe(url);
+    ["https:", null, "wss://phone.ts.net/session"],
+    ["http:", null, "ws://phone.ts.net/session"],
+    ["https:", "abc-123", "wss://phone.ts.net/session?resume=abc-123"],
+    ["https:", "a b&c", "wss://phone.ts.net/session?resume=a%20b%26c"],
+  ])("for %s and resume id %s", (protocol, resumeId, url) => {
+    expect(sessionUrl({ protocol, host: "phone.ts.net" }, resumeId)).toBe(url);
   });
 });

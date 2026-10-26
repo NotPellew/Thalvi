@@ -20,20 +20,25 @@ export function reconnectDelay(failures: number): number {
   return Math.min(500 * 2 ** failures, 5000);
 }
 
-export function sessionUrl(location: Pick<Location, "protocol" | "host">): string {
-  return `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/session`;
+export function sessionUrl(
+  location: Pick<Location, "protocol" | "host">,
+  resumeId: string | null,
+): string {
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  const query = resumeId === null ? "" : `?resume=${encodeURIComponent(resumeId)}`;
+  return `${scheme}://${location.host}/session${query}`;
 }
 
 export class Connection {
   private socket: Socket | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private failures = 0;
-  private readonly url: string;
+  private readonly url: () => string;
   private readonly handlers: ConnectionHandlers;
   private readonly openSocket: (url: string) => Socket;
 
   constructor(
-    url: string,
+    url: () => string,
     handlers: ConnectionHandlers,
     openSocket: (url: string) => Socket = (u) => new WebSocket(u),
   ) {
@@ -44,7 +49,7 @@ export class Connection {
 
   connect(): void {
     this.timer = null;
-    const socket = this.openSocket(this.url);
+    const socket = this.openSocket(this.url());
     socket.binaryType = "arraybuffer";
     socket.onopen = () => {
       this.failures = 0;

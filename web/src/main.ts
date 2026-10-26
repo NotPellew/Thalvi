@@ -5,96 +5,106 @@ import { Playback } from "./playback.ts";
 import { createView } from "./view.ts";
 import { holdWakeLock } from "./wake-lock.ts";
 
-interface Running {
+const SESSION_KEY = "thalvi.session";
+
+interface VoiceAudio {
   readonly ctx: AudioContext;
   readonly mic: Mic;
-  readonly connection: Connection;
+  readonly playback: Playback;
   readonly releaseWakeLock: () => void;
 }
 
-const view = createView();
-let running: Running | null = null;
-let playback: Playback | null = null;
+const appRoot = document.getElementById("app");
+if (!appRoot) throw new Error("#app is missing from index.html");
+const view = createView(appRoot);
+let voiceAudio: VoiceAudio | null = null;
 
 const controller = new Controller({
   send: (text) => {
-    running?.connection.send(text);
+    connection.send(text);
   },
   playback: {
     enqueue: (bytes) => {
-      playback?.enqueue(bytes);
+      voiceAudio?.playback.enqueue(bytes);
     },
     flush: () => {
-      playback?.flush();
+      voiceAudio?.playback.flush();
     },
+  },
+  remember: (id) => {
+    sessionStorage.setItem(SESSION_KEY, id);
   },
   onChange: (state) => {
     view.render(state);
   },
 });
 
-function teardown(): void {
-  const current = running;
+const connection = new Connection(
+  () => sessionUrl(location, sessionStorage.getItem(SESSION_KEY)),
+  {
+    onOpen: () => {
+      controller.opened();
+    },
+    onLost: () => {
+      controller.lost();
+    },
+    onMessage: (data) => {
+      controller.message(data);
+    },
+  },
+);
+
+function stopVoice(notice: string | null): void {
+  const current = voiceAudio;
   if (!current) return;
-  running = null;
-  current.connection.close();
+  controller.setVoice(false, notice);
+  voiceAudio = null;
   current.mic.stop();
   current.releaseWakeLock();
   void current.ctx.close();
-  playback = null;
 }
 
-function endSession(): void {
-  teardown();
-  controller.end();
-}
-
-async function startSession(): Promise<void> {
-  view.setStarting(true);
+async function startVoice(): Promise<void> {
+  view.setVoiceBusy(true);
   // Audio must be created and the mic requested inside the tap's user activation.
   const ctx = new AudioContext({ latencyHint: "interactive" });
   try {
     await ctx.resume();
-    const connection = new Connection(sessionUrl(location), {
-      onOpen: () => {
-        controller.opened();
-      },
-      onLost: () => {
-        controller.lost();
-      },
-      onMessage: (data) => {
-        controller.message(data);
-      },
-    });
     const mic = await openMic(
       ctx,
       (frame) => {
-        connection.send(frame);
+        if (controller.state.voice) connection.send(frame);
       },
       () => {
-        teardown();
-        controller.failed("The microphone stopped working.");
+        stopVoice("The microphone stopped working.");
       },
     );
-    playback = new Playback(ctx, (playing) => {
-      controller.playing(playing);
-    });
-    running = { ctx, mic, connection, releaseWakeLock: holdWakeLock() };
-    controller.begin();
-    connection.connect();
+    voiceAudio = {
+      ctx,
+      mic,
+      playback: new Playback(ctx, (playing) => {
+        controller.playing(playing);
+      }),
+      releaseWakeLock: holdWakeLock(),
+    };
+    controller.setVoice(true);
   } catch (error) {
     void ctx.close();
-    controller.failed(micErrorMessage(error));
+    controller.notify(micErrorMessage(error));
   } finally {
-    view.setStarting(false);
+    view.setVoiceBusy(false);
   }
 }
 
-view.onStart(() => {
-  void startSession();
+view.onVoice(() => {
+  if (voiceAudio) stopVoice(null);
+  else void startVoice();
 });
 view.onStop(() => {
   controller.stop();
 });
-view.onEnd(endSession);
+view.onSubmit((text) => {
+  if (controller.sendText(text)) view.clearComposer();
+});
 view.render(controller.state);
+connection.connect();

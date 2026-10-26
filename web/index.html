@@ -8,24 +8,9 @@
     />
     <meta name="theme-color" content="#101114" />
     <title>Thalvi</title>
-    <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <main>
-      <header>
-        <h1 id="state" data-state="idle">Thalvi</h1>
-        <p id="notice" role="alert" hidden></p>
-      </header>
-      <section id="conversation" aria-live="polite"></section>
-      <p id="partial"></p>
-      <footer>
-        <button id="start" type="button">Start</button>
-        <div id="controls" hidden>
-          <button id="stop" type="button">Stop</button>
-          <button id="end" type="button">End</button>
-        </div>
-      </footer>
-    </main>
+    <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

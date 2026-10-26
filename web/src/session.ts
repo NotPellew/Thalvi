@@ -1,12 +1,7 @@
-import type { Phase, ServerMessage } from "./protocol.ts";
-
-export interface Turn {
-  readonly role: "user" | "assistant";
-  readonly text: string;
-}
+import type { Phase, ServerMessage, Turn } from "./protocol.ts";
 
 export interface SessionState {
-  readonly screen: "idle" | "active";
+  readonly voice: boolean;
   readonly link: "connecting" | "online" | "reconnecting";
   readonly phase: Phase;
   readonly playing: boolean;
@@ -19,19 +14,18 @@ export interface SessionState {
 export type DisplayState = Phase | "connecting" | "reconnecting";
 
 export type SessionEvent =
-  | { type: "begin" }
-  | { type: "end" }
-  | { type: "failed"; notice: string }
   | { type: "opened" }
   | { type: "lost" }
+  | { type: "voice"; on: boolean; notice: string | null }
+  | { type: "notice"; notice: string }
   | { type: "stopped" }
   | { type: "playing"; playing: boolean }
   | { type: "server"; message: ServerMessage };
 
-export const IDLE: SessionState = {
-  screen: "idle",
+export const INITIAL: SessionState = {
+  voice: false,
   link: "connecting",
-  phase: "listening",
+  phase: "idle",
   playing: false,
   partial: "",
   turns: [],
@@ -41,23 +35,24 @@ export const IDLE: SessionState = {
 
 export const UNREACHABLE_NOTICE = "Can't reach the server. Trying again…";
 
+/** What the user is told: the server phase, corrected for what the client knows locally. */
 export function displayState(s: SessionState): DisplayState {
   if (s.link !== "online") return s.link;
-  return s.playing ? "speaking" : s.phase;
+  if (!s.voice) return s.phase === "thinking" ? "thinking" : "idle";
+  if (s.playing) return "speaking";
+  return s.phase === "idle" ? "starting" : s.phase;
 }
 
 export function reduce(s: SessionState, event: SessionEvent): SessionState {
   switch (event.type) {
-    case "begin":
-      return { ...IDLE, screen: "active" };
-    case "end":
-      return IDLE;
-    case "failed":
-      return { ...IDLE, notice: event.notice };
     case "opened":
-      return { ...s, link: "online", phase: "listening", partial: "", replyOpen: false, notice: null };
+      return { ...s, link: "online", phase: "idle", partial: "", replyOpen: false, notice: null };
     case "lost":
-      return { ...s, link: "reconnecting", phase: "listening", partial: "", replyOpen: false, notice: UNREACHABLE_NOTICE };
+      return { ...s, link: "reconnecting", phase: "idle", partial: "", replyOpen: false, notice: UNREACHABLE_NOTICE };
+    case "voice":
+      return { ...s, voice: event.on, playing: event.on && s.playing, notice: event.notice };
+    case "notice":
+      return { ...s, notice: event.notice };
     case "stopped":
       return { ...s, replyOpen: false };
     case "playing":
@@ -69,6 +64,8 @@ export function reduce(s: SessionState, event: SessionEvent): SessionState {
 
 function reduceServer(s: SessionState, m: ServerMessage): SessionState {
   switch (m.type) {
+    case "session":
+      return { ...s, turns: m.turns, partial: "", replyOpen: false };
     case "state":
       return { ...s, phase: m.state };
     case "partial":
@@ -90,7 +87,8 @@ function reduceServer(s: SessionState, m: ServerMessage): SessionState {
       return { ...s, turns, replyOpen: true };
     }
     case "interrupted":
-      return { ...s, phase: "listening", replyOpen: false };
+    case "reply_end":
+      return { ...s, replyOpen: false };
     case "error":
       return { ...s, notice: m.message };
   }
