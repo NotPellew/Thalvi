@@ -1,9 +1,10 @@
 #!/bin/sh
 # Mirrors the PR title check: type(optional scope): lowercase summary.
-# Git's own Merge, Revert, fixup!, squash! and amend! subjects pass through.
+# CI runs this on every commit in a PR, because each one lands on main.
+# Git's own Merge and Revert subjects pass through.
 subject=$(head -n 1 "$1")
 case "$subject" in
-  "Merge "* | "Revert "* | "fixup! "* | "squash! "* | "amend! "*) exit 0 ;;
+  "Merge "* | "Revert "*) exit 0 ;;
 esac
 pattern='^(feat|fix|docs|refactor|test|chore|ci|build|perf)(\([a-z0-9-]+\))?!?: [^A-Z].*'
 if ! printf '%s' "$subject" | grep -Eq "$pattern"; then

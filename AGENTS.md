@@ -49,22 +49,30 @@ the `main` ruleset on GitHub.
 
 ## Git workflow
 
-- `main` changes only through pull requests. A GitHub ruleset enforces it:
-  squash merge only, linear history, no force-push or deletion, required
-  checks must pass. No approval is required; see DECISIONS.md.
-- Never rewrite `main`'s history: it is the hackathon's provenance record.
+- `main` changes only through pull requests, merged with a merge commit. A
+  GitHub ruleset enforces it: merge commits only, no force-push or deletion,
+  required checks must pass. No approval is required; see DECISIONS.md.
+- Pushed commits are never rewritten, on `main` or on a PR branch: no
+  force-push, no rebase or squash of pushed work. Bring `main` into a branch
+  with a merge. The history is the hackathon's provenance record and shows
+  how the work progressed; dead ends and their reverts stay in it.
+- Commit in small steps that each say what changed.
 - Issues are optional. When one exists, the branch references it and the PR
   body says `Closes #N` or `Refs #N`.
 - Branch names: `<type>/<slug>`, e.g. `feat/voice-barge-in`, `fix/timer-drift`
   — three hyphenated words or fewer.
 - Commits and PR titles follow Conventional Commits: `type(scope): summary`,
   the summary starting lowercase. Types: `feat fix docs refactor test chore ci
-  build perf`. Scopes, when used, come from: `server web ci deps docs`. The
-  lists live here and in [pr-title.yml](.github/workflows/pr-title.yml);
-  change both together.
-- The squash commit takes the PR title, so the title must follow the
-  convention — CI checks it. The local commit-msg hook mirrors the rule; run
-  `git config core.hooksPath .githooks` once per clone.
+  build perf`. Scopes, when used, come from: `server web ci deps docs`. Both
+  lists also live in [commits.yml](.github/workflows/commits.yml), and the
+  types in [the commit-msg hook](.githooks/commit-msg); change them together.
+- Every branch commit lands on `main`, so CI checks each one
+  (`commit-messages`) as well as the PR title (`semantic-title`). Run
+  `git config core.hooksPath .githooks` once per clone so the commit-msg
+  hook catches a bad message before it is pushed and can no longer be
+  reworded.
+- The merge commit takes the PR title as its subject and the PR body as its
+  message, so `git log --first-parent main` reads as one line per PR.
 
 ## Hackathon provenance
 
