@@ -6,3 +6,15 @@ updates:
       interval: monthly
     commit-message:
       prefix: "ci(deps)"
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "build(deps)"
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "build(deps)"
