@@ -10,14 +10,16 @@ directing you.
 
 ## Non-negotiables
 
-- Nothing leaves the device on the user's behalf, such as a message, until
-  the user has confirmed it.
+- Thalvi asks the user to confirm right before any action that reaches other
+  people or can't be undone, such as sending a message.
 - Never rewrite pushed history, on `main` or on a PR branch: no force-push, no
   rebase or squash of pushed commits. Bring `main` into a branch with a merge.
 - Every commit message and PR title follows Conventional Commits:
-  `type(scope): summary`, the summary starting lowercase. Types: `feat fix docs
-  refactor test chore ci build perf`. Scopes: `server web ci deps docs`. CI
-  checks both. Run `git config core.hooksPath .githooks` once per clone.
+  `type(scope): summary`, the summary not starting with a capital letter.
+  Types: `feat fix docs refactor test chore ci build perf`. Scopes: `server web
+  ci deps docs`. The commit-msg hook checks this, and CI runs it on every
+  commit and the PR title. Run `git config core.hooksPath .githooks` once per
+  clone.
 - Never commit secrets, model weights, datasets, audio or camera captures,
   logs, plans or scratch notes, or PR screenshots. A committed secret is
   rotated; deleting the file does not fix it.
@@ -50,25 +52,29 @@ directing you.
   as that takes: one test per behavior, not per function, and table-driven
   cases instead of near-copies. Test what a caller can observe, not
   internals, and only failures that can really happen, not invented or
-  far-fetched ones. A bug fix adds a test that fails without it. Tests never
-  wait on the wall clock; use a paused or fake clock.
-- Comments: none inline, in tests too. Rust `///` states an item's contract
-  and any non-obvious reason; every module starts with a `//!` line saying
-  what it owns. A comment that restates the code is deleted.
+  far-fetched ones. A bug fix adds a test that fails without it. Never sleep
+  for a fixed time: drive time with a paused or fake clock, or wait for an
+  observable event under a bounded timeout.
+- Comments: default to none. Write one only for what the code can't say: a
+  constraint, a platform quirk, an invariant (`// SAFETY:` on every `unsafe`
+  block). Keep it to one line where possible. Never restate the code or
+  narrate history; the commit carries that. Rust `///` states an item's
+  contract, and every module starts with a `//!` line saying what it owns,
+  so `grep -rm1 '^//!'` maps the code.
 - Rust: `crates/` is flat, directory name = crate name. Dependency versions
   and lints are set at the workspace root. `lib.rs` only declares and
   re-exports modules. No `mod.rs`.
 - Prefer a lint or a CI check over a new rule in this file.
 - Before calling work done, run the gates and use the change end to end the
-  way the user would. Report what you ran.
+  way the user would. Report what you ran and what you could not verify.
 
 ## Keep it lean (YAGNI)
 
 Build what is needed now, for the cases we have. Code that isn't written
 can't break and doesn't slow down the next change.
 
-- Do what the developer asked, nothing more. A refactor, cleanup, or feature
-  you notice on the way is mentioned, not done.
+- Keep changes to what the developer asked. Mention unrelated refactors,
+  cleanups, or features you notice instead of doing them.
 - No speculative generality: no trait or interface with one implementation, no
   option nobody sets, no plugin point, no layer "for later". Add the
   abstraction when the second implementation arrives. A test fake counts,
@@ -85,8 +91,8 @@ can't break and doesn't slow down the next change.
 
 Nothing is scaffolded yet. The PR that adds a component adds its pinned
 toolchain (`rust-toolchain.toml`, `.node-version`), its gate commands here,
-and its CI job as a required check on `main`. npm is the package manager;
-lockfiles are committed. CI runs exactly the commands listed here.
+and a CI job that runs exactly those commands as a required check on `main`.
+npm is the package manager; lockfiles are committed.
 
 ## Git and PRs
 
@@ -94,7 +100,8 @@ lockfiles are committed. CI runs exactly the commands listed here.
   commits, so every commit stays in the history.
 - Branches: `<type>/<slug>`, three hyphenated words or fewer.
 - The PR title becomes the merge commit's subject. The body states the
-  problem, then the fix. When an issue exists, say `Closes #N`.
+  problem, then the fix. Say `Closes #N` when the PR resolves an issue,
+  `Refs #N` when it only touches one.
 
 ## Docs
 
