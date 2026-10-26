@@ -6,4 +6,5 @@ pub mod recognizer;
 pub mod sentence;
 pub mod server;
 pub mod session;
+pub mod store;
 pub mod tts;

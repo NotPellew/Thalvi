@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
-use axum::extract::State;
 use axum::extract::ws::WebSocketUpgrade;
+use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use tower_http::services::ServeDir;
@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::model::OpenAiChatModel;
 use crate::recognizer::MetaRecognizerFactory;
 use crate::session::handle_session;
+use crate::store::SessionStore;
 use crate::tts::OpenAiTts;
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -25,6 +26,7 @@ pub struct AppState {
     factory: MetaRecognizerFactory,
     model: Arc<OpenAiChatModel>,
     tts: Arc<OpenAiTts>,
+    store: Arc<SessionStore>,
 }
 
 /// Builds the router from validated configuration.
@@ -47,6 +49,7 @@ pub fn router(config: &Config) -> Router {
             config.tts_voice.clone(),
             config.tts_api_key.clone(),
         )),
+        store: Arc::new(SessionStore::new()),
     };
     Router::new()
         .route("/session", get(session_upgrade))
@@ -56,11 +59,20 @@ pub fn router(config: &Config) -> Router {
 
 async fn session_upgrade(
     State(state): State<AppState>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     upgrade: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+    let resume = query.get("resume").cloned();
     upgrade.on_upgrade(move |socket| {
-        handle_session(socket, state.factory, state.model, state.tts)
-            .instrument(tracing::info_span!("session", id))
+        handle_session(
+            socket,
+            state.factory,
+            state.model,
+            state.tts,
+            state.store,
+            resume,
+        )
+        .instrument(tracing::info_span!("session", id))
     })
 }
