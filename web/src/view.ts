@@ -48,6 +48,22 @@ export function shouldCollapse(input: CollapseInput): boolean {
   );
 }
 
+export interface ScrollInput {
+  readonly nearBottom: boolean;
+  readonly latestTall: boolean;
+  /** The latest message already had its start pinned, even if the user has scrolled since. */
+  readonly latestHandled: boolean;
+  /** The latest message's start is pinned and the user has not scrolled since. */
+  readonly latestPinned: boolean;
+}
+
+/** Follow the bottom, but keep the start of a message taller than the viewport in view. */
+export function scrollTarget(input: ScrollInput): "start" | "bottom" | "stay" {
+  if (input.latestPinned) return "start";
+  if (!input.nearBottom) return "stay";
+  return input.latestTall && !input.latestHandled ? "start" : "bottom";
+}
+
 export type TextSegment =
   | { readonly kind: "text"; readonly text: string }
   | { readonly kind: "link"; readonly text: string; readonly href: string };
@@ -274,6 +290,8 @@ export function createView(root: HTMLElement) {
   let keyboardOpen = false;
   let latestTall = false;
   let collapsed = true;
+  let handledLatest: Element | null = null;
+  let startPinned = false;
 
   const applyCollapse = (): void => {
     if (!lastState) return;
@@ -294,6 +312,11 @@ export function createView(root: HTMLElement) {
     if (!want && atBottom) scroller.scrollTop = scroller.scrollHeight;
   };
 
+  for (const input of ["wheel", "touchmove", "keydown", "pointerdown"] as const) {
+    scroller.addEventListener(input, () => {
+      startPinned = false;
+    }, { passive: true });
+  }
   scroller.addEventListener("scroll", () => {
     atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 96;
     applyCollapse();
@@ -384,7 +407,6 @@ export function createView(root: HTMLElement) {
       voice.disabled = voiceBusy;
 
       empty.hidden = s.turns.length > 0 || s.partial !== "";
-      const turnsBefore = list.children.length;
       syncTurns(list, s.turns, s.replyOpen);
       pending.hidden = display !== "thinking" || s.turns.at(-1)?.role !== "user";
       live.hidden = s.partial === "";
@@ -396,11 +418,18 @@ export function createView(root: HTMLElement) {
 
       composer.disabled = !online;
       syncSend();
-      if (!nearBottom) return;
-      if (latest instanceof HTMLElement && list.children.length > turnsBefore && latest.offsetHeight > scroller.clientHeight) {
-        scroller.scrollTop += latest.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 26;
-      } else {
+      const target = scrollTarget({
+        nearBottom,
+        latestTall: latest instanceof HTMLElement && latest.offsetHeight > scroller.clientHeight,
+        latestHandled: latest !== null && latest === handledLatest,
+        latestPinned: latest !== null && latest === handledLatest && startPinned,
+      });
+      if (target === "bottom") {
         scroller.scrollTop = scroller.scrollHeight;
+      } else if (target === "start" && latest instanceof HTMLElement) {
+        handledLatest = latest;
+        startPinned = true;
+        scroller.scrollTop += latest.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 26;
       }
     },
     setVoiceBusy(busy: boolean) {

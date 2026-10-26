@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldCollapse, splitLinks, type CollapseInput, type TextSegment } from "./view.ts";
+import { scrollTarget, shouldCollapse, splitLinks, type ScrollInput, type CollapseInput, type TextSegment } from "./view.ts";
 
 const live: CollapseInput = {
   voice: true,
@@ -28,6 +28,21 @@ describe("shouldCollapse", () => {
   ];
   it.each(cases)("%s", (_name, input, expected) => {
     expect(shouldCollapse(input)).toBe(expected);
+  });
+});
+
+describe("scrollTarget", () => {
+  const following: ScrollInput = { nearBottom: true, latestTall: false, latestHandled: false, latestPinned: false };
+  const cases: [string, ScrollInput, string][] = [
+    ["follows the bottom while the latest message is short", following, "bottom"],
+    ["keeps the start of a latest message that has just grown taller than the viewport", { ...following, latestTall: true }, "start"],
+    ["keeps the start in view while the pinned message keeps growing", { ...following, latestTall: true, latestHandled: true, latestPinned: true }, "start"],
+    ["follows the bottom once the user scrolled down to a message already pinned", { ...following, latestTall: true, latestHandled: true }, "bottom"],
+    ["leaves a user who scrolled up where they are", { ...following, nearBottom: false, latestTall: true, latestHandled: true }, "stay"],
+    ["leaves a user who scrolled up from a short message", { ...following, nearBottom: false }, "stay"],
+  ];
+  it.each(cases)("%s", (_name, input, expected) => {
+    expect(scrollTarget(input)).toBe(expected);
   });
 });
 

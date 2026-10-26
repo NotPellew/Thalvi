@@ -85,6 +85,7 @@ describe("Controller", () => {
     controller.setVoice(true);
     server({ type: "state", state: "speaking" });
     server({ type: "reply", text: "Once upon" });
+    server({ type: "partial", text: "and then" });
     controller.playing(true);
     calls.length = 0;
 
@@ -92,6 +93,7 @@ describe("Controller", () => {
     expect(calls).toEqual([VOICE_OFF, "flush"]);
     expect(shown()).toBe("idle");
     expect(controller.state.playing).toBe(false);
+    expect(controller.state.partial).toBe("");
 
     server({ type: "reply", text: " a time." });
     server({ type: "state", state: "idle" });
@@ -115,10 +117,23 @@ describe("Controller", () => {
   it.each([
     ["trims and sends", "  hello\nthere \n", 'send {"type":"text","text":"hello\\nthere"}'],
     ["sends a long paste at the limit", "x".repeat(20000), `send {"type":"text","text":"${"x".repeat(20000)}"}`],
-  ])("%s", (_name, typed, sent) => {
+  ])("%s, dropping reply audio still playing first", (_name, typed, sent) => {
     const { controller, calls } = online();
     expect(controller.sendText(typed)).toBe(true);
-    expect(calls).toEqual([sent]);
+    expect(calls).toEqual(["flush", sent]);
+  });
+
+  it.each([
+    ["starting", false],
+    ["thinking", false],
+    ["idle", false],
+    ["listening", true],
+  ] as const)("state %s keeps the live partial transcript: %s", (state, kept) => {
+    const { controller, server } = online();
+    controller.setVoice(true);
+    server({ type: "partial", text: "mm" });
+    server({ type: "state", state });
+    expect(controller.state.partial).toBe(kept ? "mm" : "");
   });
 
   it.each([

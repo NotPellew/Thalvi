@@ -51,6 +51,7 @@ export class Controller {
       this.notify(`That message is too long. The limit is ${String(MAX_TEXT_LENGTH)} characters.`);
       return false;
     }
+    this.ports.playback.flush();
     this.ports.send(textMessage(text));
     return true;
   }

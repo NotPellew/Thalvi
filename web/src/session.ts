@@ -50,7 +50,13 @@ export function reduce(s: SessionState, event: SessionEvent): SessionState {
     case "lost":
       return { ...s, link: "reconnecting", phase: "idle", partial: "", replyOpen: false, notice: UNREACHABLE_NOTICE };
     case "voice":
-      return { ...s, voice: event.on, playing: event.on && s.playing, notice: event.notice };
+      return {
+        ...s,
+        voice: event.on,
+        playing: event.on && s.playing,
+        partial: event.on ? s.partial : "",
+        notice: event.notice,
+      };
     case "notice":
       return { ...s, notice: event.notice };
     case "stopped":
@@ -67,7 +73,7 @@ function reduceServer(s: SessionState, m: ServerMessage): SessionState {
     case "session":
       return { ...s, turns: m.turns, partial: "", replyOpen: false };
     case "state":
-      return { ...s, phase: m.state };
+      return { ...s, phase: m.state, partial: m.state === "listening" ? s.partial : "" };
     case "partial":
       return { ...s, partial: m.text };
     case "user":
