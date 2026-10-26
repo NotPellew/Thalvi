@@ -45,6 +45,8 @@ directing you.
   TypeScript; no `unwrap`/`expect` outside tests in Rust.
 - Validate external input once, where it enters (network, devices, model
   output, config), and trust the typed value inside.
+- Every call to a model, endpoint or tool records its latency and outcome in
+  the opt-in metrics, so changes can be judged on real use.
 - Fix root causes: trace a bug to where it starts. A guard is a fix only when
   the state it handles is legitimate.
 - Tests: full coverage, no bloat. Every behavior is tested, with as few tests

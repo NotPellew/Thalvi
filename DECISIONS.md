@@ -24,6 +24,10 @@ areas your change touches. Editing rules are in
 - **Kokoro for local speech.** Kokoro-FastAPI streams 24 kHz PCM over the
   OpenAI speech API. Why: Meta has no TTS; Kokoro runs 12x real time on CPU. Revisit
   for a more expressive voice.
+- **Opt-in recordings.** `THALVI_RECORD` turns on metrics, turn and reply text,
+  and mic audio, each separately, written locally off the reply path. Why: to judge
+  product, model and endpoint changes on real use. Off by default: they are
+  personal data.
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
   interrupts a reply by speaking. Why: hands and eyes are busy. Rejected:
   push-to-talk.
