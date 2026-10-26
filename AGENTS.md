@@ -88,10 +88,14 @@ can't break and doesn't slow down the next change.
 
 ## Gates
 
-Nothing is scaffolded yet. The PR that adds a component adds its pinned
-toolchain (`rust-toolchain.toml`, `.node-version`), its gate commands here,
-and a CI job that runs exactly those commands as a required check on `main`.
-npm is the package manager; lockfiles are committed.
+CI runs exactly these as required checks on `main`. A new component adds its
+pinned toolchain, its commands here, and its CI job. npm is the package
+manager; lockfiles are committed.
+
+- Server (`crates/`): `cargo fmt --all -- --check`, `cargo lint`,
+  `cargo test --workspace --locked`, `RUSTDOCFLAGS="-D warnings" cargo docs`.
+- Web (`web/`): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`,
+  `npm run build`.
 
 ## Git and PRs
 
