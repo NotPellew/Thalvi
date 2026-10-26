@@ -24,8 +24,9 @@ Under construction for the
 ## Hackathon provenance
 
 All code in this repository was written during the hackathon; the commit
-history is the record. Pull requests land as merge commits and pushed commits
-are never rewritten, so every step of the work stays visible.
+history is the record. Pull requests land as merge commits, so the
+individual commits behind each change stay visible, and `main` is never
+rewritten.
 
 The idea draws on lessons from an earlier, private voice-assistant prototype
 by the same author. Nothing is copied from it or from any other repository;

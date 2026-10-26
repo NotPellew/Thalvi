@@ -17,10 +17,10 @@ areas your change touches. Editing rules are in
 
 ## Repository
 
-- **Merge commits, history kept as written.** PRs land as merge commits and
-  pushed commits are never rewritten. Why: judges and other participants see
-  how the work progressed, with original SHAs and dates. Rejected: squash
-  merge (one commit per PR), rebase merge (rewrites SHAs and commit dates).
+- **Merge commits; only `main` is fixed.** PRs land as merge commits, and PR
+  branches may be rewritten before merge. Why: the commits show the work being
+  iterated, which is enough; no full audit trail. Rejected: squash merge (hides
+  the iteration), a force-push block on all branches (more friction).
 - **No review gate.** The `main` ruleset requires PRs and passing checks but
   no approvals. Why: Thalvi has one author, and GitHub does not let authors
   approve their own PRs. Revisit if a second contributor joins.

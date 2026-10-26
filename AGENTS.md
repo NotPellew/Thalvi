@@ -12,8 +12,7 @@ directing you.
 
 - Thalvi asks the user to confirm right before any action that reaches other
   people or can't be undone, such as sending a message.
-- Never rewrite pushed history, on `main` or on a PR branch: no force-push, no
-  rebase or squash of pushed commits. Bring `main` into a branch with a merge.
+- Never rewrite `main`'s history.
 - Every commit message and PR title follows Conventional Commits:
   `type(scope): summary`, the summary not starting with a capital letter.
   Types: `feat fix docs refactor test chore ci build perf`. Scopes: `server web
@@ -97,7 +96,8 @@ npm is the package manager; lockfiles are committed.
 ## Git and PRs
 
 - Commit in small steps that each say what changed. PRs land as merge
-  commits, so every commit stays in the history.
+  commits, so a branch's commits stay in the history. Tidying a branch
+  before merge is fine; don't squash it into one commit.
 - Branches: `<type>/<slug>`, three hyphenated words or fewer.
 - The PR title becomes the merge commit's subject. The body states the
   problem, then the fix. Say `Closes #N` when the PR resolves an issue,
