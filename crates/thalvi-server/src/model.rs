@@ -55,7 +55,7 @@ pub type DeltaStream = Pin<Box<dyn Stream<Item = Result<String, ModelError>> + S
 
 struct SseState {
     bytes: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
-    buffer: String,
+    buffer: Vec<u8>,
     pending: std::collections::VecDeque<Result<String, ModelError>>,
     done: bool,
 }
@@ -135,7 +135,7 @@ impl ChatModel for OpenAiChatModel {
         }
         let state = SseState {
             bytes: Box::pin(response.bytes_stream()),
-            buffer: String::new(),
+            buffer: Vec::new(),
             pending: std::collections::VecDeque::new(),
             done: false,
         };
@@ -149,10 +149,12 @@ impl ChatModel for OpenAiChatModel {
                 }
                 match state.bytes.next().await {
                     Some(Ok(chunk)) => {
-                        state.buffer.push_str(&String::from_utf8_lossy(&chunk));
-                        while let Some(newline) = state.buffer.find('\n') {
-                            let line: String = state.buffer.drain(..=newline).collect();
-                            match parse_sse_line(line.trim()) {
+                        state.buffer.extend_from_slice(&chunk);
+                        while let Some(newline) =
+                            state.buffer.iter().position(|&byte| byte == b'\n')
+                        {
+                            let line: Vec<u8> = state.buffer.drain(..=newline).collect();
+                            match parse_sse_line(String::from_utf8_lossy(&line).trim()) {
                                 SseLine::Delta(text) => state.pending.push_back(Ok(text)),
                                 SseLine::Done => state.done = true,
                                 SseLine::Ignore => {}
@@ -170,7 +172,9 @@ impl ChatModel for OpenAiChatModel {
                     }
                     None => {
                         let tail = std::mem::take(&mut state.buffer);
-                        if let SseLine::Delta(text) = parse_sse_line(tail.trim()) {
+                        if let SseLine::Delta(text) =
+                            parse_sse_line(String::from_utf8_lossy(&tail).trim())
+                        {
                             state.pending.push_back(Ok(text));
                         }
                         state.done = true;

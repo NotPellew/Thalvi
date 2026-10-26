@@ -181,8 +181,12 @@ impl ChatModel for FakeModel {
 
 enum TtsScript {
     Audio,
+    /// Ten seconds of audio in one chunk.
+    Long,
     Fail,
     Hang,
+    /// Audio that only arrives once the gate opens.
+    Gated(Arc<Notify>),
 }
 
 #[derive(Clone, Default)]
@@ -218,7 +222,19 @@ impl Tts for FakeTts {
                     async move { Ok(bytes) },
                 )))
             }
+            TtsScript::Long => Ok(Box::pin(futures_util::stream::once(async {
+                Ok(Bytes::from(vec![0_u8; 480_000]))
+            }))),
             TtsScript::Fail => Err(TtsError("tts blew up".to_string())),
+            TtsScript::Gated(gate) => {
+                let guard = DropGuard(Arc::clone(&self.dropped));
+                let bytes = Bytes::from(format!("AUDIO:{text}"));
+                Ok(Box::pin(futures_util::stream::once(async move {
+                    let _guard = guard;
+                    gate.notified().await;
+                    Ok(bytes)
+                })))
+            }
             TtsScript::Hang => {
                 let guard = DropGuard(Arc::clone(&self.dropped));
                 let stream = futures_util::stream::unfold(Some(guard), |_guard| async move {
@@ -410,6 +426,28 @@ async fn collect_until(
     }
 }
 
+async fn next_resting_state(client: &mut ClientSocket) -> String {
+    loop {
+        if let Received::Json(v) = recv(client).await
+            && v["type"] == "state"
+            && let Some(state @ ("idle" | "starting" | "listening")) = v["state"].as_str()
+        {
+            return state.to_string();
+        }
+    }
+}
+
+/// An empty text message is answered with an error, which proves everything
+/// the server sent before it has already arrived.
+async fn expect_quiet_until_marker(harness: &mut Harness) {
+    send_json(harness, &json!({"type": "text", "text": ""})).await;
+    let marker = recv(&mut harness.client).await;
+    assert!(
+        matches!(&marker, Received::Json(v) if v["type"] == "error"),
+        "expected only the marker error, got {marker:?}"
+    );
+}
+
 fn has_state(received: &[Received], state: &str) -> bool {
     received.iter().any(
         |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == state),
@@ -544,11 +582,7 @@ async fn speech_start_and_cancel_each_interrupt_the_reply() {
         assert_eq!(audios(&received), Vec::<Bytes>::new());
         wait_until(|| harness.tts.dropped.load(Ordering::SeqCst) >= 1).await;
 
-        let extra = tokio::time::timeout(Duration::from_millis(300), harness.client.next()).await;
-        assert!(
-            matches!(extra, Err(_) | Ok(None | Some(Ok(ClientMessage::Ping(_))))),
-            "unexpected message after interrupt: {extra:?}"
-        );
+        expect_quiet_until_marker(&mut harness).await;
         harness.server.abort();
     }
 }
@@ -642,17 +676,24 @@ async fn fatal_recognizer_error_is_not_retried() {
     )
     .await;
     assert!(has_type(&received, "error"));
-    let retried = tokio::time::timeout(Duration::from_millis(400), async {
-        while harness.factory.attempts() < 2 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
+    let after_error = recv(&mut harness.client).await;
     assert!(
-        retried.is_err(),
+        matches!(&after_error, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
+        "a fatal recognizer error turns voice off and reports idle, got {after_error:?}"
+    );
+
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::time::resume();
+    expect_quiet_until_marker(&mut harness).await;
+    assert_eq!(
+        harness.factory.attempts(),
+        1,
         "fatal recognizer error must not reconnect"
     );
-    assert_eq!(harness.factory.attempts(), 1);
+
+    voice_on(&mut harness).await;
+    assert_eq!(harness.factory.attempts(), 2);
     harness.server.abort();
 }
 
@@ -661,7 +702,7 @@ async fn next_turn_history_includes_the_cut_off_reply_text() {
     let mut harness = start().await;
     voice_on(&mut harness).await;
     harness.model.add_script(vec![ModelChunk::Delta(
-        "Answer one. Answer two is longer.".to_string(),
+        "Answer one. Answer two is longer. Unfinished tail".to_string(),
     )]);
     harness.tts.add_script(TtsScript::Audio);
     harness.tts.add_script(TtsScript::Hang);
@@ -861,6 +902,25 @@ async fn turning_voice_off_mid_reply_stops_synthesis_while_text_continues() {
     assert_eq!(reply_text(&received), "Two. Three.");
     assert_eq!(audios(&received), Vec::<Bytes>::new());
     assert_eq!(harness.tts.inputs(), vec!["One.".to_string()]);
+
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Fine.".to_string())]);
+    send_json(&mut harness, &json!({"type": "text", "text": "next"})).await;
+    let _ = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
+    )
+    .await;
+    assert_eq!(
+        harness.model.calls()[1],
+        vec![
+            ChatMessage::user("question".to_string()),
+            ChatMessage::assistant("One. Two. Three.".to_string()),
+            ChatMessage::user("next".to_string()),
+        ],
+        "a finished reply is remembered in full even though only its first sentence was spoken"
+    );
     harness.server.abort();
 }
 
@@ -950,13 +1010,28 @@ async fn empty_or_oversized_text_is_an_error_and_is_ignored() {
     harness.server.abort();
 }
 
-fn recording_config(kinds: RecordKinds, tag: &str) -> RecordingConfig {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
+/// A unique scratch directory that is removed when dropped.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn new(tag: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        Self(std::env::temp_dir().join(format!("thalvi-record-test-{tag}-{nanos}")))
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn recording_config(kinds: RecordKinds, data_dir: &ScratchDir) -> RecordingConfig {
     RecordingConfig {
         kinds,
-        data_dir: std::env::temp_dir().join(format!("thalvi-record-test-{tag}-{nanos}")),
+        data_dir: data_dir.0.clone(),
         stt_model: "fake-stt".to_string(),
         llm_model: "fake-llm".to_string(),
         reasoning_effort: Some("minimal".to_string()),
@@ -1022,9 +1097,9 @@ async fn run_voice_turn(harness: &mut Harness) {
     .await;
 }
 
-async fn recorded_session(kinds: RecordKinds, tag: &str) -> (std::path::PathBuf, String) {
-    let config = recording_config(kinds, tag);
-    let data_dir = config.data_dir.clone();
+async fn recorded_session(kinds: RecordKinds, tag: &str) -> (ScratchDir, String) {
+    let data_dir = ScratchDir::new(tag);
+    let config = recording_config(kinds, &data_dir);
     let mut harness = start_with_recording(config).await;
     run_voice_turn(&mut harness).await;
     let session = harness.session_id.clone();
@@ -1039,7 +1114,7 @@ async fn recording_writes_nothing_metrics_text_or_all_kinds() {
     // Nothing enabled: no files at all.
     let (data_dir, session) = recorded_session(RecordKinds::default(), "none").await;
     assert!(
-        find_session_files(&data_dir, &session).is_empty(),
+        find_session_files(&data_dir.0, &session).is_empty(),
         "no recording files should be written when THALVI_RECORD is empty"
     );
 
@@ -1052,7 +1127,7 @@ async fn recording_writes_nothing_metrics_text_or_all_kinds() {
     let (data_dir, session) = recorded_session(kinds, "metrics").await;
     wait_until(|| {
         std::fs::read_to_string(
-            find_session_files(&data_dir, &session)
+            find_session_files(&data_dir.0, &session)
                 .into_iter()
                 .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
                 .unwrap_or_default(),
@@ -1060,7 +1135,7 @@ async fn recording_writes_nothing_metrics_text_or_all_kinds() {
         .is_ok_and(|content| content.contains("session_close"))
     })
     .await;
-    let lines = read_recorded_lines_blocking(&data_dir, &session);
+    let lines = read_recorded_lines_blocking(&data_dir.0, &session);
     assert_events(
         &lines,
         &[
@@ -1083,7 +1158,7 @@ async fn recording_writes_nothing_metrics_text_or_all_kinds() {
     assert_eq!(connect["outcome"], "ok");
     assert_eq!(connect["model"], "fake-stt");
     assert!(
-        find_session_files(&data_dir, &session)
+        find_session_files(&data_dir.0, &session)
             .iter()
             .all(|path| path.extension().is_none_or(|ext| ext != "wav")),
         "metrics-only recording must not write wav files"
@@ -1096,8 +1171,8 @@ async fn recording_writes_nothing_metrics_text_or_all_kinds() {
         audio: false,
     };
     let (data_dir, session) = recorded_session(kinds, "text").await;
-    wait_until(|| !read_recorded_lines_blocking(&data_dir, &session).is_empty()).await;
-    let lines = read_recorded_lines_blocking(&data_dir, &session);
+    wait_until(|| !read_recorded_lines_blocking(&data_dir.0, &session).is_empty()).await;
+    let lines = read_recorded_lines_blocking(&data_dir.0, &session);
     assert_ne!(lines.len(), 0);
     assert!(
         lines
@@ -1118,12 +1193,12 @@ async fn recording_writes_nothing_metrics_text_or_all_kinds() {
     };
     let (data_dir, session) = recorded_session(kinds, "all").await;
     wait_until(|| {
-        find_session_files(&data_dir, &session)
+        find_session_files(&data_dir.0, &session)
             .iter()
             .any(|path| path.extension().is_some_and(|ext| ext == "wav"))
     })
     .await;
-    let wav = find_session_files(&data_dir, &session)
+    let wav = find_session_files(&data_dir.0, &session)
         .into_iter()
         .find(|path| path.extension().is_some_and(|ext| ext == "wav"))
         .unwrap();
@@ -1133,7 +1208,7 @@ async fn recording_writes_nothing_metrics_text_or_all_kinds() {
         44 + 38_400,
         "100..500 ms speech plus 300 ms padding each side"
     );
-    let lines = read_recorded_lines_blocking(&data_dir, &session);
+    let lines = read_recorded_lines_blocking(&data_dir.0, &session);
     let turn = lines.iter().find(|line| line["event"] == "turn").unwrap();
     assert!(turn["endpoint_lag_ms"].is_number());
     assert_eq!(turn["audio"], "1.wav");
@@ -1174,8 +1249,8 @@ async fn endpoint_lag_is_measured_from_when_the_end_audio_was_forwarded() {
         text: false,
         audio: false,
     };
-    let config = recording_config(kinds, "lag");
-    let data_dir = config.data_dir.clone();
+    let data_dir = ScratchDir::new("lag");
+    let config = recording_config(kinds, &data_dir);
     let mut harness = start_with_recording(config).await;
     voice_on(&mut harness).await;
     for _ in 0..10 {
@@ -1209,7 +1284,7 @@ async fn endpoint_lag_is_measured_from_when_the_end_audio_was_forwarded() {
     harness.factory.complete_turn(connection, "hello thalvi");
     let session = harness.session_id.clone();
     wait_until(|| {
-        read_recorded_lines_blocking(&data_dir, &session)
+        read_recorded_lines_blocking(&data_dir.0, &session)
             .iter()
             .any(|line| line["event"] == "turn")
     })
@@ -1218,7 +1293,7 @@ async fn endpoint_lag_is_measured_from_when_the_end_audio_was_forwarded() {
     harness.client.close(None).await.unwrap();
     wait_until(|| harness.store.contains(&session)).await;
     harness.server.abort();
-    let lines = read_recorded_lines_blocking(&data_dir, &session);
+    let lines = read_recorded_lines_blocking(&data_dir.0, &session);
     let turn = lines.iter().find(|line| line["event"] == "turn").unwrap();
     let lag = turn["endpoint_lag_ms"].as_u64().unwrap();
     assert!(
@@ -1234,8 +1309,8 @@ async fn resumed_session_continues_turn_numbering_and_keeps_both_wavs() {
         text: true,
         audio: true,
     };
-    let config = recording_config(kinds, "resume");
-    let data_dir = config.data_dir.clone();
+    let data_dir = ScratchDir::new("resume");
+    let config = recording_config(kinds, &data_dir);
     let mut harness = start_with_recording(config).await;
     run_voice_turn(&mut harness).await;
     let session = harness.session_id.clone();
@@ -1250,16 +1325,302 @@ async fn resumed_session_continues_turn_numbering_and_keeps_both_wavs() {
     harness.server.abort();
 
     wait_until(|| {
-        let files = find_session_files(&data_dir, &session);
+        let files = find_session_files(&data_dir.0, &session);
         files.iter().any(|path| path.ends_with("1.wav"))
             && files.iter().any(|path| path.ends_with("2.wav"))
     })
     .await;
-    let lines = read_recorded_lines_blocking(&data_dir, &session);
+    let lines = read_recorded_lines_blocking(&data_dir.0, &session);
     let turn_numbers: Vec<u64> = lines
         .iter()
         .filter(|line| line["event"] == "turn")
         .filter_map(|line| line["turn"].as_u64())
         .collect();
     assert_eq!(turn_numbers, vec![1, 2]);
+}
+
+#[derive(Clone, Default)]
+struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn operator_log_carries_turn_source_and_length_but_never_the_text() {
+    let log = LogBuffer::default();
+    let writer = log.clone();
+    // Scoped subscribers lose events to callsites other test threads cached as disabled.
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish(),
+    )
+    .unwrap();
+    let mut harness = start().await;
+    voice_on(&mut harness).await;
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Ok.".to_string())]);
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Ok.".to_string())]);
+    send_json(
+        &mut harness,
+        &json!({"type": "text", "text": "alpha typed secret"}),
+    )
+    .await;
+    let _ = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+    })
+    .await;
+    harness.factory.complete_turn(0, "bravo spoken secret");
+    let _ = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+    })
+    .await;
+    harness.server.abort();
+
+    let logged = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logged.contains(r#"source="text" chars=18"#),
+        "typed turn not logged by source and length: {logged}"
+    );
+    assert!(
+        logged.contains(r#"source="voice" chars=19"#),
+        "spoken turn not logged by source and length: {logged}"
+    );
+    assert!(
+        !logged.contains("secret"),
+        "turn text must stay out of the operator log: {logged}"
+    );
+}
+
+#[tokio::test]
+async fn typed_turn_interrupts_reply_audio_still_playing_after_the_reply_finished() {
+    let mut harness = start().await;
+    voice_on(&mut harness).await;
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Long answer.".to_string())]);
+    harness.tts.add_script(TtsScript::Long);
+    send_json(&mut harness, &json!({"type": "text", "text": "first"})).await;
+    let received = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+    })
+    .await;
+    assert_eq!(audios(&received).len(), 1);
+
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Next.".to_string())]);
+    send_json(&mut harness, &json!({"type": "text", "text": "second"})).await;
+    let first = recv(&mut harness.client).await;
+    assert!(
+        matches!(&first, Received::Json(v) if v["type"] == "interrupted"),
+        "the client is still playing the first reply and must be told to drop it, got {first:?}"
+    );
+    let received = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_end"),
+    )
+    .await;
+    assert_eq!(reply_text(&received), "Next.");
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn closing_the_socket_mid_reply_keeps_the_text_shown_for_the_rejoin() {
+    let mut harness = start().await;
+    let first_id = harness.session_id.clone();
+    harness.model.add_script(vec![
+        ModelChunk::Delta("Partial words. ".to_string()),
+        ModelChunk::Wait(Arc::new(Notify::new())),
+    ]);
+    send_json(&mut harness, &json!({"type": "text", "text": "question"})).await;
+    let _ = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply"),
+    )
+    .await;
+    harness.client.close(None).await.unwrap();
+    wait_until(|| harness.store.contains(&first_id)).await;
+
+    let turns = harness.reconnect(Some(&first_id)).await;
+    assert_eq!(
+        turns,
+        json!([
+            {"role": "user", "text": "question"},
+            {"role": "assistant", "text": "Partial words."},
+        ])
+    );
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn cut_off_reply_after_voice_off_keeps_all_the_text_shown() {
+    let mut harness = start().await;
+    voice_on(&mut harness).await;
+    let (first_gate, second_gate) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    harness.model.add_script(vec![
+        ModelChunk::Delta("One. ".to_string()),
+        ModelChunk::Wait(Arc::clone(&first_gate)),
+        ModelChunk::Delta("Two. ".to_string()),
+        ModelChunk::Wait(Arc::clone(&second_gate)),
+    ]);
+    harness.factory.complete_turn(0, "question");
+    let _ = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Audio(_))
+    })
+    .await;
+    send_json(&mut harness, &json!({"type": "voice", "on": false})).await;
+    let off_state = recv(&mut harness.client).await;
+    assert!(
+        matches!(&off_state, Received::Json(v) if v["type"] == "state" && v["state"] == "thinking"),
+        "expected thinking after voice off mid-reply, got {off_state:?}"
+    );
+    first_gate.notify_one();
+    let received = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply" && v["text"] == "Two. "),
+    )
+    .await;
+    assert_eq!(audios(&received), Vec::<Bytes>::new());
+    send_json(&mut harness, &json!({"type": "cancel"})).await;
+    let _ = collect_until(&mut harness.client, |item| {
+        has_type(std::slice::from_ref(item), "interrupted")
+    })
+    .await;
+
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Fine.".to_string())]);
+    send_json(&mut harness, &json!({"type": "text", "text": "next"})).await;
+    let _ = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_end"),
+    )
+    .await;
+    assert_eq!(
+        harness.model.calls()[1][1],
+        ChatMessage::assistant("One. Two.".to_string()),
+        "voice was turned off, so the user read both sentences"
+    );
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn resting_state_waits_for_the_recognizer_after_every_way_a_reply_ends() {
+    let mut harness = start().await;
+    let connect_gate = Arc::new(Notify::new());
+    harness.factory.hold_connect(Arc::clone(&connect_gate));
+    send_json(&mut harness, &json!({"type": "voice", "on": true})).await;
+    let _ = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "starting")
+    })
+    .await;
+
+    for ending in ["finished", "cancelled", "failed"] {
+        harness.model.add_script(match ending {
+            "finished" => vec![ModelChunk::Delta("Hi there.".to_string())],
+            "cancelled" => vec![ModelChunk::Wait(Arc::new(Notify::new()))],
+            _ => vec![ModelChunk::Fail],
+        });
+        send_json(&mut harness, &json!({"type": "text", "text": ending})).await;
+        if ending == "cancelled" {
+            let _ = collect_until(&mut harness.client, |item| {
+                matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "thinking")
+            })
+            .await;
+            send_json(&mut harness, &json!({"type": "cancel"})).await;
+        }
+        assert_eq!(
+            next_resting_state(&mut harness.client).await,
+            "starting",
+            "{ending}: the recognizer is still connecting, so the mic is not listening"
+        );
+    }
+
+    connect_gate.notify_one();
+    let received = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+    })
+    .await;
+    assert!(has_state(&received, "listening"));
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn turning_voice_on_mid_reply_keeps_the_reply_state_until_it_ends() {
+    let mut harness = start().await;
+    let model_gate = Arc::new(Notify::new());
+    harness
+        .model
+        .add_script(vec![ModelChunk::Wait(Arc::clone(&model_gate))]);
+    send_json(&mut harness, &json!({"type": "text", "text": "question"})).await;
+    let _ = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "thinking")
+    })
+    .await;
+
+    let connect_gate = Arc::new(Notify::new());
+    harness.factory.hold_connect(Arc::clone(&connect_gate));
+    send_json(&mut harness, &json!({"type": "voice", "on": true})).await;
+    expect_quiet_until_marker(&mut harness).await;
+
+    model_gate.notify_one();
+    assert_eq!(
+        next_resting_state(&mut harness.client).await,
+        "starting",
+        "the reply ended while the recognizer was still connecting"
+    );
+    connect_gate.notify_one();
+    let received = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+    })
+    .await;
+    assert!(has_state(&received, "listening"));
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn turning_voice_off_stops_the_sentence_being_synthesized_while_text_continues() {
+    let mut harness = start().await;
+    voice_on(&mut harness).await;
+    let tts_gate = Arc::new(Notify::new());
+    harness
+        .tts
+        .add_script(TtsScript::Gated(Arc::clone(&tts_gate)));
+    harness.model.add_script(vec![
+        ModelChunk::Delta("Hello there. ".to_string()),
+        ModelChunk::Delta("Second.".to_string()),
+    ]);
+    harness.factory.complete_turn(0, "question");
+    wait_until(|| harness.tts.inputs().len() == 1).await;
+
+    send_json(&mut harness, &json!({"type": "voice", "on": false})).await;
+    let received = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
+    )
+    .await;
+    assert_eq!(reply_text(&received), "Hello there. Second.");
+    assert!(
+        !has_state(&received, "speaking"),
+        "no speaking state once voice is off: {received:?}"
+    );
+    wait_until(|| harness.tts.dropped.load(Ordering::SeqCst) == 1).await;
+
+    tts_gate.notify_one();
+    expect_quiet_until_marker(&mut harness).await;
+    assert_eq!(harness.tts.inputs(), vec!["Hello there.".to_string()]);
+    harness.server.abort();
 }

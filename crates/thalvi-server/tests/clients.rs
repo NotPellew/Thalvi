@@ -122,14 +122,21 @@ async fn chat_model_parses_sse_until_done_and_sends_stream_request() {
                         .lock()
                         .unwrap()
                         .push(serde_json::from_str(&body).unwrap());
+                    // The second event is split inside the two bytes of "é".
                     let sse = concat!(
                         "data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\n",
-                        "data: {\"choices\":[{\"delta\":{\"content\":\"world.\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"café.\"}}]}\n\n",
                         "data: [DONE]\n\n",
-                    );
+                    )
+                    .as_bytes();
+                    let split = sse.iter().position(|&byte| byte == 0xC3).unwrap() + 1;
+                    let chunks = vec![
+                        Ok::<Vec<u8>, std::io::Error>(sse[..split].to_vec()),
+                        Ok(sse[split..].to_vec()),
+                    ];
                     Response::builder()
                         .header("content-type", "text/event-stream")
-                        .body(Body::from(sse))
+                        .body(Body::from_stream(futures_util::stream::iter(chunks)))
                         .unwrap()
                 }
             }),
@@ -150,7 +157,7 @@ async fn chat_model_parses_sse_until_done_and_sends_stream_request() {
     while let Some(delta) = stream.next().await {
         deltas.push(delta.unwrap());
     }
-    assert_eq!(deltas, vec!["Hello ".to_string(), "world.".to_string()]);
+    assert_eq!(deltas, vec!["Hello ".to_string(), "café.".to_string()]);
     let bodies = captured.bodies.lock().unwrap();
     assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0]["stream"], true);

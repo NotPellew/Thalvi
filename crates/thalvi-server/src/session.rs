@@ -1,14 +1,13 @@
 //! Owns one voice session: recognizer, reply pipeline, and the client socket.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -43,6 +42,8 @@ struct ActiveReply {
     started_at: Instant,
     sent_sentences: Vec<String>,
     text: String,
+    /// Whether every sentence of the reply so far was sent to speech.
+    spoken_throughout: bool,
     speaking_sent: bool,
     first_delta_at: Option<Instant>,
     first_sentence_at: Option<Instant>,
@@ -111,7 +112,31 @@ struct RecognizerHandle {
     audio_tx: mpsc::Sender<Vec<u8>>,
     task: JoinHandle<()>,
     ready: bool,
-    dead: bool,
+}
+
+/// Whether the user wants voice and whether the recognizer can hear them.
+#[derive(Clone, Copy)]
+struct Voice {
+    on: bool,
+    ready: bool,
+}
+
+impl Voice {
+    fn new(on: bool, recognizer: Option<&RecognizerHandle>) -> Self {
+        Self {
+            on,
+            ready: recognizer.is_some_and(|handle| handle.ready),
+        }
+    }
+
+    /// The state to report when no reply is running.
+    fn resting_state(self) -> &'static str {
+        match (self.on, self.ready) {
+            (false, _) => "idle",
+            (true, true) => "listening",
+            (true, false) => "starting",
+        }
+    }
 }
 
 const MAX_TEXT_CHARS: usize = 20_000;
@@ -152,7 +177,7 @@ pub async fn handle_session<F, M, T>(
     send_state(&mut sink, "idle").await;
     tracing::info!("session opened");
 
-    let voice = Arc::new(AtomicBool::new(false));
+    let voice = watch::Sender::new(false);
     let mut voice_on = false;
     let mut recognizer: Option<RecognizerHandle> = None;
     let mut rec_rx: Option<mpsc::Receiver<RecognizerMessage>> = None;
@@ -200,21 +225,19 @@ pub async fn handle_session<F, M, T>(
                 }
             }
             recognizer_message = recognizer_event => {
-                handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut history, &mut reply, &mut reply_rx, &mut playing_until, &model, &tts, &voice, voice_on, &mut turn_log).await;
+                handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut rec_rx, &mut history, &mut reply, &mut reply_rx, &mut playing_until, &model, &tts, &voice, &mut voice_on, &mut turn_log).await;
             }
             event = reply_event => {
                 let Some(event) = event else {
                     reply_rx = None;
                     continue;
                 };
-                handle_reply_event(event, &mut sink, &mut history, &mut reply, &mut reply_rx, &mut playing_until, voice_on, &mut turn_log).await;
+                handle_reply_event(event, &mut sink, &mut history, &mut reply, &mut reply_rx, &mut playing_until, Voice::new(voice_on, recognizer.as_ref()), &mut turn_log).await;
             }
         }
     }
 
-    if let Some(active) = reply.take() {
-        active.handle.abort();
-    }
+    cut_off_reply(&mut history, &mut reply, &mut reply_rx, &turn_log);
     if let Some(handle) = recognizer.take() {
         handle.task.abort();
     }
@@ -237,7 +260,7 @@ async fn handle_client_text<F, M, T>(
     recognizer: &mut Option<RecognizerHandle>,
     rec_rx: &mut Option<mpsc::Receiver<RecognizerMessage>>,
     factory: &Arc<F>,
-    voice: &Arc<AtomicBool>,
+    voice: &watch::Sender<bool>,
     voice_on: &mut bool,
     history: &mut Vec<ChatMessage>,
     reply: &mut Option<ActiveReply>,
@@ -260,7 +283,7 @@ async fn handle_client_text<F, M, T>(
                 reply,
                 reply_rx,
                 playing_until,
-                *voice_on,
+                Voice::new(*voice_on, recognizer.as_ref()),
                 "cancel",
                 turn_log,
             )
@@ -275,7 +298,7 @@ async fn handle_client_text<F, M, T>(
                 rec_rx,
                 factory,
                 voice,
-                reply.is_some(),
+                reply,
                 playing_until,
                 turn_log.recorder.clone(),
             )
@@ -292,7 +315,8 @@ async fn handle_client_text<F, M, T>(
                     model,
                     tts,
                     voice,
-                    *voice_on,
+                    Voice::new(*voice_on, recognizer.as_ref()),
+                    "text",
                     text.clone(),
                     turn_log,
                 )
@@ -319,14 +343,15 @@ async fn handle_recognizer_message<M, T>(
     recognizer_message: Option<RecognizerMessage>,
     sink: &mut (impl SinkExt<Message> + Unpin),
     recognizer: &mut Option<RecognizerHandle>,
+    rec_rx: &mut Option<mpsc::Receiver<RecognizerMessage>>,
     history: &mut Vec<ChatMessage>,
     reply: &mut Option<ActiveReply>,
     reply_rx: &mut Option<mpsc::Receiver<ReplyEvent>>,
     playing_until: &mut Option<Instant>,
     model: &Arc<M>,
     tts: &Arc<T>,
-    voice: &Arc<AtomicBool>,
-    voice_on: bool,
+    voice: &watch::Sender<bool>,
+    voice_on: &mut bool,
     turn_log: &mut TurnLog,
 ) where
     M: ChatModel + 'static,
@@ -353,7 +378,7 @@ async fn handle_recognizer_message<M, T>(
                 reply,
                 reply_rx,
                 playing_until,
-                voice_on,
+                Voice::new(*voice_on, recognizer.as_ref()),
                 "speech start",
                 turn_log,
             )
@@ -381,7 +406,8 @@ async fn handle_recognizer_message<M, T>(
                     model,
                     tts,
                     voice,
-                    voice_on,
+                    Voice::new(*voice_on, recognizer.as_ref()),
+                    "voice",
                     text.clone(),
                     turn_log,
                 )
@@ -399,9 +425,6 @@ async fn handle_recognizer_message<M, T>(
         Some(RecognizerMessage::Disconnected { message, fatal }) => {
             if let Some(handle) = recognizer {
                 handle.ready = false;
-                if fatal {
-                    handle.dead = true;
-                }
             }
             tracing::warn!(%message, fatal, "recognizer disconnected");
             let message = if fatal {
@@ -412,7 +435,10 @@ async fn handle_recognizer_message<M, T>(
                 plain_recognizer_error(&message)
             };
             send_json(sink, &json!({"type": "error", "message": message})).await;
-            if !fatal && voice_on && reply.is_none() {
+            if fatal {
+                *voice_on = false;
+                stop_voice(sink, recognizer, rec_rx, voice, reply, playing_until).await;
+            } else if *voice_on && reply.is_none() {
                 send_state(sink, "starting").await;
             }
         }
@@ -422,7 +448,7 @@ async fn handle_recognizer_message<M, T>(
             if let Some(handle) = recognizer {
                 handle.ready = true;
             }
-            if voice_on && reply.is_none() {
+            if *voice_on && reply.is_none() {
                 send_state(sink, "listening").await;
             }
         }
@@ -494,7 +520,6 @@ where
             audio_tx,
             task,
             ready: false,
-            dead: false,
         },
         rec_rx,
     )
@@ -510,37 +535,49 @@ async fn set_voice<F>(
     recognizer: &mut Option<RecognizerHandle>,
     rec_rx: &mut Option<mpsc::Receiver<RecognizerMessage>>,
     factory: &Arc<F>,
-    voice: &Arc<AtomicBool>,
-    reply_active: bool,
+    voice: &watch::Sender<bool>,
+    reply: &mut Option<ActiveReply>,
     playing_until: &mut Option<Instant>,
     recorder: Recorder,
 ) where
     F: RecognizerFactory + Send + Sync + 'static,
     F::Rec: Send + 'static,
 {
-    voice.store(on, Ordering::Relaxed);
-    if on {
-        let dead = recognizer.as_ref().is_some_and(|handle| handle.dead);
-        if recognizer.is_none() || dead {
-            if let Some(old) = recognizer.take() {
-                old.task.abort();
-            }
-            let (handle, receiver) = spawn_recognizer(factory, recorder.clone());
-            *recognizer = Some(handle);
-            *rec_rx = Some(receiver);
+    if !on {
+        stop_voice(sink, recognizer, rec_rx, voice, reply, playing_until).await;
+        return;
+    }
+    voice.send_replace(true);
+    if recognizer.is_none() {
+        let (handle, receiver) = spawn_recognizer(factory, recorder);
+        *recognizer = Some(handle);
+        *rec_rx = Some(receiver);
+        if reply.is_none() {
             send_state(sink, "starting").await;
         }
+    }
+}
+
+/// Turns voice off: drops the recognizer and stops speaking the running reply.
+async fn stop_voice(
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    recognizer: &mut Option<RecognizerHandle>,
+    rec_rx: &mut Option<mpsc::Receiver<RecognizerMessage>>,
+    voice: &watch::Sender<bool>,
+    reply: &mut Option<ActiveReply>,
+    playing_until: &mut Option<Instant>,
+) {
+    voice.send_replace(false);
+    if let Some(handle) = recognizer.take() {
+        handle.task.abort();
+    }
+    *rec_rx = None;
+    if let Some(active) = reply {
+        active.spoken_throughout = false;
+        send_state(sink, "thinking").await;
     } else {
-        if let Some(handle) = recognizer.take() {
-            handle.task.abort();
-        }
-        *rec_rx = None;
-        if reply_active {
-            send_state(sink, "thinking").await;
-        } else {
-            *playing_until = None;
-            send_state(sink, "idle").await;
-        }
+        *playing_until = None;
+        send_state(sink, "idle").await;
     }
 }
 
@@ -595,8 +632,9 @@ async fn begin_turn<M, T>(
     playing_until: &mut Option<Instant>,
     model: &Arc<M>,
     tts: &Arc<T>,
-    voice: &Arc<AtomicBool>,
-    voice_on: bool,
+    voice: &watch::Sender<bool>,
+    state: Voice,
+    source: &'static str,
     text: String,
     turn_log: &mut TurnLog,
 ) -> u64
@@ -604,30 +642,27 @@ where
     M: ChatModel + 'static,
     T: Tts + 'static,
 {
-    tracing::info!(%text, "user turn");
-    if reply.is_some() {
-        interrupt(
-            sink,
-            history,
-            reply,
-            reply_rx,
-            playing_until,
-            voice_on,
-            "new turn",
-            turn_log,
-        )
-        .await;
-    }
+    tracing::info!(source, chars = text.chars().count(), "user turn");
+    interrupt(
+        sink,
+        history,
+        reply,
+        reply_rx,
+        playing_until,
+        state,
+        "new turn",
+        turn_log,
+    )
+    .await;
     turn_log.next_turn += 1;
     let turn = turn_log.next_turn;
-    *playing_until = None;
     history.push(ChatMessage::user(text.clone()));
     send_json(sink, &json!({"type": "user", "text": text})).await;
     send_state(sink, "thinking").await;
     let (active, events_rx) = start_reply(
         Arc::clone(model),
         Arc::clone(tts),
-        Arc::clone(voice),
+        voice.subscribe(),
         history.clone(),
         turn,
         turn_log.recorder.clone(),
@@ -640,7 +675,7 @@ where
 fn start_reply<M, T>(
     model: Arc<M>,
     tts: Arc<T>,
-    voice: Arc<AtomicBool>,
+    voice: watch::Receiver<bool>,
     history: Vec<ChatMessage>,
     turn: u64,
     recorder: Recorder,
@@ -650,6 +685,7 @@ where
     T: Tts + 'static,
 {
     let (events_tx, events_rx) = mpsc::channel::<ReplyEvent>(64);
+    let spoken_throughout = *voice.borrow();
     let active = ActiveReply {
         handle: tokio::spawn(
             run_reply(model, tts, voice, history, events_tx, turn, recorder).in_current_span(),
@@ -658,6 +694,7 @@ where
         started_at: Instant::now(),
         sent_sentences: Vec::new(),
         text: String::new(),
+        spoken_throughout,
         speaking_sent: false,
         first_delta_at: None,
         first_sentence_at: None,
@@ -678,7 +715,7 @@ async fn handle_reply_event(
     reply: &mut Option<ActiveReply>,
     reply_rx: &mut Option<mpsc::Receiver<ReplyEvent>>,
     playing_until: &mut Option<Instant>,
-    voice_on: bool,
+    state: Voice,
     turn_log: &mut TurnLog,
 ) {
     match event {
@@ -699,6 +736,7 @@ async fn handle_reply_event(
                 active.sent_sentences.push(sentence);
             }
         }
+        ReplyEvent::Audio(_) if !state.on => {}
         ReplyEvent::Audio(audio) => {
             if reply.as_ref().is_some_and(|active| !active.speaking_sent) {
                 send_state(sink, "speaking").await;
@@ -721,7 +759,7 @@ async fn handle_reply_event(
                     audio_bytes = active.audio_bytes,
                     "reply finished"
                 );
-                record_assistant_history(history, &active);
+                record_assistant_history(history, &active, true);
                 turn_log.last_reply_turn = active.turn;
                 turn_log.last_reply_audio_bytes = active.audio_bytes;
                 emit_reply_record(&turn_log.recorder, &active, "done", None);
@@ -729,19 +767,19 @@ async fn handle_reply_event(
             }
             *reply_rx = None;
             send_json(sink, &json!({"type": "reply_end"})).await;
-            send_state(sink, if voice_on { "listening" } else { "idle" }).await;
+            send_state(sink, state.resting_state()).await;
         }
         ReplyEvent::Failed(message) => {
             tracing::warn!(%message, "reply failed");
             if let Some(active) = reply.take() {
-                record_assistant_history(history, &active);
+                record_assistant_history(history, &active, false);
                 emit_reply_record(&turn_log.recorder, &active, "failed", Some(&message));
             }
             *reply_rx = None;
             *playing_until = None;
             send_json(sink, &json!({"type": "reply_end"})).await;
             send_json(sink, &json!({"type": "error", "message": message})).await;
-            send_state(sink, if voice_on { "listening" } else { "idle" }).await;
+            send_state(sink, state.resting_state()).await;
         }
     }
 }
@@ -794,9 +832,10 @@ fn playback_deadline(active: &ActiveReply) -> Option<Instant> {
     }
 }
 
-fn record_assistant_history(history: &mut Vec<ChatMessage>, active: &ActiveReply) {
+/// Stores what the user got: a finished reply in full, a cut-off one as far as it was spoken.
+fn record_assistant_history(history: &mut Vec<ChatMessage>, active: &ActiveReply, finished: bool) {
     let spoken = active.sent_sentences.join(" ");
-    let text = if spoken.trim().is_empty() {
+    let text = if finished || !active.spoken_throughout || spoken.trim().is_empty() {
         active.text.trim().to_string()
     } else {
         spoken
@@ -816,7 +855,7 @@ async fn interrupt(
     reply: &mut Option<ActiveReply>,
     reply_rx: &mut Option<mpsc::Receiver<ReplyEvent>>,
     playing_until: &mut Option<Instant>,
-    voice_on: bool,
+    state: Voice,
     reason: &'static str,
     turn_log: &mut TurnLog,
 ) {
@@ -838,6 +877,20 @@ async fn interrupt(
             "audio_sent_ms": u64::try_from(audio_bytes).unwrap_or(u64::MAX) * 1000 / 48_000,
         }),
     );
+    cut_off_reply(history, reply, reply_rx, turn_log);
+    *playing_until = None;
+    tracing::info!(reason, "reply interrupted");
+    send_json(sink, &json!({"type": "interrupted"})).await;
+    send_state(sink, state.resting_state()).await;
+}
+
+/// Aborts the running reply, if any, and keeps what it produced so far in history.
+fn cut_off_reply(
+    history: &mut Vec<ChatMessage>,
+    reply: &mut Option<ActiveReply>,
+    reply_rx: &mut Option<mpsc::Receiver<ReplyEvent>>,
+    turn_log: &TurnLog,
+) {
     if let Some(mut active) = reply.take() {
         active.handle.abort();
         if let Some(receiver) = reply_rx.as_mut() {
@@ -854,14 +907,10 @@ async fn interrupt(
                 }
             }
         }
-        record_assistant_history(history, &active);
+        record_assistant_history(history, &active, false);
         emit_reply_record(&turn_log.recorder, &active, "interrupted", None);
     }
     *reply_rx = None;
-    *playing_until = None;
-    tracing::info!(reason, "reply interrupted");
-    send_json(sink, &json!({"type": "interrupted"})).await;
-    send_state(sink, if voice_on { "listening" } else { "idle" }).await;
 }
 
 fn plain_recognizer_error(message: &str) -> String {
@@ -883,7 +932,7 @@ async fn send_json(sink: &mut (impl SinkExt<Message> + Unpin), value: &serde_jso
 async fn run_reply<M, T>(
     model: Arc<M>,
     tts: Arc<T>,
-    voice: Arc<AtomicBool>,
+    mut voice: watch::Receiver<bool>,
     history: Vec<ChatMessage>,
     events: mpsc::Sender<ReplyEvent>,
     turn: u64,
@@ -920,24 +969,46 @@ async fn run_reply<M, T>(
             return;
         }
         for sentence in splitter.push(&delta) {
-            if voice.load(Ordering::Relaxed)
-                && !speak_sentence(&tts, &events, &sentence, turn, &recorder).await
+            if *voice.borrow()
+                && !speak_sentence(&tts, &mut voice, &events, &sentence, turn, &recorder).await
             {
                 return;
             }
         }
     }
     if let Some(tail) = splitter.finish()
-        && voice.load(Ordering::Relaxed)
-        && !speak_sentence(&tts, &events, &tail, turn, &recorder).await
+        && *voice.borrow()
+        && !speak_sentence(&tts, &mut voice, &events, &tail, turn, &recorder).await
     {
         return;
     }
     let _ = events.send(ReplyEvent::Finished).await;
 }
 
+/// Speaks one sentence, giving it up as soon as voice turns off.
 /// Returns false when the reply should stop (failure reported or session gone).
 async fn speak_sentence<T: Tts>(
+    tts: &Arc<T>,
+    voice: &mut watch::Receiver<bool>,
+    events: &mpsc::Sender<ReplyEvent>,
+    sentence: &str,
+    turn: u64,
+    recorder: &Recorder,
+) -> bool {
+    tokio::select! {
+        biased;
+        () = voice_turned_off(voice) => true,
+        keep_going = synthesize_sentence(tts, events, sentence, turn, recorder) => keep_going,
+    }
+}
+
+async fn voice_turned_off(voice: &mut watch::Receiver<bool>) {
+    if voice.wait_for(|on| !*on).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn synthesize_sentence<T: Tts>(
     tts: &Arc<T>,
     events: &mpsc::Sender<ReplyEvent>,
     sentence: &str,

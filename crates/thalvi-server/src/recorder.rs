@@ -426,7 +426,6 @@ impl AudioBuffer {
             .min(self.data.len());
         self.data.drain(..drop_bytes);
         self.base_ms += u64::try_from(drop_bytes).unwrap_or(u64::MAX) / 48;
-        let _ = self.duration_ms();
     }
 }
 
@@ -437,7 +436,6 @@ mod tests {
         wav_bytes,
     };
     use serde_json::json;
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     #[test]
@@ -472,13 +470,15 @@ mod tests {
     #[tokio::test]
     async fn a_writer_that_cannot_keep_up_drops_events_without_blocking_the_emitter() {
         let gate = Arc::new(tokio::sync::Notify::new());
+        let data_dir =
+            std::env::temp_dir().join(format!("thalvi-recorder-drop-test-{}", std::process::id()));
         let config = RecordingConfig {
             kinds: RecordKinds {
                 metrics: true,
                 text: false,
                 audio: false,
             },
-            data_dir: PathBuf::from("/tmp/thalvi-recorder-drop-test"),
+            data_dir: data_dir.clone(),
             stt_model: String::new(),
             llm_model: String::new(),
             reasoning_effort: None,
@@ -498,5 +498,6 @@ mod tests {
         gate.notify_one();
         drop(recorder);
         active.finish(0).await;
+        std::fs::remove_dir_all(&data_dir).unwrap();
     }
 }

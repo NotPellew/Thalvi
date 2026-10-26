@@ -250,12 +250,6 @@ fn close_error(frame: Option<&CloseFrame>) -> RecognizerError {
     }
 }
 
-/// Classifies a close code: only 1008 forbids reconnecting.
-#[must_use]
-pub fn close_code_is_fatal(code: u16) -> bool {
-    code == 1008
-}
-
 /// Parses one recognizer text frame; ignored frames return `None`.
 #[must_use]
 pub fn parse_recognizer_text(text: &str) -> Option<Result<RecognizerEvent, RecognizerError>> {
@@ -308,31 +302,9 @@ pub fn parse_recognizer_text(text: &str) -> Option<Result<RecognizerEvent, Recog
     }
 }
 
-/// Builds the recognizer handshake frame for a model and API key.
-#[must_use]
-pub fn handshake_frame(model: &str, api_key: &str) -> String {
-    json!({
-        "authorization": { "accessToken": format!("Bearer {api_key}") },
-        "audioEncoding": "PCM_24KHZ",
-        "model": model,
-        "mode": "ENDPOINTING",
-    })
-    .to_string()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{RecognizerEvent, close_code_is_fatal, handshake_frame, parse_recognizer_text};
-
-    #[test]
-    fn handshake_shape_matches_contract() {
-        let frame = handshake_frame("muse-voice", "secret");
-        let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
-        assert_eq!(value["authorization"]["accessToken"], "Bearer secret");
-        assert_eq!(value["audioEncoding"], "PCM_24KHZ");
-        assert_eq!(value["model"], "muse-voice");
-        assert_eq!(value["mode"], "ENDPOINTING");
-    }
+    use super::{RecognizerEvent, parse_recognizer_text};
 
     #[test]
     fn parses_events_and_ignores_progress_frames() {
@@ -375,14 +347,6 @@ mod tests {
         for (frame, expected) in cases {
             let parsed = parse_recognizer_text(frame).map(|result| result.unwrap());
             assert_eq!(parsed, expected);
-        }
-    }
-
-    #[test]
-    fn only_policy_close_is_fatal() {
-        assert!(close_code_is_fatal(1008));
-        for code in [1000_u16, 1011, 1013] {
-            assert!(!close_code_is_fatal(code));
         }
     }
 }
