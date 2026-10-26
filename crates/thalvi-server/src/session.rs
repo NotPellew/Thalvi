@@ -10,6 +10,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use tracing::Instrument;
 
 use crate::model::{ChatMessage, ChatModel};
 use crate::recognizer::{Recognizer, RecognizerEvent, RecognizerFactory};
@@ -35,6 +36,7 @@ enum RecognizerMessage {
 
 struct ActiveReply {
     handle: JoinHandle<()>,
+    started_at: Instant,
     sent_sentences: Vec<String>,
     speaking_sent: bool,
     first_audio_at: Option<Instant>,
@@ -52,7 +54,8 @@ where
     let (mut sink, mut stream) = socket.split();
     let (audio_tx, audio_rx) = mpsc::channel::<Vec<u8>>(32);
     let (rec_tx, mut rec_rx) = mpsc::channel::<RecognizerMessage>(32);
-    let recognizer_task = tokio::spawn(run_recognizer(factory, audio_rx, rec_tx));
+    let recognizer_task = tokio::spawn(run_recognizer(factory, audio_rx, rec_tx).in_current_span());
+    tracing::info!("session opened");
 
     let mut history: Vec<ChatMessage> = Vec::new();
     let mut reply: Option<ActiveReply> = None;
@@ -70,11 +73,13 @@ where
             client_message = stream.next() => {
                 match client_message {
                     Some(Ok(Message::Binary(audio))) => {
-                        let _ = audio_tx.try_send(audio.to_vec());
+                        if audio_tx.try_send(audio.to_vec()).is_err() {
+                            tracing::debug!("mic frame dropped");
+                        }
                     }
                     Some(Ok(Message::Text(text))) => {
                         if is_cancel(&text) {
-                            interrupt(&mut sink, &mut history, &mut reply, &mut reply_rx, &mut playing_until).await;
+                            interrupt(&mut sink, &mut history, &mut reply, &mut reply_rx, &mut playing_until, "cancel").await;
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
@@ -86,9 +91,12 @@ where
                 }
             }
             recognizer_message = rec_rx.recv() => {
+                if let Some(RecognizerMessage::Event(event)) = &recognizer_message {
+                    tracing::debug!(?event, "recognizer event");
+                }
                 match recognizer_message {
                     Some(RecognizerMessage::Event(RecognizerEvent::SpeechStart)) => {
-                        interrupt(&mut sink, &mut history, &mut reply, &mut reply_rx, &mut playing_until).await;
+                        interrupt(&mut sink, &mut history, &mut reply, &mut reply_rx, &mut playing_until, "speech start").await;
                     }
                     Some(RecognizerMessage::Event(RecognizerEvent::Partial { text })) => {
                         send_json(&mut sink, &json!({"type": "partial", "text": text})).await;
@@ -97,33 +105,23 @@ where
                         if text.trim().is_empty() {
                             continue;
                         }
+                        tracing::info!(%text, "user turn");
                         if reply.is_some() {
-                            interrupt(&mut sink, &mut history, &mut reply, &mut reply_rx, &mut playing_until).await;
+                            interrupt(&mut sink, &mut history, &mut reply, &mut reply_rx, &mut playing_until, "new turn").await;
                         }
                         playing_until = None;
                         history.push(ChatMessage::user(text.clone()));
                         send_json(&mut sink, &json!({"type": "user", "text": text})).await;
                         send_state(&mut sink, "thinking").await;
-                        let (events_tx, events_rx) = mpsc::channel::<ReplyEvent>(64);
-                        let handle = tokio::spawn(run_reply(
-                            Arc::clone(&model),
-                            Arc::clone(&tts),
-                            history.clone(),
-                            events_tx,
-                        ));
-                        reply = Some(ActiveReply {
-                            handle,
-                            sent_sentences: Vec::new(),
-                            speaking_sent: false,
-                            first_audio_at: None,
-                            audio_bytes: 0,
-                        });
+                        let (active, events_rx) = start_reply(Arc::clone(&model), Arc::clone(&tts), history.clone());
+                        reply = Some(active);
                         reply_rx = Some(events_rx);
                     }
                     Some(RecognizerMessage::Event(RecognizerEvent::Error { message })) => {
                         send_json(&mut sink, &json!({"type": "error", "message": plain_recognizer_error(&message)})).await;
                     }
                     Some(RecognizerMessage::Disconnected { message, fatal }) => {
+                        tracing::warn!(%message, fatal, "recognizer disconnected");
                         let message = if fatal {
                             format!("Speech recognition stopped and won't retry: {message}. Check the speech settings, then tap Start again.")
                         } else {
@@ -147,8 +145,30 @@ where
     if let Some(active) = reply.take() {
         active.handle.abort();
     }
+    tracing::info!("session closed");
     drop(audio_tx);
     recognizer_task.abort();
+}
+
+fn start_reply<M, T>(
+    model: Arc<M>,
+    tts: Arc<T>,
+    history: Vec<ChatMessage>,
+) -> (ActiveReply, mpsc::Receiver<ReplyEvent>)
+where
+    M: ChatModel + 'static,
+    T: Tts + 'static,
+{
+    let (events_tx, events_rx) = mpsc::channel::<ReplyEvent>(64);
+    let active = ActiveReply {
+        handle: tokio::spawn(run_reply(model, tts, history, events_tx).in_current_span()),
+        started_at: Instant::now(),
+        sent_sentences: Vec::new(),
+        speaking_sent: false,
+        first_audio_at: None,
+        audio_bytes: 0,
+    };
+    (active, events_rx)
 }
 
 async fn handle_reply_event(
@@ -183,6 +203,13 @@ async fn handle_reply_event(
         }
         ReplyEvent::Finished => {
             if let Some(active) = reply.take() {
+                tracing::info!(
+                    first_audio_ms = active
+                        .first_audio_at
+                        .map(|at| at.duration_since(active.started_at).as_millis()),
+                    audio_bytes = active.audio_bytes,
+                    "reply finished"
+                );
                 push_assistant_history(history, &active.sent_sentences);
                 *playing_until = playback_deadline(&active);
             }
@@ -190,6 +217,7 @@ async fn handle_reply_event(
             send_state(sink, "listening").await;
         }
         ReplyEvent::Failed(message) => {
+            tracing::warn!(%message, "reply failed");
             if let Some(active) = reply.take() {
                 push_assistant_history(history, &active.sent_sentences);
             }
@@ -227,6 +255,7 @@ async fn interrupt(
     reply: &mut Option<ActiveReply>,
     reply_rx: &mut Option<mpsc::Receiver<ReplyEvent>>,
     playing_until: &mut Option<Instant>,
+    reason: &'static str,
 ) {
     let reply_active = reply.is_some();
     let audio_playing = playing_until.is_some_and(|until| until > Instant::now());
@@ -247,6 +276,7 @@ async fn interrupt(
     }
     *reply_rx = None;
     *playing_until = None;
+    tracing::info!(reason, "reply interrupted");
     send_json(sink, &json!({"type": "interrupted"})).await;
     send_state(sink, "listening").await;
 }

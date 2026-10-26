@@ -1,6 +1,7 @@
 //! Owns the HTTP router: the web client at `/` and sessions at `/session`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::extract::State;
@@ -8,12 +9,15 @@ use axum::extract::ws::WebSocketUpgrade;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use tower_http::services::ServeDir;
+use tracing::Instrument;
 
 use crate::config::Config;
 use crate::model::OpenAiChatModel;
 use crate::recognizer::MetaRecognizerFactory;
 use crate::session::handle_session;
 use crate::tts::OpenAiTts;
+
+static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
 /// Shared state for the session endpoint.
 #[derive(Clone)]
@@ -54,5 +58,9 @@ async fn session_upgrade(
     State(state): State<AppState>,
     upgrade: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    upgrade.on_upgrade(move |socket| handle_session(socket, state.factory, state.model, state.tts))
+    let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+    upgrade.on_upgrade(move |socket| {
+        handle_session(socket, state.factory, state.model, state.tts)
+            .instrument(tracing::info_span!("session", id))
+    })
 }
