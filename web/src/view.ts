@@ -49,10 +49,15 @@ function coreIcon(display: DisplayState): IconName {
 }
 
 function orbSvg(display: DisplayState): string {
-  let ornament = "";
+  let ticks = "";
+  for (let i = 0; i < 24; i += 1) {
+    const long = i % 6 === 0;
+    ticks += `<line class="o-tick" x1="140" y1="${long ? "6" : "12"}" x2="140" y2="20" transform="rotate(${String(i * 15)} 140 140)"/>`;
+  }
+  let ornament = ticks;
   if (display === "listening" || display === "starting") {
-    ornament =
-      '<circle class="o-ring r1" cx="140" cy="140" r="84"/><circle class="o-ring r2" cx="140" cy="140" r="84"/><circle class="o-ring r3" cx="140" cy="140" r="84"/>';
+    ornament +=
+      '<circle class="o-ring r1" cx="140" cy="140" r="84"/><circle class="o-ring r2" cx="140" cy="140" r="84"/><circle class="o-ring r3" cx="140" cy="140" r="84"/><circle class="o-scan" cx="140" cy="140" r="100"/>';
   } else if (display === "thinking") {
     ornament =
       '<circle class="o-track" cx="140" cy="140" r="112"/><g class="o-orbit"><circle cx="140" cy="28" r="10"/><circle cx="140" cy="28" r="10" transform="rotate(120 140 140)"/><circle cx="140" cy="28" r="10" transform="rotate(240 140 140)"/></g>';
@@ -78,6 +83,7 @@ const MARKUP = `
     <div class="o-layout">
       <section class="o-stage">
         <button class="o-orb" type="button" aria-label="Start talking">
+          <span class="o-hud" aria-hidden="true"><i class="o-corner tl"></i><i class="o-corner tr"></i><i class="o-corner bl"></i><i class="o-corner br"></i></span>
           <span class="o-orb-art"></span>
           <span class="o-core-ic"></span>
         </button>
@@ -145,6 +151,10 @@ function syncTurns(list: HTMLElement, turns: readonly Turn[], growing: boolean):
     line.classList.toggle(
       "o-growing",
       growing && index === turns.length - 1 && turn.role === "assistant",
+    );
+    line.classList.toggle(
+      "o-latest",
+      index === turns.length - 1 && turn.role === "assistant",
     );
   });
 }
@@ -220,6 +230,9 @@ export function createView(root: HTMLElement) {
 
       if (display !== shownState) {
         shownState = display;
+        page.classList.remove("o-glitching");
+        void page.getBoundingClientRect();
+        page.classList.add("o-glitching");
         stateName.textContent = STATES[display].label;
         hint.textContent = STATES[display].hint;
         orbArt.innerHTML = orbSvg(display);
