@@ -1,0 +1,16 @@
+#!/bin/sh
+# Checks a commit subject, or a PR title in CI: type(scope): summary, with a
+# summary that does not start with a capital letter. The subjects git
+# generates for merges and reverts pass through.
+subject=$(head -n 1 "$1")
+case "$subject" in
+  "Merge branch '"* | "Merge remote-tracking branch '"* | 'Revert "'*) exit 0 ;;
+esac
+types='feat|fix|docs|refactor|test|chore|ci|build|perf'
+scopes='server|web|ci|deps|docs'
+if ! printf '%s' "$subject" | grep -Eq "^($types)(\(($scopes)\))?!?: [^A-Z]"; then
+  echo "commit-msg: subject must be 'type(scope): summary', the summary not starting with a capital" >&2
+  echo "commit-msg: types: $types" >&2
+  echo "commit-msg: scopes: $scopes" >&2
+  exit 1
+fi

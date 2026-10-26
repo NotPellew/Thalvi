@@ -6,3 +6,10 @@ dist/
 !.env.example
 *.log
 .DS_Store
+
+# Model weights and checkpoints
+*.safetensors
+*.gguf
+*.onnx
+*.pt
+*.pth

@@ -24,11 +24,17 @@ Under construction for the
 ## Hackathon provenance
 
 All code in this repository was written during the hackathon; the commit
-history is the record. The idea draws on lessons from an earlier, private
-voice-assistant prototype by the same author; no code from it is used here.
+history is the record. Pull requests land as merge commits, so the
+individual commits behind each change stay visible, and `main` is never
+rewritten.
+
+The idea draws on lessons from an earlier, private voice-assistant prototype
+by the same author. Nothing is copied from it or from any other repository;
+third-party code enters only as declared dependencies.
 
 AI assistance is used in this project and disclosed: Claude Code helps with
-design, implementation, and review.
+design, implementation, and review. Commits made with an agent carry its
+`Co-Authored-By` trailer.
 
 ## License
 
