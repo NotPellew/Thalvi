@@ -2,7 +2,7 @@
 
 Decisions in force, grouped by area. Each area stands alone; read only the
 areas your change touches. Editing rules are in
-[AGENTS.md](AGENTS.md#documentation-rules).
+[AGENTS.md](AGENTS.md#docs).
 
 ## Architecture
 
