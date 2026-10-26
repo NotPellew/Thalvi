@@ -22,6 +22,7 @@ describe("parseServerMessage", () => {
     ['{"type":"user","text":"hello"}', { type: "user", text: "hello" }],
     ['{"type":"reply","text":"Hi."}', { type: "reply", text: "Hi." }],
     ['{"type":"interrupted"}', { type: "interrupted" }],
+    ['{"type":"voice","on":false}', { type: "voice", on: false }],
     ['{"type":"reply_end"}', { type: "reply_end" }],
     ['{"type":"error","message":"TTS failed"}', { type: "error", message: "TTS failed" }],
   ];
@@ -37,6 +38,8 @@ describe("parseServerMessage", () => {
     ["missing type", '{"text":"x"}'],
     ["unknown state", '{"type":"state","state":"dancing"}'],
     ["non-string text", '{"type":"reply","text":7}'],
+    ["voice turned on by the server", '{"type":"voice","on":true}'],
+    ["voice without a flag", '{"type":"voice"}'],
     ["missing text", '{"type":"partial"}'],
     ["session without id", '{"type":"session","turns":[]}'],
     ["session without turns", '{"type":"session","id":"abc"}'],

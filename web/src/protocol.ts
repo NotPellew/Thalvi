@@ -11,6 +11,7 @@ export type ServerMessage =
   | { type: "partial"; text: string }
   | { type: "user"; text: string }
   | { type: "reply"; text: string }
+  | { type: "voice"; on: false }
   | { type: "interrupted" }
   | { type: "reply_end" }
   | { type: "error"; message: string };
@@ -62,6 +63,8 @@ export function parseServerMessage(raw: string): ServerMessage | null {
     case "user":
     case "reply":
       return typeof text === "string" ? { type, text } : null;
+    case "voice":
+      return fields["on"] === false ? { type, on: false } : null;
     case "interrupted":
     case "reply_end":
       return { type };

@@ -34,6 +34,7 @@ const controller = new Controller({
   remember: (id) => {
     sessionStorage.setItem(SESSION_KEY, id);
   },
+  releaseVoice,
   onChange: (state) => {
     view.render(state);
   },
@@ -54,14 +55,19 @@ const connection = new Connection(
   },
 );
 
-function stopVoice(notice: string | null): void {
+function releaseVoice(): void {
   const current = voiceAudio;
   if (!current) return;
-  controller.setVoice(false, notice);
   voiceAudio = null;
   current.mic.stop();
   current.releaseWakeLock();
   void current.ctx.close();
+}
+
+function stopVoice(notice: string | null): void {
+  if (!voiceAudio) return;
+  controller.setVoice(false, notice);
+  releaseVoice();
 }
 
 async function startVoice(): Promise<void> {

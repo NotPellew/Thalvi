@@ -14,6 +14,7 @@ function setup() {
       flush: () => calls.push("flush"),
     },
     remember: (id) => calls.push(`remember ${id}`),
+    releaseVoice: () => calls.push("release"),
     onChange: () => undefined,
   });
   const server = (message: object) => {
@@ -99,6 +100,24 @@ describe("Controller", () => {
     server({ type: "state", state: "idle" });
     expect(controller.state.turns).toEqual([{ role: "assistant", text: "Once upon a time." }]);
     expect(shown()).toBe("idle");
+  });
+
+  it("tears voice down without telling the server when the server turns it off after a fatal error", () => {
+    const { controller, calls, server, shown } = online();
+    controller.setVoice(true);
+    server({ type: "state", state: "starting" });
+    controller.playing(true);
+    calls.length = 0;
+
+    server({ type: "error", message: "The speech service refused the connection." });
+    server({ type: "voice", on: false });
+    server({ type: "state", state: "idle" });
+
+    expect(calls).toEqual(["flush", "release"]);
+    expect(controller.state.voice).toBe(false);
+    expect(controller.state.playing).toBe(false);
+    expect(shown()).toBe("idle");
+    expect(controller.state.notice).toBe("The speech service refused the connection.");
   });
 
   it("shows Thinking for a text reply with voice off, then Idle with the reply closed", () => {

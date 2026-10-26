@@ -11,6 +11,8 @@ export interface ControllerPorts {
   send(text: string): void;
   playback: { enqueue(bytes: ArrayBuffer): void; flush(): void };
   remember(sessionId: string): void;
+  /** Stops the mic and audio context; the server has turned voice off by itself. */
+  releaseVoice(): void;
   onChange(state: SessionState): void;
 }
 
@@ -76,6 +78,11 @@ export class Controller {
     if (!message) return;
     if (message.type === "interrupted") this.ports.playback.flush();
     if (message.type === "session") this.ports.remember(message.id);
+    if (message.type === "voice") {
+      if (!this.state.voice) return;
+      this.ports.playback.flush();
+      this.ports.releaseVoice();
+    }
     this.apply({ type: "server", message });
   }
 
