@@ -9,6 +9,7 @@ dependencies = [
   "numpy>=2.3",
   "safetensors>=0.7",
   "soundfile>=0.13",
+  "soxr>=1.0",
   "transformers>=5.20",
 ]
 
