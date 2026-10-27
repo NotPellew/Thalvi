@@ -65,14 +65,11 @@ describe("speedOptions", () => {
     expect(speedOptions(1).map((o) => o.rate)).toEqual([0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]);
   });
 
-  it.each([0.75, 1, 1.25, 2])("marks only %s as selected", (rate) => {
+  it.each([0.75, 1, 1.25, 2] as const)("marks only %s as selected", (rate) => {
     const selected = speedOptions(rate).filter((o) => o.selected);
     expect(selected).toEqual([{ rate, label: `${String(rate)}×`, selected: true }]);
   });
 
-  it("selects 1× for an invalid current speed", () => {
-    expect(speedOptions(1.3).filter((o) => o.selected).map((o) => o.rate)).toEqual([1]);
-  });
 });
 
 describe("splitLinks", () => {

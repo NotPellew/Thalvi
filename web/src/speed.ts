@@ -1,33 +1,31 @@
 export const SPEED_STEPS = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2] as const;
 
-export const DEFAULT_SPEED = 1;
+export type Speed = (typeof SPEED_STEPS)[number];
+
+export const DEFAULT_SPEED: Speed = 1;
 
 export const SPEED_STORAGE_KEY = "thalvi.speed";
 
-export function normalizeSpeed(value: unknown): number {
-  if (typeof value === "number" && (SPEED_STEPS as readonly number[]).includes(value)) return value;
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    if ((SPEED_STEPS as readonly number[]).includes(parsed)) return parsed;
-  }
-  return DEFAULT_SPEED;
+function parseSpeed(value: unknown): Speed {
+  const parsed = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return SPEED_STEPS.find((step) => step === parsed) ?? DEFAULT_SPEED;
 }
 
-export function formatSpeed(rate: number): string {
-  return `${String(normalizeSpeed(rate))}×`;
+export function formatSpeed(rate: Speed): string {
+  return `${String(rate)}×`;
 }
 
-export function loadSpeed(storage: Pick<Storage, "getItem">): number {
+export function loadSpeed(storage: Pick<Storage, "getItem">): Speed {
   try {
-    return normalizeSpeed(storage.getItem(SPEED_STORAGE_KEY));
+    return parseSpeed(storage.getItem(SPEED_STORAGE_KEY));
   } catch {
     return DEFAULT_SPEED;
   }
 }
 
-export function saveSpeed(storage: Pick<Storage, "setItem">, rate: number): void {
+export function saveSpeed(storage: Pick<Storage, "setItem">, rate: Speed): void {
   try {
-    storage.setItem(SPEED_STORAGE_KEY, String(normalizeSpeed(rate)));
+    storage.setItem(SPEED_STORAGE_KEY, String(rate));
   } catch {
     return;
   }

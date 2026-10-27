@@ -2,7 +2,7 @@ import { Connection, sessionUrl } from "./connection.ts";
 import { Controller } from "./controller.ts";
 import { micErrorMessage, openMic, type Mic } from "./mic.ts";
 import { Playback } from "./playback.ts";
-import { loadSpeed, saveSpeed } from "./speed.ts";
+import { loadSpeed, saveSpeed, type Speed } from "./speed.ts";
 import { createView } from "./view.ts";
 import { holdWakeLock } from "./wake-lock.ts";
 
@@ -19,7 +19,7 @@ const appRoot = document.getElementById("app");
 if (!appRoot) throw new Error("#app is missing from index.html");
 const view = createView(appRoot);
 let voiceAudio: VoiceAudio | null = null;
-let currentSpeed = loadSpeed(localStorage);
+let currentSpeed: Speed = loadSpeed(localStorage);
 view.setSpeed(currentSpeed);
 
 const controller = new Controller({

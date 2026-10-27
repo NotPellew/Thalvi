@@ -1,6 +1,6 @@
 import "./view.css";
 import { displayState, type DisplayState, type SessionState } from "./session.ts";
-import { SPEED_STEPS, formatSpeed, normalizeSpeed } from "./speed.ts";
+import { SPEED_STEPS, formatSpeed, type Speed } from "./speed.ts";
 import type { Turn } from "./protocol.ts";
 
 const STATES: Record<DisplayState, { label: string; hint: string }> = {
@@ -70,14 +70,13 @@ export function scrollTarget(input: ScrollInput): "start" | "bottom" | "stay" {
 }
 
 export interface SpeedOption {
-  readonly rate: number;
+  readonly rate: Speed;
   readonly label: string;
   readonly selected: boolean;
 }
 
-export function speedOptions(current: number): SpeedOption[] {
-  const selected = normalizeSpeed(current);
-  return SPEED_STEPS.map((rate) => ({ rate, label: formatSpeed(rate), selected: rate === selected }));
+export function speedOptions(current: Speed): SpeedOption[] {
+  return SPEED_STEPS.map((rate) => ({ rate, label: formatSpeed(rate), selected: rate === current }));
 }
 
 export type TextSegment =
@@ -174,7 +173,7 @@ const MARKUP = `
     <header class="o-top">
       <span class="o-brand">Thalvi</span>
       <div class="o-head-actions">
-        <button class="o-speed-chip" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Playback speed 1×">1×</button>
+        <button class="o-speed-chip" type="button" aria-expanded="false" aria-label="Playback speed 1×">1×</button>
         <button class="o-voice" type="button" aria-pressed="false">${icon("mic")}<span class="o-voice-text">Voice off</span></button>
       </div>
     </header>
@@ -296,23 +295,23 @@ export function createView(root: HTMLElement) {
   const form = find(page, ".o-composer", HTMLFormElement);
   const composer = find(page, "textarea", HTMLTextAreaElement);
   const send = find(page, ".o-send", HTMLButtonElement);
-  let currentSpeed = 1;
+  let currentSpeed: Speed = 1;
   let speedOpen = false;
-  let speedHandler: ((rate: number) => void) | null = null;
+  let speedHandler: ((rate: Speed) => void) | null = null;
   const speedChip = find(page, ".o-speed-chip", HTMLButtonElement);
   const speedRow = find(page, ".o-speed-row", HTMLDivElement);
-  const speedButtons = SPEED_STEPS.map((rate) => {
+  const speedButtons = speedOptions(currentSpeed).map((option) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "o-speed-step";
-    button.textContent = formatSpeed(rate);
-    button.setAttribute("aria-label", `Playback speed ${formatSpeed(rate)}`);
+    button.textContent = option.label;
+    button.setAttribute("aria-label", `Playback speed ${option.label}`);
     button.addEventListener("click", () => {
-      currentSpeed = rate;
+      currentSpeed = option.rate;
       renderSpeed();
       setSpeedOpen(false);
       speedChip.focus();
-      speedHandler?.(rate);
+      speedHandler?.(option.rate);
     });
     speedRow.append(button);
     return button;
@@ -323,11 +322,11 @@ export function createView(root: HTMLElement) {
     speedChip.setAttribute("aria-label", `Playback speed ${formatSpeed(currentSpeed)}`);
     speedChip.setAttribute("aria-expanded", String(speedOpen));
     speedRow.hidden = !speedOpen;
-    speedButtons.forEach((button, index) => {
-      const selected = SPEED_STEPS[index] === currentSpeed;
+    for (const [index, button] of speedButtons.entries()) {
+      const selected = speedOptions(currentSpeed)[index]?.selected ?? false;
       button.setAttribute("aria-pressed", String(selected));
       button.classList.toggle("o-selected", selected);
-    });
+    }
   }
 
   function setSpeedOpen(open: boolean): void {
@@ -338,16 +337,10 @@ export function createView(root: HTMLElement) {
   speedChip.addEventListener("click", () => {
     setSpeedOpen(!speedOpen);
   });
-  speedChip.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && speedOpen) {
-      setSpeedOpen(false);
-    }
-  });
-  speedRow.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      setSpeedOpen(false);
-      speedChip.focus();
-    }
+  page.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !speedOpen) return;
+    setSpeedOpen(false);
+    if (speedRow.contains(document.activeElement)) speedChip.focus();
   });
   renderSpeed();
 
@@ -535,11 +528,11 @@ export function createView(root: HTMLElement) {
       voiceHandler = handler;
       voice.onclick = handler;
     },
-    setSpeed(rate: number) {
-      currentSpeed = normalizeSpeed(rate);
+    setSpeed(rate: Speed) {
+      currentSpeed = rate;
       renderSpeed();
     },
-    onSpeed(handler: (rate: number) => void) {
+    onSpeed(handler: (rate: Speed) => void) {
       speedHandler = handler;
     },
   };
