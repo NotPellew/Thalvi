@@ -43,8 +43,9 @@ replace it: Ollama or vLLM for the language model, for example.
    inline. Use `modal run --detach` for the long ones, and `--limit 50` to `::teacher`
    for a first look at the answers.
 6. Score a run on the held-out eval split: `uv run modal run src/thalvi_train/modal_app.py::evaluate --run-name <run-name>`
-   (`--limit 500` by default). It reports KL, the word error rate of the model's own
-   transcription, and latency with and without the encoder.
+   (`--limit 500` and `--batch-size 32` by default). It reports KL, the word error rate
+   of the model's own transcription, batched decoding throughput, and the latency of a
+   single request with and without the encoder.
 
 Outputs stay on the `thalvi-data` volume: `teacher/train.jsonl`,
 `runs/<run-name>/projector.safetensors`, `runs/<run-name>/eval.jsonl` and `eval.summary.json`.

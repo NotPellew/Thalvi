@@ -6,10 +6,15 @@ Per held-out sample the student, Glimmer reading projected audio, decodes greedi
 with a KV cache. Glimmer's reasoning opens by repeating the request, so that first
 paragraph is the student's transcription of the audio and is scored as a word
 error rate against the sample's text. The training KL on the teacher's stored
-response is reported too. The audio goes through the Whisper encoder inline, as in
-the live path. `encode_s` times the encoder, mel features included; reading the file is
-not timed. The decoder's prefill to the first token is `time_to_first_token_s`, and
-`time_to_first_token_with_encoder_s` adds `encode_s`, the figure the live path sees.
+response is reported too.
+
+Samples run in batches of similar prompt length, left-padded, and rows come back in
+record order. The audio goes through the Whisper encoder inline, as in the live path,
+a batch at a time. A batch's timings sit on each of its rows, since a batch has no
+per-sample latency: `batch_encode_s` is the encoder, mel features included (reading
+files is not timed), `batch_prefill_s` the decoder's prefill to the first token, and
+`batch_generate_s` the whole decode, prefill included. The latency a single request sees
+is measured apart, by `--latency-samples` unbatched runs of the same code.
 """
 
 import argparse
@@ -24,14 +29,22 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from safetensors.torch import load_file
 from transformers import AutoTokenizer, WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
-from thalvi_train.batch import make_batch
-from thalvi_train.features import DEFAULT_MODEL, FRAMES_PER_SECOND, encode, load_encoder, read_audio
-from thalvi_train.glimmer import FrozenGlimmer, load_glimmer
+from thalvi_train.batch import Batch, make_batch
+from thalvi_train.features import (
+    DEFAULT_MODEL,
+    FRAMES_PER_SECOND,
+    encode,
+    frame_count,
+    load_encoder,
+    read_audio,
+)
+from thalvi_train.glimmer import PAD_TOKEN_ID, FrozenGlimmer, load_glimmer
 from thalvi_train.projector import AudioProjector
 from thalvi_train.prompts import (
     AUDIO_TOKEN_TEXT,
@@ -47,7 +60,7 @@ from thalvi_train.train import (
     PROJECTOR_CONFIG,
     PROJECTOR_WEIGHTS,
     ProjectorConfig,
-    distill_loss,
+    token_losses,
 )
 
 SUMMARY_SUFFIX = ".summary.json"
@@ -59,15 +72,15 @@ _ANSWER = re.compile(r"to=user<\|message\|>(.*?)(?:<\|eot\|>|\Z)", re.DOTALL)
 
 @dataclass(frozen=True)
 class Generation:
-    """Greedy output: the new ids (including a final stop id), and the seconds it took.
+    """Greedy output of a batch: per row the new ids (including a final stop id), and the seconds.
 
-    `time_to_first_token_s` runs from the start of the prompt's prefill to the first
-    token chosen; `seconds` to the last.
+    `prefill_s` runs from the start of the prompts' prefill to the first tokens chosen;
+    `seconds` to the last step.
     """
 
-    ids: list[int]
-    finished: bool
-    time_to_first_token_s: float
+    ids: list[list[int]]
+    finished: list[bool]
+    prefill_s: float
     seconds: float
 
 
@@ -78,7 +91,6 @@ class Baseline:
     response: str
     answer: str
     finished: bool
-    generate_s: float
 
 
 @dataclass(frozen=True)
@@ -86,7 +98,8 @@ class SampleResult:
     """One evaluated sample; a row of the per-sample JSONL.
 
     `wer` is `edits / reference_words` of `transcript` against the record's text, and
-    `None` when the reference normalises to no words.
+    `None` when the reference normalises to no words. The `batch_*` fields are those
+    of the whole batch the sample ran in, numbered `batch_index` in run order.
     """
 
     id: str
@@ -101,10 +114,11 @@ class SampleResult:
     finished: bool
     new_tokens: int
     audio_seconds: float
-    encode_s: float
-    time_to_first_token_s: float
-    time_to_first_token_with_encoder_s: float
-    generate_s: float
+    batch_index: int
+    batch_size: int
+    batch_encode_s: float
+    batch_prefill_s: float
+    batch_generate_s: float
     response: str
     baseline: Baseline | None
 
@@ -155,97 +169,146 @@ def _sync(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
+def _left_pad(rows: Sequence[Sequence[int]]) -> tuple[torch.Tensor, torch.Tensor]:
+    """Ids padded on the left with `PAD_TOKEN_ID` to the longest row, and the mask of real ones."""
+    width = max(len(row) for row in rows)
+    ids = torch.tensor([[PAD_TOKEN_ID] * (width - len(row)) + list(row) for row in rows])
+    mask = torch.tensor([[0] * (width - len(row)) + [1] * len(row) for row in rows])
+    return ids, mask
+
+
 @torch.no_grad()
 def generate(
-    glimmer: FrozenGlimmer, prompt_embeds: torch.Tensor, max_new_tokens: int, stop_id: int = EOT_ID
+    glimmer: FrozenGlimmer,
+    prompt_embeds: torch.Tensor,
+    attention_mask: torch.Tensor,
+    max_new_tokens: int,
+    stop_id: int = EOT_ID,
 ) -> Generation:
-    """Greedy decoding from `prompt_embeds` `(1, length, hidden)` with a KV cache.
+    """Greedy decoding from left-padded `prompt_embeds` `(batch, length, hidden)` with a KV cache.
 
-    Stops after emitting `stop_id`, or after `max_new_tokens` ids.
+    `attention_mask` `(batch, length)` is 0 on the padding. A row stops after emitting
+    `stop_id`, or after `max_new_tokens` ids; a stopped row is fed pad tokens and its
+    outputs are dropped until every row is done.
     """
     if max_new_tokens < 1:
         raise ValueError("max_new_tokens must be at least 1")
     device = glimmer.device
+    mask = attention_mask.to(device)
+    rows = prompt_embeds.shape[0]
     _sync(device)
     started = time.perf_counter()
-    hidden, cache = glimmer.cached_hidden_states(prompt_embeds)
-    token = int(glimmer.logits(hidden[:, -1]).argmax())
+    hidden, cache = glimmer.cached_hidden_states(prompt_embeds, mask)
+    token = glimmer.logits(hidden[:, -1]).argmax(dim=-1)
     _sync(device)
-    first_token = time.perf_counter() - started
-    ids = [token]
-    while token != stop_id and len(ids) < max_new_tokens:
-        step = glimmer.embed_text(torch.tensor([[token]]))
-        hidden, cache = glimmer.cached_hidden_states(step, cache)
-        token = int(glimmer.logits(hidden[:, -1]).argmax())
-        ids.append(token)
+    prefill_s = time.perf_counter() - started
+    ids: list[list[int]] = [[] for _ in range(rows)]
+    finished = [False] * rows
+    for step in range(max_new_tokens):
+        for row, new in enumerate(token.tolist()):
+            if not finished[row]:
+                ids[row].append(new)
+                finished[row] = new == stop_id
+        if all(finished) or step + 1 == max_new_tokens:
+            break
+        fed = token.masked_fill(torch.tensor(finished, device=device), PAD_TOKEN_ID)
+        mask = torch.cat([mask, mask.new_ones(rows, 1)], dim=1)
+        hidden, cache = glimmer.cached_hidden_states(glimmer.embed_text(fed[:, None]), mask, cache)
+        token = glimmer.logits(hidden[:, -1]).argmax(dim=-1)
     _sync(device)
-    return Generation(ids, token == stop_id, first_token, time.perf_counter() - started)
+    return Generation(ids, finished, prefill_s, time.perf_counter() - started)
 
 
-def _read(tokenizer: PromptTokenizer, generation: Generation) -> tuple[str, str, str]:
-    """The decoded response, its reasoning and its answer."""
-    response = GENERATION_PROMPT + tokenizer.decode(generation.ids)
+def _read(tokenizer: PromptTokenizer, ids: list[int]) -> tuple[str, str, str]:
+    """The decoded response of generated `ids`, its reasoning and its answer."""
+    response = GENERATION_PROMPT + tokenizer.decode(ids)
     return (response, *split_reply(response))
 
 
-def evaluate_record(
+def _sample_kl(
+    glimmer: FrozenGlimmer, projector: AudioProjector, batch: Batch, samples: int
+) -> list[float]:
+    """Each sample's mean KL over its own response tokens, from one batched forward."""
+    kl = token_losses(glimmer, projector, batch).kl.float()
+    rows = batch.student.rows.to(kl.device)
+    totals = torch.zeros(samples, device=kl.device).index_add_(0, rows, kl)
+    return (totals / torch.bincount(rows, minlength=samples)).tolist()
+
+
+def evaluate_batch(
     glimmer: FrozenGlimmer,
     tokenizer: PromptTokenizer,
     projector: AudioProjector,
-    record: Record,
-    frames: torch.Tensor,
-    encode_s: float,
+    encoder: WhisperEncoder,
+    extractor: WhisperFeatureExtractor,
+    records: Sequence[Record],
+    clips: Sequence[np.ndarray],
     *,
+    index: int,
     max_new_tokens: int,
     with_text_baseline: bool,
-) -> SampleResult:
-    """Scores one record: its KL, and the student's greedy reply from its encoder `frames`.
+) -> list[SampleResult]:
+    """Scores `records` together: their KLs, and the students' greedy replies from `clips`.
 
-    `encode_s` is the seconds the encoder took to produce `frames`.
+    The clips are encoded as one batch. `index` numbers the batch in the results.
     """
     device = glimmer.device
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
+    started = time.perf_counter()
+    frames = [clip.float() for clip in encode(encoder, extractor, clips)]
+    encode_s = time.perf_counter() - started
     with torch.no_grad(), autocast:
-        batch = make_batch([record], [frames], tokenizer, projector.audio_token_count)
-        kl = distill_loss(glimmer, projector, batch).kl.item()
-        count = batch.audio_tokens[0]
-        audio = projector(frames.unsqueeze(0).to(device))[0, :count]
-        prompt = generation_ids(record.task, AUDIO_TOKEN_TEXT * count, tokenizer)
-        embeds = glimmer.embed_with_audio(torch.tensor([prompt]), [audio])
-        student = generate(glimmer, embeds, max_new_tokens)
-        baseline = None
+        batch = make_batch(records, frames, tokenizer, projector.audio_token_count)
+        kls = _sample_kl(glimmer, projector, batch, len(records))
+        projected = projector(batch.frames.to(device))
+        audio = [projected[i, :count] for i, count in enumerate(batch.audio_tokens)]
+        prompts = [
+            generation_ids(record.task, AUDIO_TOKEN_TEXT * count, tokenizer)
+            for record, count in zip(records, batch.audio_tokens, strict=True)
+        ]
+        ids, mask = _left_pad(prompts)
+        student = generate(
+            glimmer, glimmer.embed_with_audio(ids, audio), mask, max_new_tokens=max_new_tokens
+        )
+        baselines: list[Baseline | None] = [None] * len(records)
         if with_text_baseline:
-            text_prompt = generation_ids(record.task, record.text, tokenizer)
-            teacher = generate(
-                glimmer, glimmer.embed_text(torch.tensor([text_prompt])), max_new_tokens
-            )
-            response, _, answer = _read(tokenizer, teacher)
-            baseline = Baseline(response, answer, teacher.finished, teacher.seconds)
+            texts = [generation_ids(r.task, r.text, tokenizer) for r in records]
+            ids, mask = _left_pad(texts)
+            teacher = generate(glimmer, glimmer.embed_text(ids), mask, max_new_tokens)
+            for i, (new, done) in enumerate(zip(teacher.ids, teacher.finished, strict=True)):
+                response, _, answer = _read(tokenizer, new)
+                baselines[i] = Baseline(response, answer, done)
 
-    response, reasoning, answer = _read(tokenizer, student)
-    transcript = transcript_of(reasoning, record.task)
-    reference = normalize(record.text)
-    edits = edit_distance(reference, normalize(transcript))
-    return SampleResult(
-        id=record.id,
-        task=record.task,
-        text=record.text,
-        kl=kl,
-        transcript=transcript,
-        edits=edits,
-        reference_words=len(reference),
-        wer=edits / len(reference) if reference else None,
-        answer=answer,
-        finished=student.finished,
-        new_tokens=len(student.ids),
-        audio_seconds=frames.shape[0] / FRAMES_PER_SECOND,
-        encode_s=encode_s,
-        time_to_first_token_s=student.time_to_first_token_s,
-        time_to_first_token_with_encoder_s=encode_s + student.time_to_first_token_s,
-        generate_s=student.seconds,
-        response=response,
-        baseline=baseline,
-    )
+    results = []
+    for i, record in enumerate(records):
+        response, reasoning, answer = _read(tokenizer, student.ids[i])
+        transcript = transcript_of(reasoning, record.task)
+        reference = normalize(record.text)
+        edits = edit_distance(reference, normalize(transcript))
+        results.append(
+            SampleResult(
+                id=record.id,
+                task=record.task,
+                text=record.text,
+                kl=kls[i],
+                transcript=transcript,
+                edits=edits,
+                reference_words=len(reference),
+                wer=edits / len(reference) if reference else None,
+                answer=answer,
+                finished=student.finished[i],
+                new_tokens=len(student.ids[i]),
+                audio_seconds=frames[i].shape[0] / FRAMES_PER_SECOND,
+                batch_index=index,
+                batch_size=len(records),
+                batch_encode_s=encode_s,
+                batch_prefill_s=student.prefill_s,
+                batch_generate_s=student.seconds,
+                response=response,
+                baseline=baselines[i],
+            )
+        )
+    return results
 
 
 def _group_summary(results: Sequence[SampleResult]) -> dict[str, Any]:
@@ -261,25 +324,62 @@ def _group_summary(results: Sequence[SampleResult]) -> dict[str, Any]:
 def summarize(results: Sequence[SampleResult]) -> dict[str, Any]:
     """Corpus figures over `results`, overall and per task.
 
-    `wer` is total edits over total reference words. `baseline_finished_rate`
-    appears only when every sample has a text-prompt baseline.
+    `wer` is total edits over total reference words. `median_batch_prefill_s` is over
+    batches, not samples. `generated_tokens_per_s` is the tokens the samples kept
+    over the seconds the batches spent generating, prefill included.
+    `baseline_finished_rate` appears only when every sample has a text-prompt baseline.
     """
     if not results:
         raise ValueError("no results to summarize")
     by_task: dict[str, list[SampleResult]] = defaultdict(list)
     for result in results:
         by_task[result.task].append(result)
+    batches = {r.batch_index: r for r in results}.values()
     summary = _group_summary(results) | {
-        "median_time_to_first_token_s": statistics.median(r.time_to_first_token_s for r in results),
-        "median_time_to_first_token_with_encoder_s": statistics.median(
-            r.time_to_first_token_with_encoder_s for r in results
-        ),
+        "median_batch_prefill_s": statistics.median(b.batch_prefill_s for b in batches),
+        "generated_tokens_per_s": sum(r.new_tokens for r in results)
+        / sum(b.batch_generate_s for b in batches),
         "by_task": {task: _group_summary(group) for task, group in sorted(by_task.items())},
     }
     baselines = [r.baseline for r in results if r.baseline]
     if len(baselines) == len(results):
         summary["baseline_finished_rate"] = sum(b.finished for b in baselines) / len(baselines)
     return summary
+
+
+def summarize_latency(results: Sequence[SampleResult]) -> dict[str, Any]:
+    """Medians of what one request sees, from `results` that each ran as a batch of one."""
+    return {
+        "samples": len(results),
+        "median_time_to_first_token_s": statistics.median(r.batch_prefill_s for r in results),
+        "median_time_to_first_token_with_encoder_s": statistics.median(
+            r.batch_encode_s + r.batch_prefill_s for r in results
+        ),
+    }
+
+
+def plan_batches(
+    records: Sequence[Record],
+    clips: Sequence[np.ndarray],
+    projector: AudioProjector,
+    tokenizer: PromptTokenizer,
+    batch_size: int,
+) -> list[list[int]]:
+    """Record indices in batches of at most `batch_size`, grouped by audio prompt length."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    lengths = [
+        len(
+            generation_ids(
+                record.task,
+                AUDIO_TOKEN_TEXT * projector.audio_token_count(frame_count(len(clip))),
+                tokenizer,
+            )
+        )
+        for record, clip in zip(records, clips, strict=True)
+    ]
+    order = sorted(range(len(records)), key=lengths.__getitem__)
+    return [order[start : start + batch_size] for start in range(0, len(order), batch_size)]
 
 
 def evaluate(
@@ -291,33 +391,63 @@ def evaluate(
     records: Sequence[Record],
     audio: Sequence[Path],
     *,
+    batch_size: int,
     max_new_tokens: int,
     with_text_baseline: bool,
-    emit: Callable[[SampleResult], None],
+    emit: Callable[[list[SampleResult]], None],
 ) -> list[SampleResult]:
-    """Evaluates `records` in order, passing each result to `emit` as it is done.
+    """Evaluates `records` in batches, passing each batch's results to `emit` as it is done.
 
-    `audio[i]` is the file of `records[i]`; each is encoded here, timed as `encode_s`.
+    `audio[i]` is the file of `records[i]`. All clips are read first, so batches can
+    group similar lengths; the returned results are in the order of `records`.
     """
-    results = []
-    for record, path in zip(records, audio, strict=True):
-        clip = read_audio(path, extractor.n_samples)
-        started = time.perf_counter()
-        (frames,) = encode(encoder, extractor, [clip])
-        encode_s = time.perf_counter() - started
-        result = evaluate_record(
+    clips = [read_audio(path, extractor.n_samples) for path in audio]
+    results: dict[int, SampleResult] = {}
+    for index, members in enumerate(plan_batches(records, clips, projector, tokenizer, batch_size)):
+        batch = evaluate_batch(
             glimmer,
             tokenizer,
             projector,
-            record,
-            frames.float(),
-            encode_s,
+            encoder,
+            extractor,
+            [records[i] for i in members],
+            [clips[i] for i in members],
+            index=index,
             max_new_tokens=max_new_tokens,
             with_text_baseline=with_text_baseline,
         )
-        emit(result)
-        results.append(result)
-    return results
+        results |= dict(zip(members, batch, strict=True))
+        emit(batch)
+    return [results[i] for i in range(len(records))]
+
+
+def measure_latency(
+    glimmer: FrozenGlimmer,
+    tokenizer: PromptTokenizer,
+    projector: AudioProjector,
+    encoder: WhisperEncoder,
+    extractor: WhisperFeatureExtractor,
+    records: Sequence[Record],
+    audio: Sequence[Path],
+    *,
+    max_new_tokens: int,
+) -> list[SampleResult]:
+    """Runs each of `records` alone, as a batch of one: the latency of a single request."""
+    return [
+        evaluate_batch(
+            glimmer,
+            tokenizer,
+            projector,
+            encoder,
+            extractor,
+            [record],
+            [read_audio(path, extractor.n_samples)],
+            index=index,
+            max_new_tokens=max_new_tokens,
+            with_text_baseline=False,
+        )[0]
+        for index, (record, path) in enumerate(zip(records, audio, strict=True))
+    ]
 
 
 def load_projector(
@@ -356,6 +486,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--quantize", action="store_true", help="4-bit NF4 decoder; needs cuda")
     parser.add_argument("--max-new-tokens", type=int, default=384)
     parser.add_argument(
+        "--batch-size", type=int, default=32, help="samples decoded together, grouped by length"
+    )
+    parser.add_argument(
+        "--latency-samples",
+        type=int,
+        default=8,
+        help="first N samples also run alone, unbatched, for single-request latency",
+    )
+    parser.add_argument(
         "--with-text-baseline",
         action="store_true",
         help="also decode from the transcript text with the same weights",
@@ -367,6 +506,8 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     if args.quantize and args.device != "cuda":
         raise SystemExit("--quantize needs --device cuda")
+    if args.batch_size < 1 or args.latency_samples < 0:
+        raise SystemExit("--batch-size must be at least 1 and --latency-samples at least 0")
     records = read_records(args.manifest, args.split, args.limit)
     if not records:
         raise SystemExit(f"no {args.split!r} records in {args.manifest}")
@@ -376,32 +517,43 @@ def main(argv: list[str] | None = None) -> None:
     projector, config = load_projector(args.projector, glimmer.hidden_size, glimmer.device)
     encoder, extractor = load_encoder(args.whisper_model, args.device, config.encoder_dim)
 
+    def emit(batch: list[SampleResult]) -> None:
+        for result in batch:
+            print(json.dumps({"id": result.id, "kl": result.kl, "wer": result.wer}), flush=True)
+
+    results = evaluate(
+        glimmer,
+        tokenizer,
+        projector,
+        encoder,
+        extractor,
+        records,
+        audio,
+        batch_size=args.batch_size,
+        max_new_tokens=args.max_new_tokens,
+        with_text_baseline=args.with_text_baseline,
+        emit=emit,
+    )
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    with args.out.open("w", encoding="utf-8") as sink:
-
-        def emit(result: SampleResult) -> None:
-            sink.write(json.dumps(asdict(result), ensure_ascii=False) + "\n")
-            sink.flush()
-            print(
-                json.dumps({"id": result.id, "kl": result.kl, "wer": result.wer}),
-                flush=True,
-            )
-
-        results = evaluate(
+    rows = "".join(json.dumps(asdict(r), ensure_ascii=False) + "\n" for r in results)
+    args.out.write_text(rows, encoding="utf-8")
+    summary = summarize(results)
+    if args.latency_samples:
+        count = args.latency_samples
+        alone = measure_latency(
             glimmer,
             tokenizer,
             projector,
             encoder,
             extractor,
-            records,
-            audio,
+            records[:count],
+            audio[:count],
             max_new_tokens=args.max_new_tokens,
-            with_text_baseline=args.with_text_baseline,
-            emit=emit,
         )
-    summary = json.dumps(summarize(results), indent=2)
-    args.out.with_suffix(SUMMARY_SUFFIX).write_text(summary + "\n", encoding="utf-8")
-    print(summary)
+        summary["single_request"] = summarize_latency(alone)
+    text = json.dumps(summary, indent=2)
+    args.out.with_suffix(SUMMARY_SUFFIX).write_text(text + "\n", encoding="utf-8")
+    print(text)
 
 
 if __name__ == "__main__":

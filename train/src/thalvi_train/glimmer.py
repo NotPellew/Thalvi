@@ -78,7 +78,7 @@ class FrozenGlimmer(nn.Module):
     ) -> torch.Tensor:
         """Token embeddings with `audio[i]` written over sample i's placeholder positions.
 
-        `input_ids` is `(batch, length)` and may be right-padded; `audio[i]` is
+        `input_ids` is `(batch, length)` and may be padded on either side; `audio[i]` is
         `(tokens_i, hidden)` and `tokens_i` must equal the number of
         `AUDIO_TOKEN_ID`s in row i. Gradients flow into `audio`.
         """
@@ -103,14 +103,25 @@ class FrozenGlimmer(nn.Module):
         return out.last_hidden_state
 
     def cached_hidden_states(
-        self, inputs_embeds: torch.Tensor, cache: Cache | None = None
+        self, inputs_embeds: torch.Tensor, attention_mask: torch.Tensor, cache: Cache | None = None
     ) -> tuple[torch.Tensor, Cache]:
-        """Final-norm states of `inputs_embeds` `(1, length, hidden)` appended to `cache`.
+        """Final-norm states of `inputs_embeds` `(batch, length, hidden)` appended to `cache`.
 
         `cache` is `None` for a prompt and the returned cache afterwards, which
-        holds every position fed so far. There is no padding, so no mask.
+        holds every position fed so far. `attention_mask` `(batch, seen + length)`
+        marks the real positions of everything fed so far, this call included;
+        rows may be left-padded. Each row's positions count its real tokens only,
+        so padding shifts neither rotary positions nor the sliding window, which
+        transformers measures in cache slots, the same distance for a left-padded row.
         """
-        out = self.decoder(inputs_embeds=inputs_embeds, past_key_values=cache, use_cache=True)
+        positions = (attention_mask.cumsum(dim=-1) - 1).clamp(min=0)[:, -inputs_embeds.shape[1] :]
+        out = self.decoder(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            position_ids=positions,
+            past_key_values=cache,
+            use_cache=True,
+        )
         return out.last_hidden_state, out.past_key_values
 
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:

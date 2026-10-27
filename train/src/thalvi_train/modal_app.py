@@ -356,11 +356,14 @@ def run_train(run_name: str, extra_args: str) -> None:
     ephemeral_disk=TRAIN_DISK_MIB,
     timeout=6 * HOUR,
 )
-def run_eval(run_name: str, limit: int, extra_args: str) -> None:
+def run_eval(run_name: str, limit: int, batch_size: int, extra_args: str) -> None:
     """Evaluates `runs/<run_name>` on unquantized bf16 Glimmer, writing `eval.jsonl` beside it.
 
     The summary lands next to the rows as `eval.summary.json`; `extra_args` go to
     `thalvi_train.evaluate`. The audio is staged onto local disk first, inside the timed step.
+
+    On an 80 GB card the ~52 GB of weights, the ~1.3 GB encoder and the projector leave
+    room for 32 samples' KV cache (~53 KB per token, ~1.5 GB) and activations.
     """
     run_dir = f"{RUNS_DIR}/{run_name}"
     with logged("evaluate", GPU):
@@ -383,6 +386,8 @@ def run_eval(run_name: str, limit: int, extra_args: str) -> None:
                 "cuda",
                 "--limit",
                 str(limit),
+                "--batch-size",
+                str(batch_size),
                 *shlex.split(extra_args),
             ]
         )
@@ -415,6 +420,8 @@ def train(run_name: str = "projector", extra_args: str = "") -> None:
 
 
 @app.local_entrypoint()
-def evaluate(run_name: str = "projector", limit: int = 500, extra_args: str = "") -> None:
-    """Step 5: score `runs/<run_name>` on the first `--limit` eval samples; extras go to the CLI."""
-    run_eval.remote(run_name, limit, extra_args)
+def evaluate(
+    run_name: str = "projector", limit: int = 500, batch_size: int = 32, extra_args: str = ""
+) -> None:
+    """Step 5: score `runs/<run_name>` on the first `--limit` eval samples, in batches."""
+    run_eval.remote(run_name, limit, batch_size, extra_args)

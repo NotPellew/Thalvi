@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import torch.nn.functional as F
 from safetensors.torch import save_file
 from tiny_glimmer import HIDDEN, FakeTokenizer
 from tiny_whisper import DIM, WINDOW, tone, write_audio_manifest
@@ -13,7 +14,7 @@ from thalvi_train.evaluate import (
     Baseline,
     SampleResult,
     edit_distance,
-    evaluate_record,
+    evaluate_batch,
     generate,
     normalize,
     split_reply,
@@ -23,7 +24,7 @@ from thalvi_train.evaluate import (
 from thalvi_train.features import encode
 from thalvi_train.glimmer import FrozenGlimmer, load_glimmer
 from thalvi_train.projector import AudioProjector
-from thalvi_train.records import Record
+from thalvi_train.records import Record, resolve_audio
 from thalvi_train.train import PROJECTOR_CONFIG, PROJECTOR_WEIGHTS, ProjectorConfig, distill_loss
 
 PROJECTOR = ProjectorConfig(encoder_dim=DIM, hidden_dim=32, text_dim=HIDDEN, stack=4)
@@ -149,76 +150,156 @@ def uncached_greedy(glimmer: FrozenGlimmer, prompt: torch.Tensor, steps: int) ->
     return ids
 
 
+def solo(glimmer: FrozenGlimmer, prompt: torch.Tensor, steps: int, stop_id: int = -1):
+    """`generate` on one unpadded prompt `(length, hidden)`."""
+    return generate(
+        glimmer, prompt[None], torch.ones(1, len(prompt), dtype=torch.long), steps, stop_id
+    )
+
+
 def test_cached_greedy_generation_matches_recomputing_the_full_sequence(
     glimmer: FrozenGlimmer,
 ) -> None:
     torch.manual_seed(3)
-    prompt = torch.randn(1, 13, HIDDEN)
+    prompt = torch.randn(13, HIDDEN)
     steps = 20
-    expected = uncached_greedy(glimmer, prompt, steps)
-    generation = generate(glimmer, prompt, steps, stop_id=-1)
-    assert generation.ids == expected
+    expected = uncached_greedy(glimmer, prompt[None], steps)
+    generation = solo(glimmer, prompt, steps)
+    assert generation.ids == [expected]
     assert len(set(expected)) > 3
-    assert not generation.finished
-    assert 0 < generation.time_to_first_token_s <= generation.seconds
+    assert generation.finished == [False]
+    assert 0 < generation.prefill_s <= generation.seconds
 
 
 def test_generation_stops_after_the_stop_id_and_not_past_the_limit(glimmer: FrozenGlimmer) -> None:
     torch.manual_seed(4)
-    prompt = torch.randn(1, 6, HIDDEN)
-    free = generate(glimmer, prompt, 10, stop_id=-1).ids
+    prompt = torch.randn(6, HIDDEN)
+    (free,) = solo(glimmer, prompt, 10).ids
     stop = next(token for token in free[1:] if token not in free[:1])
     cut = free.index(stop)
 
-    stopped = generate(glimmer, prompt, 10, stop_id=stop)
-    assert (stopped.ids, stopped.finished) == (free[: cut + 1], True)
-    limited = generate(glimmer, prompt, cut, stop_id=stop)
-    assert (limited.ids, limited.finished) == (free[:cut], False)
+    stopped = solo(glimmer, prompt, 10, stop)
+    assert (stopped.ids, stopped.finished) == ([free[: cut + 1]], [True])
+    limited = solo(glimmer, prompt, cut, stop)
+    assert (limited.ids, limited.finished) == ([free[:cut]], [False])
     with pytest.raises(ValueError, match="max_new_tokens"):
-        generate(glimmer, prompt, 0)
+        solo(glimmer, prompt, 0)
 
 
-def test_a_record_reports_its_training_kl_audio_length_and_optional_baseline(
+def test_left_padded_batch_generates_what_each_prompt_generates_alone(
+    glimmer: FrozenGlimmer,
+) -> None:
+    """Prompts of 5, 13 and 9 positions and 24 steps run past the 8-position sliding window."""
+    torch.manual_seed(5)
+    prompts = [torch.randn(n, HIDDEN) for n in (5, 13, 9)]
+    steps = 24
+    free = [solo(glimmer, prompt, steps).ids[0] for prompt in prompts]
+    stop = next(t for t in free[0][2:] if t not in free[1] and t not in free[2])
+    expected = [solo(glimmer, prompt, steps, stop) for prompt in prompts]
+
+    width = max(len(prompt) for prompt in prompts)
+    embeds = torch.stack([F.pad(p, (0, 0, width - len(p), 0)) for p in prompts])
+    mask = torch.tensor([[0] * (width - len(p)) + [1] * len(p) for p in prompts])
+    batched = generate(glimmer, embeds, mask, steps, stop)
+
+    assert batched.ids == [one.ids[0] for one in expected]
+    assert batched.finished == [True, False, False]
+    assert len(batched.ids[0]) < len(batched.ids[1]) == steps
+    assert all(len(set(ids)) > 3 for ids in free)
+
+
+def test_a_batch_scores_each_sample_as_if_it_ran_alone(
     glimmer: FrozenGlimmer, projector: AudioProjector, tiny_encoder
 ) -> None:
-    (encoded,) = encode(*tiny_encoder, [tone(WINDOW)])
-    frames = encoded.float()
-    kwargs = {"max_new_tokens": 6}
-    plain = evaluate_record(
-        glimmer,
+    records = [RECORDS[0], RECORDS[1], Record("d", "a third sample", "answer", "eval", RESPONSE)]
+    clips = [tone(WINDOW, 0), tone(1600, 1), tone(9600, 2)]
+    kwargs = {"max_new_tokens": 24, "with_text_baseline": True}
+
+    def run(rows, audio, index=0):
+        return evaluate_batch(
+            glimmer, FakeTokenizer(), projector, *tiny_encoder, rows, audio, index=index, **kwargs
+        )
+
+    batched = run(records, clips)
+    alone = [run([record], [clip])[0] for record, clip in zip(records, clips, strict=True)]
+
+    for together, single in zip(batched, alone, strict=True):
+        assert together.response == single.response
+        assert together.baseline == single.baseline
+        assert together.new_tokens == single.new_tokens == 24
+        assert together.kl == pytest.approx(single.kl, rel=1e-4)
+        assert together.audio_seconds == single.audio_seconds
+    assert len({row.response for row in batched}) == 3
+
+    batch = make_batch(
+        records[:1],
+        [encode(*tiny_encoder, clips[:1])[0].float()],
         FakeTokenizer(),
-        projector,
-        RECORDS[0],
-        frames,
-        0.25,
-        with_text_baseline=False,
-        **kwargs,
+        projector.audio_token_count,
     )
-    compared = evaluate_record(
+    with torch.no_grad():
+        assert batched[0].kl == pytest.approx(
+            distill_loss(glimmer, projector, batch).kl.item(), rel=1e-4
+        )
+
+
+def test_a_batch_reports_audio_length_baseline_and_its_own_timings(
+    glimmer: FrozenGlimmer, projector: AudioProjector, tiny_encoder
+) -> None:
+    rows = RECORDS[:2]
+    clips = [tone(WINDOW), tone(1600)]
+
+    def run(with_text_baseline):
+        return evaluate_batch(
+            glimmer,
+            FakeTokenizer(),
+            projector,
+            *tiny_encoder,
+            rows,
+            clips,
+            index=7,
+            max_new_tokens=6,
+            with_text_baseline=with_text_baseline,
+        )
+
+    plain, compared = run(False), run(True)
+    for row, other in zip(plain, compared, strict=True):
+        assert row.baseline is None
+        assert row.response == other.response
+        assert isinstance(other.baseline, Baseline)
+        assert other.baseline.response.startswith("<|start|>assistant")
+        assert (row.batch_index, row.batch_size) == (7, 2)
+        assert row.batch_encode_s > 0
+        assert 0 < row.batch_prefill_s <= row.batch_generate_s
+        assert row.new_tokens == 6
+    assert [row.audio_seconds for row in plain] == [2.0, 0.1]
+    assert plain[0].reference_words == 5
+    assert plain[0].wer == plain[0].edits / 5
+    assert plain[0].batch_prefill_s == plain[1].batch_prefill_s
+
+
+def test_results_come_back_in_record_order_though_batches_group_by_prompt_length(
+    glimmer: FrozenGlimmer, projector: AudioProjector, tiny_encoder, audio_manifest: Path
+) -> None:
+    records = RECORDS
+    emitted: list[list[str]] = []
+
+    results = evaluate.evaluate(
         glimmer,
         FakeTokenizer(),
         projector,
-        RECORDS[0],
-        frames,
-        0.25,
-        with_text_baseline=True,
-        **kwargs,
+        *tiny_encoder,
+        records,
+        resolve_audio(records, [audio_manifest]),
+        batch_size=2,
+        max_new_tokens=3,
+        with_text_baseline=False,
+        emit=lambda batch: emitted.append([row.id for row in batch]),
     )
 
-    batch = make_batch(RECORDS[:1], [frames], FakeTokenizer(), projector.audio_token_count)
-    with torch.no_grad():
-        expected_kl = distill_loss(glimmer, projector, batch).kl.item()
-    assert plain.kl == pytest.approx(expected_kl, rel=1e-5)
-    assert plain.audio_seconds == 2.0
-    assert plain.encode_s == 0.25
-    assert plain.time_to_first_token_with_encoder_s == 0.25 + plain.time_to_first_token_s
-    assert plain.new_tokens == 6
-    assert plain.baseline is None
-    assert compared.response == plain.response
-    assert isinstance(compared.baseline, Baseline)
-    assert compared.baseline.response.startswith("<|start|>assistant")
-    assert plain.reference_words == 5
-    assert plain.wer == plain.edits / 5
+    assert [row.id for row in results] == ["a", "b", "c"]
+    assert emitted == [["c", "a"], ["b"]]
+    assert [(row.batch_index, row.batch_size) for row in results] == [(0, 2), (1, 1), (0, 2)]
 
 
 def result(task: str, edits: int, words: int, **overrides) -> SampleResult:
@@ -235,51 +316,32 @@ def result(task: str, edits: int, words: int, **overrides) -> SampleResult:
         "finished": True,
         "new_tokens": 1,
         "audio_seconds": 1.0,
-        "encode_s": 0.05,
-        "time_to_first_token_s": 0.1,
-        "time_to_first_token_with_encoder_s": 0.15,
-        "generate_s": 1.0,
+        "batch_index": 0,
+        "batch_size": 1,
+        "batch_encode_s": 0.05,
+        "batch_prefill_s": 0.1,
+        "batch_generate_s": 1.0,
         "response": "",
         "baseline": None,
     }
     return SampleResult(**(fields | overrides))
 
 
-def test_summary_pools_edits_over_words_instead_of_averaging_sample_wers() -> None:
+def test_summary_pools_edits_over_words_and_counts_each_batch_once() -> None:
+    first = {"batch_index": 0, "batch_size": 2, "batch_prefill_s": 0.3, "batch_generate_s": 2.0}
+    second = {"batch_index": 1, "batch_size": 1, "batch_prefill_s": 0.1, "batch_generate_s": 1.0}
     rows = [
-        result(
-            "answer",
-            1,
-            2,
-            kl=1.0,
-            time_to_first_token_s=0.3,
-            time_to_first_token_with_encoder_s=0.9,
-        ),
-        result(
-            "answer",
-            0,
-            8,
-            kl=3.0,
-            finished=False,
-            time_to_first_token_s=0.1,
-            time_to_first_token_with_encoder_s=0.5,
-        ),
-        result(
-            "continue",
-            3,
-            10,
-            kl=5.0,
-            time_to_first_token_s=0.2,
-            time_to_first_token_with_encoder_s=0.4,
-        ),
+        result("answer", 1, 2, kl=1.0, new_tokens=10, **first),
+        result("answer", 0, 8, kl=3.0, new_tokens=30, finished=False, **first),
+        result("continue", 3, 10, kl=5.0, new_tokens=20, **second),
     ]
     summary = summarize(rows)
     assert summary["samples"] == 3
     assert summary["wer"] == pytest.approx(4 / 20)
     assert summary["mean_kl"] == pytest.approx(3.0)
     assert summary["finished_rate"] == pytest.approx(2 / 3)
-    assert summary["median_time_to_first_token_s"] == pytest.approx(0.2)
-    assert summary["median_time_to_first_token_with_encoder_s"] == pytest.approx(0.5)
+    assert summary["median_batch_prefill_s"] == pytest.approx(0.2)
+    assert summary["generated_tokens_per_s"] == pytest.approx(60 / 3.0)
     assert summary["by_task"]["answer"] == {
         "samples": 2,
         "mean_kl": 2.0,
@@ -291,8 +353,8 @@ def test_summary_pools_edits_over_words_instead_of_averaging_sample_wers() -> No
 
 
 def test_summary_adds_the_baseline_finish_rate_only_when_every_sample_has_one() -> None:
-    done = Baseline("", "", True, 1.0)
-    cut = Baseline("", "", False, 1.0)
+    done = Baseline("", "", True)
+    cut = Baseline("", "", False)
     both = summarize([result("answer", 0, 1, baseline=done), result("answer", 0, 1, baseline=cut)])
     assert both["baseline_finished_rate"] == 0.5
     mixed = summarize([result("answer", 0, 1, baseline=done), result("answer", 0, 1)])
@@ -328,6 +390,8 @@ def test_cli_writes_a_row_per_eval_sample_and_a_summary(
             *("--projector", str(run)),
             *("--out", str(out)),
             *("--max-new-tokens", "5"),
+            *("--batch-size", "2"),
+            *("--latency-samples", "1"),
             "--with-text-baseline",
         ]
     )
@@ -337,20 +401,21 @@ def test_cli_writes_a_row_per_eval_sample_and_a_summary(
     assert all(row["new_tokens"] <= 5 and row["kl"] > 0 for row in rows)
     assert all(row["baseline"]["response"] for row in rows)
     assert [row["audio_seconds"] for row in rows] == [2.0, 0.1]
-    assert all(row["encode_s"] > 0 for row in rows)
-    assert all(
-        row["time_to_first_token_with_encoder_s"]
-        == pytest.approx(row["encode_s"] + row["time_to_first_token_s"])
-        for row in rows
-    )
+    assert [row["batch_size"] for row in rows] == [2, 2]
+    assert all(row["batch_encode_s"] > 0 for row in rows)
     summary = json.loads((run / "eval.summary.json").read_text(encoding="utf-8"))
     assert summary["samples"] == 2
     assert set(summary["by_task"]) == {"answer", "continue"}
-    assert (
-        summary["median_time_to_first_token_with_encoder_s"]
-        > summary["median_time_to_first_token_s"]
-    )
+    assert summary["median_batch_prefill_s"] == rows[0]["batch_prefill_s"] > 0
+    assert summary["generated_tokens_per_s"] > 0
     assert summary["mean_kl"] == pytest.approx(sum(row["kl"] for row in rows) / 2)
+    single = summary["single_request"]
+    assert single["samples"] == 1
+    assert (
+        single["median_time_to_first_token_with_encoder_s"]
+        > single["median_time_to_first_token_s"]
+        > 0
+    )
 
 
 def test_cli_refuses_a_projector_trained_for_another_hidden_size(

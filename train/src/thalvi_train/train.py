@@ -68,7 +68,7 @@ class TrainConfig:
 
 @dataclass(frozen=True)
 class LossParts:
-    """Token-mean KL and cross-entropy of one micro-batch."""
+    """KL and cross-entropy of a micro-batch: token means, or one value per response token."""
 
     kl: torch.Tensor
     ce: torch.Tensor
@@ -91,18 +91,19 @@ def _chunk_losses(
     with torch.no_grad():
         teacher = F.log_softmax(glimmer.logits(teacher_hidden), dim=-1)
     student = F.log_softmax(glimmer.logits(student_hidden), dim=-1)
-    kl = F.kl_div(student, teacher, reduction="sum", log_target=True)
-    ce = F.nll_loss(student, targets, reduction="sum")
+    kl = F.kl_div(student, teacher, reduction="none", log_target=True).sum(dim=-1)
+    ce = F.nll_loss(student, targets, reduction="none")
     return kl, ce
 
 
-def distill_loss(
+def token_losses(
     glimmer: FrozenGlimmer, projector: AudioProjector, batch: Batch, kl_chunk: int = 64
 ) -> LossParts:
-    """Teacher-vs-student loss for `batch`, with gradients into `projector` only.
+    """Teacher-vs-student KL and cross-entropy of each response token of `batch`.
 
-    Each chunk of response positions is recomputed in backward, so full-vocab
-    logits for at most `kl_chunk` tokens are alive at once.
+    Both are `(tokens,)`, in `batch.student.rows` order, with gradients into
+    `projector` only. Each chunk of response positions is recomputed in
+    backward, so full-vocab logits for at most `kl_chunk` tokens are alive at once.
     """
     device = glimmer.device
     teacher, student = batch.teacher, batch.student
@@ -120,10 +121,8 @@ def distill_loss(
     student_hidden = states[student.rows.to(device), student.cols.to(device)]
 
     targets = batch.targets.to(device)
-    kl = ce = torch.zeros((), device=device)
-    for start in range(0, len(targets), kl_chunk):
-        window = slice(start, start + kl_chunk)
-        chunk_kl, chunk_ce = checkpoint(
+    chunks = [
+        checkpoint(
             _chunk_losses,
             glimmer,
             teacher_hidden[window],
@@ -131,8 +130,17 @@ def distill_loss(
             targets[window],
             use_reentrant=False,
         )
-        kl, ce = kl + chunk_kl, ce + chunk_ce
-    return LossParts(kl=kl / len(targets), ce=ce / len(targets))
+        for window in (slice(i, i + kl_chunk) for i in range(0, len(targets), kl_chunk))
+    ]
+    return LossParts(kl=torch.cat([kl for kl, _ in chunks]), ce=torch.cat([ce for _, ce in chunks]))
+
+
+def distill_loss(
+    glimmer: FrozenGlimmer, projector: AudioProjector, batch: Batch, kl_chunk: int = 64
+) -> LossParts:
+    """Token-mean teacher-vs-student loss for `batch`, with gradients into `projector` only."""
+    tokens = token_losses(glimmer, projector, batch, kl_chunk)
+    return LossParts(kl=tokens.kl.mean(), ce=tokens.ce.mean())
 
 
 def _save_projector(projector: AudioProjector, path: Path) -> None:
