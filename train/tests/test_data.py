@@ -15,8 +15,11 @@ from thalvi_train.prompts import (
     SYSTEM_PROMPT,
     GlimmerTokenizer,
     build_example,
+    generation_ids,
+    user_turn,
 )
 from thalvi_train.records import Record, load_frames, read_records
+from thalvi_train.teacher import EOT_ID
 
 RESPONSE = (
     "<|start|>assistant to=self<|message|>think<|eom|>"
@@ -120,3 +123,25 @@ def test_real_tokenizer_renders_the_documented_template() -> None:
     )
     assert example.student_ids == tok.text_ids(expected)
     assert example.student_ids.count(AUDIO_TOKEN_ID) == 2
+
+
+@pytest.mark.skipif(
+    not (GLIMMER_PATH / "tokenizer.json").exists(), reason="no local Glimmer tokenizer"
+)
+@pytest.mark.parametrize("task", ["answer", "continue"])
+def test_teacher_prompt_ids_are_the_chat_template_with_generation_prompt(task: str) -> None:
+    hf = AutoTokenizer.from_pretrained(GLIMMER_PATH)
+    rendered = hf.apply_chat_template(
+        [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_turn(task, "what time is it")},
+        ],
+        tokenize=False,
+        add_generation_prompt=True,
+        reasoning_strength="low",
+    )
+    assert rendered.endswith("<|start|>assistant")
+    assert hf.convert_tokens_to_ids("<|eot|>") == EOT_ID
+    assert generation_ids(task, "what time is it", GlimmerTokenizer(hf)) == hf.encode(
+        rendered, add_special_tokens=False
+    )
