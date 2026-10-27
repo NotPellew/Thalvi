@@ -14,6 +14,23 @@ areas your change touches. Editing rules are in
   which mobile browsers require for microphone and camera access. Why: no
   app-store builds or signing in a 9-day hackathon. Rejected for now: a
   native app; revisit once the web client works.
+- **Self-hosted; parts swap by endpoint.** Config sets each part's address on a
+  standard protocol (Chat Completions, OpenAI speech, MCP); Meta's realtime ASR
+  is the one custom adapter. Why: any provider or local server plugs in without
+  code. Rejected: a plugin system (no faster, much more code).
+- **Chat Completions first.** Self-hosted servers speak it. Why: one adapter
+  covers Meta, Ollama and vLLM. Revisit: add Responses for Meta if its search
+  grounding beats an MCP search tool on the road briefing.
+- **Kokoro for local speech.** Kokoro-FastAPI streams 24 kHz PCM over the
+  OpenAI speech API. Why: Meta has no TTS; Kokoro runs 12x real time on CPU. Revisit
+  for a more expressive voice.
+- **Opt-in recordings.** `THALVI_RECORD` turns on metrics, turn and reply text,
+  and mic audio, each separately, written locally off the reply path. Why: to judge
+  product, model and endpoint changes on real use. Off by default: they are
+  personal data.
+- **Hands-free turns.** The recognizer runs in endpointing mode, and the user
+  interrupts a reply by speaking. Why: hands and eyes are busy. Rejected:
+  push-to-talk.
 
 ## Repository
 

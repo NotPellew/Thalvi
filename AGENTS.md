@@ -30,8 +30,11 @@ directing you.
 
 - Latency our code adds is a bug. Keep the path from input to response short,
   use results as they stream in instead of waiting for whole responses, and
-  move work that can wait off that path. Model and network latency are outside
-  this project's control; don't build machinery to hide them.
+  move work that can wait off that path. Tricks that make waiting on a model
+  feel shorter (starting early, a quick acknowledgement) are welcome when the
+  recordings show they help, but numbers stay honest: report a model's real
+  latency and the latency the user perceives separately, never one as the
+  other.
 - The user can always tell what Thalvi is doing, and can interrupt or cancel
   it at any moment.
 - When something fails, the user is told what happened in plain words and the
@@ -45,6 +48,8 @@ directing you.
   TypeScript; no `unwrap`/`expect` outside tests in Rust.
 - Validate external input once, where it enters (network, devices, model
   output, config), and trust the typed value inside.
+- Every call to a model, endpoint or tool records its latency and outcome in
+  the opt-in metrics, so changes can be judged on real use.
 - Fix root causes: trace a bug to where it starts. A guard is a fix only when
   the state it handles is legitimate.
 - Tests: full coverage, no bloat. Every behavior is tested, with as few tests
@@ -88,10 +93,14 @@ can't break and doesn't slow down the next change.
 
 ## Gates
 
-Nothing is scaffolded yet. The PR that adds a component adds its pinned
-toolchain (`rust-toolchain.toml`, `.node-version`), its gate commands here,
-and a CI job that runs exactly those commands as a required check on `main`.
-npm is the package manager; lockfiles are committed.
+CI runs exactly these as required checks on `main`. A new component adds its
+pinned toolchain, its commands here, and its CI job. npm is the package
+manager; lockfiles are committed.
+
+- Server (`crates/`): `cargo fmt --all -- --check`, `cargo lint`,
+  `cargo test --workspace --locked`, `RUSTDOCFLAGS="-D warnings" cargo docs`.
+- Web (`web/`): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`,
+  `npm run build`.
 
 ## Git and PRs
 
