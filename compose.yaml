@@ -1,0 +1,97 @@
+# Speech servers for Thalvi; see "Speech" in README.md. Pick one profile:
+#   docker compose --profile kokoro up -d --wait       Kokoro on CPU
+#   docker compose --profile vllm-omni up -d --wait    Qwen3-TTS af_heart clone on an NVIDIA GPU
+# Model weights and registered voices live under $SPEECH_DIR (default ~/thalvi-tts).
+name: thalvi
+
+services:
+  kokoro:
+    profiles: [kokoro, vllm-omni]
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.0
+    ports: ["127.0.0.1:8880:8880"]
+    mem_limit: 3g
+    memswap_limit: 3g
+    pids_limit: 512
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8880/health"]
+      interval: 5s
+      retries: 60
+
+  vllm-omni:
+    profiles: [vllm-omni]
+    image: vllm/vllm-omni:v0.32.0rc1
+    # The deploy config's relative path in the docs does not resolve in the image.
+    # Stage 0 needs about 0.34 of a 16 GB GPU for weights, the KV cache and CUDA graphs.
+    command:
+      - vllm
+      - serve
+      - /models/qwen3-base
+      - --served-model-name=Qwen/Qwen3-TTS-12Hz-1.7B-Base
+      - --deploy-config=/usr/local/lib/python3.12/dist-packages/vllm_omni/deploy/qwen3_tts.yaml
+      - --omni
+      - --host=0.0.0.0
+      - --port=8091
+      - --trust-remote-code
+      - '--stage-overrides={"0":{"gpu_memory_utilization":0.34,"max_num_seqs":4,"max_model_len":2048},"1":{"gpu_memory_utilization":0.06,"max_num_seqs":4}}'
+    ipc: host
+    ports: ["127.0.0.1:8091:8091"]
+    volumes:
+      - ${SPEECH_DIR:-${HOME}/thalvi-tts}/models:/models:ro
+      - voices:/voices
+    environment:
+      HF_HUB_OFFLINE: "1"
+      SPEAKER_SAMPLES_DIR: /voices
+    mem_limit: 10g
+    memswap_limit: 10g
+    pids_limit: 512
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8091/health"]
+      interval: 5s
+      retries: 120
+      start_period: 300s
+
+  # Registers the af_heart clone once: Kokoro reads a reference line, vLLM-Omni keeps the voice in `voices`.
+  # It then warms the model up (the first request is ~2 s slower) and idles, healthy,
+  # because `up --wait` fails on a container that exits.
+  voice:
+    profiles: [vllm-omni]
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.0
+    depends_on:
+      kokoro: {condition: service_healthy}
+      vllm-omni: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/registered"]
+      interval: 2s
+      retries: 150
+    environment:
+      TEXT: >-
+        Wait, you did what? That's amazing! Okay, let me explain how it works.
+        First you pick a quiet spot, then you read the page out loud, nice and slowly,
+        and it picks up the rest. Does that make sense? If it doesn't, no worries at all,
+        we can go through it together, one step at a time.
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        if ! curl -sf http://vllm-omni:8091/v1/audio/voices | grep -q '"af_heart"'; then
+          curl -sf http://kokoro:8880/v1/audio/speech -H 'content-type: application/json' \
+            -d "{\"model\":\"kokoro\",\"voice\":\"af_heart\",\"response_format\":\"wav\",\"input\":\"$$TEXT\"}" \
+            -o /tmp/ref.wav
+          curl -sf http://vllm-omni:8091/v1/audio/voices -F audio_sample=@/tmp/ref.wav \
+            -F consent=thalvi-local -F name=af_heart -F "ref_text=$$TEXT" -o /dev/null
+        fi
+        curl -sf http://vllm-omni:8091/v1/audio/speech -H 'content-type: application/json' \
+          -d '{"model":"Qwen/Qwen3-TTS-12Hz-1.7B-Base","voice":"af_heart","response_format":"pcm","stream_format":"audio","input":"Hello."}' \
+          -o /dev/null
+        touch /tmp/registered
+        exec sleep infinity
+
+volumes:
+  voices:
