@@ -1,8 +1,8 @@
-//! Owns the text-to-speech trait and the streamed `OpenAI` speech client.
+//! Owns the text-to-speech trait and the streamed `OpenAI` and Qwen3-TTS speech clients.
 
 use std::pin::Pin;
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes, BytesMut};
 use futures_util::{Stream, StreamExt};
 use serde_json::{Value, json};
 
@@ -73,22 +73,89 @@ impl Tts for OpenAiTts {
         if !self.api_key.is_empty() {
             request = request.bearer_auth(&self.api_key);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| TtsError(format!("speech synthesis could not be reached: {error}")))?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let _ = response.text().await;
-            return Err(TtsError(format!(
-                "speech synthesis returned an error ({status})"
-            )));
-        }
-        let stream = response.bytes_stream().map(|item| {
+        let stream = send(request).await?.bytes_stream().map(|item| {
             item.map_err(|error| TtsError(format!("speech synthesis stream failed: {error}")))
         });
         Ok(Box::pin(stream))
     }
+}
+
+/// Speech client backed by a Qwen3-TTS server's framed `/audio/speech/pcm-stream`.
+///
+/// Yields each frame's PCM as it arrives; the stream fails if the body ends
+/// before the zero-length end frame.
+#[derive(Debug, Clone)]
+pub struct Qwen3Tts {
+    client: reqwest::Client,
+    base_url: String,
+    voice: String,
+}
+
+impl Qwen3Tts {
+    /// Creates a speech client from validated configuration values.
+    #[must_use]
+    pub fn new(base_url: String, voice: String) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            base_url,
+            voice,
+        }
+    }
+}
+
+impl Tts for Qwen3Tts {
+    async fn synthesize(&self, text: &str) -> Result<AudioStream, TtsError> {
+        let url = format!("{}/audio/speech/pcm-stream", self.base_url);
+        let request = self
+            .client
+            .post(&url)
+            .json(&json!({"input": text, "voice": self.voice}));
+        let body = Box::pin(send(request).await?.bytes_stream());
+        let frames =
+            futures_util::stream::unfold(Some((body, BytesMut::new())), |state| async move {
+                let (mut body, mut buffer) = state?;
+                loop {
+                    if let Some(&header) = buffer.first_chunk::<4>() {
+                        let len = u32::from_be_bytes(header) as usize;
+                        if buffer.len() >= 4 + len {
+                            buffer.advance(4);
+                            if len == 0 {
+                                return None;
+                            }
+                            let frame = buffer.split_to(len).freeze();
+                            return Some((Ok(frame), Some((body, buffer))));
+                        }
+                    }
+                    let error = match body.next().await {
+                        Some(Ok(chunk)) => {
+                            buffer.extend_from_slice(&chunk);
+                            continue;
+                        }
+                        Some(Err(error)) => format!("speech synthesis stream failed: {error}"),
+                        None => {
+                            "speech synthesis stopped before the sentence was finished".to_string()
+                        }
+                    };
+                    return Some((Err(TtsError(error)), None));
+                }
+            });
+        Ok(Box::pin(frames))
+    }
+}
+
+async fn send(request: reqwest::RequestBuilder) -> Result<reqwest::Response, TtsError> {
+    let response = request
+        .send()
+        .await
+        .map_err(|error| TtsError(format!("speech synthesis could not be reached: {error}")))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let _ = response.text().await;
+        return Err(TtsError(format!(
+            "speech synthesis returned an error ({status})"
+        )));
+    }
+    Ok(response)
 }
 
 #[cfg(test)]
