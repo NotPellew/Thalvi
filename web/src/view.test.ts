@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scrollTarget, shouldCollapse, splitLinks, type ScrollInput, type CollapseInput, type TextSegment } from "./view.ts";
+import { scrollTarget, shouldCollapse, speedOptions, splitLinks, type ScrollInput, type CollapseInput, type TextSegment } from "./view.ts";
 
 const live: CollapseInput = {
   voice: true,
@@ -47,6 +47,31 @@ describe("scrollTarget", () => {
   ];
   it.each(cases)("%s", (_name, input, expected) => {
     expect(scrollTarget(input)).toBe(expected);
+  });
+});
+
+describe("speedOptions", () => {
+  it("lists every step in order with its label", () => {
+    expect(speedOptions(1).map((o) => o.label)).toEqual([
+      "0.75×",
+      "0.9×",
+      "1×",
+      "1.1×",
+      "1.25×",
+      "1.5×",
+      "1.75×",
+      "2×",
+    ]);
+    expect(speedOptions(1).map((o) => o.rate)).toEqual([0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]);
+  });
+
+  it.each([0.75, 1, 1.25, 2])("marks only %s as selected", (rate) => {
+    const selected = speedOptions(rate).filter((o) => o.selected);
+    expect(selected).toEqual([{ rate, label: `${String(rate)}×`, selected: true }]);
+  });
+
+  it("selects 1× for an invalid current speed", () => {
+    expect(speedOptions(1.3).filter((o) => o.selected).map((o) => o.rate)).toEqual([1]);
   });
 });
 

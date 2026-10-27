@@ -2,6 +2,7 @@ import { Connection, sessionUrl } from "./connection.ts";
 import { Controller } from "./controller.ts";
 import { micErrorMessage, openMic, type Mic } from "./mic.ts";
 import { Playback } from "./playback.ts";
+import { loadSpeed, saveSpeed } from "./speed.ts";
 import { createView } from "./view.ts";
 import { holdWakeLock } from "./wake-lock.ts";
 
@@ -18,6 +19,8 @@ const appRoot = document.getElementById("app");
 if (!appRoot) throw new Error("#app is missing from index.html");
 const view = createView(appRoot);
 let voiceAudio: VoiceAudio | null = null;
+let currentSpeed = loadSpeed(localStorage);
+view.setSpeed(currentSpeed);
 
 const controller = new Controller({
   send: (text) => {
@@ -85,12 +88,14 @@ async function startVoice(): Promise<void> {
         stopVoice("The microphone stopped working.");
       },
     );
+    const playback = new Playback(ctx, (playing) => {
+      controller.playing(playing);
+    });
+    playback.setRate(currentSpeed);
     voiceAudio = {
       ctx,
       mic,
-      playback: new Playback(ctx, (playing) => {
-        controller.playing(playing);
-      }),
+      playback,
       releaseWakeLock: holdWakeLock(),
     };
     controller.setVoice(true);
@@ -102,6 +107,11 @@ async function startVoice(): Promise<void> {
   }
 }
 
+view.onSpeed((rate) => {
+  currentSpeed = rate;
+  saveSpeed(localStorage, rate);
+  voiceAudio?.playback.setRate(rate);
+});
 view.onVoice(() => {
   if (voiceAudio) stopVoice(null);
   else void startVoice();

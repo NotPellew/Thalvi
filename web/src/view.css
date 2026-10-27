@@ -61,6 +61,25 @@ body { margin: 0; }
 }
 .o-voice .o-ic { width: 22px; height: 22px; }
 .o-voice[aria-pressed="true"] { background: var(--neon); color: light-dark(#fff, #02120a); }
+.o-head-actions { display: inline-flex; align-items: center; gap: 8px; }
+.o-speed-chip {
+  min-height: 50px; min-width: 52px; padding: 0 10px;
+  border: 2px solid var(--line); border-radius: 6px;
+  font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--neon);
+  background: var(--surf);
+}
+.o-speed-row {
+  flex: none; display: flex; gap: 6px; overflow-x: auto;
+  padding: 8px calc(12px + env(safe-area-inset-right)) 8px calc(12px + env(safe-area-inset-left));
+  border-bottom: 2px solid var(--line); background: var(--surf);
+}
+.o-speed-row[hidden] { display: none; }
+.o-speed-step {
+  flex: none; min-height: 44px; padding: 0 12px;
+  border: 2px solid var(--line); border-radius: 6px;
+  font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--fg);
+}
+.o-speed-step.o-selected { background: var(--neon); border-color: var(--neon); color: light-dark(#fff, #02120a); }
 
 .o-layout { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .o-stage {
