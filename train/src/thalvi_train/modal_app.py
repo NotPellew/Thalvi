@@ -31,7 +31,7 @@ from pathlib import Path
 import modal
 
 GPU = "H100"
-FEATURES_GPU = "L4"
+FEATURES_GPUS = ["L4", "A10G", "L40S"]
 
 GLIMMER_REPO = "meta-models/Muse-Glimmer-30B"
 GLIMMER_REVISION = "cec94fcfd6512f2cfe708138c32533b346ea4f69"
@@ -259,12 +259,12 @@ def run_teacher(limit: int, temperature: float, max_tokens: int, concurrency: in
 
 
 @app.function(
-    image=project_image, gpu=FEATURES_GPU, volumes={DATA_MOUNT: data_volume}, timeout=3 * HOUR
+    image=project_image, gpu=FEATURES_GPUS, volumes={DATA_MOUNT: data_volume}, timeout=3 * HOUR
 )
 def run_features(batch_size: int) -> None:
     """Caches Whisper encoder features for every data manifest into one directory."""
     manifests = [m for m in (SPEECH_MANIFEST, LIBRISPEECH_MANIFEST) if Path(m).exists()]
-    with logged("features", FEATURES_GPU):
+    with logged("features", "/".join(FEATURES_GPUS)):
         for manifest in manifests:
             run_logged(
                 [
