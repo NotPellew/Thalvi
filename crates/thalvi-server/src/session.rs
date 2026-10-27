@@ -1,6 +1,7 @@
 //! Owns one voice session: recognizer, reply pipeline, and the client socket.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -21,11 +22,12 @@ use crate::tts::Tts;
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
-
 enum ReplyEvent {
     Delta(String),
     Sentence(String),
     Audio(Bytes),
+    FirstSentence(Instant),
+    ModelFinished(Instant),
     Finished,
     Failed(String),
 }
@@ -46,6 +48,7 @@ struct ActiveReply {
     spoken_throughout: bool,
     speaking_sent: bool,
     first_delta_at: Option<Instant>,
+    model_finished_at: Option<Instant>,
     first_sentence_at: Option<Instant>,
     first_audio_at: Option<Instant>,
     audio_bytes: usize,
@@ -414,8 +417,7 @@ async fn handle_recognizer_message<M, T>(
             turn_id,
             audio_processed_ms,
         })) => {
-            let pending = turn_log.pending.entry(turn_id).or_default();
-            pending.end_ms = audio_processed_ms;
+            turn_log.pending.entry(turn_id).or_default().end_ms = audio_processed_ms;
         }
         Some(RecognizerMessage::Event(RecognizerEvent::Partial { text })) => {
             send_json(sink, &json!({"type": "partial", "text": text})).await;
@@ -729,6 +731,7 @@ where
         spoken_throughout,
         speaking_sent: false,
         first_delta_at: None,
+        model_finished_at: None,
         first_sentence_at: None,
         first_audio_at: None,
         audio_bytes: 0,
@@ -760,11 +763,20 @@ async fn handle_reply_event(
             }
             send_json(sink, &json!({"type": "reply", "text": text})).await;
         }
+        ReplyEvent::ModelFinished(at) => {
+            if let Some(active) = reply {
+                active.model_finished_at = Some(at);
+            }
+        }
+        ReplyEvent::FirstSentence(at) => {
+            if let Some(active) = reply
+                && active.first_sentence_at.is_none()
+            {
+                active.first_sentence_at = Some(at);
+            }
+        }
         ReplyEvent::Sentence(sentence) => {
             if let Some(active) = reply {
-                if active.first_sentence_at.is_none() {
-                    active.first_sentence_at = Some(Instant::now());
-                }
                 active.sent_sentences.push(sentence);
             }
         }
@@ -815,6 +827,11 @@ async fn handle_reply_event(
     }
 }
 
+fn model_ms(started_at: Instant, model_finished_at: Option<Instant>, recorded_at: Instant) -> u64 {
+    let end = model_finished_at.unwrap_or(recorded_at);
+    u64::try_from(end.duration_since(started_at).as_millis()).unwrap_or(u64::MAX)
+}
+
 fn emit_reply_record(
     recorder: &Recorder,
     active: &ActiveReply,
@@ -832,7 +849,7 @@ fn emit_reply_record(
         "reasoning_effort": recorder.reasoning_effort(),
         "first_token_ms": ms_since(active.first_delta_at),
         "first_sentence_ms": ms_since(active.first_sentence_at),
-        "model_ms": u64::try_from(active.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "model_ms": model_ms(active.started_at, active.model_finished_at, Instant::now()),
         "tts_model": recorder.tts_model(),
         "voice": recorder.tts_voice(),
         "first_audio_ms": ms_since(active.first_audio_at),
@@ -911,13 +928,14 @@ fn cut_off_reply(
         if let Some(receiver) = reply_rx.as_mut() {
             while let Ok(event) = receiver.try_recv() {
                 match event {
-                    ReplyEvent::Sentence(sentence) => {
-                        if active.first_sentence_at.is_none() {
-                            active.first_sentence_at = Some(Instant::now());
-                        }
-                        active.sent_sentences.push(sentence);
-                    }
+                    ReplyEvent::Sentence(sentence) => active.sent_sentences.push(sentence),
                     ReplyEvent::Delta(text) => active.text.push_str(&text),
+                    ReplyEvent::FirstSentence(at) => {
+                        if active.first_sentence_at.is_none() {
+                            active.first_sentence_at = Some(at);
+                        }
+                    }
+                    ReplyEvent::ModelFinished(at) => active.model_finished_at = Some(at),
                     _ => {}
                 }
             }
@@ -944,60 +962,201 @@ async fn send_json(sink: &mut (impl SinkExt<Message> + Unpin), value: &serde_jso
     let _ = sink.send(Message::Text(value.to_string().into())).await;
 }
 
+struct AbortOnDrop {
+    handles: Vec<tokio::task::AbortHandle>,
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        for handle in &self.handles {
+            handle.abort();
+        }
+    }
+}
+
 async fn run_reply<M, T>(
     model: Arc<M>,
     tts: Arc<T>,
-    mut voice: watch::Receiver<bool>,
+    voice: watch::Receiver<bool>,
     history: Vec<ChatMessage>,
     events: mpsc::Sender<ReplyEvent>,
     turn: u64,
     recorder: Recorder,
 ) where
+    M: ChatModel + 'static,
+    T: Tts + 'static,
+{
+    let (sentence_tx, sentence_rx) = mpsc::unbounded_channel::<String>();
+    let failure_sent = Arc::new(AtomicBool::new(false));
+    let mut producer = tokio::spawn(
+        produce_sentences(
+            model,
+            history,
+            events.clone(),
+            sentence_tx,
+            Arc::clone(&failure_sent),
+        )
+        .in_current_span(),
+    );
+    let mut consumer = tokio::spawn(
+        consume_sentences(
+            sentence_rx,
+            tts,
+            voice,
+            events.clone(),
+            turn,
+            recorder,
+            failure_sent,
+        )
+        .in_current_span(),
+    );
+    let _abort_on_drop = AbortOnDrop {
+        handles: vec![producer.abort_handle(), consumer.abort_handle()],
+    };
+    let mut producer_done = false;
+    let mut consumer_done = false;
+    let mut succeeded = true;
+    while !producer_done || !consumer_done {
+        tokio::select! {
+            result = &mut producer, if !producer_done => {
+                producer_done = true;
+                if !matches!(result, Ok(true)) {
+                    succeeded = false;
+                    consumer.abort();
+                }
+            }
+            result = &mut consumer, if !consumer_done => {
+                consumer_done = true;
+                if !matches!(result, Ok(true)) {
+                    succeeded = false;
+                    producer.abort();
+                }
+            }
+        }
+    }
+    if succeeded {
+        let _ = events.send(ReplyEvent::Finished).await;
+    }
+}
+
+async fn send_failed(
+    events: &mpsc::Sender<ReplyEvent>,
+    failure_sent: &AtomicBool,
+    message: String,
+) {
+    if !failure_sent.swap(true, Ordering::SeqCst) {
+        let _ = events.send(ReplyEvent::Failed(message)).await;
+    }
+}
+
+async fn produce_sentences<M>(
+    model: Arc<M>,
+    history: Vec<ChatMessage>,
+    events: mpsc::Sender<ReplyEvent>,
+    sentences: mpsc::UnboundedSender<String>,
+    failure_sent: Arc<AtomicBool>,
+) -> bool
+where
     M: ChatModel,
-    T: Tts,
 {
     let mut deltas = match model.stream_reply(&history).await {
         Ok(deltas) => deltas,
         Err(error) => {
-            let _ = events
-                .send(ReplyEvent::Failed(format!(
-                    "The language model could not reply: {error}"
-                )))
-                .await;
-            return;
+            send_failed(
+                &events,
+                &failure_sent,
+                format!("The language model could not reply: {error}"),
+            )
+            .await;
+            return false;
         }
     };
     let mut splitter = SentenceSplitter::new();
+    let mut first_sentence_sent = false;
     while let Some(delta) = deltas.next().await {
         let delta = match delta {
             Ok(delta) => delta,
             Err(error) => {
-                let _ = events
-                    .send(ReplyEvent::Failed(format!(
-                        "The language model could not reply: {error}"
-                    )))
-                    .await;
-                return;
+                send_failed(
+                    &events,
+                    &failure_sent,
+                    format!("The language model could not reply: {error}"),
+                )
+                .await;
+                return false;
             }
         };
         if events.send(ReplyEvent::Delta(delta.clone())).await.is_err() {
-            return;
+            return false;
         }
         for sentence in splitter.push(&delta) {
-            if *voice.borrow()
-                && !speak_sentence(&tts, &mut voice, &events, &sentence, turn, &recorder).await
-            {
-                return;
+            if !first_sentence_sent {
+                first_sentence_sent = true;
+                if events
+                    .send(ReplyEvent::FirstSentence(Instant::now()))
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+            if sentences.send(sentence).is_err() {
+                return false;
             }
         }
     }
-    if let Some(tail) = splitter.finish()
-        && *voice.borrow()
-        && !speak_sentence(&tts, &mut voice, &events, &tail, turn, &recorder).await
-    {
-        return;
+    if let Some(tail) = splitter.finish() {
+        if !first_sentence_sent
+            && events
+                .send(ReplyEvent::FirstSentence(Instant::now()))
+                .await
+                .is_err()
+        {
+            return false;
+        }
+        if sentences.send(tail).is_err() {
+            return false;
+        }
     }
-    let _ = events.send(ReplyEvent::Finished).await;
+    if events
+        .send(ReplyEvent::ModelFinished(Instant::now()))
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    true
+}
+
+async fn consume_sentences<T>(
+    mut sentences: mpsc::UnboundedReceiver<String>,
+    tts: Arc<T>,
+    mut voice: watch::Receiver<bool>,
+    events: mpsc::Sender<ReplyEvent>,
+    turn: u64,
+    recorder: Recorder,
+    failure_sent: Arc<AtomicBool>,
+) -> bool
+where
+    T: Tts,
+{
+    while let Some(sentence) = sentences.recv().await {
+        if *voice.borrow()
+            && !speak_sentence(
+                &tts,
+                &mut voice,
+                &events,
+                &sentence,
+                turn,
+                &recorder,
+                &failure_sent,
+            )
+            .await
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Speaks one sentence, giving it up as soon as voice turns off.
@@ -1009,11 +1168,12 @@ async fn speak_sentence<T: Tts>(
     sentence: &str,
     turn: u64,
     recorder: &Recorder,
+    failure_sent: &AtomicBool,
 ) -> bool {
     tokio::select! {
         biased;
         () = voice_turned_off(voice) => true,
-        keep_going = synthesize_sentence(tts, events, sentence, turn, recorder) => keep_going,
+        keep_going = synthesize_sentence(tts, events, sentence, turn, recorder, failure_sent) => keep_going,
     }
 }
 
@@ -1029,6 +1189,7 @@ async fn synthesize_sentence<T: Tts>(
     sentence: &str,
     turn: u64,
     recorder: &Recorder,
+    failure_sent: &AtomicBool,
 ) -> bool {
     let tts_started = Instant::now();
     let mut first_byte_at: Option<Instant> = None;
@@ -1043,11 +1204,12 @@ async fn synthesize_sentence<T: Tts>(
     let mut audio = match tts.synthesize(sentence).await {
         Ok(audio) => audio,
         Err(error) => {
-            let _ = events
-                .send(ReplyEvent::Failed(format!(
-                    "Speech synthesis could not speak: {error}"
-                )))
-                .await;
+            send_failed(
+                events,
+                failure_sent,
+                format!("Speech synthesis could not speak: {error}"),
+            )
+            .await;
             return false;
         }
     };
@@ -1063,11 +1225,12 @@ async fn synthesize_sentence<T: Tts>(
                 }
             }
             Err(error) => {
-                let _ = events
-                    .send(ReplyEvent::Failed(format!(
-                        "Speech synthesis could not speak: {error}"
-                    )))
-                    .await;
+                send_failed(
+                    events,
+                    failure_sent,
+                    format!("Speech synthesis could not speak: {error}"),
+                )
+                .await;
                 return false;
             }
         }
@@ -1331,9 +1494,271 @@ async fn run_recognizer<F>(
 
 #[cfg(test)]
 mod tests {
-    use super::ForwardClock;
+    use super::{ForwardClock, ReplyEvent, model_ms, run_reply};
+    use crate::model::{ChatMessage, ChatModel, DeltaStream, ModelError};
+    use crate::recorder::{RecordingConfig, start_recording};
+    use crate::tts::{AudioStream, Tts, TtsError};
+    use bytes::Bytes;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use tokio::sync::{Notify, mpsc, watch};
     use tokio::time::Instant;
+
+    struct FakeModel;
+
+    impl ChatModel for FakeModel {
+        fn stream_reply(
+            &self,
+            _history: &[ChatMessage],
+        ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
+            let deltas = vec![
+                Ok("First. ".to_string()),
+                Ok("Second. ".to_string()),
+                Ok("Third.".to_string()),
+            ];
+            let stream: DeltaStream = Box::pin(futures_util::stream::iter(deltas));
+            std::future::ready(Ok(stream))
+        }
+    }
+
+    struct ManySentenceModel;
+
+    impl ChatModel for ManySentenceModel {
+        fn stream_reply(
+            &self,
+            _history: &[ChatMessage],
+        ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
+            let deltas: Vec<Result<String, ModelError>> = (1..=12)
+                .map(|index| Ok(format!("Sentence {index}. ")))
+                .collect();
+            let stream: DeltaStream = Box::pin(futures_util::stream::iter(deltas));
+            std::future::ready(Ok(stream))
+        }
+    }
+
+    struct FakeTts {
+        spoken: Arc<Mutex<Vec<String>>>,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+        block_first: AtomicBool,
+    }
+
+    impl Tts for FakeTts {
+        async fn synthesize(&self, text: &str) -> Result<AudioStream, TtsError> {
+            self.spoken
+                .lock()
+                .expect("spoken lock")
+                .push(text.to_string());
+            self.entered.notify_one();
+            if self.block_first.swap(false, Ordering::SeqCst) {
+                self.release.notified().await;
+            }
+            Ok(Box::pin(futures_util::stream::iter(vec![Ok(
+                Bytes::from_static(b"audio"),
+            )])))
+        }
+    }
+
+    fn describe(event: &ReplyEvent) -> String {
+        match event {
+            ReplyEvent::Delta(text) => format!("delta:{text}"),
+            ReplyEvent::Sentence(sentence) => format!("sentence:{sentence}"),
+            ReplyEvent::Audio(_) => "audio".to_string(),
+            ReplyEvent::Finished => "finished".to_string(),
+            ReplyEvent::Failed(message) => format!("failed:{message}"),
+            ReplyEvent::FirstSentence(_) => "first_sentence".to_string(),
+            ReplyEvent::ModelFinished(_) => "model_finished".to_string(),
+        }
+    }
+
+    async fn next_description(events_rx: &mut mpsc::Receiver<ReplyEvent>) -> String {
+        let event = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+            .await
+            .expect("event should arrive within timeout")
+            .expect("events channel should stay open");
+        describe(&event)
+    }
+
+    #[tokio::test]
+    async fn deltas_arrive_while_first_sentence_is_blocked_in_tts() {
+        let spoken = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let tts = Arc::new(FakeTts {
+            spoken: Arc::clone(&spoken),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            block_first: AtomicBool::new(true),
+        });
+        let (_voice_tx, voice_rx) = watch::channel(true);
+        let (events_tx, mut events_rx) = mpsc::channel(64);
+        let recorder = start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
+        let handle = tokio::spawn(run_reply(
+            Arc::new(FakeModel),
+            tts,
+            voice_rx,
+            Vec::new(),
+            events_tx,
+            1,
+            recorder,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("tts should start within timeout");
+        let mut seen = Vec::new();
+        loop {
+            let description = next_description(&mut events_rx).await;
+            let is_later_delta = description == "delta:Second. ";
+            seen.push(description);
+            if is_later_delta {
+                break;
+            }
+        }
+        assert_eq!(
+            spoken.lock().expect("spoken lock").as_slice(),
+            ["First."],
+            "later delta should arrive while only the first sentence is in tts: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|event| event == "finished"),
+            "finished must not arrive while tts is blocked: {seen:?}"
+        );
+        release.notify_one();
+        let mut rest = Vec::new();
+        loop {
+            let description = next_description(&mut events_rx).await;
+            let is_finished = description == "finished";
+            rest.push(description);
+            if is_finished {
+                break;
+            }
+        }
+        handle.await.expect("reply task should finish");
+        assert_eq!(
+            spoken.lock().expect("spoken lock").as_slice(),
+            ["First.", "Second.", "Third."],
+            "sentences should reach tts in stream order"
+        );
+        let sentences: Vec<&str> = seen
+            .iter()
+            .chain(rest.iter())
+            .filter_map(|event| event.strip_prefix("sentence:"))
+            .collect();
+        assert_eq!(sentences, ["First.", "Second.", "Third."]);
+        let last_audio = rest
+            .iter()
+            .rposition(|event| event == "audio")
+            .expect("last sentence audio should arrive");
+        assert!(
+            last_audio < rest.len() - 1,
+            "finished should arrive only after the last sentence audio: {rest:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn long_reply_streams_every_delta_while_first_sentence_is_blocked_in_tts() {
+        let spoken = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let tts = Arc::new(FakeTts {
+            spoken: Arc::clone(&spoken),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            block_first: AtomicBool::new(true),
+        });
+        let (_voice_tx, voice_rx) = watch::channel(true);
+        let (events_tx, mut events_rx) = mpsc::channel(64);
+        let recorder = start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
+        let handle = tokio::spawn(run_reply(
+            Arc::new(ManySentenceModel),
+            tts,
+            voice_rx,
+            Vec::new(),
+            events_tx,
+            1,
+            recorder,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("tts should start within timeout");
+        let mut deltas = 0;
+        let mut model_finished = false;
+        while !model_finished {
+            let description = next_description(&mut events_rx).await;
+            if description.starts_with("delta:") {
+                deltas += 1;
+            }
+            model_finished = description == "model_finished";
+        }
+        assert_eq!(
+            deltas, 12,
+            "every delta should arrive while the first sentence is blocked in tts"
+        );
+        assert_eq!(
+            spoken.lock().expect("spoken lock").as_slice(),
+            ["Sentence 1."],
+            "model_finished should be stamped before tts works through the queue"
+        );
+        release.notify_one();
+        loop {
+            if next_description(&mut events_rx).await == "finished" {
+                break;
+            }
+        }
+        handle.await.expect("reply task should finish");
+        assert_eq!(spoken.lock().expect("spoken lock").len(), 12);
+    }
+
+    #[tokio::test]
+    async fn voice_off_streams_deltas_without_synthesis_and_finishes() {
+        let spoken = Arc::new(Mutex::new(Vec::new()));
+        let tts = Arc::new(FakeTts {
+            spoken: Arc::clone(&spoken),
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            block_first: AtomicBool::new(false),
+        });
+        let (_voice_tx, voice_rx) = watch::channel(false);
+        let (events_tx, mut events_rx) = mpsc::channel(64);
+        let recorder = start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
+        let handle = tokio::spawn(run_reply(
+            Arc::new(FakeModel),
+            tts,
+            voice_rx,
+            Vec::new(),
+            events_tx,
+            1,
+            recorder,
+        ));
+        let mut seen = Vec::new();
+        loop {
+            let description = next_description(&mut events_rx).await;
+            let is_finished = description == "finished";
+            seen.push(description);
+            if is_finished {
+                break;
+            }
+        }
+        handle.await.expect("reply task should finish");
+        assert!(seen.contains(&"delta:Second. ".to_string()), "{seen:?}");
+        assert!(
+            !seen
+                .iter()
+                .any(|event| event.starts_with("sentence:") || event == "audio"),
+            "voice off should not synthesize: {seen:?}"
+        );
+        assert!(spoken.lock().expect("spoken lock").is_empty());
+    }
+
+    #[test]
+    fn model_ms_ends_at_model_finish_when_known_and_at_record_time_otherwise() {
+        let started = Instant::now();
+        let model_finished = started + Duration::from_millis(120);
+        let recorded = started + Duration::from_millis(5_000);
+        assert_eq!(model_ms(started, Some(model_finished), recorded), 120);
+        assert_eq!(model_ms(started, None, recorded), 5_000);
+    }
 
     #[test]
     fn forward_clock_maps_processed_time_to_when_it_was_forwarded() {
