@@ -2109,9 +2109,14 @@ async fn a_title_the_user_typed_is_not_overwritten_by_the_model() {
 
 #[tokio::test]
 async fn only_a_voice_turn_carries_its_padded_clip_and_only_with_audio_input_on() {
-    for audio_input in [true, false] {
+    // Recording the mic fills the buffer too, but must not send the clip to the model.
+    for (audio_input, record_audio) in [(true, false), (false, false), (false, true)] {
         let data_dir = ScratchDir::new("audio-input");
-        let config = recording_config(metrics_only(), &data_dir);
+        let kinds = RecordKinds {
+            audio: record_audio,
+            ..metrics_only()
+        };
+        let config = recording_config(kinds, &data_dir);
         let mut harness = start_full(config, None, audio_input).await;
         voice_on(&mut harness).await;
         let mut mic = Vec::new();
@@ -2160,7 +2165,7 @@ async fn only_a_voice_turn_carries_its_padded_clip_and_only_with_audio_input_on(
         assert_eq!(
             harness.model.clips(),
             vec![audio_input.then_some(expected), None],
-            "audio_input={audio_input}"
+            "audio_input={audio_input} record_audio={record_audio}"
         );
         let texts: Vec<String> = harness.model.calls()[1]
             .iter()
@@ -2186,7 +2191,7 @@ async fn only_a_voice_turn_carries_its_padded_clip_and_only_with_audio_input_on(
         assert_eq!(
             input_ms,
             vec![first, Value::Null],
-            "audio_input={audio_input}"
+            "audio_input={audio_input} record_audio={record_audio}"
         );
     }
 }
