@@ -5,6 +5,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 from tiny_glimmer import HIDDEN, FakeTokenizer
+from tiny_whisper import DIM, WINDOW, tone, write_audio_manifest
 
 from thalvi_train import evaluate
 from thalvi_train.batch import make_batch
@@ -19,12 +20,13 @@ from thalvi_train.evaluate import (
     summarize,
     transcript_of,
 )
+from thalvi_train.features import encode
 from thalvi_train.glimmer import FrozenGlimmer, load_glimmer
 from thalvi_train.projector import AudioProjector
 from thalvi_train.records import Record
 from thalvi_train.train import PROJECTOR_CONFIG, PROJECTOR_WEIGHTS, ProjectorConfig, distill_loss
 
-PROJECTOR = ProjectorConfig(encoder_dim=16, hidden_dim=32, text_dim=HIDDEN, stack=4)
+PROJECTOR = ProjectorConfig(encoder_dim=DIM, hidden_dim=32, text_dim=HIDDEN, stack=4)
 RESPONSE = (
     "<|start|>assistant to=self<|message|>hmm<|eom|><|start|>assistant to=user<|message|>yes<|eot|>"
 )
@@ -41,13 +43,8 @@ def glimmer(tiny_glimmer_dir: Path) -> FrozenGlimmer:
 
 
 @pytest.fixture
-def features(tmp_path: Path) -> Path:
-    torch.manual_seed(1)
-    directory = tmp_path / "features"
-    directory.mkdir()
-    for name, frames in (("a", 100), ("b", 5), ("c", 10)):
-        save_file({"frames": torch.randn(frames, 16).half()}, directory / f"{name}.safetensors")
-    return directory
+def audio_manifest(tmp_path: Path) -> Path:
+    return write_audio_manifest(tmp_path / "speech", {"a": WINDOW, "b": 1600, "c": 3200})
 
 
 @pytest.fixture
@@ -182,15 +179,30 @@ def test_generation_stops_after_the_stop_id_and_not_past_the_limit(glimmer: Froz
 
 
 def test_a_record_reports_its_training_kl_audio_length_and_optional_baseline(
-    glimmer: FrozenGlimmer, projector: AudioProjector, features: Path
+    glimmer: FrozenGlimmer, projector: AudioProjector, tiny_encoder
 ) -> None:
-    frames = evaluate.load_frames(features, RECORDS[0], PROJECTOR.encoder_dim)
+    (encoded,) = encode(*tiny_encoder, [tone(WINDOW)])
+    frames = encoded.float()
     kwargs = {"max_new_tokens": 6}
     plain = evaluate_record(
-        glimmer, FakeTokenizer(), projector, RECORDS[0], frames, with_text_baseline=False, **kwargs
+        glimmer,
+        FakeTokenizer(),
+        projector,
+        RECORDS[0],
+        frames,
+        0.25,
+        with_text_baseline=False,
+        **kwargs,
     )
     compared = evaluate_record(
-        glimmer, FakeTokenizer(), projector, RECORDS[0], frames, with_text_baseline=True, **kwargs
+        glimmer,
+        FakeTokenizer(),
+        projector,
+        RECORDS[0],
+        frames,
+        0.25,
+        with_text_baseline=True,
+        **kwargs,
     )
 
     batch = make_batch(RECORDS[:1], [frames], FakeTokenizer(), projector.audio_token_count)
@@ -198,6 +210,8 @@ def test_a_record_reports_its_training_kl_audio_length_and_optional_baseline(
         expected_kl = distill_loss(glimmer, projector, batch).kl.item()
     assert plain.kl == pytest.approx(expected_kl, rel=1e-5)
     assert plain.audio_seconds == 2.0
+    assert plain.encode_s == 0.25
+    assert plain.time_to_first_token_with_encoder_s == 0.25 + plain.time_to_first_token_s
     assert plain.new_tokens == 6
     assert plain.baseline is None
     assert compared.response == plain.response
@@ -221,7 +235,9 @@ def result(task: str, edits: int, words: int, **overrides) -> SampleResult:
         "finished": True,
         "new_tokens": 1,
         "audio_seconds": 1.0,
+        "encode_s": 0.05,
         "time_to_first_token_s": 0.1,
+        "time_to_first_token_with_encoder_s": 0.15,
         "generate_s": 1.0,
         "response": "",
         "baseline": None,
@@ -231,9 +247,31 @@ def result(task: str, edits: int, words: int, **overrides) -> SampleResult:
 
 def test_summary_pools_edits_over_words_instead_of_averaging_sample_wers() -> None:
     rows = [
-        result("answer", 1, 2, kl=1.0, time_to_first_token_s=0.3),
-        result("answer", 0, 8, kl=3.0, finished=False, time_to_first_token_s=0.1),
-        result("continue", 3, 10, kl=5.0, time_to_first_token_s=0.2),
+        result(
+            "answer",
+            1,
+            2,
+            kl=1.0,
+            time_to_first_token_s=0.3,
+            time_to_first_token_with_encoder_s=0.9,
+        ),
+        result(
+            "answer",
+            0,
+            8,
+            kl=3.0,
+            finished=False,
+            time_to_first_token_s=0.1,
+            time_to_first_token_with_encoder_s=0.5,
+        ),
+        result(
+            "continue",
+            3,
+            10,
+            kl=5.0,
+            time_to_first_token_s=0.2,
+            time_to_first_token_with_encoder_s=0.4,
+        ),
     ]
     summary = summarize(rows)
     assert summary["samples"] == 3
@@ -241,6 +279,7 @@ def test_summary_pools_edits_over_words_instead_of_averaging_sample_wers() -> No
     assert summary["mean_kl"] == pytest.approx(3.0)
     assert summary["finished_rate"] == pytest.approx(2 / 3)
     assert summary["median_time_to_first_token_s"] == pytest.approx(0.2)
+    assert summary["median_time_to_first_token_with_encoder_s"] == pytest.approx(0.5)
     assert summary["by_task"]["answer"] == {
         "samples": 2,
         "mean_kl": 2.0,
@@ -263,7 +302,8 @@ def test_summary_adds_the_baseline_finish_rate_only_when_every_sample_has_one() 
 def test_cli_writes_a_row_per_eval_sample_and_a_summary(
     tiny_glimmer_dir: Path,
     projector: AudioProjector,
-    features: Path,
+    tiny_whisper_dir: Path,
+    audio_manifest: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -282,7 +322,8 @@ def test_cli_writes_a_row_per_eval_sample_and_a_summary(
     evaluate.main(
         [
             *("--manifest", str(manifest)),
-            *("--features-dir", str(features)),
+            *("--audio-manifest", str(audio_manifest)),
+            *("--whisper-model", str(tiny_whisper_dir)),
             *("--glimmer", str(tiny_glimmer_dir)),
             *("--projector", str(run)),
             *("--out", str(out)),
@@ -295,9 +336,20 @@ def test_cli_writes_a_row_per_eval_sample_and_a_summary(
     assert [(row["id"], row["task"]) for row in rows] == [("a", "answer"), ("b", "continue")]
     assert all(row["new_tokens"] <= 5 and row["kl"] > 0 for row in rows)
     assert all(row["baseline"]["response"] for row in rows)
+    assert [row["audio_seconds"] for row in rows] == [2.0, 0.1]
+    assert all(row["encode_s"] > 0 for row in rows)
+    assert all(
+        row["time_to_first_token_with_encoder_s"]
+        == pytest.approx(row["encode_s"] + row["time_to_first_token_s"])
+        for row in rows
+    )
     summary = json.loads((run / "eval.summary.json").read_text(encoding="utf-8"))
     assert summary["samples"] == 2
     assert set(summary["by_task"]) == {"answer", "continue"}
+    assert (
+        summary["median_time_to_first_token_with_encoder_s"]
+        > summary["median_time_to_first_token_s"]
+    )
     assert summary["mean_kl"] == pytest.approx(sum(row["kl"] for row in rows) / 2)
 
 

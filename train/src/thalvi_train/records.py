@@ -1,12 +1,12 @@
-"""Distillation records: the manifest fields training reads, and their cached encoder features."""
+"""Distillation records: the manifest fields training reads, and the audio each one is spoken in."""
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, get_args
 
-import torch
-from safetensors.torch import load_file
+from thalvi_train.manifest import ManifestError, audio_path, read_manifest
 
 Task = Literal["answer", "continue"]
 
@@ -59,9 +59,21 @@ def read_records(manifest: Path, split: str, limit: int | None = None) -> list[R
     return records
 
 
-def load_frames(features_dir: Path, record: Record, encoder_dim: int) -> torch.Tensor:
-    """Loads `<features_dir>/<id>.safetensors`'s `frames` as float32 `(frames, encoder_dim)`."""
-    frames = load_file(features_dir / f"{record.id}.safetensors")["frames"]
-    if frames.ndim != 2 or frames.shape[1] != encoder_dim:
-        raise ValueError(f"{record.id}: frames {tuple(frames.shape)} is not (T, {encoder_dim})")
-    return frames.float()
+def resolve_audio(records: Sequence[Record], manifests: Sequence[Path]) -> list[Path]:
+    """The audio file of each record, found by id in the data `manifests`, in record order.
+
+    Records carry no audio path; the data manifests do. An id in two manifests, or a
+    record in none, is an error naming the id.
+    """
+    paths: dict[str, Path] = {}
+    for manifest in manifests:
+        for sample in read_manifest(manifest):
+            if sample.id in paths:
+                raise ManifestError(
+                    f"{manifest}: id {sample.id!r} is already in an earlier manifest"
+                )
+            paths[sample.id] = audio_path(manifest, sample)
+    missing = next((r.id for r in records if r.id not in paths), None)
+    if missing is not None:
+        raise ManifestError(f"{missing}: no audio for this record in {[str(m) for m in manifests]}")
+    return [paths[record.id] for record in records]

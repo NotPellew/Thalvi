@@ -6,8 +6,10 @@ Per held-out sample the student, Glimmer reading projected audio, decodes greedi
 with a KV cache. Glimmer's reasoning opens by repeating the request, so that first
 paragraph is the student's transcription of the audio and is scored as a word
 error rate against the sample's text. The training KL on the teacher's stored
-response is reported too. Times cover the decoder only: Whisper features are
-read from the cache, so projection onward is timed, the encoder is not.
+response is reported too. The audio goes through the Whisper encoder inline, as in
+the live path. `encode_s` times the encoder, mel features included; reading the file is
+not timed. The decoder's prefill to the first token is `time_to_first_token_s`, and
+`time_to_first_token_with_encoder_s` adds `encode_s`, the figure the live path sees.
 """
 
 import argparse
@@ -24,10 +26,11 @@ from typing import Any
 
 import torch
 from safetensors.torch import load_file
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, WhisperFeatureExtractor
+from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
 from thalvi_train.batch import make_batch
-from thalvi_train.features import FRAMES_PER_SECOND
+from thalvi_train.features import DEFAULT_MODEL, FRAMES_PER_SECOND, encode, load_encoder, read_audio
 from thalvi_train.glimmer import FrozenGlimmer, load_glimmer
 from thalvi_train.projector import AudioProjector
 from thalvi_train.prompts import (
@@ -38,7 +41,7 @@ from thalvi_train.prompts import (
     PromptTokenizer,
     generation_ids,
 )
-from thalvi_train.records import Record, load_frames, read_records
+from thalvi_train.records import Record, read_records, resolve_audio
 from thalvi_train.teacher import EOT_ID
 from thalvi_train.train import (
     PROJECTOR_CONFIG,
@@ -98,7 +101,9 @@ class SampleResult:
     finished: bool
     new_tokens: int
     audio_seconds: float
+    encode_s: float
     time_to_first_token_s: float
+    time_to_first_token_with_encoder_s: float
     generate_s: float
     response: str
     baseline: Baseline | None
@@ -189,11 +194,15 @@ def evaluate_record(
     projector: AudioProjector,
     record: Record,
     frames: torch.Tensor,
+    encode_s: float,
     *,
     max_new_tokens: int,
     with_text_baseline: bool,
 ) -> SampleResult:
-    """Scores one record: its KL, and the student's greedy reply from its encoder `frames`."""
+    """Scores one record: its KL, and the student's greedy reply from its encoder `frames`.
+
+    `encode_s` is the seconds the encoder took to produce `frames`.
+    """
     device = glimmer.device
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
     with torch.no_grad(), autocast:
@@ -230,7 +239,9 @@ def evaluate_record(
         finished=student.finished,
         new_tokens=len(student.ids),
         audio_seconds=frames.shape[0] / FRAMES_PER_SECOND,
+        encode_s=encode_s,
         time_to_first_token_s=student.time_to_first_token_s,
+        time_to_first_token_with_encoder_s=encode_s + student.time_to_first_token_s,
         generate_s=student.seconds,
         response=response,
         baseline=baseline,
@@ -260,6 +271,9 @@ def summarize(results: Sequence[SampleResult]) -> dict[str, Any]:
         by_task[result.task].append(result)
     summary = _group_summary(results) | {
         "median_time_to_first_token_s": statistics.median(r.time_to_first_token_s for r in results),
+        "median_time_to_first_token_with_encoder_s": statistics.median(
+            r.time_to_first_token_with_encoder_s for r in results
+        ),
         "by_task": {task: _group_summary(group) for task, group in sorted(by_task.items())},
     }
     baselines = [r.baseline for r in results if r.baseline]
@@ -272,24 +286,32 @@ def evaluate(
     glimmer: FrozenGlimmer,
     tokenizer: PromptTokenizer,
     projector: AudioProjector,
+    encoder: WhisperEncoder,
+    extractor: WhisperFeatureExtractor,
     records: Sequence[Record],
-    features_dir: Path,
+    audio: Sequence[Path],
     *,
-    encoder_dim: int,
     max_new_tokens: int,
     with_text_baseline: bool,
     emit: Callable[[SampleResult], None],
 ) -> list[SampleResult]:
-    """Evaluates `records` in order, passing each result to `emit` as it is done."""
+    """Evaluates `records` in order, passing each result to `emit` as it is done.
+
+    `audio[i]` is the file of `records[i]`; each is encoded here, timed as `encode_s`.
+    """
     results = []
-    for record in records:
-        frames = load_frames(features_dir, record, encoder_dim)
+    for record, path in zip(records, audio, strict=True):
+        clip = read_audio(path, extractor.n_samples)
+        started = time.perf_counter()
+        (frames,) = encode(encoder, extractor, [clip])
+        encode_s = time.perf_counter() - started
         result = evaluate_record(
             glimmer,
             tokenizer,
             projector,
             record,
-            frames,
+            frames.float(),
+            encode_s,
             max_new_tokens=max_new_tokens,
             with_text_baseline=with_text_baseline,
         )
@@ -317,7 +339,14 @@ def _load_tokenizer(path: Path) -> PromptTokenizer:
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--manifest", type=Path, required=True, help="teacher records JSONL")
-    parser.add_argument("--features-dir", type=Path, required=True)
+    parser.add_argument(
+        "--audio-manifest",
+        type=Path,
+        action="append",
+        required=True,
+        help="data manifest that holds the records' audio; repeatable",
+    )
+    parser.add_argument("--whisper-model", default=DEFAULT_MODEL)
     parser.add_argument("--glimmer", type=Path, required=True, help="Glimmer checkpoint")
     parser.add_argument("--projector", type=Path, required=True, help="run dir with the projector")
     parser.add_argument("--out", type=Path, required=True, help="per-sample results JSONL")
@@ -341,9 +370,11 @@ def main(argv: list[str] | None = None) -> None:
     records = read_records(args.manifest, args.split, args.limit)
     if not records:
         raise SystemExit(f"no {args.split!r} records in {args.manifest}")
+    audio = resolve_audio(records, args.audio_manifest)
     glimmer = load_glimmer(args.glimmer, device=args.device, quantize=args.quantize)
     tokenizer = _load_tokenizer(args.glimmer)
     projector, config = load_projector(args.projector, glimmer.hidden_size, glimmer.device)
+    encoder, extractor = load_encoder(args.whisper_model, args.device, config.encoder_dim)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", encoding="utf-8") as sink:
@@ -360,9 +391,10 @@ def main(argv: list[str] | None = None) -> None:
             glimmer,
             tokenizer,
             projector,
+            encoder,
+            extractor,
             records,
-            args.features_dir,
-            encoder_dim=config.encoder_dim,
+            audio,
             max_new_tokens=args.max_new_tokens,
             with_text_baseline=args.with_text_baseline,
             emit=emit,

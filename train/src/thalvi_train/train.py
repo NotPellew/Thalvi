@@ -2,7 +2,8 @@
 
 Only the projector trains. Per response token the loss is KL(teacher || student)
 at temperature 1, with an optional cross-entropy against the response tokens.
-Logits exist only at response positions, a chunk at a time.
+Logits exist only at response positions, a chunk at a time. The frozen Whisper
+encoder runs inline on the training device, one micro-batch ahead of the projector.
 """
 
 import argparse
@@ -10,24 +11,29 @@ import json
 import math
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from safetensors.torch import save_file
 from torch.utils.checkpoint import checkpoint
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, WhisperFeatureExtractor
+from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
 from thalvi_train.batch import Batch, make_batch
+from thalvi_train.features import DEFAULT_MODEL, encode, load_encoder, read_audio
 from thalvi_train.glimmer import FrozenGlimmer, load_glimmer
 from thalvi_train.projector import AudioProjector
 from thalvi_train.prompts import GlimmerTokenizer, PromptTokenizer
-from thalvi_train.records import Record, load_frames, read_records
+from thalvi_train.records import Record, read_records, resolve_audio
 
 PROJECTOR_WEIGHTS = "projector.safetensors"
 PROJECTOR_CONFIG = "projector.json"
+READ_THREADS = 4
 
 
 @dataclass(frozen=True)
@@ -142,16 +148,38 @@ def _step_groups(
     return [batches[i : i + grad_accum] for i in range(0, len(batches), grad_accum)]
 
 
+def _read_ahead(
+    pool: ThreadPoolExecutor, batches: Sequence[Sequence[Path]], max_samples: int
+) -> Iterator[list[np.ndarray]]:
+    """Yields each batch's clips, already reading the next batch while the caller works."""
+
+    def submit(paths: Sequence[Path]) -> list[Future[np.ndarray]]:
+        return [pool.submit(read_audio, path, max_samples) for path in paths]
+
+    pending = submit(batches[0]) if batches else []
+    for index in range(len(batches)):
+        current = pending
+        if index + 1 < len(batches):
+            pending = submit(batches[index + 1])
+        yield [future.result() for future in current]
+
+
 def run(
     glimmer: FrozenGlimmer,
     tokenizer: PromptTokenizer,
     records: list[Record],
-    features_dir: Path,
+    audio: Sequence[Path],
+    encoder: WhisperEncoder,
+    extractor: WhisperFeatureExtractor,
     projector_config: ProjectorConfig,
     config: TrainConfig,
     emit: Callable[[dict[str, float | int]], None],
 ) -> AudioProjector:
-    """Trains a fresh projector on `records`, emitting one dict per step and saving checkpoints."""
+    """Trains a fresh projector on `records`, emitting one dict per step and saving checkpoints.
+
+    `audio[i]` is the file of `records[i]`. Each micro-batch is read, run through the
+    frozen `encoder` without gradients, and only then through the projector.
+    """
     if not records:
         raise ValueError("no records to train on")
     torch.manual_seed(config.seed)
@@ -169,25 +197,26 @@ def run(
         _step_groups(len(records), config.batch_size, config.grad_accum, rng)
         for _ in range(config.epochs)
     ]
-    steps_available = sum(len(groups) for groups in epochs)
-    total_steps = min(steps_available, config.max_steps or steps_available)
+    plan = [group for groups in epochs for group in groups]
+    total_steps = min(len(plan), config.max_steps or len(plan))
+    plan = plan[:total_steps]
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
 
-    step = 0
-    for groups in epochs:
-        for group in groups:
-            if step == total_steps:
-                break
-            lr = lr_at(step, total_steps, config.warmup_steps, config.lr)
+    with ThreadPoolExecutor(READ_THREADS) as pool:
+        clips = _read_ahead(
+            pool,
+            [[audio[i] for i in indices] for group in plan for indices in group],
+            extractor.n_samples,
+        )
+        for step, group in enumerate(plan, start=1):
+            lr = lr_at(step - 1, total_steps, config.warmup_steps, config.lr)
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
             started = time.perf_counter()
             loss_sum = kl_sum = tokens = 0.0
             for indices in group:
                 chosen = [records[i] for i in indices]
-                frames = [
-                    load_frames(features_dir, r, projector_config.encoder_dim) for r in chosen
-                ]
+                frames = [f.float() for f in encode(encoder, extractor, next(clips))]
                 batch = make_batch(chosen, frames, tokenizer, projector.audio_token_count)
                 with autocast:
                     parts = distill_loss(glimmer, projector, batch, config.kl_chunk)
@@ -199,7 +228,6 @@ def run(
             torch.nn.utils.clip_grad_norm_(projector.parameters(), config.max_grad_norm)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
-            step += 1
             emit(
                 {
                     "step": step,
@@ -218,7 +246,14 @@ def run(
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--features-dir", type=Path, required=True)
+    parser.add_argument(
+        "--audio-manifest",
+        type=Path,
+        action="append",
+        required=True,
+        help="data manifest that holds the records' audio; repeatable",
+    )
+    parser.add_argument("--whisper-model", default=DEFAULT_MODEL)
     parser.add_argument("--glimmer", type=Path, required=True, help="full Glimmer checkpoint")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
@@ -248,6 +283,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.quantize and args.device != "cuda":
         raise SystemExit("--quantize needs --device cuda")
     records = read_records(args.manifest, args.split, args.limit)
+    audio = resolve_audio(records, args.audio_manifest)
+    encoder, extractor = load_encoder(args.whisper_model, args.device, args.encoder_dim)
     glimmer = load_glimmer(args.glimmer, device=args.device, quantize=args.quantize)
     tokenizer = GlimmerTokenizer(AutoTokenizer.from_pretrained(args.glimmer))
     projector_config = ProjectorConfig(
@@ -275,7 +312,9 @@ def main(argv: list[str] | None = None) -> None:
         glimmer,
         tokenizer,
         records,
-        args.features_dir,
+        audio,
+        encoder,
+        extractor,
         projector_config,
         config,
         lambda line: print(json.dumps(line), flush=True),

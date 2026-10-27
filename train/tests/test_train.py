@@ -4,14 +4,16 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn.functional as F
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file
 from tiny_glimmer import HIDDEN, FakeTokenizer
+from tiny_whisper import DIM, write_audio_manifest
 from transformers import MuseGlimmerForConditionalGeneration
 
+from thalvi_train import train
 from thalvi_train.batch import make_batch
 from thalvi_train.glimmer import FrozenGlimmer, load_glimmer
 from thalvi_train.projector import AudioProjector
-from thalvi_train.records import Record
+from thalvi_train.records import Record, resolve_audio
 from thalvi_train.train import (
     PROJECTOR_CONFIG,
     PROJECTOR_WEIGHTS,
@@ -22,7 +24,7 @@ from thalvi_train.train import (
     run,
 )
 
-PROJECTOR = ProjectorConfig(encoder_dim=16, hidden_dim=32, text_dim=HIDDEN, stack=4)
+PROJECTOR = ProjectorConfig(encoder_dim=DIM, hidden_dim=32, text_dim=HIDDEN, stack=4)
 RESPONSE = (
     "<|start|>assistant to=self<|message|>hmm<|eom|><|start|>assistant to=user<|message|>yes<|eot|>"
 )
@@ -33,12 +35,12 @@ def glimmer(tiny_glimmer_dir: Path) -> FrozenGlimmer:
     return load_glimmer(tiny_glimmer_dir, dtype=torch.float32)
 
 
+CLIP_SAMPLES = {"a": 3200, "b": 1600}
+
+
 @pytest.fixture
-def features(tmp_path: Path) -> Path:
-    torch.manual_seed(1)
-    save_file({"frames": torch.randn(10, 16).half()}, tmp_path / "a.safetensors")
-    save_file({"frames": torch.randn(5, 16).half()}, tmp_path / "b.safetensors")
-    return tmp_path
+def audio_manifest(tmp_path: Path) -> Path:
+    return write_audio_manifest(tmp_path / "speech", CLIP_SAMPLES)
 
 
 RECORDS = [
@@ -86,11 +88,10 @@ def reference_losses(
 def test_loss_matches_kl_and_ce_computed_from_the_full_model(
     glimmer: FrozenGlimmer,
     reference_model: MuseGlimmerForConditionalGeneration,
-    features: Path,
 ) -> None:
     torch.manual_seed(2)
     projector = AudioProjector(**PROJECTOR.__dict__)
-    frames = [torch.randn(10, 16), torch.randn(5, 16)]
+    frames = [torch.randn(10, DIM), torch.randn(5, DIM)]
     batch = make_batch(RECORDS, frames, FakeTokenizer(), projector.audio_token_count)
     parts = distill_loss(glimmer, projector, batch, kl_chunk=3)
     kl, ce = reference_losses(reference_model, glimmer, projector, batch)
@@ -99,20 +100,25 @@ def test_loss_matches_kl_and_ce_computed_from_the_full_model(
     assert parts.ce.item() == pytest.approx(ce.item(), rel=1e-4)
 
 
+def run_on(glimmer, encoder, audio_manifest, records, config, emit=lambda _: None):
+    audio = resolve_audio(records, [audio_manifest])
+    return run(glimmer, FakeTokenizer(), records, audio, *encoder, PROJECTOR, config, emit)
+
+
 def test_training_lowers_the_loss_and_changes_only_the_projector(
-    glimmer: FrozenGlimmer, features: Path, tmp_path: Path
+    glimmer: FrozenGlimmer, tiny_encoder, audio_manifest: Path, tmp_path: Path
 ) -> None:
     before = {k: v.clone() for k, v in glimmer.state_dict().items()}
+    encoder_before = {k: v.clone() for k, v in tiny_encoder[0].state_dict().items()}
     lines: list[dict] = []
     config = train_config(tmp_path / "out", grad_accum=1, epochs=40, max_steps=40)
-    projector = run(
-        glimmer, FakeTokenizer(), RECORDS[:1], features, PROJECTOR, config, lines.append
-    )
+    projector = run_on(glimmer, tiny_encoder, audio_manifest, RECORDS[:1], config, lines.append)
 
     assert [line["step"] for line in lines] == list(range(1, 41))
     assert set(lines[0]) == {"step", "loss", "kl", "lr", "tokens_per_s"}
     assert lines[-1]["loss"] < 0.5 * lines[0]["loss"]
     assert all(torch.equal(v, glimmer.state_dict()[k]) for k, v in before.items())
+    assert all(torch.equal(v, tiny_encoder[0].state_dict()[k]) for k, v in encoder_before.items())
     untrained = AudioProjector(**PROJECTOR.__dict__)
     assert any(
         not torch.equal(p, q)
@@ -121,11 +127,11 @@ def test_training_lowers_the_loss_and_changes_only_the_projector(
 
 
 def test_saves_intermediate_and_final_projector_with_its_config(
-    glimmer: FrozenGlimmer, features: Path, tmp_path: Path
+    glimmer: FrozenGlimmer, tiny_encoder, audio_manifest: Path, tmp_path: Path
 ) -> None:
     out = tmp_path / "out"
     config = train_config(out, grad_accum=1, epochs=3, max_steps=5, save_every=2)
-    projector = run(glimmer, FakeTokenizer(), RECORDS, features, PROJECTOR, config, lambda _: None)
+    projector = run_on(glimmer, tiny_encoder, audio_manifest, RECORDS, config)
 
     assert {p.name for p in out.iterdir()} == {
         PROJECTOR_CONFIG,
@@ -139,12 +145,40 @@ def test_saves_intermediate_and_final_projector_with_its_config(
 
 
 def test_accumulates_micro_batches_into_each_step(
-    glimmer: FrozenGlimmer, features: Path, tmp_path: Path
+    glimmer: FrozenGlimmer, tiny_encoder, audio_manifest: Path, tmp_path: Path
 ) -> None:
     lines: list[dict] = []
     config = train_config(tmp_path / "out", batch_size=1, grad_accum=2, epochs=2)
-    run(glimmer, FakeTokenizer(), RECORDS, features, PROJECTOR, config, lines.append)
+    run_on(glimmer, tiny_encoder, audio_manifest, RECORDS, config, lines.append)
     assert [line["step"] for line in lines] == [1, 2]
+
+
+def test_every_micro_batch_is_encoded_from_its_own_records_audio(
+    glimmer: FrozenGlimmer,
+    tiny_encoder,
+    audio_manifest: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded: list[int] = []
+    batched: list[str] = []
+    real_encode, real_make_batch = train.encode, train.make_batch
+
+    def spy_encode(encoder, extractor, clips):
+        encoded.extend(len(clip) for clip in clips)
+        return real_encode(encoder, extractor, clips)
+
+    def spy_make_batch(records, frames, *args):
+        batched.extend(r.id for r in records)
+        return real_make_batch(records, frames, *args)
+
+    monkeypatch.setattr(train, "encode", spy_encode)
+    monkeypatch.setattr(train, "make_batch", spy_make_batch)
+    config = train_config(tmp_path / "out", grad_accum=1, epochs=3)
+    run_on(glimmer, tiny_encoder, audio_manifest, RECORDS, config)
+
+    assert len(batched) == 6
+    assert encoded == [CLIP_SAMPLES[id] for id in batched]
 
 
 def test_gradient_checkpointing_leaves_projector_gradients_unchanged(
@@ -154,7 +188,7 @@ def test_gradient_checkpointing_leaves_projector_gradients_unchanged(
     projector = AudioProjector(**PROJECTOR.__dict__)
     batch = make_batch(
         RECORDS,
-        [torch.randn(10, 16), torch.randn(5, 16)],
+        [torch.randn(10, DIM), torch.randn(5, DIM)],
         FakeTokenizer(),
         projector.audio_token_count,
     )

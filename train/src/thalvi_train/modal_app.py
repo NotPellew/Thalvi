@@ -1,7 +1,7 @@
 """The Modal app that runs the adapter pipeline's download and GPU steps on two volumes.
 
 `thalvi-glimmer` holds Glimmer's weights; `thalvi-data` holds LibriSpeech, the
-Kokoro speech uploaded from the local machine, the Whisper features, the teacher's
+Kokoro speech uploaded from the local machine as `speech.tar`, the teacher's
 answers and training runs. Each step is a function plus a local entrypoint of
 the shorter name, so `modal run src/thalvi_train/modal_app.py::teacher` runs it.
 
@@ -10,6 +10,10 @@ the CUDA torch extra, so Modal runs the code and versions the local machine does
 teacher step uses vLLM, which pins its own torch and transformers (`< 5.20`,
 older than the project's), so it gets an image of its own and reads only
 `thalvi_train.teacher`, `prompts`, `records` and `manifest`.
+
+Training and evaluation run the Whisper encoder inline. A volume serves small files
+at ~0.2 s each, so they first stage the audio onto the container's local disk
+(`stage_audio`) and read it from there; the staging time is in the log.
 
 Every GPU step prints when it starts and ends and the hours between, which
 times the GPU rate for the cost of the step. Image pulls and container start
@@ -25,13 +29,14 @@ import subprocess
 import sys
 import tarfile
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 import modal
 
 GPU = "H100"
-FEATURES_GPUS = ["H100", "L40S", "A10G"]
+TRAIN_MEMORY_MIB = 64 * 1024
+TRAIN_DISK_MIB = 512 * 1024
 
 GLIMMER_REPO = "meta-models/Muse-Glimmer-30B"
 GLIMMER_REVISION = "cec94fcfd6512f2cfe708138c32533b346ea4f69"
@@ -44,10 +49,11 @@ DATA_MOUNT = "/data"
 GLIMMER_DIR = f"{GLIMMER_MOUNT}/Muse-Glimmer-30B"
 GLIMMER_TEXT_DIR = f"{GLIMMER_MOUNT}/Muse-Glimmer-30B-text"
 TEXT_SHARD_BYTES = 4 * 1024**3
-SPEECH_MANIFEST = f"{DATA_MOUNT}/speech/manifest.jsonl"
+SPEECH_TAR = f"{DATA_MOUNT}/speech.tar"
+SPEECH_MANIFEST_MEMBER = "speech/manifest.jsonl"
+STAGE_ROOT = "/tmp/stage"
 LIBRISPEECH_ROOT = f"{DATA_MOUNT}/librispeech"
 LIBRISPEECH_MANIFEST = f"{LIBRISPEECH_ROOT}/manifest.jsonl"
-FEATURES_DIR = f"{DATA_MOUNT}/features"
 TEACHER_OUT = f"{DATA_MOUNT}/teacher/train.jsonl"
 RUNS_DIR = f"{DATA_MOUNT}/runs"
 
@@ -141,39 +147,91 @@ def fetch_glimmer() -> None:
         glimmer_volume.commit()
 
 
+def download_librispeech(root: Path, after_subset: Callable[[], None] = lambda: None) -> None:
+    """Downloads and extracts the LibriSpeech subsets missing under `root/LibriSpeech`.
+
+    Each archive is deleted once extracted; `after_subset` runs after every extraction.
+    """
+    import httpx
+
+    for subset in LIBRISPEECH_SUBSETS:
+        final = root / "LibriSpeech" / subset
+        if final.is_dir():
+            print(f"{subset}: already extracted", flush=True)
+            continue
+        archive = Path("/tmp") / f"{subset}.tar.gz"
+        with (
+            httpx.stream(
+                "GET", LIBRISPEECH_URL.format(subset=subset), follow_redirects=True
+            ) as response,
+            archive.open("wb") as file,
+        ):
+            response.raise_for_status()
+            for chunk in response.iter_bytes(1 << 20):
+                file.write(chunk)
+        staging = root / f".staging-{subset}"
+        with tarfile.open(archive) as tar:
+            tar.extractall(staging, filter="data")
+        final.parent.mkdir(parents=True, exist_ok=True)
+        (staging / "LibriSpeech" / subset).replace(final)
+        archive.unlink()
+        after_subset()
+        print(f"{subset}: extracted", flush=True)
+
+
+def stage_audio() -> list[str]:
+    """Stages all audio on local disk and returns the `--audio-manifest` arguments naming it.
+
+    LibriSpeech is downloaded fresh and gets its own manifest; the Kokoro speech comes
+    out of `speech.tar` on `thalvi-data`, with its manifest inside. The ids match the
+    manifests the teacher read on the volume.
+    """
+    from thalvi_train import librispeech
+
+    started = time.monotonic()
+    root = Path(STAGE_ROOT)
+    root.mkdir(parents=True, exist_ok=True)
+    librispeech_root = root / "librispeech"
+    download_librispeech(librispeech_root)
+    librispeech_manifest = librispeech_root / "manifest.jsonl"
+    librispeech.main([str(librispeech_root), str(librispeech_manifest)])
+    with tarfile.open(SPEECH_TAR) as tar:
+        tar.extractall(root, filter="data")
+    speech_manifest = root / SPEECH_MANIFEST_MEMBER
+    if not speech_manifest.is_file():
+        raise FileNotFoundError(f"{SPEECH_TAR} holds no {SPEECH_MANIFEST_MEMBER}")
+    print(f"staged audio in {time.monotonic() - started:.0f} s", flush=True)
+    return [
+        arg
+        for manifest in (speech_manifest, librispeech_manifest)
+        for arg in ("--audio-manifest", str(manifest))
+    ]
+
+
+def teacher_manifests() -> list[str]:
+    """The data manifests the teacher answers: the Kokoro speech's, read out of `speech.tar`
+    without its audio, and LibriSpeech's on the volume; whichever exist.
+    """
+    manifests = []
+    if Path(SPEECH_TAR).exists():
+        with tarfile.open(SPEECH_TAR) as tar:
+            tar.extract(SPEECH_MANIFEST_MEMBER, STAGE_ROOT, filter="data")
+        manifests.append(f"{STAGE_ROOT}/{SPEECH_MANIFEST_MEMBER}")
+    if Path(LIBRISPEECH_MANIFEST).exists():
+        manifests.append(LIBRISPEECH_MANIFEST)
+    if not manifests:
+        raise FileNotFoundError(f"no {SPEECH_TAR} or {LIBRISPEECH_MANIFEST}")
+    return manifests
+
+
 @app.function(image=project_image, volumes={DATA_MOUNT: data_volume}, timeout=3 * HOUR)
 def fetch_librispeech() -> None:
     """Downloads and extracts the LibriSpeech subsets, then writes their manifest."""
-    import httpx
-
     from thalvi_train import librispeech
 
-    root = Path(LIBRISPEECH_ROOT)
     with logged("librispeech", None):
-        for subset in LIBRISPEECH_SUBSETS:
-            final = root / "LibriSpeech" / subset
-            if final.is_dir():
-                print(f"{subset}: already extracted", flush=True)
-                continue
-            archive = Path("/tmp") / f"{subset}.tar.gz"
-            with (
-                httpx.stream(
-                    "GET", LIBRISPEECH_URL.format(subset=subset), follow_redirects=True
-                ) as response,
-                archive.open("wb") as file,
-            ):
-                response.raise_for_status()
-                for chunk in response.iter_bytes(1 << 20):
-                    file.write(chunk)
-            staging = root / f".staging-{subset}"
-            with tarfile.open(archive) as tar:
-                tar.extractall(staging, filter="data")
-            final.parent.mkdir(parents=True, exist_ok=True)
-            (staging / "LibriSpeech" / subset).replace(final)
-            archive.unlink()
-            data_volume.commit()
-            print(f"{subset}: extracted", flush=True)
-        librispeech.main([str(root), LIBRISPEECH_MANIFEST])
+        download_librispeech(Path(LIBRISPEECH_ROOT), data_volume.commit)
+        librispeech.main([LIBRISPEECH_ROOT, LIBRISPEECH_MANIFEST])
         data_volume.commit()
 
 
@@ -229,9 +287,7 @@ def vllm_server() -> Iterator[str]:
 )
 def run_teacher(limit: int, temperature: float, max_tokens: int, concurrency: int) -> None:
     """Has Glimmer read each transcript and answer, appending to the training manifest."""
-    manifests = [m for m in (SPEECH_MANIFEST, LIBRISPEECH_MANIFEST) if Path(m).exists()]
-    if not manifests:
-        raise FileNotFoundError(f"no manifest at {SPEECH_MANIFEST} or {LIBRISPEECH_MANIFEST}")
+    manifests = teacher_manifests()
     with logged("teacher", GPU), vllm_server() as base_url:
         run_logged(
             [
@@ -259,37 +315,20 @@ def run_teacher(limit: int, temperature: float, max_tokens: int, concurrency: in
 
 
 @app.function(
-    image=project_image, gpu=FEATURES_GPUS, volumes={DATA_MOUNT: data_volume}, timeout=3 * HOUR
-)
-def run_features(batch_size: int) -> None:
-    """Caches Whisper encoder features for every data manifest into one directory."""
-    manifests = [m for m in (SPEECH_MANIFEST, LIBRISPEECH_MANIFEST) if Path(m).exists()]
-    with logged("features", "/".join(FEATURES_GPUS)):
-        for manifest in manifests:
-            run_logged(
-                [
-                    sys.executable,
-                    "-m",
-                    "thalvi_train.features",
-                    manifest,
-                    FEATURES_DIR,
-                    "--device",
-                    "cuda",
-                    "--batch-size",
-                    str(batch_size),
-                ]
-            )
-
-
-@app.function(
     image=project_image,
     gpu=GPU,
     volumes={GLIMMER_MOUNT: glimmer_volume, DATA_MOUNT: data_volume},
+    memory=TRAIN_MEMORY_MIB,
+    ephemeral_disk=TRAIN_DISK_MIB,
     timeout=12 * HOUR,
 )
 def run_train(run_name: str, extra_args: str) -> None:
-    """Trains the projector on unquantized bf16 Glimmer; `extra_args` go to `thalvi_train.train`."""
+    """Trains the projector on unquantized bf16 Glimmer; `extra_args` go to `thalvi_train.train`.
+
+    The audio is staged onto local disk first, inside the timed step.
+    """
     with logged("train", GPU):
+        audio_args = stage_audio()
         run_logged(
             [
                 sys.executable,
@@ -297,8 +336,7 @@ def run_train(run_name: str, extra_args: str) -> None:
                 "thalvi_train.train",
                 "--manifest",
                 TEACHER_OUT,
-                "--features-dir",
-                FEATURES_DIR,
+                *audio_args,
                 "--glimmer",
                 GLIMMER_TEXT_DIR,
                 "--out-dir",
@@ -314,16 +352,19 @@ def run_train(run_name: str, extra_args: str) -> None:
     image=project_image,
     gpu=GPU,
     volumes={GLIMMER_MOUNT: glimmer_volume, DATA_MOUNT: data_volume},
+    memory=TRAIN_MEMORY_MIB,
+    ephemeral_disk=TRAIN_DISK_MIB,
     timeout=6 * HOUR,
 )
 def run_eval(run_name: str, limit: int, extra_args: str) -> None:
     """Evaluates `runs/<run_name>` on unquantized bf16 Glimmer, writing `eval.jsonl` beside it.
 
     The summary lands next to the rows as `eval.summary.json`; `extra_args` go to
-    `thalvi_train.evaluate`.
+    `thalvi_train.evaluate`. The audio is staged onto local disk first, inside the timed step.
     """
     run_dir = f"{RUNS_DIR}/{run_name}"
     with logged("evaluate", GPU):
+        audio_args = stage_audio()
         run_logged(
             [
                 sys.executable,
@@ -331,8 +372,7 @@ def run_eval(run_name: str, limit: int, extra_args: str) -> None:
                 "thalvi_train.evaluate",
                 "--manifest",
                 TEACHER_OUT,
-                "--features-dir",
-                FEATURES_DIR,
+                *audio_args,
                 "--glimmer",
                 GLIMMER_TEXT_DIR,
                 "--projector",
@@ -369,18 +409,12 @@ def teacher(
 
 
 @app.local_entrypoint()
-def features(batch_size: int = 32) -> None:
-    """Step 4: cache Whisper encoder features for every sample."""
-    run_features.remote(batch_size)
-
-
-@app.local_entrypoint()
 def train(run_name: str = "projector", extra_args: str = "") -> None:
-    """Step 5: train the projector into `runs/<run_name>`; `--extra-args` goes to the trainer."""
+    """Step 4: train the projector into `runs/<run_name>`; `--extra-args` goes to the trainer."""
     run_train.remote(run_name, extra_args)
 
 
 @app.local_entrypoint()
 def evaluate(run_name: str = "projector", limit: int = 500, extra_args: str = "") -> None:
-    """Step 6: score `runs/<run_name>` on the first `--limit` eval samples; extras go to the CLI."""
+    """Step 5: score `runs/<run_name>` on the first `--limit` eval samples; extras go to the CLI."""
     run_eval.remote(run_name, limit, extra_args)

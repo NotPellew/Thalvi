@@ -4,12 +4,13 @@ from pathlib import Path
 
 import pytest
 import torch
-from safetensors.torch import save_file
 from tiny_glimmer import FakeTokenizer
+from tiny_whisper import write_audio_manifest
 from transformers import AutoTokenizer
 
 from thalvi_train.batch import make_batch
 from thalvi_train.glimmer import AUDIO_TOKEN_ID, PAD_TOKEN_ID
+from thalvi_train.manifest import ManifestError
 from thalvi_train.prompts import (
     AUDIO_TOKEN_TEXT,
     SYSTEM_PROMPT,
@@ -18,7 +19,7 @@ from thalvi_train.prompts import (
     generation_ids,
     user_turn,
 )
-from thalvi_train.records import Record, load_frames, read_records
+from thalvi_train.records import Record, read_records, resolve_audio
 from thalvi_train.teacher import EOT_ID
 
 RESPONSE = (
@@ -56,11 +57,27 @@ def test_rejects_malformed_records(task: str, response: str) -> None:
         record(task=task, response=response)
 
 
-def test_frames_load_as_float32_and_must_match_the_encoder_width(tmp_path: Path) -> None:
-    save_file({"frames": torch.randn(6, 16).half()}, tmp_path / "a.safetensors")
-    assert load_frames(tmp_path, record(), 16).dtype == torch.float32
-    with pytest.raises(ValueError, match="not"):
-        load_frames(tmp_path, record(), 8)
+def test_audio_is_found_by_record_id_across_manifests_in_record_order(tmp_path: Path) -> None:
+    first = write_audio_manifest(tmp_path / "one", {"a": 100, "b": 100})
+    second = write_audio_manifest(tmp_path / "two", {"c": 100})
+    records = [record("c"), record("a")]
+    assert resolve_audio(records, [first, second]) == [
+        tmp_path / "two" / "audio" / "c.wav",
+        tmp_path / "one" / "audio" / "a.wav",
+    ]
+
+
+def test_a_record_without_audio_is_an_error_naming_its_id(tmp_path: Path) -> None:
+    manifest = write_audio_manifest(tmp_path, {"a": 100})
+    with pytest.raises(ManifestError, match="lost"):
+        resolve_audio([record("a"), record("lost")], [manifest])
+
+
+def test_an_id_in_two_manifests_is_an_error(tmp_path: Path) -> None:
+    first = write_audio_manifest(tmp_path / "one", {"a": 100})
+    second = write_audio_manifest(tmp_path / "two", {"a": 100})
+    with pytest.raises(ManifestError, match="'a'"):
+        resolve_audio([record("a")], [first, second])
 
 
 @pytest.mark.parametrize(
