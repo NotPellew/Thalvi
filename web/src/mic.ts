@@ -9,7 +9,7 @@ export function micErrorMessage(error: unknown): string {
   switch (name) {
     case "NotAllowedError":
     case "SecurityError":
-      return "Microphone access was denied. Allow it in your browser settings, then tap Start.";
+      return "Microphone access was denied. Allow it in your browser settings, then tap the reticle again.";
     case "NotFoundError":
     case "OverconstrainedError":
       return "No microphone was found.";
