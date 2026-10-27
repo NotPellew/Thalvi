@@ -103,13 +103,14 @@ describe("Library", () => {
     expect(log).toEqual(["list", "remove s1", "startNew", "list"]);
   });
 
-  it("renames with a trimmed title and ignores a blank one", async () => {
+  it("renames with a trimmed title and a blank one just leaves rename mode", async () => {
     const { library, log } = setup();
     await library.show();
     library.startRename("s2");
     expect(library.state.renaming).toBe("s2");
     await library.rename("s2", "   ");
     expect(log).toEqual(["list"]);
+    expect(library.state.renaming).toBeNull();
 
     await library.rename("s2", "  Dinner plan ");
     expect(log.slice(1)).toEqual(["rename s2 Dinner plan", "list"]);
