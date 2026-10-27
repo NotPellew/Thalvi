@@ -101,8 +101,9 @@ manager; lockfiles are committed.
   `cargo test --workspace --locked`, `RUSTDOCFLAGS="-D warnings" cargo docs`.
 - Web (`web/`): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`,
   `npm run build`.
-- Speech servers (`compose.yaml`): `docker compose --profile kokoro --profile
-  vllm-omni config -q`.
+- Speech servers (`compose.yaml`, `speech/`): `docker compose --profile kokoro
+  --profile vllm-omni config -q`, `pipx run shellcheck-py==0.11.0.1
+  speech/qwentts.sh`.
 
 ## Git and PRs
 
