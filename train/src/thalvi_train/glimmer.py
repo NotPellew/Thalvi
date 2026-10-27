@@ -22,6 +22,8 @@ PAD_TOKEN_ID = 200018
 
 LANGUAGE_MODEL_PREFIX = r"^model\.language_model\."
 LM_HEAD_KEY = "lm_head.weight"
+EMBED_TOKENS_KEY = "model.language_model.embed_tokens.weight"
+LM_HEAD_SLICES = 8
 IGNORED_CHECKPOINT_KEYS = ("model.vision_", LM_HEAD_KEY)
 
 
@@ -160,16 +162,18 @@ def _require_complete(info: dict[str, set[str]]) -> None:
         )
 
 
-def _read_lm_head(path: Path) -> torch.Tensor:
-    """Reads `lm_head.weight` alone, from whichever shard holds it."""
+def _read_tensor(path: Path, key: str) -> torch.Tensor:
+    """Reads one tensor from whichever shard holds it, with `pread` rather than a mapping."""
     index = path / "model.safetensors.index.json"
-    shard = json.loads(index.read_text())["weight_map"][LM_HEAD_KEY] if index.exists() else None
-    with safe_open(path / (shard or "model.safetensors"), framework="pt") as shards:
-        return shards.get_tensor(LM_HEAD_KEY)
+    shard = json.loads(index.read_text())["weight_map"][key] if index.exists() else None
+    with safe_open(
+        path / (shard or "model.safetensors"), framework="pt", backend="pread"
+    ) as shards:
+        return shards.get_tensor(key)
 
 
 def _lm_head(path: Path, text_config: MuseGlimmerTextConfig, dtype: torch.dtype) -> nn.Linear:
-    weight = _read_lm_head(path).to(dtype)
+    weight = _read_tensor(path, LM_HEAD_KEY).to(dtype)
     head = nn.Linear(text_config.hidden_size, text_config.vocab_size, bias=False, device="meta")
     head.weight = nn.Parameter(weight, requires_grad=False)
     return head
@@ -199,25 +203,55 @@ def _load_decoder_4bit(path: Path, text_config: MuseGlimmerTextConfig, device: t
         output_loading_info=True,
     )
     _require_complete(info)
+    _keep_embeddings_on_cpu(decoder, path)
     return decoder
 
 
+def _keep_embeddings_on_cpu(decoder: MuseGlimmerTextModel, path: Path) -> None:
+    """Gives `embed_tokens` its weights on the CPU, without accelerate's offload hook.
+
+    With the hook, every lookup would copy the 2.7 GB table to the GPU first.
+    """
+    from accelerate.hooks import remove_hook_from_module
+
+    remove_hook_from_module(decoder.embed_tokens)
+    weight = _read_tensor(path, EMBED_TOKENS_KEY).to(torch.bfloat16)
+    decoder.embed_tokens.weight = nn.Parameter(weight, requires_grad=False)
+
+
+class ChunkedHead(nn.Module):
+    """A Linear split by output rows, so each slice quantizes with little GPU memory."""
+
+    def __init__(self, parts: Sequence[nn.Module]) -> None:
+        super().__init__()
+        self.parts = nn.ModuleList(parts)
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        return torch.cat([part(hidden) for part in self.parts], dim=-1)
+
+
 def _quantized_lm_head(path: Path, text_config: MuseGlimmerTextConfig, device: torch.device):
+    """NF4 lm_head in `LM_HEAD_SLICES` row slices.
+
+    bitsandbytes quantizes on the GPU from a bf16 copy, and the whole 2.5 GB
+    matrix does not fit next to the 4-bit decoder on a 16 GB card.
+    """
     import bitsandbytes as bnb
 
-    head = bnb.nn.Linear4bit(
-        text_config.hidden_size,
-        text_config.vocab_size,
-        bias=False,
-        compute_dtype=torch.bfloat16,
-        compress_statistics=True,
-        quant_type="nf4",
-        device="meta",
-    )
-    head.weight = bnb.nn.Params4bit(
-        _read_lm_head(path).to(torch.bfloat16),
-        requires_grad=False,
-        compress_statistics=True,
-        quant_type="nf4",
-    )
-    return head.to(device)
+    weight = _read_tensor(path, LM_HEAD_KEY).to(torch.bfloat16)
+    parts = []
+    for rows in weight.chunk(LM_HEAD_SLICES, dim=0):
+        part = bnb.nn.Linear4bit(
+            text_config.hidden_size,
+            rows.shape[0],
+            bias=False,
+            compute_dtype=torch.bfloat16,
+            compress_statistics=True,
+            quant_type="nf4",
+            device="meta",
+        )
+        part.weight = bnb.nn.Params4bit(
+            rows.contiguous(), requires_grad=False, compress_statistics=True, quant_type="nf4"
+        )
+        parts.append(part.to(device))
+    return ChunkedHead(parts)
