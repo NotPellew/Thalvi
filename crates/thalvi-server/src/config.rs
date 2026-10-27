@@ -303,7 +303,10 @@ mod tests {
                 Ok(false) => assert_eq!(result, Ok(None)),
                 Err(name) => {
                     let err = result.unwrap_err();
-                    assert!(err.contains(name), "error {err:?} should name {name}");
+                    assert!(
+                        err.contains(name) && err.contains("together"),
+                        "error {err:?} should name {name} and say they go together"
+                    );
                 }
             }
         }

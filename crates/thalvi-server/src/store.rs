@@ -371,9 +371,6 @@ fn load(dir: &Path) -> Result<HashMap<String, Stored>, String> {
 fn read_stored(path: &Path) -> Result<Stored, String> {
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let stored: Stored = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    if path.file_stem().and_then(|stem| stem.to_str()) != Some(stored.id.as_str()) {
-        return Err("the file name does not match the session id".to_string());
-    }
     if stored.turns.is_empty() {
         return Err("the session has no turns".to_string());
     }
@@ -432,7 +429,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unreadable_files_are_skipped_and_long_multiline_first_lines_are_cut() {
+    async fn unreadable_and_empty_files_are_skipped_and_long_multiline_first_lines_are_cut() {
         let dir = scratch("load");
         let _ = std::fs::remove_dir_all(&dir);
         let store = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
@@ -441,11 +438,11 @@ mod tests {
         store.save(&attachment, &[ChatMessage::user(question)], 1);
         store.flush().await;
         std::fs::write(dir.join("broken.json"), "{").unwrap_or_else(|e| panic!("{e}"));
-        std::fs::write(
-            dir.join("other.json"),
-            attachment_file(&dir, &attachment.id),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
+        let json = String::from_utf8_lossy(&attachment_file(&dir, &attachment.id)).to_string();
+        let without_turns = json.replace(&attachment.id, "empty");
+        let (head, _) = without_turns.split_once("\"turns\":").unwrap_or_default();
+        std::fs::write(dir.join("empty.json"), format!("{head}\"turns\":[]}}"))
+            .unwrap_or_else(|e| panic!("{e}"));
 
         let reopened = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
         let titles: Vec<_> = reopened.list().into_iter().map(|row| row.title).collect();
@@ -465,7 +462,12 @@ mod tests {
         let mut old = store.attach(None).await;
         store.save(&old, &[ChatMessage::user("hi".to_string())], 1);
 
-        let new = store.attach(Some(&old.id)).await;
+        let new = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            store.attach(Some(&old.id)),
+        )
+        .await
+        .expect("the takeover waited for a connection that never answers");
         assert_eq!(new.id, old.id);
         assert_eq!(old.detached().await, Detach::Moved);
         let _ = std::fs::remove_dir_all(&dir);
