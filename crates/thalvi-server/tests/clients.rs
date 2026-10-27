@@ -213,7 +213,7 @@ async fn tts_client_sends_contract_body_and_streams_pcm() {
             "voice": "af_heart",
             "input": "Hello there.",
             "response_format": "pcm",
-            "stream": true,
+            "stream_format": "audio",
         })
     );
 }

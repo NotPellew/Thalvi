@@ -61,7 +61,7 @@ impl OpenAiTts {
             "voice": self.voice,
             "input": text,
             "response_format": "pcm",
-            "stream": true,
+            "stream_format": "audio",
         })
     }
 }
@@ -175,6 +175,6 @@ mod tests {
         assert_eq!(body["voice"], "af_heart");
         assert_eq!(body["input"], "Hello there.");
         assert_eq!(body["response_format"], "pcm");
-        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_format"], "audio");
     }
 }
