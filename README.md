@@ -89,26 +89,25 @@ in `compose.yaml` and `TTS_MODEL`).
 **Qwen3-TTS on older GPUs** (before Ampere, such as an RTX 2080, which
 vLLM-Omni does not run on, but any NVIDIA GPU works) runs
 [qwentts.cpp](https://github.com/ServeurpersoCom/qwentts.cpp), a C++ port of
-Qwen3-TTS, as a systemd user service. With Kokoro running (`docker compose
---profile kokoro up -d --wait`), one script needs no root and no Docker: it
-builds the server from the pinned commit of
-[a fork](https://github.com/NotPellew/qwentts.cpp) that adds Thalvi's
-streaming route and startup voice (offered upstream in
-[#45](https://github.com/ServeurpersoCom/qwentts.cpp/pull/45)), downloads the
-checksummed models, has Kokoro read the `af_heart` reference clip, and writes
-the unit.
+Qwen3-TTS, as a systemd user service. The script needs no root: it builds the
+server from a pinned commit of [a fork](https://github.com/NotPellew/qwentts.cpp)
+that adds Thalvi's framed streaming route (offered upstream in
+[#45](https://github.com/ServeurpersoCom/qwentts.cpp/pull/45)) and a startup
+voice, downloads the checksummed models, has Kokoro read the `af_heart`
+reference clip once, and writes the unit.
 
 ```sh
+docker compose --profile kokoro up -d --wait   # or set KOKORO_URL to a running Kokoro
 speech/qwentts.sh
 systemctl --user enable --now thalvi-qwentts
 ```
 
-It needs `git`, `cmake`, a C++ compiler and the CUDA toolkit (`nvcc`). It
-builds for the GPU it finds; to build on a machine without one, or for
-another, set `CUDA_ARCH` (`75` for an RTX 2080). `KOKORO_URL` points it at a
-Kokoro on another host, and `SPEECH_DIR`, `HOST`, `PORT` (default `8011`) and
-`VOICE` (default `af_heart`) change where it lives and what it serves. Rerun
-it to resume after an error. The script prints the lines for `.env`:
+It needs `git`, `cmake`, a C++ compiler and the CUDA toolkit (`nvcc` on
+`PATH`). Set `CUDA_ARCH` to build for a GPU other than the one ggml detects
+(`75` for an RTX 2080); `SPEECH_DIR`, `HOST` and `PORT` (default `8011`) change
+where it lives and listens. The server has no authentication, so a `HOST` other
+than `127.0.0.1` exposes it to that network. Rerun the script to resume after an
+error or to upgrade, then restart the service. It prints the lines for `.env`:
 
 ```sh
 TTS_API=qwen3
