@@ -1,5 +1,5 @@
 import { formatAge, type ConversationSummary } from "./conversations.ts";
-import type { Library, LibraryState } from "./library.ts";
+import { focusTarget, type Library, type LibraryState } from "./library.ts";
 
 const LIST_ICON =
   '<svg class="o-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>';
@@ -133,19 +133,17 @@ export function createLibraryView(root: ParentNode, library: Library): void {
     list.replaceChildren(...state.items.map((item) => row(item, state)));
     if (keep) list.querySelector<HTMLElement>(keep)?.focus();
 
-    if (state.open && !previous.open) newButton.focus();
-    else if (!state.open && previous.open) opener.focus();
-    else if (state.renaming !== null && state.renaming !== previous.renaming) {
+    const target = focusTarget(previous, state);
+    if (target?.control === "new") newButton.focus();
+    else if (target?.control === "opener") opener.focus();
+    else if (target?.control === "rename-input") {
       const input = list.querySelector("input");
       input?.focus();
       input?.select();
-    } else if (state.confirmingDelete !== null && state.confirmingDelete !== previous.confirmingDelete) {
-      list.querySelector<HTMLButtonElement>(".o-lib-keep")?.focus();
-    } else if (previous.renaming !== null && state.renaming === null && state.open) {
-      list.querySelector<HTMLButtonElement>(`[data-rename="${CSS.escape(previous.renaming)}"]`)?.focus();
-    } else if (previous.confirmingDelete !== null && state.confirmingDelete === null && state.open) {
-      list.querySelector<HTMLButtonElement>(`[data-delete="${CSS.escape(previous.confirmingDelete)}"]`)?.focus();
-    }
+    } else if (target?.control === "keep") list.querySelector<HTMLButtonElement>(".o-lib-keep")?.focus();
+    else if (target?.control === "rename") list.querySelector<HTMLButtonElement>(`[data-rename="${CSS.escape(target.id)}"]`)?.focus();
+    else if (target?.control === "delete") list.querySelector<HTMLButtonElement>(`[data-delete="${CSS.escape(target.id)}"]`)?.focus();
+    else if (target?.control === "row") list.querySelector<HTMLButtonElement>(`[data-id="${CSS.escape(target.id)}"]`)?.focus();
     if (state.open && !overlay.contains(document.activeElement)) newButton.focus();
     previous = state;
   });
