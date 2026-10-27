@@ -88,8 +88,9 @@ systemctl --user daemon-reload 2>/dev/null || true
 
 cat <<DONE
 
-Installed. Start it (and on every login) with:
+Installed. Start it, and at every boot, with:
   systemctl --user enable --now thalvi-qwentts
+  loginctl enable-linger   # keeps user services running without a login session
 It needs about 4 GB of VRAM and is ready once it logs the voice as warmed.
 Then put this in Thalvi's .env:
   TTS_API=qwen3
