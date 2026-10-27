@@ -2,6 +2,8 @@
   color-scheme: light dark;
 }
 
+body { margin: 0; }
+
 .orb-app {
   --bg: light-dark(#e8eff7, #020617);
   --fg: light-dark(#07182e, #eafff3);
