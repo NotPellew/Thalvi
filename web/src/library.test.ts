@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ConversationSummary } from "./conversations.ts";
-import { Library } from "./library.ts";
+import { focusTarget, Library, type FocusTarget, type LibraryState } from "./library.ts";
 
 function setup(current: string | null = "s1") {
   const log: string[] = [];
@@ -127,5 +127,61 @@ describe("Library", () => {
     expect(library.state.error).toBe("Can't reach the server.");
     expect(log).not.toContain("startNew");
     expect(library.state.items).toHaveLength(2);
+  });
+
+  it("keeps the rename and delete prompts up until the list is refreshed, so the view renders the final rows once", async () => {
+    const { library } = setup("s1");
+    await library.show();
+    const seen: LibraryState[] = [];
+    library.onChange((state) => seen.push(state));
+
+    library.startRename("s2");
+    await library.rename("s2", "Dinner plan");
+    library.askDelete("s2");
+    await library.confirmDelete();
+
+    expect(seen.map((state) => [state.renaming, state.confirmingDelete, state.items.map((item) => item.title)])).toEqual([
+      ["s2", null, ["Times tables", "Pasta"]],
+      [null, null, ["Times tables", "Dinner plan"]],
+      [null, "s2", ["Times tables", "Dinner plan"]],
+      [null, null, ["Times tables"]],
+    ]);
+  });
+});
+
+describe("focusTarget", () => {
+  const item = (id: string) => ({ id, title: id, ageS: 1 });
+  const state = (patch: Partial<LibraryState>): LibraryState => ({
+    open: true,
+    loading: false,
+    items: [item("a"), item("b"), item("c")],
+    renaming: null,
+    confirmingDelete: null,
+    error: null,
+    ...patch,
+  });
+  const cases: [string, LibraryState, LibraryState, FocusTarget | null][] = [
+    ["opening the list focuses New conversation", state({ open: false }), state({}), { control: "new" }],
+    ["closing the list returns to its button", state({}), state({ open: false }), { control: "opener" }],
+    ["starting a rename focuses the title input", state({}), state({ renaming: "b" }), { control: "rename-input" }],
+    ["asking to delete focuses Keep it", state({}), state({ confirmingDelete: "b" }), { control: "keep" }],
+    ["a saved rename returns to that row's Rename button", state({ renaming: "b" }), state({}), { control: "rename", id: "b" }],
+    [
+      "a confirmed delete moves to the next row",
+      state({ confirmingDelete: "b" }),
+      state({ items: [item("a"), item("c")] }),
+      { control: "row", id: "c" },
+    ],
+    [
+      "deleting the last row moves to New conversation",
+      state({ confirmingDelete: "c" }),
+      state({ items: [item("a"), item("b")] }),
+      { control: "new" },
+    ],
+    ["a delete that failed returns to that row's Delete button", state({ confirmingDelete: "b" }), state({}), { control: "delete", id: "b" }],
+    ["an unrelated refresh leaves focus alone", state({}), state({ error: "No." }), null],
+  ];
+  it.each(cases)("%s", (_name, previous, next, expected) => {
+    expect(focusTarget(previous, next)).toEqual(expected);
   });
 });

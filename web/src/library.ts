@@ -19,6 +19,27 @@ export interface LibraryPorts {
   startNew(): void;
 }
 
+/** The control the view should focus after the list changes from `previous` to `state`. */
+export type FocusTarget =
+  | { readonly control: "new" | "opener" | "rename-input" | "keep" }
+  | { readonly control: "rename" | "delete" | "row"; readonly id: string };
+
+export function focusTarget(previous: LibraryState, state: LibraryState): FocusTarget | null {
+  if (state.open && !previous.open) return { control: "new" };
+  if (!state.open && previous.open) return { control: "opener" };
+  if (!state.open) return null;
+  if (state.renaming !== null && state.renaming !== previous.renaming) return { control: "rename-input" };
+  if (state.confirmingDelete !== null && state.confirmingDelete !== previous.confirmingDelete) return { control: "keep" };
+  if (previous.renaming !== null && state.renaming === null) return { control: "rename", id: previous.renaming };
+  const deleted = previous.confirmingDelete;
+  if (deleted !== null && state.confirmingDelete === null) {
+    if (state.items.some((item) => item.id === deleted)) return { control: "delete", id: deleted };
+    const next = state.items[previous.items.findIndex((item) => item.id === deleted)];
+    return next ? { control: "row", id: next.id } : { control: "new" };
+  }
+  return null;
+}
+
 const CLOSED: LibraryState = {
   open: false,
   loading: false,
@@ -77,7 +98,6 @@ export class Library {
   async confirmDelete(): Promise<void> {
     const id = this.state.confirmingDelete;
     if (id === null) return;
-    this.set({ ...this.state, confirmingDelete: null });
     let error: string | null = null;
     try {
       await this.ports.api.remove(id);
@@ -85,7 +105,7 @@ export class Library {
     } catch (failure) {
       error = plain(failure);
     }
-    await this.reload(error);
+    await this.reload(error, { confirmingDelete: null });
   }
 
   startRename(id: string): void {
@@ -102,22 +122,22 @@ export class Library {
       this.cancelRename();
       return;
     }
-    this.set({ ...this.state, renaming: null });
     let error: string | null = null;
     try {
       await this.ports.api.rename(id, trimmed);
     } catch (failure) {
       error = plain(failure);
     }
-    await this.reload(error);
+    await this.reload(error, { renaming: null });
   }
 
-  private async reload(error: string | null = null): Promise<void> {
+  /** Refreshes the list; `settled` is applied in the same update, so the view renders once with the final rows. */
+  private async reload(error: string | null = null, settled: Partial<LibraryState> = {}): Promise<void> {
     try {
       const items = await this.ports.api.list();
-      this.set({ ...this.state, loading: false, items, error });
+      this.set({ ...this.state, ...settled, loading: false, items, error });
     } catch (failure) {
-      this.set({ ...this.state, loading: false, error: error ?? plain(failure) });
+      this.set({ ...this.state, ...settled, loading: false, error: error ?? plain(failure) });
     }
   }
 

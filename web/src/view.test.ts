@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scrollTarget, shouldCollapse, speedOptions, splitLinks, type ScrollInput, type CollapseInput, type TextSegment } from "./view.ts";
+import { scrollTarget, shouldCollapse, speedOptions, splitLinks, stateText, type ScrollInput, type CollapseInput, type TextSegment } from "./view.ts";
 
 const live: CollapseInput = {
   voice: true,
@@ -30,6 +30,13 @@ describe("shouldCollapse", () => {
   ];
   it.each(cases)("%s", (_name, input, expected) => {
     expect(shouldCollapse(input)).toBe(expected);
+  });
+});
+
+describe("stateText", () => {
+  it("only says voice is paused while reconnecting when voice is on", () => {
+    expect(stateText("reconnecting", true).hint).toBe("Voice is paused. Trying again.");
+    expect(stateText("reconnecting", false)).toEqual({ label: "Reconnecting", hint: "Trying again." });
   });
 });
 

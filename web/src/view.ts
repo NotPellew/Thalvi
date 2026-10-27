@@ -5,7 +5,7 @@ import type { Turn } from "./protocol.ts";
 
 const STATES: Record<DisplayState, { label: string; hint: string }> = {
   connecting: { label: "Connecting", hint: "Reaching the server." },
-  reconnecting: { label: "Reconnecting", hint: "Voice is paused. Trying again." },
+  reconnecting: { label: "Reconnecting", hint: "Trying again." },
   ended: { label: "Stopped", hint: "Start a new conversation, or open one from the list." },
   idle: { label: "Idle", hint: "Tap the reticle to start talking, or type below." },
   starting: { label: "Starting", hint: "Getting ready to listen." },
@@ -13,6 +13,12 @@ const STATES: Record<DisplayState, { label: string; hint: string }> = {
   thinking: { label: "Thinking", hint: "Working on your answer. Tap the reticle to stop." },
   speaking: { label: "Speaking", hint: "Reading the answer aloud. Tap the reticle to stop." },
 };
+
+/** The state's name and hint; a reconnect only pauses voice that is on. */
+export function stateText(display: DisplayState, voice: boolean): { label: string; hint: string } {
+  const text = STATES[display];
+  return display === "reconnecting" && voice ? { ...text, hint: "Voice is paused. Trying again." } : text;
+}
 
 const PATHS = {
   mic: '<path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
@@ -442,10 +448,12 @@ export function createView(root: HTMLElement) {
     else if (orbAction === "voice") voiceHandler?.();
   });
 
-  return {
+  const api = {
     render(s: SessionState) {
       lastState = s;
-      const display = displayState(s);
+      const display = displayState(s, voiceBusy);
+      const text = stateText(display, s.voice);
+      if (hint.textContent !== text.hint) hint.textContent = text.hint;
       const nearBottom =
         scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 96;
       atBottom = nearBottom;
@@ -458,8 +466,7 @@ export function createView(root: HTMLElement) {
         page.classList.remove("o-glitching");
         void page.getBoundingClientRect();
         page.classList.add("o-glitching");
-        stateName.textContent = STATES[display].label;
-        hint.textContent = STATES[display].hint;
+        stateName.textContent = text.label;
         orbArt.innerHTML = orbSvg(display);
         const busy = display === "speaking" || display === "thinking";
         if (busy) {
@@ -518,8 +525,7 @@ export function createView(root: HTMLElement) {
     },
     setVoiceBusy(busy: boolean) {
       voiceBusy = busy;
-      voice.disabled = busy || ended;
-      if (orbAction === "voice") orb.disabled = busy;
+      if (lastState) api.render(lastState);
     },
     clearComposer() {
       composer.value = "";
@@ -543,4 +549,5 @@ export function createView(root: HTMLElement) {
       speedHandler = handler;
     },
   };
+  return api;
 }

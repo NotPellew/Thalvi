@@ -37,9 +37,9 @@ export const INITIAL: SessionState = {
 export const UNREACHABLE_NOTICE = "Can't reach the server. Trying again…";
 
 /** What the user is told: the server phase, corrected for what the client knows locally. */
-export function displayState(s: SessionState): DisplayState {
+export function displayState(s: SessionState, micPending = false): DisplayState {
   if (s.link !== "online") return s.link;
-  if (!s.voice) return s.phase === "thinking" ? "thinking" : "idle";
+  if (!s.voice) return s.phase === "thinking" ? "thinking" : micPending ? "starting" : "idle";
   if (s.playing) return "speaking";
   return s.phase === "idle" ? "starting" : s.phase;
 }
