@@ -47,7 +47,7 @@ restart Thalvi.
 | --- | --- | --- | --- |
 | Kokoro | ~0.15 s for a short sentence, ~1 s for a long one | CPU, ~1 GB RAM | nothing |
 | Qwen3-TTS clone of `af_heart`, vLLM-Omni | ~50 ms | ~8 GB VRAM, ~8 GB RAM, ~2.5 min to start | NVIDIA GPU, Ampere or newer |
-| Qwen3-TTS, `qwen3-tts-server` | ~0.2 s | ~6 GB VRAM | NVIDIA GPU, any recent one |
+| Qwen3-TTS, `qwen3-tts-server` | ~0.15 s (RTX 5070 Ti) to ~0.35 s (RTX 2080) | ~7 GB VRAM | NVIDIA GPU, including pre-Ampere |
 
 **Kokoro** (`--profile kokoro`):
 

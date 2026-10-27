@@ -22,11 +22,11 @@ areas your change touches. Editing rules are in
 - **Chat Completions first.** Self-hosted servers speak it. Why: one adapter
   covers Meta, Ollama and vLLM. Revisit: add Responses for Meta if its search
   grounding beats an MCP search tool on the road briefing.
-- **Qwen3-TTS clone of af_heart on vLLM-Omni; Kokoro on CPU.** A Qwen3-TTS
-  clone of `af_heart`, served by vLLM-Omni; Kokoro is the fallback when the GPU
-  is busy. Why: the developer preferred its sound, and it streams first audio
-  in ~50 ms (~7 GB VRAM), where Kokoro synthesizes a whole sentence first.
-  Rejected: Chatterbox (AGPL), Kyutai, Orpheus, qwen3-tts-server (custom framing).
+- **Qwen3-TTS clone of af_heart on vLLM-Omni; Kokoro on CPU.** vLLM-Omni serves
+  a Qwen3-TTS clone of `af_heart`; GPUs it can't run on use qwen3-tts-server, and
+  Kokoro is the CPU fallback. Why: the developer preferred its sound, and it streams
+  first audio in ~50 ms (~8 GB VRAM), where Kokoro synthesizes a whole sentence
+  first. Rejected: Chatterbox (AGPL), Kyutai (no public cloning), Orpheus (slow).
 - **Opt-in recordings.** `THALVI_RECORD` turns on metrics, turn and reply text,
   and mic audio, each separately, written locally off the reply path. Why: to judge
   product, model and endpoint changes on real use. Off by default: they are
