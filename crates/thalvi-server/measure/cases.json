@@ -1,0 +1,27 @@
+[
+  {"id": "hello", "turns": ["Hello, what's going on?"]},
+  {"id": "thanks", "turns": ["Thanks, that's all for now."]},
+  {"id": "capital", "turns": ["What's the capital of Australia?"]},
+  {"id": "boiling", "turns": ["At what temperature does water boil on top of a mountain?"]},
+  {"id": "times", "turns": ["What is 12 times 7?"]},
+  {"id": "tip", "turns": ["What's eighteen percent of eighty-five dollars?"]},
+  {"id": "risotto", "turns": ["How do I make a basic risotto?"]},
+  {"id": "sleep", "turns": ["Give me a quick tip for falling asleep faster."]},
+  {"id": "tire", "turns": ["How do I change a flat tire?"]},
+  {"id": "sky", "turns": ["Why is the sky blue?"]},
+  {"id": "heatpump", "turns": ["How does a heat pump work?"]},
+  {"id": "mortgage", "turns": ["What's the difference between a fixed and a variable mortgage rate?"]},
+  {"id": "eiffel", "turns": ["Tell me about the history of the Eiffel Tower."]},
+  {"id": "water3", "turns": ["Describe the water cycle in three sentences."]},
+  {"id": "water8", "turns": ["Describe the water cycle in eight sentences."]},
+  {"id": "story", "turns": ["Tell me a long story about a lighthouse keeper and his cat."]},
+  {"id": "german", "turns": ["Wie funktioniert eine Wärmepumpe?"]},
+  {
+    "id": "ballon",
+    "turns": [
+      "Tell me what the Ballon d'Or is.",
+      "The Ballon d'Or is an annual award given to the best football player in the world. It is presented by the magazine France Football and has been handed out since nineteen fifty-six.",
+      "How is it chosen?"
+    ]
+  }
+]
