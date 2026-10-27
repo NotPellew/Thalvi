@@ -82,9 +82,19 @@ def generation_ids(task: Task, text: str, tokenizer: PromptTokenizer) -> list[in
     )
 
 
-def build_example(record: Record, tokenizer: PromptTokenizer, audio_tokens: int) -> Example:
-    """Renders `record` for the teacher (text) and the student (`audio_tokens` placeholders)."""
-    response_ids = tokenizer.text_ids(record.response)
+def build_example(
+    record: Record,
+    tokenizer: PromptTokenizer,
+    audio_tokens: int,
+    max_response_tokens: int | None = None,
+) -> Example:
+    """Renders `record` for the teacher (text) and the student (`audio_tokens` placeholders).
+
+    With `max_response_tokens`, only the response's first tokens are kept: under
+    teacher forcing, tokens after Glimmer's echo of the request read the transcript
+    from context and carry little signal about the audio.
+    """
+    response_ids = tokenizer.text_ids(record.response)[:max_response_tokens]
     placeholders = AUDIO_TOKEN_TEXT * audio_tokens
     return Example(
         teacher_ids=tokenizer.chat_ids(SYSTEM_PROMPT, user_message(record)) + response_ids,

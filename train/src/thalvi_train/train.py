@@ -63,6 +63,7 @@ class TrainConfig:
     ce_weight: float = 0.0
     save_every: int = 500
     kl_chunk: int = 64
+    max_response_tokens: int | None = None
     seed: int = 0
 
 
@@ -237,7 +238,13 @@ def run(
             for indices in group:
                 chosen = [records[i] for i in indices]
                 frames = [f.float() for f in encode(encoder, extractor, next(clips))]
-                batch = make_batch(chosen, frames, tokenizer, projector.audio_token_count)
+                batch = make_batch(
+                    chosen,
+                    frames,
+                    tokenizer,
+                    projector.audio_token_count,
+                    config.max_response_tokens,
+                )
                 with autocast:
                     parts = distill_loss(glimmer, projector, batch, config.kl_chunk)
                     loss = parts.kl + config.ce_weight * parts.ce
@@ -291,6 +298,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--ce-weight", type=float, default=0.0)
     parser.add_argument("--save-every", type=int, default=500)
     parser.add_argument("--kl-chunk", type=int, default=64)
+    parser.add_argument("--max-response-tokens", type=int, help="train on the first N only")
     parser.add_argument("--encoder-dim", type=int, default=ProjectorConfig.encoder_dim)
     parser.add_argument("--hidden-dim", type=int, default=ProjectorConfig.hidden_dim)
     parser.add_argument("--stack", type=int, default=ProjectorConfig.stack)
@@ -326,6 +334,7 @@ def main(argv: list[str] | None = None) -> None:
         ce_weight=args.ce_weight,
         save_every=args.save_every,
         kl_chunk=args.kl_chunk,
+        max_response_tokens=args.max_response_tokens,
         seed=args.seed,
     )
     run(

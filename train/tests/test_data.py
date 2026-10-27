@@ -103,6 +103,14 @@ def test_prompts_differ_only_in_the_user_turn_and_share_the_response(
     assert example.student_ids.count(AUDIO_TOKEN_ID) == 3
 
 
+def test_response_cap_keeps_only_the_first_tokens_on_both_sides() -> None:
+    tok = FakeTokenizer()
+    example = build_example(record(), tok, audio_tokens=3, max_response_tokens=5)
+    assert example.response_ids == tok.text_ids(RESPONSE)[:5]
+    assert example.teacher_ids[-5:] == example.response_ids
+    assert example.student_ids[-5:] == example.response_ids
+
+
 def test_batch_positions_predict_each_response_token_in_both_prompts() -> None:
     records = [
         record("a"),

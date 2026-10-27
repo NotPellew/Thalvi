@@ -61,11 +61,12 @@ def make_batch(
     frames: Sequence[torch.Tensor],
     tokenizer: PromptTokenizer,
     audio_token_count: Callable[[int], int],
+    max_response_tokens: int | None = None,
 ) -> Batch:
     """Builds the batch for `records` whose encoder frames are `frames`."""
     audio_tokens = [audio_token_count(clip.shape[0]) for clip in frames]
     examples: list[Example] = [
-        build_example(record, tokenizer, count)
+        build_example(record, tokenizer, count, max_response_tokens)
         for record, count in zip(records, audio_tokens, strict=True)
     ]
     response_lens = [len(example.response_ids) for example in examples]
