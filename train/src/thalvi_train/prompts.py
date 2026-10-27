@@ -15,7 +15,7 @@ GENERATION_PROMPT = "<|start|>assistant"
 
 
 class PromptTokenizer(Protocol):
-    """What prompt building needs from a tokenizer; the real one wraps Glimmer's."""
+    """What prompts and generations need from a tokenizer; the real one wraps Glimmer's."""
 
     def chat_ids(self, system: str, user: str) -> list[int]:
         """Ids of the system and user turns, ending after the user's `<|eot|>`."""
@@ -23,6 +23,10 @@ class PromptTokenizer(Protocol):
 
     def text_ids(self, text: str) -> list[int]:
         """Ids of `text` with special tokens parsed and none added."""
+        ...
+
+    def decode(self, ids: list[int]) -> str:
+        """The text of `ids`, special tokens written out."""
         ...
 
 
@@ -43,6 +47,9 @@ class GlimmerTokenizer:
 
     def text_ids(self, text: str) -> list[int]:
         return self.tokenizer.encode(text, add_special_tokens=False)
+
+    def decode(self, ids: list[int]) -> str:
+        return self.tokenizer.decode(ids, skip_special_tokens=False)
 
 
 @dataclass(frozen=True)

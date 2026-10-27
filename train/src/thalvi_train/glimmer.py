@@ -1,4 +1,4 @@
-"""Frozen Glimmer text decoder and lm_head: loading, audio splicing, and logits.
+"""Frozen Glimmer text decoder and lm_head: loading, audio splicing, cached decoding, and logits.
 
 Only `model.language_model.*` and `lm_head.weight` are read from a full Glimmer
 checkpoint; the vision tower is never built. The 4-bit branch
@@ -14,6 +14,7 @@ import torch
 from safetensors import safe_open
 from torch import nn
 from transformers import BitsAndBytesConfig, MuseGlimmerConfig
+from transformers.cache_utils import Cache
 from transformers.models.muse_glimmer.configuration_muse_glimmer import MuseGlimmerTextConfig
 from transformers.models.muse_glimmer.modeling_muse_glimmer import MuseGlimmerTextModel
 
@@ -100,6 +101,17 @@ class FrozenGlimmer(nn.Module):
             inputs_embeds=inputs_embeds, attention_mask=attention_mask, use_cache=False
         )
         return out.last_hidden_state
+
+    def cached_hidden_states(
+        self, inputs_embeds: torch.Tensor, cache: Cache | None = None
+    ) -> tuple[torch.Tensor, Cache]:
+        """Final-norm states of `inputs_embeds` `(1, length, hidden)` appended to `cache`.
+
+        `cache` is `None` for a prompt and the returned cache afterwards, which
+        holds every position fed so far. There is no padding, so no mask.
+        """
+        out = self.decoder(inputs_embeds=inputs_embeds, past_key_values=cache, use_cache=True)
+        return out.last_hidden_state, out.past_key_values
 
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:
         """Vocabulary logits in fp32: `softcap * tanh(multiplier * head(hidden) / softcap)`."""

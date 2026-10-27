@@ -310,6 +310,44 @@ def run_train(run_name: str, extra_args: str) -> None:
         )
 
 
+@app.function(
+    image=project_image,
+    gpu=GPU,
+    volumes={GLIMMER_MOUNT: glimmer_volume, DATA_MOUNT: data_volume},
+    timeout=6 * HOUR,
+)
+def run_eval(run_name: str, limit: int, extra_args: str) -> None:
+    """Evaluates `runs/<run_name>` on unquantized bf16 Glimmer, writing `eval.jsonl` beside it.
+
+    The summary lands next to the rows as `eval.summary.json`; `extra_args` go to
+    `thalvi_train.evaluate`.
+    """
+    run_dir = f"{RUNS_DIR}/{run_name}"
+    with logged("evaluate", GPU):
+        run_logged(
+            [
+                sys.executable,
+                "-m",
+                "thalvi_train.evaluate",
+                "--manifest",
+                TEACHER_OUT,
+                "--features-dir",
+                FEATURES_DIR,
+                "--glimmer",
+                GLIMMER_TEXT_DIR,
+                "--projector",
+                run_dir,
+                "--out",
+                f"{run_dir}/eval.jsonl",
+                "--device",
+                "cuda",
+                "--limit",
+                str(limit),
+                *shlex.split(extra_args),
+            ]
+        )
+
+
 @app.local_entrypoint()
 def glimmer() -> None:
     """Step 1: download Glimmer onto `thalvi-glimmer`."""
@@ -340,3 +378,9 @@ def features(batch_size: int = 32) -> None:
 def train(run_name: str = "projector", extra_args: str = "") -> None:
     """Step 5: train the projector into `runs/<run_name>`; `--extra-args` goes to the trainer."""
     run_train.remote(run_name, extra_args)
+
+
+@app.local_entrypoint()
+def evaluate(run_name: str = "projector", limit: int = 500, extra_args: str = "") -> None:
+    """Step 6: score `runs/<run_name>` on the first `--limit` eval samples; extras go to the CLI."""
+    run_eval.remote(run_name, limit, extra_args)

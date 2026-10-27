@@ -56,3 +56,7 @@ class FakeTokenizer:
         for i, part in enumerate(text.split(AUDIO_TOKEN_TEXT)):
             ids += [AUDIO_TOKEN_ID] * (i > 0) + [ord(c) for c in part]
         return ids
+
+    def decode(self, ids: list[int]) -> str:
+        specials = {START: "<|start|>", EOT: "<|eot|>"}
+        return "".join(chr(i) if i < 128 else specials.get(i, f"<{i}>") for i in ids)
