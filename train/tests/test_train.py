@@ -1,4 +1,5 @@
 import json
+import random
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from thalvi_train.train import (
     PROJECTOR_WEIGHTS,
     ProjectorConfig,
     TrainConfig,
+    _step_groups,
     distill_loss,
     lr_at,
     run,
@@ -205,3 +207,13 @@ def test_gradient_checkpointing_leaves_projector_gradients_unchanged(
     assert all(
         torch.allclose(a, b, atol=1e-6, rtol=1e-4) for a, b in zip(plain, checkpointed, strict=True)
     )
+
+
+def test_step_groups_cover_every_record_once_in_length_sorted_batches() -> None:
+    lengths = [random.Random(i).randrange(1000) for i in range(500)]
+    groups = _step_groups(lengths, batch_size=4, grad_accum=2, rng=random.Random(0))
+    batches = [batch for group in groups for batch in group]
+    assert sorted(i for batch in batches for i in batch) == list(range(500))
+    assert all(len(group) <= 2 for group in groups)
+    spread = sum(max(lengths[i] for i in b) - min(lengths[i] for i in b) for b in batches)
+    assert spread / len(batches) < 100

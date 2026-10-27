@@ -33,6 +33,7 @@ from thalvi_train.records import Record, read_records, resolve_audio
 
 PROJECTOR_WEIGHTS = "projector.safetensors"
 PROJECTOR_CONFIG = "projector.json"
+BUCKET_WINDOW = 64
 READ_THREADS = 4
 
 
@@ -139,12 +140,22 @@ def _save_projector(projector: AudioProjector, path: Path) -> None:
 
 
 def _step_groups(
-    count: int, batch_size: int, grad_accum: int, rng: random.Random
+    lengths: Sequence[int], batch_size: int, grad_accum: int, rng: random.Random
 ) -> list[list[list[int]]]:
-    """One epoch of shuffled record indices, as optimiser steps of micro-batches."""
-    order = list(range(count))
+    """One epoch of record indices, as optimiser steps of micro-batches.
+
+    Records are shuffled, sorted by `lengths` within windows of `BUCKET_WINDOW`
+    micro-batches so each micro-batch pads little, and the micro-batches are
+    shuffled again so lengths don't drift through the epoch.
+    """
+    order = list(range(len(lengths)))
     rng.shuffle(order)
-    batches = [order[i : i + batch_size] for i in range(0, count, batch_size)]
+    window = BUCKET_WINDOW * batch_size
+    batches = []
+    for start in range(0, len(order), window):
+        bucket = sorted(order[start : start + window], key=lambda i: lengths[i])
+        batches += [bucket[i : i + batch_size] for i in range(0, len(bucket), batch_size)]
+    rng.shuffle(batches)
     return [batches[i : i + grad_accum] for i in range(0, len(batches), grad_accum)]
 
 
@@ -193,8 +204,9 @@ def run(
     config.out_dir.mkdir(parents=True, exist_ok=True)
     (config.out_dir / PROJECTOR_CONFIG).write_text(json.dumps(asdict(projector_config)))
 
+    lengths = [len(record.text) + len(record.response) for record in records]
     epochs = [
-        _step_groups(len(records), config.batch_size, config.grad_accum, rng)
+        _step_groups(lengths, config.batch_size, config.grad_accum, rng)
         for _ in range(config.epochs)
     ]
     plan = [group for groups in epochs for group in groups]
