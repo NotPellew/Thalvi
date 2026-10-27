@@ -322,10 +322,17 @@ export function createView(root: HTMLElement) {
       startPinned = false;
     }, { passive: true });
   }
+  let observedHeight = scroller.clientHeight;
   scroller.addEventListener("scroll", () => {
+    // Chrome fires a queued scroll after a resize but before the ResizeObserver, which re-pins first.
+    if (scroller.clientHeight !== observedHeight) return;
     atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 96;
     applyCollapse();
   }, { passive: true });
+  new ResizeObserver(() => {
+    observedHeight = scroller.clientHeight;
+    if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+  }).observe(scroller);
   composer.addEventListener("focus", () => {
     composerFocused = true;
     applyCollapse();
