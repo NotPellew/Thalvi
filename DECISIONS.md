@@ -16,14 +16,18 @@ areas your change touches. Editing rules are in
   native app; revisit once the web client works.
 - **Self-hosted; parts swap by endpoint.** Config sets each part's address on a
   standard protocol (Chat Completions, OpenAI speech, MCP); Meta's realtime ASR
-  is the one custom adapter. Why: any provider or local server plugs in without
-  code. Rejected: a plugin system (no faster, much more code).
+  and Qwen3-TTS's framed PCM stream are the custom adapters. Why: any provider
+  or local server plugs in without code. Rejected: a plugin system (no faster,
+  much more code).
 - **Chat Completions first.** Self-hosted servers speak it. Why: one adapter
   covers Meta, Ollama and vLLM. Revisit: add Responses for Meta if its search
   grounding beats an MCP search tool on the road briefing.
-- **Kokoro for local speech.** Kokoro-FastAPI streams 24 kHz PCM over the
-  OpenAI speech API. Why: Meta has no TTS; Kokoro runs 12x real time on CPU. Revisit
-  for a more expressive voice.
+- **Qwen3-TTS clone of af_heart; Kokoro on CPU.** Speech is a Qwen3-TTS Base
+  1.7B clone of Kokoro's `af_heart`; `TTS_API=openai` keeps Kokoro for when the
+  GPU is busy. Why: the developer preferred af_heart's sound, and the clone is
+  more expressive and streams first audio in ~0.17 s, where Kokoro synthesizes
+  a whole sentence first; it costs ~6 GB VRAM. Rejected: Chatterbox (AGPL
+  wrapper, slower start), Kyutai (no public cloning), Orpheus (too slow).
 - **Opt-in recordings.** `THALVI_RECORD` turns on metrics, turn and reply text,
   and mic audio, each separately, written locally off the reply path. Why: to judge
   product, model and endpoint changes on real use. Off by default: they are
