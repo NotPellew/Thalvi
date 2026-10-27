@@ -98,7 +98,10 @@ export class Library {
 
   async rename(id: string, title: string): Promise<void> {
     const trimmed = title.trim();
-    if (trimmed === "") return;
+    if (trimmed === "") {
+      this.cancelRename();
+      return;
+    }
     this.set({ ...this.state, renaming: null });
     let error: string | null = null;
     try {

@@ -170,10 +170,13 @@ impl SessionStore {
             let previous = state.live.insert(id.clone(), live);
             (id, previous)
         };
-        if let Some(previous) = previous
-            && previous.detach.send(Detach::Moved).is_ok()
-        {
-            let _ = tokio::time::timeout(HANDOFF_WAIT, previous.released).await;
+        if let Some(previous) = previous {
+            if previous.detach.send(Detach::Moved).is_ok() {
+                let _ = tokio::time::timeout(HANDOFF_WAIT, previous.released).await;
+            }
+            // Under the lock, so no save from the old connection lands after this.
+            let _state = self.lock();
+            previous.dead.store(true, Ordering::SeqCst);
         }
         let (history, next_turn) = self.lock().sessions.get(&id).map_or_else(
             || (Vec::new(), 0),
@@ -371,6 +374,9 @@ fn load(dir: &Path) -> Result<HashMap<String, Stored>, String> {
 fn read_stored(path: &Path) -> Result<Stored, String> {
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let stored: Stored = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    if path.file_stem().and_then(|stem| stem.to_str()) != Some(stored.id.as_str()) {
+        return Err("the file name does not match the session id".to_string());
+    }
     if stored.turns.is_empty() {
         return Err("the session has no turns".to_string());
     }
@@ -429,7 +435,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unreadable_and_empty_files_are_skipped_and_long_multiline_first_lines_are_cut() {
+    async fn unreadable_empty_and_misnamed_files_are_skipped_and_long_multiline_first_lines_are_cut()
+     {
         let dir = scratch("load");
         let _ = std::fs::remove_dir_all(&dir);
         let store = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
@@ -439,6 +446,11 @@ mod tests {
         store.flush().await;
         std::fs::write(dir.join("broken.json"), "{").unwrap_or_else(|e| panic!("{e}"));
         let json = String::from_utf8_lossy(&attachment_file(&dir, &attachment.id)).to_string();
+        std::fs::write(
+            dir.join("misnamed.json"),
+            json.replace(&attachment.id, "elsewhere"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         let without_turns = json.replace(&attachment.id, "empty");
         let (head, _) = without_turns.split_once("\"turns\":").unwrap_or_default();
         std::fs::write(dir.join("empty.json"), format!("{head}\"turns\":[]}}"))
@@ -471,5 +483,32 @@ mod tests {
         assert_eq!(new.id, old.id);
         assert_eq!(old.detached().await, Detach::Moved);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_save_from_a_superseded_connection_changes_nothing() {
+        let dir = scratch("late");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let old = store.attach(None).await;
+        store.save(&old, &[ChatMessage::user("hi".to_string())], 1);
+
+        let new = store.attach(Some(&old.id)).await;
+        store.save(
+            &old,
+            &[
+                ChatMessage::user("hi".to_string()),
+                ChatMessage::assistant("late words".to_string()),
+            ],
+            9,
+        );
+        store.flush().await;
+        let saved = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let history = saved.attach(Some(&new.id)).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            (history.history, history.next_turn),
+            (vec![ChatMessage::user("hi".to_string())], 1)
+        );
     }
 }
