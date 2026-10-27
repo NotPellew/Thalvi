@@ -73,7 +73,14 @@ project_image = (
 vllm_image = (
     modal.Image.debian_slim(python_version="3.12")
     .uv_pip_install(f"vllm=={VLLM_VERSION}")
-    .env({"PYTHONUNBUFFERED": "1", "HF_HUB_OFFLINE": "1", "VLLM_NO_USAGE_STATS": "1"})
+    .env(
+        {
+            "PYTHONUNBUFFERED": "1",
+            "HF_HUB_OFFLINE": "1",
+            "VLLM_NO_USAGE_STATS": "1",
+            "VLLM_USE_FLASHINFER_SAMPLER": "0",
+        }
+    )
     .add_local_python_source("thalvi_train")
 )
 
