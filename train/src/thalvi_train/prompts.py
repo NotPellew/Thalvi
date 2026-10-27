@@ -1,7 +1,7 @@
 """Prompt rendering for distillation: the same question as text (teacher) and as audio (student)."""
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from transformers import PreTrainedTokenizerBase
 
@@ -30,6 +30,14 @@ class PromptTokenizer(Protocol):
         ...
 
 
+class ChatTokenizer(PromptTokenizer, Protocol):
+    """A `PromptTokenizer` that also renders whole conversations, as serving needs."""
+
+    def render_chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:
+        """The prompt text of `messages` and `tools`, ending at the generation prompt."""
+        ...
+
+
 class GlimmerTokenizer:
     """`PromptTokenizer` over Glimmer's Hugging Face tokenizer and chat template."""
 
@@ -44,6 +52,15 @@ class GlimmerTokenizer:
             reasoning_strength=REASONING_STRENGTH,
         )
         return self.text_ids(rendered)
+
+    def render_chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:
+        return self.tokenizer.apply_chat_template(
+            messages,
+            tools=tools or None,
+            tokenize=False,
+            add_generation_prompt=True,
+            reasoning_strength=REASONING_STRENGTH,
+        )
 
     def text_ids(self, text: str) -> list[int]:
         return self.tokenizer.encode(text, add_special_tokens=False)

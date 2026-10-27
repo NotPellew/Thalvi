@@ -1,0 +1,71 @@
+from pathlib import Path
+
+import pytest
+import torch
+
+from thalvi_train.decode import decode_steps, greedy, sampler
+from thalvi_train.glimmer import FrozenGlimmer, load_glimmer
+
+
+@pytest.fixture(scope="module")
+def glimmer(tiny_glimmer_dir: Path) -> FrozenGlimmer:
+    return load_glimmer(tiny_glimmer_dir, dtype=torch.float32)
+
+
+def draws(pick, logits: list[float], count: int = 300) -> set[int]:
+    torch.manual_seed(0)
+    row = torch.tensor([logits]).expand(count, -1)
+    return set(pick(row).tolist())
+
+
+def test_zero_temperature_is_greedy() -> None:
+    assert sampler(0.0, 0.5) is greedy
+    assert greedy(torch.tensor([[0.0, 3.0, 1.0], [2.0, 0.0, 1.0]])).tolist() == [1, 0]
+
+
+@pytest.mark.parametrize(
+    ("logits", "top_p", "temperature", "reachable"),
+    [
+        ([0.0, 0.0], 1.0, 1.0, {0, 1}),
+        ([1.0, 5.0, 2.0], 0.1, 1.0, {1}),
+        ([0.0, 0.0, -50.0], 1.0, 1.0, {0, 1}),
+        ([2.0, 1.9, 1.8, -9.0], 0.5, 1.0, {0, 1}),
+        ([1.0, 5.0, 2.0], 1.0, 0.01, {1}),
+    ],
+)
+def test_sampling_stays_within_the_temperature_scaled_nucleus(
+    logits: list[float], top_p: float, temperature: float, reachable: set[int]
+) -> None:
+    assert draws(sampler(temperature, top_p), logits) == reachable
+
+
+def prompt(glimmer: FrozenGlimmer) -> tuple[torch.Tensor, torch.Tensor]:
+    ids = torch.tensor([[200000, 65, 66, 67, 200022]])
+    return glimmer.embed_text(ids), torch.ones_like(ids)
+
+
+def test_steps_end_at_the_stop_token_or_the_limit(glimmer: FrozenGlimmer) -> None:
+    embeds, mask = prompt(glimmer)
+    unbounded = [step[0] for step in decode_steps(glimmer, embeds, mask, 4, stop_id=-1)]
+    assert len(unbounded) == 4
+    stopped = [step[0] for step in decode_steps(glimmer, embeds, mask, 4, stop_id=unbounded[1])]
+    assert stopped == unbounded[: stopped.index(unbounded[1]) + 1]
+
+
+def test_a_stopped_row_yields_none_while_others_go_on(glimmer: FrozenGlimmer) -> None:
+    ids = torch.tensor([[200000, 65, 66, 67, 200022], [200000, 70, 71, 72, 200022]])
+    embeds, mask = glimmer.embed_text(ids), torch.ones_like(ids)
+    free = list(decode_steps(glimmer, embeds, mask, 6, stop_id=-1))
+    stop = free[0][0]
+    cut = list(decode_steps(glimmer, embeds, mask, 6, stop_id=stop))
+    assert cut[0] == free[0]
+    assert all(step[0] is None for step in cut[1:])
+    assert free[0][1] != stop
+    assert len(cut) > 1
+    assert cut[1][1] == free[1][1]
+
+
+def test_rejects_a_zero_limit(glimmer: FrozenGlimmer) -> None:
+    embeds, mask = prompt(glimmer)
+    with pytest.raises(ValueError, match="at least 1"):
+        next(decode_steps(glimmer, embeds, mask, 0, stop_id=1))

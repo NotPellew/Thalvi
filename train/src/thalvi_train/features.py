@@ -5,6 +5,7 @@ Frames come at 50 per second as fp16 `(T, d_model)` tensors; the 30 s window's p
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import BinaryIO
 
 import numpy as np
 import soundfile
@@ -35,14 +36,29 @@ def frame_count(samples: int) -> int:
     return -(-samples // SAMPLES_PER_FRAME)
 
 
-def read_audio(path: Path, max_samples: int) -> np.ndarray:
-    """Reads `path` as mono float32 at 16 kHz, rejecting clips longer than `max_samples`."""
-    data, rate = soundfile.read(path, dtype="float32", always_2d=True)
+def decode_audio(source: str | Path | BinaryIO) -> np.ndarray:
+    """Reads a WAV (or any libsndfile format) as mono float32 at 16 kHz.
+
+    Raises `FeatureError` for an unreadable source and for one with no audio.
+    """
+    try:
+        data, rate = soundfile.read(source, dtype="float32", always_2d=True)
+    except soundfile.LibsndfileError as error:
+        raise FeatureError(f"cannot read audio: {error}") from error
     audio = data.mean(axis=1)
     if rate != SAMPLE_RATE:
         audio = soxr.resample(audio, rate, SAMPLE_RATE)
     if audio.size == 0:
-        raise FeatureError(f"{path}: no audio")
+        raise FeatureError("no audio")
+    return audio
+
+
+def read_audio(path: Path, max_samples: int) -> np.ndarray:
+    """Reads `path` as mono float32 at 16 kHz, rejecting clips longer than `max_samples`."""
+    try:
+        audio = decode_audio(path)
+    except FeatureError as error:
+        raise FeatureError(f"{path}: {error}") from error
     if audio.size > max_samples:
         raise FeatureError(
             f"{path}: {audio.size / SAMPLE_RATE:.1f} s is longer than "
@@ -98,3 +114,17 @@ def encode(
             raise FeatureError("encoder output is not finite; fp16 overflowed")
         frames.append(kept)
     return frames
+
+
+def encode_long(
+    encoder: WhisperEncoder, extractor: WhisperFeatureExtractor, clip: np.ndarray
+) -> torch.Tensor:
+    """Encodes a clip of any length as fp16 `(frame_count(len(clip)), d_model)` on the CPU.
+
+    A clip longer than the extractor's window is cut into consecutive windows,
+    encoded together, and their frames concatenated. Every full window is a
+    whole number of frames, so no frame straddles a cut.
+    """
+    window = extractor.n_samples
+    pieces = [clip[start : start + window] for start in range(0, len(clip), window)]
+    return torch.cat(encode(encoder, extractor, pieces))

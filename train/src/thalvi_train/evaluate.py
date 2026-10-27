@@ -36,6 +36,7 @@ from transformers import AutoTokenizer, WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
 from thalvi_train.batch import Batch, make_batch
+from thalvi_train.decode import decode_steps
 from thalvi_train.features import (
     DEFAULT_MODEL,
     FRAMES_PER_SECOND,
@@ -188,35 +189,24 @@ def generate(
     """Greedy decoding from left-padded `prompt_embeds` `(batch, length, hidden)` with a KV cache.
 
     `attention_mask` `(batch, length)` is 0 on the padding. A row stops after emitting
-    `stop_id`, or after `max_new_tokens` ids; a stopped row is fed pad tokens and its
-    outputs are dropped until every row is done.
+    `stop_id`, or after `max_new_tokens` ids; see `decode_steps`.
     """
-    if max_new_tokens < 1:
-        raise ValueError("max_new_tokens must be at least 1")
     device = glimmer.device
-    mask = attention_mask.to(device)
     rows = prompt_embeds.shape[0]
+    ids: list[list[int]] = [[] for _ in range(rows)]
     _sync(device)
     started = time.perf_counter()
-    hidden, cache = glimmer.cached_hidden_states(prompt_embeds, mask)
-    token = glimmer.logits(hidden[:, -1]).argmax(dim=-1)
-    _sync(device)
-    prefill_s = time.perf_counter() - started
-    ids: list[list[int]] = [[] for _ in range(rows)]
-    finished = [False] * rows
-    for step in range(max_new_tokens):
-        for row, new in enumerate(token.tolist()):
-            if not finished[row]:
+    prefill_s = None
+    for step in decode_steps(glimmer, prompt_embeds, attention_mask, max_new_tokens, stop_id):
+        if prefill_s is None:
+            _sync(device)
+            prefill_s = time.perf_counter() - started
+        for row, new in enumerate(step):
+            if new is not None:
                 ids[row].append(new)
-                finished[row] = new == stop_id
-        if all(finished) or step + 1 == max_new_tokens:
-            break
-        fed = token.masked_fill(torch.tensor(finished, device=device), PAD_TOKEN_ID)
-        mask = torch.cat([mask, mask.new_ones(rows, 1)], dim=1)
-        hidden, cache = glimmer.cached_hidden_states(glimmer.embed_text(fed[:, None]), mask, cache)
-        token = glimmer.logits(hidden[:, -1]).argmax(dim=-1)
+    finished = [bool(row_ids) and row_ids[-1] == stop_id for row_ids in ids]
     _sync(device)
-    return Generation(ids, finished, prefill_s, time.perf_counter() - started)
+    return Generation(ids, finished, prefill_s or 0.0, time.perf_counter() - started)
 
 
 def _read(tokenizer: PromptTokenizer, ids: list[int]) -> tuple[str, str, str]:

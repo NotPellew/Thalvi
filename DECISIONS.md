@@ -36,6 +36,11 @@ areas your change touches. Editing rules are in
   the audio towards its answer to the transcript. Training is Python in
   `train/`. Why: small enough to train in days, keeps Glimmer's behaviour.
   Rejected: fine-tuning Glimmer itself, a speech model from scratch.
+- **Glimmer hears through Chat Completions.** The adapter is served as an
+  OpenAI Chat Completions endpoint that takes `input_audio` parts; a voice turn
+  sends its audio alone, earlier turns as ASR text. Why: Thalvi's one model
+  adapter stays; the adapter was trained to listen, not to read. Rejected: a
+  custom audio protocol, sending the transcript alongside.
 
 ## Repository
 
