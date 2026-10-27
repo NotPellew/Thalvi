@@ -370,6 +370,9 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
+/// The most microphone audio kept while no turn completes, so silence cannot grow it.
+const MAX_BUFFER_MS: u64 = 300_000;
+
 /// Accumulates forwarded microphone audio and cuts padded turn clips.
 #[derive(Debug, Default)]
 pub struct AudioBuffer {
@@ -384,9 +387,10 @@ impl AudioBuffer {
         self.data.clear();
     }
 
-    /// Appends one forwarded frame.
+    /// Appends one forwarded frame, dropping the oldest audio beyond `MAX_BUFFER_MS`.
     pub fn push(&mut self, frame: &[u8]) {
         self.data.extend_from_slice(frame);
+        self.prune(self.end_ms().saturating_sub(MAX_BUFFER_MS));
     }
 
     /// How many milliseconds of audio are buffered from the base.
@@ -465,6 +469,18 @@ mod tests {
         buffer.push(&vec![7_u8; 48_000]);
         assert_eq!(buffer.cut(100, 500, 300).len(), 38_400);
         assert_eq!(buffer.cut(900, 990, 300).len(), 48_000 - 600 * 48);
+    }
+
+    #[test]
+    fn buffer_keeps_only_the_latest_minutes_without_shifting_turn_times() {
+        let mut buffer = AudioBuffer::default();
+        let second = vec![1_u8; 48_000];
+        for _ in 0..400 {
+            buffer.push(&second);
+        }
+        assert_eq!(buffer.end_ms(), 400_000);
+        assert_eq!(buffer.data.len(), 300_000 * 48);
+        assert_eq!(buffer.cut(399_000, 399_500, 0).len(), 500 * 48);
     }
 
     #[tokio::test]

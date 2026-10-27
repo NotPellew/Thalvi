@@ -2,9 +2,13 @@
 
 use std::pin::Pin;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use crate::recorder::wav_bytes;
 
 /// System prompt sent with every model request.
 pub const SYSTEM_PROMPT: &str = "You are Thalvi, a voice assistant for when the user's hands and eyes are busy. Everything you write is read aloud. Fit the length to the question: a greeting or a simple fact takes a sentence or two, while an explanation, a how-to or a story gets the detail it needs. When the user asks for a length, give that length. Start with a short, direct sentence. Talk the way a knowledgeable friend would, in sentences of ordinary spoken length. Write numbers, units and abbreviations the way you would say them. Do not use markdown, lists, headings, or emoji.";
@@ -72,10 +76,12 @@ struct SseState {
 
 /// The language model.
 pub trait ChatModel: Send + Sync {
-    /// Starts a streamed reply for `history`, returning its text deltas.
+    /// Starts a streamed reply for `history`, returning its text deltas. `audio` is
+    /// the 24 kHz s16le mono PCM of the last user message, sent in place of its text.
     fn stream_reply(
         &self,
         history: &[ChatMessage],
+        audio: Option<&[u8]>,
     ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send;
 }
 
@@ -118,10 +124,14 @@ impl OpenAiChatModel {
 
     /// Builds the JSON request body for a streamed completion.
     #[must_use]
-    pub fn request_body(&self, history: &[ChatMessage]) -> Value {
+    pub fn request_body(&self, history: &[ChatMessage], audio: Option<&[u8]>) -> Value {
         let mut messages = vec![json!({"role": "system", "content": self.system_prompt})];
-        for message in history {
-            messages.push(json!({"role": message.role, "content": message.content}));
+        for (index, message) in history.iter().enumerate() {
+            let content = match audio {
+                Some(pcm) if index + 1 == history.len() => audio_content(pcm),
+                _ => json!(message.content),
+            };
+            messages.push(json!({"role": message.role, "content": content}));
         }
         let mut body = json!({
             "model": self.model,
@@ -135,10 +145,25 @@ impl OpenAiChatModel {
     }
 }
 
+/// A message body holding only the audio, as one `OpenAI` `input_audio` part.
+fn audio_content(pcm: &[u8]) -> Value {
+    json!([{
+        "type": "input_audio",
+        "input_audio": {"data": BASE64.encode(wav_bytes(pcm)), "format": "wav"},
+    }])
+}
+
 impl ChatModel for OpenAiChatModel {
-    async fn stream_reply(&self, history: &[ChatMessage]) -> Result<DeltaStream, ModelError> {
+    async fn stream_reply(
+        &self,
+        history: &[ChatMessage],
+        audio: Option<&[u8]>,
+    ) -> Result<DeltaStream, ModelError> {
         let url = format!("{}/chat/completions", self.base_url);
-        let mut request = self.client.post(&url).json(&self.request_body(history));
+        let mut request = self
+            .client
+            .post(&url)
+            .json(&self.request_body(history, audio));
         if !self.api_key.is_empty() {
             request = request.bearer_auth(&self.api_key);
         }
@@ -277,10 +302,13 @@ mod tests {
             String::new(),
             None,
         );
-        let body = model.request_body(&[
-            ChatMessage::user("hi".to_string()),
-            ChatMessage::assistant("hello".to_string()),
-        ]);
+        let body = model.request_body(
+            &[
+                ChatMessage::user("hi".to_string()),
+                ChatMessage::assistant("hello".to_string()),
+            ],
+            None,
+        );
         assert_eq!(body["stream"], true);
         assert_eq!(body["model"], "m");
         assert!(body.get("reasoning_effort").is_none());
@@ -288,7 +316,7 @@ mod tests {
         assert_eq!(body["messages"][0]["content"], super::SYSTEM_PROMPT);
         let titled = model.clone().with_system_prompt("Write titles.");
         assert_eq!(
-            titled.request_body(&[])["messages"][0]["content"],
+            titled.request_body(&[], None)["messages"][0]["content"],
             "Write titles."
         );
         assert_eq!(
@@ -299,5 +327,44 @@ mod tests {
             body["messages"][2],
             serde_json::json!({"role":"assistant","content":"hello"})
         );
+    }
+    #[test]
+    fn audio_replaces_only_the_last_message_with_one_wav_part() {
+        use base64::Engine;
+        let model = OpenAiChatModel::new(
+            "http://x/v1".to_string(),
+            "m".to_string(),
+            String::new(),
+            None,
+        );
+        let pcm: Vec<u8> = (0..=255).cycle().take(4800).collect();
+        let body = model.request_body(
+            &[
+                ChatMessage::user("earlier".to_string()),
+                ChatMessage::assistant("answer".to_string()),
+                ChatMessage::user("transcript of the clip".to_string()),
+            ],
+            Some(&pcm),
+        );
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], super::SYSTEM_PROMPT);
+        assert_eq!(messages[1]["content"], "earlier");
+        assert_eq!(messages[2]["content"], "answer");
+        let parts = messages[3]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 1, "audio only, no transcript text part");
+        assert_eq!(parts[0]["type"], "input_audio");
+        assert_eq!(parts[0]["input_audio"]["format"], "wav");
+        let wav = base64::engine::general_purpose::STANDARD
+            .decode(parts[0]["input_audio"]["data"].as_str().unwrap())
+            .unwrap();
+        let le16 = |at: usize| u16::from_le_bytes([wav[at], wav[at + 1]]);
+        let le32 = |at: usize| u32::from_le_bytes([wav[at], wav[at + 1], wav[at + 2], wav[at + 3]]);
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(le16(20), 1, "PCM");
+        assert_eq!(le16(22), 1, "mono");
+        assert_eq!(le32(24), 24_000, "sample rate");
+        assert_eq!(le16(34), 16, "bits per sample");
+        assert_eq!(le32(40) as usize, pcm.len());
+        assert_eq!(&wav[44..], pcm.as_slice());
     }
 }

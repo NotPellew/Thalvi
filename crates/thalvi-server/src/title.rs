@@ -66,7 +66,7 @@ pub fn spawn_title<M: ChatModel + 'static>(
 
 async fn ask<M: ChatModel>(model: &M, prompt: String) -> Result<Option<String>, String> {
     let mut deltas = model
-        .stream_reply(&[ChatMessage::user(prompt)])
+        .stream_reply(&[ChatMessage::user(prompt)], None)
         .await
         .map_err(|error| error.to_string())?;
     let mut answer = String::new();

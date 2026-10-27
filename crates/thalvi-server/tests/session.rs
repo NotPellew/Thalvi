@@ -138,6 +138,7 @@ impl Drop for DropGuard {
 #[derive(Clone, Default)]
 struct FakeModel {
     calls: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+    clips: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
     scripts: Arc<Mutex<VecDeque<Vec<ModelChunk>>>>,
     dropped: Arc<AtomicUsize>,
 }
@@ -150,11 +151,21 @@ impl FakeModel {
     fn calls(&self) -> Vec<Vec<ChatMessage>> {
         self.calls.lock().unwrap().clone()
     }
+
+    /// The audio each call was given for the last user message.
+    fn clips(&self) -> Vec<Option<Vec<u8>>> {
+        self.clips.lock().unwrap().clone()
+    }
 }
 
 impl ChatModel for FakeModel {
-    async fn stream_reply(&self, history: &[ChatMessage]) -> Result<DeltaStream, ModelError> {
+    async fn stream_reply(
+        &self,
+        history: &[ChatMessage],
+        audio: Option<&[u8]>,
+    ) -> Result<DeltaStream, ModelError> {
         self.calls.lock().unwrap().push(history.to_vec());
+        self.clips.lock().unwrap().push(audio.map(<[u8]>::to_vec));
         let chunks = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
         let guard = DropGuard(Arc::clone(&self.dropped));
         let stream = futures_util::stream::unfold(
@@ -313,6 +324,14 @@ fn title_model() -> (FakeModel, Arc<Titler<FakeModel>>) {
 }
 
 async fn start_with(recording: RecordingConfig, titler: Option<Arc<Titler<FakeModel>>>) -> Harness {
+    start_full(recording, titler, false).await
+}
+
+async fn start_full(
+    recording: RecordingConfig,
+    titler: Option<Arc<Titler<FakeModel>>>,
+    audio_input: bool,
+) -> Harness {
     let factory = FakeFactory::default();
     let model = FakeModel::default();
     let tts = FakeTts::default();
@@ -357,6 +376,7 @@ async fn start_with(recording: RecordingConfig, titler: Option<Arc<Titler<FakeMo
                                 titler,
                                 recording,
                                 false,
+                                audio_input,
                             )
                             .await;
                             closed.fetch_add(1, Ordering::SeqCst);
@@ -2085,4 +2105,88 @@ async fn a_title_the_user_typed_is_not_overwritten_by_the_model() {
     assert_eq!(event["outcome"], "ok");
     assert_eq!(listed(&harness).await[0]["title"], "Mine");
     harness.server.abort();
+}
+
+#[tokio::test]
+async fn only_a_voice_turn_carries_its_padded_clip_and_only_with_audio_input_on() {
+    for audio_input in [true, false] {
+        let data_dir = ScratchDir::new("audio-input");
+        let config = recording_config(metrics_only(), &data_dir);
+        let mut harness = start_full(config, None, audio_input).await;
+        voice_on(&mut harness).await;
+        let mut mic = Vec::new();
+        for frame in 0..30_u8 {
+            let bytes = vec![frame; 3840];
+            mic.extend_from_slice(&bytes);
+            harness
+                .client
+                .send(ClientMessage::Binary(bytes.into()))
+                .await
+                .unwrap();
+        }
+        wait_until(|| harness.factory.audio_received().len() == 30).await;
+        let connection = harness.factory.latest_connection();
+        for (event, at) in [("start", 1000), ("end", 1500)] {
+            let turn_id = "turn-1".to_string();
+            let audio_processed_ms = Some(at);
+            harness.factory.push(
+                connection,
+                Ok(if event == "start" {
+                    RecognizerEvent::SpeechStart {
+                        turn_id,
+                        audio_processed_ms,
+                    }
+                } else {
+                    RecognizerEvent::SpeechEnd {
+                        turn_id,
+                        audio_processed_ms,
+                    }
+                }),
+            );
+        }
+        for answer in ["Hello there.", "Typed answer."] {
+            harness
+                .model
+                .add_script(vec![ModelChunk::Delta(answer.to_string())]);
+        }
+        harness.factory.complete_turn(connection, "hello thalvi");
+        let listening = |item: &Received| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening");
+        let _ = collect_until(&mut harness.client, listening).await;
+        send_json(&mut harness, &json!({"type": "text", "text": "and typed"})).await;
+        let _ = collect_until(&mut harness.client, listening).await;
+
+        // 1000 ms and 1500 ms, each padded by 300 ms: mic bytes 700..1800 ms.
+        let expected = mic[700 * 48..1800 * 48].to_vec();
+        assert_eq!(
+            harness.model.clips(),
+            vec![audio_input.then_some(expected), None],
+            "audio_input={audio_input}"
+        );
+        let texts: Vec<String> = harness.model.calls()[1]
+            .iter()
+            .map(|message| message.content.clone())
+            .collect();
+        assert_eq!(texts, ["hello thalvi", "Hello there.", "and typed"]);
+
+        let session = harness.session_id.clone();
+        harness.client.close(None).await.unwrap();
+        wait_closed(&harness, 1).await;
+        harness.server.abort();
+        let lines = read_recorded_lines_blocking(&data_dir.0, &session);
+        let input_ms: Vec<Value> = lines
+            .iter()
+            .filter(|line| line["event"] == "reply")
+            .map(|line| line["input_audio_ms"].clone())
+            .collect();
+        let first = if audio_input {
+            json!(1100)
+        } else {
+            Value::Null
+        };
+        assert_eq!(
+            input_ms,
+            vec![first, Value::Null],
+            "audio_input={audio_input}"
+        );
+    }
 }

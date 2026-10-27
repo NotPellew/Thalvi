@@ -40,6 +40,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Whether the spoken acknowledgement is enabled (`THALVI_ACK`).
     pub ack_enabled: bool,
+    /// Whether voice turns reach the chat model as audio (`LLM_AUDIO_INPUT`).
+    pub llm_audio_input: bool,
 }
 
 /// The background model's Chat Completions endpoint (`BG_LLM_*`).
@@ -115,7 +117,9 @@ impl Config {
             }
         };
         let tts_voice = required(&lookup, "TTS_VOICE", false)?;
-        let ack_enabled = parse_ack_enabled(lookup("THALVI_ACK").as_deref())?;
+        let ack_enabled = parse_on_off("THALVI_ACK", lookup("THALVI_ACK").as_deref())?;
+        let llm_audio_input =
+            parse_on_off("LLM_AUDIO_INPUT", lookup("LLM_AUDIO_INPUT").as_deref())?;
         let record = parse_record_kinds(lookup("THALVI_RECORD"))?;
         let data_dir = lookup("THALVI_DATA_DIR")
             .map(|value| value.trim().to_string())
@@ -138,6 +142,7 @@ impl Config {
             record,
             data_dir: PathBuf::from(data_dir),
             ack_enabled,
+            llm_audio_input,
         })
     }
 }
@@ -164,12 +169,12 @@ fn parse_bg_llm(lookup: &impl Fn(&str) -> Option<String>) -> Result<Option<BgLlm
     }))
 }
 
-fn parse_ack_enabled(raw: Option<&str>) -> Result<bool, String> {
+fn parse_on_off(name: &str, raw: Option<&str>) -> Result<bool, String> {
     match raw.map(str::trim) {
         None | Some("" | "off") => Ok(false),
         Some("on") => Ok(true),
         Some(other) => Err(format!(
-            "THALVI_ACK must be on or off: {other:?} (expected on, off, or unset)"
+            "{name} must be on or off: {other:?} (expected on, off, or unset)"
         )),
     }
 }
@@ -362,7 +367,12 @@ mod tests {
     }
 
     #[test]
-    fn ack_enabled_parses_on_off_unset_and_rejects_unknown_values() {
+    fn on_off_switches_parse_on_off_unset_and_reject_unknown_values() {
+        type Switch = fn(&Config) -> bool;
+        let switches: [(&str, Switch); 2] = [
+            ("THALVI_ACK", |c| c.ack_enabled),
+            ("LLM_AUDIO_INPUT", |c| c.llm_audio_input),
+        ];
         let cases: Vec<(Option<&str>, Result<bool, ()>)> = vec![
             (None, Ok(false)),
             (Some(""), Ok(false)),
@@ -370,20 +380,22 @@ mod tests {
             (Some("on"), Ok(true)),
             (Some("yes"), Err(())),
         ];
-        for (value, expected) in cases {
-            let mut vars = full();
-            if let Some(value) = value {
-                vars.insert("THALVI_ACK", value.to_string());
-            }
-            let result = Config::from_lookup(|name| vars.get(name).cloned()).map(|c| c.ack_enabled);
-            if let Ok(expected) = expected {
-                assert_eq!(result, Ok(expected), "value={value:?}");
-            } else {
-                let err = result.unwrap_err();
-                assert!(
-                    err.contains("THALVI_ACK") && err.contains("on") && err.contains("off"),
-                    "error should name THALVI_ACK and expected values: {err}"
-                );
+        for (name, read) in switches {
+            for (value, expected) in &cases {
+                let mut vars = full();
+                if let Some(value) = value {
+                    vars.insert(name, value.to_string());
+                }
+                let result = Config::from_lookup(|key| vars.get(key).cloned()).map(|c| read(&c));
+                if let Ok(expected) = expected {
+                    assert_eq!(result, Ok(*expected), "{name}={value:?}");
+                } else {
+                    let err = result.unwrap_err();
+                    assert!(
+                        err.contains(name) && err.contains("on") && err.contains("off"),
+                        "error should name {name} and expected values: {err}"
+                    );
+                }
             }
         }
     }

@@ -151,7 +151,7 @@ async fn chat_model_parses_sse_until_done_and_sends_stream_request() {
         Some("minimal".to_string()),
     );
     let mut stream = model
-        .stream_reply(&[ChatMessage::user("hi".to_string())])
+        .stream_reply(&[ChatMessage::user("hi".to_string())], None)
         .await
         .unwrap();
     let mut deltas = Vec::new();
@@ -168,6 +168,50 @@ async fn chat_model_parses_sse_until_done_and_sends_stream_request() {
         bodies[0]["messages"][1],
         json!({"role": "user", "content": "hi"})
     );
+}
+
+#[tokio::test]
+async fn chat_model_sends_the_clip_and_skips_reasoning_deltas() {
+    let captured = Captured::default();
+    let captured2 = captured.clone();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |body: String| {
+            let captured = captured2.clone();
+            async move {
+                captured
+                    .bodies
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_str(&body).unwrap());
+                Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(concat!(
+                        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hm\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"Four.\"}}]}\n\n",
+                        "data: [DONE]\n\n",
+                    )))
+                    .unwrap()
+            }
+        }),
+    );
+    let model = OpenAiChatModel::new(serve(app).await, "m".to_string(), String::new(), None);
+    let mut stream = model
+        .stream_reply(
+            &[ChatMessage::user("two plus two".to_string())],
+            Some(&[0, 1, 2, 3]),
+        )
+        .await
+        .unwrap();
+    let mut deltas = Vec::new();
+    while let Some(delta) = stream.next().await {
+        deltas.push(delta.unwrap());
+    }
+    assert_eq!(deltas, vec!["Four.".to_string()]);
+    let bodies = captured.bodies.lock().unwrap();
+    let parts = bodies[0]["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0]["type"], "input_audio");
 }
 
 #[tokio::test]
