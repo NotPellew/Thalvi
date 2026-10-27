@@ -4,6 +4,8 @@
 `input_audio` WAV parts, and streams Server-Sent Events: the reasoning as
 `delta.reasoning_content`, the answer as `delta.content`, tool calls as `delta.tool_calls`,
 a final chunk with `finish_reason`, an optional `usage` chunk, and `data: [DONE]`.
+A spoken turn without tools is answered in echo mode unless `--reply-mode reasoning`:
+the reasoning is one line saying what Glimmer heard, so the answer starts sooner.
 
 A request is rejected with an OpenAI-style 400 before any streaming starts. A failure
 before the first token is a 500; after it the stream is just closed, since the client
@@ -20,7 +22,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
@@ -29,6 +31,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from thalvi_train.chat import RequestError, parse_request
+from thalvi_train.echo import ReplyMode
 from thalvi_train.engine import Engine, Finished, Ready, Step, Update
 from thalvi_train.features import DEFAULT_MODEL
 from thalvi_train.reply import Content, Event, Reasoning
@@ -176,6 +179,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cuda", help="the decoder's")
     parser.add_argument("--quantize", action="store_true", help="4-bit NF4 decoder; needs cuda")
     parser.add_argument("--encoder-device", choices=["cpu", "cuda"], default="cuda")
+    parser.add_argument(
+        "--reply-mode",
+        choices=get_args(ReplyMode),
+        default="echo",
+        help="echo: a spoken turn is answered after a one-line echo; reasoning: full reasoning",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8090)
     return parser.parse_args(argv)
@@ -197,7 +206,7 @@ def load_engine(args: argparse.Namespace) -> Engine:
         projector = projector.to(torch.bfloat16)
     encoder, extractor = load_encoder(args.whisper_model, args.encoder_device, config.encoder_dim)
     tokenizer = GlimmerTokenizer(AutoTokenizer.from_pretrained(args.glimmer))
-    return Engine(glimmer, tokenizer, projector, encoder, extractor)
+    return Engine(glimmer, tokenizer, projector, encoder, extractor, args.reply_mode)
 
 
 def main(argv: list[str] | None = None) -> None:

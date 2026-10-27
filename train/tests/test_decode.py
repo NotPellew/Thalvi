@@ -69,3 +69,59 @@ def test_rejects_a_zero_limit(glimmer: FrozenGlimmer) -> None:
     embeds, mask = prompt(glimmer)
     with pytest.raises(ValueError, match="at least 1"):
         next(decode_steps(glimmer, embeds, mask, 0, stop_id=1))
+
+
+FORCED = [70, 71, 72, 73, 74, 75, 76]
+
+
+def logits_after(glimmer: FrozenGlimmer, ids: list[int]) -> torch.Tensor:
+    embeds = glimmer.embed_text(torch.tensor([ids]))
+    return glimmer.logits(glimmer.hidden_states(embeds, torch.ones(1, len(ids), dtype=torch.long)))[
+        :, -1
+    ]
+
+
+def test_forced_tokens_continue_the_cache_like_one_prefill_of_the_whole_sequence(
+    glimmer: FrozenGlimmer,
+) -> None:
+    ids = [200000, 65, 66, 67, 200022]
+    embeds, mask = prompt(glimmer)
+    picked: list[torch.Tensor] = []
+
+    def recording(logits: torch.Tensor) -> torch.Tensor:
+        picked.append(logits)
+        return greedy(logits)
+
+    steps = decode_steps(glimmer, embeds, mask, 6, stop_id=-1, pick=recording)
+    next(steps)
+    (after,) = steps.send(FORCED)
+    torch.testing.assert_close(picked[-1], logits_after(glimmer, ids + FORCED), rtol=0, atol=1e-4)
+    assert after == picked[-1].argmax(dim=-1).item()
+    next(steps)
+    torch.testing.assert_close(
+        picked[-1], logits_after(glimmer, [*ids, *FORCED, after]), rtol=0, atol=1e-4
+    )
+
+
+def test_forced_tokens_replace_a_stop_token_but_not_its_place_in_the_limit(
+    glimmer: FrozenGlimmer,
+) -> None:
+    embeds, mask = prompt(glimmer)
+    (first,) = next(decode_steps(glimmer, embeds, mask, 3, stop_id=-1))
+    steps = decode_steps(glimmer, embeds, mask, 3, stop_id=first)
+    assert next(steps) == [first]
+    assert steps.send(FORCED) is not None
+    assert next(steps, None) is not None
+    assert next(steps, None) is None
+    last = decode_steps(glimmer, embeds, mask, 1, stop_id=-1)
+    next(last)
+    with pytest.raises(StopIteration):
+        last.send(FORCED)
+
+
+def test_forced_tokens_need_a_single_row(glimmer: FrozenGlimmer) -> None:
+    ids = torch.tensor([[200000, 65, 66, 67, 200022]] * 2)
+    steps = decode_steps(glimmer, glimmer.embed_text(ids), torch.ones_like(ids), 3, stop_id=-1)
+    next(steps)
+    with pytest.raises(ValueError, match="single row"):
+        steps.send(FORCED)

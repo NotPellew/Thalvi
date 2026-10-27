@@ -13,14 +13,17 @@ from tiny_whisper import DIM
 from wav import audio_part
 
 from thalvi_train import engine as engine_module
+from thalvi_train.echo import HANDOFF, ReplyMode
 from thalvi_train.engine import Engine
-from thalvi_train.glimmer import load_glimmer
+from thalvi_train.glimmer import AUDIO_TOKEN_ID, load_glimmer
 from thalvi_train.projector import AudioProjector
-from thalvi_train.serve import MODEL_ID, create_app
+from thalvi_train.prompts import AUDIO_TOKEN_TEXT
+from thalvi_train.serve import MODEL_ID, _parse_args, create_app
 
 MESSAGE = 200023
 EOM = 200007
 MARKERS = {"<|start|>": START, "<|message|>": MESSAGE, "<|eom|>": EOM, "<|eot|>": EOT}
+MERGED_DOT_NEWLINE = 300
 STACK = 2
 
 
@@ -35,8 +38,14 @@ class ChatFakeTokenizer(FakeTokenizer):
 
         return "".join(f"{m['role']}:{flat(m['content'])}|" for m in messages)
 
+    def text_ids(self, text: str) -> list[int]:
+        ids: list[int] = []
+        for i, part in enumerate(text.split(AUDIO_TOKEN_TEXT)):
+            ids += [AUDIO_TOKEN_ID] * (i > 0) + script(part)
+        return ids
+
     def decode(self, ids: list[int]) -> str:
-        names = {value: key for key, value in MARKERS.items()}
+        names = {value: key for key, value in MARKERS.items()} | {MERGED_DOT_NEWLINE: ".\n"}
         return "".join(chr(i) if i < 128 else names.get(i, f"<{i}>") for i in ids)
 
 
@@ -54,11 +63,16 @@ def script(text: str) -> list[int]:
 
 
 class Scripted:
-    """Stands in for `decode_steps`: yields the script's ids, then ends, counting the pulls."""
+    """Stands in for `decode_steps`: yields the script's ids, then ends, counting the pulls.
+
+    Tokens sent after a step are recorded in `forced`, and the script goes on with the
+    next id as if the model had continued from them.
+    """
 
     def __init__(self, ids: Iterator[int]) -> None:
         self.ids = ids
         self.pulled = 0
+        self.forced: list[list[int]] = []
         self.closed = threading.Event()
 
     def __call__(self, glimmer, embeds, mask, max_new_tokens, stop_id, pick):
@@ -67,24 +81,37 @@ class Scripted:
                 if index == max_new_tokens:
                     return
                 self.pulled += 1
-                yield [token]
-                if token == stop_id:
+                forced = yield [token]
+                if forced:
+                    self.forced.append(forced)
+                elif token == stop_id:
                     return
         finally:
             self.closed.set()
 
 
-@pytest.fixture
-def engine(tiny_glimmer_dir: Path, tiny_encoder) -> Engine:
+def make_engine(tiny_glimmer_dir: Path, tiny_encoder, mode: ReplyMode) -> Engine:
     torch.manual_seed(3)
     projector = AudioProjector(DIM, 24, HIDDEN, STACK).eval()
     encoder, extractor = tiny_encoder
     glimmer = load_glimmer(tiny_glimmer_dir, dtype=torch.float32)
-    return Engine(glimmer, ChatFakeTokenizer(), projector, encoder, extractor)
+    return Engine(glimmer, ChatFakeTokenizer(), projector, encoder, extractor, mode)
+
+
+@pytest.fixture
+def engine(tiny_glimmer_dir: Path, tiny_encoder) -> Engine:
+    return make_engine(tiny_glimmer_dir, tiny_encoder, "reasoning")
 
 
 @pytest.fixture
 def client(engine: Engine) -> Iterator[TestClient]:
+    with TestClient(create_app(engine)) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def echo_client(tiny_glimmer_dir: Path, tiny_encoder) -> Iterator[TestClient]:
+    engine = make_engine(tiny_glimmer_dir, tiny_encoder, "echo")
     with TestClient(create_app(engine)) as test_client:
         yield test_client
 
@@ -216,6 +243,111 @@ def test_the_tiny_model_itself_streams_until_the_token_limit(client: TestClient)
     assert data[-1] == "[DONE]"
     assert chunks[-1]["usage"]["completion_tokens"] == 5
     assert chunks[-2]["choices"][0]["finish_reason"] == "length"
+
+
+QUOTED = ' "Is it going to rain?"'
+SPOKEN = [
+    pytest.param(
+        script(QUOTED + "No rain today.<|eot|>"),
+        'The user said: "Is it going to rain?"',
+        "No rain today.",
+        [ord('"'), *script(HANDOFF)],
+        id="closing-quote",
+    ),
+    pytest.param(
+        [*script(" Rain today"), MERGED_DOT_NEWLINE, *script("No rain.<|eot|>")],
+        "The user said: Rain today.",
+        "No rain.",
+        [ord("."), *script(HANDOFF)],
+        id="line-break-inside-a-token",
+    ),
+    pytest.param(
+        script(" Rain today<|eom|>No rain.<|eot|>"),
+        "The user said: Rain today",
+        "No rain.",
+        script(HANDOFF),
+        id="the-model-ends-the-message",
+    ),
+    pytest.param(
+        script(QUOTED + QUOTED + "<|eot|>"),
+        'The user said: "Is it going to rain?"',
+        QUOTED,
+        [ord('"'), *script(HANDOFF)],
+        id="the-answer-repeats-the-echo",
+    ),
+]
+
+
+@pytest.mark.parametrize(("tokens", "reasoning", "content", "forced"), SPOKEN)
+def test_a_spoken_turn_streams_the_echo_as_reasoning_then_the_answer(
+    echo_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tokens: list[int],
+    reasoning: str,
+    content: str,
+    forced: list[int],
+) -> None:
+    fake = Scripted(iter(tokens))
+    monkeypatch.setattr(engine_module, "decode_steps", fake)
+    _, chunks = post(
+        echo_client,
+        request_body(
+            {"role": "user", "content": [audio_part()]}, stream_options={"include_usage": True}
+        ),
+    )
+    pieces = deltas(chunks)
+    last_reasoning = max(i for i, p in enumerate(pieces) if "reasoning_content" in p)
+    first_content = min(i for i, p in enumerate(pieces) if "content" in p)
+    assert last_reasoning < first_content
+    assert "".join(p.get("reasoning_content", "") for p in pieces) == reasoning
+    assert "".join(p.get("content", "") for p in pieces) == content
+    assert fake.forced == [forced]
+    assert chunks[-2]["choices"][0]["finish_reason"] == "stop"
+    assert chunks[-1]["usage"]["prompt_tokens"] >= len(script(HANDOFF))
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "user", "content": "hi"},
+        {"role": "user", "content": [audio_part()]},
+    ],
+    ids=["text", "audio-with-tools"],
+)
+def test_text_turns_and_requests_with_tools_keep_the_reasoning(
+    echo_client: TestClient, monkeypatch: pytest.MonkeyPatch, message: dict
+) -> None:
+    fake = Scripted(iter(script(ANSWER)))
+    monkeypatch.setattr(engine_module, "decode_steps", fake)
+    tools = [] if message["content"] == "hi" else [{"type": "function", "function": {"name": "f"}}]
+    _, chunks = post(echo_client, request_body(message, tools=tools))
+    pieces = deltas(chunks)
+    assert "".join(p.get("reasoning_content", "") for p in pieces) == "User asks."
+    assert "".join(p.get("content", "") for p in pieces) == "Hello!"
+    assert fake.forced == []
+
+
+def test_the_tiny_model_goes_from_echo_to_answer_through_one_cache(echo_client: TestClient) -> None:
+    _, chunks = post(
+        echo_client,
+        request_body(
+            {"role": "user", "content": [audio_part()]},
+            max_tokens=60,
+            stream_options={"include_usage": True},
+        ),
+    )
+    pieces = deltas(chunks)
+    reasoning = "".join(p.get("reasoning_content", "") for p in pieces)
+    assert reasoning.startswith("The user said:")
+    assert any("content" in p for p in pieces)
+    assert chunks[-2]["choices"][0]["finish_reason"] == "length"
+    assert chunks[-1]["usage"]["completion_tokens"] == 60
+
+
+def test_the_reply_mode_flag_defaults_to_echo() -> None:
+    required = ["--glimmer", "g", "--projector", "p"]
+    assert _parse_args(required).reply_mode == "echo"
+    assert _parse_args([*required, "--reply-mode", "reasoning"]).reply_mode == "reasoning"
 
 
 @pytest.mark.parametrize(

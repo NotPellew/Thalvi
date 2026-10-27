@@ -4,10 +4,16 @@ The engine owns the loaded models and a lock, so requests queue and generate in 
 `Engine.run` is blocking and reports through `emit`: `Ready` once the first token is
 chosen, then a `Step` per token with the events it completed, then `Finished`.
 Setting `cancelled` stops it before the next token.
+
+A spoken turn without tools is answered in echo mode (see `thalvi_train.echo`): the
+prompt ends in the echo prefill, and once the echo is over the engine sends the
+handoff tokens to the decoder, which feeds them into the running KV cache. The reply
+parser is given the same text, so it switches from reasoning to the answer exactly
+where the model would have.
 """
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from typing import Literal
 
@@ -17,6 +23,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
 from thalvi_train.chat import ChatRequest, prompt_text
 from thalvi_train.decode import decode_steps, sampler
+from thalvi_train.echo import HANDOFF, PREFILL, EchoWatch, ReplyMode, uses_echo
 from thalvi_train.features import encode_long
 from thalvi_train.glimmer import FrozenGlimmer
 from thalvi_train.projector import AudioProjector
@@ -57,6 +64,16 @@ class Finished:
 Update = Ready | Step | Finished
 
 
+def _resume(
+    steps: Generator[list[int | None], list[int] | None, None], forced: list[int] | None
+) -> list[int | None] | None:
+    """The next step, after feeding `forced` if given; `None` once the generator is over."""
+    try:
+        return steps.send(forced)
+    except StopIteration:
+        return None
+
+
 class Engine:
     """Glimmer with its hearing: encoder, projector, decoder and tokenizer."""
 
@@ -67,12 +84,14 @@ class Engine:
         projector: AudioProjector,
         encoder: WhisperEncoder,
         extractor: WhisperFeatureExtractor,
+        reply_mode: ReplyMode = "echo",
     ) -> None:
         self._glimmer = glimmer
         self._tokenizer = tokenizer
         self._projector = projector
         self._encoder = encoder
         self._extractor = extractor
+        self._reply_mode = reply_mode
         self._lock = threading.Lock()
 
     def run(
@@ -88,9 +107,12 @@ class Engine:
         with self._lock, torch.no_grad(), autocast:
             if cancelled.is_set():
                 return
-            embeds, prompt_tokens = self._prompt(request)
+            echoing = uses_echo(request, self._reply_mode)
+            embeds, prompt_tokens = self._prompt(request, echoing=echoing)
             parser = ReplyParser(tool_parameter_types(request.tools))
             decoder = IncrementalDecoder(self._tokenizer.decode)
+            watch = EchoWatch() if echoing else None
+            handoff = self._tokenizer.text_ids(HANDOFF)
             pick = sampler(request.temperature, request.top_p)
             steps = decode_steps(
                 self._glimmer,
@@ -102,17 +124,33 @@ class Engine:
             )
             generated, called = 0, False
             try:
-                for (token,) in steps:
+                step = _resume(steps, None)
+                while step is not None:
                     if cancelled.is_set():
                         return
+                    events: list[Event] = []
                     if generated == 0:
                         emit(Ready())
+                        if watch:
+                            events = parser.feed(PREFILL)
                     generated += 1
-                    events = parser.feed(decoder.push(token))
+                    text, forced = decoder.push(step[0]), None
+                    if watch:
+                        kept, ended = watch.push(text)
+                        if ended:
+                            head = [step[0]] if kept == text else self._tokenizer.text_ids(kept)
+                            forced = head + handoff
+                        text = kept
+                    events += parser.feed(text)
                     called = called or any(isinstance(e, ToolCall) for e in events)
                     emit(Step(events))
                     if parser.done:
                         break
+                    if forced is not None:
+                        parser.feed(HANDOFF)
+                        prompt_tokens += len(handoff)
+                        watch, decoder = None, IncrementalDecoder(self._tokenizer.decode)
+                    step = _resume(steps, forced)
             finally:
                 steps.close()
             events = parser.feed(decoder.flush()) + parser.finish()
@@ -124,8 +162,12 @@ class Engine:
                 reason = "length"
             emit(Finished(reason, prompt_tokens, generated))
 
-    def _prompt(self, request: ChatRequest) -> tuple[torch.Tensor, int]:
-        """The prompt's embeddings `(1, length, hidden)`, clips spliced in, and its length."""
+    def _prompt(self, request: ChatRequest, *, echoing: bool) -> tuple[torch.Tensor, int]:
+        """The prompt's embeddings `(1, length, hidden)`, clips spliced in, and its length.
+
+        The echo prefill is tokenized apart from the rendered text, the way training
+        tokenizes a response apart from its prompt.
+        """
         weights = next(self._projector.parameters())
         audio = [
             self._projector(
@@ -136,7 +178,10 @@ class Engine:
             for clip in request.clips
         ]
         text = prompt_text(self._tokenizer.render_chat, request, [a.shape[0] for a in audio])
-        ids = torch.tensor([self._tokenizer.text_ids(text)])
+        ids = self._tokenizer.text_ids(text) + (
+            self._tokenizer.text_ids(PREFILL) if echoing else []
+        )
+        ids = torch.tensor([ids])
         embeds = (
             self._glimmer.embed_with_audio(ids, audio) if audio else self._glimmer.embed_text(ids)
         )

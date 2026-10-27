@@ -41,6 +41,10 @@ areas your change touches. Editing rules are in
   sends its audio alone, earlier turns as ASR text. Why: Thalvi's one model
   adapter stays; the adapter was trained to listen, not to read. Rejected: a
   custom audio protocol, sending the transcript alongside.
+- **Spoken turns answer after a one-line echo.** The endpoint prefills
+  Glimmer's reasoning with "The user said:", stops at the end of that line and
+  switches to the answer. Why: full reasoning puts 3–5 s before the first word.
+  Rejected: full reasoning; an empty reasoning prefill (parrots ~40% of turns).
 
 ## Repository
 
