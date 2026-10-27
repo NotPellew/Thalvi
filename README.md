@@ -140,6 +140,43 @@ together or not at all) and a background model rewrites each title in three to
 six words after the first reply, off the reply path. A title you typed is
 never overwritten.
 
+## Measure a setup
+
+`cargo run --release --bin measure -- --setup data/measure/a.env --setup data/measure/b.env`
+times and grades the same prompts on each setup and prints their numbers side
+by side. A setup is your normal `.env` plus an override file of env lines that
+win over it; keep override files under `data/` (git-ignored), since they may
+hold keys:
+
+```sh
+# data/measure/spark12.env
+LLM_MODEL=muse-spark-1.2
+LLM_REASONING_EFFORT=low
+```
+
+Setups run interleaved (case 1 on A, B, A, B, then case 2), so they see the
+same network noise. The prompts are `crates/thalvi-server/measure/cases.json`
+(greetings, facts, arithmetic, how-tos, explanations, requested lengths, a
+German question, a follow-up); a multi-turn case lists alternating user and
+assistant turns, ending on the user turn to answer. Flags: `--setup <file>`
+(repeat; none measures the plain `.env`), `--runs <n>` (default 3), `--cases
+<file>`, `--only <id>` (repeat) and `--no-judge`.
+
+Each reply goes through the code Thalvi uses: the chat model, the sentence
+splitter, the speech client from config and `SYSTEM_PROMPT`. The table gives
+median (min-max) seconds from the request start to the first content token, the
+first sentence, the first audio byte and the last audio byte of the whole reply,
+plus sentences and audio seconds per reply, failed replies and the judge's mean
+score. The wait the user perceives adds endpointing (about 0.5-0.75 s). A reply
+that hits an error or takes over 120 s counts as an error. Every reply, grade
+and error is written to `data/measure/run-<time>.json`.
+
+The judge grades each answer from 1 to 5 against a short rubric (correct, length
+fits the question, speakable) after all timing is done. Set `JUDGE_BASE_URL`,
+`JUDGE_MODEL` and `JUDGE_API_KEY` for any OpenAI-compatible model; without them
+quality is reported as "not judged". One judge on a fixed prompt set is a
+yardstick for comparing setups, not a verdict on one reply.
+
 ## Status
 
 Under construction for the
