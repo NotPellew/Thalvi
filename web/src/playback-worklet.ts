@@ -43,10 +43,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         this.resampler.reset();
         this.queue = [];
         this.queueOffset = 0;
-        if (this.playing) {
-          this.playing = false;
-          this.port.postMessage({ type: "playing", playing: false, seq: this.seq });
-        }
+        this.playing = false;
       }
     };
   }

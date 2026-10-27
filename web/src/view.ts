@@ -322,8 +322,9 @@ export function createView(root: HTMLElement) {
     speedChip.setAttribute("aria-label", `Playback speed ${formatSpeed(currentSpeed)}`);
     speedChip.setAttribute("aria-expanded", String(speedOpen));
     speedRow.hidden = !speedOpen;
+    const options = speedOptions(currentSpeed);
     for (const [index, button] of speedButtons.entries()) {
-      const selected = speedOptions(currentSpeed)[index]?.selected ?? false;
+      const selected = options[index]?.selected ?? false;
       button.setAttribute("aria-pressed", String(selected));
       button.classList.toggle("o-selected", selected);
     }
@@ -337,7 +338,7 @@ export function createView(root: HTMLElement) {
   speedChip.addEventListener("click", () => {
     setSpeedOpen(!speedOpen);
   });
-  page.addEventListener("keydown", (event) => {
+  root.ownerDocument.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !speedOpen) return;
     setSpeedOpen(false);
     if (speedRow.contains(document.activeElement)) speedChip.focus();
