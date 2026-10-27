@@ -19,7 +19,6 @@ import numpy as np
 import soundfile
 import soxr
 import torch
-from safetensors import SafetensorError, safe_open
 from safetensors.torch import save_file
 from transformers import WhisperConfig, WhisperFeatureExtractor, WhisperModel
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
@@ -34,6 +33,7 @@ SAMPLES_PER_FRAME = 320
 FRAMES_PER_SECOND = SAMPLE_RATE // SAMPLES_PER_FRAME
 INFO_NAME = "features.json"
 IO_THREADS = 32
+SUFFIX = ".safetensors"
 
 Log = Callable[[dict[str, object]], None]
 
@@ -129,14 +129,13 @@ def encode(
     return frames
 
 
-def _has_frames(path: Path, encoder_dim: int) -> bool:
-    try:
-        with safe_open(path, "pt") as file:
-            piece = file.get_slice("frames")
-            shape = piece.get_shape()
-            return piece.get_dtype() == "F16" and len(shape) == 2 and shape[1] == encoder_dim
-    except (OSError, SafetensorError, KeyError):
-        return False
+def _finished(features_dir: Path) -> set[str]:
+    """Names of finished feature files, from one directory listing.
+
+    A file only gets its final name by an atomic rename after it is fully written,
+    so its presence is proof enough; opening each one costs ~0.2 s on a Modal volume.
+    """
+    return {entry.name for entry in os.scandir(features_dir) if entry.name.endswith(SUFFIX)}
 
 
 def _write_atomically(path: Path, frames: torch.Tensor) -> None:
@@ -172,18 +171,16 @@ def extract(
     """Writes features for the first `limit` samples of `manifest` and returns `(written, skipped)`.
 
     A sample whose file already loads is skipped, so an interrupted run resumes. Each
-    batch logs one line with the running count and clips per second. Checks, reads and
-    writes run on `IO_THREADS` threads, overlapping the encoder: on a Modal volume each
+    batch logs one line with the running count and clips per second. Reads and writes
+    run on `IO_THREADS` threads, overlapping the encoder: on a Modal volume each
     file costs ~0.2 s of latency, which otherwise caps a run at ~5 clips/s.
     """
     info = FeaturesInfo(model=model, encoder_dim=encoder.config.d_model)
     samples = read_manifest(manifest)[:limit]
     _claim_directory(features_dir, info)
     with ThreadPoolExecutor(IO_THREADS) as pool:
-        present = list(
-            pool.map(lambda s: _has_frames(_target(features_dir, s), info.encoder_dim), samples)
-        )
-        todo = [s for s, done in zip(samples, present, strict=True) if not done]
+        finished = _finished(features_dir)
+        todo = [s for s in samples if _target(features_dir, s).name not in finished]
         skipped = len(samples) - len(todo)
         batches = [todo[i : i + batch_size] for i in range(0, len(todo), batch_size)]
 
@@ -222,7 +219,7 @@ def extract(
 
 
 def _target(features_dir: Path, sample: Sample) -> Path:
-    return features_dir / f"{sample.id}.safetensors"
+    return features_dir / f"{sample.id}{SUFFIX}"
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:

@@ -145,13 +145,13 @@ def test_written_files_follow_the_load_frames_contract(tmp_path: Path, tiny) -> 
     ]
 
 
-def test_resume_skips_files_that_load_and_redoes_the_rest(tmp_path: Path, tiny) -> None:
+def test_resume_skips_finished_files_and_redoes_the_rest(tmp_path: Path, tiny) -> None:
     manifest = make_manifest(tmp_path, {n: (tone(4_000, i), 16_000) for i, n in enumerate("abc")})
     features = tmp_path / "features"
     extract(manifest, features, *tiny, model="tiny")
     kept = (features / "a.safetensors").stat().st_mtime_ns
     (features / "b.safetensors").unlink()
-    (features / "c.safetensors").write_bytes(b"truncated")
+    (features / "c.safetensors").rename(features / "c.safetensors.part")
     assert extract(manifest, features, *tiny, model="tiny") == (2, 1)
     assert (features / "a.safetensors").stat().st_mtime_ns == kept
     assert load_frames(features, Record("c", "t", "answer", "train", RECORD), DIM).shape[0] == 13
