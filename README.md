@@ -20,40 +20,92 @@ or vLLM for the language model, for example.
 
 ## Run it
 
-1. Start speech, one of:
-   - **Qwen3-TTS** (GPU, about 6 GB of VRAM). Download
-     [Qwen3-TTS-12Hz-1.7B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base)
-     with `hf download Qwen/Qwen3-TTS-12Hz-1.7B-Base --local-dir ~/thalvi-tts/models/qwen3-base`,
-     then start the server:
+1. Start speech (details in [Speech](#speech)). On an NVIDIA GPU with 9 GB
+   of free VRAM:
 
-     ```sh
-     docker run -d --name thalvi-qwen3 --gpus all \
-       --memory=10g --memory-swap=10g --cpus=12 --pids-limit=512 \
-       -p 127.0.0.1:8001:8001 \
-       -v ~/thalvi-tts/models:/models:ro -v ~/thalvi-tts/voices:/data/voices \
-       -e QWEN3_TTS_MODEL_ID=/models/qwen3-base -e HF_HUB_OFFLINE=1 -e HF_HOME=/tmp/hf \
-       ghcr.io/malaiwah/qwen3-tts-server:latest --host 0.0.0.0 --port 8001
-     ```
+   ```sh
+   hf download Qwen/Qwen3-TTS-12Hz-1.7B-Base --local-dir ~/thalvi-tts/models/qwen3-base
+   docker compose --profile vllm-omni up -d --wait
+   ```
 
-     Clone `af_heart` once: with Kokoro running (below), have it read a
-     reference line, then register that clip and its transcript.
-
-     ```sh
-     text="Wait, you did what? That's amazing! Okay, let me explain how it works. First you pick a quiet spot, then you read the page out loud, nice and slowly, and it picks up the rest. Does that make sense? If it doesn't, no worries at all, we can go through it together, one step at a time."
-     curl -s 127.0.0.1:8880/v1/audio/speech -H 'content-type: application/json' \
-       -d "{\"model\":\"kokoro\",\"voice\":\"af_heart\",\"response_format\":\"wav\",\"input\":\"$text\"}" \
-       -o /tmp/af_heart_ref.wav
-     curl -s 127.0.0.1:8001/v1/voices -F name=af_heart -F audio=@/tmp/af_heart_ref.wav -F "ref_text=$text"
-     ```
-
-     Put the returned `id` (`vc_…`) in `TTS_VOICE`.
-   - **Kokoro** (CPU; use it when the GPU is busy, for example with a local
-     language model): `docker run -d -p 127.0.0.1:8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu:latest`,
-     and in `.env` set `TTS_API=openai`, `TTS_BASE_URL=http://127.0.0.1:8880/v1`
-     and `TTS_VOICE=af_heart`.
-2. `cp .env.example .env` and fill in the API keys and `TTS_VOICE`.
+   Without one, `docker compose --profile kokoro up -d --wait`.
+2. `cp .env.example .env` and fill in the API keys and the speech lines for the
+   engine you started.
 3. `npm ci --prefix web && npm run build --prefix web`, then `cargo run --release`.
 4. `tailscale serve --bg 8080` and open the printed HTTPS address on your phone.
+
+## Speech
+
+`compose.yaml` runs the speech server in Docker, with pinned images, ports on
+127.0.0.1 and memory limits. Weights and registered voices live under
+`$SPEECH_DIR` (default `~/thalvi-tts`). `--wait` returns once the server answers
+its health check. Thalvi reads `TTS_API`, `TTS_BASE_URL`, `TTS_VOICE` and, for
+`openai`, `TTS_MODEL` from `.env`; to switch engine, change those lines and
+restart Thalvi.
+
+| Engine | First audio | Cost | Needs |
+| --- | --- | --- | --- |
+| Kokoro | ~0.15 s for a short sentence, ~1 s for a long one | CPU, ~1 GB RAM | nothing |
+| Qwen3-TTS clone of `af_heart`, vLLM-Omni | ~50 ms | ~8 GB VRAM, ~8 GB RAM, ~2.5 min to start | NVIDIA GPU, Ampere or newer |
+| Qwen3-TTS, `qwen3-tts-server` | ~0.2 s | ~6 GB VRAM | NVIDIA GPU, any recent one |
+
+**Kokoro** (`--profile kokoro`):
+
+```sh
+TTS_API=openai
+TTS_BASE_URL=http://127.0.0.1:8880/v1
+TTS_MODEL=kokoro
+TTS_VOICE=af_heart
+```
+
+Any [Kokoro voice](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md)
+name works for `TTS_VOICE`.
+
+**Qwen3-TTS on vLLM-Omni** (`--profile vllm-omni`). The first start also runs
+Kokoro, which reads a reference line for the `af_heart` clone and then stays up
+as the CPU fallback.
+
+```sh
+TTS_API=openai
+TTS_BASE_URL=http://127.0.0.1:8091/v1
+TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-Base
+TTS_VOICE=af_heart
+```
+
+To speak in another voice, register a clip of it (a few seconds of clean
+speech) with its transcript, then put the name in `TTS_VOICE`:
+
+```sh
+curl 127.0.0.1:8091/v1/audio/voices -F audio_sample=@me.wav -F consent=mine \
+  -F name=me -F "ref_text=What the clip says"
+```
+
+A misspelled voice name fails with a confusing "does not support
+task_type='CustomVoice'" error. Qwen3's built-in presets (such as `vivian`)
+are not in the Base checkpoint; they need `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`
+in its place (download it, then change the model path and `--served-model-name`
+in `compose.yaml` and `TTS_MODEL`).
+
+**Qwen3-TTS on older GPUs** (before Ampere, such as an RTX 2080, which
+vLLM-Omni does not run on) uses `qwen3-tts-server`, which streams framed PCM:
+
+```sh
+docker run -d --name thalvi-qwen3 --gpus all \
+  --memory=10g --memory-swap=10g --pids-limit=512 \
+  -p 127.0.0.1:8001:8001 \
+  -v ~/thalvi-tts/models:/models:ro -v ~/thalvi-tts/voices:/data/voices \
+  -e QWEN3_TTS_MODEL_ID=/models/qwen3-base -e HF_HUB_OFFLINE=1 -e HF_HOME=/tmp/hf \
+  ghcr.io/malaiwah/qwen3-tts-server:latest --host 0.0.0.0 --port 8001
+curl -s 127.0.0.1:8001/v1/voices -F name=af_heart -F audio=@ref.wav -F "ref_text=$text"
+```
+
+```sh
+TTS_API=qwen3
+TTS_BASE_URL=http://127.0.0.1:8001/v1
+TTS_VOICE=vc_…   # the id the voices call returned
+```
+
+Here `ref.wav` is a clip of the voice and `$text` its transcript.
 
 ## Status
 
