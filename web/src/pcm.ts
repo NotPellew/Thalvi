@@ -11,14 +11,19 @@ export function floatToPcm16(input: Float32Array): Int16Array {
   return out;
 }
 
-/** Streaming linear-interpolation resampler to the wire rate. */
+/** Streaming linear-interpolation resampler between two rates. */
 export class Resampler {
   private readonly step: number;
   private pos = 1;
   private prev = 0;
 
-  constructor(inputRate: number) {
-    this.step = inputRate / WIRE_RATE;
+  constructor(inputRate: number, outputRate: number = WIRE_RATE) {
+    this.step = inputRate / outputRate;
+  }
+
+  reset(): void {
+    this.pos = 1;
+    this.prev = 0;
   }
 
   process(input: Float32Array): Float32Array {

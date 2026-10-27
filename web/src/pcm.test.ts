@@ -46,6 +46,21 @@ describe("Resampler", () => {
   );
 });
 
+describe("Resampler to another output rate", () => {
+  it("resamples 24 kHz to 48 kHz and reset restarts it", () => {
+    const input = ramp(2400, 1e-5);
+    const resampler = new Resampler(24000, 48000);
+    const out = resampler.process(input);
+    expect(out.length).toBeGreaterThan(4700);
+    expect(out.length).toBeLessThan(4900);
+    expect(out[2]).toBeCloseTo(1e-5, 6);
+    resampler.reset();
+    const again = resampler.process(input);
+    expect(again.length).toBe(out.length);
+    expect(again[2]).toBeCloseTo(out[2] ?? 0, 6);
+  });
+});
+
 describe("MicEncoder", () => {
   it("emits 80 ms frames of 24 kHz s16le from 48 kHz input blocks", () => {
     const encoder = new MicEncoder(48000);
