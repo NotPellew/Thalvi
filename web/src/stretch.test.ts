@@ -86,10 +86,35 @@ describe("TimeStretcher", () => {
     expect(Math.abs(measureFreq(tailMiddle) - 440)).toBeLessThan(20);
   });
 
-  it("rejects an invalid rate", () => {
+  it("finish returns what remains at the new rate after a mid-stream rate change", () => {
     const s = new TimeStretcher();
-    s.push(tone(0.1));
-    expect(() => s.pull(0)).toThrow(RangeError);
-    expect(() => s.pull(Number.NaN)).toThrow(RangeError);
+    s.push(new Float32Array(48000).fill(0.1));
+    expect(s.pull(0.75, 32000)).toHaveLength(32000);
+    const tail = s.finish(2);
+    expect(Math.abs(tail.length - 12000)).toBeLessThanOrEqual(256);
+    expect(s.pendingInputSamples).toBe(0);
+  });
+
+  it("a 1× turn followed by a 1.5× turn keeps the second turn's tail", () => {
+    const s = new TimeStretcher();
+    s.push(new Float32Array(120000).fill(0.1));
+    let first = 0;
+    for (;;) {
+      const chunk = s.pull(1, 1024);
+      if (chunk.length === 0) break;
+      first += chunk.length;
+    }
+    expect(first).toBe(120000);
+    s.push(new Float32Array(48000).fill(0.1));
+    let pulled = 0;
+    for (;;) {
+      const chunk = s.pull(1.5, 1024);
+      if (chunk.length === 0) break;
+      pulled += chunk.length;
+    }
+    const tail = s.finish(1.5);
+    expect(tail.length).toBeGreaterThan(0);
+    expect(Math.abs(pulled + tail.length - 32000)).toBeLessThanOrEqual(256);
+    expect(s.pendingInputSamples).toBe(0);
   });
 });

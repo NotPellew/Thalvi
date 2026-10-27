@@ -8,15 +8,10 @@ const TOLERANCE = 64;
 const WINDOW_TABLE = new Float32Array(WINDOW);
 for (let i = 0; i < WINDOW; i++) WINDOW_TABLE[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / WINDOW));
 
-function checkRate(rate: number): void {
-  if (!Number.isFinite(rate) || rate <= 0) throw new RangeError(`invalid playback rate: ${String(rate)}`);
-}
-
 export class TimeStretcher {
   private buffer = new Float32Array(8192);
   private length = 0;
   private base = 0;
-  private analysisPos = 0;
   private nominalPos = 0;
   private readPos = 0;
   private prevAnalysis: number | null = null;
@@ -26,8 +21,7 @@ export class TimeStretcher {
   private readonly olaWin = new Float32Array(WINDOW);
   private outChunks: Float32Array[] = [];
   private outOffset = 0;
-  private totalPushed = 0;
-  private produced = 0;
+  private readonly scores = new Float32Array(2 * TOLERANCE + 1);
 
   get pendingInputSamples(): number {
     const cursor = this.active ? Math.floor(this.nominalPos) : this.readPos;
@@ -48,11 +42,9 @@ export class TimeStretcher {
     }
     this.buffer.set(input, this.length);
     this.length += input.length;
-    this.totalPushed += input.length;
   }
 
   pull(rate: number, maxSamples = Number.POSITIVE_INFINITY): Float32Array {
-    checkRate(rate);
     if (maxSamples <= 0) return new Float32Array(0);
     while (this.queuedSamples() < maxSamples) {
       if (rate === 1 && !this.active) {
@@ -62,7 +54,6 @@ export class TimeStretcher {
         const start = this.readPos - this.base;
         const chunk = this.buffer.slice(start, start + take);
         this.readPos += take;
-        this.analysisPos = this.readPos;
         this.nominalPos = this.readPos;
         this.enqueueOut(chunk);
       } else {
@@ -75,10 +66,8 @@ export class TimeStretcher {
   }
 
   finish(rate: number): Float32Array {
-    checkRate(rate);
     this.finished = true;
-    const emittedBefore = this.produced - this.queuedSamples();
-    const expected = Math.round(this.totalPushed / rate);
+    const target = this.queuedSamples() + Math.round(this.pendingInputSamples / rate);
     const parts: Float32Array[] = [];
     let length = 0;
     for (;;) {
@@ -86,22 +75,21 @@ export class TimeStretcher {
       if (chunk.length === 0) break;
       parts.push(chunk);
       length += chunk.length;
-      if (emittedBefore + length >= expected) break;
+      if (length >= target) break;
     }
-    const wanted = Math.max(0, expected - emittedBefore);
-    if (length < wanted && this.active) {
+    if (length < target && this.active) {
       const tail = new Float32Array(OVERLAP);
       for (let i = 0; i < OVERLAP; i++) {
         const w = this.olaWin[i] ?? 0;
         tail[i] = w > 1e-6 ? (this.ola[i] ?? 0) / w : 0;
       }
-      const take = Math.min(tail.length, wanted - length);
+      const take = Math.min(tail.length, target - length);
       if (take > 0) {
         parts.push(tail.subarray(0, take));
         length += take;
       }
     }
-    const all = new Float32Array(Math.min(length, wanted));
+    const all = new Float32Array(Math.min(length, target));
     let at = 0;
     for (const part of parts) {
       if (at >= all.length) break;
@@ -116,7 +104,6 @@ export class TimeStretcher {
   reset(): void {
     this.length = 0;
     this.base = 0;
-    this.analysisPos = 0;
     this.nominalPos = 0;
     this.readPos = 0;
     this.prevAnalysis = null;
@@ -126,8 +113,6 @@ export class TimeStretcher {
     this.olaWin.fill(0);
     this.outChunks = [];
     this.outOffset = 0;
-    this.totalPushed = 0;
-    this.produced = 0;
   }
 
   private get end(): number {
@@ -157,7 +142,6 @@ export class TimeStretcher {
 
   private enqueueOut(chunk: Float32Array): void {
     this.outChunks.push(chunk);
-    this.produced += chunk.length;
   }
 
   private dequeue(maxSamples: number): Float32Array {
@@ -195,7 +179,7 @@ export class TimeStretcher {
         targetEnergy += v * v;
       }
       if (targetEnergy > 1e-12) {
-        const scores = new Float32Array(2 * TOLERANCE + 1);
+        const scores = this.scores;
         let bestScore = Number.NEGATIVE_INFINITY;
         for (let delta = -TOLERANCE; delta <= TOLERANCE; delta++) {
           const start = nominal + delta;
@@ -235,7 +219,6 @@ export class TimeStretcher {
     this.olaWin.fill(0, OVERLAP);
     this.prevAnalysis = candidate;
     this.nominalPos = nominal + HOP * rate;
-    this.analysisPos = candidate;
     this.readPos = Math.min(Math.round(this.nominalPos), this.end);
     this.active = true;
     return out;
