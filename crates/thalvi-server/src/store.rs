@@ -73,6 +73,8 @@ pub enum Detach {
 
 struct Live {
     dead: Arc<AtomicBool>,
+    /// Earlier connections whose takeover has not resumed yet, so can still save.
+    predecessors: Vec<Arc<AtomicBool>>,
     detach: oneshot::Sender<Detach>,
     released: oneshot::Receiver<()>,
 }
@@ -162,21 +164,37 @@ impl SessionStore {
             let id = resume
                 .filter(|id| state.sessions.contains_key(*id))
                 .map_or_else(|| self.new_id(), str::to_string);
-            let live = Live {
-                dead: Arc::clone(&dead),
-                detach: detach_tx,
-                released: released_rx,
-            };
-            let previous = state.live.insert(id.clone(), live);
-            (id, previous)
+            let previous = state.live.remove(&id);
+            let predecessors = previous.as_ref().map_or_else(Vec::new, |previous| {
+                let mut all = previous.predecessors.clone();
+                all.push(Arc::clone(&previous.dead));
+                all
+            });
+            state.live.insert(
+                id.clone(),
+                Live {
+                    dead: Arc::clone(&dead),
+                    predecessors: predecessors.clone(),
+                    detach: detach_tx,
+                    released: released_rx,
+                },
+            );
+            (id, previous.map(|previous| (previous, predecessors)))
         };
-        if let Some(previous) = previous {
+        if let Some((previous, predecessors)) = previous {
             if previous.detach.send(Detach::Moved).is_ok() {
                 let _ = tokio::time::timeout(HANDOFF_WAIT, previous.released).await;
             }
-            // Under the lock, so no save from the old connection lands after this.
-            let _state = self.lock();
-            previous.dead.store(true, Ordering::SeqCst);
+            // Under the lock, so no save from any older connection lands after this.
+            let mut state = self.lock();
+            for older in &predecessors {
+                older.store(true, Ordering::SeqCst);
+            }
+            if let Some(live) = state.live.get_mut(&id)
+                && Arc::ptr_eq(&live.dead, &dead)
+            {
+                live.predecessors.clear();
+            }
         }
         let (history, next_turn) = self.lock().sessions.get(&id).map_or_else(
             || (Vec::new(), 0),
@@ -307,6 +325,9 @@ impl SessionStore {
         let existed = state.sessions.remove(id).is_some();
         if let Some(live) = state.live.remove(id) {
             live.dead.store(true, Ordering::SeqCst);
+            for older in &live.predecessors {
+                older.store(true, Ordering::SeqCst);
+            }
             let _ = live.detach.send(Detach::Deleted);
         }
         if existed {
@@ -510,5 +531,63 @@ mod tests {
             (history.history, history.next_turn),
             (vec![ChatMessage::user("hi".to_string())], 1)
         );
+    }
+
+    fn one(text: &str) -> Vec<ChatMessage> {
+        vec![ChatMessage::user(text.to_string())]
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_conversation_deleted_during_a_handoff_stays_deleted() {
+        let dir = scratch("delete-during");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let mut old = store.attach(None).await;
+        store.save(&old, &one("initial"), 1);
+        let id = old.id.clone();
+        let takeover = store.attach(Some(&id));
+        tokio::pin!(takeover);
+        assert!(futures_util::poll!(&mut takeover).is_pending());
+        assert_eq!(old.detached().await, Detach::Moved);
+
+        assert!(store.delete(&id));
+        store.save(&old, &one("partial reply after delete"), 2);
+        store.release(old);
+        let _ = takeover.await;
+        store.flush().await;
+        let remaining = SessionStore::open(&dir)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .list();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(remaining, vec![], "the deleted conversation came back");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_takeover_of_a_takeover_revokes_every_older_connection() {
+        let dir = scratch("chain");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let oldest = store.attach(None).await;
+        store.save(&oldest, &one("initial"), 1);
+        let id = oldest.id.clone();
+        let middle = store.attach(Some(&id));
+        tokio::pin!(middle);
+        assert!(futures_util::poll!(&mut middle).is_pending());
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        let newest = store.attach(Some(&id));
+        tokio::pin!(newest);
+        assert!(futures_util::poll!(&mut newest).is_pending());
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+
+        // Both deadlines have passed and the newest resumes first.
+        let newest = newest.await;
+        store.save(&newest, &one("newest history"), 3);
+        store.save(&oldest, &one("stale oldest history"), 1);
+        let _ = middle.await;
+        store.flush().await;
+        let reopened = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let history = reopened.attach(Some(&id)).await.history;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(history, one("newest history"));
     }
 }
