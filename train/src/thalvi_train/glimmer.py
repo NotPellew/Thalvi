@@ -181,6 +181,7 @@ def _load_decoder_4bit(path: Path, text_config: MuseGlimmerTextConfig, device: t
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.bfloat16,
         bnb_4bit_use_double_quant=True,
+        llm_int8_enable_fp32_cpu_offload=True,
     )
     device_map = {
         "embed_tokens": "cpu",

@@ -42,6 +42,8 @@ LIBRISPEECH_SUBSETS = ("train-clean-100", "dev-clean", "test-clean")
 GLIMMER_MOUNT = "/glimmer"
 DATA_MOUNT = "/data"
 GLIMMER_DIR = f"{GLIMMER_MOUNT}/Muse-Glimmer-30B"
+GLIMMER_TEXT_DIR = f"{GLIMMER_MOUNT}/Muse-Glimmer-30B-text"
+TEXT_SHARD_BYTES = 4 * 1024**3
 SPEECH_MANIFEST = f"{DATA_MOUNT}/speech/manifest.jsonl"
 LIBRISPEECH_ROOT = f"{DATA_MOUNT}/librispeech"
 LIBRISPEECH_MANIFEST = f"{LIBRISPEECH_ROOT}/manifest.jsonl"
@@ -111,10 +113,15 @@ def run_logged(command: Sequence[str]) -> None:
         raise subprocess.CalledProcessError(code, list(command))
 
 
-@app.function(image=project_image, volumes={GLIMMER_MOUNT: glimmer_volume}, timeout=2 * HOUR)
+@app.function(image=project_image, volumes={GLIMMER_MOUNT: glimmer_volume}, timeout=3 * HOUR)
 def fetch_glimmer() -> None:
-    """Downloads Glimmer's whole repository, vision tower included, onto `thalvi-glimmer`."""
+    """Downloads Glimmer onto `thalvi-glimmer`, plus the text-only resharded copy training loads.
+
+    vLLM serves the original; training loads the copy (see `thalvi_train.reshard`).
+    """
     from huggingface_hub import snapshot_download
+
+    from thalvi_train.reshard import reshard
 
     with logged("glimmer", None):
         path = Path(
@@ -123,6 +130,7 @@ def fetch_glimmer() -> None:
         shards = sorted(path.glob("*.safetensors"))
         gigabytes = sum(shard.stat().st_size for shard in shards) / 1e9
         print(f"{len(shards)} shards, {gigabytes:.1f} GB in {path}", flush=True)
+        reshard(path, Path(GLIMMER_TEXT_DIR), TEXT_SHARD_BYTES)
         glimmer_volume.commit()
 
 
@@ -285,7 +293,7 @@ def run_train(run_name: str, extra_args: str) -> None:
                 "--features-dir",
                 FEATURES_DIR,
                 "--glimmer",
-                GLIMMER_DIR,
+                GLIMMER_TEXT_DIR,
                 "--out-dir",
                 f"{RUNS_DIR}/{run_name}",
                 "--device",

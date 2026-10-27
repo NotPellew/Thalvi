@@ -1351,7 +1351,7 @@ requires-dist = [
     { name = "bitsandbytes", marker = "extra == 'cu128'", specifier = ">=0.50" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "numpy", specifier = ">=2.3" },
-    { name = "safetensors", specifier = ">=0.7" },
+    { name = "safetensors", specifier = ">=0.8" },
     { name = "soundfile", specifier = ">=0.13" },
     { name = "soxr", specifier = ">=1.0" },
     { name = "torch", marker = "extra == 'cpu'", specifier = ">=2.11", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "thalvi-train", extra = "cpu" } },
