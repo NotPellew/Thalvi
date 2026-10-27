@@ -22,10 +22,26 @@ use crate::tts::Tts;
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
+const ACK_DELAY: Duration = Duration::from_millis(500);
+const ACK_LINES: [&str; 3] = [
+    "Got it, one moment.",
+    "Let me think about that.",
+    "One moment.",
+];
+
+type AckCache = Arc<std::sync::Mutex<std::collections::HashMap<&'static str, Bytes>>>;
+
+#[derive(Clone)]
+struct AckSettings {
+    enabled: bool,
+    cache: AckCache,
+}
+
 enum ReplyEvent {
     Delta(String),
     Sentence(String),
     Audio(Bytes),
+    AckAudio(Bytes),
     FirstSentence(Instant),
     ModelFinished(Instant),
     Finished,
@@ -51,6 +67,7 @@ struct ActiveReply {
     model_finished_at: Option<Instant>,
     first_sentence_at: Option<Instant>,
     first_audio_at: Option<Instant>,
+    ack_first_audio_at: Option<Instant>,
     audio_bytes: usize,
 }
 
@@ -170,6 +187,10 @@ impl Voice {
 const MAX_TEXT_CHARS: usize = 20_000;
 
 /// Runs one client session until its socket closes.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session state is passed explicitly rather than bundled into a context type"
+)]
 pub async fn handle_session<F, M, T>(
     socket: WebSocket,
     factory: F,
@@ -178,6 +199,7 @@ pub async fn handle_session<F, M, T>(
     store: Arc<SessionStore>,
     resume: Option<String>,
     recording_config: RecordingConfig,
+    ack_enabled: bool,
 ) where
     F: RecognizerFactory + Send + Sync + 'static,
     F::Rec: Send + 'static,
@@ -205,6 +227,10 @@ pub async fn handle_session<F, M, T>(
     send_state(&mut sink, "idle").await;
     tracing::info!("session opened");
 
+    let ack = AckSettings {
+        enabled: ack_enabled,
+        cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+    };
     let voice = watch::Sender::new(false);
     let mut voice_on = false;
     let mut recognizer: Option<RecognizerHandle> = None;
@@ -242,7 +268,7 @@ pub async fn handle_session<F, M, T>(
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
-                        handle_client_text(&text, &mut sink, &mut recognizer, &mut rec_rx, &factory, &voice, &mut voice_on, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut turn_log).await;
+                        handle_client_text(&text, &mut sink, &mut recognizer, &mut rec_rx, &factory, &voice, &mut voice_on, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut turn_log, ack.clone()).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
@@ -253,7 +279,7 @@ pub async fn handle_session<F, M, T>(
                 }
             }
             recognizer_message = recognizer_event => {
-                handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut rec_rx, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &voice, &mut voice_on, &mut turn_log).await;
+                handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut rec_rx, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &voice, &mut voice_on, &mut turn_log, ack.clone()).await;
             }
             event = reply_event => {
                 let Some(event) = event else {
@@ -297,6 +323,7 @@ async fn handle_client_text<F, M, T>(
     model: &Arc<M>,
     tts: &Arc<T>,
     turn_log: &mut TurnLog,
+    ack: AckSettings,
 ) where
     F: RecognizerFactory + Send + Sync + 'static,
     F::Rec: Send + 'static,
@@ -348,6 +375,7 @@ async fn handle_client_text<F, M, T>(
                     "text",
                     text.clone(),
                     turn_log,
+                    ack.clone(),
                 )
                 .await;
                 let mut fields = json!({"turn": turn, "source": "text"});
@@ -382,6 +410,7 @@ async fn handle_recognizer_message<M, T>(
     voice: &watch::Sender<bool>,
     voice_on: &mut bool,
     turn_log: &mut TurnLog,
+    ack: AckSettings,
 ) where
     M: ChatModel + 'static,
     T: Tts + 'static,
@@ -438,6 +467,7 @@ async fn handle_recognizer_message<M, T>(
                     "voice",
                     text.clone(),
                     turn_log,
+                    ack.clone(),
                 )
                 .await;
                 record_voice_turn(turn_log, turn, &pending, &text);
@@ -671,6 +701,7 @@ async fn begin_turn<M, T>(
     source: &'static str,
     text: String,
     turn_log: &mut TurnLog,
+    ack: AckSettings,
 ) -> u64
 where
     M: ChatModel + 'static,
@@ -700,6 +731,7 @@ where
         history.clone(),
         turn,
         turn_log.recorder.clone(),
+        ack,
     );
     *reply = Some(active);
     *reply_rx = Some(events_rx);
@@ -713,6 +745,7 @@ fn start_reply<M, T>(
     history: Vec<ChatMessage>,
     turn: u64,
     recorder: Recorder,
+    ack: AckSettings,
 ) -> (ActiveReply, mpsc::Receiver<ReplyEvent>)
 where
     M: ChatModel + 'static,
@@ -722,7 +755,7 @@ where
     let spoken_throughout = *voice.borrow();
     let active = ActiveReply {
         handle: tokio::spawn(
-            run_reply(model, tts, voice, history, events_tx, turn, recorder).in_current_span(),
+            run_reply(model, tts, voice, history, events_tx, turn, recorder, ack).in_current_span(),
         ),
         turn,
         started_at: Instant::now(),
@@ -734,6 +767,7 @@ where
         model_finished_at: None,
         first_sentence_at: None,
         first_audio_at: None,
+        ack_first_audio_at: None,
         audio_bytes: 0,
     };
     (active, events_rx)
@@ -780,7 +814,20 @@ async fn handle_reply_event(
                 active.sent_sentences.push(sentence);
             }
         }
-        ReplyEvent::Audio(_) if !state.on => {}
+        ReplyEvent::AckAudio(_) | ReplyEvent::Audio(_) if !state.on => {}
+        ReplyEvent::AckAudio(audio) => {
+            if reply.as_ref().is_some_and(|active| !active.speaking_sent) {
+                send_state(sink, "speaking").await;
+            }
+            if let Some(active) = reply {
+                active.speaking_sent = true;
+                if active.ack_first_audio_at.is_none() {
+                    active.ack_first_audio_at = Some(Instant::now());
+                }
+            }
+            client_audio.sent(audio.len());
+            let _ = sink.send(Message::Binary(audio)).await;
+        }
         ReplyEvent::Audio(audio) => {
             if reply.as_ref().is_some_and(|active| !active.speaking_sent) {
                 send_state(sink, "speaking").await;
@@ -853,6 +900,7 @@ fn emit_reply_record(
         "tts_model": recorder.tts_model(),
         "voice": recorder.tts_voice(),
         "first_audio_ms": ms_since(active.first_audio_at),
+        "ack_first_audio_ms": ms_since(active.ack_first_audio_at),
         "sentences": active.sent_sentences.len(),
         "audio_ms": u64::try_from(active.audio_bytes).unwrap_or(u64::MAX) * 1000 / 48_000,
         "outcome": outcome,
@@ -870,11 +918,13 @@ fn emit_reply_record(
 /// Stores what the user got: a finished reply in full, a cut-off one as far as it was spoken.
 fn record_assistant_history(history: &mut Vec<ChatMessage>, active: &ActiveReply, finished: bool) {
     let spoken = active.sent_sentences.join(" ");
-    let text = if finished || !active.spoken_throughout || spoken.trim().is_empty() {
-        active.text.trim().to_string()
-    } else {
-        spoken
-    };
+    let heard_only_ack = active.speaking_sent && spoken.trim().is_empty();
+    let text =
+        if finished || !active.spoken_throughout || (spoken.trim().is_empty() && !heard_only_ack) {
+            active.text.trim().to_string()
+        } else {
+            spoken
+        };
     if !text.is_empty() {
         history.push(ChatMessage::assistant(text));
     }
@@ -974,6 +1024,10 @@ impl Drop for AbortOnDrop {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session state is passed explicitly rather than bundled into a context type"
+)]
 async fn run_reply<M, T>(
     model: Arc<M>,
     tts: Arc<T>,
@@ -982,6 +1036,7 @@ async fn run_reply<M, T>(
     events: mpsc::Sender<ReplyEvent>,
     turn: u64,
     recorder: Recorder,
+    ack: AckSettings,
 ) where
     M: ChatModel + 'static,
     T: Tts + 'static,
@@ -1007,6 +1062,7 @@ async fn run_reply<M, T>(
             turn,
             recorder,
             failure_sent,
+            ack,
         )
         .in_current_span(),
     );
@@ -1128,6 +1184,10 @@ where
     true
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session state is passed explicitly rather than bundled into a context type"
+)]
 async fn consume_sentences<T>(
     mut sentences: mpsc::UnboundedReceiver<String>,
     tts: Arc<T>,
@@ -1136,10 +1196,39 @@ async fn consume_sentences<T>(
     turn: u64,
     recorder: Recorder,
     failure_sent: Arc<AtomicBool>,
+    ack: AckSettings,
 ) -> bool
 where
     T: Tts,
 {
+    let mut pending_first: Option<String> = None;
+    if ack.enabled && *voice.borrow() {
+        match tokio::time::timeout(ACK_DELAY, sentences.recv()).await {
+            Ok(Some(sentence)) => pending_first = Some(sentence),
+            Ok(None) => return true,
+            Err(_) => {
+                let line = ACK_LINES[usize::try_from(turn.saturating_sub(1) % 3).unwrap_or(0)];
+                if !speak_ack(&tts, &mut voice, &events, line, turn, &recorder, &ack.cache).await {
+                    return false;
+                }
+            }
+        }
+    }
+    if let Some(sentence) = pending_first
+        && *voice.borrow()
+        && !speak_sentence(
+            &tts,
+            &mut voice,
+            &events,
+            &sentence,
+            turn,
+            &recorder,
+            &failure_sent,
+        )
+        .await
+    {
+        return false;
+    }
     while let Some(sentence) = sentences.recv().await {
         if *voice.borrow()
             && !speak_sentence(
@@ -1156,6 +1245,98 @@ where
             return false;
         }
     }
+    true
+}
+
+fn lock_ack_cache(
+    ack_cache: &AckCache,
+) -> std::sync::MutexGuard<'_, std::collections::HashMap<&'static str, Bytes>> {
+    ack_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+async fn speak_ack<T: Tts>(
+    tts: &Arc<T>,
+    voice: &mut watch::Receiver<bool>,
+    events: &mpsc::Sender<ReplyEvent>,
+    line: &'static str,
+    turn: u64,
+    recorder: &Recorder,
+    ack_cache: &AckCache,
+) -> bool {
+    tokio::select! {
+        biased;
+        () = voice_turned_off(voice) => true,
+        keep_going = synthesize_ack(tts, events, line, turn, recorder, ack_cache) => keep_going,
+    }
+}
+
+async fn synthesize_ack<T: Tts>(
+    tts: &Arc<T>,
+    events: &mpsc::Sender<ReplyEvent>,
+    line: &'static str,
+    turn: u64,
+    recorder: &Recorder,
+    ack_cache: &AckCache,
+) -> bool {
+    let started = Instant::now();
+    let total_ms =
+        |started: Instant| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let cached = lock_ack_cache(ack_cache).get(line).cloned();
+    if let Some(pcm) = cached {
+        if events.send(ReplyEvent::AckAudio(pcm)).await.is_err() {
+            return false;
+        }
+        recorder.emit(
+            "ack",
+            json!({"turn": turn, "cached": true, "total_ms": total_ms(started)}),
+        );
+        return true;
+    }
+    let mut audio = match tts.synthesize(line).await {
+        Ok(audio) => audio,
+        Err(error) => {
+            tracing::warn!(%error, "acknowledgement synthesis failed");
+            recorder.emit(
+                "ack",
+                json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "outcome": "failed"}),
+            );
+            return true;
+        }
+    };
+    let mut pcm: Vec<u8> = Vec::new();
+    while let Some(chunk) = audio.next().await {
+        match chunk {
+            Ok(chunk) if chunk.is_empty() => {}
+            Ok(chunk) => {
+                pcm.extend_from_slice(&chunk);
+                if events.send(ReplyEvent::AckAudio(chunk)).await.is_err() {
+                    return false;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "acknowledgement synthesis failed");
+                recorder.emit(
+                    "ack",
+                    json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "outcome": "failed"}),
+                );
+                return true;
+            }
+        }
+    }
+    if pcm.is_empty() {
+        recorder.emit(
+            "ack",
+            json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "outcome": "failed"}),
+        );
+        return true;
+    }
+    lock_ack_cache(ack_cache).insert(line, Bytes::from(pcm));
+    recorder.emit(
+        "ack",
+        json!({"turn": turn, "cached": false, "total_ms": total_ms(started)}),
+    );
     true
 }
 
@@ -1494,7 +1675,10 @@ async fn run_recognizer<F>(
 
 #[cfg(test)]
 mod tests {
-    use super::{ForwardClock, ReplyEvent, model_ms, run_reply};
+    use super::{
+        ACK_LINES, AckCache, AckSettings, ActiveReply, ForwardClock, ReplyEvent, model_ms,
+        record_assistant_history, run_reply,
+    };
     use crate::model::{ChatMessage, ChatModel, DeltaStream, ModelError};
     use crate::recorder::{RecordingConfig, start_recording};
     use crate::tts::{AudioStream, Tts, TtsError};
@@ -1560,11 +1744,62 @@ mod tests {
         }
     }
 
+    struct GatedModel {
+        release: Arc<Notify>,
+    }
+
+    impl ChatModel for GatedModel {
+        fn stream_reply(
+            &self,
+            _history: &[ChatMessage],
+        ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
+            let release = Arc::clone(&self.release);
+            let stream: DeltaStream = Box::pin(futures_util::stream::once(async move {
+                release.notified().await;
+                Ok("First answer.".to_string())
+            }));
+            std::future::ready(Ok(stream))
+        }
+    }
+
+    struct AckFailTts {
+        spoken: Arc<Mutex<Vec<String>>>,
+        entered: Arc<Notify>,
+    }
+
+    impl Tts for AckFailTts {
+        fn synthesize(
+            &self,
+            text: &str,
+        ) -> impl std::future::Future<Output = Result<AudioStream, TtsError>> + Send {
+            self.spoken
+                .lock()
+                .expect("spoken lock")
+                .push(text.to_string());
+            self.entered.notify_one();
+            let result = if ACK_LINES.contains(&text) {
+                Err(TtsError("ack failed".to_string()))
+            } else {
+                Ok(
+                    Box::pin(futures_util::stream::iter(vec![Ok(Bytes::from_static(
+                        b"audio",
+                    ))])) as AudioStream,
+                )
+            };
+            std::future::ready(result)
+        }
+    }
+
+    fn new_ack_cache() -> AckCache {
+        Arc::new(Mutex::new(std::collections::HashMap::new()))
+    }
+
     fn describe(event: &ReplyEvent) -> String {
         match event {
             ReplyEvent::Delta(text) => format!("delta:{text}"),
             ReplyEvent::Sentence(sentence) => format!("sentence:{sentence}"),
             ReplyEvent::Audio(_) => "audio".to_string(),
+            ReplyEvent::AckAudio(_) => "ack_audio".to_string(),
             ReplyEvent::Finished => "finished".to_string(),
             ReplyEvent::Failed(message) => format!("failed:{message}"),
             ReplyEvent::FirstSentence(_) => "first_sentence".to_string(),
@@ -1602,6 +1837,10 @@ mod tests {
             events_tx,
             1,
             recorder,
+            AckSettings {
+                enabled: false,
+                cache: new_ack_cache(),
+            },
         ));
         tokio::time::timeout(Duration::from_secs(5), entered.notified())
             .await
@@ -1678,6 +1917,10 @@ mod tests {
             events_tx,
             1,
             recorder,
+            AckSettings {
+                enabled: false,
+                cache: new_ack_cache(),
+            },
         ));
         tokio::time::timeout(Duration::from_secs(5), entered.notified())
             .await
@@ -1730,6 +1973,10 @@ mod tests {
             events_tx,
             1,
             recorder,
+            AckSettings {
+                enabled: false,
+                cache: new_ack_cache(),
+            },
         ));
         let mut seen = Vec::new();
         loop {
@@ -1749,6 +1996,245 @@ mod tests {
             "voice off should not synthesize: {seen:?}"
         );
         assert!(spoken.lock().expect("spoken lock").is_empty());
+    }
+
+    async fn collect_until_finished(events_rx: &mut mpsc::Receiver<ReplyEvent>) -> Vec<String> {
+        let mut seen = Vec::new();
+        loop {
+            let description = next_description(events_rx).await;
+            let is_finished = description == "finished";
+            seen.push(description);
+            if is_finished {
+                break;
+            }
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn slow_reply_speaks_ack_before_first_sentence() {
+        let spoken = Arc::new(Mutex::new(Vec::new()));
+        let tts = Arc::new(FakeTts {
+            spoken: Arc::clone(&spoken),
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            block_first: AtomicBool::new(false),
+        });
+        let release = Arc::new(Notify::new());
+        let (_voice_tx, voice_rx) = watch::channel(true);
+        let (events_tx, mut events_rx) = mpsc::channel(64);
+        let recorder = start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
+        let handle = tokio::spawn(run_reply(
+            Arc::new(GatedModel {
+                release: Arc::clone(&release),
+            }),
+            tts,
+            voice_rx,
+            Vec::new(),
+            events_tx,
+            1,
+            recorder,
+            AckSettings {
+                enabled: true,
+                cache: new_ack_cache(),
+            },
+        ));
+        let first = next_description(&mut events_rx).await;
+        assert_eq!(first, "ack_audio", "ack should arrive before any sentence");
+        release.notify_one();
+        let rest = collect_until_finished(&mut events_rx).await;
+        handle.await.expect("reply task should finish");
+        assert!(
+            rest.iter().any(|event| event == "sentence:First answer."),
+            "real sentence should follow the ack: {rest:?}"
+        );
+        assert!(
+            !rest.iter().any(|event| event.starts_with("failed")),
+            "reply should not fail: {rest:?}"
+        );
+        assert!(
+            !rest.iter().any(|event| event
+                .strip_prefix("sentence:")
+                .is_some_and(|s| ACK_LINES.contains(&s))),
+            "ack text must not appear as a sentence: {rest:?}"
+        );
+        let spoken = spoken.lock().expect("spoken lock").clone();
+        assert_eq!(spoken.first().map(String::as_str), Some(ACK_LINES[0]));
+        assert!(spoken.contains(&"First answer.".to_string()), "{spoken:?}");
+    }
+
+    #[tokio::test]
+    async fn fast_reply_speaks_no_ack() {
+        let spoken = Arc::new(Mutex::new(Vec::new()));
+        let tts = Arc::new(FakeTts {
+            spoken: Arc::clone(&spoken),
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            block_first: AtomicBool::new(false),
+        });
+        let (_voice_tx, voice_rx) = watch::channel(true);
+        let (events_tx, mut events_rx) = mpsc::channel(64);
+        let recorder = start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
+        let handle = tokio::spawn(run_reply(
+            Arc::new(FakeModel),
+            tts,
+            voice_rx,
+            Vec::new(),
+            events_tx,
+            1,
+            recorder,
+            AckSettings {
+                enabled: true,
+                cache: new_ack_cache(),
+            },
+        ));
+        let seen = collect_until_finished(&mut events_rx).await;
+        handle.await.expect("reply task should finish");
+        assert!(
+            !seen.iter().any(|event| event == "ack_audio"),
+            "fast reply should not speak an ack: {seen:?}"
+        );
+        assert!(
+            !spoken
+                .lock()
+                .expect("spoken lock")
+                .iter()
+                .any(|text| ACK_LINES.contains(&text.as_str())),
+            "fast reply should not synthesize an ack"
+        );
+    }
+
+    #[tokio::test]
+    async fn second_slow_turn_replays_cached_ack() {
+        let spoken = Arc::new(Mutex::new(Vec::new()));
+        let tts = Arc::new(FakeTts {
+            spoken: Arc::clone(&spoken),
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            block_first: AtomicBool::new(false),
+        });
+        let cache = new_ack_cache();
+        for turn in [1_u64, 4_u64] {
+            let release = Arc::new(Notify::new());
+            let (_voice_tx, voice_rx) = watch::channel(true);
+            let (events_tx, mut events_rx) = mpsc::channel(64);
+            let recorder =
+                start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
+            let handle = tokio::spawn(run_reply(
+                Arc::new(GatedModel {
+                    release: Arc::clone(&release),
+                }),
+                Arc::clone(&tts),
+                voice_rx,
+                Vec::new(),
+                events_tx,
+                turn,
+                recorder,
+                AckSettings {
+                    enabled: true,
+                    cache: Arc::clone(&cache),
+                },
+            ));
+            let first = next_description(&mut events_rx).await;
+            assert_eq!(first, "ack_audio", "turn {turn} should speak an ack");
+            release.notify_one();
+            let rest = collect_until_finished(&mut events_rx).await;
+            handle.await.expect("reply task should finish");
+            assert!(
+                rest.iter().any(|event| event == "sentence:First answer."),
+                "turn {turn} real sentence should follow: {rest:?}"
+            );
+        }
+        let ack_calls = spoken
+            .lock()
+            .expect("spoken lock")
+            .iter()
+            .filter(|text| text.as_str() == ACK_LINES[0])
+            .count();
+        assert_eq!(ack_calls, 1, "cached ack should be synthesized only once");
+    }
+
+    #[tokio::test]
+    async fn ack_tts_failure_still_delivers_reply() {
+        let spoken = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(Notify::new());
+        let tts = Arc::new(AckFailTts {
+            spoken: Arc::clone(&spoken),
+            entered: Arc::clone(&entered),
+        });
+        let release = Arc::new(Notify::new());
+        let (_voice_tx, voice_rx) = watch::channel(true);
+        let (events_tx, mut events_rx) = mpsc::channel(64);
+        let recorder = start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
+        let handle = tokio::spawn(run_reply(
+            Arc::new(GatedModel {
+                release: Arc::clone(&release),
+            }),
+            tts,
+            voice_rx,
+            Vec::new(),
+            events_tx,
+            1,
+            recorder,
+            AckSettings {
+                enabled: true,
+                cache: new_ack_cache(),
+            },
+        ));
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("ack synthesis should be attempted within timeout");
+        release.notify_one();
+        let seen = collect_until_finished(&mut events_rx).await;
+        handle.await.expect("reply task should finish");
+        assert!(
+            !seen.iter().any(|event| event == "ack_audio"),
+            "failed ack should produce no ack audio: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|event| event == "sentence:First answer."),
+            "real sentence should still arrive: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|event| event == "audio"),
+            "real audio should still arrive: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|event| event.starts_with("failed")),
+            "ack failure must not fail the reply: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cut_off_after_ack_audio_records_no_unspoken_reply_text() {
+        let make_active = |speaking_sent: bool| ActiveReply {
+            handle: tokio::spawn(async {}),
+            turn: 1,
+            started_at: Instant::now(),
+            sent_sentences: Vec::new(),
+            text: "One. Two. Three.".to_string(),
+            spoken_throughout: true,
+            speaking_sent,
+            first_delta_at: None,
+            model_finished_at: None,
+            first_sentence_at: None,
+            first_audio_at: None,
+            ack_first_audio_at: None,
+            audio_bytes: 0,
+        };
+        let mut history = Vec::new();
+        record_assistant_history(&mut history, &make_active(true), false);
+        assert!(
+            history.is_empty(),
+            "only the ack was heard, so no reply text belongs in history: {history:?}"
+        );
+        let mut history = Vec::new();
+        record_assistant_history(&mut history, &make_active(false), false);
+        assert_eq!(
+            history,
+            vec![ChatMessage::assistant("One. Two. Three.".to_string())],
+            "text shown before any audio is kept as before"
+        );
     }
 
     #[test]

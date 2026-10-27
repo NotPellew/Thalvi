@@ -36,6 +36,8 @@ pub struct Config {
     pub record: RecordKinds,
     /// Directory recordings are written under (`THALVI_DATA_DIR`).
     pub data_dir: PathBuf,
+    /// Whether the spoken acknowledgement is enabled (`THALVI_ACK`).
+    pub ack_enabled: bool,
 }
 
 /// Speech synthesis protocol (`TTS_API`).
@@ -99,6 +101,7 @@ impl Config {
             }
         };
         let tts_voice = required(&lookup, "TTS_VOICE", false)?;
+        let ack_enabled = parse_ack_enabled(lookup("THALVI_ACK").as_deref())?;
         let record = parse_record_kinds(lookup("THALVI_RECORD"))?;
         let data_dir = lookup("THALVI_DATA_DIR")
             .map(|value| value.trim().to_string())
@@ -119,7 +122,18 @@ impl Config {
             tts_voice,
             record,
             data_dir: PathBuf::from(data_dir),
+            ack_enabled,
         })
+    }
+}
+
+fn parse_ack_enabled(raw: Option<&str>) -> Result<bool, String> {
+    match raw.map(str::trim) {
+        None | Some("" | "off") => Ok(false),
+        Some("on") => Ok(true),
+        Some(other) => Err(format!(
+            "THALVI_ACK must be on or off: {other:?} (expected on, off, or unset)"
+        )),
     }
 }
 
@@ -252,6 +266,33 @@ mod tests {
                     let err = result.unwrap_err();
                     assert!(err.contains(name), "error {err:?} should name {name}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn ack_enabled_parses_on_off_unset_and_rejects_unknown_values() {
+        let cases: Vec<(Option<&str>, Result<bool, ()>)> = vec![
+            (None, Ok(false)),
+            (Some(""), Ok(false)),
+            (Some("off"), Ok(false)),
+            (Some("on"), Ok(true)),
+            (Some("yes"), Err(())),
+        ];
+        for (value, expected) in cases {
+            let mut vars = full();
+            if let Some(value) = value {
+                vars.insert("THALVI_ACK", value.to_string());
+            }
+            let result = Config::from_lookup(|name| vars.get(name).cloned()).map(|c| c.ack_enabled);
+            if let Ok(expected) = expected {
+                assert_eq!(result, Ok(expected), "value={value:?}");
+            } else {
+                let err = result.unwrap_err();
+                assert!(
+                    err.contains("THALVI_ACK") && err.contains("on") && err.contains("off"),
+                    "error should name THALVI_ACK and expected values: {err}"
+                );
             }
         }
     }
