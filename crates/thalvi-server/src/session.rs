@@ -917,9 +917,6 @@ async fn handle_reply_event(
         }
         ReplyEvent::AckAudio(_) | ReplyEvent::Audio(_) if !state.on => {}
         ReplyEvent::AckAudio(audio) => {
-            if reply.as_ref().is_some_and(|active| !active.speaking_sent) {
-                send_state(sink, "speaking").await;
-            }
             if let Some(active) = reply {
                 active.speaking_sent = true;
                 if active.ack_first_audio_at.is_none() {
@@ -930,7 +927,10 @@ async fn handle_reply_event(
             let _ = sink.send(Message::Binary(audio)).await;
         }
         ReplyEvent::Audio(audio) => {
-            if reply.as_ref().is_some_and(|active| !active.speaking_sent) {
+            if reply
+                .as_ref()
+                .is_some_and(|active| active.first_audio_at.is_none())
+            {
                 send_state(sink, "speaking").await;
             }
             if let Some(active) = reply {
