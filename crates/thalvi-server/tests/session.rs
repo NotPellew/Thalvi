@@ -1936,6 +1936,16 @@ async fn deleting_a_live_conversation_tells_its_device_and_it_is_not_saved_again
     let mut harness = start().await;
     let id = harness.session_id.clone();
     ask(&mut harness, "to be deleted", "Gone soon.").await;
+    harness.model.add_script(vec![
+        ModelChunk::Delta("Still talking. ".to_string()),
+        ModelChunk::Wait(Arc::new(Notify::new())),
+    ]);
+    send_json(&mut harness, &json!({"type": "text", "text": "and again"})).await;
+    let _ = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply"),
+    )
+    .await;
 
     let response = reqwest::Client::new()
         .delete(url(&harness, &format!("/sessions/{id}")))
