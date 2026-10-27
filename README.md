@@ -115,6 +115,16 @@ TTS_BASE_URL=http://127.0.0.1:8011/v1
 TTS_VOICE=af_heart
 ```
 
+## Audio input
+
+With `LLM_AUDIO_INPUT=on` the language model hears a spoken turn instead of
+reading its transcript: the turn's audio, as recorded and padded by 300 ms on
+each side, is sent as an OpenAI `input_audio` WAV part with no text beside it.
+The model must accept such parts; the transcript still drives the captions,
+the saved conversation and earlier turns, which go to the model as text. Typed
+turns are always text. Recordings of replies (`THALVI_RECORD=metrics`) carry
+`input_audio_ms`, the length of the clip sent.
+
 ## Conversations
 
 Every conversation is kept under `$THALVI_DATA_DIR/sessions/` (default
