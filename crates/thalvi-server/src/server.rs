@@ -29,6 +29,7 @@ pub struct AppState<T> {
     tts: Arc<T>,
     store: Arc<SessionStore>,
     recording: RecordingConfig,
+    ack_enabled: bool,
 }
 
 /// Builds the router from validated configuration.
@@ -73,6 +74,7 @@ fn with_tts<T: Tts + Clone + 'static>(config: &Config, tts: T, tts_model: String
             tts_model,
             tts_voice: config.tts_voice.clone(),
         },
+        ack_enabled: config.ack_enabled,
     };
     Router::new()
         .route("/session", get(session_upgrade::<T>))
@@ -96,6 +98,7 @@ async fn session_upgrade<T: Tts + Clone + 'static>(
             state.store,
             resume,
             state.recording,
+            state.ack_enabled,
         )
         .instrument(tracing::info_span!("session", id))
     })

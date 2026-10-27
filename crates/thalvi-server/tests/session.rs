@@ -329,6 +329,7 @@ async fn start_with_recording(recording: RecordingConfig) -> Harness {
                             store,
                             resume,
                             recording,
+                            false,
                         )
                     })
                 }

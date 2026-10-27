@@ -35,6 +35,12 @@ areas your change touches. Editing rules are in
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
   interrupts a reply by speaking. Why: hands and eyes are busy. Rejected:
   push-to-talk.
+- **Spoken acknowledgement.** With `THALVI_ACK=on`, a slow reply first plays a
+  canned line (rotated, synthesized once and cached per session) when no first
+  sentence arrives within 500 ms. Why: it covers the model's thinking gap with
+  no extra model call, and recordings report its first audio separately from
+  the real answer's. Rejected: a small model writing the line (adds the
+  latency it should hide), and on by default (no off baseline to compare).
 
 ## Repository
 
