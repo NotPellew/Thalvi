@@ -213,15 +213,27 @@ def test_a_batch_scores_each_sample_as_if_it_ran_alone(
 ) -> None:
     records = [RECORDS[0], RECORDS[1], Record("d", "a third sample", "answer", "eval", RESPONSE)]
     clips = [tone(WINDOW, 0), tone(1600, 1), tone(9600, 2)]
+    histories = [(("hi", "hello"),), (), (("one", "two"), ("three", "four"))]
     kwargs = {"max_new_tokens": 24, "with_text_baseline": True}
 
-    def run(rows, audio, index=0):
+    def run(rows, audio, earlier, index=0):
         return evaluate_batch(
-            glimmer, FakeTokenizer(), projector, *tiny_encoder, rows, audio, index=index, **kwargs
+            glimmer,
+            FakeTokenizer(),
+            projector,
+            *tiny_encoder,
+            rows,
+            audio,
+            histories=earlier,
+            index=index,
+            **kwargs,
         )
 
-    batched = run(records, clips)
-    alone = [run([record], [clip])[0] for record, clip in zip(records, clips, strict=True)]
+    batched = run(records, clips, histories)
+    alone = [
+        run([record], [clip], [history])[0]
+        for record, clip, history in zip(records, clips, histories, strict=True)
+    ]
 
     for together, single in zip(batched, alone, strict=True):
         assert together.response == single.response
@@ -236,6 +248,7 @@ def test_a_batch_scores_each_sample_as_if_it_ran_alone(
         [encode(*tiny_encoder, clips[:1])[0].float()],
         FakeTokenizer(),
         projector.audio_token_count,
+        histories=histories[:1],
     )
     with torch.no_grad():
         assert batched[0].kl == pytest.approx(
@@ -257,6 +270,7 @@ def test_a_batch_reports_audio_length_baseline_and_its_own_timings(
             *tiny_encoder,
             rows,
             clips,
+            histories=[(), ()],
             index=7,
             max_new_tokens=6,
             with_text_baseline=with_text_baseline,
@@ -291,6 +305,7 @@ def test_results_come_back_in_record_order_though_batches_group_by_prompt_length
         *tiny_encoder,
         records,
         resolve_audio(records, [audio_manifest]),
+        histories=[()] * 3,
         batch_size=2,
         max_new_tokens=3,
         with_text_baseline=False,
@@ -361,14 +376,15 @@ def test_summary_adds_the_baseline_finish_rate_only_when_every_sample_has_one() 
     assert "baseline_finished_rate" not in mixed
 
 
-def test_cli_writes_a_row_per_eval_sample_and_a_summary(
+@pytest.fixture
+def cli_arguments(
     tiny_glimmer_dir: Path,
     projector: AudioProjector,
     tiny_whisper_dir: Path,
     audio_manifest: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+) -> list[str]:
     manifest = tmp_path / "teacher.jsonl"
     manifest.write_text(
         "".join(json.dumps(r.__dict__ | {"source": "x"}) + "\n" for r in RECORDS),
@@ -379,22 +395,25 @@ def test_cli_writes_a_row_per_eval_sample_and_a_summary(
     (run / PROJECTOR_CONFIG).write_text(json.dumps(PROJECTOR.__dict__))
     save_file(projector.state_dict(), run / PROJECTOR_WEIGHTS)
     monkeypatch.setattr(evaluate, "_load_tokenizer", lambda path: FakeTokenizer())
+    return [
+        *("--manifest", str(manifest)),
+        *("--audio-manifest", str(audio_manifest)),
+        *("--whisper-model", str(tiny_whisper_dir)),
+        *("--glimmer", str(tiny_glimmer_dir)),
+        *("--projector", str(run)),
+        *("--out", str(run / "eval.jsonl")),
+        *("--max-new-tokens", "5"),
+        *("--batch-size", "2"),
+    ]
+
+
+def test_cli_writes_a_row_per_eval_sample_and_a_summary(
+    cli_arguments: list[str], tmp_path: Path
+) -> None:
+    run = tmp_path / "run"
     out = run / "eval.jsonl"
 
-    evaluate.main(
-        [
-            *("--manifest", str(manifest)),
-            *("--audio-manifest", str(audio_manifest)),
-            *("--whisper-model", str(tiny_whisper_dir)),
-            *("--glimmer", str(tiny_glimmer_dir)),
-            *("--projector", str(run)),
-            *("--out", str(out)),
-            *("--max-new-tokens", "5"),
-            *("--batch-size", "2"),
-            *("--latency-samples", "1"),
-            "--with-text-baseline",
-        ]
-    )
+    evaluate.main([*cli_arguments, *("--latency-samples", "1"), "--with-text-baseline"])
 
     rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
     assert [(row["id"], row["task"]) for row in rows] == [("a", "answer"), ("b", "continue")]
@@ -405,6 +424,7 @@ def test_cli_writes_a_row_per_eval_sample_and_a_summary(
     assert all(row["batch_encode_s"] > 0 for row in rows)
     summary = json.loads((run / "eval.summary.json").read_text(encoding="utf-8"))
     assert summary["samples"] == 2
+    assert summary["history"] == {"prob": 0.0, "turns": 3, "same_task": 0.5, "seed": 0}
     assert set(summary["by_task"]) == {"answer", "continue"}
     assert summary["median_batch_prefill_s"] == rows[0]["batch_prefill_s"] > 0
     assert summary["generated_tokens_per_s"] > 0
@@ -416,6 +436,49 @@ def test_cli_writes_a_row_per_eval_sample_and_a_summary(
         > single["median_time_to_first_token_s"]
         > 0
     )
+
+
+def test_cli_runs_samples_after_history_and_records_the_setting(
+    cli_arguments: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple] = []
+    real_evaluate_batch = evaluate.evaluate_batch
+
+    def spy(*args, histories, **kwargs):
+        seen.extend(histories)
+        return real_evaluate_batch(*args, histories=histories, **kwargs)
+
+    monkeypatch.setattr(evaluate, "evaluate_batch", spy)
+    arguments = [
+        *cli_arguments,
+        *("--history-prob", "1"),
+        *("--history-turns", "1"),
+        *("--history-same-task", "0"),
+        *("--latency-samples", "1"),
+    ]
+    evaluate.main(arguments)
+
+    assert seen[:2] == [(("once upon a time", "yes"),), (("what is two plus two", "yes"),)]
+    assert seen[2:] == seen[:1]
+    summary = json.loads((tmp_path / "run" / "eval.summary.json").read_text(encoding="utf-8"))
+    assert summary["history"] == {"prob": 1.0, "turns": 1, "same_task": 0.0, "seed": 0}
+    rows = [json.loads(line) for line in (tmp_path / "run" / "eval.jsonl").read_text().splitlines()]
+    evaluate.main(cli_arguments)
+    plain = [
+        json.loads(line) for line in (tmp_path / "run" / "eval.jsonl").read_text().splitlines()
+    ]
+    assert [r["kl"] for r in rows] != [r["kl"] for r in plain]
+
+
+def test_batches_group_by_prompt_length_including_history(
+    projector: AudioProjector,
+) -> None:
+    records = RECORDS[:2]
+    clips = [tone(1600), tone(1600)]
+    long = (("a long earlier question", "a long earlier answer"),)
+    kwargs = {"projector": projector, "tokenizer": FakeTokenizer(), "batch_size": 1}
+    assert evaluate.plan_batches(records, clips, [long, ()], **kwargs) == [[1], [0]]
+    assert evaluate.plan_batches(records, clips, [(), long], **kwargs) == [[0], [1]]
 
 
 def test_cli_refuses_a_projector_trained_for_another_hidden_size(

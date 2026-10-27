@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn.functional as F
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from tiny_glimmer import HIDDEN, FakeTokenizer
 from tiny_whisper import DIM, write_audio_manifest
 from transformers import MuseGlimmerForConditionalGeneration
@@ -13,6 +13,7 @@ from transformers import MuseGlimmerForConditionalGeneration
 from thalvi_train import train
 from thalvi_train.batch import make_batch
 from thalvi_train.glimmer import FrozenGlimmer, load_glimmer
+from thalvi_train.history import HistoryConfig, history_chars
 from thalvi_train.projector import AudioProjector
 from thalvi_train.records import Record, resolve_audio
 from thalvi_train.train import (
@@ -170,9 +171,9 @@ def test_every_micro_batch_is_encoded_from_its_own_records_audio(
         encoded.extend(len(clip) for clip in clips)
         return real_encode(encoder, extractor, clips)
 
-    def spy_make_batch(records, frames, *args):
+    def spy_make_batch(records, frames, *args, **kwargs):
         batched.extend(r.id for r in records)
-        return real_make_batch(records, frames, *args)
+        return real_make_batch(records, frames, *args, **kwargs)
 
     monkeypatch.setattr(train, "encode", spy_encode)
     monkeypatch.setattr(train, "make_batch", spy_make_batch)
@@ -217,3 +218,153 @@ def test_step_groups_cover_every_record_once_in_length_sorted_batches() -> None:
     assert all(len(group) <= 2 for group in groups)
     spread = sum(max(lengths[i] for i in b) - min(lengths[i] for i in b) for b in batches)
     assert spread / len(batches) < 100
+
+
+def test_history_reaches_both_prompts_and_training_still_lowers_the_loss(
+    glimmer: FrozenGlimmer,
+    tiny_encoder,
+    audio_manifest: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = {k: v.clone() for k, v in glimmer.state_dict().items()}
+    encoder_before = {k: v.clone() for k, v in tiny_encoder[0].state_dict().items()}
+    seen: list[list[tuple]] = []
+    real_make_batch = train.make_batch
+
+    def spy_make_batch(*args, histories, **kwargs):
+        seen.extend(histories)
+        return real_make_batch(*args, histories=histories, **kwargs)
+
+    monkeypatch.setattr(train, "make_batch", spy_make_batch)
+    lines: list[dict] = []
+    config = train_config(
+        tmp_path / "out",
+        batch_size=2,
+        grad_accum=1,
+        epochs=40,
+        max_steps=40,
+        history=HistoryConfig(prob=1.0, turns=1),
+    )
+    projector = run_on(glimmer, tiny_encoder, audio_manifest, RECORDS, config, lines.append)
+
+    assert len(lines) == 40
+    assert lines[-1]["loss"] < 0.5 * lines[0]["loss"]
+    assert sorted({history[0][0] for history in seen}) == [
+        "once upon a time",
+        "what is two plus two",
+    ]
+    assert all(len(history) == 1 for history in seen)
+    assert all(torch.equal(v, glimmer.state_dict()[k]) for k, v in before.items())
+    assert all(torch.equal(v, tiny_encoder[0].state_dict()[k]) for k, v in encoder_before.items())
+    untrained = AudioProjector(**PROJECTOR.__dict__)
+    assert any(
+        not torch.equal(p, q)
+        for p, q in zip(projector.parameters(), untrained.parameters(), strict=True)
+    )
+
+
+def test_length_bucketing_counts_the_history(
+    glimmer: FrozenGlimmer,
+    tiny_encoder,
+    audio_manifest: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[int]] = []
+    real_groups = train._step_groups
+
+    def spy_groups(lengths, *args):
+        seen.append(list(lengths))
+        return real_groups(lengths, *args)
+
+    monkeypatch.setattr(train, "_step_groups", spy_groups)
+    for prob in (0.0, 1.0):
+        config = train_config(
+            tmp_path / "out", grad_accum=1, history=HistoryConfig(prob=prob, turns=1)
+        )
+        run_on(glimmer, tiny_encoder, audio_manifest, RECORDS, config)
+
+    plain, with_history = seen
+    assert plain == [len(r.text) + len(r.response) for r in RECORDS]
+    extra = [history_chars(((RECORDS[1 - i].text, "yes"),)) for i in range(2)]
+    assert [b - a for a, b in zip(plain, with_history, strict=True)] == extra
+
+
+def save_run(directory: Path, config: ProjectorConfig, seed: int = 5) -> dict[str, torch.Tensor]:
+    torch.manual_seed(seed)
+    weights = AudioProjector(**config.__dict__).state_dict()
+    directory.mkdir()
+    (directory / PROJECTOR_CONFIG).write_text(json.dumps(config.__dict__))
+    save_file(weights, directory / PROJECTOR_WEIGHTS)
+    return weights
+
+
+def test_init_projector_starts_from_the_saved_weights(
+    glimmer: FrozenGlimmer, tiny_encoder, audio_manifest: Path, tmp_path: Path
+) -> None:
+    weights = save_run(tmp_path / "init", PROJECTOR)
+    still = train_config(tmp_path / "still", lr=0.0, init_projector=tmp_path / "init")
+    kept = run_on(glimmer, tiny_encoder, audio_manifest, RECORDS, still)
+    assert all(torch.equal(kept.state_dict()[k], v) for k, v in weights.items())
+
+    lines: list[dict] = []
+    moving = train_config(tmp_path / "moving", grad_accum=1, init_projector=tmp_path / "init")
+    moved = run_on(glimmer, tiny_encoder, audio_manifest, RECORDS, moving, lines.append)
+    assert lines[0]["lr"] == pytest.approx(3e-2)
+    assert any(not torch.equal(moved.state_dict()[k], v) for k, v in weights.items())
+    assert load_file(tmp_path / "moving" / PROJECTOR_WEIGHTS).keys() == weights.keys()
+
+
+def test_init_projector_with_another_config_is_refused(
+    glimmer: FrozenGlimmer, tiny_encoder, audio_manifest: Path, tmp_path: Path
+) -> None:
+    save_run(tmp_path / "init", ProjectorConfig(DIM, 48, HIDDEN, 4))
+    config = train_config(tmp_path / "out", init_projector=tmp_path / "init")
+    with pytest.raises(ValueError, match="hidden_dim=48"):
+        run_on(glimmer, tiny_encoder, audio_manifest, RECORDS, config)
+    assert not (tmp_path / "out" / PROJECTOR_WEIGHTS).exists()
+
+
+def test_cli_takes_the_projector_config_from_the_init_run_and_passes_history_flags(
+    tiny_glimmer_dir: Path,
+    tiny_whisper_dir: Path,
+    audio_manifest: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "teacher.jsonl"
+    manifest.write_text("".join(json.dumps(r.__dict__) + "\n" for r in RECORDS), encoding="utf-8")
+    config = ProjectorConfig(DIM, 48, HIDDEN, 2)
+    weights = save_run(tmp_path / "init", config)
+    monkeypatch.setattr(train, "_load_tokenizer", lambda path: FakeTokenizer())
+    batched: list = []
+    real_make_batch = train.make_batch
+
+    def spy_make_batch(*args, histories, **kwargs):
+        batched.extend(histories)
+        return real_make_batch(*args, histories=histories, **kwargs)
+
+    monkeypatch.setattr(train, "make_batch", spy_make_batch)
+    arguments = [
+        *("--manifest", str(manifest)),
+        *("--audio-manifest", str(audio_manifest)),
+        *("--whisper-model", str(tiny_whisper_dir)),
+        *("--glimmer", str(tiny_glimmer_dir)),
+        *("--out-dir", str(tmp_path / "out")),
+        *("--init-projector", str(tmp_path / "init")),
+        *("--lr", "0"),
+        *("--grad-accum", "1"),
+        *("--history-prob", "1"),
+        *("--history-turns", "1"),
+    ]
+    train.main(arguments)
+
+    out = tmp_path / "out"
+    assert json.loads((out / PROJECTOR_CONFIG).read_text()) == config.__dict__
+    saved = load_file(out / PROJECTOR_WEIGHTS)
+    assert all(torch.equal(saved[k], v) for k, v in weights.items())
+    assert len(batched) == 2 and all(len(history) == 1 for history in batched)
+
+    with pytest.raises(ValueError, match="hidden_dim"):
+        train.main([*arguments, "--hidden-dim", "64"])

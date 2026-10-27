@@ -7,6 +7,9 @@ from transformers import PreTrainedTokenizerBase
 
 from thalvi_train.records import Record, Task
 
+Turn = tuple[str, str]
+History = tuple[Turn, ...]
+
 SYSTEM_PROMPT = "You are Thalvi, a voice assistant. Reply in short spoken sentences, no markdown."
 CONTINUE_PREFIX = "Continue the following text: "
 AUDIO_TOKEN_TEXT = "<|reserved_special_token_1000|>"
@@ -17,8 +20,10 @@ GENERATION_PROMPT = "<|start|>assistant"
 class PromptTokenizer(Protocol):
     """What prompts and generations need from a tokenizer; the real one wraps Glimmer's."""
 
-    def chat_ids(self, system: str, user: str) -> list[int]:
-        """Ids of the system and user turns, ending after the user's `<|eot|>`."""
+    def chat_ids(self, system: str, user: str, history: History = ()) -> list[int]:
+        """Ids of the system turn, the `history` of `(user, assistant)` text turns, and the
+        user turn, ending after the user's `<|eot|>`.
+        """
         ...
 
     def text_ids(self, text: str) -> list[int]:
@@ -44,9 +49,14 @@ class GlimmerTokenizer:
     def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
         self.tokenizer = tokenizer
 
-    def chat_ids(self, system: str, user: str) -> list[int]:
+    def chat_ids(self, system: str, user: str, history: History = ()) -> list[int]:
+        messages = [{"role": "system", "content": system}]
+        for earlier_user, earlier_assistant in history:
+            messages.append({"role": "user", "content": earlier_user})
+            messages.append({"role": "assistant", "content": earlier_assistant})
+        messages.append({"role": "user", "content": user})
         rendered = self.tokenizer.apply_chat_template(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            messages,
             tokenize=False,
             add_generation_prompt=False,
             reasoning_strength=REASONING_STRENGTH,
@@ -88,13 +98,16 @@ def user_message(record: Record, audio: str | None = None) -> str:
     return user_turn(record.task, record.text if audio is None else audio)
 
 
-def generation_ids(task: Task, text: str, tokenizer: PromptTokenizer) -> list[int]:
+def generation_ids(
+    task: Task, text: str, tokenizer: PromptTokenizer, history: History = ()
+) -> list[int]:
     """Ids the teacher is prompted with for a transcript: the chat turns plus `GENERATION_PROMPT`.
 
     Every `Record.response` is `GENERATION_PROMPT` plus what the teacher generated
-    from these ids, so `build_example` trains on the prompt the teacher saw.
+    from these ids with no `history`, so `build_example` trains on the prompt the
+    teacher saw, plus any earlier turns.
     """
-    return tokenizer.chat_ids(SYSTEM_PROMPT, user_turn(task, text)) + tokenizer.text_ids(
+    return tokenizer.chat_ids(SYSTEM_PROMPT, user_turn(task, text), history) + tokenizer.text_ids(
         GENERATION_PROMPT
     )
 
@@ -104,8 +117,14 @@ def build_example(
     tokenizer: PromptTokenizer,
     audio_tokens: int,
     max_response_tokens: int | None = None,
+    history: History = (),
 ) -> Example:
     """Renders `record` for the teacher (text) and the student (`audio_tokens` placeholders).
+
+    Both prompts open with the same `history` of earlier text turns and differ only in
+    the current user turn; the response is the one stored with `record`, whatever the
+    history, because the echo of the current request that carries the audio signal
+    does not depend on it.
 
     With `max_response_tokens`, only the response's first tokens are kept: under
     teacher forcing, tokens after Glimmer's echo of the request read the transcript
@@ -114,8 +133,8 @@ def build_example(
     response_ids = tokenizer.text_ids(record.response)[:max_response_tokens]
     placeholders = AUDIO_TOKEN_TEXT * audio_tokens
     return Example(
-        teacher_ids=tokenizer.chat_ids(SYSTEM_PROMPT, user_message(record)) + response_ids,
-        student_ids=tokenizer.chat_ids(SYSTEM_PROMPT, user_message(record, placeholders))
+        teacher_ids=tokenizer.chat_ids(SYSTEM_PROMPT, user_message(record), history) + response_ids,
+        student_ids=tokenizer.chat_ids(SYSTEM_PROMPT, user_message(record, placeholders), history)
         + response_ids,
         response_ids=response_ids,
     )

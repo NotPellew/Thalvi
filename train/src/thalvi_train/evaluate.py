@@ -10,7 +10,11 @@ response is reported too.
 
 Samples run in batches of similar prompt length, left-padded, and rows come back in
 record order. The audio goes through the Whisper encoder inline, as in the live path,
-a batch at a time. A batch's timings sit on each of its rows, since a batch has no
+a batch at a time. With `--history-prob`, samples run after earlier text turns drawn
+from other evaluated records (see `history`), the same for every run of the same
+records and settings; the summary states the setting.
+
+A batch's timings sit on each of its rows, since a batch has no
 per-sample latency: `batch_encode_s` is the encoder, mel features included (reading
 files is not timed), `batch_prefill_s` the decoder's prefill to the first token, and
 `batch_generate_s` the whole decode, prefill included. The latency a single request sees
@@ -46,29 +50,31 @@ from thalvi_train.features import (
     read_audio,
 )
 from thalvi_train.glimmer import PAD_TOKEN_ID, FrozenGlimmer, load_glimmer
+from thalvi_train.history import HistoryConfig, HistorySampler, answer_of
 from thalvi_train.projector import AudioProjector
 from thalvi_train.prompts import (
     AUDIO_TOKEN_TEXT,
     CONTINUE_PREFIX,
     GENERATION_PROMPT,
     GlimmerTokenizer,
+    History,
     PromptTokenizer,
     generation_ids,
 )
 from thalvi_train.records import Record, read_records, resolve_audio
 from thalvi_train.teacher import EOT_ID
 from thalvi_train.train import (
-    PROJECTOR_CONFIG,
     PROJECTOR_WEIGHTS,
     ProjectorConfig,
+    read_projector_config,
     token_losses,
 )
 
 SUMMARY_SUFFIX = ".summary.json"
+HISTORY_SEED = 0
 
 _PARAGRAPH_BREAK = re.compile(r"\n\s*\n")
 _REASONING = re.compile(r"to=self<\|message\|>(.*?)(?:<\|eom\|>|<\|eot\|>|\Z)", re.DOTALL)
-_ANSWER = re.compile(r"to=user<\|message\|>(.*?)(?:<\|eot\|>|\Z)", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -153,8 +159,7 @@ def split_reply(generated: str) -> tuple[str, str]:
     Tolerates a generation cut off anywhere, since the student may run out of tokens.
     """
     reasoning = _REASONING.search(generated)
-    answer = _ANSWER.search(generated)
-    return (reasoning.group(1) if reasoning else "", answer.group(1) if answer else "")
+    return (reasoning.group(1) if reasoning else "", answer_of(generated))
 
 
 def transcript_of(reasoning: str, task: str) -> str:
@@ -234,13 +239,16 @@ def evaluate_batch(
     records: Sequence[Record],
     clips: Sequence[np.ndarray],
     *,
+    histories: Sequence[History],
     index: int,
     max_new_tokens: int,
     with_text_baseline: bool,
 ) -> list[SampleResult]:
     """Scores `records` together: their KLs, and the students' greedy replies from `clips`.
 
-    The clips are encoded as one batch. `index` numbers the batch in the results.
+    The clips are encoded as one batch. `histories[i]` is the earlier text turns in
+    front of `records[i]`, for the student and the baseline alike. `index` numbers the
+    batch in the results.
     """
     device = glimmer.device
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
@@ -248,13 +256,15 @@ def evaluate_batch(
     frames = [clip.float() for clip in encode(encoder, extractor, clips)]
     encode_s = time.perf_counter() - started
     with torch.no_grad(), autocast:
-        batch = make_batch(records, frames, tokenizer, projector.audio_token_count)
+        batch = make_batch(
+            records, frames, tokenizer, projector.audio_token_count, histories=histories
+        )
         kls = _sample_kl(glimmer, projector, batch, len(records))
         projected = projector(batch.frames.to(device))
         audio = [projected[i, :count] for i, count in enumerate(batch.audio_tokens)]
         prompts = [
-            generation_ids(record.task, AUDIO_TOKEN_TEXT * count, tokenizer)
-            for record, count in zip(records, batch.audio_tokens, strict=True)
+            generation_ids(record.task, AUDIO_TOKEN_TEXT * count, tokenizer, history)
+            for record, count, history in zip(records, batch.audio_tokens, histories, strict=True)
         ]
         ids, mask = _left_pad(prompts)
         student = generate(
@@ -262,7 +272,10 @@ def evaluate_batch(
         )
         baselines: list[Baseline | None] = [None] * len(records)
         if with_text_baseline:
-            texts = [generation_ids(r.task, r.text, tokenizer) for r in records]
+            texts = [
+                generation_ids(r.task, r.text, tokenizer, h)
+                for r, h in zip(records, histories, strict=True)
+            ]
             ids, mask = _left_pad(texts)
             teacher = generate(glimmer, glimmer.embed_text(ids), mask, max_new_tokens)
             for i, (new, done) in enumerate(zip(teacher.ids, teacher.finished, strict=True)):
@@ -351,11 +364,15 @@ def summarize_latency(results: Sequence[SampleResult]) -> dict[str, Any]:
 def plan_batches(
     records: Sequence[Record],
     clips: Sequence[np.ndarray],
+    histories: Sequence[History],
     projector: AudioProjector,
     tokenizer: PromptTokenizer,
     batch_size: int,
 ) -> list[list[int]]:
-    """Record indices in batches of at most `batch_size`, grouped by audio prompt length."""
+    """Record indices in batches of at most `batch_size`, grouped by audio prompt length.
+
+    The prompt counts the record's `histories` entry.
+    """
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
     lengths = [
@@ -364,9 +381,10 @@ def plan_batches(
                 record.task,
                 AUDIO_TOKEN_TEXT * projector.audio_token_count(frame_count(len(clip))),
                 tokenizer,
+                history,
             )
         )
-        for record, clip in zip(records, clips, strict=True)
+        for record, clip, history in zip(records, clips, histories, strict=True)
     ]
     order = sorted(range(len(records)), key=lengths.__getitem__)
     return [order[start : start + batch_size] for start in range(0, len(order), batch_size)]
@@ -381,6 +399,7 @@ def evaluate(
     records: Sequence[Record],
     audio: Sequence[Path],
     *,
+    histories: Sequence[History],
     batch_size: int,
     max_new_tokens: int,
     with_text_baseline: bool,
@@ -388,12 +407,14 @@ def evaluate(
 ) -> list[SampleResult]:
     """Evaluates `records` in batches, passing each batch's results to `emit` as it is done.
 
-    `audio[i]` is the file of `records[i]`. All clips are read first, so batches can
-    group similar lengths; the returned results are in the order of `records`.
+    `audio[i]` and `histories[i]` are the file and the earlier turns of `records[i]`.
+    All clips are read first, so batches can group similar lengths; the returned
+    results are in the order of `records`.
     """
     clips = [read_audio(path, extractor.n_samples) for path in audio]
     results: dict[int, SampleResult] = {}
-    for index, members in enumerate(plan_batches(records, clips, projector, tokenizer, batch_size)):
+    planned = plan_batches(records, clips, histories, projector, tokenizer, batch_size)
+    for index, members in enumerate(planned):
         batch = evaluate_batch(
             glimmer,
             tokenizer,
@@ -402,6 +423,7 @@ def evaluate(
             extractor,
             [records[i] for i in members],
             [clips[i] for i in members],
+            histories=[histories[i] for i in members],
             index=index,
             max_new_tokens=max_new_tokens,
             with_text_baseline=with_text_baseline,
@@ -420,6 +442,7 @@ def measure_latency(
     records: Sequence[Record],
     audio: Sequence[Path],
     *,
+    histories: Sequence[History],
     max_new_tokens: int,
 ) -> list[SampleResult]:
     """Runs each of `records` alone, as a batch of one: the latency of a single request."""
@@ -432,11 +455,12 @@ def measure_latency(
             extractor,
             [record],
             [read_audio(path, extractor.n_samples)],
+            histories=[history],
             index=index,
             max_new_tokens=max_new_tokens,
             with_text_baseline=False,
         )[0]
-        for index, (record, path) in enumerate(zip(records, audio, strict=True))
+        for index, (record, path, history) in enumerate(zip(records, audio, histories, strict=True))
     ]
 
 
@@ -444,7 +468,7 @@ def load_projector(
     run_dir: Path, text_dim: int, device: torch.device
 ) -> tuple[AudioProjector, ProjectorConfig]:
     """The trained projector of a run directory, on `device`; its output must be `text_dim` wide."""
-    config = ProjectorConfig(**json.loads((run_dir / PROJECTOR_CONFIG).read_text()))
+    config = read_projector_config(run_dir)
     if config.text_dim != text_dim:
         raise ValueError(f"projector text_dim {config.text_dim} != Glimmer hidden size {text_dim}")
     projector = AudioProjector(**asdict(config))
@@ -485,6 +509,24 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="first N samples also run alone, unbatched, for single-request latency",
     )
     parser.add_argument(
+        "--history-prob",
+        type=float,
+        default=0.0,
+        help="chance that a sample follows earlier text turns from other evaluated records",
+    )
+    parser.add_argument(
+        "--history-turns",
+        type=int,
+        default=HistoryConfig.turns,
+        help="most earlier turns a sample follows; each history has 1 to this many",
+    )
+    parser.add_argument(
+        "--history-same-task",
+        type=float,
+        default=HistoryConfig.same_task,
+        help="chance that a history is drawn from records of the sample's own task",
+    )
+    parser.add_argument(
         "--with-text-baseline",
         action="store_true",
         help="also decode from the transcript text with the same weights",
@@ -502,6 +544,8 @@ def main(argv: list[str] | None = None) -> None:
     if not records:
         raise SystemExit(f"no {args.split!r} records in {args.manifest}")
     audio = resolve_audio(records, args.audio_manifest)
+    history = HistoryConfig(args.history_prob, args.history_turns, args.history_same_task)
+    histories = HistorySampler(records, history, HISTORY_SEED).draw_all()
     glimmer = load_glimmer(args.glimmer, device=args.device, quantize=args.quantize)
     tokenizer = _load_tokenizer(args.glimmer)
     projector, config = load_projector(args.projector, glimmer.hidden_size, glimmer.device)
@@ -519,6 +563,7 @@ def main(argv: list[str] | None = None) -> None:
         extractor,
         records,
         audio,
+        histories=histories,
         batch_size=args.batch_size,
         max_new_tokens=args.max_new_tokens,
         with_text_baseline=args.with_text_baseline,
@@ -527,7 +572,7 @@ def main(argv: list[str] | None = None) -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     rows = "".join(json.dumps(asdict(r), ensure_ascii=False) + "\n" for r in results)
     args.out.write_text(rows, encoding="utf-8")
-    summary = summarize(results)
+    summary = summarize(results) | {"history": asdict(history) | {"seed": HISTORY_SEED}}
     if args.latency_samples:
         count = args.latency_samples
         alone = measure_latency(
@@ -538,6 +583,7 @@ def main(argv: list[str] | None = None) -> None:
             extractor,
             records[:count],
             audio[:count],
+            histories=histories[:count],
             max_new_tokens=args.max_new_tokens,
         )
         summary["single_request"] = summarize_latency(alone)

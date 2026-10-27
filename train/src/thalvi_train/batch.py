@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from thalvi_train.glimmer import PAD_TOKEN_ID
-from thalvi_train.prompts import Example, PromptTokenizer, build_example
+from thalvi_train.prompts import Example, History, PromptTokenizer, build_example
 from thalvi_train.records import Record
 
 
@@ -62,12 +62,18 @@ def make_batch(
     tokenizer: PromptTokenizer,
     audio_token_count: Callable[[int], int],
     max_response_tokens: int | None = None,
+    histories: Sequence[History] | None = None,
 ) -> Batch:
-    """Builds the batch for `records` whose encoder frames are `frames`."""
+    """Builds the batch for `records` whose encoder frames are `frames`.
+
+    `histories[i]` holds the earlier text turns in front of `records[i]`; none by default.
+    """
     audio_tokens = [audio_token_count(clip.shape[0]) for clip in frames]
     examples: list[Example] = [
-        build_example(record, tokenizer, count, max_response_tokens)
-        for record, count in zip(records, audio_tokens, strict=True)
+        build_example(record, tokenizer, count, max_response_tokens, history)
+        for record, count, history in zip(
+            records, audio_tokens, histories or [()] * len(records), strict=True
+        )
     ]
     response_lens = [len(example.response_ids) for example in examples]
     sides = []

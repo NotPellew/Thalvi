@@ -4,6 +4,10 @@ Only the projector trains. Per response token the loss is KL(teacher || student)
 at temperature 1, with an optional cross-entropy against the response tokens.
 Logits exist only at response positions, a chunk at a time. The frozen Whisper
 encoder runs inline on the training device, one micro-batch ahead of the projector.
+
+Some samples get earlier text turns drawn from other records (see `history`), the same
+for teacher and student, so the projector learns to hear the audio with text in context.
+`--init-projector` continues from an earlier run's weights.
 """
 
 import argparse
@@ -13,13 +17,13 @@ import random
 import time
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from torch.utils.checkpoint import checkpoint
 from transformers import AutoTokenizer, WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
@@ -27,6 +31,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from thalvi_train.batch import Batch, make_batch
 from thalvi_train.features import DEFAULT_MODEL, encode, load_encoder, read_audio
 from thalvi_train.glimmer import FrozenGlimmer, load_glimmer
+from thalvi_train.history import HistoryConfig, HistorySampler, history_chars
 from thalvi_train.projector import AudioProjector
 from thalvi_train.prompts import GlimmerTokenizer, PromptTokenizer
 from thalvi_train.records import Record, read_records, resolve_audio
@@ -47,9 +52,18 @@ class ProjectorConfig:
     stack: int = 8
 
 
+def read_projector_config(run_dir: Path) -> ProjectorConfig:
+    """The `ProjectorConfig` saved in a run directory."""
+    return ProjectorConfig(**json.loads((run_dir / PROJECTOR_CONFIG).read_text()))
+
+
 @dataclass(frozen=True)
 class TrainConfig:
-    """Optimisation settings. A step is one optimiser update over `grad_accum` micro-batches."""
+    """Optimisation settings. A step is one optimiser update over `grad_accum` micro-batches.
+
+    `init_projector` is a run directory whose weights the projector starts from; its
+    saved config must equal the one being trained. Warmup applies as for a fresh start.
+    """
 
     out_dir: Path
     batch_size: int = 1
@@ -65,6 +79,8 @@ class TrainConfig:
     kl_chunk: int = 64
     max_response_tokens: int | None = None
     seed: int = 0
+    history: HistoryConfig = field(default_factory=HistoryConfig)
+    init_projector: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -148,6 +164,13 @@ def _save_projector(projector: AudioProjector, path: Path) -> None:
     save_file({k: v.detach().cpu().contiguous() for k, v in projector.state_dict().items()}, path)
 
 
+def _load_init(run_dir: Path, expected: ProjectorConfig) -> dict[str, torch.Tensor]:
+    saved = read_projector_config(run_dir)
+    if saved != expected:
+        raise ValueError(f"{run_dir}: projector config {saved} does not match {expected}")
+    return load_file(run_dir / PROJECTOR_WEIGHTS)
+
+
 def _step_groups(
     lengths: Sequence[int], batch_size: int, grad_accum: int, rng: random.Random
 ) -> list[list[list[int]]]:
@@ -195,17 +218,22 @@ def run(
     config: TrainConfig,
     emit: Callable[[dict[str, float | int]], None],
 ) -> AudioProjector:
-    """Trains a fresh projector on `records`, emitting one dict per step and saving checkpoints.
+    """Trains a projector on `records`, emitting one dict per step and saving checkpoints.
 
-    `audio[i]` is the file of `records[i]`. Each micro-batch is read, run through the
-    frozen `encoder` without gradients, and only then through the projector.
+    The projector is fresh, or loaded from `config.init_projector`. `audio[i]` is the
+    file of `records[i]`. Each micro-batch is read, run through the frozen `encoder`
+    without gradients, and only then through the projector. Every epoch draws its own
+    histories, and the length bucketing counts them.
     """
     if not records:
         raise ValueError("no records to train on")
     torch.manual_seed(config.seed)
     rng = random.Random(config.seed)
     device = glimmer.device
-    projector = AudioProjector(**asdict(projector_config)).to(device)
+    projector = AudioProjector(**asdict(projector_config))
+    if config.init_projector is not None:
+        projector.load_state_dict(_load_init(config.init_projector, projector_config))
+    projector = projector.to(device)
     optimizer = torch.optim.AdamW(
         projector.parameters(), lr=config.lr, weight_decay=config.weight_decay
     )
@@ -213,12 +241,16 @@ def run(
     config.out_dir.mkdir(parents=True, exist_ok=True)
     (config.out_dir / PROJECTOR_CONFIG).write_text(json.dumps(asdict(projector_config)))
 
-    lengths = [len(record.text) + len(record.response) for record in records]
-    epochs = [
-        _step_groups(lengths, config.batch_size, config.grad_accum, rng)
-        for _ in range(config.epochs)
-    ]
-    plan = [group for groups in epochs for group in groups]
+    sampler = HistorySampler(records, config.history, config.seed)
+    histories = [sampler.draw_all(epoch) for epoch in range(config.epochs)]
+    epochs = []
+    for epoch_histories in histories:
+        lengths = [
+            len(record.text) + len(record.response) + history_chars(history)
+            for record, history in zip(records, epoch_histories, strict=True)
+        ]
+        epochs.append(_step_groups(lengths, config.batch_size, config.grad_accum, rng))
+    plan = [(epoch, group) for epoch, groups in enumerate(epochs) for group in groups]
     total_steps = min(len(plan), config.max_steps or len(plan))
     plan = plan[:total_steps]
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
@@ -226,10 +258,10 @@ def run(
     with ThreadPoolExecutor(READ_THREADS) as pool:
         clips = _read_ahead(
             pool,
-            [[audio[i] for i in indices] for group in plan for indices in group],
+            [[audio[i] for i in indices] for _, group in plan for indices in group],
             extractor.n_samples,
         )
-        for step, group in enumerate(plan, start=1):
+        for step, (epoch, group) in enumerate(plan, start=1):
             lr = lr_at(step - 1, total_steps, config.warmup_steps, config.lr)
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
@@ -244,6 +276,7 @@ def run(
                     tokenizer,
                     projector.audio_token_count,
                     config.max_response_tokens,
+                    histories=[histories[epoch][i] for i in indices],
                 )
                 with autocast:
                     parts = distill_loss(glimmer, projector, batch, config.kl_chunk)
@@ -299,11 +332,42 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, default=500)
     parser.add_argument("--kl-chunk", type=int, default=64)
     parser.add_argument("--max-response-tokens", type=int, help="train on the first N only")
-    parser.add_argument("--encoder-dim", type=int, default=ProjectorConfig.encoder_dim)
-    parser.add_argument("--hidden-dim", type=int, default=ProjectorConfig.hidden_dim)
-    parser.add_argument("--stack", type=int, default=ProjectorConfig.stack)
+    parser.add_argument(
+        "--encoder-dim", type=int, help=f"default {ProjectorConfig.encoder_dim}, or the init's"
+    )
+    parser.add_argument(
+        "--hidden-dim", type=int, help=f"default {ProjectorConfig.hidden_dim}, or the init's"
+    )
+    parser.add_argument("--stack", type=int, help=f"default {ProjectorConfig.stack}, or the init's")
+    parser.add_argument(
+        "--init-projector",
+        type=Path,
+        help="run dir whose projector weights and config training starts from",
+    )
+    parser.add_argument(
+        "--history-prob",
+        type=float,
+        default=HistoryConfig.prob,
+        help="chance that a sample gets earlier text turns from other records",
+    )
+    parser.add_argument(
+        "--history-turns",
+        type=int,
+        default=HistoryConfig.turns,
+        help="most earlier turns a sample gets; each history has 1 to this many",
+    )
+    parser.add_argument(
+        "--history-same-task",
+        type=float,
+        default=HistoryConfig.same_task,
+        help="chance that a history is drawn from records of the sample's own task",
+    )
     parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args(argv)
+
+
+def _load_tokenizer(path: Path) -> PromptTokenizer:
+    return GlimmerTokenizer(AutoTokenizer.from_pretrained(path))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -312,14 +376,18 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--quantize needs --device cuda")
     records = read_records(args.manifest, args.split, args.limit)
     audio = resolve_audio(records, args.audio_manifest)
-    encoder, extractor = load_encoder(args.whisper_model, args.device, args.encoder_dim)
+    base = ProjectorConfig()
+    if args.init_projector is not None:
+        base = read_projector_config(args.init_projector)
+    encoder_dim = base.encoder_dim if args.encoder_dim is None else args.encoder_dim
+    encoder, extractor = load_encoder(args.whisper_model, args.device, encoder_dim)
     glimmer = load_glimmer(args.glimmer, device=args.device, quantize=args.quantize)
-    tokenizer = GlimmerTokenizer(AutoTokenizer.from_pretrained(args.glimmer))
+    tokenizer = _load_tokenizer(args.glimmer)
     projector_config = ProjectorConfig(
-        encoder_dim=args.encoder_dim,
-        hidden_dim=args.hidden_dim,
+        encoder_dim=encoder_dim,
+        hidden_dim=base.hidden_dim if args.hidden_dim is None else args.hidden_dim,
         text_dim=glimmer.hidden_size,
-        stack=args.stack,
+        stack=base.stack if args.stack is None else args.stack,
     )
     config = TrainConfig(
         out_dir=args.out_dir,
@@ -336,6 +404,8 @@ def main(argv: list[str] | None = None) -> None:
         kl_chunk=args.kl_chunk,
         max_response_tokens=args.max_response_tokens,
         seed=args.seed,
+        history=HistoryConfig(args.history_prob, args.history_turns, args.history_same_task),
+        init_projector=args.init_projector,
     )
     run(
         glimmer,

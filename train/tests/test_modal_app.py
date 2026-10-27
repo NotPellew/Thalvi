@@ -85,3 +85,28 @@ def test_the_teacher_needs_some_manifest(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setattr(modal_app, "LIBRISPEECH_MANIFEST", str(tmp_path / "none.jsonl"))
     with pytest.raises(FileNotFoundError, match=r"none\.tar"):
         modal_app.teacher_manifests()
+
+
+@pytest.mark.filterwarnings("ignore:The run_train function is executing locally")
+def test_training_passes_extra_arguments_such_as_an_init_run_to_the_trainer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(modal_app, "stage_audio", lambda subsets: ["--audio-manifest", "m"])
+    monkeypatch.setattr(modal_app, "run_logged", commands.append)
+
+    modal_app.run_train.local(
+        "projector-v3", "--init-projector /data/runs/projector-v2 --history-prob 0.5"
+    )
+
+    (command,) = commands
+    tail = command[command.index("--device") :]
+    assert tail == [
+        "--device",
+        "cuda",
+        "--init-projector",
+        "/data/runs/projector-v2",
+        "--history-prob",
+        "0.5",
+    ]
+    assert command[command.index("--out-dir") + 1] == "/data/runs/projector-v3"

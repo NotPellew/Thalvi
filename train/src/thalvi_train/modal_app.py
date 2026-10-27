@@ -348,6 +348,8 @@ def run_teacher(limit: int, temperature: float, max_tokens: int, concurrency: in
 def run_train(run_name: str, extra_args: str) -> None:
     """Trains the projector on unquantized bf16 Glimmer; `extra_args` go to `thalvi_train.train`.
 
+    `--init-projector /data/runs/<earlier run>` continues from that run's projector.
+
     The audio is staged onto local disk first, inside the timed step.
     """
     with logged("train", GPU):

@@ -6,7 +6,7 @@ import torch
 from transformers import MuseGlimmerConfig, MuseGlimmerForConditionalGeneration
 
 from thalvi_train.glimmer import AUDIO_TOKEN_ID
-from thalvi_train.prompts import AUDIO_TOKEN_TEXT
+from thalvi_train.prompts import AUDIO_TOKEN_TEXT, History
 
 HIDDEN = 32
 BOS = 200000
@@ -48,8 +48,14 @@ def save_tiny_glimmer(path: Path) -> MuseGlimmerForConditionalGeneration:
 class FakeTokenizer:
     """One id per character, the chat markers as single ids, `AUDIO_TOKEN_TEXT` as the audio id."""
 
-    def chat_ids(self, system: str, user: str) -> list[int]:
-        return [BOS, START, *self.text_ids(system), EOT, START, *self.text_ids(user), EOT]
+    def chat_ids(self, system: str, user: str, history: History = ()) -> list[int]:
+        earlier = [
+            id
+            for first, second in history
+            for turn in (first, second)
+            for id in (START, *self.text_ids(turn), EOT)
+        ]
+        return [BOS, START, *self.text_ids(system), EOT, *earlier, START, *self.text_ids(user), EOT]
 
     def text_ids(self, text: str) -> list[int]:
         ids: list[int] = []
