@@ -52,6 +52,8 @@ pub struct SetupSummary {
     pub label: String,
     /// Replies measured.
     pub replies: usize,
+    /// Replies that finished without an error; the numbers below cover these.
+    pub succeeded: usize,
     /// Replies that failed.
     pub errors: usize,
     /// Time to first content token.
@@ -74,8 +76,13 @@ pub struct SetupSummary {
 #[must_use]
 pub fn summarize(name: &str, label: &str, samples: &[Sample]) -> SetupSummary {
     let mine: Vec<&Sample> = samples.iter().filter(|s| s.setup == name).collect();
+    let finished: Vec<&Sample> = mine
+        .iter()
+        .copied()
+        .filter(|s| s.measured.error.is_none())
+        .collect();
     let stat = |value: fn(&Sample) -> Option<f64>| {
-        Stat::of(mine.iter().filter_map(|s| value(s)).collect())
+        Stat::of(finished.iter().filter_map(|s| value(s)).collect())
     };
     let scores: Vec<f64> = mine
         .iter()
@@ -103,6 +110,7 @@ pub fn summarize(name: &str, label: &str, samples: &[Sample]) -> SetupSummary {
         name: name.to_string(),
         label: label.to_string(),
         replies: mine.len(),
+        succeeded: finished.len(),
         errors: mine.iter().filter(|s| s.measured.error.is_some()).count(),
         first_token: stat(|s| s.measured.first_token_s),
         first_sentence: stat(|s| s.measured.first_sentence_s),
@@ -116,7 +124,7 @@ pub fn summarize(name: &str, label: &str, samples: &[Sample]) -> SetupSummary {
 }
 
 /// Explains what the numbers are; printed under the table.
-pub const NOTE: &str = "Times are model and speech latencies in seconds from the request start, shown as median (min-max). The wait the user perceives adds endpointing (about 0.5-0.75 s) on top.";
+pub const NOTE: &str = "Times, sentences and audio cover the replies that finished without an error. Times are model and speech latencies in seconds from the request start, shown as median (min-max). The wait the user perceives adds endpointing (about 0.5-0.75 s) on top.";
 
 /// Renders the summaries as a table with one column per setup.
 #[must_use]
@@ -139,8 +147,11 @@ pub fn render_table(summaries: &[SetupSummary]) -> String {
             summaries.iter().map(|s| s.label.clone()).collect(),
         ),
         (
-            "replies (n)",
-            summaries.iter().map(|s| s.replies.to_string()).collect(),
+            "replies ok",
+            summaries
+                .iter()
+                .map(|s| format!("{} of {}", s.succeeded, s.replies))
+                .collect(),
         ),
         (
             "errors",

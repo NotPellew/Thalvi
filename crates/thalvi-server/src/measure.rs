@@ -193,6 +193,7 @@ impl Measured {
     }
 }
 
+#[derive(Default)]
 struct Produced {
     first_token: Option<f64>,
     first_sentence: Option<f64>,
@@ -201,6 +202,7 @@ struct Produced {
     error: Option<String>,
 }
 
+#[derive(Default)]
 struct Spoken {
     first_audio: Option<f64>,
     last_audio: Option<f64>,
@@ -217,10 +219,32 @@ pub async fn measure_reply(
 ) -> Measured {
     let start = Instant::now();
     let (sentence_tx, sentence_rx) = mpsc::unbounded_channel();
-    let (produced, spoken) = tokio::join!(
-        produce(model, history, start, sentence_tx),
-        speak(tts, start, sentence_rx)
-    );
+    let mut produced = Produced::default();
+    let mut spoken = Spoken::default();
+    {
+        let producing = produce(model, history, start, sentence_tx, &mut produced);
+        let speaking = speak(tts, start, sentence_rx, &mut spoken);
+        tokio::pin!(producing, speaking);
+        let (mut producing_done, mut speaking_done) = (false, false);
+        // The first failure ends the reply, like a session does; dropping the
+        // other side keeps the timings it had reached.
+        while !(producing_done && speaking_done) {
+            tokio::select! {
+                ok = &mut producing, if !producing_done => {
+                    producing_done = true;
+                    if !ok {
+                        break;
+                    }
+                }
+                ok = &mut speaking, if !speaking_done => {
+                    speaking_done = true;
+                    if !ok {
+                        break;
+                    }
+                }
+            }
+        }
+    }
     let mut error = produced.error.or(spoken.error);
     if error.is_none() && produced.sentences == 0 {
         error = Some("the model replied with no text".to_string());
@@ -252,19 +276,13 @@ async fn produce(
     history: &[ChatMessage],
     start: Instant,
     sentences: mpsc::UnboundedSender<String>,
-) -> Produced {
-    let mut produced = Produced {
-        first_token: None,
-        first_sentence: None,
-        sentences: 0,
-        reply: String::new(),
-        error: None,
-    };
+    produced: &mut Produced,
+) -> bool {
     let mut deltas = match model.stream_reply(history).await {
         Ok(deltas) => deltas,
         Err(error) => {
             produced.error = Some(format!("The language model could not reply: {error}"));
-            return produced;
+            return false;
         }
     };
     let mut splitter = SentenceSplitter::new();
@@ -281,7 +299,7 @@ async fn produce(
             Ok(delta) => delta,
             Err(error) => {
                 produced.error = Some(format!("The language model could not reply: {error}"));
-                return produced;
+                return false;
             }
         };
         produced
@@ -289,40 +307,36 @@ async fn produce(
             .get_or_insert_with(|| start.elapsed().as_secs_f64());
         produced.reply.push_str(&delta);
         for sentence in splitter.push(&delta) {
-            emit(&mut produced, sentence);
+            emit(produced, sentence);
         }
     }
     if let Some(tail) = splitter.finish() {
-        emit(&mut produced, tail);
+        emit(produced, tail);
     }
-    produced
+    true
 }
 
 async fn speak(
     tts: &impl Tts,
     start: Instant,
     mut sentences: mpsc::UnboundedReceiver<String>,
-) -> Spoken {
-    let mut spoken = Spoken {
-        first_audio: None,
-        last_audio: None,
-        audio_bytes: 0,
-        error: None,
-    };
+    spoken: &mut Spoken,
+) -> bool {
     while let Some(sentence) = sentences.recv().await {
         let mut audio = match tts.synthesize(&sentence).await {
             Ok(audio) => audio,
             Err(error) => {
                 spoken.error = Some(format!("Speech synthesis failed: {error}"));
-                return spoken;
+                return false;
             }
         };
+        let bytes_before = spoken.audio_bytes;
         while let Some(chunk) = audio.next().await {
             let chunk = match chunk {
                 Ok(chunk) => chunk,
                 Err(error) => {
                     spoken.error = Some(format!("Speech synthesis failed: {error}"));
-                    return spoken;
+                    return false;
                 }
             };
             if chunk.is_empty() {
@@ -333,8 +347,12 @@ async fn speak(
             spoken.last_audio = Some(now);
             spoken.audio_bytes += chunk.len();
         }
+        if spoken.audio_bytes == bytes_before {
+            spoken.error = Some("Speech synthesis returned no audio for a sentence".to_string());
+            return false;
+        }
     }
-    spoken
+    true
 }
 
 /// One measured reply for one setup, case and run.

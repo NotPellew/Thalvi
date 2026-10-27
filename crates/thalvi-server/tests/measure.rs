@@ -200,6 +200,14 @@ async fn failures_are_recorded_with_the_timings_reached_before_them() {
             sentences: 2,
         },
         Failure {
+            name: "speech returns no audio",
+            model: FakeModel::new("m", vec![Step::Delta(100, "One. Two.")]),
+            tts: FakeTts::new(vec![(10, 0)]),
+            error_has: "no audio",
+            first_audio: None,
+            sentences: 2,
+        },
+        Failure {
             name: "empty reply",
             model: FakeModel::new("m", vec![]),
             tts: one_second_tts(),
@@ -219,6 +227,39 @@ async fn failures_are_recorded_with_the_timings_reached_before_them() {
         assert_eq!(measured.end_to_end_s, None, "{}", failure.name);
         near(measured.first_audio_s, failure.first_audio, failure.name);
         assert_eq!(measured.sentences, failure.sentences, "{}", failure.name);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_first_failure_ends_the_reply_and_keeps_its_own_error() {
+    let mut mute = one_second_tts();
+    mute.cannot_start = true;
+    let cases = [
+        (
+            "speech fails while the model hangs",
+            FakeModel::new("m", vec![Step::Delta(10, "One. Two"), Step::Hang]),
+            mute,
+            "no voice",
+        ),
+        (
+            "the model fails while speech stalls",
+            FakeModel::new("m", vec![Step::Delta(10, "One. Two"), Step::Fail(40)]),
+            FakeTts::new(vec![(3_600_000, 48_000)]),
+            "stream cut",
+        ),
+    ];
+    for (name, model, tts, error_has) in cases {
+        let start = tokio::time::Instant::now();
+        let measured = tokio::time::timeout(
+            Duration::from_secs(10),
+            measure_reply(&model, &tts, &[user("hi")]),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{name}: still waiting on the other side"));
+        let error = measured.error.as_deref().unwrap_or_default();
+        assert!(error.contains(error_has), "{name}: {error}");
+        assert!(start.elapsed() < Duration::from_secs(1), "{name}");
+        near(measured.first_sentence_s, Some(0.01), name);
     }
 }
 
@@ -588,11 +629,19 @@ fn the_table_puts_each_setups_numbers_side_by_side() {
                 reply: "hm".to_string(),
             },
         ),
+        // A failed reply's partial numbers must stay out of the statistics.
         sample(
             "fast",
             "c",
             3,
-            Measured::failed("model offline".to_string()),
+            Measured {
+                first_token_s: Some(9.0),
+                first_sentence_s: Some(9.0),
+                first_audio_s: Some(9.0),
+                sentences: 7,
+                audio_s: 99.0,
+                ..Measured::failed("speech stopped".to_string())
+            },
         ),
         sample("slow", "c", 0, ok(1.0, 1.5, 2.0, 5.0, 6)),
     ];
@@ -601,7 +650,7 @@ fn the_table_puts_each_setups_numbers_side_by_side() {
         summarize("slow", "model s", &samples),
     ];
     let fast = &summaries[0];
-    assert_eq!((fast.replies, fast.errors), (4, 1));
+    assert_eq!((fast.replies, fast.succeeded, fast.errors), (4, 3, 1));
     assert_eq!(
         fast.quality.map(|q| (q.mean, q.scored, q.ungraded)),
         Some((Some(4.5), 2, 1))
@@ -618,7 +667,7 @@ fn the_table_puts_each_setups_numbers_side_by_side() {
             .collect()
     };
     assert_eq!(row("setup"), ["fast", "slow"]);
-    assert_eq!(row("replies (n)"), ["4", "1"]);
+    assert_eq!(row("replies ok"), ["3 of 4", "1 of 1"]);
     assert_eq!(row("errors"), ["1", "0"]);
     assert_eq!(
         row("first token (s)"),
@@ -628,6 +677,8 @@ fn the_table_puts_each_setups_numbers_side_by_side() {
         row("first audio (s)"),
         ["0.40 (0.30-0.50)", "2.00 (2.00-2.00)"]
     );
+    assert_eq!(row("sentences"), ["3.0 (2.0-4.0)", "6.0 (6.0-6.0)"]);
+    assert_eq!(row("audio (s)"), ["3.0 (3.0-3.0)", "3.0 (3.0-3.0)"]);
     assert_eq!(
         row("end to end (s)"),
         ["2.00 (1.00-3.00)", "5.00 (5.00-5.00)"]

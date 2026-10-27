@@ -118,6 +118,9 @@ async fn run() -> Result<(), String> {
         Judge::from_lookup(env)?
     };
 
+    let started_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis());
     eprintln!(
         "Measuring {} setup(s) on {} case(s), {} run(s) each.",
         setups.len(),
@@ -176,12 +179,9 @@ async fn run() -> Result<(), String> {
         .filter(|dir| !dir.trim().is_empty())
         .unwrap_or_else(|| "data".to_string());
     let dir = Path::new(&data_dir).join("measure");
-    let started = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
-    let path = dir.join(format!("run-{started}.json"));
+    let path = dir.join(format!("run-{started_ms}.json"));
     let results = json!({
-        "started_unix": started,
+        "started_unix_ms": started_ms,
         "runs": args.runs,
         "judge_model": judge.as_ref().map(Judge::model),
         "setups": setups.iter().map(|s| json!({"name": s.name, "label": s.label})).collect::<Vec<_>>(),
