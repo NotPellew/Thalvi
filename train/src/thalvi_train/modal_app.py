@@ -17,6 +17,12 @@ at ~0.2 s each, so every corpus lives on the volume as one big archive; they fir
 stage the archives onto the container's local disk (`stage_audio`) and read the
 audio from there; the staging time is in the log.
 
+`Endpoint` serves the chat endpoint of `thalvi_train.serve` on an H100: unquantized bf16
+Glimmer from the volume, the Whisper encoder in fp16, and the projector of the run named by
+`THALVI_PROJECTOR_RUN` (default `projector-v2`). Its `thalvi-endpoint` secret holds the bearer
+key. `modal deploy src/thalvi_train/modal_app.py` publishes it, `modal app stop thalvi-adapter`
+takes it down; it scales to zero five minutes after the last request.
+
 Every GPU step prints when it starts and ends and the hours between, which
 times the GPU rate for the cost of the step. Image pulls and container start
 are not in that figure. Long steps commit the volume while they run, so a
@@ -76,6 +82,11 @@ LIBRISPEECH_ROOT = f"{DATA_MOUNT}/librispeech"
 LIBRISPEECH_MANIFEST = f"{LIBRISPEECH_ROOT}/manifest.jsonl"
 TEACHER_OUT = f"{DATA_MOUNT}/teacher/train.jsonl"
 RUNS_DIR = f"{DATA_MOUNT}/runs"
+WHISPER_MODEL = "openai/whisper-large-v3-turbo"
+ENDPOINT_SECRET = "thalvi-endpoint"
+PROJECTOR_RUN_ENV = "THALVI_PROJECTOR_RUN"
+DEFAULT_PROJECTOR_RUN = "projector-v2"
+ENDPOINT_IDLE_SECONDS = 5 * 60
 
 VLLM_PORT = 8000
 SERVED_NAME = "glimmer"
@@ -112,6 +123,18 @@ vllm_image = (
             "VLLM_NO_USAGE_STATS": "1",
             "VLLM_USE_FLASHINFER_SAMPLER": "0",
         }
+    )
+    .add_local_python_source("thalvi_train")
+)
+
+
+endpoint_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .uv_sync(str(PROJECT_DIR), extras=["cu128", "serve"], extra_options="--no-dev")
+    .env({"PYTHONUNBUFFERED": "1"})
+    .run_commands(
+        'python -c "from huggingface_hub import snapshot_download; '
+        f"snapshot_download('{WHISPER_MODEL}')\""
     )
     .add_local_python_source("thalvi_train")
 )
@@ -629,6 +652,56 @@ def run_eval(run_name: str, limit: int, batch_size: int, extra_args: str) -> Non
                 *shlex.split(extra_args),
             ]
         )
+
+
+@app.cls(
+    image=endpoint_image,
+    gpu=GPU,
+    volumes={GLIMMER_MOUNT: glimmer_volume, DATA_MOUNT: data_volume},
+    secrets=[
+        modal.Secret.from_name(ENDPOINT_SECRET),
+        modal.Secret.from_dict(
+            {PROJECTOR_RUN_ENV: os.environ.get(PROJECTOR_RUN_ENV, DEFAULT_PROJECTOR_RUN)}
+        ),
+    ],
+    scaledown_window=ENDPOINT_IDLE_SECONDS,
+    max_containers=1,
+    timeout=HOUR,
+)
+@modal.concurrent(max_inputs=8)
+class Endpoint:
+    """The chat endpoint on one H100; the engine's lock keeps generation one request at a time."""
+
+    @modal.enter()
+    def load(self) -> None:
+        """Loads the models once per container and logs how long that took."""
+        import argparse
+
+        from thalvi_train.serve import API_KEY_ENV, create_app, load_engine
+
+        started = time.monotonic()
+        run = os.environ[PROJECTOR_RUN_ENV]
+        args = argparse.Namespace(
+            glimmer=Path(GLIMMER_TEXT_DIR),
+            projector=Path(RUNS_DIR) / run,
+            whisper_model=WHISPER_MODEL,
+            device="cuda",
+            quantize=False,
+            encoder_device="cuda",
+            reply_mode="echo",
+        )
+        engine = load_engine(args)
+        self.app = create_app(engine, api_key=os.environ[API_KEY_ENV])
+        print(
+            f"[endpoint] models loaded in {time.monotonic() - started:.1f} s "
+            f"(projector {run}, {_utc_now()})",
+            flush=True,
+        )
+
+    @modal.asgi_app()
+    def web(self):
+        """The Starlette app of `thalvi_train.serve`."""
+        return self.app
 
 
 @app.local_entrypoint()

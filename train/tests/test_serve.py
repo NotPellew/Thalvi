@@ -471,3 +471,55 @@ def test_generation_stops_when_the_client_disconnects(
         drive(create_app(engine), request_body({"role": "user", "content": "x"}), 10**6)
     )
     assert b"[DONE]" in b"".join(m.get("body", b"") for m in done)
+
+
+@pytest.fixture
+def keyed_client(engine: Engine) -> Iterator[TestClient]:
+    with TestClient(create_app(engine, api_key="secret")) as test_client:
+        yield test_client
+
+
+def test_models_routes_list_the_served_model(client: TestClient) -> None:
+    for path in ("/models", "/v1/models"):
+        body = client.get(path).json()
+        assert body["object"] == "list"
+        assert [entry["id"] for entry in body["data"]] == [MODEL_ID]
+
+
+@pytest.mark.parametrize("path", ["/models", "/v1/models"])
+@pytest.mark.parametrize("authorization", [None, "Bearer wrong", "secret", "Bearer secret2"])
+def test_a_missing_or_wrong_key_is_a_401_on_every_route(
+    keyed_client: TestClient, path: str, authorization: str | None
+) -> None:
+    headers = {} if authorization is None else {"Authorization": authorization}
+    response = keyed_client.get(path, headers=headers)
+    assert response.status_code == 401
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_a_chat_request_without_the_key_is_a_401_and_with_it_streams(
+    keyed_client: TestClient,
+) -> None:
+    payload = request_body({"role": "user", "content": "hi"}, max_tokens=2)
+    assert keyed_client.post("/v1/chat/completions", json=payload).status_code == 401
+    headers = {"Authorization": "Bearer secret"}
+    with keyed_client.stream(
+        "POST", "/v1/chat/completions", json=payload, headers=headers
+    ) as response:
+        assert response.status_code == 200
+        assert response.read().decode().endswith("data: [DONE]\n\n")
+    assert keyed_client.get("/v1/models", headers=headers).status_code == 200
+
+
+def test_without_a_key_no_auth_is_asked(client: TestClient) -> None:
+    assert client.get("/v1/models").status_code == 200
+
+
+def test_the_api_key_flag_defaults_to_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    required = ["--glimmer", "g", "--projector", "p"]
+    monkeypatch.delenv("THALVI_ENDPOINT_KEY", raising=False)
+    assert _parse_args(required).api_key is None
+    monkeypatch.setenv("THALVI_ENDPOINT_KEY", "from-env")
+    assert _parse_args(required).api_key == "from-env"
+    assert _parse_args([*required, "--api-key", "k"]).api_key == "k"

@@ -10,6 +10,7 @@ from corpus_files import write_fleurs, write_musan, write_voxpopuli
 from tiny_whisper import write_audio_manifest
 
 from thalvi_train import augment, corpora, modal_app
+from thalvi_train.features import DEFAULT_MODEL
 from thalvi_train.manifest import read_manifest
 
 
@@ -25,6 +26,12 @@ def test_every_step_is_a_function_with_a_local_entrypoint() -> None:
     for entrypoint, function in steps.items():
         assert isinstance(function, modal.Function)
         assert callable(getattr(modal_app, entrypoint))
+
+
+def test_the_endpoint_is_a_class_with_an_enter_hook_and_an_asgi_app() -> None:
+    assert isinstance(modal_app.Endpoint, modal.Cls)
+    assert modal_app.WHISPER_MODEL == DEFAULT_MODEL
+    assert modal_app.DEFAULT_PROJECTOR_RUN == "projector-v2"
 
 
 def test_image_builds_from_the_project_directory() -> None:
