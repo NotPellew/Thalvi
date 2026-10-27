@@ -23,6 +23,15 @@ function find<T extends Element>(root: ParentNode, selector: string, type: new (
   return found;
 }
 
+/** A selector that finds the same control again after the list is rebuilt. */
+function keyOf(element: HTMLElement): string | null {
+  for (const name of ["id", "rename", "delete"]) {
+    const value = element.dataset[name];
+    if (value !== undefined) return `[data-${name}="${CSS.escape(value)}"]`;
+  }
+  return null;
+}
+
 function button(label: string, className: string, onClick: () => void): HTMLButtonElement {
   const element = document.createElement("button");
   element.type = "button";
@@ -119,7 +128,10 @@ export function createLibraryView(root: ParentNode, library: Library): void {
     for (const element of background) element.toggleAttribute("inert", state.open);
     opener.setAttribute("aria-expanded", String(state.open));
     note.textContent = state.error ?? (state.loading ? "Loading…" : state.items.length === 0 ? "No saved conversations yet." : "");
+    const active = document.activeElement;
+    const keep = active instanceof HTMLElement && list.contains(active) ? keyOf(active) : null;
     list.replaceChildren(...state.items.map((item) => row(item, state)));
+    if (keep) list.querySelector<HTMLElement>(keep)?.focus();
 
     if (state.open && !previous.open) newButton.focus();
     else if (!state.open && previous.open) opener.focus();
@@ -134,6 +146,7 @@ export function createLibraryView(root: ParentNode, library: Library): void {
     } else if (previous.confirmingDelete !== null && state.confirmingDelete === null && state.open) {
       list.querySelector<HTMLButtonElement>(`[data-delete="${CSS.escape(previous.confirmingDelete)}"]`)?.focus();
     }
+    if (state.open && !overlay.contains(document.activeElement)) newButton.focus();
     previous = state;
   });
 
