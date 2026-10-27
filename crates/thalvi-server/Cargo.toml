@@ -4,6 +4,7 @@ edition.workspace = true
 version.workspace = true
 publish.workspace = true
 license.workspace = true
+default-run = "thalvi"
 
 [lints]
 workspace = true
@@ -11,6 +12,10 @@ workspace = true
 [[bin]]
 name = "thalvi"
 path = "src/main.rs"
+
+[[bin]]
+name = "measure"
+path = "src/bin/measure.rs"
 
 [dependencies]
 axum.workspace = true

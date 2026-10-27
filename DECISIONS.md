@@ -39,6 +39,10 @@ areas your change touches. Editing rules are in
   no extra model call, and recordings report its first audio separately from
   the real answer's. Rejected: a small model writing the line (adds the
   latency it should hide), and on by default (no off baseline to compare).
+- **Measure setups with an LLM judge on a fixed prompt set.** `measure` times
+  setups interleaved, then a judge model grades answers 1 to 5 against a rubric.
+  Why: setups compare in minutes, with numbers, repeatably. Rejected: rating by
+  hand (slow), and a router or fast-model role before the numbers ask for one.
 
 ## Repository
 
