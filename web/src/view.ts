@@ -448,10 +448,10 @@ export function createView(root: HTMLElement) {
     else if (orbAction === "voice") voiceHandler?.();
   });
 
-  return {
+  const api = {
     render(s: SessionState) {
       lastState = s;
-      const display = displayState(s);
+      const display = displayState(s, voiceBusy);
       const text = stateText(display, s.voice);
       if (hint.textContent !== text.hint) hint.textContent = text.hint;
       const nearBottom =
@@ -525,8 +525,7 @@ export function createView(root: HTMLElement) {
     },
     setVoiceBusy(busy: boolean) {
       voiceBusy = busy;
-      voice.disabled = busy || ended;
-      if (orbAction === "voice") orb.disabled = busy;
+      if (lastState) api.render(lastState);
     },
     clearComposer() {
       composer.value = "";
@@ -550,4 +549,5 @@ export function createView(root: HTMLElement) {
       speedHandler = handler;
     },
   };
+  return api;
 }
