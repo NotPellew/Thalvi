@@ -1,5 +1,8 @@
 import { Connection, sessionUrl } from "./connection.ts";
 import { Controller } from "./controller.ts";
+import { conversationsApi } from "./conversations.ts";
+import { Library } from "./library.ts";
+import { createLibraryView } from "./library-view.ts";
 import { micErrorMessage, openMic, type Mic } from "./mic.ts";
 import { Playback } from "./playback.ts";
 import { loadSpeed, saveSpeed, type Speed } from "./speed.ts";
@@ -37,6 +40,18 @@ const controller = new Controller({
   remember: (id) => {
     sessionStorage.setItem(SESSION_KEY, id);
   },
+  forget: () => {
+    sessionStorage.removeItem(SESSION_KEY);
+  },
+  stopConnection: () => {
+    connection.close();
+  },
+  connect: (id) => {
+    if (id === null) sessionStorage.removeItem(SESSION_KEY);
+    else sessionStorage.setItem(SESSION_KEY, id);
+    connection.close();
+    connection.connect();
+  },
   releaseVoice,
   onChange: (state) => {
     view.render(state);
@@ -57,6 +72,18 @@ const connection = new Connection(
     },
   },
 );
+
+const library = new Library({
+  api: conversationsApi((input, init) => fetch(input, init)),
+  currentId: () => sessionStorage.getItem(SESSION_KEY),
+  open: (id) => {
+    controller.switchTo(id);
+  },
+  startNew: () => {
+    controller.switchTo(null);
+  },
+});
+createLibraryView(appRoot, library);
 
 function releaseVoice(): void {
   const current = voiceAudio;

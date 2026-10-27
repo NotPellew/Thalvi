@@ -74,11 +74,17 @@ export class Connection {
     if (this.socket?.readyState === OPEN) this.socket.send(data);
   }
 
+  /** Stops reconnecting and ignores anything the closed socket still delivers. */
   close(): void {
     if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.failures = 0;
     if (this.socket) {
+      this.socket.onopen = null;
+      this.socket.onmessage = null;
       this.socket.onclose = null;
       this.socket.close();
+      this.socket = null;
     }
   }
 }

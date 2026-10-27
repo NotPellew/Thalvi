@@ -6,6 +6,7 @@ import type { Turn } from "./protocol.ts";
 const STATES: Record<DisplayState, { label: string; hint: string }> = {
   connecting: { label: "Connecting", hint: "Reaching the server." },
   reconnecting: { label: "Reconnecting", hint: "Voice is paused. Trying again." },
+  ended: { label: "Stopped", hint: "Start a new conversation, or open one from the list." },
   idle: { label: "Idle", hint: "Tap the reticle to start talking, or type below." },
   starting: { label: "Starting", hint: "Getting ready to listen." },
   listening: { label: "Listening", hint: "Go ahead, I am listening." },
@@ -113,6 +114,8 @@ function coreIcon(display: DisplayState): IconName {
     case "connecting":
     case "reconnecting":
       return "wait";
+    case "ended":
+      return "alert";
     case "idle":
     case "starting":
       return "mic";
@@ -350,6 +353,7 @@ export function createView(root: HTMLElement) {
   let voiceHandler: (() => void) | null = null;
   let voiceBusy = false;
   let online = false;
+  let ended = false;
   let shownState: DisplayState | null = null;
   let orbAction: "stop" | "voice" | "none" = "none";
   let lastState: SessionState | null = null;
@@ -447,6 +451,7 @@ export function createView(root: HTMLElement) {
       atBottom = nearBottom;
       page.dataset["state"] = display;
       online = s.link === "online";
+      ended = s.link === "ended";
 
       if (display !== shownState) {
         shownState = display;
@@ -467,11 +472,12 @@ export function createView(root: HTMLElement) {
       }
 
       const busy = display === "speaking" || display === "thinking";
-      orbAction = busy ? "stop" : display === "connecting" || display === "reconnecting" ? "none" : "voice";
+      const offline = display === "connecting" || display === "reconnecting" || display === "ended";
+      orbAction = busy ? "stop" : offline ? "none" : "voice";
       orb.disabled = orbAction === "none" || (orbAction === "voice" && voiceBusy);
       orb.setAttribute(
         "aria-label",
-        busy ? "Stop" : display === "idle" ? "Start talking" : display === "connecting" || display === "reconnecting" ? STATES[display].label : "End voice",
+        busy ? "Stop" : display === "idle" ? "Start talking" : offline ? STATES[display].label : "End voice",
       );
       orb.classList.toggle("o-is-stop", busy);
 
@@ -480,7 +486,7 @@ export function createView(root: HTMLElement) {
 
       voice.setAttribute("aria-pressed", String(s.voice));
       voiceText.textContent = s.voice ? "Voice on" : "Voice off";
-      voice.disabled = voiceBusy;
+      voice.disabled = voiceBusy || ended;
 
       empty.hidden = s.turns.length > 0 || s.partial !== "";
       syncTurns(list, s.turns, s.replyOpen);
@@ -512,7 +518,7 @@ export function createView(root: HTMLElement) {
     },
     setVoiceBusy(busy: boolean) {
       voiceBusy = busy;
-      voice.disabled = busy;
+      voice.disabled = busy || ended;
       if (orbAction === "voice") orb.disabled = busy;
     },
     clearComposer() {

@@ -25,6 +25,14 @@ describe("parseServerMessage", () => {
     ['{"type":"voice","on":false}', { type: "voice", on: false }],
     ['{"type":"reply_end"}', { type: "reply_end" }],
     ['{"type":"error","message":"TTS failed"}', { type: "error", message: "TTS failed" }],
+    [
+      '{"type":"ended","reason":"moved","message":"This conversation continued on another device."}',
+      { type: "ended", reason: "moved", message: "This conversation continued on another device." },
+    ],
+    [
+      '{"type":"ended","reason":"deleted","message":"This conversation was deleted."}',
+      { type: "ended", reason: "deleted", message: "This conversation was deleted." },
+    ],
   ];
   it.each(valid)("accepts %s", (raw, expected) => {
     expect(parseServerMessage(raw)).toEqual(expected);
@@ -47,6 +55,8 @@ describe("parseServerMessage", () => {
     ["session turn with unknown role", '{"type":"session","id":"abc","turns":[{"role":"system","text":"x"}]}'],
     ["session turn without text", '{"type":"session","id":"abc","turns":[{"role":"user"}]}'],
     ["non-string error", '{"type":"error","message":{}}'],
+    ["ended with an unknown reason", '{"type":"ended","reason":"expired","message":"x"}'],
+    ["ended without a message", '{"type":"ended","reason":"moved"}'],
   ];
   it.each(ignored)("ignores %s", (_name, raw) => {
     expect(parseServerMessage(raw)).toBeNull();

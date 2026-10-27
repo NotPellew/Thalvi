@@ -2,7 +2,7 @@ import type { Phase, ServerMessage, Turn } from "./protocol.ts";
 
 export interface SessionState {
   readonly voice: boolean;
-  readonly link: "connecting" | "online" | "reconnecting";
+  readonly link: "connecting" | "online" | "reconnecting" | "ended";
   readonly phase: Phase;
   readonly playing: boolean;
   readonly partial: string;
@@ -11,7 +11,7 @@ export interface SessionState {
   readonly notice: string | null;
 }
 
-export type DisplayState = Phase | "connecting" | "reconnecting";
+export type DisplayState = Phase | "connecting" | "reconnecting" | "ended";
 
 export type SessionEvent =
   | { type: "opened" }
@@ -19,6 +19,7 @@ export type SessionEvent =
   | { type: "voice"; on: boolean; notice: string | null }
   | { type: "notice"; notice: string }
   | { type: "stopped" }
+  | { type: "switched" }
   | { type: "playing"; playing: boolean }
   | { type: "server"; message: ServerMessage };
 
@@ -49,6 +50,8 @@ export function reduce(s: SessionState, event: SessionEvent): SessionState {
       return { ...s, link: "online", phase: "idle", partial: "", replyOpen: false, notice: null };
     case "lost":
       return { ...s, link: "reconnecting", phase: "idle", partial: "", replyOpen: false, notice: UNREACHABLE_NOTICE };
+    case "switched":
+      return { ...s, link: "connecting", phase: "idle", playing: false, partial: "", turns: [], replyOpen: false, notice: null };
     case "voice":
       return {
         ...s,
@@ -99,5 +102,7 @@ function reduceServer(s: SessionState, m: ServerMessage): SessionState {
       return { ...s, replyOpen: false };
     case "error":
       return { ...s, notice: m.message };
+    case "ended":
+      return { ...s, link: "ended", voice: false, phase: "idle", playing: false, partial: "", replyOpen: false, notice: m.message };
   }
 }
