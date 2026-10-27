@@ -1405,62 +1405,83 @@ async fn operator_log_carries_turn_source_and_length_but_never_the_text() {
 }
 
 #[tokio::test]
-async fn typed_turn_speech_start_and_cancel_interrupt_audio_the_client_may_still_play() {
-    for trigger in ["typed", "speech start", "cancel"] {
-        let mut harness = start().await;
-        voice_on(&mut harness).await;
-        let gap = Arc::new(Notify::new());
-        harness.model.add_script(vec![
-            ModelChunk::Delta("One. ".to_string()),
-            ModelChunk::Wait(Arc::clone(&gap)),
-            ModelChunk::Delta("Two.".to_string()),
-        ]);
-        harness.factory.complete_turn(0, "first");
-        let _ = collect_until(&mut harness.client, |item| {
-            matches!(item, Received::Audio(_))
-        })
-        .await;
-        // The reply is idle between sentences, then finishes: the server cannot
-        // know when the client stops playing, so audio was sent and may still play.
-        gap.notify_one();
-        let received = collect_until(&mut harness.client, |item| {
-            matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
-        })
-        .await;
-        assert_eq!(audios(&received), vec![Bytes::from("AUDIO:Two.")]);
-
-        match trigger {
-            "typed" => {
-                harness
-                    .model
-                    .add_script(vec![ModelChunk::Delta("Next.".to_string())]);
-                send_json(&mut harness, &json!({"type": "text", "text": "second"})).await;
+async fn typed_turn_speech_start_and_cancel_interrupt_audio_until_the_client_has_played_it_all() {
+    // "AUDIO:One." and "AUDIO:Two." are 10 bytes each; a count of 10 is a report
+    // that left the client before the second sentence arrived.
+    for (played, interrupts) in [(None, true), (Some(10), true), (Some(20), false)] {
+        for trigger in ["typed", "speech start", "cancel"] {
+            let case = format!("{trigger} after played {played:?}");
+            let mut harness = start().await;
+            voice_on(&mut harness).await;
+            let gap = Arc::new(Notify::new());
+            harness.model.add_script(vec![
+                ModelChunk::Delta("One. ".to_string()),
+                ModelChunk::Wait(Arc::clone(&gap)),
+                ModelChunk::Delta("Two.".to_string()),
+            ]);
+            harness.factory.complete_turn(0, "first");
+            let _ = collect_until(&mut harness.client, |item| {
+                matches!(item, Received::Audio(_))
+            })
+            .await;
+            gap.notify_one();
+            let received = collect_until(&mut harness.client, |item| {
+                matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+            })
+            .await;
+            assert_eq!(audios(&received), vec![Bytes::from("AUDIO:Two.")]);
+            if let Some(bytes) = played {
+                send_json(&mut harness, &json!({"type": "played", "bytes": bytes})).await;
+                expect_quiet_until_marker(&mut harness).await;
             }
-            "speech start" => harness.factory.push(
-                0,
-                Ok(RecognizerEvent::SpeechStart {
-                    turn_id: "turn-2".to_string(),
-                    audio_processed_ms: None,
-                }),
-            ),
-            _ => send_json(&mut harness, &json!({"type": "cancel"})).await,
-        }
-        let interrupted = recv(&mut harness.client).await;
-        assert!(
-            matches!(&interrupted, Received::Json(v) if v["type"] == "interrupted"),
-            "{trigger}: expected interrupted first, got {interrupted:?}"
-        );
-        let resting = recv(&mut harness.client).await;
-        assert!(
-            matches!(&resting, Received::Json(v) if v["type"] == "state" && v["state"] == "listening"),
-            "{trigger}: interrupted must be followed by the resting state, got {resting:?}"
-        );
 
-        if trigger == "cancel" {
-            send_json(&mut harness, &json!({"type": "cancel"})).await;
-            expect_quiet_until_marker(&mut harness).await;
+            match trigger {
+                "typed" => {
+                    harness
+                        .model
+                        .add_script(vec![ModelChunk::Delta("Next.".to_string())]);
+                    send_json(&mut harness, &json!({"type": "text", "text": "second"})).await;
+                }
+                "speech start" => harness.factory.push(
+                    0,
+                    Ok(RecognizerEvent::SpeechStart {
+                        turn_id: "turn-2".to_string(),
+                        audio_processed_ms: None,
+                    }),
+                ),
+                _ => send_json(&mut harness, &json!({"type": "cancel"})).await,
+            }
+
+            if !interrupts {
+                if trigger == "typed" {
+                    let first = recv(&mut harness.client).await;
+                    assert!(
+                        matches!(&first, Received::Json(v) if v["type"] == "user"),
+                        "{case}: a played reply must not be interrupted, got {first:?}"
+                    );
+                } else {
+                    expect_quiet_until_marker(&mut harness).await;
+                }
+                harness.server.abort();
+                continue;
+            }
+            let interrupted = recv(&mut harness.client).await;
+            assert!(
+                matches!(&interrupted, Received::Json(v) if v["type"] == "interrupted"),
+                "{case}: expected interrupted first, got {interrupted:?}"
+            );
+            let resting = recv(&mut harness.client).await;
+            assert!(
+                matches!(&resting, Received::Json(v) if v["type"] == "state" && v["state"] == "listening"),
+                "{case}: interrupted must be followed by the resting state, got {resting:?}"
+            );
+
+            if trigger == "cancel" {
+                send_json(&mut harness, &json!({"type": "cancel"})).await;
+                expect_quiet_until_marker(&mut harness).await;
+            }
+            harness.server.abort();
         }
-        harness.server.abort();
     }
 }
 
