@@ -11,28 +11,45 @@ use axum::routing::get;
 use tower_http::services::ServeDir;
 use tracing::Instrument;
 
-use crate::config::Config;
+use crate::config::{Config, TtsApi};
 use crate::model::OpenAiChatModel;
 use crate::recognizer::MetaRecognizerFactory;
 use crate::recorder::RecordingConfig;
 use crate::session::handle_session;
 use crate::store::SessionStore;
-use crate::tts::OpenAiTts;
+use crate::tts::{OpenAiTts, Qwen3Tts, Tts};
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
 /// Shared state for the session endpoint.
 #[derive(Clone)]
-pub struct AppState {
+pub struct AppState<T> {
     factory: MetaRecognizerFactory,
     model: Arc<OpenAiChatModel>,
-    tts: Arc<OpenAiTts>,
+    tts: Arc<T>,
     store: Arc<SessionStore>,
     recording: RecordingConfig,
 }
 
 /// Builds the router from validated configuration.
 pub fn router(config: &Config) -> Router {
+    let base_url = config.tts_base_url.clone();
+    let voice = config.tts_voice.clone();
+    match &config.tts_api {
+        TtsApi::OpenAi { model, api_key } => with_tts(
+            config,
+            OpenAiTts::new(base_url, model.clone(), voice, api_key.clone()),
+            model.clone(),
+        ),
+        TtsApi::Qwen3 => with_tts(
+            config,
+            Qwen3Tts::new(base_url, voice),
+            "qwen3-tts".to_string(),
+        ),
+    }
+}
+
+fn with_tts<T: Tts + Clone + 'static>(config: &Config, tts: T, tts_model: String) -> Router {
     let state = AppState {
         factory: MetaRecognizerFactory::new(
             config.stt_url.clone(),
@@ -45,12 +62,7 @@ pub fn router(config: &Config) -> Router {
             config.llm_api_key.clone(),
             config.llm_reasoning_effort.clone(),
         )),
-        tts: Arc::new(OpenAiTts::new(
-            config.tts_base_url.clone(),
-            config.tts_model.clone(),
-            config.tts_voice.clone(),
-            config.tts_api_key.clone(),
-        )),
+        tts: Arc::new(tts),
         store: Arc::new(SessionStore::new()),
         recording: RecordingConfig {
             kinds: config.record,
@@ -58,18 +70,18 @@ pub fn router(config: &Config) -> Router {
             stt_model: config.stt_model.clone(),
             llm_model: config.llm_model.clone(),
             reasoning_effort: config.llm_reasoning_effort.clone(),
-            tts_model: config.tts_model.clone(),
+            tts_model,
             tts_voice: config.tts_voice.clone(),
         },
     };
     Router::new()
-        .route("/session", get(session_upgrade))
+        .route("/session", get(session_upgrade::<T>))
         .fallback_service(ServeDir::new(&config.web_dir))
         .with_state(state)
 }
 
-async fn session_upgrade(
-    State(state): State<AppState>,
+async fn session_upgrade<T: Tts + Clone + 'static>(
+    State(state): State<AppState<T>>,
     Query(query): Query<std::collections::HashMap<String, String>>,
     upgrade: WebSocketUpgrade,
 ) -> impl IntoResponse {

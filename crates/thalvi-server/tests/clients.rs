@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::post;
 use futures_util::{SinkExt, StreamExt};
@@ -14,7 +15,7 @@ use thalvi_server::model::{ChatMessage, ChatModel, OpenAiChatModel};
 use thalvi_server::recognizer::{
     MetaRecognizerFactory, Recognizer, RecognizerError, RecognizerEvent, RecognizerFactory,
 };
-use thalvi_server::tts::{OpenAiTts, Tts};
+use thalvi_server::tts::{OpenAiTts, Qwen3Tts, Tts};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -215,4 +216,84 @@ async fn tts_client_sends_contract_body_and_streams_pcm() {
             "stream": true,
         })
     );
+}
+
+fn frame(pcm: &[u8]) -> Vec<u8> {
+    let mut framed = u32::try_from(pcm.len()).unwrap().to_be_bytes().to_vec();
+    framed.extend_from_slice(pcm);
+    framed
+}
+
+#[tokio::test]
+async fn qwen3_tts_client_decodes_framed_pcm_as_it_arrives() {
+    let end = frame(&[]);
+    let both = [frame(&[1, 2, 3, 4]), frame(&[5, 6])].concat();
+    // Chunks the fake server sends, and the frames (Err = stream failure) the client yields.
+    let cases = [
+        (
+            "frames split across chunks",
+            StatusCode::OK,
+            vec![
+                both[..2].to_vec(),
+                both[2..7].to_vec(),
+                [&both[7..], &end[..1]].concat(),
+                end[1..].to_vec(),
+            ],
+            Ok(vec![Ok(vec![1, 2, 3, 4]), Ok(vec![5, 6])]),
+        ),
+        (
+            "several frames and the end frame in one chunk",
+            StatusCode::OK,
+            vec![[both.clone(), end.clone(), frame(&[9])].concat()],
+            Ok(vec![Ok(vec![1, 2, 3, 4]), Ok(vec![5, 6])]),
+        ),
+        (
+            "stream ends without the end frame",
+            StatusCode::OK,
+            vec![frame(&[1, 2]), frame(&[3, 4])[..3].to_vec()],
+            Ok(vec![Ok(vec![1, 2]), Err(())]),
+        ),
+        (
+            "error status",
+            StatusCode::BAD_REQUEST,
+            vec![br#"{"detail":"Unknown voice"}"#.to_vec()],
+            Err(()),
+        ),
+    ];
+    for (name, status, chunks, expected) in cases {
+        let captured = Captured::default();
+        let captured2 = captured.clone();
+        let app = Router::new().route(
+            "/v1/audio/speech/pcm-stream",
+            post(move |body: String| {
+                let captured = captured2.clone();
+                async move {
+                    captured
+                        .bodies
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_str(&body).unwrap());
+                    let chunks = chunks.into_iter().map(Ok::<Vec<u8>, std::io::Error>);
+                    Response::builder()
+                        .status(status)
+                        .body(Body::from_stream(futures_util::stream::iter(chunks)))
+                        .unwrap()
+                }
+            }),
+        );
+        let tts = Qwen3Tts::new(serve(app).await, "vc_test".to_string());
+        let outcome = match tts.synthesize("Hello there.").await {
+            Ok(stream) => Ok(stream
+                .map(|item| item.map(|pcm| pcm.to_vec()).map_err(|_| ()))
+                .collect::<Vec<_>>()
+                .await),
+            Err(_) => Err(()),
+        };
+        assert_eq!(outcome, expected, "{name}");
+        assert_eq!(
+            captured.bodies.lock().unwrap()[..],
+            [json!({"input": "Hello there.", "voice": "vc_test"})],
+            "{name}"
+        );
+    }
 }

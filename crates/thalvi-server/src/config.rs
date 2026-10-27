@@ -28,16 +28,28 @@ pub struct Config {
     pub stt_api_key: String,
     /// Speech synthesis base URL, without a trailing slash.
     pub tts_base_url: String,
-    /// Speech synthesis model name.
-    pub tts_model: String,
+    /// Speech protocol `tts_base_url` speaks, with its own settings.
+    pub tts_api: TtsApi,
     /// Speech synthesis voice name.
     pub tts_voice: String,
-    /// Speech API key; empty means no Authorization header.
-    pub tts_api_key: String,
     /// Which recording kinds are enabled (`THALVI_RECORD`).
     pub record: RecordKinds,
     /// Directory recordings are written under (`THALVI_DATA_DIR`).
     pub data_dir: PathBuf,
+}
+
+/// Speech synthesis protocol (`TTS_API`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TtsApi {
+    /// `OpenAI` `/audio/speech` streaming raw PCM, as Kokoro-FastAPI serves it.
+    OpenAi {
+        /// Speech synthesis model name.
+        model: String,
+        /// Speech API key; empty means no Authorization header.
+        api_key: String,
+    },
+    /// Qwen3-TTS server's framed `/audio/speech/pcm-stream`.
+    Qwen3,
 }
 
 impl Config {
@@ -76,9 +88,17 @@ impl Config {
         let stt_model = required(&lookup, "STT_MODEL", false)?;
         let stt_api_key = required(&lookup, "STT_API_KEY", true)?;
         let tts_base_url = http_base(&lookup, "TTS_BASE_URL")?;
-        let tts_model = required(&lookup, "TTS_MODEL", false)?;
+        let tts_api = match required(&lookup, "TTS_API", false)?.trim() {
+            "openai" => TtsApi::OpenAi {
+                model: required(&lookup, "TTS_MODEL", false)?,
+                api_key: required(&lookup, "TTS_API_KEY", true)?,
+            },
+            "qwen3" => TtsApi::Qwen3,
+            other => {
+                return Err(format!("TTS_API must be openai or qwen3: {other:?}"));
+            }
+        };
         let tts_voice = required(&lookup, "TTS_VOICE", false)?;
-        let tts_api_key = required(&lookup, "TTS_API_KEY", true)?;
         let record = parse_record_kinds(lookup("THALVI_RECORD"))?;
         let data_dir = lookup("THALVI_DATA_DIR")
             .map(|value| value.trim().to_string())
@@ -95,9 +115,8 @@ impl Config {
             stt_model,
             stt_api_key,
             tts_base_url,
-            tts_model,
+            tts_api,
             tts_voice,
-            tts_api_key,
             record,
             data_dir: PathBuf::from(data_dir),
         })
@@ -152,7 +171,7 @@ fn http_base(lookup: &impl Fn(&str) -> Option<String>, name: &str) -> Result<Str
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, TtsApi};
     use std::collections::HashMap;
 
     fn full() -> HashMap<&'static str, String> {
@@ -165,6 +184,7 @@ mod tests {
             ("STT_URL", "wss://example.invalid/asr"),
             ("STT_MODEL", "s"),
             ("STT_API_KEY", ""),
+            ("TTS_API", "openai"),
             ("TTS_BASE_URL", "http://127.0.0.1:8880/v1"),
             ("TTS_MODEL", "kokoro"),
             ("TTS_VOICE", "af_heart"),
@@ -196,6 +216,43 @@ mod tests {
             vars.insert("LLM_REASONING_EFFORT", value.to_string());
             let config = Config::from_lookup(|name| vars.get(name).cloned());
             assert_eq!(config.map(|c| c.llm_reasoning_effort), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn tts_api_selects_the_protocol_and_its_settings() {
+        let openai = TtsApi::OpenAi {
+            model: "kokoro".to_string(),
+            api_key: String::new(),
+        };
+        let cases = [
+            (Some("openai"), vec![], Ok(openai)),
+            (
+                Some("qwen3"),
+                vec!["TTS_MODEL", "TTS_API_KEY"],
+                Ok(TtsApi::Qwen3),
+            ),
+            (Some("openai"), vec!["TTS_MODEL"], Err("TTS_MODEL")),
+            (Some("kokoro"), vec![], Err("TTS_API")),
+            (None, vec![], Err("TTS_API")),
+        ];
+        for (value, unset, expected) in cases {
+            let mut vars = full();
+            match value {
+                Some(value) => vars.insert("TTS_API", value.to_string()),
+                None => vars.remove("TTS_API"),
+            };
+            for name in unset {
+                vars.remove(name);
+            }
+            let result = Config::from_lookup(|name| vars.get(name).cloned()).map(|c| c.tts_api);
+            match expected {
+                Ok(api) => assert_eq!(result, Ok(api), "value={value:?}"),
+                Err(name) => {
+                    let err = result.unwrap_err();
+                    assert!(err.contains(name), "error {err:?} should name {name}");
+                }
+            }
         }
     }
 
