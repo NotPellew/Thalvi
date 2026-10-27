@@ -6,6 +6,7 @@ data/
 .env.*
 !.env.example
 *.log
+__pycache__/
 .DS_Store
 
 # Model weights and checkpoints

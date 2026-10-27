@@ -35,6 +35,11 @@ areas your change touches. Editing rules are in
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
   interrupts a reply by speaking. Why: hands and eyes are busy. Rejected:
   push-to-talk.
+- **Glimmer hears through a trained projector.** Frozen Whisper encoder, a
+  trained projector, frozen Muse Glimmer; the loss pulls Glimmer's answer to
+  the audio towards its answer to the transcript. Training is Python in
+  `train/`. Why: small enough to train in days, keeps Glimmer's behaviour.
+  Rejected: fine-tuning Glimmer itself, a speech model from scratch.
 
 ## Repository
 

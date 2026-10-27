@@ -55,6 +55,28 @@ or vLLM for the language model, for example.
 3. `npm ci --prefix web && npm run build --prefix web`, then `cargo run --release`.
 4. `tailscale serve --bg 8080` and open the printed HTTPS address on your phone.
 
+## Train the audio adapter
+
+`train/` teaches Muse Glimmer to hear. Run everything from `train/` after
+`uv sync --extra cpu`; the Modal steps need no GPU locally.
+
+1. Local data: `BASETEN_API_KEY=… uv run python -m thalvi_train.questions ~/datasets/thalvi/questions.jsonl`,
+   then, with Kokoro running, `uv run python -m thalvi_train.speak ~/datasets/thalvi/questions.jsonl ~/datasets/thalvi/speech`.
+2. Log in to Modal once: `uvx modal setup`.
+3. Fetch the weights and LibriSpeech inside Modal:
+   `uv run modal run src/thalvi_train/modal_app.py::glimmer` and `::librispeech`.
+4. Upload the Kokoro speech: `uv run modal volume put thalvi-data ~/datasets/thalvi/speech /speech`.
+5. Run `::teacher`, then `::features`, then `::train` (same prefix). Each prints its
+   start, end and hours on the GPU. Use `modal run --detach` for the long ones,
+   and `--limit 50` to `::teacher` for a first look at the answers.
+
+6. Score a run on the held-out eval split: `uv run modal run src/thalvi_train/modal_app.py::evaluate --run-name <run-name>`
+   (`--limit 500` by default). It reports KL, the word error rate of the model's own
+   transcription, and latency.
+
+Outputs stay on the `thalvi-data` volume: `teacher/train.jsonl`, `features/`,
+`runs/<run-name>/projector.safetensors`, `runs/<run-name>/eval.jsonl` and `eval.summary.json`.
+
 ## Status
 
 Under construction for the

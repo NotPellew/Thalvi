@@ -7,7 +7,7 @@ case "$subject" in
   "Merge branch '"* | "Merge remote-tracking branch '"* | 'Revert "'*) exit 0 ;;
 esac
 types='feat|fix|docs|refactor|test|chore|ci|build|perf'
-scopes='server|web|ci|deps|docs'
+scopes='server|web|train|ci|deps|docs'
 if ! printf '%s' "$subject" | grep -Eq "^($types)(\(($scopes)\))?!?: [^A-Z]"; then
   echo "commit-msg: subject must be 'type(scope): summary', the summary not starting with a capital" >&2
   echo "commit-msg: types: $types" >&2
