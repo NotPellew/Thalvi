@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Connection, reconnectDelay, sessionUrl, type Socket } from "./connection.ts";
+import { Controller } from "./controller.ts";
 
 class FakeSocket implements Socket {
   binaryType: BinaryType = "blob";
@@ -121,6 +122,78 @@ describe("Connection", () => {
     connection().connect();
     sockets[0]?.onmessage?.(new MessageEvent("message", { data: "hi" }));
     expect(events).toEqual(["message hi"]);
+  });
+});
+
+describe("a conversation the server ended", () => {
+  it("is not rejoined when the server closes the socket, and a replaced socket cannot speak for the new one", () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const urls: string[] = [];
+    let resumeId: string | null = null;
+    const remembered: string[] = [];
+    const connection: Connection = new Connection(
+      () => sessionUrl({ protocol: "http:", host: "x" }, resumeId),
+      {
+        onOpen: () => {
+          controller.opened();
+        },
+        onLost: () => {
+          controller.lost();
+        },
+        onMessage: (data) => {
+          controller.message(data);
+        },
+      },
+      (url) => {
+        urls.push(url);
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    );
+    const controller = new Controller({
+      send: () => undefined,
+      playback: { enqueue: () => undefined, flush: () => undefined },
+      remember: (id) => remembered.push(id),
+      forget: () => {
+        resumeId = null;
+      },
+      stopConnection: () => {
+        connection.close();
+      },
+      connect: (id) => {
+        resumeId = id;
+        connection.close();
+        connection.connect();
+      },
+      releaseVoice: () => undefined,
+      onChange: () => undefined,
+    });
+    const deliver = (socket: FakeSocket | undefined, message: object) => {
+      socket?.onmessage?.(new MessageEvent("message", { data: JSON.stringify(message) }));
+    };
+
+    connection.connect();
+    sockets[0]?.open();
+    deliver(sockets[0], { type: "ended", reason: "moved", message: "This conversation continued on another device." });
+    sockets[0]?.drop();
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(1);
+    expect(controller.state.link).toBe("ended");
+
+    controller.switchTo("s2");
+    expect(urls).toEqual(["ws://x/session", "ws://x/session?resume=s2"]);
+    sockets[1]?.open();
+    deliver(sockets[1], { type: "session", id: "s2", turns: [] });
+    controller.switchTo(null);
+    deliver(sockets[1], { type: "ended", reason: "deleted", message: "This conversation was deleted." });
+    sockets[1]?.drop();
+    vi.advanceTimersByTime(60_000);
+    expect(urls).toEqual(["ws://x/session", "ws://x/session?resume=s2", "ws://x/session"]);
+    expect(controller.state.link).toBe("connecting");
+    expect(remembered).toEqual(["s2"]);
+    vi.useRealTimers();
   });
 });
 

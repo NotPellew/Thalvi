@@ -1,4 +1,4 @@
-//! Owns the HTTP router: the web client at `/` and sessions at `/session`.
+//! Owns the HTTP router: the web client at `/`, the live socket at `/session`, and `/sessions`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,12 +11,14 @@ use axum::routing::get;
 use tower_http::services::ServeDir;
 use tracing::Instrument;
 
+use crate::api;
 use crate::config::{Config, TtsApi};
 use crate::model::OpenAiChatModel;
 use crate::recognizer::MetaRecognizerFactory;
 use crate::recorder::RecordingConfig;
 use crate::session::handle_session;
 use crate::store::SessionStore;
+use crate::title::{TITLE_SYSTEM_PROMPT, Titler};
 use crate::tts::{OpenAiTts, Qwen3Tts, Tts};
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -28,29 +30,42 @@ pub struct AppState<T> {
     model: Arc<OpenAiChatModel>,
     tts: Arc<T>,
     store: Arc<SessionStore>,
+    titler: Option<Arc<Titler<OpenAiChatModel>>>,
     recording: RecordingConfig,
     ack_enabled: bool,
 }
 
 /// Builds the router from validated configuration.
-pub fn router(config: &Config) -> Router {
+///
+/// # Errors
+///
+/// Returns a plain message when the saved conversations cannot be opened.
+pub fn router(config: &Config) -> Result<Router, String> {
+    let store = Arc::new(SessionStore::open(&config.data_dir.join("sessions"))?);
     let base_url = config.tts_base_url.clone();
     let voice = config.tts_voice.clone();
-    match &config.tts_api {
+    Ok(match &config.tts_api {
         TtsApi::OpenAi { model, api_key } => with_tts(
             config,
+            store,
             OpenAiTts::new(base_url, model.clone(), voice, api_key.clone()),
             model.clone(),
         ),
         TtsApi::Qwen3 => with_tts(
             config,
+            store,
             Qwen3Tts::new(base_url, voice),
             "qwen3-tts".to_string(),
         ),
-    }
+    })
 }
 
-fn with_tts<T: Tts + Clone + 'static>(config: &Config, tts: T, tts_model: String) -> Router {
+fn with_tts<T: Tts + Clone + 'static>(
+    config: &Config,
+    store: Arc<SessionStore>,
+    tts: T,
+    tts_model: String,
+) -> Router {
     let state = AppState {
         factory: MetaRecognizerFactory::new(
             config.stt_url.clone(),
@@ -64,7 +79,19 @@ fn with_tts<T: Tts + Clone + 'static>(config: &Config, tts: T, tts_model: String
             config.llm_reasoning_effort.clone(),
         )),
         tts: Arc::new(tts),
-        store: Arc::new(SessionStore::new()),
+        store: Arc::clone(&store),
+        titler: config.bg_llm.as_ref().map(|bg| {
+            Arc::new(Titler {
+                model: OpenAiChatModel::new(
+                    bg.base_url.clone(),
+                    bg.model.clone(),
+                    bg.api_key.clone(),
+                    None,
+                )
+                .with_system_prompt(TITLE_SYSTEM_PROMPT),
+                name: bg.model.clone(),
+            })
+        }),
         recording: RecordingConfig {
             kinds: config.record,
             data_dir: config.data_dir.clone(),
@@ -78,8 +105,9 @@ fn with_tts<T: Tts + Clone + 'static>(config: &Config, tts: T, tts_model: String
     };
     Router::new()
         .route("/session", get(session_upgrade::<T>))
-        .fallback_service(ServeDir::new(&config.web_dir))
         .with_state(state)
+        .merge(api::routes().with_state(store))
+        .fallback_service(ServeDir::new(&config.web_dir))
 }
 
 async fn session_upgrade<T: Tts + Clone + 'static>(
@@ -97,6 +125,7 @@ async fn session_upgrade<T: Tts + Clone + 'static>(
             state.tts,
             state.store,
             resume,
+            state.titler,
             state.recording,
             state.ack_enabled,
         )

@@ -24,6 +24,13 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let app = match router(&config) {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("could not open saved sessions: {error}");
+            std::process::exit(1);
+        }
+    };
     let listener = match tokio::net::TcpListener::bind(config.addr).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -32,7 +39,7 @@ async fn main() {
         }
     };
     tracing::info!(addr = %config.addr, "thalvi listening");
-    if let Err(error) = axum::serve(listener, router(&config)).await {
+    if let Err(error) = axum::serve(listener, app).await {
         eprintln!("server failed: {error}");
         std::process::exit(1);
     }

@@ -20,6 +20,8 @@ pub struct Config {
     pub llm_api_key: String,
     /// `reasoning_effort` sent with each request; `None` leaves the server default.
     pub llm_reasoning_effort: Option<String>,
+    /// Background model for conversation titles; `None` keeps first-line titles.
+    pub bg_llm: Option<BgLlm>,
     /// Recognizer WebSocket URL.
     pub stt_url: String,
     /// Recognizer model name.
@@ -38,6 +40,17 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Whether the spoken acknowledgement is enabled (`THALVI_ACK`).
     pub ack_enabled: bool,
+}
+
+/// The background model's Chat Completions endpoint (`BG_LLM_*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BgLlm {
+    /// Chat Completions base URL, without a trailing slash.
+    pub base_url: String,
+    /// Chat model name.
+    pub model: String,
+    /// Chat API key; empty means no Authorization header.
+    pub api_key: String,
 }
 
 /// Speech synthesis protocol (`TTS_API`).
@@ -81,6 +94,7 @@ impl Config {
         let llm_reasoning_effort = lookup("LLM_REASONING_EFFORT")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+        let bg_llm = parse_bg_llm(&lookup)?;
         let stt_url = required(&lookup, "STT_URL", false)?;
         if !stt_url.starts_with("ws://") && !stt_url.starts_with("wss://") {
             return Err(format!(
@@ -114,6 +128,7 @@ impl Config {
             llm_model,
             llm_api_key,
             llm_reasoning_effort,
+            bg_llm,
             stt_url,
             stt_model,
             stt_api_key,
@@ -125,6 +140,28 @@ impl Config {
             ack_enabled,
         })
     }
+}
+
+fn parse_bg_llm(lookup: &impl Fn(&str) -> Option<String>) -> Result<Option<BgLlm>, String> {
+    const NAMES: [&str; 3] = ["BG_LLM_BASE_URL", "BG_LLM_MODEL", "BG_LLM_API_KEY"];
+    let missing: Vec<&str> = NAMES
+        .into_iter()
+        .filter(|name| lookup(name).is_none())
+        .collect();
+    if missing.len() == NAMES.len() {
+        return Ok(None);
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "BG_LLM_BASE_URL, BG_LLM_MODEL and BG_LLM_API_KEY must be set together; not set: {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(Some(BgLlm {
+        base_url: http_base(lookup, "BG_LLM_BASE_URL")?,
+        model: required(lookup, "BG_LLM_MODEL", false)?,
+        api_key: required(lookup, "BG_LLM_API_KEY", true)?,
+    }))
 }
 
 fn parse_ack_enabled(raw: Option<&str>) -> Result<bool, String> {
@@ -185,7 +222,7 @@ fn http_base(lookup: &impl Fn(&str) -> Option<String>, name: &str) -> Result<Str
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, TtsApi};
+    use super::{BgLlm, Config, TtsApi};
     use std::collections::HashMap;
 
     fn full() -> HashMap<&'static str, String> {
@@ -231,6 +268,60 @@ mod tests {
             let config = Config::from_lookup(|name| vars.get(name).cloned());
             assert_eq!(config.map(|c| c.llm_reasoning_effort), Ok(expected));
         }
+    }
+
+    #[test]
+    fn background_model_needs_all_three_variables_or_none() {
+        let all = [
+            ("BG_LLM_BASE_URL", "https://bg.invalid/v1/"),
+            ("BG_LLM_MODEL", "title-model"),
+            ("BG_LLM_API_KEY", "secret"),
+        ];
+        let cases = [
+            (0..0, Ok(false)),
+            (0..3, Ok(true)),
+            (0..2, Err("BG_LLM_API_KEY")),
+            (1..3, Err("BG_LLM_BASE_URL")),
+        ];
+        for (given, expected) in cases {
+            let mut vars = full();
+            vars.extend(
+                all[given]
+                    .iter()
+                    .map(|(name, value)| (*name, (*value).to_string())),
+            );
+            let result = Config::from_lookup(|name| vars.get(name).cloned()).map(|c| c.bg_llm);
+            match expected {
+                Ok(true) => assert_eq!(
+                    result,
+                    Ok(Some(BgLlm {
+                        base_url: "https://bg.invalid/v1".to_string(),
+                        model: "title-model".to_string(),
+                        api_key: "secret".to_string(),
+                    }))
+                ),
+                Ok(false) => assert_eq!(result, Ok(None)),
+                Err(name) => {
+                    let err = result.unwrap_err();
+                    assert!(
+                        err.contains(name) && err.contains("together"),
+                        "error {err:?} should name {name} and say they go together"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn background_model_url_must_be_http() {
+        let mut vars = full();
+        vars.extend([
+            ("BG_LLM_BASE_URL", "ftp://x".to_string()),
+            ("BG_LLM_MODEL", "m".to_string()),
+            ("BG_LLM_API_KEY", String::new()),
+        ]);
+        let err = Config::from_lookup(|name| vars.get(name).cloned()).unwrap_err();
+        assert!(err.contains("BG_LLM_BASE_URL"), "{err}");
     }
 
     #[test]

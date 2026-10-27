@@ -14,6 +14,9 @@ function setup() {
       flush: () => calls.push("flush"),
     },
     remember: (id) => calls.push(`remember ${id}`),
+    forget: () => calls.push("forget"),
+    stopConnection: () => calls.push("stopConnection"),
+    connect: (id) => calls.push(`connect ${String(id)}`),
     releaseVoice: () => calls.push("release"),
     onChange: () => undefined,
   });
@@ -232,6 +235,52 @@ describe("Controller", () => {
     server({ type: "reply", text: "More." });
     expect(controller.state.turns.at(-1)).toEqual({ role: "assistant", text: "More." });
     expect(controller.state.turns).toHaveLength(3);
+  });
+
+  it("shows why the server ended the conversation, stops voice and reconnecting, and forgets it", () => {
+    const { controller, calls, server, shown } = online();
+    controller.setVoice(true);
+    server({ type: "state", state: "speaking" });
+    controller.playing(true);
+    calls.length = 0;
+
+    server({ type: "ended", reason: "moved", message: "This conversation continued on another device." });
+    expect(calls).toEqual(["flush", "release", "forget", "stopConnection"]);
+    expect(shown()).toBe("ended");
+    expect(controller.state).toMatchObject({
+      voice: false,
+      playing: false,
+      notice: "This conversation continued on another device.",
+    });
+  });
+
+  it("switching joins the chosen conversation, shows its history when the server sends it, and keeps voice on", () => {
+    const { controller, calls, server, shown } = online();
+    controller.setVoice(true);
+    server({ type: "user", text: "old question" });
+    calls.length = 0;
+
+    controller.switchTo("s9");
+    expect(calls).toEqual(["flush", "connect s9"]);
+    expect(shown()).toBe("connecting");
+    expect(controller.state.turns).toEqual([]);
+    expect(controller.state.notice).toBeNull();
+
+    controller.opened();
+    server({
+      type: "session",
+      id: "s9",
+      turns: [
+        { role: "user", text: "what's twelve times seven?" },
+        { role: "assistant", text: "Eighty-four." },
+      ],
+    });
+    expect(calls.slice(2)).toEqual([VOICE_ON, "remember s9"]);
+    expect(controller.state.turns.map((turn) => turn.text)).toEqual(["what's twelve times seven?", "Eighty-four."]);
+
+    controller.switchTo(null);
+    expect(calls.at(-1)).toBe("connect null");
+    expect(controller.state.turns).toEqual([]);
   });
 
   it("shows Reconnecting when the link drops, then re-enables voice on the new connection", () => {

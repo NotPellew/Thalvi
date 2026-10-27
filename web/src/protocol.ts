@@ -14,7 +14,8 @@ export type ServerMessage =
   | { type: "voice"; on: false }
   | { type: "interrupted" }
   | { type: "reply_end" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "ended"; reason: "moved" | "deleted"; message: string };
 
 export const CANCEL_MESSAGE = JSON.stringify({ type: "cancel" });
 export const MAX_TEXT_LENGTH = 20000;
@@ -75,6 +76,11 @@ export function parseServerMessage(raw: string): ServerMessage | null {
       return { type };
     case "error":
       return typeof message === "string" ? { type, message } : null;
+    case "ended":
+      return (fields["reason"] === "moved" || fields["reason"] === "deleted") &&
+        typeof message === "string"
+        ? { type, reason: fields["reason"], message }
+        : null;
     default:
       return null;
   }

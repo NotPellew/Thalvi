@@ -17,11 +17,13 @@ use axum::routing::get;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use thalvi_server::api;
 use thalvi_server::model::{ChatMessage, ChatModel, DeltaStream, ModelError};
 use thalvi_server::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerFactory};
 use thalvi_server::recorder::{RecordKinds, RecordingConfig};
 use thalvi_server::session::handle_session;
 use thalvi_server::store::SessionStore;
+use thalvi_server::title::Titler;
 use thalvi_server::tts::{AudioStream, Tts, TtsError};
 use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::Message as ClientMessage;
@@ -254,6 +256,10 @@ struct Harness {
     model: FakeModel,
     tts: FakeTts,
     store: Arc<SessionStore>,
+    /// Sessions that have run to the end, saved and released.
+    closed: Arc<AtomicUsize>,
+    /// Holds the saved conversations; removed on drop.
+    dir: ScratchDir,
     addr: std::net::SocketAddr,
     server: tokio::task::JoinHandle<()>,
 }
@@ -293,49 +299,73 @@ async fn start() -> Harness {
 }
 
 async fn start_with_recording(recording: RecordingConfig) -> Harness {
+    start_with(recording, None).await
+}
+
+/// A background title model the test can script, alongside the title config.
+fn title_model() -> (FakeModel, Arc<Titler<FakeModel>>) {
+    let model = FakeModel::default();
+    let titler = Arc::new(Titler {
+        model: model.clone(),
+        name: "fake-title-model".to_string(),
+    });
+    (model, titler)
+}
+
+async fn start_with(recording: RecordingConfig, titler: Option<Arc<Titler<FakeModel>>>) -> Harness {
     let factory = FakeFactory::default();
     let model = FakeModel::default();
     let tts = FakeTts::default();
-    let store = Arc::new(SessionStore::new());
-    let (factory2, model2, tts2, store2) = (
+    let dir = ScratchDir::new("sessions");
+    let store = Arc::new(SessionStore::open(&dir.0.join("sessions")).unwrap());
+    let closed = Arc::new(AtomicUsize::new(0));
+    let (factory2, model2, tts2, store2, closed2) = (
         factory.clone(),
         model.clone(),
         tts.clone(),
         Arc::clone(&store),
+        Arc::clone(&closed),
     );
     let recording2 = recording.clone();
-    let app = Router::new().route(
-        "/session",
-        get(
-            move |upgrade: WebSocketUpgrade,
-                  axum::extract::Query(query): axum::extract::Query<
-                std::collections::HashMap<String, String>,
-            >| {
-                let (factory, model, tts, store) = (
-                    factory2.clone(),
-                    model2.clone(),
-                    tts2.clone(),
-                    Arc::clone(&store2),
-                );
-                let recording = recording2.clone();
-                async move {
-                    let resume = query.get("resume").cloned();
-                    upgrade.on_upgrade(move |socket: WebSocket| {
-                        handle_session(
-                            socket,
-                            factory,
-                            Arc::new(model),
-                            Arc::new(tts),
-                            store,
-                            resume,
-                            recording,
-                            false,
-                        )
-                    })
-                }
-            },
-        ),
-    );
+    let app = Router::new()
+        .route(
+            "/session",
+            get(
+                move |upgrade: WebSocketUpgrade,
+                      axum::extract::Query(query): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| {
+                    let (factory, model, tts, store, closed, titler) = (
+                        factory2.clone(),
+                        model2.clone(),
+                        tts2.clone(),
+                        Arc::clone(&store2),
+                        Arc::clone(&closed2),
+                        titler.clone(),
+                    );
+                    let recording = recording2.clone();
+                    async move {
+                        let resume = query.get("resume").cloned();
+                        upgrade.on_upgrade(move |socket: WebSocket| async move {
+                            handle_session(
+                                socket,
+                                factory,
+                                Arc::new(model),
+                                Arc::new(tts),
+                                store,
+                                resume,
+                                titler,
+                                recording,
+                                false,
+                            )
+                            .await;
+                            closed.fetch_add(1, Ordering::SeqCst);
+                        })
+                    }
+                },
+            ),
+        )
+        .merge(api::routes().with_state(Arc::clone(&store)));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -353,6 +383,8 @@ async fn start_with_recording(recording: RecordingConfig) -> Harness {
         model,
         tts,
         store,
+        closed,
+        dir,
         addr,
         server,
     }
@@ -386,6 +418,11 @@ async fn wait_until(condition: impl Fn() -> bool) {
     })
     .await
     .expect("condition not reached within 5s");
+}
+
+/// Waits until `count` sessions have fully ended, final save and recording flush included.
+async fn wait_closed(harness: &Harness, count: usize) {
+    wait_until(|| harness.closed.load(Ordering::SeqCst) >= count).await;
 }
 
 #[derive(Debug, PartialEq)]
@@ -943,7 +980,7 @@ async fn rejoining_restores_history_and_unknown_ids_start_fresh() {
     )
     .await;
     harness.client.close(None).await.unwrap();
-    wait_until(|| harness.store.contains(&first_id)).await;
+    wait_closed(&harness, 1).await;
 
     let turns = harness.reconnect(Some(&first_id)).await;
     assert_eq!(harness.session_id, first_id);
@@ -1105,7 +1142,7 @@ async fn recorded_session(kinds: RecordKinds, tag: &str) -> (ScratchDir, String)
     run_voice_turn(&mut harness).await;
     let session = harness.session_id.clone();
     harness.client.close(None).await.unwrap();
-    wait_until(|| harness.store.contains(&session)).await;
+    wait_closed(&harness, 1).await;
     harness.server.abort();
     (data_dir, session)
 }
@@ -1292,7 +1329,7 @@ async fn endpoint_lag_is_measured_from_when_the_end_audio_was_forwarded() {
     .await;
     tokio::time::resume();
     harness.client.close(None).await.unwrap();
-    wait_until(|| harness.store.contains(&session)).await;
+    wait_closed(&harness, 1).await;
     harness.server.abort();
     let lines = read_recorded_lines_blocking(&data_dir.0, &session);
     let turn = lines.iter().find(|line| line["event"] == "turn").unwrap();
@@ -1316,13 +1353,13 @@ async fn resumed_session_continues_turn_numbering_and_keeps_both_wavs() {
     run_voice_turn(&mut harness).await;
     let session = harness.session_id.clone();
     harness.client.close(None).await.unwrap();
-    wait_until(|| harness.store.contains(&session)).await;
+    wait_closed(&harness, 1).await;
 
     let turns = harness.reconnect(Some(&session)).await;
     assert_eq!(turns.as_array().map(Vec::len), Some(2));
     run_voice_turn(&mut harness).await;
     harness.client.close(None).await.unwrap();
-    wait_until(|| harness.store.contains(&session)).await;
+    wait_closed(&harness, 2).await;
     harness.server.abort();
 
     wait_until(|| {
@@ -1501,7 +1538,7 @@ async fn closing_the_socket_mid_reply_keeps_the_text_shown_for_the_rejoin() {
     )
     .await;
     harness.client.close(None).await.unwrap();
-    wait_until(|| harness.store.contains(&first_id)).await;
+    wait_closed(&harness, 1).await;
 
     let turns = harness.reconnect(Some(&first_id)).await;
     assert_eq!(
@@ -1671,5 +1708,381 @@ async fn turning_voice_off_stops_the_sentence_being_synthesized_while_text_conti
     tts_gate.notify_one();
     expect_quiet_until_marker(&mut harness).await;
     assert_eq!(harness.tts.inputs(), vec!["Hello there.".to_string()]);
+    harness.server.abort();
+}
+
+// ---------- saved conversations ----------
+
+fn saved_titles(harness: &Harness) -> Vec<String> {
+    let reopened = SessionStore::open(&harness.dir.0.join("sessions")).unwrap();
+    reopened.list().into_iter().map(|row| row.title).collect()
+}
+
+async fn open_client(
+    addr: std::net::SocketAddr,
+    resume: Option<&str>,
+) -> (ClientSocket, String, Value) {
+    let url = resume.map_or_else(
+        || format!("ws://{addr}/session"),
+        |id| format!("ws://{addr}/session?resume={id}"),
+    );
+    let (mut client, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    let (id, turns) = read_session_opening(&mut client).await;
+    (client, id, turns)
+}
+
+async fn expect_closed(client: &mut ClientSocket) {
+    let next = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("socket stayed open");
+    assert!(
+        matches!(next, None | Some(Ok(ClientMessage::Close(_)) | Err(_))),
+        "expected the socket to close, got {next:?}"
+    );
+}
+
+async fn ask(harness: &mut Harness, question: &str, answer: &str) {
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta(answer.to_string())]);
+    send_json(harness, &json!({"type": "text", "text": question})).await;
+    let _ = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
+    )
+    .await;
+}
+
+fn url(harness: &Harness, path: &str) -> String {
+    format!("http://{}{path}", harness.addr)
+}
+
+async fn listed(harness: &Harness) -> Vec<Value> {
+    let body: Value = reqwest::get(url(harness, "/sessions"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body["sessions"].as_array().unwrap().clone()
+}
+
+#[tokio::test]
+async fn conversations_survive_a_restart_with_their_history_and_turn_numbers() {
+    let mut harness = start().await;
+    let id = harness.session_id.clone();
+    ask(&mut harness, "what's twelve times seven?", "Eighty-four.").await;
+    harness.store.flush().await;
+
+    let reopened = SessionStore::open(&harness.dir.0.join("sessions")).unwrap();
+    let summaries = reopened.list();
+    assert_eq!(
+        summaries
+            .iter()
+            .map(|s| (&s.id[..], &s.title[..]))
+            .collect::<Vec<_>>(),
+        vec![(id.as_str(), "what's twelve times seven?")]
+    );
+    let attachment = reopened.attach(Some(&id)).await;
+    assert_eq!(
+        (attachment.history, attachment.next_turn),
+        (
+            vec![
+                ChatMessage::user("what's twelve times seven?".to_string()),
+                ChatMessage::assistant("Eighty-four.".to_string()),
+            ],
+            1
+        )
+    );
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn the_list_shows_only_conversations_with_turns_and_supports_rename_and_delete() {
+    let mut harness = start().await;
+    assert_eq!(listed(&harness).await, Vec::<Value>::new());
+    let id = harness.session_id.clone();
+    ask(&mut harness, "first question", "First answer.").await;
+
+    let rows = listed(&harness).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], id.as_str());
+    assert_eq!(rows[0]["title"], "first question");
+    assert!(rows[0]["age_s"].is_u64(), "row: {}", rows[0]);
+
+    let client = reqwest::Client::new();
+    let too_long = format!("{{\"title\":\"{}\"}}", "x".repeat(81));
+    let cases = [
+        ("{\"title\":\"  \"}", id.as_str(), 400),
+        (too_long.as_str(), id.as_str(), 400),
+        ("not json", id.as_str(), 400),
+        ("{\"name\":\"x\"}", id.as_str(), 400),
+        ("{\"title\":\"Maths\"}", "no-such-session", 404),
+        ("{\"title\":\"  Times   tables \"}", id.as_str(), 204),
+    ];
+    for (body, target, status) in cases {
+        let response = client
+            .patch(url(&harness, &format!("/sessions/{target}")))
+            .header("content-type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), status, "body: {body:.40}");
+        if status != 204 {
+            let error: Value = response.json().await.unwrap();
+            assert!(
+                error["error"].as_str().is_some_and(|m| !m.is_empty()),
+                "{error}"
+            );
+        }
+    }
+    assert_eq!(listed(&harness).await[0]["title"], "Times tables");
+
+    let delete = |target: &str| {
+        client
+            .delete(url(&harness, &format!("/sessions/{target}")))
+            .send()
+    };
+    assert_eq!(
+        delete("no-such-session").await.unwrap().status().as_u16(),
+        404
+    );
+    assert_eq!(delete(&id).await.unwrap().status().as_u16(), 204);
+    assert_eq!(listed(&harness).await, Vec::<Value>::new());
+    harness.store.flush().await;
+    assert_eq!(saved_titles(&harness), Vec::<String>::new());
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn opening_a_live_conversation_elsewhere_moves_it_and_stops_its_reply() {
+    let mut harness = start().await;
+    let id = harness.session_id.clone();
+    ask(&mut harness, "first question", "First answer.").await;
+    harness.model.add_script(vec![
+        ModelChunk::Delta("Partial words. ".to_string()),
+        ModelChunk::Wait(Arc::new(Notify::new())),
+    ]);
+    send_json(
+        &mut harness,
+        &json!({"type": "text", "text": "second question"}),
+    )
+    .await;
+    let _ = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply"),
+    )
+    .await;
+
+    let (mut other, other_id, turns) = open_client(harness.addr, Some(&id)).await;
+    assert_eq!(other_id, id);
+    assert_eq!(
+        turns,
+        json!([
+            {"role": "user", "text": "first question"},
+            {"role": "assistant", "text": "First answer."},
+            {"role": "user", "text": "second question"},
+            {"role": "assistant", "text": "Partial words."},
+        ])
+    );
+
+    let ended = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "ended"),
+    )
+    .await;
+    assert_eq!(
+        ended.last(),
+        Some(&Received::Json(json!({
+            "type": "ended",
+            "reason": "moved",
+            "message": "This conversation continued on another device.",
+        })))
+    );
+    expect_closed(&mut harness.client).await;
+    assert_eq!(harness.model.dropped.load(Ordering::SeqCst), 2);
+
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Carrying on.".to_string())]);
+    harness.client = {
+        send_json_to(
+            &mut other,
+            &json!({"type": "text", "text": "third question"}),
+        )
+        .await;
+        other
+    };
+    let _ = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
+    )
+    .await;
+    assert_eq!(harness.model.calls().last().map(Vec::len), Some(5));
+    assert_eq!(listed(&harness).await.len(), 1);
+    harness.server.abort();
+}
+
+async fn send_json_to(client: &mut ClientSocket, value: &Value) {
+    client
+        .send(ClientMessage::Text(value.to_string().into()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn deleting_a_live_conversation_tells_its_device_and_it_is_not_saved_again() {
+    let mut harness = start().await;
+    let id = harness.session_id.clone();
+    ask(&mut harness, "to be deleted", "Gone soon.").await;
+    harness.model.add_script(vec![
+        ModelChunk::Delta("Still talking. ".to_string()),
+        ModelChunk::Wait(Arc::new(Notify::new())),
+    ]);
+    send_json(&mut harness, &json!({"type": "text", "text": "and again"})).await;
+    let _ = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply"),
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .delete(url(&harness, &format!("/sessions/{id}")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 204);
+    let ended = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "ended"),
+    )
+    .await;
+    assert_eq!(
+        ended.last(),
+        Some(&Received::Json(json!({
+            "type": "ended",
+            "reason": "deleted",
+            "message": "This conversation was deleted.",
+        })))
+    );
+    expect_closed(&mut harness.client).await;
+    wait_closed(&harness, 1).await;
+    harness.store.flush().await;
+    assert_eq!(saved_titles(&harness), Vec::<String>::new());
+
+    let turns = harness.reconnect(Some(&id)).await;
+    assert_eq!(turns, json!([]));
+    assert_ne!(harness.session_id, id);
+    harness.server.abort();
+}
+
+async fn wait_for_title_event(data_dir: &ScratchDir, session: &str) -> Value {
+    wait_until(|| {
+        read_recorded_lines_blocking(&data_dir.0, session)
+            .iter()
+            .any(|line| line["event"] == "title")
+    })
+    .await;
+    read_recorded_lines_blocking(&data_dir.0, session)
+        .into_iter()
+        .find(|line| line["event"] == "title")
+        .unwrap()
+}
+
+fn metrics_only() -> RecordKinds {
+    RecordKinds {
+        metrics: true,
+        text: false,
+        audio: false,
+    }
+}
+
+#[tokio::test]
+async fn the_background_model_titles_the_first_exchange_and_the_call_is_measured() {
+    let data_dir = ScratchDir::new("title-ok");
+    let (title_fake, titler) = title_model();
+    title_fake.add_script(vec![
+        ModelChunk::Delta("\"Twelve times seven".to_string()),
+        ModelChunk::Delta(" explained.\"".to_string()),
+    ]);
+    let mut harness = start_with(recording_config(metrics_only(), &data_dir), Some(titler)).await;
+    let id = harness.session_id.clone();
+    let long_question = "what's twelve times seven, and can you show me how to work it out";
+    ask(&mut harness, long_question, "Eighty-four.").await;
+
+    let event = wait_for_title_event(&data_dir, &id).await;
+    assert_eq!(event["model"], "fake-title-model");
+    assert_eq!(event["outcome"], "ok");
+    assert!(event["latency_ms"].is_u64(), "{event}");
+    assert_eq!(
+        listed(&harness).await[0]["title"],
+        "Twelve times seven explained"
+    );
+    let prompt = &title_fake.calls()[0];
+    assert!(
+        prompt[0].content.contains(long_question) && prompt[0].content.contains("Eighty-four."),
+        "title prompt should carry the exchange: {prompt:?}"
+    );
+
+    harness.store.flush().await;
+    assert_eq!(saved_titles(&harness), vec!["Twelve times seven explained"]);
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn a_failed_title_call_keeps_the_first_line_title_and_is_measured() {
+    let data_dir = ScratchDir::new("title-fail");
+    let (title_fake, titler) = title_model();
+    title_fake.add_script(vec![ModelChunk::Fail]);
+    let mut harness = start_with(recording_config(metrics_only(), &data_dir), Some(titler)).await;
+    let id = harness.session_id.clone();
+    ask(
+        &mut harness,
+        "what's twelve times seven, and can you show me how to work it out",
+        "Eighty-four.",
+    )
+    .await;
+
+    let event = wait_for_title_event(&data_dir, &id).await;
+    assert_eq!(event["outcome"], "failed");
+    assert!(
+        event["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("model blew up")),
+        "{event}"
+    );
+    assert_eq!(
+        listed(&harness).await[0]["title"],
+        "what's twelve times seven, and can you s…"
+    );
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn a_title_the_user_typed_is_not_overwritten_by_the_model() {
+    let data_dir = ScratchDir::new("title-renamed");
+    let (title_fake, titler) = title_model();
+    let gate = Arc::new(Notify::new());
+    title_fake.add_script(vec![
+        ModelChunk::Wait(Arc::clone(&gate)),
+        ModelChunk::Delta("Model title".to_string()),
+    ]);
+    let mut harness = start_with(recording_config(metrics_only(), &data_dir), Some(titler)).await;
+    let id = harness.session_id.clone();
+    ask(&mut harness, "hello", "Hi.").await;
+    wait_until(|| !title_fake.calls().is_empty()).await;
+
+    let response = reqwest::Client::new()
+        .patch(url(&harness, &format!("/sessions/{id}")))
+        .json(&json!({"title": "Mine"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 204);
+    gate.notify_one();
+    let event = wait_for_title_event(&data_dir, &id).await;
+    assert_eq!(event["outcome"], "ok");
+    assert_eq!(listed(&harness).await[0]["title"], "Mine");
     harness.server.abort();
 }

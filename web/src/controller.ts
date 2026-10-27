@@ -12,6 +12,12 @@ export interface ControllerPorts {
   send(text: string): void;
   playback: { enqueue(bytes: ArrayBuffer): void; flush(): void };
   remember(sessionId: string): void;
+  /** Drops the remembered id, so a reload starts a new conversation instead of taking this one back. */
+  forget(): void;
+  /** Stops reconnecting: the server ended this connection for good. */
+  stopConnection(): void;
+  /** Drops the current connection and joins conversation `id`, or starts a new one for null. */
+  connect(id: string | null): void;
   /** Stops the mic and audio context; the server has turned voice off by itself. */
   releaseVoice(): void;
   onChange(state: SessionState): void;
@@ -67,6 +73,13 @@ export class Controller {
     this.apply({ type: "stopped" });
   }
 
+  /** Leaves the current conversation for `id`, or a new one for null; voice stays as it is. */
+  switchTo(id: string | null): void {
+    this.ports.playback.flush();
+    this.ports.connect(id);
+    this.apply({ type: "switched" });
+  }
+
   playing(playing: boolean): void {
     if (!playing) this.ports.send(playedMessage(this.receivedAudioBytes));
     this.apply({ type: "playing", playing });
@@ -83,6 +96,12 @@ export class Controller {
     if (!message) return;
     if (message.type === "interrupted") this.ports.playback.flush();
     if (message.type === "session") this.ports.remember(message.id);
+    if (message.type === "ended") {
+      this.ports.playback.flush();
+      if (this.state.voice) this.ports.releaseVoice();
+      this.ports.forget();
+      this.ports.stopConnection();
+    }
     if (message.type === "voice") {
       if (!this.state.voice) return;
       this.ports.playback.flush();
