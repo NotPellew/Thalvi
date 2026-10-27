@@ -177,7 +177,9 @@ pub struct Measured {
 }
 
 impl Measured {
-    fn failed(error: String) -> Self {
+    /// A reply that failed before measuring anything.
+    #[must_use]
+    pub fn failed(error: String) -> Self {
         Self {
             first_token_s: None,
             first_sentence_s: None,
