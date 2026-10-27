@@ -43,6 +43,7 @@ GLIMMER_REVISION = "cec94fcfd6512f2cfe708138c32533b346ea4f69"
 VLLM_VERSION = "0.32.0"
 LIBRISPEECH_URL = "https://openslr.trmal.net/resources/12/{subset}.tar.gz"
 LIBRISPEECH_SUBSETS = ("train-clean-100", "dev-clean", "test-clean")
+EVAL_SUBSETS = ("dev-clean", "test-clean")
 
 GLIMMER_MOUNT = "/glimmer"
 DATA_MOUNT = "/data"
@@ -52,6 +53,7 @@ TEXT_SHARD_BYTES = 4 * 1024**3
 SPEECH_TAR = f"{DATA_MOUNT}/speech.tar"
 SPEECH_MANIFEST_MEMBER = "speech/manifest.jsonl"
 STAGE_ROOT = "/tmp/stage"
+ARCHIVES_DIR = f"{DATA_MOUNT}/archives"
 LIBRISPEECH_ROOT = f"{DATA_MOUNT}/librispeech"
 LIBRISPEECH_MANIFEST = f"{LIBRISPEECH_ROOT}/manifest.jsonl"
 TEACHER_OUT = f"{DATA_MOUNT}/teacher/train.jsonl"
@@ -147,42 +149,61 @@ def fetch_glimmer() -> None:
         glimmer_volume.commit()
 
 
-def download_librispeech(root: Path, after_subset: Callable[[], None] = lambda: None) -> None:
-    """Downloads and extracts the LibriSpeech subsets missing under `root/LibriSpeech`.
+def librispeech_archive(subset: str) -> Path:
+    """The subset's archive on `thalvi-data`, downloaded on first use.
 
-    Each archive is deleted once extracted; `after_subset` runs after every extraction.
+    The openslr mirror sends ~4 MB/s to Modal, which made staging train-clean-100
+    cost half an hour of H100 time; a big file on the volume reads fast.
     """
     import httpx
 
-    for subset in LIBRISPEECH_SUBSETS:
+    path = Path(ARCHIVES_DIR) / f"{subset}.tar.gz"
+    if path.is_file():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(path.name + ".part")
+    with (
+        httpx.stream(
+            "GET", LIBRISPEECH_URL.format(subset=subset), follow_redirects=True
+        ) as response,
+        partial.open("wb") as file,
+    ):
+        response.raise_for_status()
+        for chunk in response.iter_bytes(1 << 20):
+            file.write(chunk)
+    partial.replace(path)
+    data_volume.commit()
+    return path
+
+
+def download_librispeech(
+    root: Path,
+    subsets: Sequence[str] = LIBRISPEECH_SUBSETS,
+    after_subset: Callable[[], None] = lambda: None,
+) -> None:
+    """Extracts the LibriSpeech `subsets` missing under `root/LibriSpeech`.
+
+    `after_subset` runs after every extraction.
+    """
+    for subset in subsets:
         final = root / "LibriSpeech" / subset
         if final.is_dir():
             print(f"{subset}: already extracted", flush=True)
             continue
-        archive = Path("/tmp") / f"{subset}.tar.gz"
-        with (
-            httpx.stream(
-                "GET", LIBRISPEECH_URL.format(subset=subset), follow_redirects=True
-            ) as response,
-            archive.open("wb") as file,
-        ):
-            response.raise_for_status()
-            for chunk in response.iter_bytes(1 << 20):
-                file.write(chunk)
         staging = root / f".staging-{subset}"
-        with tarfile.open(archive) as tar:
+        with tarfile.open(librispeech_archive(subset)) as tar:
             tar.extractall(staging, filter="data")
         final.parent.mkdir(parents=True, exist_ok=True)
         (staging / "LibriSpeech" / subset).replace(final)
-        archive.unlink()
         after_subset()
         print(f"{subset}: extracted", flush=True)
 
 
-def stage_audio() -> list[str]:
+def stage_audio(subsets: Sequence[str]) -> list[str]:
     """Stages all audio on local disk and returns the `--audio-manifest` arguments naming it.
 
-    LibriSpeech is downloaded fresh and gets its own manifest; the Kokoro speech comes
+    The LibriSpeech `subsets` come from their archives on the volume and get their own
+    manifest; the Kokoro speech comes
     out of `speech.tar` on `thalvi-data`, with its manifest inside. The ids match the
     manifests the teacher read on the volume.
     """
@@ -192,7 +213,7 @@ def stage_audio() -> list[str]:
     root = Path(STAGE_ROOT)
     root.mkdir(parents=True, exist_ok=True)
     librispeech_root = root / "librispeech"
-    download_librispeech(librispeech_root)
+    download_librispeech(librispeech_root, subsets)
     librispeech_manifest = librispeech_root / "manifest.jsonl"
     librispeech.main([str(librispeech_root), str(librispeech_manifest)])
     with tarfile.open(SPEECH_TAR) as tar:
@@ -226,11 +247,13 @@ def teacher_manifests() -> list[str]:
 
 @app.function(image=project_image, volumes={DATA_MOUNT: data_volume}, timeout=3 * HOUR)
 def fetch_librispeech() -> None:
-    """Downloads and extracts the LibriSpeech subsets, then writes their manifest."""
+    """Caches the LibriSpeech archives on the volume, extracts them, and writes their manifest."""
     from thalvi_train import librispeech
 
     with logged("librispeech", None):
-        download_librispeech(Path(LIBRISPEECH_ROOT), data_volume.commit)
+        for subset in LIBRISPEECH_SUBSETS:
+            librispeech_archive(subset)
+        download_librispeech(Path(LIBRISPEECH_ROOT), after_subset=data_volume.commit)
         librispeech.main([LIBRISPEECH_ROOT, LIBRISPEECH_MANIFEST])
         data_volume.commit()
 
@@ -328,7 +351,7 @@ def run_train(run_name: str, extra_args: str) -> None:
     The audio is staged onto local disk first, inside the timed step.
     """
     with logged("train", GPU):
-        audio_args = stage_audio()
+        audio_args = stage_audio(LIBRISPEECH_SUBSETS)
         run_logged(
             [
                 sys.executable,
@@ -367,7 +390,7 @@ def run_eval(run_name: str, limit: int, batch_size: int, extra_args: str) -> Non
     """
     run_dir = f"{RUNS_DIR}/{run_name}"
     with logged("evaluate", GPU):
-        audio_args = stage_audio()
+        audio_args = stage_audio(EVAL_SUBSETS)
         run_logged(
             [
                 sys.executable,

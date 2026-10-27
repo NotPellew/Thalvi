@@ -1,4 +1,5 @@
 import tarfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import modal
@@ -38,7 +39,7 @@ def test_a_step_logs_its_start_and_end_even_when_it_fails(capsys: pytest.Capture
     assert end.startswith("[teacher] end ") and end.endswith(" h on H100")
 
 
-def fake_download(root: Path, after_subset=lambda: None) -> None:
+def fake_download(root: Path, subsets: Sequence[str] = (), *_: object) -> None:
     folder = root / "LibriSpeech" / "dev-clean" / "84" / "121123"
     folder.mkdir(parents=True)
     soundfile.write(folder / "84-121123-0000.flac", np.zeros(8000), 8000)
@@ -60,7 +61,7 @@ def test_staging_puts_both_audio_sets_on_local_disk_and_names_their_manifests(
     volume_speech: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(modal_app, "download_librispeech", fake_download)
-    args = modal_app.stage_audio()
+    args = modal_app.stage_audio(modal_app.EVAL_SUBSETS)
 
     assert args[::2] == ["--audio-manifest"] * 2
     speech, librispeech = (Path(path) for path in args[1::2])
