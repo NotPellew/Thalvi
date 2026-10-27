@@ -8,6 +8,9 @@ encoder runs inline on the training device, one micro-batch ahead of the project
 Some samples get earlier text turns drawn from other records (see `history`), the same
 for teacher and student, so the projector learns to hear the audio with text in context.
 `--init-projector` continues from an earlier run's weights.
+
+With `--augment-prob`, the read-ahead threads also mix backgrounds, reverb and gain into
+a share of the clips (see `augment`); the teacher still reads the transcript.
 """
 
 import argparse
@@ -28,6 +31,7 @@ from torch.utils.checkpoint import checkpoint
 from transformers import AutoTokenizer, WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
+from thalvi_train.augment import Augmenter, add_arguments, build_augmenter
 from thalvi_train.batch import Batch, make_batch
 from thalvi_train.features import DEFAULT_MODEL, encode, load_encoder, read_audio
 from thalvi_train.glimmer import FrozenGlimmer, load_glimmer
@@ -192,12 +196,17 @@ def _step_groups(
 
 
 def _read_ahead(
-    pool: ThreadPoolExecutor, batches: Sequence[Sequence[Path]], max_samples: int
+    pool: ThreadPoolExecutor,
+    batches: Sequence[Sequence[tuple[int, int]]],
+    load: Callable[[int, int], np.ndarray],
 ) -> Iterator[list[np.ndarray]]:
-    """Yields each batch's clips, already reading the next batch while the caller works."""
+    """Yields each batch's clips, already loading the next batch while the caller works.
 
-    def submit(paths: Sequence[Path]) -> list[Future[np.ndarray]]:
-        return [pool.submit(read_audio, path, max_samples) for path in paths]
+    A batch lists `(epoch, index)` pairs; `load` turns one into its clip.
+    """
+
+    def submit(samples: Sequence[tuple[int, int]]) -> list[Future[np.ndarray]]:
+        return [pool.submit(load, epoch, index) for epoch, index in samples]
 
     pending = submit(batches[0]) if batches else []
     for index in range(len(batches)):
@@ -217,13 +226,15 @@ def run(
     projector_config: ProjectorConfig,
     config: TrainConfig,
     emit: Callable[[dict[str, float | int]], None],
+    augmenter: Augmenter | None = None,
 ) -> AudioProjector:
     """Trains a projector on `records`, emitting one dict per step and saving checkpoints.
 
     The projector is fresh, or loaded from `config.init_projector`. `audio[i]` is the
     file of `records[i]`. Each micro-batch is read, run through the frozen `encoder`
     without gradients, and only then through the projector. Every epoch draws its own
-    histories, and the length bucketing counts them.
+    histories, and the length bucketing counts them. With an `augmenter`, the read-ahead
+    threads augment each clip as the sample's `(epoch, index)` seeds it, off the device.
     """
     if not records:
         raise ValueError("no records to train on")
@@ -255,11 +266,15 @@ def run(
     plan = plan[:total_steps]
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
 
+    def load(epoch: int, index: int) -> np.ndarray:
+        clip = read_audio(audio[index], extractor.n_samples)
+        return clip if augmenter is None else augmenter(clip, index, epoch)
+
     with ThreadPoolExecutor(READ_THREADS) as pool:
         clips = _read_ahead(
             pool,
-            [[audio[i] for i in indices] for _, group in plan for indices in group],
-            extractor.n_samples,
+            [[(epoch, i) for i in indices] for epoch, group in plan for indices in group],
+            load,
         )
         for step, (epoch, group) in enumerate(plan, start=1):
             lr = lr_at(step - 1, total_steps, config.warmup_steps, config.lr)
@@ -362,6 +377,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=HistoryConfig.same_task,
         help="chance that a history is drawn from records of the sample's own task",
     )
+    add_arguments(parser)
     parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args(argv)
 
@@ -417,6 +433,7 @@ def main(argv: list[str] | None = None) -> None:
         projector_config,
         config,
         lambda line: print(json.dumps(line), flush=True),
+        build_augmenter(args.noise_manifest, args.augment_prob, audio, args.seed),
     )
 
 

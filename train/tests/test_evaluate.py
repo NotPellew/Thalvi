@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import save_file
 from tiny_glimmer import HIDDEN, FakeTokenizer
+from tiny_noise import write_noise_manifest
 from tiny_whisper import DIM, WINDOW, tone, write_audio_manifest
 
 from thalvi_train import evaluate
@@ -489,3 +490,26 @@ def test_cli_refuses_a_projector_trained_for_another_hidden_size(
     (run / PROJECTOR_CONFIG).write_text(json.dumps(PROJECTOR.__dict__ | {"text_dim": HIDDEN + 1}))
     with pytest.raises(ValueError, match="text_dim"):
         evaluate.load_projector(run, HIDDEN, torch.device("cpu"))
+
+
+def test_cli_evaluates_noisy_audio_reproducibly_and_records_the_settings(
+    cli_arguments: list[str], tmp_path: Path
+) -> None:
+    run = tmp_path / "run"
+    noise = write_noise_manifest(tmp_path / "noise", {"hiss": ("noise", 4000)})
+
+    def kls_of(extra: list[str]) -> list[float]:
+        evaluate.main([*cli_arguments, *extra, *("--latency-samples", "0")])
+        rows = [json.loads(line) for line in (run / "eval.jsonl").read_text().splitlines()]
+        return [row["kl"] for row in rows]
+
+    def summary() -> dict:
+        return json.loads((run / "eval.summary.json").read_text(encoding="utf-8"))
+
+    clean = kls_of([])
+    assert summary()["augment"] == {"prob": 0.0, "seed": 0, "noise_manifest": None}
+    noisy = ["--noise-manifest", str(noise), "--augment-prob", "1"]
+    first, second = kls_of(noisy), kls_of(noisy)
+
+    assert summary()["augment"] == {"prob": 1.0, "seed": 0, "noise_manifest": str(noise)}
+    assert first == second != clean

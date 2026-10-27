@@ -2,15 +2,19 @@ import json
 import random
 from pathlib import Path
 
+import numpy as np
 import pytest
+import soundfile
 import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 from tiny_glimmer import HIDDEN, FakeTokenizer
+from tiny_noise import write_noise_manifest
 from tiny_whisper import DIM, write_audio_manifest
 from transformers import MuseGlimmerForConditionalGeneration
 
 from thalvi_train import train
+from thalvi_train.augment import Augmenter, read_noise_manifest
 from thalvi_train.batch import make_batch
 from thalvi_train.glimmer import FrozenGlimmer, load_glimmer
 from thalvi_train.history import HistoryConfig, history_chars
@@ -103,9 +107,12 @@ def test_loss_matches_kl_and_ce_computed_from_the_full_model(
     assert parts.ce.item() == pytest.approx(ce.item(), rel=1e-4)
 
 
-def run_on(glimmer, encoder, audio_manifest, records, config, emit=lambda _: None):
+def run_on(glimmer, encoder, audio_manifest, records, config, emit=lambda _: None, augment=None):
     audio = resolve_audio(records, [audio_manifest])
-    return run(glimmer, FakeTokenizer(), records, audio, *encoder, PROJECTOR, config, emit)
+    augmenter = augment(audio) if augment else None
+    return run(
+        glimmer, FakeTokenizer(), records, audio, *encoder, PROJECTOR, config, emit, augmenter
+    )
 
 
 def test_training_lowers_the_loss_and_changes_only_the_projector(
@@ -182,6 +189,54 @@ def test_every_micro_batch_is_encoded_from_its_own_records_audio(
 
     assert len(batched) == 6
     assert encoded == [CLIP_SAMPLES[id] for id in batched]
+
+
+def test_augmented_clips_reach_the_encoder_and_only_the_projector_trains(
+    glimmer: FrozenGlimmer,
+    tiny_encoder,
+    audio_manifest: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = {k: v.clone() for k, v in glimmer.state_dict().items()}
+    encoder_before = {k: v.clone() for k, v in tiny_encoder[0].state_dict().items()}
+    noise = write_noise_manifest(tmp_path / "noise", {"hiss": ("noise", 4000)})
+    encoded: list[np.ndarray] = []
+    real_encode = train.encode
+
+    def spy_encode(encoder, extractor, clips):
+        encoded.extend(clips)
+        return real_encode(encoder, extractor, clips)
+
+    monkeypatch.setattr(train, "encode", spy_encode)
+    lines: list[dict] = []
+    config = train_config(tmp_path / "out", grad_accum=1, epochs=3)
+    projector = run_on(
+        glimmer,
+        tiny_encoder,
+        audio_manifest,
+        RECORDS,
+        config,
+        lines.append,
+        augment=lambda audio: Augmenter(
+            read_noise_manifest(noise), audio, prob=1.0, seed=config.seed
+        ),
+    )
+
+    plain = {n: soundfile.read(tmp_path / "speech" / "audio" / f"{n}.wav")[0] for n in "ab"}
+    assert len(encoded) == 6 and len(lines) == 6
+    assert sorted(len(clip) for clip in encoded) == [1600] * 3 + [3200] * 3
+    assert all(
+        not np.allclose(clip, plain["a" if len(clip) == 3200 else "b"], atol=1e-4)
+        for clip in encoded
+    )
+    assert all(torch.equal(v, glimmer.state_dict()[k]) for k, v in before.items())
+    assert all(torch.equal(v, tiny_encoder[0].state_dict()[k]) for k, v in encoder_before.items())
+    untrained = AudioProjector(**PROJECTOR.__dict__)
+    assert any(
+        not torch.equal(p, q)
+        for p, q in zip(projector.parameters(), untrained.parameters(), strict=True)
+    )
 
 
 def test_gradient_checkpointing_leaves_projector_gradients_unchanged(
@@ -368,3 +423,33 @@ def test_cli_takes_the_projector_config_from_the_init_run_and_passes_history_fla
 
     with pytest.raises(ValueError, match="hidden_dim"):
         train.main([*arguments, "--hidden-dim", "64"])
+
+
+def test_cli_builds_the_augmenter_from_the_noise_manifest_and_probability(
+    tiny_glimmer_dir: Path,
+    tiny_whisper_dir: Path,
+    audio_manifest: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "teacher.jsonl"
+    manifest.write_text("".join(json.dumps(r.__dict__) + "\n" for r in RECORDS), encoding="utf-8")
+    noise = write_noise_manifest(tmp_path / "noise", {"hiss": ("noise", 4000)})
+    monkeypatch.setattr(train, "_load_tokenizer", lambda path: FakeTokenizer())
+    built: list = []
+    monkeypatch.setattr(train, "run", lambda *args: built.append(args[-1]))
+    arguments = [
+        *("--manifest", str(manifest)),
+        *("--audio-manifest", str(audio_manifest)),
+        *("--whisper-model", str(tiny_whisper_dir)),
+        *("--glimmer", str(tiny_glimmer_dir)),
+        *("--out-dir", str(tmp_path / "out")),
+        *("--encoder-dim", str(DIM)),
+        *("--seed", "4"),
+    ]
+    train.main(arguments)
+    train.main([*arguments, *("--noise-manifest", str(noise)), *("--augment-prob", "0.25")])
+
+    off, on = built
+    assert off is None
+    assert (on.prob, on.seed) == (0.25, 4)

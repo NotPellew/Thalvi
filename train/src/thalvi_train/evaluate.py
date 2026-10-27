@@ -12,7 +12,9 @@ Samples run in batches of similar prompt length, left-padded, and rows come back
 record order. The audio goes through the Whisper encoder inline, as in the live path,
 a batch at a time. With `--history-prob`, samples run after earlier text turns drawn
 from other evaluated records (see `history`), the same for every run of the same
-records and settings; the summary states the setting.
+records and settings; the summary states the setting. With `--augment-prob`, the clips
+get backgrounds, reverb and gain under a fixed seed (see `augment`), for a noisy
+evaluation that reruns identically; the summary states those settings too.
 
 A batch's timings sit on each of its rows, since a batch has no
 per-sample latency: `batch_encode_s` is the encoder, mel features included (reading
@@ -39,6 +41,7 @@ from safetensors.torch import load_file
 from transformers import AutoTokenizer, WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
+from thalvi_train.augment import Augmenter, add_arguments, build_augmenter
 from thalvi_train.batch import Batch, make_batch
 from thalvi_train.decode import decode_steps
 from thalvi_train.features import (
@@ -72,6 +75,7 @@ from thalvi_train.train import (
 
 SUMMARY_SUFFIX = ".summary.json"
 HISTORY_SEED = 0
+AUGMENT_SEED = 0
 
 _PARAGRAPH_BREAK = re.compile(r"\n\s*\n")
 _REASONING = re.compile(r"to=self<\|message\|>(.*?)(?:<\|eom\|>|<\|eot\|>|\Z)", re.DOTALL)
@@ -404,14 +408,17 @@ def evaluate(
     max_new_tokens: int,
     with_text_baseline: bool,
     emit: Callable[[list[SampleResult]], None],
+    augmenter: Augmenter | None = None,
 ) -> list[SampleResult]:
     """Evaluates `records` in batches, passing each batch's results to `emit` as it is done.
 
     `audio[i]` and `histories[i]` are the file and the earlier turns of `records[i]`.
-    All clips are read first, so batches can group similar lengths; the returned
-    results are in the order of `records`.
+    All clips are read first, and augmented by the `augmenter` if there is one, so
+    batches can group similar lengths; the returned results are in the order of `records`.
     """
     clips = [read_audio(path, extractor.n_samples) for path in audio]
+    if augmenter is not None:
+        clips = [augmenter(clip, index) for index, clip in enumerate(clips)]
     results: dict[int, SampleResult] = {}
     planned = plan_batches(records, clips, histories, projector, tokenizer, batch_size)
     for index, members in enumerate(planned):
@@ -531,6 +538,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="also decode from the transcript text with the same weights",
     )
+    add_arguments(parser)
     return parser.parse_args(argv)
 
 
@@ -546,6 +554,7 @@ def main(argv: list[str] | None = None) -> None:
     audio = resolve_audio(records, args.audio_manifest)
     history = HistoryConfig(args.history_prob, args.history_turns, args.history_same_task)
     histories = HistorySampler(records, history, HISTORY_SEED).draw_all()
+    augmenter = build_augmenter(args.noise_manifest, args.augment_prob, audio, AUGMENT_SEED)
     glimmer = load_glimmer(args.glimmer, device=args.device, quantize=args.quantize)
     tokenizer = _load_tokenizer(args.glimmer)
     projector, config = load_projector(args.projector, glimmer.hidden_size, glimmer.device)
@@ -568,11 +577,19 @@ def main(argv: list[str] | None = None) -> None:
         max_new_tokens=args.max_new_tokens,
         with_text_baseline=args.with_text_baseline,
         emit=emit,
+        augmenter=augmenter,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     rows = "".join(json.dumps(asdict(r), ensure_ascii=False) + "\n" for r in results)
     args.out.write_text(rows, encoding="utf-8")
-    summary = summarize(results) | {"history": asdict(history) | {"seed": HISTORY_SEED}}
+    summary = summarize(results) | {
+        "history": asdict(history) | {"seed": HISTORY_SEED},
+        "augment": {
+            "prob": args.augment_prob,
+            "seed": AUGMENT_SEED,
+            "noise_manifest": str(args.noise_manifest) if args.noise_manifest else None,
+        },
+    }
     if args.latency_samples:
         count = args.latency_samples
         alone = measure_latency(
