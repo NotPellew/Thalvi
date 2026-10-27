@@ -11,6 +11,7 @@ import os
 import sys
 import time
 from collections.abc import Callable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -32,6 +33,7 @@ SAMPLE_RATE = 16_000
 SAMPLES_PER_FRAME = 320
 FRAMES_PER_SECOND = SAMPLE_RATE // SAMPLES_PER_FRAME
 INFO_NAME = "features.json"
+IO_THREADS = 32
 
 Log = Callable[[dict[str, object]], None]
 
@@ -108,7 +110,11 @@ def encode(
     Every clip is padded to the extractor's window; only frames carrying audio are kept.
     """
     mel = extractor(
-        list(clips), sampling_rate=SAMPLE_RATE, padding="max_length", return_tensors="pt"
+        list(clips),
+        sampling_rate=SAMPLE_RATE,
+        padding="max_length",
+        return_tensors="pt",
+        device=encoder.device.type,
     ).input_features
     hidden = encoder(mel.to(device=encoder.device, dtype=encoder.dtype)).last_hidden_state
     frames = []
@@ -166,28 +172,52 @@ def extract(
     """Writes features for the first `limit` samples of `manifest` and returns `(written, skipped)`.
 
     A sample whose file already loads is skipped, so an interrupted run resumes. Each
-    batch logs one line with the running count and clips per second.
+    batch logs one line with the running count and clips per second. Checks, reads and
+    writes run on `IO_THREADS` threads, overlapping the encoder: on a Modal volume each
+    file costs ~0.2 s of latency, which otherwise caps a run at ~5 clips/s.
     """
     info = FeaturesInfo(model=model, encoder_dim=encoder.config.d_model)
     samples = read_manifest(manifest)[:limit]
     _claim_directory(features_dir, info)
-    todo = [s for s in samples if not _has_frames(_target(features_dir, s), info.encoder_dim)]
-    skipped = len(samples) - len(todo)
-    started = time.perf_counter()
-    for start in range(0, len(todo), batch_size):
-        batch = todo[start : start + batch_size]
-        clips = [read_audio(audio_path(manifest, s), extractor.n_samples) for s in batch]
-        for sample, frames in zip(batch, encode(encoder, extractor, clips), strict=True):
-            _write_atomically(_target(features_dir, sample), frames)
-        done = start + len(batch)
-        log(
-            {
-                "done": done,
-                "total": len(todo),
-                "skipped": skipped,
-                "clips_per_s": round(done / (time.perf_counter() - started), 3),
-            }
+    with ThreadPoolExecutor(IO_THREADS) as pool:
+        present = list(
+            pool.map(lambda s: _has_frames(_target(features_dir, s), info.encoder_dim), samples)
         )
+        todo = [s for s, done in zip(samples, present, strict=True) if not done]
+        skipped = len(samples) - len(todo)
+        batches = [todo[i : i + batch_size] for i in range(0, len(todo), batch_size)]
+
+        def read(batch: list[Sample]) -> list[Future[np.ndarray]]:
+            return [
+                pool.submit(read_audio, audio_path(manifest, s), extractor.n_samples) for s in batch
+            ]
+
+        reads = read(batches[0]) if batches else []
+        writes: list[Future[None]] = []
+        started = time.perf_counter()
+        done = 0
+        for index, batch in enumerate(batches):
+            clips = [future.result() for future in reads]
+            if index + 1 < len(batches):
+                reads = read(batches[index + 1])
+            frames = encode(encoder, extractor, clips)
+            for future in writes:
+                future.result()
+            writes = [
+                pool.submit(_write_atomically, _target(features_dir, sample), clip_frames)
+                for sample, clip_frames in zip(batch, frames, strict=True)
+            ]
+            done += len(batch)
+            log(
+                {
+                    "done": done,
+                    "total": len(todo),
+                    "skipped": skipped,
+                    "clips_per_s": round(done / (time.perf_counter() - started), 3),
+                }
+            )
+        for future in writes:
+            future.result()
     return len(todo), skipped
 
 

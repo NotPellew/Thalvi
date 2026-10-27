@@ -31,7 +31,7 @@ from pathlib import Path
 import modal
 
 GPU = "H100"
-FEATURES_GPUS = ["L4", "A10G", "L40S"]
+FEATURES_GPUS = ["H100", "L40S", "A10G"]
 
 GLIMMER_REPO = "meta-models/Muse-Glimmer-30B"
 GLIMMER_REVISION = "cec94fcfd6512f2cfe708138c32533b346ea4f69"
