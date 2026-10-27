@@ -1,21 +1,26 @@
 import { PcmDecoder } from "./pcm.ts";
-import { normalizeSpeed } from "./speed.ts";
+import type { Speed } from "./speed.ts";
 import playbackWorkletUrl from "./playback-worklet.ts?worker&url";
 
 type Pending =
-  | { kind: "push"; samples: Float32Array<ArrayBuffer> }
-  | { kind: "rate"; rate: number }
-  | { kind: "flush" };
+  | { kind: "push"; seq: number; samples: Float32Array<ArrayBuffer> }
+  | { kind: "rate"; rate: Speed }
+  | { kind: "flush"; seq: number };
 
 interface PlayingMessage {
   type: "playing";
   playing: boolean;
+  seq: number;
 }
 
 function isPlayingMessage(data: unknown): data is PlayingMessage {
   if (typeof data !== "object" || data === null) return false;
   const record = data as Record<string, unknown>;
-  return record["type"] === "playing" && typeof record["playing"] === "boolean";
+  return (
+    record["type"] === "playing" &&
+    typeof record["playing"] === "boolean" &&
+    typeof record["seq"] === "number"
+  );
 }
 
 export class Playback {
@@ -25,6 +30,7 @@ export class Playback {
   private node: AudioWorkletNode | null = null;
   private pending: Pending[] = [];
   private playingState = false;
+  private latestSeq = 0;
 
   constructor(ctx: AudioContext, onPlaying: (playing: boolean) => void) {
     this.ctx = ctx;
@@ -42,7 +48,10 @@ export class Playback {
           outputChannelCount: [1],
         });
         node.port.onmessage = (event: MessageEvent<unknown>) => {
-          if (isPlayingMessage(event.data)) this.emitPlaying(event.data.playing);
+          if (!isPlayingMessage(event.data)) return;
+          if (event.data.playing) return;
+          if (event.data.seq !== this.latestSeq) return;
+          this.emitPlaying(false);
         };
         node.connect(ctx.destination);
         this.node = node;
@@ -59,22 +68,26 @@ export class Playback {
   enqueue(bytes: ArrayBuffer): void {
     const samples = this.decoder.decode(new Uint8Array(bytes));
     if (samples.length === 0) return;
-    this.deliver({ kind: "push", samples });
+    this.latestSeq += 1;
+    this.deliver({ kind: "push", seq: this.latestSeq, samples });
+    this.emitPlaying(true);
   }
 
   flush(): void {
     this.decoder.reset();
+    this.latestSeq += 1;
+    const seq = this.latestSeq;
     if (this.node) {
-      this.node.port.postMessage({ type: "flush" });
+      this.node.port.postMessage({ type: "flush", seq });
     } else {
       this.pending = this.pending.filter((message) => message.kind === "rate");
-      this.pending.push({ kind: "flush" });
+      this.pending.push({ kind: "flush", seq });
     }
     this.emitPlaying(false);
   }
 
-  setRate(rate: number): void {
-    this.deliver({ kind: "rate", rate: normalizeSpeed(rate) });
+  setRate(rate: Speed): void {
+    this.deliver({ kind: "rate", rate });
   }
 
   private deliver(message: Pending): void {
@@ -83,11 +96,13 @@ export class Playback {
       return;
     }
     if (message.kind === "push") {
-      this.node.port.postMessage({ type: "push", samples: message.samples }, [message.samples.buffer]);
+      this.node.port.postMessage({ type: "push", seq: message.seq, samples: message.samples }, [
+        message.samples.buffer,
+      ]);
     } else if (message.kind === "rate") {
       this.node.port.postMessage({ type: "rate", rate: message.rate });
     } else {
-      this.node.port.postMessage({ type: "flush" });
+      this.node.port.postMessage({ type: "flush", seq: message.seq });
     }
   }
 
