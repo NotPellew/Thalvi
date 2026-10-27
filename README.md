@@ -47,7 +47,7 @@ restart Thalvi.
 | --- | --- | --- | --- |
 | Kokoro | ~0.15 s for a short sentence, ~1 s for a long one | CPU, ~1 GB RAM | nothing |
 | Qwen3-TTS clone of `af_heart`, vLLM-Omni | ~50 ms | ~8 GB VRAM, ~8 GB RAM, ~2.5 min to start | NVIDIA GPU, Ampere or newer |
-| Qwen3-TTS, `qwen3-tts-server` | ~0.15 s (RTX 5070 Ti) to ~0.35 s (RTX 2080) | ~7 GB VRAM | NVIDIA GPU, including pre-Ampere |
+| Qwen3-TTS clone of `af_heart`, qwentts.cpp | ~60 ms (RTX 2080), ~4.8× real time | ~4 GB VRAM, ~3 GB RAM, starts in seconds | NVIDIA GPU, including pre-Ampere, and the CUDA toolkit to build |
 
 **Kokoro** (`--profile kokoro`):
 
@@ -87,25 +87,34 @@ in its place (download it, then change the model path and `--served-model-name`
 in `compose.yaml` and `TTS_MODEL`).
 
 **Qwen3-TTS on older GPUs** (before Ampere, such as an RTX 2080, which
-vLLM-Omni does not run on) uses `qwen3-tts-server`, which streams framed PCM:
+vLLM-Omni does not run on, but any NVIDIA GPU works) runs
+[qwentts.cpp](https://github.com/ServeurpersoCom/qwentts.cpp), a C++ port of
+Qwen3-TTS, as a systemd user service. With Kokoro running (`docker compose
+--profile kokoro up -d --wait`), one script needs no root and no Docker: it
+builds the server from the pinned commit of
+[a fork](https://github.com/NotPellew/qwentts.cpp) that adds Thalvi's
+streaming route and startup voice (offered upstream in
+[#45](https://github.com/ServeurpersoCom/qwentts.cpp/pull/45)), downloads the
+checksummed models, has Kokoro read the `af_heart` reference clip, and writes
+the unit.
 
 ```sh
-docker run -d --name thalvi-qwen3 --gpus all \
-  --memory=10g --memory-swap=10g --pids-limit=512 \
-  -p 127.0.0.1:8001:8001 \
-  -v ~/thalvi-tts/models:/models:ro -v ~/thalvi-tts/voices:/data/voices \
-  -e QWEN3_TTS_MODEL_ID=/models/qwen3-base -e HF_HUB_OFFLINE=1 -e HF_HOME=/tmp/hf \
-  ghcr.io/malaiwah/qwen3-tts-server:latest --host 0.0.0.0 --port 8001
-curl -s 127.0.0.1:8001/v1/voices -F name=af_heart -F audio=@ref.wav -F "ref_text=$text"
+speech/qwentts.sh
+systemctl --user enable --now thalvi-qwentts
 ```
+
+It needs `git`, `cmake`, a C++ compiler and the CUDA toolkit (`nvcc`). It
+builds for the GPU it finds; to build on a machine without one, or for
+another, set `CUDA_ARCH` (`75` for an RTX 2080). `KOKORO_URL` points it at a
+Kokoro on another host, and `SPEECH_DIR`, `HOST`, `PORT` (default `8011`) and
+`VOICE` (default `af_heart`) change where it lives and what it serves. Rerun
+it to resume after an error. The script prints the lines for `.env`:
 
 ```sh
 TTS_API=qwen3
-TTS_BASE_URL=http://127.0.0.1:8001/v1
-TTS_VOICE=vc_…   # the id the voices call returned
+TTS_BASE_URL=http://127.0.0.1:8011/v1
+TTS_VOICE=af_heart
 ```
-
-Here `ref.wav` is a clip of the voice and `$text` its transcript.
 
 ## Status
 
