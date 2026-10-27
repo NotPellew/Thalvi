@@ -7,6 +7,7 @@ dependencies = [
   "accelerate>=1.12",
   "httpx>=0.28",
   "numpy>=2.3",
+  "pyarrow>=24",
   "safetensors>=0.8",
   "soundfile>=0.13",
   "soxr>=1.0",

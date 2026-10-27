@@ -50,6 +50,11 @@ areas your change touches. Editing rules are in
   Glimmer's reasoning with "The user said:", stops at the end of that line and
   switches to the answer. Why: full reasoning puts 3–5 s before the first word.
   Rejected: full reasoning; an empty reasoning prefill (parrots ~40% of turns).
+- **Real voices train beside TTS, and eval voices are unseen.** VoxPopuli
+  (accented English), FLEURS (English, German) and MUSAN noise join Kokoro and
+  LibriSpeech; no eval speaker has training clips. Why: VoxPopuli reuses speaker
+  ids across its files, so the official English test split shares about half
+  its clips with train. Rejected: using that split as is, a clip-level holdout.
 
 ## Repository
 

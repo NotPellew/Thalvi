@@ -47,6 +47,11 @@ def test_sample_rejects_invalid_fields(overrides: dict[str, str]) -> None:
         sample(**overrides)
 
 
+@pytest.mark.parametrize("source", ["kokoro", "librispeech", "voxpopuli", "fleurs"])
+def test_sample_accepts_every_source(source: str) -> None:
+    assert sample(source=source).source == source
+
+
 def test_write_rejects_duplicate_ids(tmp_path: Path) -> None:
     with pytest.raises(ManifestError, match="duplicate id"):
         write_manifest(tmp_path / "m.jsonl", [sample(), sample()])

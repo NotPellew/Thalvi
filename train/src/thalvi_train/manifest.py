@@ -9,7 +9,7 @@ from typing import Literal, get_args
 
 Task = Literal["answer", "continue"]
 Split = Literal["train", "eval"]
-Source = Literal["kokoro", "librispeech"]
+Source = Literal["kokoro", "librispeech", "voxpopuli", "fleurs"]
 
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
