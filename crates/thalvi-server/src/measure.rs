@@ -278,7 +278,7 @@ async fn produce(
     sentences: mpsc::UnboundedSender<String>,
     produced: &mut Produced,
 ) -> bool {
-    let mut deltas = match model.stream_reply(history).await {
+    let mut deltas = match model.stream_reply(history, None).await {
         Ok(deltas) => deltas,
         Err(error) => {
             produced.error = Some(format!("The language model could not reply: {error}"));

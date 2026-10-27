@@ -55,7 +55,11 @@ impl FakeModel {
 }
 
 impl ChatModel for FakeModel {
-    async fn stream_reply(&self, history: &[ChatMessage]) -> Result<DeltaStream, ModelError> {
+    async fn stream_reply(
+        &self,
+        history: &[ChatMessage],
+        _audio: Option<&[u8]>,
+    ) -> Result<DeltaStream, ModelError> {
         self.log.lock().unwrap().push((self.name, history.to_vec()));
         if self.cannot_start {
             return Err(ModelError("offline".to_string()));
