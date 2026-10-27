@@ -212,6 +212,11 @@ impl<M: ChatModel + 'static> Persistence<M> {
         (persistence, history)
     }
 
+    fn finish(mut self, history: &[ChatMessage], next_turn: u64, recorder: &Recorder) {
+        self.sync(history, next_turn, recorder);
+        self.store.release(self.attachment);
+    }
+
     fn sync(&mut self, history: &[ChatMessage], next_turn: u64, recorder: &Recorder) {
         if history.len() == self.saved_len {
             return;
@@ -242,6 +247,8 @@ impl<M: ChatModel + 'static> Persistence<M> {
 }
 
 const MAX_TEXT_CHARS: usize = 20_000;
+/// How long a client that is being let go may hold up the end of its session.
+const ENDED_SEND_WAIT: Duration = Duration::from_secs(2);
 
 /// Runs one client session until its socket closes.
 #[expect(
@@ -270,10 +277,9 @@ pub async fn handle_session<F, M, T>(
     let (mut persistence, mut history) =
         Persistence::attach(store, resume.as_deref(), titler).await;
     let session_id = persistence.attachment.id.clone();
-    let restored_next_turn = persistence.attachment.next_turn;
     let resumed = !history.is_empty();
     let recording = start_recording(recording_config, session_id.clone());
-    let mut turn_log = TurnLog::new(recording.recorder.clone(), restored_next_turn);
+    let mut turn_log = TurnLog::new(recording.recorder.clone(), persistence.attachment.next_turn);
     turn_log
         .recorder
         .emit("session_open", json!({"resumed": resumed}));
@@ -292,6 +298,7 @@ pub async fn handle_session<F, M, T>(
     let mut reply: Option<ActiveReply> = None;
     let mut reply_rx: Option<mpsc::Receiver<ReplyEvent>> = None;
     let mut client_audio = ClientAudio::default();
+    let mut detached = None;
 
     loop {
         persistence.sync(&history, turn_log.next_turn, &turn_log.recorder);
@@ -309,7 +316,7 @@ pub async fn handle_session<F, M, T>(
         };
         tokio::select! {
             reason = persistence.attachment.detached() => {
-                send_ended(&mut sink, reason).await;
+                detached = Some(reason);
                 break;
             }
             client_message = stream.next() => {
@@ -351,12 +358,16 @@ pub async fn handle_session<F, M, T>(
     }
 
     cut_off_reply(&mut history, &mut reply, &mut reply_rx, &turn_log);
-    if let Some(handle) = recognizer.take() {
-        handle.task.abort();
-    }
-    tracing::info!("session closed");
-    persistence.sync(&history, turn_log.next_turn, &turn_log.recorder);
-    persistence.store.release(persistence.attachment);
+    recognizer.take().inspect(|handle| handle.task.abort());
+    close_session(
+        persistence,
+        &history,
+        turn_log.next_turn,
+        &turn_log.recorder,
+        detached,
+        &mut sink,
+    )
+    .await;
     drop(turn_log);
     recording
         .finish(u64::try_from(session_started.elapsed().as_millis()).unwrap_or(u64::MAX))
@@ -602,6 +613,23 @@ fn record_voice_turn(turn_log: &mut TurnLog, turn: u64, pending: &PendingVoice, 
         turn_log.audio.prune(end.saturating_sub(300));
     }
     recorder.emit("turn", fields);
+}
+
+/// Saves and releases the conversation first, so a stalled client cannot hold up the
+/// handoff, then tells a client that was let go why.
+async fn close_session<M: ChatModel + 'static>(
+    persistence: Persistence<M>,
+    history: &[ChatMessage],
+    next_turn: u64,
+    recorder: &Recorder,
+    detached: Option<Detach>,
+    sink: &mut (impl SinkExt<Message> + Unpin),
+) {
+    persistence.finish(history, next_turn, recorder);
+    tracing::info!("session closed");
+    if let Some(reason) = detached {
+        let _ = tokio::time::timeout(ENDED_SEND_WAIT, send_ended(sink, reason)).await;
+    }
 }
 
 /// Tells the client why its conversation was taken away, then closes its socket.
@@ -2334,5 +2362,44 @@ mod tests {
         assert_eq!(clock.instant_for(10_000), None);
         clock.reset();
         assert_eq!(clock.instant_for(0), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_client_that_cannot_receive_does_not_hold_up_the_handoff() {
+        let dir = std::env::temp_dir().join(format!("thalvi-close-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Arc::new(crate::store::SessionStore::open(&dir).unwrap());
+        let (persistence, _) =
+            super::Persistence::<FakeModel>::attach(Arc::clone(&store), None, None).await;
+        let history = vec![
+            ChatMessage::user("question".to_string()),
+            ChatMessage::assistant("Partial words.".to_string()),
+        ];
+        let mut stalled = Box::pin(futures_util::sink::unfold((), |(), _message| {
+            std::future::pending::<Result<(), std::convert::Infallible>>()
+        }));
+        let recorder = start_recording(RecordingConfig::disabled(), "s".to_string()).recorder;
+        let closing = tokio::spawn(async move {
+            super::close_session(
+                persistence,
+                &history,
+                1,
+                &recorder,
+                Some(crate::store::Detach::Moved),
+                &mut stalled,
+            )
+            .await;
+        });
+
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        let saved = store.list().len();
+        closing.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            saved, 1,
+            "the history was not saved while the send was stalled"
+        );
     }
 }
