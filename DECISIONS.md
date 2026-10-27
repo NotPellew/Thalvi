@@ -44,6 +44,12 @@ areas your change touches. Editing rules are in
   Why: setups compare in minutes, with numbers, repeatably. Rejected: rating by
   hand (slow), and a router or fast-model role before the numbers ask for one.
 
+- **Audio input is the current turn only.** With `LLM_AUDIO_INPUT=on`, a
+  spoken turn reaches the model as its audio alone, with no transcript beside
+  it, while earlier turns stay text. Why: the model was trained on audio only,
+  and old clips would grow every request. Rejected: audio plus transcript
+  (off-distribution), audio for the whole history.
+
 ## Repository
 
 - **Merge commits; only `main` is fixed.** PRs land as merge commits, and PR

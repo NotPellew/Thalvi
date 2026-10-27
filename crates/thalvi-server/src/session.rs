@@ -24,6 +24,8 @@ use crate::tts::Tts;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 const ACK_DELAY: Duration = Duration::from_millis(500);
+/// Audio kept on both sides of a spoken turn, as the recognizer's boundaries are tight.
+const CLIP_PADDING_MS: u64 = 300;
 const ACK_LINES: [&str; 3] = [
     "Got it, one moment.",
     "Let me think about that.",
@@ -70,6 +72,8 @@ struct ActiveReply {
     first_audio_at: Option<Instant>,
     ack_first_audio_at: Option<Instant>,
     audio_bytes: usize,
+    /// Length of the user's audio sent to the model, when it heard the turn.
+    input_audio_ms: Option<u64>,
 }
 
 /// Reply audio sent on this connection that the client may still be playing.
@@ -130,9 +134,10 @@ impl ForwardClock {
 }
 
 impl TurnLog {
-    fn new(recorder: Recorder, next_turn: u64) -> Self {
+    fn new(recorder: Recorder, next_turn: u64, audio_input: bool) -> Self {
         Self {
             recorder,
+            audio_input,
             pending: std::collections::HashMap::new(),
             audio: AudioBuffer::default(),
             forward_clock: ForwardClock::default(),
@@ -141,11 +146,36 @@ impl TurnLog {
             last_reply_audio_bytes: 0,
         }
     }
+
+    /// Forgets buffered mic audio and timing; a new recognizer starts its clock at zero.
+    fn reset_mic(&mut self) {
+        self.audio.reset();
+        self.forward_clock.reset();
+    }
+
+    fn buffers_audio(&self) -> bool {
+        self.audio_input || self.recorder.audio_enabled()
+    }
+
+    /// Takes a finished voice turn's boundaries and its padded mic clip, and drops the
+    /// audio the next turn no longer needs.
+    fn take_voice_turn(&mut self, turn_id: &str) -> (PendingVoice, Vec<u8>) {
+        let pending = self.pending.remove(turn_id).unwrap_or_default();
+        if !self.buffers_audio() {
+            return (pending, Vec::new());
+        }
+        let start = pending.start_ms.unwrap_or(0);
+        let end = pending.end_ms.unwrap_or_else(|| self.audio.end_ms());
+        let clip = self.audio.cut(start, end, CLIP_PADDING_MS);
+        self.audio.prune(end.saturating_sub(CLIP_PADDING_MS));
+        (pending, clip)
+    }
 }
 
 /// Per-session recording state: pending voice turns and forwarded audio.
 struct TurnLog {
     recorder: Recorder,
+    audio_input: bool,
     pending: std::collections::HashMap<String, PendingVoice>,
     audio: AudioBuffer,
     forward_clock: ForwardClock,
@@ -265,6 +295,7 @@ pub async fn handle_session<F, M, T>(
     titler: Option<Arc<Titler<M>>>,
     recording_config: RecordingConfig,
     ack_enabled: bool,
+    audio_input: bool,
 ) where
     F: RecognizerFactory + Send + Sync + 'static,
     F::Rec: Send + 'static,
@@ -279,7 +310,11 @@ pub async fn handle_session<F, M, T>(
     let session_id = persistence.attachment.id.clone();
     let resumed = !history.is_empty();
     let recording = start_recording(recording_config, session_id.clone());
-    let mut turn_log = TurnLog::new(recording.recorder.clone(), persistence.attachment.next_turn);
+    let mut turn_log = TurnLog::new(
+        recording.recorder.clone(),
+        persistence.attachment.next_turn,
+        audio_input,
+    );
     turn_log
         .recorder
         .emit("session_open", json!({"resumed": resumed}));
@@ -322,16 +357,7 @@ pub async fn handle_session<F, M, T>(
             client_message = stream.next() => {
                 match client_message {
                     Some(Ok(Message::Binary(audio))) => {
-                        let forwarded = recognizer.as_ref().is_some_and(|handle| handle.ready)
-                            && recognizer.as_ref().is_some_and(|handle| handle.audio_tx.try_send(audio.to_vec()).is_ok());
-                        if forwarded {
-                            turn_log.forward_clock.push(audio.len(), Instant::now());
-                            if turn_log.recorder.audio_enabled() {
-                                turn_log.audio.push(&audio);
-                            }
-                        } else {
-                            tracing::debug!("mic frame dropped");
-                        }
+                        forward_mic(&audio, recognizer.as_ref(), &mut turn_log);
                     }
                     Some(Ok(Message::Text(text))) => {
                         handle_client_text(&text, &mut sink, &mut recognizer, &mut rec_rx, &factory, &voice, &mut voice_on, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut turn_log, ack.clone()).await;
@@ -444,6 +470,7 @@ async fn handle_client_text<F, M, T>(
                     Voice::new(*voice_on, recognizer.as_ref()),
                     "text",
                     text.clone(),
+                    &[],
                     turn_log,
                     ack.clone(),
                 )
@@ -523,7 +550,7 @@ async fn handle_recognizer_message<M, T>(
         }
         Some(RecognizerMessage::Event(RecognizerEvent::SpeechComplete { turn_id, text })) => {
             if !text.trim().is_empty() {
-                let pending = turn_log.pending.remove(&turn_id).unwrap_or_default();
+                let (pending, clip) = turn_log.take_voice_turn(&turn_id);
                 let turn = begin_turn(
                     sink,
                     history,
@@ -536,11 +563,12 @@ async fn handle_recognizer_message<M, T>(
                     Voice::new(*voice_on, recognizer.as_ref()),
                     "voice",
                     text.clone(),
+                    &clip,
                     turn_log,
                     ack.clone(),
                 )
                 .await;
-                record_voice_turn(turn_log, turn, &pending, &text);
+                record_voice_turn(turn_log, turn, &pending, &text, clip);
             }
         }
         Some(RecognizerMessage::Event(RecognizerEvent::Error { message })) => {
@@ -572,8 +600,7 @@ async fn handle_recognizer_message<M, T>(
             }
         }
         Some(RecognizerMessage::Ready) => {
-            turn_log.audio.reset();
-            turn_log.forward_clock.reset();
+            turn_log.reset_mic();
             if let Some(handle) = recognizer {
                 handle.ready = true;
             }
@@ -585,7 +612,27 @@ async fn handle_recognizer_message<M, T>(
     }
 }
 
-fn record_voice_turn(turn_log: &mut TurnLog, turn: u64, pending: &PendingVoice, text: &str) {
+/// Passes one mic frame to a ready recognizer, keeping it for turn clips.
+fn forward_mic(audio: &[u8], recognizer: Option<&RecognizerHandle>, turn_log: &mut TurnLog) {
+    let forwarded = recognizer
+        .is_some_and(|handle| handle.ready && handle.audio_tx.try_send(audio.to_vec()).is_ok());
+    if !forwarded {
+        tracing::debug!("mic frame dropped");
+        return;
+    }
+    turn_log.forward_clock.push(audio.len(), Instant::now());
+    if turn_log.buffers_audio() {
+        turn_log.audio.push(audio);
+    }
+}
+
+fn record_voice_turn(
+    turn_log: &TurnLog,
+    turn: u64,
+    pending: &PendingVoice,
+    text: &str,
+    clip: Vec<u8>,
+) {
     let recorder = &turn_log.recorder;
     let mut fields = json!({"turn": turn, "source": "voice"});
     if let (Some(start), Some(end)) = (pending.start_ms, pending.end_ms) {
@@ -600,17 +647,11 @@ fn record_voice_turn(turn_log: &mut TurnLog, turn: u64, pending: &PendingVoice, 
     if recorder.text_enabled() {
         fields["text"] = json!(text);
     }
-    if recorder.audio_enabled() {
-        let start = pending.start_ms.unwrap_or(0);
-        let end = pending.end_ms.unwrap_or_else(|| turn_log.audio.end_ms());
-        let pcm = turn_log.audio.cut(start, end, 300);
-        if !pcm.is_empty() {
-            recorder.emit_wav(turn, pcm);
-            if recorder.metrics_enabled() || recorder.text_enabled() {
-                fields["audio"] = json!(format!("{turn}.wav"));
-            }
+    if recorder.audio_enabled() && !clip.is_empty() {
+        recorder.emit_wav(turn, clip);
+        if recorder.metrics_enabled() || recorder.text_enabled() {
+            fields["audio"] = json!(format!("{turn}.wav"));
         }
-        turn_log.audio.prune(end.saturating_sub(300));
     }
     recorder.emit("turn", fields);
 }
@@ -801,6 +842,7 @@ async fn begin_turn<M, T>(
     state: Voice,
     source: &'static str,
     text: String,
+    clip: &[u8],
     turn_log: &mut TurnLog,
     ack: AckSettings,
 ) -> u64
@@ -822,6 +864,7 @@ where
     .await;
     turn_log.next_turn += 1;
     let turn = turn_log.next_turn;
+    let audio = (turn_log.audio_input && !clip.is_empty()).then(|| clip.to_vec());
     history.push(ChatMessage::user(text.clone()));
     send_json(sink, &json!({"type": "user", "text": text})).await;
     send_state(sink, "thinking").await;
@@ -830,6 +873,7 @@ where
         Arc::clone(tts),
         voice.subscribe(),
         history.clone(),
+        audio,
         turn,
         turn_log.recorder.clone(),
         ack,
@@ -839,11 +883,16 @@ where
     turn
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session state is passed explicitly rather than bundled into a context type"
+)]
 fn start_reply<M, T>(
     model: Arc<M>,
     tts: Arc<T>,
     voice: watch::Receiver<bool>,
     history: Vec<ChatMessage>,
+    audio: Option<Vec<u8>>,
     turn: u64,
     recorder: Recorder,
     ack: AckSettings,
@@ -854,9 +903,15 @@ where
 {
     let (events_tx, events_rx) = mpsc::channel::<ReplyEvent>(64);
     let spoken_throughout = *voice.borrow();
+    let input_audio_ms = audio
+        .as_ref()
+        .map(|pcm| u64::try_from(pcm.len()).unwrap_or(u64::MAX) / 48);
     let active = ActiveReply {
         handle: tokio::spawn(
-            run_reply(model, tts, voice, history, events_tx, turn, recorder, ack).in_current_span(),
+            run_reply(
+                model, tts, voice, history, audio, events_tx, turn, recorder, ack,
+            )
+            .in_current_span(),
         ),
         turn,
         started_at: Instant::now(),
@@ -870,6 +925,7 @@ where
         first_audio_at: None,
         ack_first_audio_at: None,
         audio_bytes: 0,
+        input_audio_ms,
     };
     (active, events_rx)
 }
@@ -1004,6 +1060,7 @@ fn emit_reply_record(
         "ack_first_audio_ms": ms_since(active.ack_first_audio_at),
         "sentences": active.sent_sentences.len(),
         "audio_ms": u64::try_from(active.audio_bytes).unwrap_or(u64::MAX) * 1000 / 48_000,
+        "input_audio_ms": active.input_audio_ms,
         "outcome": outcome,
         "error": error,
     });
@@ -1134,6 +1191,7 @@ async fn run_reply<M, T>(
     tts: Arc<T>,
     voice: watch::Receiver<bool>,
     history: Vec<ChatMessage>,
+    audio: Option<Vec<u8>>,
     events: mpsc::Sender<ReplyEvent>,
     turn: u64,
     recorder: Recorder,
@@ -1148,6 +1206,7 @@ async fn run_reply<M, T>(
         produce_sentences(
             model,
             history,
+            audio,
             events.clone(),
             sentence_tx,
             Arc::clone(&failure_sent),
@@ -1209,6 +1268,7 @@ async fn send_failed(
 async fn produce_sentences<M>(
     model: Arc<M>,
     history: Vec<ChatMessage>,
+    audio: Option<Vec<u8>>,
     events: mpsc::Sender<ReplyEvent>,
     sentences: mpsc::UnboundedSender<String>,
     failure_sent: Arc<AtomicBool>,
@@ -1216,7 +1276,7 @@ async fn produce_sentences<M>(
 where
     M: ChatModel,
 {
-    let mut deltas = match model.stream_reply(&history).await {
+    let mut deltas = match model.stream_reply(&history, audio.as_deref()).await {
         Ok(deltas) => deltas,
         Err(error) => {
             send_failed(
@@ -1796,6 +1856,7 @@ mod tests {
         fn stream_reply(
             &self,
             _history: &[ChatMessage],
+            _audio: Option<&[u8]>,
         ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
             let deltas = vec![
                 Ok("First. ".to_string()),
@@ -1813,6 +1874,7 @@ mod tests {
         fn stream_reply(
             &self,
             _history: &[ChatMessage],
+            _audio: Option<&[u8]>,
         ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
             let deltas: Vec<Result<String, ModelError>> = (1..=12)
                 .map(|index| Ok(format!("Sentence {index}. ")))
@@ -1853,6 +1915,7 @@ mod tests {
         fn stream_reply(
             &self,
             _history: &[ChatMessage],
+            _audio: Option<&[u8]>,
         ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
             let release = Arc::clone(&self.release);
             let stream: DeltaStream = Box::pin(futures_util::stream::once(async move {
@@ -1935,6 +1998,7 @@ mod tests {
             tts,
             voice_rx,
             Vec::new(),
+            None,
             events_tx,
             1,
             recorder,
@@ -2015,6 +2079,7 @@ mod tests {
             tts,
             voice_rx,
             Vec::new(),
+            None,
             events_tx,
             1,
             recorder,
@@ -2071,6 +2136,7 @@ mod tests {
             tts,
             voice_rx,
             Vec::new(),
+            None,
             events_tx,
             1,
             recorder,
@@ -2132,6 +2198,7 @@ mod tests {
             tts,
             voice_rx,
             Vec::new(),
+            None,
             events_tx,
             1,
             recorder,
@@ -2181,6 +2248,7 @@ mod tests {
             tts,
             voice_rx,
             Vec::new(),
+            None,
             events_tx,
             1,
             recorder,
@@ -2228,6 +2296,7 @@ mod tests {
                 Arc::clone(&tts),
                 voice_rx,
                 Vec::new(),
+                None,
                 events_tx,
                 turn,
                 recorder,
@@ -2274,6 +2343,7 @@ mod tests {
             tts,
             voice_rx,
             Vec::new(),
+            None,
             events_tx,
             1,
             recorder,
@@ -2322,6 +2392,7 @@ mod tests {
             first_audio_at: None,
             ack_first_audio_at: None,
             audio_bytes: 0,
+            input_audio_ms: None,
         };
         let mut history = Vec::new();
         record_assistant_history(&mut history, &make_active(true), false);

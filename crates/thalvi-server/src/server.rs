@@ -33,6 +33,7 @@ pub struct AppState<T> {
     titler: Option<Arc<Titler<OpenAiChatModel>>>,
     recording: RecordingConfig,
     ack_enabled: bool,
+    audio_input: bool,
 }
 
 /// Builds the router from validated configuration.
@@ -102,6 +103,7 @@ fn with_tts<T: Tts + Clone + 'static>(
             tts_voice: config.tts_voice.clone(),
         },
         ack_enabled: config.ack_enabled,
+        audio_input: config.llm_audio_input,
     };
     Router::new()
         .route("/session", get(session_upgrade::<T>))
@@ -128,6 +130,7 @@ async fn session_upgrade<T: Tts + Clone + 'static>(
             state.titler,
             state.recording,
             state.ack_enabled,
+            state.audio_input,
         )
         .instrument(tracing::info_span!("session", id))
     })
