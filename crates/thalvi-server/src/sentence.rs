@@ -37,13 +37,24 @@ impl SentenceSplitter {
 }
 
 fn sentence_end(buffer: &str) -> Option<usize> {
-    let bytes = buffer.as_bytes();
-    for (index, byte) in bytes.iter().enumerate() {
-        if matches!(byte, b'.' | b'!' | b'?') {
-            match bytes.get(index + 1) {
-                Some(next) if next.is_ascii_whitespace() => return Some(index + 1),
-                _ => {}
+    let mut chars = buffer.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if !matches!(ch, '.' | '!' | '?') {
+            continue;
+        }
+        let mut end = index + ch.len_utf8();
+        while let Some(&(_, next)) = chars.peek() {
+            if matches!(next, '"' | '\'' | '”' | '’' | ')' | ']') {
+                end += next.len_utf8();
+                chars.next();
+            } else {
+                break;
             }
+        }
+        if let Some(&(_, next)) = chars.peek()
+            && next.is_whitespace()
+        {
+            return Some(end);
         }
     }
     None
@@ -74,6 +85,23 @@ mod tests {
             (vec!["No terminator"], vec![], Some("No terminator")),
             (vec!["End."], vec![], Some("End.")),
             (vec!["Wow! ", "Next"], vec!["Wow!"], Some("Next")),
+            (
+                vec!["He said \"Stop.\" Then he left."],
+                vec!["He said \"Stop.\""],
+                Some("Then he left."),
+            ),
+            (vec!["(Really?) Yes."], vec!["(Really?)"], Some("Yes.")),
+            (
+                vec!["She said ‘Stop.’ Then she left."],
+                vec!["She said ‘Stop.’"],
+                Some("Then she left."),
+            ),
+            (
+                vec!["He said \"Stop.\"", " Then he left."],
+                vec!["He said \"Stop.\""],
+                Some("Then he left."),
+            ),
+            (vec!["He said \"Stop.\""], vec![], Some("He said \"Stop.\"")),
         ];
         for (deltas, expected_sentences, expected_tail) in cases {
             let mut splitter = SentenceSplitter::new();
