@@ -13,11 +13,12 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::Instrument;
 
-use crate::model::{ChatMessage, ChatModel};
+use crate::model::{ChatMessage, ChatModel, Role};
 use crate::recognizer::{Recognizer, RecognizerEvent, RecognizerFactory};
 use crate::recorder::{AudioBuffer, Recorder, RecordingConfig, start_recording};
 use crate::sentence::SentenceSplitter;
-use crate::store::SessionStore;
+use crate::store::{Attachment, Detach, SessionStore};
+use crate::title::{Titler, spawn_title};
 use crate::tts::Tts;
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
@@ -184,6 +185,62 @@ impl Voice {
     }
 }
 
+/// Keeps the store in step with the history and asks for a title after the first reply.
+struct Persistence<M> {
+    store: Arc<SessionStore>,
+    attachment: Attachment,
+    titler: Option<Arc<Titler<M>>>,
+    saved_len: usize,
+    title_tried: bool,
+}
+
+impl<M: ChatModel + 'static> Persistence<M> {
+    async fn attach(
+        store: Arc<SessionStore>,
+        resume: Option<&str>,
+        titler: Option<Arc<Titler<M>>>,
+    ) -> (Self, Vec<ChatMessage>) {
+        let mut attachment = store.attach(resume).await;
+        let history = std::mem::take(&mut attachment.history);
+        let persistence = Self {
+            store,
+            attachment,
+            titler,
+            saved_len: history.len(),
+            title_tried: false,
+        };
+        (persistence, history)
+    }
+
+    fn sync(&mut self, history: &[ChatMessage], next_turn: u64, recorder: &Recorder) {
+        if history.len() == self.saved_len {
+            return;
+        }
+        self.saved_len = history.len();
+        self.store.save(&self.attachment, history, next_turn);
+        let (Some(titler), false) = (&self.titler, self.title_tried) else {
+            return;
+        };
+        let first_user = history.iter().find(|message| message.role == Role::User);
+        let first_reply = history
+            .iter()
+            .find(|message| message.role == Role::Assistant);
+        if let (Some(user), Some(reply)) = (first_user, first_reply)
+            && self.store.needs_title(&self.attachment.id)
+        {
+            self.title_tried = true;
+            spawn_title(
+                Arc::clone(titler),
+                Arc::clone(&self.store),
+                self.attachment.id.clone(),
+                &user.content,
+                &reply.content,
+                recorder.clone(),
+            );
+        }
+    }
+}
+
 const MAX_TEXT_CHARS: usize = 20_000;
 
 /// Runs one client session until its socket closes.
@@ -198,6 +255,7 @@ pub async fn handle_session<F, M, T>(
     tts: Arc<T>,
     store: Arc<SessionStore>,
     resume: Option<String>,
+    titler: Option<Arc<Titler<M>>>,
     recording_config: RecordingConfig,
     ack_enabled: bool,
 ) where
@@ -209,15 +267,11 @@ pub async fn handle_session<F, M, T>(
     let (mut sink, mut stream) = socket.split();
     let factory = Arc::new(factory);
     let session_started = Instant::now();
-    let resumed = resume.as_deref().is_some_and(|id| store.contains(id));
-    let (session_id, mut history, restored_next_turn) = resume
-        .as_deref()
-        .and_then(|id| {
-            store
-                .take(id)
-                .map(|(history, next_turn)| (id.to_string(), history, next_turn))
-        })
-        .unwrap_or_else(|| (store.new_id(), Vec::new(), 0));
+    let (mut persistence, mut history) =
+        Persistence::attach(store, resume.as_deref(), titler).await;
+    let session_id = persistence.attachment.id.clone();
+    let restored_next_turn = persistence.attachment.next_turn;
+    let resumed = !history.is_empty();
     let recording = start_recording(recording_config, session_id.clone());
     let mut turn_log = TurnLog::new(recording.recorder.clone(), restored_next_turn);
     turn_log
@@ -240,6 +294,7 @@ pub async fn handle_session<F, M, T>(
     let mut client_audio = ClientAudio::default();
 
     loop {
+        persistence.sync(&history, turn_log.next_turn, &turn_log.recorder);
         let reply_event = async {
             match &mut reply_rx {
                 Some(receiver) => receiver.recv().await,
@@ -253,6 +308,10 @@ pub async fn handle_session<F, M, T>(
             }
         };
         tokio::select! {
+            reason = persistence.attachment.detached() => {
+                send_ended(&mut sink, reason).await;
+                break;
+            }
             client_message = stream.next() => {
                 match client_message {
                     Some(Ok(Message::Binary(audio))) => {
@@ -296,8 +355,8 @@ pub async fn handle_session<F, M, T>(
         handle.task.abort();
     }
     tracing::info!("session closed");
-    let next_turn = turn_log.next_turn;
-    store.save(session_id, history, next_turn);
+    persistence.sync(&history, turn_log.next_turn, &turn_log.recorder);
+    persistence.store.release(persistence.attachment);
     drop(turn_log);
     recording
         .finish(u64::try_from(session_started.elapsed().as_millis()).unwrap_or(u64::MAX))
@@ -543,6 +602,20 @@ fn record_voice_turn(turn_log: &mut TurnLog, turn: u64, pending: &PendingVoice, 
         turn_log.audio.prune(end.saturating_sub(300));
     }
     recorder.emit("turn", fields);
+}
+
+/// Tells the client why its conversation was taken away, then closes its socket.
+async fn send_ended(sink: &mut (impl SinkExt<Message> + Unpin), reason: Detach) {
+    let (reason, message) = match reason {
+        Detach::Moved => ("moved", "This conversation continued on another device."),
+        Detach::Deleted => ("deleted", "This conversation was deleted."),
+    };
+    send_json(
+        sink,
+        &json!({"type": "ended", "reason": reason, "message": message}),
+    )
+    .await;
+    let _ = sink.send(Message::Close(None)).await;
 }
 
 async fn send_session_opening(

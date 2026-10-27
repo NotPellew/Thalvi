@@ -3,17 +3,27 @@
 use std::pin::Pin;
 
 use futures_util::{Stream, StreamExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// System prompt sent with every model request.
 pub const SYSTEM_PROMPT: &str = "You are Thalvi, a voice assistant for when the user's hands and eyes are busy. Everything you write is read aloud. Fit the length to the question: a greeting or a simple fact takes a sentence or two, while an explanation, a how-to or a story gets the detail it needs. When the user asks for a length, give that length. Start with a short, direct sentence. Talk the way a knowledgeable friend would, in sentences of ordinary spoken length. Write numbers, units and abbreviations the way you would say them. Do not use markdown, lists, headings, or emoji.";
 
+/// Who wrote a conversation message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// The person talking to Thalvi.
+    User,
+    /// Thalvi's reply.
+    Assistant,
+}
+
 /// One conversation message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChatMessage {
-    /// Either `user` or `assistant`.
-    pub role: &'static str,
+    /// Who wrote the message.
+    pub role: Role,
     /// The message text.
     pub content: String,
 }
@@ -23,7 +33,7 @@ impl ChatMessage {
     #[must_use]
     pub fn user(content: String) -> Self {
         Self {
-            role: "user",
+            role: Role::User,
             content,
         }
     }
@@ -32,7 +42,7 @@ impl ChatMessage {
     #[must_use]
     pub fn assistant(content: String) -> Self {
         Self {
-            role: "assistant",
+            role: Role::Assistant,
             content,
         }
     }
@@ -77,6 +87,7 @@ pub struct OpenAiChatModel {
     model: String,
     api_key: String,
     reasoning_effort: Option<String>,
+    system_prompt: String,
 }
 
 impl OpenAiChatModel {
@@ -94,13 +105,21 @@ impl OpenAiChatModel {
             model,
             api_key,
             reasoning_effort,
+            system_prompt: SYSTEM_PROMPT.to_string(),
         }
+    }
+
+    /// Replaces the voice-assistant system prompt, for calls that are not replies.
+    #[must_use]
+    pub fn with_system_prompt(mut self, prompt: &str) -> Self {
+        self.system_prompt = prompt.to_string();
+        self
     }
 
     /// Builds the JSON request body for a streamed completion.
     #[must_use]
     pub fn request_body(&self, history: &[ChatMessage]) -> Value {
-        let mut messages = vec![json!({"role": "system", "content": SYSTEM_PROMPT})];
+        let mut messages = vec![json!({"role": "system", "content": self.system_prompt})];
         for message in history {
             messages.push(json!({"role": message.role, "content": message.content}));
         }
@@ -266,6 +285,12 @@ mod tests {
         assert_eq!(body["model"], "m");
         assert!(body.get("reasoning_effort").is_none());
         assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], super::SYSTEM_PROMPT);
+        let titled = model.clone().with_system_prompt("Write titles.");
+        assert_eq!(
+            titled.request_body(&[])["messages"][0]["content"],
+            "Write titles."
+        );
         assert_eq!(
             body["messages"][1],
             serde_json::json!({"role":"user","content":"hi"})

@@ -115,6 +115,21 @@ TTS_BASE_URL=http://127.0.0.1:8011/v1
 TTS_VOICE=af_heart
 ```
 
+## Conversations
+
+Every conversation is kept under `$THALVI_DATA_DIR/sessions/` (default
+`data/sessions/`, one JSON file each) until you delete it from the list in the
+app. A reload or a dropped connection rejoins the same conversation, and
+opening one that is live on another device moves it there. There is no
+authentication: anyone who can reach the server can list, read and delete
+every conversation, so keep it on your tailnet.
+
+Titles start as the first line you said. Set all three of `BG_LLM_BASE_URL`,
+`BG_LLM_MODEL` and `BG_LLM_API_KEY` (any Chat Completions endpoint, set
+together or not at all) and a background model rewrites each title in three to
+six words after the first reply, off the reply path. A title you typed is
+never overwritten.
+
 ## Status
 
 Under construction for the
