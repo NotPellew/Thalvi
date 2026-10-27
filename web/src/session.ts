@@ -41,6 +41,8 @@ export function displayState(s: SessionState): DisplayState {
   if (s.link !== "online") return s.link;
   if (!s.voice) return s.phase === "thinking" ? "thinking" : "idle";
   if (s.playing) return "speaking";
+  // The server stays in "speaking" for the whole reply; with nothing audible it is waiting for the next audio.
+  if (s.phase === "speaking") return "thinking";
   return s.phase === "idle" ? "starting" : s.phase;
 }
 
