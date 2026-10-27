@@ -78,7 +78,7 @@ describe("Controller", () => {
       { role: "user", text: "What is the time?" },
       { role: "assistant", text: "It is noon." },
     ]);
-    expect(calls).toEqual(["enqueue 3840"]);
+    expect(calls).toEqual(["enqueue 3840", 'send {"type":"played","bytes":3840}']);
   });
 
   it("voice off tells the server, drops local audio and goes idle while the reply text continues", () => {
@@ -178,11 +178,29 @@ describe("Controller", () => {
     server({ type: "interrupted" });
     controller.playing(false);
     server({ type: "state", state: "listening" });
-    expect(calls).toEqual(["flush"]);
+    expect(calls).toEqual(["flush", 'send {"type":"played","bytes":0}']);
     expect(displayState(controller.state)).toBe("listening");
 
     server({ type: "reply", text: "Sure." });
     expect(controller.state.turns.map((t) => t.text)).toEqual(["tell me a story", "Once upon", "Sure."]);
+  });
+
+  it("reports all reply audio received on the connection each time playback drains", () => {
+    const { controller, calls } = online();
+    controller.message(new ArrayBuffer(100));
+    controller.playing(true);
+    controller.playing(false);
+    controller.message(new ArrayBuffer(50));
+    controller.playing(false);
+    controller.lost();
+    controller.opened();
+    controller.message(new ArrayBuffer(30));
+    controller.playing(false);
+    expect(calls.filter((call) => call.includes("played"))).toEqual([
+      'send {"type":"played","bytes":100}',
+      'send {"type":"played","bytes":150}',
+      'send {"type":"played","bytes":30}',
+    ]);
   });
 
   it("Stop sends cancel and drops local audio at once", () => {

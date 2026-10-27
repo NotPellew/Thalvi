@@ -23,6 +23,11 @@ export function voiceMessage(on: boolean): string {
   return JSON.stringify({ type: "voice", on });
 }
 
+/** Tells the server that everything up to `bytes` of reply audio on this connection has played or been dropped. */
+export function playedMessage(bytes: number): string {
+  return JSON.stringify({ type: "played", bytes });
+}
+
 export function textMessage(text: string): string {
   return JSON.stringify({ type: "text", text });
 }

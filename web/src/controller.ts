@@ -2,6 +2,7 @@ import {
   CANCEL_MESSAGE,
   MAX_TEXT_LENGTH,
   parseServerMessage,
+  playedMessage,
   textMessage,
   voiceMessage,
 } from "./protocol.ts";
@@ -19,12 +20,14 @@ export interface ControllerPorts {
 export class Controller {
   state: SessionState = INITIAL;
   private readonly ports: ControllerPorts;
+  private receivedAudioBytes = 0;
 
   constructor(ports: ControllerPorts) {
     this.ports = ports;
   }
 
   opened(): void {
+    this.receivedAudioBytes = 0;
     this.apply({ type: "opened" });
     if (this.state.voice) this.ports.send(voiceMessage(true));
   }
@@ -65,11 +68,13 @@ export class Controller {
   }
 
   playing(playing: boolean): void {
+    if (!playing) this.ports.send(playedMessage(this.receivedAudioBytes));
     this.apply({ type: "playing", playing });
   }
 
   message(data: unknown): void {
     if (data instanceof ArrayBuffer) {
+      this.receivedAudioBytes += data.byteLength;
       this.ports.playback.enqueue(data);
       return;
     }
