@@ -313,6 +313,14 @@ fn title_model() -> (FakeModel, Arc<Titler<FakeModel>>) {
 }
 
 async fn start_with(recording: RecordingConfig, titler: Option<Arc<Titler<FakeModel>>>) -> Harness {
+    start_with_ack(recording, titler, false).await
+}
+
+async fn start_with_ack(
+    recording: RecordingConfig,
+    titler: Option<Arc<Titler<FakeModel>>>,
+    ack_enabled: bool,
+) -> Harness {
     let factory = FakeFactory::default();
     let model = FakeModel::default();
     let tts = FakeTts::default();
@@ -356,7 +364,7 @@ async fn start_with(recording: RecordingConfig, titler: Option<Arc<Titler<FakeMo
                                 resume,
                                 titler,
                                 recording,
-                                false,
+                                ack_enabled,
                             )
                             .await;
                             closed.fetch_add(1, Ordering::SeqCst);
@@ -1674,6 +1682,55 @@ async fn turning_voice_on_mid_reply_keeps_the_reply_state_until_it_ends() {
     })
     .await;
     assert!(has_state(&received, "listening"));
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn an_acknowledgement_is_heard_while_still_thinking_and_speaking_starts_with_the_real_answer()
+{
+    let mut harness = start_with_ack(RecordingConfig::disabled(), None, true).await;
+    voice_on(&mut harness).await;
+    let gate = Arc::new(Notify::new());
+    harness.model.add_script(vec![
+        ModelChunk::Wait(Arc::clone(&gate)),
+        ModelChunk::Delta("Take the ring road.".to_string()),
+    ]);
+    harness.factory.complete_turn(0, "route please");
+    wait_until(|| harness.model.calls().len() == 1).await;
+
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(600)).await;
+    tokio::time::resume();
+    let before_answer = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Audio(_))
+    })
+    .await;
+    assert!(has_state(&before_answer, "thinking"));
+    assert!(
+        !has_state(&before_answer, "speaking"),
+        "only the acknowledgement was sent: {before_answer:?}"
+    );
+    assert_eq!(
+        audios(&before_answer).len(),
+        1,
+        "the acknowledgement: {before_answer:?}"
+    );
+    expect_quiet_until_marker(&mut harness).await;
+
+    gate.notify_one();
+    let answer = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Audio(_))
+    })
+    .await;
+    assert_eq!(
+        audios(&answer),
+        vec![Bytes::from("AUDIO:Take the ring road.")]
+    );
+    let speaking = answer
+        .iter()
+        .position(|item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "speaking"))
+        .expect("speaking state before the real audio");
+    assert!(speaking < answer.len() - 1, "{answer:?}");
     harness.server.abort();
 }
 

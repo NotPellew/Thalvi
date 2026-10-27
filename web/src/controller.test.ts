@@ -84,6 +84,25 @@ describe("Controller", () => {
     expect(calls).toEqual(["enqueue 3840", 'send {"type":"played","bytes":3840}']);
   });
 
+  it("shows Speaking while the spoken acknowledgement plays, though the server is still thinking", () => {
+    const { controller, server, shown } = online();
+    controller.setVoice(true);
+    server({ type: "state", state: "listening" });
+    server({ type: "user", text: "Plan my route." });
+    server({ type: "state", state: "thinking" });
+
+    controller.message(new ArrayBuffer(3840));
+    controller.playing(true);
+    expect(shown()).toBe("speaking");
+    controller.playing(false);
+    expect(shown()).toBe("thinking");
+
+    server({ type: "state", state: "speaking" });
+    controller.message(new ArrayBuffer(3840));
+    controller.playing(true);
+    expect(shown()).toBe("speaking");
+  });
+
   it("voice off tells the server, drops local audio and goes idle while the reply text continues", () => {
     const { controller, calls, server, shown } = online();
     controller.setVoice(true);
