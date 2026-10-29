@@ -64,13 +64,22 @@ impl std::fmt::Display for ModelError {
 
 impl std::error::Error for ModelError {}
 
-/// A stream of model text deltas.
-pub type DeltaStream = Pin<Box<dyn Stream<Item = Result<String, ModelError>> + Send>>;
+/// One piece of a streamed model reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatEvent {
+    /// A fragment of the answer.
+    Text(String),
+    /// A fragment of the model's echo of what it heard in an audio turn.
+    Heard(String),
+}
+
+/// A stream of model reply events.
+pub type DeltaStream = Pin<Box<dyn Stream<Item = Result<ChatEvent, ModelError>> + Send>>;
 
 struct SseState {
     bytes: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
     buffer: Vec<u8>,
-    pending: std::collections::VecDeque<Result<String, ModelError>>,
+    pending: std::collections::VecDeque<Result<ChatEvent, ModelError>>,
     done: bool,
 }
 
@@ -199,7 +208,7 @@ impl ChatModel for OpenAiChatModel {
                         {
                             let line: Vec<u8> = state.buffer.drain(..=newline).collect();
                             match parse_sse_line(String::from_utf8_lossy(&line).trim()) {
-                                SseLine::Delta(text) => state.pending.push_back(Ok(text)),
+                                SseLine::Delta(event) => state.pending.push_back(Ok(event)),
                                 SseLine::Done => state.done = true,
                                 SseLine::Ignore => {}
                             }
@@ -216,10 +225,10 @@ impl ChatModel for OpenAiChatModel {
                     }
                     None => {
                         let tail = std::mem::take(&mut state.buffer);
-                        if let SseLine::Delta(text) =
+                        if let SseLine::Delta(event) =
                             parse_sse_line(String::from_utf8_lossy(&tail).trim())
                         {
-                            state.pending.push_back(Ok(text));
+                            state.pending.push_back(Ok(event));
                         }
                         state.done = true;
                     }
@@ -233,8 +242,8 @@ impl ChatModel for OpenAiChatModel {
 /// What one SSE line from the model stream means.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SseLine {
-    /// A text delta.
-    Delta(String),
+    /// An answer or echo delta.
+    Delta(ChatEvent),
     /// The `[DONE]` terminator.
     Done,
     /// A line that carries no delta.
@@ -254,29 +263,41 @@ pub fn parse_sse_line(line: &str) -> SseLine {
     let Ok(value) = serde_json::from_str::<Value>(data) else {
         return SseLine::Ignore;
     };
-    value
+    let Some(delta) = value
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("content"))
-        .and_then(Value::as_str)
-        .filter(|content| !content.is_empty())
-        .map_or(SseLine::Ignore, |content| {
-            SseLine::Delta(content.to_string())
-        })
+    else {
+        return SseLine::Ignore;
+    };
+    let field = |name: &str| {
+        delta
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    field("content")
+        .map(ChatEvent::Text)
+        .or_else(|| field("reasoning_content").map(ChatEvent::Heard))
+        .map_or(SseLine::Ignore, SseLine::Delta)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatMessage, OpenAiChatModel, SseLine, parse_sse_line};
+    use super::{ChatEvent, ChatMessage, OpenAiChatModel, SseLine, parse_sse_line};
 
     #[test]
     fn parses_sse_deltas_done_and_noise() {
         let cases: Vec<(&str, SseLine)> = vec![
             (
                 r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#,
-                SseLine::Delta("Hello".to_string()),
+                SseLine::Delta(ChatEvent::Text("Hello".to_string())),
+            ),
+            (
+                r#"data: {"choices":[{"delta":{"reasoning_content":"The user said: \"hi\""}}]}"#,
+                SseLine::Delta(ChatEvent::Heard("The user said: \"hi\"".to_string())),
             ),
             (r"data: [DONE]", SseLine::Done),
             (": keep-alive", SseLine::Ignore),

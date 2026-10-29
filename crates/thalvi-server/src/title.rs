@@ -8,7 +8,7 @@ use serde_json::json;
 use tokio::time::Instant;
 use tracing::Instrument;
 
-use crate::model::{ChatMessage, ChatModel};
+use crate::model::{ChatEvent, ChatMessage, ChatModel};
 use crate::recorder::Recorder;
 use crate::store::{MAX_TITLE_CHARS, SessionStore};
 
@@ -71,7 +71,9 @@ async fn ask<M: ChatModel>(model: &M, prompt: String) -> Result<Option<String>, 
         .map_err(|error| error.to_string())?;
     let mut answer = String::new();
     while let Some(delta) = deltas.next().await {
-        answer.push_str(&delta.map_err(|error| error.to_string())?);
+        if let ChatEvent::Text(text) = delta.map_err(|error| error.to_string())? {
+            answer.push_str(&text);
+        }
     }
     Ok(clean_title(&answer))
 }

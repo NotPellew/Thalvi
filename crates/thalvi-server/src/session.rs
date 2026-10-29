@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::Instrument;
 
+use crate::model::ChatEvent;
 use crate::model::{ChatMessage, ChatModel, Role};
 use crate::recognizer::{Recognizer, RecognizerEvent, RecognizerFactory};
 use crate::recorder::{AudioBuffer, Recorder, RecordingConfig, start_recording};
@@ -32,6 +33,8 @@ const ACK_LINES: [&str; 3] = [
     "One moment.",
 ];
 
+const MISHEARD_LINE: &str = "Sorry, I didn't catch that.";
+
 type AckCache = Arc<std::sync::Mutex<std::collections::HashMap<&'static str, Bytes>>>;
 
 #[derive(Clone)]
@@ -41,6 +44,8 @@ struct AckSettings {
 }
 
 enum ReplyEvent {
+    /// The model's echo disagreed with the caption; the reply is the fallback line instead.
+    Misheard,
     Delta(String),
     Sentence(String),
     Audio(Bytes),
@@ -74,6 +79,8 @@ struct ActiveReply {
     audio_bytes: usize,
     /// Length of the user's audio sent to the model, when it heard the turn.
     input_audio_ms: Option<u64>,
+    /// The turn was not addressed to Thalvi, so it stays out of history.
+    misheard: bool,
 }
 
 /// Reply audio sent on this connection that the client may still be playing.
@@ -865,6 +872,7 @@ where
     turn_log.next_turn += 1;
     let turn = turn_log.next_turn;
     let audio = (turn_log.audio_input && !clip.is_empty()).then(|| clip.to_vec());
+    let caption = audio.is_some().then(|| text.clone());
     history.push(ChatMessage::user(text.clone()));
     send_json(sink, &json!({"type": "user", "text": text})).await;
     send_state(sink, "thinking").await;
@@ -873,7 +881,7 @@ where
         Arc::clone(tts),
         voice.subscribe(),
         history.clone(),
-        audio,
+        audio.zip(caption),
         turn,
         turn_log.recorder.clone(),
         ack,
@@ -892,7 +900,7 @@ fn start_reply<M, T>(
     tts: Arc<T>,
     voice: watch::Receiver<bool>,
     history: Vec<ChatMessage>,
-    audio: Option<Vec<u8>>,
+    audio: Option<(Vec<u8>, String)>,
     turn: u64,
     recorder: Recorder,
     ack: AckSettings,
@@ -905,7 +913,7 @@ where
     let spoken_throughout = *voice.borrow();
     let input_audio_ms = audio
         .as_ref()
-        .map(|pcm| u64::try_from(pcm.len()).unwrap_or(u64::MAX) / 48);
+        .map(|(pcm, _)| u64::try_from(pcm.len()).unwrap_or(u64::MAX) / 48);
     let active = ActiveReply {
         handle: tokio::spawn(
             run_reply(
@@ -926,6 +934,7 @@ where
         ack_first_audio_at: None,
         audio_bytes: 0,
         input_audio_ms,
+        misheard: false,
     };
     (active, events_rx)
 }
@@ -945,6 +954,11 @@ async fn handle_reply_event(
     turn_log: &mut TurnLog,
 ) {
     match event {
+        ReplyEvent::Misheard => {
+            if let Some(active) = reply {
+                active.misheard = true;
+            }
+        }
         ReplyEvent::Delta(text) => {
             if let Some(active) = reply {
                 if active.first_delta_at.is_none() {
@@ -1075,6 +1089,10 @@ fn emit_reply_record(
 
 /// Stores what the user got: a finished reply in full, a cut-off one as far as it was spoken.
 fn record_assistant_history(history: &mut Vec<ChatMessage>, active: &ActiveReply, finished: bool) {
+    if active.misheard {
+        history.pop();
+        return;
+    }
     let spoken = active.sent_sentences.join(" ");
     let heard_only_ack = active.speaking_sent && spoken.trim().is_empty();
     let text =
@@ -1136,6 +1154,7 @@ fn cut_off_reply(
         if let Some(receiver) = reply_rx.as_mut() {
             while let Ok(event) = receiver.try_recv() {
                 match event {
+                    ReplyEvent::Misheard => active.misheard = true,
                     ReplyEvent::Sentence(sentence) => active.sent_sentences.push(sentence),
                     ReplyEvent::Delta(text) => active.text.push_str(&text),
                     ReplyEvent::FirstSentence(at) => {
@@ -1191,7 +1210,7 @@ async fn run_reply<M, T>(
     tts: Arc<T>,
     voice: watch::Receiver<bool>,
     history: Vec<ChatMessage>,
-    audio: Option<Vec<u8>>,
+    audio: Option<(Vec<u8>, String)>,
     events: mpsc::Sender<ReplyEvent>,
     turn: u64,
     recorder: Recorder,
@@ -1268,7 +1287,7 @@ async fn send_failed(
 async fn produce_sentences<M>(
     model: Arc<M>,
     history: Vec<ChatMessage>,
-    audio: Option<Vec<u8>>,
+    audio: Option<(Vec<u8>, String)>,
     events: mpsc::Sender<ReplyEvent>,
     sentences: mpsc::UnboundedSender<String>,
     failure_sent: Arc<AtomicBool>,
@@ -1276,7 +1295,11 @@ async fn produce_sentences<M>(
 where
     M: ChatModel,
 {
-    let mut deltas = match model.stream_reply(&history, audio.as_deref()).await {
+    let (clip, caption) = match audio {
+        Some((clip, caption)) => (Some(clip), Some(caption)),
+        None => (None, None),
+    };
+    let mut deltas = match model.stream_reply(&history, clip.as_deref()).await {
         Ok(deltas) => deltas,
         Err(error) => {
             send_failed(
@@ -1290,9 +1313,15 @@ where
     };
     let mut splitter = SentenceSplitter::new();
     let mut first_sentence_sent = false;
+    let mut heard = String::new();
+    let mut echo_checked = caption.is_none();
     while let Some(delta) = deltas.next().await {
         let delta = match delta {
-            Ok(delta) => delta,
+            Ok(ChatEvent::Heard(fragment)) => {
+                heard.push_str(&fragment);
+                continue;
+            }
+            Ok(ChatEvent::Text(delta)) => delta,
             Err(error) => {
                 send_failed(
                     &events,
@@ -1303,6 +1332,12 @@ where
                 return false;
             }
         };
+        if let Some(caption) = caption.as_deref().filter(|_| !echo_checked) {
+            echo_checked = true;
+            if echo_disagrees(&heard, caption) {
+                return reply_misheard(&events, &sentences).await;
+            }
+        }
         if events.send(ReplyEvent::Delta(delta.clone())).await.is_err() {
             return false;
         }
@@ -1321,6 +1356,11 @@ where
                 return false;
             }
         }
+    }
+    if let Some(caption) = caption.as_deref().filter(|_| !echo_checked)
+        && echo_disagrees(&heard, caption)
+    {
+        return reply_misheard(&events, &sentences).await;
     }
     if let Some(tail) = splitter.finish() {
         if !first_sentence_sent
@@ -1343,6 +1383,32 @@ where
         return false;
     }
     true
+}
+
+/// Logs the echo next to the caption; true when the guard should discard the answer.
+/// An endpoint that sends no echo is trusted.
+fn echo_disagrees(heard: &str, caption: &str) -> bool {
+    let echo = (!heard.trim().is_empty()).then_some(heard.trim());
+    tracing::info!(heard = ?echo, caption = ?caption, "audio turn heard");
+    echo.is_some_and(|echo| crate::heard::disagrees(echo, caption))
+}
+
+async fn reply_misheard(
+    events: &mpsc::Sender<ReplyEvent>,
+    sentences: &mpsc::UnboundedSender<String>,
+) -> bool {
+    let now = Instant::now();
+    for event in [
+        ReplyEvent::Misheard,
+        ReplyEvent::Delta(MISHEARD_LINE.to_string()),
+        ReplyEvent::FirstSentence(now),
+        ReplyEvent::ModelFinished(now),
+    ] {
+        if events.send(event).await.is_err() {
+            return false;
+        }
+    }
+    sentences.send(MISHEARD_LINE.to_string()).is_ok()
 }
 
 #[expect(
@@ -1840,7 +1906,7 @@ mod tests {
         ACK_LINES, AckCache, AckSettings, ActiveReply, ForwardClock, ReplyEvent, model_ms,
         record_assistant_history, run_reply,
     };
-    use crate::model::{ChatMessage, ChatModel, DeltaStream, ModelError};
+    use crate::model::{ChatEvent, ChatMessage, ChatModel, DeltaStream, ModelError};
     use crate::recorder::{RecordingConfig, start_recording};
     use crate::tts::{AudioStream, Tts, TtsError};
     use bytes::Bytes;
@@ -1859,9 +1925,9 @@ mod tests {
             _audio: Option<&[u8]>,
         ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
             let deltas = vec![
-                Ok("First. ".to_string()),
-                Ok("Second. ".to_string()),
-                Ok("Third.".to_string()),
+                Ok(ChatEvent::Text("First. ".to_string())),
+                Ok(ChatEvent::Text("Second. ".to_string())),
+                Ok(ChatEvent::Text("Third.".to_string())),
             ];
             let stream: DeltaStream = Box::pin(futures_util::stream::iter(deltas));
             std::future::ready(Ok(stream))
@@ -1876,8 +1942,8 @@ mod tests {
             _history: &[ChatMessage],
             _audio: Option<&[u8]>,
         ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
-            let deltas: Vec<Result<String, ModelError>> = (1..=12)
-                .map(|index| Ok(format!("Sentence {index}. ")))
+            let deltas: Vec<Result<ChatEvent, ModelError>> = (1..=12)
+                .map(|index| Ok(ChatEvent::Text(format!("Sentence {index}. "))))
                 .collect();
             let stream: DeltaStream = Box::pin(futures_util::stream::iter(deltas));
             std::future::ready(Ok(stream))
@@ -1920,7 +1986,7 @@ mod tests {
             let release = Arc::clone(&self.release);
             let stream: DeltaStream = Box::pin(futures_util::stream::once(async move {
                 release.notified().await;
-                Ok("First answer.".to_string())
+                Ok(ChatEvent::Text("First answer.".to_string()))
             }));
             std::future::ready(Ok(stream))
         }
@@ -1960,6 +2026,7 @@ mod tests {
 
     fn describe(event: &ReplyEvent) -> String {
         match event {
+            ReplyEvent::Misheard => "misheard".to_string(),
             ReplyEvent::Delta(text) => format!("delta:{text}"),
             ReplyEvent::Sentence(sentence) => format!("sentence:{sentence}"),
             ReplyEvent::Audio(_) => "audio".to_string(),
@@ -2393,6 +2460,7 @@ mod tests {
             ack_first_audio_at: None,
             audio_bytes: 0,
             input_audio_ms: None,
+            misheard: false,
         };
         let mut history = Vec::new();
         record_assistant_history(&mut history, &make_active(true), false);

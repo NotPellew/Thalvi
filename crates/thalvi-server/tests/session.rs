@@ -18,7 +18,7 @@ use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use thalvi_server::api;
-use thalvi_server::model::{ChatMessage, ChatModel, DeltaStream, ModelError};
+use thalvi_server::model::{ChatEvent, ChatMessage, ChatModel, DeltaStream, ModelError};
 use thalvi_server::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerFactory};
 use thalvi_server::recorder::{RecordKinds, RecordingConfig};
 use thalvi_server::session::handle_session;
@@ -123,6 +123,7 @@ impl Recognizer for FakeRecognizer {
 
 enum ModelChunk {
     Delta(String),
+    Heard(String),
     Wait(Arc<Notify>),
     Fail,
 }
@@ -172,10 +173,15 @@ impl ChatModel for FakeModel {
             (VecDeque::from(chunks), Some(guard)),
             |(mut chunks, guard)| async move {
                 match chunks.pop_front() {
-                    Some(ModelChunk::Delta(text)) => Some((Ok(text), (chunks, guard))),
+                    Some(ModelChunk::Delta(text)) => {
+                        Some((Ok(ChatEvent::Text(text)), (chunks, guard)))
+                    }
+                    Some(ModelChunk::Heard(text)) => {
+                        Some((Ok(ChatEvent::Heard(text)), (chunks, guard)))
+                    }
                     Some(ModelChunk::Wait(notify)) => {
                         notify.notified().await;
-                        Some((Ok(String::new()), (chunks, guard)))
+                        Some((Ok(ChatEvent::Text(String::new())), (chunks, guard)))
                     }
                     Some(ModelChunk::Fail) => Some((
                         Err(ModelError("model blew up".to_string())),
@@ -185,7 +191,9 @@ impl ChatModel for FakeModel {
                 }
             },
         )
-        .filter(|item| std::future::ready(!matches!(item, Ok(text) if text.is_empty())));
+        .filter(|item| {
+            std::future::ready(!matches!(item, Ok(ChatEvent::Text(text)) if text.is_empty()))
+        });
         Ok(Box::pin(stream))
     }
 }
@@ -2251,5 +2259,78 @@ async fn only_a_voice_turn_carries_its_padded_clip_and_only_with_audio_input_on(
             vec![first, Value::Null],
             "audio_input={audio_input} record_audio={record_audio}"
         );
+    }
+}
+
+#[tokio::test]
+async fn a_voice_turn_whose_echo_disagrees_gets_the_fallback_and_leaves_no_history() {
+    let cases = [
+        (
+            Some("The user said: \"turn on the lights\""),
+            "Lights are on.",
+            "Lights are on.",
+        ),
+        (
+            Some("The user said: \"play some jazz\""),
+            "Playing jazz.",
+            "Sorry, I didn't catch that.",
+        ),
+        (None, "Lights are on.", "Lights are on."),
+    ];
+    for (echo, answer, spoken) in cases {
+        let mut harness = start_full(RecordingConfig::disabled(), None, false, true).await;
+        harness.model.add_script(
+            echo.map(|echo| ModelChunk::Heard(echo.to_string()))
+                .into_iter()
+                .chain([ModelChunk::Delta(answer.to_string())])
+                .collect(),
+        );
+        voice_on(&mut harness).await;
+        for _ in 0..10 {
+            harness
+                .client
+                .send(ClientMessage::Binary(vec![3_u8; 3840].into()))
+                .await
+                .unwrap();
+        }
+        wait_until(|| harness.factory.audio_received().len() == 10).await;
+        let connection = harness.factory.latest_connection();
+        harness
+            .factory
+            .complete_turn(connection, "turn on the lights");
+        let received = collect_until(&mut harness.client, |item| {
+            matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+        })
+        .await;
+        let replies: String = received
+            .iter()
+            .filter_map(|item| match item {
+                Received::Json(v) if v["type"] == "reply" => v["text"].as_str(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replies, spoken, "echo {echo:?}");
+        assert_eq!(harness.tts.inputs(), [spoken], "echo {echo:?}");
+        assert!(has_state(&received, "speaking"), "echo {echo:?}");
+
+        harness
+            .model
+            .add_script(vec![ModelChunk::Delta("Fine.".to_string())]);
+        send_json(&mut harness, &json!({"type": "text", "text": "and typed"})).await;
+        let _ = collect_until(&mut harness.client, |item| {
+            matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+        })
+        .await;
+        let texts: Vec<String> = harness.model.calls()[1]
+            .iter()
+            .map(|message| message.content.clone())
+            .collect();
+        let expected: &[&str] = if spoken == answer {
+            &["turn on the lights", answer, "and typed"]
+        } else {
+            &["and typed"]
+        };
+        assert_eq!(texts, expected, "echo {echo:?}");
+        harness.server.abort();
     }
 }

@@ -49,6 +49,11 @@ areas your change touches. Editing rules are in
   it, while earlier turns stay text. Why: the model was trained on audio only,
   and old clips would grow every request. Rejected: audio plus transcript
   (off-distribution), audio for the whole history.
+- **Heard guard.** On an audio turn, the answer is dropped for "Sorry, I didn't
+  catch that." and the turn leaves history when the model's echo of what it
+  heard differs from the caption by over half the caption's words, or the
+  caption has under two words. Why: VAD turns background speech into turns
+  and the model then invents a request. Rejected: trusting the caption alone.
 
 ## Repository
 

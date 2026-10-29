@@ -11,7 +11,7 @@ use axum::response::Response;
 use axum::routing::post;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use thalvi_server::model::{ChatMessage, ChatModel, OpenAiChatModel};
+use thalvi_server::model::{ChatEvent, ChatMessage, ChatModel, OpenAiChatModel};
 use thalvi_server::recognizer::{
     MetaRecognizerFactory, Recognizer, RecognizerError, RecognizerEvent, RecognizerFactory,
 };
@@ -158,7 +158,13 @@ async fn chat_model_parses_sse_until_done_and_sends_stream_request() {
     while let Some(delta) = stream.next().await {
         deltas.push(delta.unwrap());
     }
-    assert_eq!(deltas, vec!["Hello ".to_string(), "café.".to_string()]);
+    assert_eq!(
+        deltas,
+        vec![
+            ChatEvent::Text("Hello ".to_string()),
+            ChatEvent::Text("café.".to_string())
+        ]
+    );
     let bodies = captured.bodies.lock().unwrap();
     assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0]["stream"], true);
@@ -171,7 +177,7 @@ async fn chat_model_parses_sse_until_done_and_sends_stream_request() {
 }
 
 #[tokio::test]
-async fn chat_model_sends_the_clip_and_skips_reasoning_deltas() {
+async fn chat_model_sends_the_clip_and_surfaces_the_echo() {
     let captured = Captured::default();
     let captured2 = captured.clone();
     let app = Router::new().route(
@@ -207,7 +213,13 @@ async fn chat_model_sends_the_clip_and_skips_reasoning_deltas() {
     while let Some(delta) = stream.next().await {
         deltas.push(delta.unwrap());
     }
-    assert_eq!(deltas, vec!["Four.".to_string()]);
+    assert_eq!(
+        deltas,
+        vec![
+            ChatEvent::Heard("hm".to_string()),
+            ChatEvent::Text("Four.".to_string())
+        ]
+    );
     let bodies = captured.bodies.lock().unwrap();
     let parts = bodies[0]["messages"][1]["content"].as_array().unwrap();
     assert_eq!(parts.len(), 1);
