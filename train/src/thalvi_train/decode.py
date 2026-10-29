@@ -5,7 +5,8 @@ the next token is a `Pick`: greedy, or temperature and nucleus sampling. A calle
 decoding one row can `send` tokens to feed in place of the one just chosen.
 
 A glimmer with a `StaticDecoder` (`FrozenGlimmer.static`) decodes an unpadded single
-row from its CUDA graph instead, when the request fits; the tokens are the same.
+row from its CUDA graph instead, when the request fits; greedy tokens match up to
+bf16 noise, which can flip a near-tied choice.
 """
 
 from collections.abc import Callable, Generator
