@@ -22,6 +22,7 @@ def test_every_step_is_a_function_with_a_local_entrypoint() -> None:
         "teacher": modal_app.run_teacher,
         "train": modal_app.run_train,
         "evaluate": modal_app.run_eval,
+        "cascade": modal_app.run_cascade,
     }
     for entrypoint, function in steps.items():
         assert isinstance(function, modal.Function)

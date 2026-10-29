@@ -17,6 +17,9 @@ at ~0.2 s each, so every corpus lives on the volume as one big archive; they fir
 stage the archives onto the container's local disk (`stage_audio`) and read the
 audio from there; the staging time is in the log.
 
+`run_cascade` scores the cascaded baseline, Muse Voice Transcribe, on the same eval clips on
+CPU, with the Meta API key from the `thalvi-meta-asr` secret.
+
 `Endpoint` serves the chat endpoint of `thalvi_train.serve` on an H100: unquantized bf16
 Glimmer from the volume, the Whisper encoder in fp16, and the projector of the run named by
 `THALVI_PROJECTOR_RUN` (default `projector-v2`). Its `thalvi-endpoint` secret holds the bearer
@@ -84,6 +87,7 @@ TEACHER_OUT = f"{DATA_MOUNT}/teacher/train.jsonl"
 RUNS_DIR = f"{DATA_MOUNT}/runs"
 WHISPER_MODEL = "openai/whisper-large-v3-turbo"
 ENDPOINT_SECRET = "thalvi-endpoint"
+ASR_SECRET = "thalvi-meta-asr"
 PROJECTOR_RUN_ENV = "THALVI_PROJECTOR_RUN"
 DEFAULT_PROJECTOR_RUN = "projector-v2"
 ENDPOINT_IDLE_SECONDS = 5 * 60
@@ -128,6 +132,12 @@ vllm_image = (
 )
 
 
+cascade_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .uv_sync(str(PROJECT_DIR), extras=["cpu", "cascade"], extra_options="--no-dev")
+    .env({"PYTHONUNBUFFERED": "1"})
+    .add_local_python_source("thalvi_train")
+)
 endpoint_image = (
     modal.Image.debian_slim(python_version="3.12")
     .uv_sync(str(PROJECT_DIR), extras=["cu128", "serve"], extra_options="--no-dev")
@@ -654,6 +664,34 @@ def run_eval(run_name: str, limit: int, batch_size: int, extra_args: str) -> Non
         )
 
 
+@app.function(
+    image=cascade_image,
+    volumes={DATA_MOUNT: data_volume},
+    secrets=[modal.Secret.from_name(ASR_SECRET)],
+    cpu=4,
+    memory=CORPORA_MEMORY_MIB,
+    ephemeral_disk=TRAIN_DISK_MIB,
+    timeout=2 * HOUR,
+)
+def run_cascade(limit: int, extra_args: str) -> None:
+    """Scores Muse Voice Transcribe on the first `limit` eval clips; `extra_args` go to
+    `thalvi_train.cascade`, which needs at least `--manifest` and `--out`.
+    """
+    with logged("cascade", None):
+        audio_args = stage_audio(EVAL_SUBSETS)
+        run_logged(
+            [
+                sys.executable,
+                "-m",
+                "thalvi_train.cascade",
+                *audio_args,
+                "--limit",
+                str(limit),
+                *shlex.split(extra_args),
+            ]
+        )
+
+
 @app.cls(
     image=endpoint_image,
     gpu=GPU,
@@ -742,3 +780,9 @@ def evaluate(
 ) -> None:
     """Step 5: score `runs/<run_name>` on the first `--limit` eval samples, in batches."""
     run_eval.remote(run_name, limit, batch_size, extra_args)
+
+
+@app.local_entrypoint()
+def cascade(limit: int = 300, extra_args: str = "") -> None:
+    """Baseline: Muse Voice Transcribe's word error rate on the first `--limit` eval clips."""
+    run_cascade.remote(limit, extra_args)
