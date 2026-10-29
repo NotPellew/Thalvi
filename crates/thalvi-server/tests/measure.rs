@@ -17,7 +17,7 @@ use thalvi_server::judge::{Grade, Judge, judge_all, parse_grade};
 use thalvi_server::measure::{
     Case, Measured, Sample, Setup, load_setup, measure_reply, parse_cases, run_all,
 };
-use thalvi_server::model::{ChatMessage, ChatModel, DeltaStream, ModelError};
+use thalvi_server::model::{ChatEvent, ChatMessage, ChatModel, DeltaStream, ModelError};
 use thalvi_server::report::{Stat, render_table, summarize};
 use thalvi_server::tts::{AudioStream, Tts, TtsError};
 use tokio::time::{Duration, sleep};
@@ -71,7 +71,7 @@ impl ChatModel for FakeModel {
                 match steps.next()? {
                     Step::Delta(ms, text) => {
                         sleep(Duration::from_millis(ms)).await;
-                        Some((Ok(text.to_string()), steps))
+                        Some((Ok(ChatEvent::Text(text.to_string())), steps))
                     }
                     Step::Fail(ms) => {
                         sleep(Duration::from_millis(ms)).await;

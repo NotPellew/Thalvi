@@ -10,7 +10,7 @@ use tokio::time::Instant;
 
 use crate::config::{Config, TtsApi};
 use crate::judge::Grade;
-use crate::model::{ChatMessage, ChatModel, OpenAiChatModel};
+use crate::model::{ChatEvent, ChatMessage, ChatModel, OpenAiChatModel};
 use crate::sentence::SentenceSplitter;
 use crate::tts::{AudioStream, OpenAiTts, Qwen3Tts, Tts, TtsError};
 
@@ -301,6 +301,9 @@ async fn produce(
                 produced.error = Some(format!("The language model could not reply: {error}"));
                 return false;
             }
+        };
+        let ChatEvent::Text(delta) = delta else {
+            continue;
         };
         produced
             .first_token
