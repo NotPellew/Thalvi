@@ -11,6 +11,7 @@ from tiny_whisper import DIM, WINDOW, tone, write_audio_manifest
 
 from thalvi_train import evaluate
 from thalvi_train.batch import make_batch
+from thalvi_train.echo import PREFILL
 from thalvi_train.evaluate import (
     Baseline,
     SampleResult,
@@ -25,6 +26,7 @@ from thalvi_train.evaluate import (
 from thalvi_train.features import encode
 from thalvi_train.glimmer import FrozenGlimmer, load_glimmer
 from thalvi_train.projector import AudioProjector
+from thalvi_train.prompts import GENERATION_PROMPT
 from thalvi_train.records import Record, resolve_audio
 from thalvi_train.train import PROJECTOR_CONFIG, PROJECTOR_WEIGHTS, ProjectorConfig, distill_loss
 
@@ -437,6 +439,17 @@ def test_cli_writes_a_row_per_eval_sample_and_a_summary(
         > single["median_time_to_first_token_s"]
         > 0
     )
+
+
+def test_cli_in_echo_mode_starts_each_reasoning_like_serving_and_says_so(
+    cli_arguments: list[str], tmp_path: Path
+) -> None:
+    evaluate.main([*cli_arguments, *("--latency-samples", "0"), "--echo"])
+
+    rows = [json.loads(line) for line in (tmp_path / "run" / "eval.jsonl").read_text().splitlines()]
+    assert all(row["response"].startswith(GENERATION_PROMPT + PREFILL) for row in rows)
+    summary = json.loads((tmp_path / "run" / "eval.summary.json").read_text(encoding="utf-8"))
+    assert summary["echo"] is True
 
 
 def test_cli_runs_samples_after_history_and_records_the_setting(

@@ -2,7 +2,14 @@ import pytest
 from wav import audio_part
 
 from thalvi_train.chat import parse_request
-from thalvi_train.echo import MAX_ECHO_TOKENS, EchoWatch, ReplyMode, echo_end, uses_echo
+from thalvi_train.echo import (
+    MAX_ECHO_TOKENS,
+    EchoWatch,
+    ReplyMode,
+    echo_end,
+    heard,
+    uses_echo,
+)
 
 TOOLS = [{"type": "function", "function": {"name": "f"}}]
 
@@ -96,3 +103,17 @@ EARLIER_AUDIO = [{"role": "user", "content": AUDIO}, {"role": "assistant", "cont
 )
 def test_only_a_spoken_turn_without_tools_echoes(chat, mode: ReplyMode, echoes: bool) -> None:
     assert uses_echo(chat, mode) is echoes
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "request_text"),
+    [
+        ('The user said: "What is the weather?"\n\nPlan', "What is the weather?"),
+        ("The user said: “Hi there” and more", "Hi there"),
+        ("The user said: what is it\nThen", "what is it"),
+        ("The user said: cut off mid", "cut off mid"),
+        ("The user said:", ""),
+    ],
+)
+def test_heard_is_the_echo_line_without_its_quotes(reasoning: str, request_text: str) -> None:
+    assert heard(reasoning) == request_text

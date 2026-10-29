@@ -14,7 +14,10 @@ a batch at a time. With `--history-prob`, samples run after earlier text turns d
 from other evaluated records (see `history`), the same for every run of the same
 records and settings; the summary states the setting. With `--augment-prob`, the clips
 get backgrounds, reverb and gain under a fixed seed (see `augment`), for a noisy
-evaluation that reruns identically; the summary states those settings too.
+evaluation that reruns identically; the summary states those settings too. With
+`--echo`, the reasoning starts as the echo reply mode starts it when serving, and the
+transcript is the echo line: after earlier turns Glimmer often answers without
+reasoning, which leaves no transcript to score.
 
 A batch's timings sit on each of its rows, since a batch has no
 per-sample latency: `batch_encode_s` is the encoder, mel features included (reading
@@ -44,6 +47,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from thalvi_train.augment import Augmenter, add_arguments, build_augmenter
 from thalvi_train.batch import Batch, make_batch
 from thalvi_train.decode import decode_steps
+from thalvi_train.echo import PREFILL, heard
 from thalvi_train.features import (
     DEFAULT_MODEL,
     FRAMES_PER_SECOND,
@@ -218,9 +222,9 @@ def generate(
     return Generation(ids, finished, prefill_s or 0.0, time.perf_counter() - started)
 
 
-def _read(tokenizer: PromptTokenizer, ids: list[int]) -> tuple[str, str, str]:
-    """The decoded response of generated `ids`, its reasoning and its answer."""
-    response = GENERATION_PROMPT + tokenizer.decode(ids)
+def _read(tokenizer: PromptTokenizer, ids: list[int], prefill: str = "") -> tuple[str, str, str]:
+    """The decoded response of `ids` generated after `prefill`, its reasoning and its answer."""
+    response = GENERATION_PROMPT + prefill + tokenizer.decode(ids)
     return (response, *split_reply(response))
 
 
@@ -247,13 +251,16 @@ def evaluate_batch(
     index: int,
     max_new_tokens: int,
     with_text_baseline: bool,
+    echo: bool = False,
 ) -> list[SampleResult]:
     """Scores `records` together: their KLs, and the students' greedy replies from `clips`.
 
     The clips are encoded as one batch. `histories[i]` is the earlier text turns in
     front of `records[i]`, for the student and the baseline alike. `index` numbers the
-    batch in the results.
+    batch in the results. With `echo`, the student's reasoning starts from the echo
+    mode's `PREFILL`, as serving does, and its transcript is the echo line.
     """
+    prefill = PREFILL if echo else ""
     device = glimmer.device
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
     started = time.perf_counter()
@@ -268,6 +275,7 @@ def evaluate_batch(
         audio = [projected[i, :count] for i, count in enumerate(batch.audio_tokens)]
         prompts = [
             generation_ids(record.task, AUDIO_TOKEN_TEXT * count, tokenizer, history)
+            + tokenizer.text_ids(prefill)
             for record, count, history in zip(records, batch.audio_tokens, histories, strict=True)
         ]
         ids, mask = _left_pad(prompts)
@@ -288,8 +296,8 @@ def evaluate_batch(
 
     results = []
     for i, record in enumerate(records):
-        response, reasoning, answer = _read(tokenizer, student.ids[i])
-        transcript = transcript_of(reasoning, record.task)
+        response, reasoning, answer = _read(tokenizer, student.ids[i], prefill)
+        transcript = transcript_of(heard(reasoning) if echo else reasoning, record.task)
         reference = normalize(record.text)
         edits = edit_distance(reference, normalize(transcript))
         results.append(
@@ -409,6 +417,7 @@ def evaluate(
     with_text_baseline: bool,
     emit: Callable[[list[SampleResult]], None],
     augmenter: Augmenter | None = None,
+    echo: bool = False,
 ) -> list[SampleResult]:
     """Evaluates `records` in batches, passing each batch's results to `emit` as it is done.
 
@@ -434,6 +443,7 @@ def evaluate(
             index=index,
             max_new_tokens=max_new_tokens,
             with_text_baseline=with_text_baseline,
+            echo=echo,
         )
         results |= dict(zip(members, batch, strict=True))
         emit(batch)
@@ -538,6 +548,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="also decode from the transcript text with the same weights",
     )
+    parser.add_argument(
+        "--echo",
+        action="store_true",
+        help="start the reasoning as the echo reply mode does and score the echo line",
+    )
     add_arguments(parser)
     return parser.parse_args(argv)
 
@@ -578,11 +593,13 @@ def main(argv: list[str] | None = None) -> None:
         with_text_baseline=args.with_text_baseline,
         emit=emit,
         augmenter=augmenter,
+        echo=args.echo,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     rows = "".join(json.dumps(asdict(r), ensure_ascii=False) + "\n" for r in results)
     args.out.write_text(rows, encoding="utf-8")
     summary = summarize(results) | {
+        "echo": args.echo,
         "history": asdict(history) | {"seed": HISTORY_SEED},
         "augment": {
             "prob": args.augment_prob,

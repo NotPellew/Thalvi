@@ -17,7 +17,8 @@ from thalvi_train.chat import ChatRequest
 
 ReplyMode = Literal["echo", "reasoning"]
 
-PREFILL = " to=self<|message|>The user said:"
+OPENING = "The user said:"
+PREFILL = " to=self<|message|>" + OPENING
 HANDOFF = "<|eom|><|start|>assistant to=user<|message|>"
 MAX_ECHO_TOKENS = 40
 _END_MARKERS = ("<|eom|>", "<|eot|>")
@@ -54,6 +55,17 @@ def echo_end(text: str) -> int | None:
             ends.append(at + 1 if at >= 0 else -1)
     found = [end for end in ends if end >= 0]
     return min(found) if found else None
+
+
+def heard(reasoning: str) -> str:
+    """The request an echo heard: `reasoning` after `OPENING`, up to `echo_end`, quotes dropped."""
+    text = reasoning.removeprefix(OPENING)
+    end = echo_end(text)
+    line = (text if end is None else text[:end]).strip()
+    for opening, closing in _CLOSING_QUOTES.items():
+        if line.startswith(opening):
+            line = line[len(opening) :].removesuffix(closing)
+    return line.strip()
 
 
 class EchoWatch:
