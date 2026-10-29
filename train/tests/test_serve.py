@@ -523,3 +523,20 @@ def test_the_api_key_flag_defaults_to_the_environment(monkeypatch: pytest.Monkey
     monkeypatch.setenv("THALVI_ENDPOINT_KEY", "from-env")
     assert _parse_args(required).api_key == "from-env"
     assert _parse_args([*required, "--api-key", "k"]).api_key == "k"
+
+
+def test_warming_up_runs_one_short_spoken_request_and_leaves_the_engine_free(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    limits: list[int] = []
+    real = engine_module.decode_steps
+
+    def counted(glimmer, embeds, mask, max_new_tokens, *rest):
+        limits.append(max_new_tokens)
+        return real(glimmer, embeds, mask, max_new_tokens, *rest)
+
+    monkeypatch.setattr(engine_module, "decode_steps", counted)
+    engine.warm_up()
+    engine.warm_up()
+
+    assert limits == [engine_module.WARM_UP_TOKENS] * 2

@@ -19,6 +19,7 @@ from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from typing import Literal
 
+import numpy as np
 import torch
 from transformers import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
@@ -26,7 +27,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from thalvi_train.chat import ChatRequest, prompt_text
 from thalvi_train.decode import decode_steps, sampler
 from thalvi_train.echo import HANDOFF, PREFILL, EchoWatch, ReplyMode, uses_echo
-from thalvi_train.features import encode_long
+from thalvi_train.features import SAMPLE_RATE, encode_long
 from thalvi_train.glimmer import FrozenGlimmer
 from thalvi_train.projector import AudioProjector
 from thalvi_train.prompts import ChatTokenizer
@@ -40,6 +41,8 @@ from thalvi_train.reply import (
 from thalvi_train.teacher import EOT_ID
 
 FinishReason = Literal["stop", "length", "tool_calls"]
+
+WARM_UP_TOKENS = 2
 
 
 @dataclass(frozen=True)
@@ -214,6 +217,23 @@ class Engine:
         """
         kind = self._glimmer.device.type
         return torch.autocast(kind, dtype=torch.bfloat16, enabled=kind == "cuda")
+
+    def warm_up(self) -> None:
+        """Answers one second of silence, `WARM_UP_TOKENS` long, and drops the reply.
+
+        The first pass through the audio encoder and projector on a GPU takes about a
+        second longer than the ones after it, which a spoken turn would otherwise wait for.
+        """
+        request = ChatRequest(
+            messages=[{"role": "user", "content": [{"type": "input_audio", "clip": 0}]}],
+            clips=[np.zeros(SAMPLE_RATE, dtype=np.float32)],
+            tools=[],
+            max_tokens=WARM_UP_TOKENS,
+            temperature=0.0,
+            top_p=1.0,
+            include_usage=False,
+        )
+        self.run(request, lambda update: None, threading.Event())
 
     def _prompt(self, request: ChatRequest, *, echoing: bool) -> tuple[torch.Tensor, int]:
         """The prompt's embeddings `(1, length, hidden)`, clips spliced in, and its length.

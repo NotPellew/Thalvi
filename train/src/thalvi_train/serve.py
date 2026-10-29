@@ -269,7 +269,10 @@ def load_engine(args: argparse.Namespace) -> Engine:
             f"in {time.monotonic() - started:.1f} s",
             flush=True,
         )
-    return Engine(glimmer, tokenizer, projector, encoder, extractor, args.reply_mode)
+    engine = Engine(glimmer, tokenizer, projector, encoder, extractor, args.reply_mode)
+    if glimmer.device.type == "cuda":
+        engine.warm_up()
+    return engine
 
 
 def main(argv: list[str] | None = None) -> None:
