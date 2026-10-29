@@ -133,9 +133,7 @@ class Engine:
         Returns without a `Finished` if `cancelled` is set. Errors propagate; if they
         come before `Ready`, nothing was emitted.
         """
-        device = self._glimmer.device
-        autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
-        with self._lock, torch.no_grad(), autocast:
+        with self._lock, torch.no_grad():
             if cancelled.is_set():
                 return
             echoing = uses_echo(request, self._reply_mode)
@@ -197,6 +195,14 @@ class Engine:
                 reason = "length"
             emit(Finished(reason, prompt_tokens, generated))
 
+    def _encoder_autocast(self) -> torch.autocast:
+        """bf16 autocast for the encoder and projector, which hold fp16 and bf16 weights.
+
+        The decoder's weights are bf16 already, so decoding runs outside it.
+        """
+        kind = self._glimmer.device.type
+        return torch.autocast(kind, dtype=torch.bfloat16, enabled=kind == "cuda")
+
     def _prompt(self, request: ChatRequest, *, echoing: bool) -> tuple[torch.Tensor, int]:
         """The prompt's embeddings `(1, length, hidden)`, clips spliced in, and its length.
 
@@ -204,14 +210,15 @@ class Engine:
         tokenizes a response apart from its prompt.
         """
         weights = next(self._projector.parameters())
-        audio = [
-            self._projector(
-                encode_long(self._encoder, self._extractor, clip)[None].to(
-                    weights.device, weights.dtype
-                )
-            )[0]
-            for clip in request.clips
-        ]
+        with self._encoder_autocast():
+            audio = [
+                self._projector(
+                    encode_long(self._encoder, self._extractor, clip)[None].to(
+                        weights.device, weights.dtype
+                    )
+                )[0]
+                for clip in request.clips
+            ]
         text = prompt_text(self._tokenizer.render_chat, request, [a.shape[0] for a in audio])
         ids = self._tokenizer.text_ids(text) + (
             self._tokenizer.text_ids(PREFILL) if echoing else []

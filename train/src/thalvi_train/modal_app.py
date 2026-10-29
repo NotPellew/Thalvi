@@ -24,9 +24,10 @@ CPU, with the Meta API key from the `thalvi-meta-asr` secret.
 Glimmer from the volume, the Whisper encoder in fp16, and the projector of the run named by
 `THALVI_PROJECTOR_RUN` (default `projector-v2`). Its `thalvi-endpoint` secret holds the bearer
 key. `modal deploy src/thalvi_train/modal_app.py` publishes it, `modal app stop thalvi-adapter`
-takes it down; it scales to zero five minutes after the last request. Decoding one token
-launches hundreds of small kernels from Python, so its speed is also the CPU's, hence
-cores reserved rather than Modal's default fractional, burstable share.
+takes it down; it scales to zero five minutes after the last request. Stock decoding launches
+hundreds of small kernels per token from Python, so its speed is also the CPU's, hence cores
+reserved rather than Modal's default fractional, burstable share. The endpoint decodes from a
+compiled CUDA graph instead (`thalvi_train.static_decode`), captured at load for ~1.5 minutes.
 
 Every GPU step prints when it starts and ends and the hours between, which
 times the GPU rate for the cost of the step. Image pulls and container start
@@ -695,6 +696,22 @@ def run_cascade(limit: int, extra_args: str) -> None:
         )
 
 
+@app.function(
+    image=endpoint_image,
+    gpu=GPU,
+    volumes={GLIMMER_MOUNT: glimmer_volume},
+    memory=TRAIN_MEMORY_MIB,
+    cpu=ENDPOINT_CPUS,
+    timeout=HOUR,
+)
+def run_bench(tokens: int, compiled: bool) -> None:
+    """Times stock against CUDA-graph decoding of `tokens` tokens (`thalvi_train.bench_decode`)."""
+    from thalvi_train.bench_decode import main
+
+    with logged("bench", GPU):
+        main(["--glimmer", GLIMMER_TEXT_DIR, "--tokens", str(tokens), *(["--compile"] * compiled)])
+
+
 @app.cls(
     image=endpoint_image,
     gpu=GPU,
@@ -720,6 +737,7 @@ class Endpoint:
         import argparse
 
         from thalvi_train.serve import API_KEY_ENV, create_app, load_engine
+        from thalvi_train.static_decode import DEFAULT_CAPACITY
 
         started = time.monotonic()
         run = os.environ[PROJECTOR_RUN_ENV]
@@ -730,6 +748,7 @@ class Endpoint:
             device="cuda",
             quantize=False,
             encoder_device="cuda",
+            static_length=DEFAULT_CAPACITY,
             reply_mode="echo",
         )
         engine = load_engine(args)
@@ -784,6 +803,12 @@ def evaluate(
 ) -> None:
     """Step 5: score `runs/<run_name>` on the first `--limit` eval samples, in batches."""
     run_eval.remote(run_name, limit, batch_size, extra_args)
+
+
+@app.local_entrypoint()
+def bench(tokens: int = 200, compiled: bool = True) -> None:
+    """Decoding speed of the endpoint's Glimmer, stock against CUDA graph, on one H100."""
+    run_bench.remote(tokens, compiled)
 
 
 @app.local_entrypoint()

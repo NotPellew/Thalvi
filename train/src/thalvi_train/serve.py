@@ -16,6 +16,10 @@ before the first token is a 500; after it the stream is just closed, since the c
 reads `content` and an error must never be taken for the answer. Generation runs in a
 worker thread, one request at a time, and stops after the token being decoded when the
 client disconnects.
+
+On an unquantized CUDA decoder the model is loaded with a CUDA-graph decoder of
+`--static-length` positions (`thalvi_train.static_decode`), compiled and captured once at
+load; a request too long for it, or one that arrives while it is busy, decodes the stock way.
 """
 
 import argparse
@@ -42,6 +46,7 @@ from thalvi_train.echo import ReplyMode
 from thalvi_train.engine import Engine, Finished, Ready, Step, Update
 from thalvi_train.features import DEFAULT_MODEL
 from thalvi_train.reply import Content, Event, Reasoning
+from thalvi_train.static_decode import DEFAULT_CAPACITY, StaticDecoder
 
 MODEL_ID = "muse-glimmer-30b-hears"
 API_KEY_ENV = "THALVI_ENDPOINT_KEY"
@@ -218,6 +223,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--quantize", action="store_true", help="4-bit NF4 decoder; needs cuda")
     parser.add_argument("--encoder-device", choices=["cpu", "cuda"], default="cuda")
     parser.add_argument(
+        "--static-length",
+        type=int,
+        default=DEFAULT_CAPACITY,
+        help="KV positions of the CUDA-graph decoder, 0 for none; ignored when quantized",
+    )
+    parser.add_argument(
         "--reply-mode",
         choices=get_args(ReplyMode),
         default="echo",
@@ -249,6 +260,15 @@ def load_engine(args: argparse.Namespace) -> Engine:
         projector = projector.to(torch.bfloat16)
     encoder, extractor = load_encoder(args.whisper_model, args.encoder_device, config.encoder_dim)
     tokenizer = GlimmerTokenizer(AutoTokenizer.from_pretrained(args.glimmer))
+    if glimmer.device.type == "cuda" and not args.quantize and args.static_length > 0:
+        started = time.monotonic()
+        glimmer.static = StaticDecoder(glimmer, args.static_length, compile=True)
+        glimmer.static.warm_up()
+        print(
+            f"[static] decoder graph captured for {args.static_length} positions "
+            f"in {time.monotonic() - started:.1f} s",
+            flush=True,
+        )
     return Engine(glimmer, tokenizer, projector, encoder, extractor, args.reply_mode)
 
 

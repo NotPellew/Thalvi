@@ -9,6 +9,7 @@ device, and is the only code that does.
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 from safetensors import safe_open
@@ -17,6 +18,9 @@ from transformers import BitsAndBytesConfig, MuseGlimmerConfig
 from transformers.cache_utils import Cache
 from transformers.models.muse_glimmer.configuration_muse_glimmer import MuseGlimmerTextConfig
 from transformers.models.muse_glimmer.modeling_muse_glimmer import MuseGlimmerTextModel
+
+if TYPE_CHECKING:
+    from thalvi_train.static_decode import StaticDecoder
 
 AUDIO_TOKEN_ID = 201000
 PAD_TOKEN_ID = 200018
@@ -49,6 +53,7 @@ class FrozenGlimmer(nn.Module):
         self.embed_device = embed_device
         self.output_multiplier = decoder.config.output_multiplier
         self.softcap = decoder.config.final_logit_softcapping
+        self.static: StaticDecoder | None = None
         self.requires_grad_(False)
         self.eval()
 
