@@ -14,7 +14,8 @@ Each clip goes over its own connection in `ENDPOINTING` mode, as 24 kHz PCM in
 100 ms chunks at `--speed` times real time, followed by `TRAILING_SILENCE_S` of
 silence so the last turn ends. The transcript is every completed turn, joined;
 the stream is done when the service sends its final empty transcript after
-`endStream`. `--speed 1` paces the audio like a live speaker, and then
+`endStream`. A clip the recognizer falls behind on is sent again at half the speed, down to
+real time. `--speed 1` paces the audio like a live speaker, and then
 `end_to_transcript_s`, from the last speech sample sent to the last completed turn,
 is the latency a speaker sees.
 """
@@ -46,6 +47,16 @@ CHUNK_S = 0.1
 TRAILING_SILENCE_S = 2.0
 MAX_CLIP_SAMPLES = 30 * SAMPLE_RATE
 STREAM_TIMEOUT_S = 60.0
+BACKLOG = "backlog"
+
+
+class RecognizerError(RuntimeError):
+    """An error event from the recognizer."""
+
+    @property
+    def backlog(self) -> bool:
+        """Whether the audio came faster than the recognizer keeps up with."""
+        return BACKLOG in str(self).lower()
 
 
 @dataclass(frozen=True)
@@ -86,7 +97,7 @@ def read_stream(messages: Sequence[str]) -> tuple[str, bool]:
             partial = event.get("transcript", "").strip() or partial
             done = done or bool(event.get("final"))
         elif kind == "error":
-            raise RuntimeError(f"recognizer error: {event.get('message', 'unknown')}")
+            raise RecognizerError(f"recognizer error: {event.get('message', 'unknown')}")
     return (" ".join(t for t in turns if t) if turns else partial), done
 
 
@@ -140,6 +151,19 @@ async def transcribe(
     return transcript, latency
 
 
+async def transcribe_paced(
+    clip: np.ndarray, api_key: str, speed: float
+) -> tuple[str, float | None]:
+    """`transcribe` at `speed`, halved down to real time each time the recognizer falls behind."""
+    while True:
+        try:
+            return await transcribe(clip, api_key, speed)
+        except RecognizerError as error:
+            if not error.backlog or speed <= 1:
+                raise
+            speed = max(1.0, speed / 2)
+
+
 def score(record_id: str, text: str, transcript: str, clip: np.ndarray, latency: float | None):
     """The `CascadeResult` of `transcript` against the reference `text`."""
     reference = normalize(text)
@@ -182,7 +206,7 @@ async def run(
 
     async def one(i: int) -> CascadeResult:
         async with gate:
-            transcript, latency = await transcribe(clips[i], api_key, speed)
+            transcript, latency = await transcribe_paced(clips[i], api_key, speed)
         result = score(ids[i], texts[i], transcript, clips[i], latency)
         print(json.dumps({"id": result.id, "wer": result.wer}), flush=True)
         return result
@@ -204,7 +228,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--split", default="eval")
     parser.add_argument("--limit", type=int, help="the first N records of the split")
     parser.add_argument(
-        "--speed", type=float, default=10.0, help="audio sent at this many times real time"
+        "--speed", type=float, default=4.0, help="audio sent at this many times real time"
     )
     parser.add_argument("--concurrency", type=int, default=16)
     add_arguments(parser)

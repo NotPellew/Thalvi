@@ -11,9 +11,11 @@ from thalvi_train import cascade
 from thalvi_train.cascade import (
     ASR_RATE,
     TRAILING_SILENCE_S,
+    RecognizerError,
     read_stream,
     to_pcm,
     transcribe,
+    transcribe_paced,
 )
 from thalvi_train.features import SAMPLE_RATE
 from thalvi_train.records import Record
@@ -52,8 +54,39 @@ def test_the_transcript_is_every_completed_turn_or_else_the_latest_partial(
 
 
 def test_a_recognizer_error_is_raised() -> None:
-    with pytest.raises(RuntimeError, match="boom"):
+    with pytest.raises(RecognizerError, match="boom"):
         read_stream([event(type="error", message="boom")])
+
+
+def test_a_clip_the_recognizer_falls_behind_on_is_resent_slower_down_to_real_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    speeds: list[float] = []
+
+    async def behind(clip: np.ndarray, api_key: str, speed: float):
+        speeds.append(speed)
+        if speed > 1:
+            raise RecognizerError("recognizer error: Audio processing backlog too large")
+        return "ok", None
+
+    monkeypatch.setattr(cascade, "transcribe", behind)
+    clip = np.zeros(1, dtype=np.float32)
+
+    assert asyncio.run(transcribe_paced(clip, "k", 5.0)) == ("ok", None)
+    assert speeds == [5.0, 2.5, 1.25, 1.0]
+
+
+def test_other_recognizer_errors_are_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[float] = []
+
+    async def broken(clip: np.ndarray, api_key: str, speed: float):
+        calls.append(speed)
+        raise RecognizerError("recognizer error: bad key")
+
+    monkeypatch.setattr(cascade, "transcribe", broken)
+    with pytest.raises(RecognizerError, match="bad key"):
+        asyncio.run(transcribe_paced(np.zeros(1, dtype=np.float32), "k", 4.0))
+    assert calls == [4.0]
 
 
 def test_pcm_is_16_bit_at_24_khz_and_clipped() -> None:
