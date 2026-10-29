@@ -67,25 +67,36 @@ Update = Ready | Step | Finished
 
 
 class StepTimer:
-    """Times a request's prefill and each decoding step after it, for the serving log."""
+    """Times a request's prompt, its prefill and each decoding step after it, for the serving log.
+
+    The prompt's time is the audio encoding, projection and tokenizing before the prefill.
+    """
 
     def __init__(self, clock: Callable[[], float] = time.perf_counter) -> None:
         self._clock = clock
         self._start = clock()
+        self._built: float | None = None
         self._marks: list[float] = []
+
+    def built(self) -> None:
+        """Notes that the prompt has just been built, so the prefill starts now."""
+        self._built = self._clock()
 
     def mark(self) -> None:
         """Notes that a step, the first being the prefill's, has just come out."""
         self._marks.append(self._clock())
 
     def summary(self, prompt_tokens: int) -> str:
-        """One line: prefill time, decoding rate, and the slowest step and its index."""
+        """One line: prompt and prefill times, decoding rate, and the slowest step and its index."""
+        line = f"[engine] prompt {prompt_tokens} tokens"
+        prefill_start = self._start
+        if self._built is not None:
+            line += f" built in {self._built - self._start:.2f} s"
+            prefill_start = self._built
         if not self._marks:
-            return f"[engine] prompt {prompt_tokens} tokens, cancelled before the first token"
+            return line + ", cancelled before the first token"
         gaps = [b - a for a, b in zip(self._marks, self._marks[1:], strict=False)]
-        line = (
-            f"[engine] prompt {prompt_tokens} tokens, prefill {self._marks[0] - self._start:.2f} s"
-        )
+        line += f", prefill {self._marks[0] - prefill_start:.2f} s"
         if gaps:
             slowest = max(range(len(gaps)), key=gaps.__getitem__)
             line += (
@@ -136,8 +147,10 @@ class Engine:
         with self._lock, torch.no_grad():
             if cancelled.is_set():
                 return
+            timer = StepTimer()
             echoing = uses_echo(request, self._reply_mode)
             embeds, prompt_tokens = self._prompt(request, echoing=echoing)
+            timer.built()
             parser = ReplyParser(tool_parameter_types(request.tools))
             decoder = IncrementalDecoder(self._tokenizer.decode)
             watch = EchoWatch() if echoing else None
@@ -152,7 +165,6 @@ class Engine:
                 pick,
             )
             generated, called = 0, False
-            timer = StepTimer()
             try:
                 step = _resume(steps, None)
                 timer.mark()
