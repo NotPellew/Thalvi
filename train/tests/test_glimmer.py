@@ -70,3 +70,17 @@ def test_splice_rejects_audio_that_does_not_fill_the_placeholders(
     ids = torch.tensor([[1, p, p, 2], [3, p, 4, 0]])
     with pytest.raises(ValueError, match="placeholders"):
         glimmer.embed_with_audio(ids, [torch.randn(n, HIDDEN) for n in audio_tokens])
+
+
+def test_cudnn_attention_is_turned_off_for_the_process() -> None:
+    """Guards a reply decoding at ~1 token/s on H100s: cuDNN builds a graph per new length."""
+    import torch
+
+    from thalvi_train.glimmer import avoid_cudnn_attention
+
+    before = torch.backends.cuda.cudnn_sdp_enabled()
+    try:
+        avoid_cudnn_attention()
+        assert not torch.backends.cuda.cudnn_sdp_enabled()
+    finally:
+        torch.backends.cuda.enable_cudnn_sdp(before)

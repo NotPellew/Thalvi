@@ -146,9 +146,12 @@ def load_glimmer(
     With `quantize`, decoder Linear layers and the lm_head load as NF4 with
     double quantization and bf16 compute, straight onto the GPU shard by shard,
     while `embed_tokens` stays on the CPU. The unquantized checkpoint is ~60 GB
-    and loads unquantized straight onto `device`, e.g. an 80 GB GPU.
+    and loads unquantized straight onto `device`, e.g. an 80 GB GPU. Loading onto
+    CUDA calls `avoid_cudnn_attention`.
     """
     device = torch.device(device)
+    if device.type == "cuda":
+        avoid_cudnn_attention()
     text_config = MuseGlimmerConfig.from_pretrained(path).text_config
     if quantize:
         decoder = _load_decoder_4bit(path, text_config, device)
@@ -159,6 +162,16 @@ def load_glimmer(
         lm_head = _lm_head(path, text_config, dtype).to(device)
         embed_device = device
     return FrozenGlimmer(decoder, lm_head, device, embed_device)
+
+
+def avoid_cudnn_attention() -> None:
+    """Turns off cuDNN attention for the process, leaving flash, memory-efficient and math.
+
+    PyTorch prefers it on Hopper GPUs, and it builds a graph for every new pair of
+    query and key lengths: ~0.2 s each, against well under a millisecond for the
+    others. Decoding meets a new key length every token, so a reply ran at ~1 token/s.
+    """
+    torch.backends.cuda.enable_cudnn_sdp(False)
 
 
 def _load_decoder(

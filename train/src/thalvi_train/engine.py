@@ -3,7 +3,8 @@
 The engine owns the loaded models and a lock, so requests queue and generate in turn.
 `Engine.run` is blocking and reports through `emit`: `Ready` once the first token is
 chosen, then a `Step` per token with the events it completed, then `Finished`.
-Setting `cancelled` stops it before the next token.
+Setting `cancelled` stops it before the next token. Every request ends with one
+`[engine]` log line of its timings (`StepTimer`), the serving log's view of speed.
 
 A spoken turn without tools is answered in echo mode (see `thalvi_train.echo`): the
 prompt ends in the echo prefill, and once the echo is over the engine sends the
@@ -13,6 +14,7 @@ where the model would have.
 """
 
 import threading
+import time
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from typing import Literal
@@ -62,6 +64,35 @@ class Finished:
 
 
 Update = Ready | Step | Finished
+
+
+class StepTimer:
+    """Times a request's prefill and each decoding step after it, for the serving log."""
+
+    def __init__(self, clock: Callable[[], float] = time.perf_counter) -> None:
+        self._clock = clock
+        self._start = clock()
+        self._marks: list[float] = []
+
+    def mark(self) -> None:
+        """Notes that a step, the first being the prefill's, has just come out."""
+        self._marks.append(self._clock())
+
+    def summary(self, prompt_tokens: int) -> str:
+        """One line: prefill time, decoding rate, and the slowest step and its index."""
+        if not self._marks:
+            return f"[engine] prompt {prompt_tokens} tokens, cancelled before the first token"
+        gaps = [b - a for a, b in zip(self._marks, self._marks[1:], strict=False)]
+        line = (
+            f"[engine] prompt {prompt_tokens} tokens, prefill {self._marks[0] - self._start:.2f} s"
+        )
+        if gaps:
+            slowest = max(range(len(gaps)), key=gaps.__getitem__)
+            line += (
+                f", {len(gaps)} steps at {len(gaps) / sum(gaps):.1f}/s,"
+                f" slowest {gaps[slowest]:.2f} s at step {slowest + 1}"
+            )
+        return line
 
 
 def _resume(
@@ -123,8 +154,10 @@ class Engine:
                 pick,
             )
             generated, called = 0, False
+            timer = StepTimer()
             try:
                 step = _resume(steps, None)
+                timer.mark()
                 while step is not None:
                     if cancelled.is_set():
                         return
@@ -151,8 +184,10 @@ class Engine:
                         prompt_tokens += len(handoff)
                         watch, decoder = None, IncrementalDecoder(self._tokenizer.decode)
                     step = _resume(steps, forced)
+                    timer.mark()
             finally:
                 steps.close()
+                print(timer.summary(prompt_tokens), flush=True)
             events = parser.feed(decoder.flush()) + parser.finish()
             if events:
                 called = called or any(isinstance(e, ToolCall) for e in events)

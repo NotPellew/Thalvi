@@ -24,7 +24,9 @@ CPU, with the Meta API key from the `thalvi-meta-asr` secret.
 Glimmer from the volume, the Whisper encoder in fp16, and the projector of the run named by
 `THALVI_PROJECTOR_RUN` (default `projector-v2`). Its `thalvi-endpoint` secret holds the bearer
 key. `modal deploy src/thalvi_train/modal_app.py` publishes it, `modal app stop thalvi-adapter`
-takes it down; it scales to zero five minutes after the last request.
+takes it down; it scales to zero five minutes after the last request. Decoding one token
+launches hundreds of small kernels from Python, so its speed is also the CPU's, hence
+cores reserved rather than Modal's default fractional, burstable share.
 
 Every GPU step prints when it starts and ends and the hours between, which
 times the GPU rate for the cost of the step. Image pulls and container start
@@ -91,6 +93,7 @@ ASR_SECRET = "thalvi-meta-asr"
 PROJECTOR_RUN_ENV = "THALVI_PROJECTOR_RUN"
 DEFAULT_PROJECTOR_RUN = "projector-v2"
 ENDPOINT_IDLE_SECONDS = 5 * 60
+ENDPOINT_CPUS = 8.0
 
 VLLM_PORT = 8000
 SERVED_NAME = "glimmer"
@@ -702,6 +705,7 @@ def run_cascade(limit: int, extra_args: str) -> None:
             {PROJECTOR_RUN_ENV: os.environ.get(PROJECTOR_RUN_ENV, DEFAULT_PROJECTOR_RUN)}
         ),
     ],
+    cpu=ENDPOINT_CPUS,
     scaledown_window=ENDPOINT_IDLE_SECONDS,
     max_containers=1,
     timeout=HOUR,
