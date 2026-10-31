@@ -301,3 +301,53 @@ def test_cli_recovery_prints_text_when_clipboard_fails(capsys):
 
     asyncio.run(recover(BrokenClipboard(), "Keep this"))
     assert "Keep this" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "spoken, expected",
+    [
+        ("open google.com do that", "https://google.com"),
+        ("OPEN https://Example.com/Case?q=Value do that", "https://Example.com/Case?q=Value"),
+    ],
+)
+def test_spoken_url_task_reaches_typed_executor(config, spoken, expected):
+    async def behavior():
+        host = PreviewHost(lambda _: None)
+        request = Capture(config.endings).final(spoken)
+
+        async def no_confirmation():
+            raise AssertionError("Opening a page does not submit anything.")
+
+        assert await Workflow(config, host, lambda _: None).finish(
+            request, host.capture(), no_confirmation
+        )
+        assert host.operations == [("open_url", expected, False)]
+
+    asyncio.run(behavior())
+
+
+@pytest.mark.parametrize(
+    "spoken",
+    [
+        "open javascript:alert(1)",
+        "open https://user@example.com",
+        "open example.com extra",
+        "open example.com;$(bad)",
+        "open https://example.com:bad",
+        "open https://example.com/%zz",
+        "open https://example.com\\evil",
+    ],
+)
+def test_invalid_url_task_is_preserved(config, spoken):
+    async def behavior():
+        host = PreviewHost(lambda _: None)
+
+        async def no_confirmation():
+            raise AssertionError("Invalid tasks do not request confirmation.")
+
+        assert not await Workflow(config, host, lambda _: None).finish(
+            Request(Ending.TASK, spoken), host.capture(), no_confirmation
+        )
+        assert host.operations == [("clipboard", spoken, False)]
+
+    asyncio.run(behavior())

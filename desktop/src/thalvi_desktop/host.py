@@ -114,7 +114,18 @@ class Hyprland:
         return selected
 
     def open_url(self, url: str) -> None:
-        self.command(["xdg-open", url], None)
+        browser = self.command(["xdg-settings", "get", "default-web-browser"], None).strip()
+        executables = {
+            "firefox_firefox.desktop": "/snap/bin/firefox",
+            "firefox.desktop": "firefox",
+            "chromium_chromium.desktop": "/snap/bin/chromium",
+            "chromium.desktop": "chromium",
+            "google-chrome.desktop": "google-chrome",
+            "google-chrome-stable.desktop": "google-chrome-stable",
+        }
+        if browser not in executables:
+            raise RuntimeError("The default browser does not support this new-tab action yet.")
+        self.command([executables[browser], "--new-tab", url], None)
 
 
 def key_arguments(keys: tuple[str, ...]) -> list[str]:

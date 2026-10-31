@@ -121,3 +121,40 @@ def test_configured_input_shortcut_is_sent_only_after_focus_is_verified():
 
     Hyprland(command).focus_app(App(("firefox",), ("ctrl", "l")))
     assert calls[-1] == ["wtype", "-M", "ctrl", "-k", "l"]
+
+
+@pytest.mark.parametrize(
+    "browser, expected",
+    [
+        ("firefox_firefox.desktop", "/snap/bin/firefox"),
+        ("firefox.desktop", "firefox"),
+        ("chromium_chromium.desktop", "/snap/bin/chromium"),
+        ("chromium.desktop", "chromium"),
+        ("google-chrome.desktop", "google-chrome"),
+        ("google-chrome-stable.desktop", "google-chrome-stable"),
+    ],
+)
+def test_open_url_requests_new_tab_in_supported_default_browser(browser, expected):
+    calls = []
+
+    def command(argv, stdin):
+        calls.append(list(argv))
+        return browser if argv[0] == "xdg-settings" else ""
+
+    Hyprland(command).open_url("https://example.com/Case?q=Value")
+    assert calls == [
+        ["xdg-settings", "get", "default-web-browser"],
+        [expected, "--new-tab", "https://example.com/Case?q=Value"],
+    ]
+
+
+def test_open_url_rejects_unsupported_default_browser():
+    calls = []
+
+    def command(argv, stdin):
+        calls.append(list(argv))
+        return "other.desktop"
+
+    with pytest.raises(RuntimeError, match="default browser"):
+        Hyprland(command).open_url("https://example.com")
+    assert calls == [["xdg-settings", "get", "default-web-browser"]]

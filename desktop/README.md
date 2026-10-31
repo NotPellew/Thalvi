@@ -70,6 +70,18 @@ history chooses the first. An unconfigured task preserves its text on the
 clipboard. `tasks.decide` returns `OpenUrl`, `FocusApp`, or `DiscordMessage`; a future
 model decision can return the same typed action to `tasks.execute`.
 
+On Hyprland/Wayland, “open google.com do that” opens `https://google.com` in a
+new tab of the default browser. Firefox, Chromium and Google Chrome desktop
+entries are supported, including Firefox and Chromium Snap entries. Other
+default browsers report that the action is unavailable and preserve the text.
+URLs without a scheme use HTTPS; path and query case are preserved.
+
+Preview this task without a microphone or browser action:
+
+```sh
+uv run thalvi-desktop --config config.example.json replay examples/open-browser.jsonl
+```
+
 ### Discord Desktop
 
 Live Discord typing and submission are disabled. A scripted Discord request
