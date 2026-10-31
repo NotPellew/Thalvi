@@ -28,9 +28,27 @@ async def recover(host, text: str) -> None:
 
 
 async def run(config: Config, once: bool, dry_run: bool) -> int:
-    wake = await asyncio.to_thread(Wake, config)
-    host = PreviewHost() if dry_run else desktop()
     metrics = Metrics(config.metrics)
+    started, outcome = time.monotonic(), "error"
+    try:
+        wake = await asyncio.to_thread(Wake, config)
+        outcome = "ok"
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    finally:
+        try:
+            await metrics.record("desktop_wake_load", started, outcome)
+        except OSError:
+            notice("The optional desktop metrics could not be saved.")
+
+    async def flush_metrics() -> None:
+        try:
+            await metrics.flush()
+        except OSError:
+            notice("The optional desktop metrics could not be saved.")
+
+    host = PreviewHost() if dry_run else desktop()
     workflow = Workflow(
         config,
         host,
@@ -42,9 +60,24 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
         notice("Waiting for a wake word. Ctrl+C stops and releases the microphone.")
         try:
             while True:
-                mode = await asyncio.to_thread(wake.detect, await audio.next())
+                frame = await audio.next()
+                started, outcome = time.monotonic(), "error"
+                try:
+                    mode = await asyncio.to_thread(wake.detect, frame)
+                    outcome = "ok"
+                except asyncio.CancelledError:
+                    outcome = "cancelled"
+                    raise
+                finally:
+                    try:
+                        await metrics.record(
+                            "desktop_wake_inference", started, outcome, buffered=True
+                        )
+                    except OSError:
+                        notice("The optional desktop metrics could not be saved.")
                 if mode is None:
                     continue
+                await flush_metrics()
                 started = time.monotonic()
                 outcome = "failed"
                 try:
@@ -109,6 +142,7 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
                     return 0
                 notice("Waiting for a wake word.")
         finally:
+            await flush_metrics()
             if current is not None and current.text:
                 await recover(host, current.text)
 

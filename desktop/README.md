@@ -6,7 +6,7 @@ conversation. `/transcription` returns text without asking the chat model;
 `/session` keeps the existing conversational protocol.
 
 The first native target is Hyprland. It needs `hyprctl`, `wtype`, `wl-copy`,
-and `xdg-open`. Other desktop adapters are not yet implemented or qualified.
+and `xdg-settings`. Other desktop adapters are not yet implemented or qualified.
 Python 3.12.14 is pinned; use uv 0.12.15. No code is copied from Hex-Hands-free.
 
 ## Run
@@ -19,20 +19,26 @@ cp config.example.json ../data/desktop.json
 uv run thalvi-desktop --config ../data/desktop.json run
 ```
 
-Configure existing ONNX files for the two wake models and their
-`melspectrogram.onnx` and `embedding_model.onnx` feature models. Paths are
-relative to the config file. Nothing downloads weights automatically.
-The example names refer to openWakeWord models; the words they detect come
-from those weights, not an editable text label. Check each model's licence
-before choosing it; the pretrained Jarvis model is non-commercial. See the
-[upstream project](https://github.com/dscripka/openWakeWord).
+Configure `wake.model_dir` to an existing sherpa-onnx
+`kws-zipformer-gigaspeech-3.3M-2024-01-01` directory containing `tokens.txt`,
+`bpe.model`, and the int8 encoder, decoder and joiner for epoch 12, average 2,
+chunk 16, left context 64. Paths are relative to the config file. Assets are
+never downloaded automatically. The model is from the [sherpa-onnx pretrained
+keyword models](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html);
+its model-specific licence has not been established, so this configuration is
+for private validation, not an asset redistribution claim.
 
-Audio dependencies are optional so tests and the replay command need neither
-PortAudio nor model weights. `openwakeword` supplies local ONNX wake inference,
-`sounddevice` supplies native audio on the platform prototypes, NumPy converts
-48 kHz microphone frames to the wake and recognizer formats, and `websockets`
-speaks the local server protocol. The uv override excludes the unused TFLite
-runtime from openWakeWord's metadata; inference explicitly selects ONNX.
+The capture wake phrase is “Hey Thalvi”; configure its phonetic spelling as
+`Hey Talvi` because the literal spelling did not detect in the local trial.
+`conversation_phrase` defaults to `Hey Mycroft` for the demo and has not been
+live qualified. The phrases must be distinct English-letter text supported by
+the model tokenizer. Both use the same model and stay local until a wake.
+
+Audio dependencies are optional so tests and replay need neither PortAudio nor
+weights. `sherpa-onnx` runs local CPU keyword inference, `sentencepiece`
+tokenizes configured phrases for its BPE model, `sounddevice` supplies native
+audio, NumPy converts audio formats, and `websockets` speaks the local server
+protocol. Keyword data is held in memory on Linux; model files are not modified.
 
 Use headphones for native conversation: this prototype has no acoustic echo
 cancellation. The phone/browser client retains its own media handling. The
@@ -110,6 +116,11 @@ outcomes, including each local debug discovery, composer check, text insert and
 key press. Desktop metrics contain neither captured text, destinations, tokens
 nor debugger messages. Status and confirmation text appear in the foreground
 terminal.
+
+Wake-model loading and each detector call record their host elapsed time and
+outcome when metrics are enabled. Detector timings buffer at most 125 records
+and flush at a wake or shutdown, avoiding a disk write on every audio frame.
+These timings measure local call cost, not perceived wake latency.
 
 ## Tests
 

@@ -33,10 +33,10 @@ areas your change touches. Editing rules are in
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
   interrupts a reply by speaking. Why: hands and eyes are busy. Rejected:
   push-to-talk.
-- **Two wake entries, endings select the capture route.** One wake model starts
-  capture; paste, submit and task endings choose delivery. A separate model
-  starts conversation without per-turn endings. Why: defer the capture choice
-  without delaying conversation. Rejected: one wake phrase for both flows.
+- **Two wake entries, endings select the capture route.** One local model
+  recognizes separate capture and conversation phrases. Why: defer the action
+  choice until an ending without delaying conversation. Rejected: one phrase
+  for both flows.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
   browser and app actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative

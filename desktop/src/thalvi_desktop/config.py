@@ -1,7 +1,6 @@
 """Owns validation of desktop configuration and scripted task definitions."""
 
 import json
-import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,10 +51,9 @@ class Script:
 @dataclass(frozen=True)
 class Config:
     server: str
-    capture_model: Path | None
-    conversation_model: Path | None
     model_dir: Path | None
-    threshold: float
+    capture_phrase: str
+    conversation_phrase: str
     endings: dict[str, Ending]
     apps: dict[str, App]
     scripts: tuple[Script, ...]
@@ -76,14 +74,22 @@ class Config:
         if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
             raise ValueError("server must be the server root, without a path, query, or fragment.")
         wake = record(raw.get("wake", {}), "wake")
-        fields(wake, {"capture_model", "conversation_model", "model_dir", "threshold"}, "wake")
-        threshold = wake.get("threshold", 0.65)
-        if (
-            type(threshold) not in (int, float)
-            or not math.isfinite(threshold)
-            or not 0 < threshold < 1
+        fields(wake, {"model_dir", "capture_phrase", "conversation_phrase"}, "wake")
+        capture_phrase = " ".join(
+            text(wake.get("capture_phrase", "Hey Talvi"), "wake.capture_phrase").upper().split()
+        )
+        conversation_phrase = " ".join(
+            text(wake.get("conversation_phrase", "Hey Mycroft"), "wake.conversation_phrase")
+            .upper()
+            .split()
+        )
+        if capture_phrase == conversation_phrase:
+            raise ValueError("Wake phrases must be distinct.")
+        if any(
+            re.fullmatch(r"[A-Z]+(?: [A-Z]+)*", phrase) is None
+            for phrase in (capture_phrase, conversation_phrase)
         ):
-            raise ValueError("wake.threshold must be between zero and one.")
+            raise ValueError("Wake phrases must contain only English letters and spaces.")
         endings_raw = record(raw.get("endings", dict(DEFAULT_ENDINGS)), "endings")
         endings: dict[str, Ending] = {}
         for phrase, action in endings_raw.items():
@@ -157,16 +163,11 @@ class Config:
             result = Path(text(value, "local path")).expanduser()
             return result if result.is_absolute() else path.parent / result
 
-        capture_model = local(wake.get("capture_model"))
-        conversation_model = local(wake.get("conversation_model"))
-        if capture_model is not None and capture_model == conversation_model:
-            raise ValueError("Capture and conversation need different wake models.")
         return cls(
             server.rstrip("/"),
-            capture_model,
-            conversation_model,
             local(wake.get("model_dir")),
-            float(threshold),
+            capture_phrase,
+            conversation_phrase,
             endings,
             apps,
             tuple(scripts),

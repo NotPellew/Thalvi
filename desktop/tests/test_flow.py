@@ -143,7 +143,7 @@ def test_replay_cli_runs_without_microphone_models_or_desktop_side_effects(
 @pytest.mark.parametrize(
     "patch,message",
     [
-        ({"wake": {"threshold": True}}, "threshold"),
+        ({"wake": {"capture_phrase": "Hey Mycroft"}}, "distinct"),
         (
             {
                 "scripts": [
