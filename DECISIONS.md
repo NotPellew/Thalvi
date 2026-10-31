@@ -49,6 +49,18 @@ areas your change touches. Editing rules are in
   it, while earlier turns stay text. Why: the model was trained on audio only,
   and old clips would grow every request. Rejected: audio plus transcript
   (off-distribution), audio for the whole history.
+- **Keyword history search.** `search_history` searches the current and past
+  sessions and returns short excerpts as data; task steps stay collapsed. Why:
+  recover earlier details without whole-history context. Rejected: embeddings
+  and code mode before a keyword tool proves useful.
+- **Opt-in retirement with editable learnings.** `THALVI_RETIRE_DAYS` replaces
+  old transcripts with summaries and keeps durable facts in a separate editable
+  store. Why: bound retention without losing useful context. Rejected:
+  automatic deletion by default or hiding learnings inside summaries.
+- **Per-device voices on the configured engine.** `TTS_VOICES` offers names;
+  browsers preview and save their own choice. Why: simple personalization
+  without shared-device surprises. Rejected: runtime engine switching and a
+  server-wide voice preference.
 
 ## Repository
 

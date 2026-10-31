@@ -215,6 +215,37 @@ async fn chat_model_sends_the_clip_and_skips_reasoning_deltas() {
 }
 
 #[tokio::test]
+async fn truncated_model_streams_never_produce_executable_tool_calls() {
+    let fragment = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"function\":{\"name\":\"search_history\",\"arguments\":\"{}\"}}]}}]}\n";
+    for ending in [
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n",
+        "",
+    ] {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move {
+                Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(format!("{fragment}{ending}")))
+                    .unwrap()
+            }),
+        );
+        let model = OpenAiChatModel::new(serve(app).await, "m".to_string(), String::new(), None);
+        let stream = model
+            .stream_reply_with_tools(&[ChatMessage::user("search".to_string())], None, &[], &[])
+            .await
+            .unwrap();
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(events.len(), 1);
+        assert!(
+            events[0].is_err(),
+            "unfinished tool call must not run: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn tts_client_sends_contract_body_and_streams_pcm() {
     let captured = Captured::default();
     let captured2 = captured.clone();

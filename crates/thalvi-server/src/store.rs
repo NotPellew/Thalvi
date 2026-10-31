@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
+use crate::history::{self, HistoryMatch, HistoryQuery, HistoryScope};
 use crate::model::{ChatMessage, Role};
 
 /// Longest stored title, in characters.
@@ -49,6 +50,8 @@ struct Stored {
     updated_ms: u64,
     next_turn: u64,
     turns: Vec<Turn>,
+    #[serde(default)]
+    retired: bool,
 }
 
 /// One row of the conversation list.
@@ -60,6 +63,17 @@ pub struct Summary {
     pub title: String,
     /// Seconds since the last turn was saved.
     pub age_s: u64,
+}
+
+/// One inactive old conversation awaiting a generated retirement summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetirementCandidate {
+    /// Conversation id, rechecked when the summary is committed.
+    pub id: String,
+    /// Full transcript given to the retirement model.
+    pub history: Vec<ChatMessage>,
+    /// Version used to avoid replacing a conversation that changed meanwhile.
+    pub updated_ms: u64,
 }
 
 /// Why a live connection must let go of its conversation.
@@ -77,6 +91,7 @@ struct Live {
     predecessors: Vec<Arc<AtomicBool>>,
     detach: oneshot::Sender<Detach>,
     released: oneshot::Receiver<()>,
+    save_error: watch::Sender<bool>,
 }
 
 #[derive(Default)]
@@ -86,8 +101,29 @@ struct State {
 }
 
 enum DiskOp {
-    Save { id: String, json: Vec<u8> },
-    Remove(String),
+    Save {
+        id: String,
+    },
+    Rename {
+        id: String,
+        title: String,
+        done: oneshot::Sender<Result<bool, String>>,
+    },
+    Remove {
+        id: String,
+        done: oneshot::Sender<Result<bool, String>>,
+    },
+    Retire {
+        id: String,
+        expected_updated_ms: u64,
+        summary: String,
+        done: oneshot::Sender<Result<bool, String>>,
+    },
+    #[cfg(test)]
+    Pause {
+        ready: oneshot::Sender<()>,
+        resume: mpsc::Receiver<()>,
+    },
     Flush(oneshot::Sender<()>),
 }
 
@@ -102,6 +138,7 @@ pub struct Attachment {
     dead: Arc<AtomicBool>,
     detach: oneshot::Receiver<Detach>,
     released: Option<oneshot::Sender<()>>,
+    save_error: watch::Receiver<bool>,
 }
 
 impl Attachment {
@@ -112,11 +149,25 @@ impl Attachment {
             Err(_) => std::future::pending().await,
         }
     }
+
+    /// Resolves when a save of this conversation has failed; pends forever if the store is gone.
+    pub async fn save_failed(&mut self) {
+        let signalled = self.save_error.wait_for(|failed| *failed).await.is_ok();
+        if !signalled {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// A second watcher for this connection's save failures, sharing the same signal.
+    #[must_use]
+    pub fn save_error_receiver(&self) -> watch::Receiver<bool> {
+        self.save_error.clone()
+    }
 }
 
 /// Conversations kept under one directory until the user deletes them.
 pub struct SessionStore {
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
     writer: mpsc::Sender<DiskOp>,
     counter: AtomicU64,
 }
@@ -133,12 +184,14 @@ impl SessionStore {
         let sessions = load(dir)?;
         let (writer, queue) = mpsc::channel();
         let dir = dir.to_path_buf();
-        std::thread::spawn(move || write_loop(&dir, &queue));
+        let state = Arc::new(Mutex::new(State {
+            sessions,
+            live: HashMap::new(),
+        }));
+        let writer_state = Arc::clone(&state);
+        std::thread::spawn(move || write_loop(&dir, &queue, &writer_state));
         Ok(Self {
-            state: Mutex::new(State {
-                sessions,
-                live: HashMap::new(),
-            }),
+            state,
             writer,
             counter: AtomicU64::new(1),
         })
@@ -159,6 +212,7 @@ impl SessionStore {
         let dead = Arc::new(AtomicBool::new(false));
         let (detach_tx, detach) = oneshot::channel();
         let (released_tx, released_rx) = oneshot::channel();
+        let (save_error_tx, save_error) = watch::channel(false);
         let (id, previous) = {
             let mut state = self.lock();
             let id = resume
@@ -177,6 +231,7 @@ impl SessionStore {
                     predecessors: predecessors.clone(),
                     detach: detach_tx,
                     released: released_rx,
+                    save_error: save_error_tx,
                 },
             );
             (id, previous.map(|previous| (previous, predecessors)))
@@ -217,6 +272,7 @@ impl SessionStore {
             dead,
             detach,
             released: Some(released_tx),
+            save_error,
         }
     }
 
@@ -256,7 +312,9 @@ impl SessionStore {
                 updated_ms: now,
                 next_turn: 0,
                 turns: Vec::new(),
+                retired: false,
             });
+        stored.retired = false;
         stored.turns = history
             .iter()
             .map(|message| Turn {
@@ -288,9 +346,154 @@ impl SessionStore {
             .collect()
     }
 
-    /// Sets a title the user typed; false when the conversation does not exist.
-    pub fn rename(&self, id: &str, title: &str) -> bool {
-        self.retitle(id, title, TitleSource::User)
+    /// Searches the live history and, for `All`, every saved conversation.
+    #[must_use]
+    pub fn search_history(
+        &self,
+        current_id: &str,
+        current_history: &[ChatMessage],
+        query: &HistoryQuery,
+    ) -> Vec<HistoryMatch> {
+        let state = self.lock();
+        let mut matches = Vec::new();
+        if let Some(stored) = state.sessions.get(current_id) {
+            for message in current_history {
+                if let Some(found) = history::find_match(
+                    current_id,
+                    &stored.title,
+                    message.role,
+                    &message.content,
+                    stored.updated_ms,
+                    &query.text,
+                ) {
+                    matches.push(found);
+                }
+            }
+        } else {
+            let now = now_ms();
+            for message in current_history {
+                if let Some(found) = history::find_match(
+                    current_id,
+                    "Current conversation",
+                    message.role,
+                    &message.content,
+                    now,
+                    &query.text,
+                ) {
+                    matches.push(found);
+                }
+            }
+        }
+        if query.scope == HistoryScope::All {
+            for stored in state
+                .sessions
+                .values()
+                .filter(|stored| stored.id != current_id)
+            {
+                for turn in &stored.turns {
+                    if let Some(found) = history::find_match(
+                        &stored.id,
+                        &stored.title,
+                        turn.role,
+                        &turn.text,
+                        stored.updated_ms,
+                        &query.text,
+                    ) {
+                        matches.push(found);
+                    }
+                }
+            }
+        }
+        matches.sort_by(|a, b| {
+            b.updated_ms
+                .cmp(&a.updated_ms)
+                .then(a.session_id.cmp(&b.session_id))
+        });
+        matches.truncate(history::MAX_RESULTS);
+        matches
+    }
+
+    /// Returns inactive, not-yet-retired sessions last updated before `cutoff_ms`.
+    #[must_use]
+    pub fn retirement_candidates(&self, cutoff_ms: u64) -> Vec<RetirementCandidate> {
+        let state = self.lock();
+        state
+            .sessions
+            .values()
+            .filter(|stored| {
+                !stored.retired
+                    && stored.updated_ms < cutoff_ms
+                    && !state.live.contains_key(&stored.id)
+            })
+            .map(|stored| RetirementCandidate {
+                id: stored.id.clone(),
+                history: stored
+                    .turns
+                    .iter()
+                    .map(|turn| ChatMessage {
+                        role: turn.role,
+                        content: turn.text.clone(),
+                    })
+                    .collect(),
+                updated_ms: stored.updated_ms,
+            })
+            .collect()
+    }
+
+    /// Whether a retirement candidate is still unchanged and closed.
+    #[must_use]
+    pub fn retirement_current(&self, id: &str, expected_updated_ms: u64) -> bool {
+        let state = self.lock();
+        state.sessions.get(id).is_some_and(|stored| {
+            !stored.retired
+                && stored.updated_ms == expected_updated_ms
+                && !state.live.contains_key(id)
+        })
+    }
+
+    /// Replaces an unchanged, inactive transcript with its summary after the write succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plain message when the summary cannot be encoded or written.
+    pub async fn retire(
+        &self,
+        id: &str,
+        expected_updated_ms: u64,
+        summary: &str,
+    ) -> Result<bool, String> {
+        let (done, result) = oneshot::channel();
+        self.writer
+            .send(DiskOp::Retire {
+                id: id.to_string(),
+                expected_updated_ms,
+                summary: summary.to_string(),
+                done,
+            })
+            .map_err(|_| "could not queue the session retirement".to_string())?;
+        result
+            .await
+            .map_err(|_| "the session writer stopped".to_string())?
+    }
+
+    /// Sets a title the user typed and waits for it to reach disk; false when
+    /// the conversation does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plain message when the write fails.
+    pub async fn rename(&self, id: &str, title: &str) -> Result<bool, String> {
+        let (done, result) = oneshot::channel();
+        self.writer
+            .send(DiskOp::Rename {
+                id: id.to_string(),
+                title: title.to_string(),
+                done,
+            })
+            .map_err(|_| "could not queue the session rename".to_string())?;
+        result
+            .await
+            .map_err(|_| "the session writer stopped".to_string())?
     }
 
     /// Sets the background model's title unless the user already chose one.
@@ -319,21 +522,23 @@ impl SessionStore {
             .is_some_and(|stored| stored.title_source == TitleSource::FirstLine)
     }
 
-    /// Deletes a conversation and tells the connection holding it; false if unknown.
-    pub fn delete(&self, id: &str) -> bool {
-        let mut state = self.lock();
-        let existed = state.sessions.remove(id).is_some();
-        if let Some(live) = state.live.remove(id) {
-            live.dead.store(true, Ordering::SeqCst);
-            for older in &live.predecessors {
-                older.store(true, Ordering::SeqCst);
-            }
-            let _ = live.detach.send(Detach::Deleted);
-        }
-        if existed {
-            let _ = self.writer.send(DiskOp::Remove(id.to_string()));
-        }
-        existed
+    /// Deletes a conversation, tells the connection holding it, and waits for
+    /// the removal to reach disk; false if unknown.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plain message when the removal fails.
+    pub async fn delete(&self, id: &str) -> Result<bool, String> {
+        let (done, result) = oneshot::channel();
+        self.writer
+            .send(DiskOp::Remove {
+                id: id.to_string(),
+                done,
+            })
+            .map_err(|_| "could not queue the session removal".to_string())?;
+        result
+            .await
+            .map_err(|_| "the session writer stopped".to_string())?
     }
 
     /// Waits until everything saved so far has reached the disk.
@@ -345,15 +550,9 @@ impl SessionStore {
     }
 
     fn queue_save(&self, stored: &Stored) {
-        match serde_json::to_vec(stored) {
-            Ok(json) => {
-                let _ = self.writer.send(DiskOp::Save {
-                    id: stored.id.clone(),
-                    json,
-                });
-            }
-            Err(error) => tracing::warn!(%error, id = %stored.id, "could not encode session"),
-        }
+        let _ = self.writer.send(DiskOp::Save {
+            id: stored.id.clone(),
+        });
     }
 }
 
@@ -404,26 +603,114 @@ fn read_stored(path: &Path) -> Result<Stored, String> {
     Ok(stored)
 }
 
-fn write_loop(dir: &Path, queue: &mpsc::Receiver<DiskOp>) {
+fn notify_save_failed(state: &Mutex<State>, id: &str) {
+    let state = state.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(live) = state.live.get(id) {
+        let _ = live.save_error.send(true);
+    }
+}
+
+fn write_loop(dir: &Path, queue: &mpsc::Receiver<DiskOp>, state: &Arc<Mutex<State>>) {
     while let Ok(message) = queue.recv() {
         match message {
-            DiskOp::Save { id, json } => {
-                if let Err(error) = write_atomic(dir, &id, &json) {
+            DiskOp::Save { id } => {
+                let stored = state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .sessions
+                    .get(&id)
+                    .cloned();
+                let Some(stored) = stored else { continue };
+                let result = write_stored(dir, &stored);
+                if let Err(error) = &result {
                     tracing::warn!(%error, %id, "could not save session");
+                    notify_save_failed(state, &id);
                 }
             }
-            DiskOp::Remove(id) => {
-                if let Err(error) = std::fs::remove_file(session_path(dir, &id))
-                    && error.kind() != std::io::ErrorKind::NotFound
-                {
-                    tracing::warn!(%error, %id, "could not remove session");
-                }
+            DiskOp::Rename { id, title, done } => {
+                let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+                let result = match state.sessions.get_mut(&id) {
+                    Some(stored) => {
+                        let mut next = stored.clone();
+                        next.title = title;
+                        next.title_source = TitleSource::User;
+                        write_stored(dir, &next).map(|()| {
+                            *stored = next;
+                            true
+                        })
+                    }
+                    None => Ok(false),
+                };
+                let _ = done.send(result);
+            }
+            DiskOp::Remove { id, done } => {
+                let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+                let result = if state.sessions.contains_key(&id) {
+                    match std::fs::remove_file(session_path(dir, &id)) {
+                        Ok(()) => Ok(()),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        Err(error) => Err(error.to_string()),
+                    }
+                    .map(|()| {
+                        state.sessions.remove(&id);
+                        if let Some(live) = state.live.remove(&id) {
+                            live.dead.store(true, Ordering::SeqCst);
+                            for older in &live.predecessors {
+                                older.store(true, Ordering::SeqCst);
+                            }
+                            let _ = live.detach.send(Detach::Deleted);
+                        }
+                        true
+                    })
+                } else {
+                    Ok(false)
+                };
+                let _ = done.send(result);
+            }
+            DiskOp::Retire {
+                id,
+                expected_updated_ms,
+                summary,
+                done,
+            } => {
+                let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+                let inactive = !state.live.contains_key(&id);
+                let result = match state.sessions.get_mut(&id) {
+                    Some(stored)
+                        if inactive
+                            && !stored.retired
+                            && stored.updated_ms == expected_updated_ms =>
+                    {
+                        let mut next = stored.clone();
+                        next.turns = vec![Turn {
+                            role: Role::Assistant,
+                            text: format!("Summary of the earlier conversation:\n{summary}"),
+                        }];
+                        next.retired = true;
+                        write_stored(dir, &next).map(|()| {
+                            *stored = next;
+                            true
+                        })
+                    }
+                    _ => Ok(false),
+                };
+                let _ = done.send(result);
+            }
+            #[cfg(test)]
+            DiskOp::Pause { ready, resume } => {
+                let _ = ready.send(());
+                let _ = resume.recv();
             }
             DiskOp::Flush(done) => {
                 let _ = done.send(());
             }
         }
     }
+}
+
+fn write_stored(dir: &Path, stored: &Stored) -> Result<(), String> {
+    let json = serde_json::to_vec(stored).map_err(|error| error.to_string())?;
+    write_atomic(dir, &stored.id, &json).map_err(|error| error.to_string())
 }
 
 fn session_path(dir: &Path, id: &str) -> PathBuf {
@@ -449,10 +736,28 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{Detach, SessionStore};
+    use crate::history::parse_arguments;
     use crate::model::ChatMessage;
 
     fn scratch(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("thalvi-store-test-{tag}-{}", std::process::id()))
+    }
+
+    async fn pause_writer(store: &SessionStore) -> std::sync::mpsc::Sender<()> {
+        let (ready, paused) = tokio::sync::oneshot::channel();
+        let (resume, wait) = std::sync::mpsc::channel();
+        store
+            .writer
+            .send(super::DiskOp::Pause {
+                ready,
+                resume: wait,
+            })
+            .expect("pause writer");
+        tokio::time::timeout(std::time::Duration::from_secs(5), paused)
+            .await
+            .expect("writer paused")
+            .expect("pause acknowledged");
+        resume
     }
 
     #[tokio::test]
@@ -481,6 +786,34 @@ mod tests {
         let titles: Vec<_> = reopened.list().into_iter().map(|row| row.title).collect();
         assert_eq!(titles, vec!["word word word word word word word word…"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_history_save_signals_the_live_attachment() {
+        let dir = scratch("save-fails");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&dir);
+        let store = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let mut attachment = store.attach(None).await;
+        store.save(&attachment, &[ChatMessage::user("hi".to_string())], 1);
+        store.flush().await;
+        std::fs::remove_dir_all(&dir).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(&dir, b"not a directory").unwrap_or_else(|e| panic!("{e}"));
+        store.save(
+            &attachment,
+            &[
+                ChatMessage::user("hi".to_string()),
+                ChatMessage::assistant("hello".to_string()),
+            ],
+            1,
+        );
+        let signalled =
+            tokio::time::timeout(std::time::Duration::from_secs(5), attachment.save_failed()).await;
+        let _ = std::fs::remove_file(&dir);
+        assert!(
+            signalled.is_ok(),
+            "a failed history save must signal the live attachment"
+        );
     }
 
     fn attachment_file(dir: &std::path::Path, id: &str) -> Vec<u8> {
@@ -550,7 +883,7 @@ mod tests {
         assert!(futures_util::poll!(&mut takeover).is_pending());
         assert_eq!(old.detached().await, Detach::Moved);
 
-        assert!(store.delete(&id));
+        assert!(store.delete(&id).await.unwrap_or_else(|e| panic!("{e}")));
         store.save(&old, &one("partial reply after delete"), 2);
         store.release(old);
         let _ = takeover.await;
@@ -589,5 +922,206 @@ mod tests {
         let history = reopened.attach(Some(&id)).await.history;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(history, one("newest history"));
+    }
+
+    #[tokio::test]
+    async fn history_search_uses_live_turns_and_optionally_every_saved_session() {
+        let dir = scratch("history-search");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let current = store.attach(None).await;
+        store.save(&current, &one("Earlier decision from disk"), 1);
+        let other = store.attach(None).await;
+        store.save(&other, &one("Past decision in another session"), 1);
+        let live = one("Current decision not yet saved");
+        let all = parse_arguments(r#"{"query":"decision"}"#).unwrap_or_else(|e| panic!("{e}"));
+        let matches = store.search_history(&current.id, &live, &all);
+        assert_eq!(matches.len(), 2);
+        assert!(
+            matches
+                .iter()
+                .any(|found| found.session_id == current.id
+                    && found.excerpt.contains("not yet saved"))
+        );
+        assert!(matches.iter().any(|found| found.session_id == other.id));
+        assert!(
+            !matches
+                .iter()
+                .any(|found| found.excerpt.contains("from disk"))
+        );
+        let current_only = parse_arguments(r#"{"query":"decision","scope":"current"}"#)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            store
+                .search_history(&current.id, &live, &current_only)
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn retirement_replaces_an_old_transcript_with_a_summary_that_survives_reopen() {
+        let dir = scratch("retire");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let attachment = store.attach(None).await;
+        store.save(&attachment, &one("Full transcript that must go"), 1);
+        store.release(attachment);
+        let candidate = store
+            .retirement_candidates(u64::MAX)
+            .into_iter()
+            .next()
+            .expect("one old inactive session");
+        assert!(
+            !store
+                .retire(&candidate.id, candidate.updated_ms + 1, "Wrong version")
+                .await
+                .unwrap_or_else(|e| panic!("{e}"))
+        );
+        assert!(
+            store
+                .retire(
+                    &candidate.id,
+                    candidate.updated_ms,
+                    "Keep only this summary."
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{e}"))
+        );
+        let reopened = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(reopened.list().len(), 1);
+        let history = reopened.attach(Some(&candidate.id)).await.history;
+        assert_eq!(history.len(), 1);
+        assert!(history[0].content.contains("Keep only this summary."));
+        assert!(!history[0].content.contains("Full transcript"));
+        assert!(
+            reopened.retirement_candidates(u64::MAX).is_empty(),
+            "a retired summary must not be summarized again"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_retirement_write_keeps_the_full_transcript() {
+        let dir = scratch("retire-fails");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&dir);
+        let store = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let attachment = store.attach(None).await;
+        store.save(&attachment, &one("Do not lose this"), 1);
+        store.release(attachment);
+        let candidate = store
+            .retirement_candidates(u64::MAX)
+            .into_iter()
+            .next()
+            .expect("one old inactive session");
+        std::fs::remove_dir_all(&dir).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(&dir, "in the way").unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            store
+                .retire(&candidate.id, candidate.updated_ms, "Summary")
+                .await
+                .is_err()
+        );
+        let history = store.attach(Some(&candidate.id)).await.history;
+        assert_eq!(history, one("Do not lose this"));
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[tokio::test]
+    async fn reopening_before_retirement_keeps_the_full_transcript_on_disk() {
+        let dir = scratch("retire-reopen");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let old = store.attach(None).await;
+        let id = old.id.clone();
+        store.save(&old, &one("Full original transcript"), 1);
+        store.flush().await;
+        store.release(old);
+        let candidate = store
+            .retirement_candidates(u64::MAX)
+            .into_iter()
+            .next()
+            .expect("one old inactive session");
+        let resume = pause_writer(&store).await;
+        let mut retiring = Box::pin(store.retire(&id, candidate.updated_ms, "Short summary"));
+        assert!(futures_util::poll!(&mut retiring).is_pending());
+        let reopened = store.attach(Some(&id)).await;
+        resume.send(()).expect("resume writer");
+        assert!(!retiring.await.unwrap_or_else(|e| panic!("{e}")));
+        assert_eq!(reopened.history, one("Full original transcript"));
+        let disk = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            disk.attach(Some(&id)).await.history,
+            one("Full original transcript")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_save_during_delete_cannot_resurrect_the_conversation() {
+        let dir = scratch("delete-save");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let live = store.attach(None).await;
+        store.save(&live, &one("Initial"), 1);
+        store.flush().await;
+        let resume = pause_writer(&store).await;
+        let mut deleting = Box::pin(store.delete(&live.id));
+        assert!(futures_util::poll!(&mut deleting).is_pending());
+        store.save(
+            &live,
+            &[
+                ChatMessage::user("Initial".to_string()),
+                ChatMessage::assistant("Late save".to_string()),
+            ],
+            2,
+        );
+        resume.send(()).expect("resume writer");
+        assert!(deleting.await.unwrap_or_else(|e| panic!("{e}")));
+        assert_eq!(
+            SessionStore::open(&dir)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .list(),
+            Vec::new()
+        );
+        store.flush().await;
+        assert_eq!(store.list().len(), 0);
+        assert_eq!(
+            SessionStore::open(&dir)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .list()
+                .len(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_title_change_during_rename_cannot_overwrite_the_users_title() {
+        let dir = scratch("rename-title");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let live = store.attach(None).await;
+        store.save(&live, &one("Original title"), 1);
+        store.flush().await;
+        let resume = pause_writer(&store).await;
+        let mut renaming = Box::pin(store.rename(&live.id, "User title"));
+        assert!(futures_util::poll!(&mut renaming).is_pending());
+        store.set_model_title(&live.id, "Model title");
+        store.save(&live, &one("Latest transcript"), 2);
+        resume.send(()).expect("resume writer");
+        assert!(renaming.await.unwrap_or_else(|e| panic!("{e}")));
+        let reopened = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(reopened.list()[0].title, "User title");
+        assert_eq!(
+            reopened.attach(Some(&live.id)).await.history,
+            one("Latest transcript")
+        );
+        store.flush().await;
+        let reopened = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(reopened.list()[0].title, "User title");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
