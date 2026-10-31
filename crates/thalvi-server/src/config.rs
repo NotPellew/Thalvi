@@ -32,8 +32,10 @@ pub struct Config {
     pub tts_base_url: String,
     /// Speech protocol `tts_base_url` speaks, with its own settings.
     pub tts_api: TtsApi,
-    /// Speech synthesis voice name.
+    /// Speech synthesis voice name; the default every browser starts with.
     pub tts_voice: String,
+    /// Voices offered in the app (`TTS_VOICES`), the default first.
+    pub tts_voices: Vec<String>,
     /// Which recording kinds are enabled (`THALVI_RECORD`).
     pub record: RecordKinds,
     /// Directory recordings are written under (`THALVI_DATA_DIR`).
@@ -42,6 +44,8 @@ pub struct Config {
     pub ack_enabled: bool,
     /// Whether voice turns reach the chat model as audio (`LLM_AUDIO_INPUT`).
     pub llm_audio_input: bool,
+    /// Age in days after which sessions are retired (`THALVI_RETIRE_DAYS`); `None` is off.
+    pub retire_days: Option<u64>,
 }
 
 /// The background model's Chat Completions endpoint (`BG_LLM_*`).
@@ -117,10 +121,12 @@ impl Config {
             }
         };
         let tts_voice = required(&lookup, "TTS_VOICE", false)?;
+        let tts_voices = parse_voices(&tts_voice, lookup("TTS_VOICES").as_deref())?;
         let ack_enabled = parse_on_off("THALVI_ACK", lookup("THALVI_ACK").as_deref())?;
         let llm_audio_input =
             parse_on_off("LLM_AUDIO_INPUT", lookup("LLM_AUDIO_INPUT").as_deref())?;
         let record = parse_record_kinds(lookup("THALVI_RECORD"))?;
+        let retire_days = parse_retire_days(lookup("THALVI_RETIRE_DAYS").as_deref())?;
         let data_dir = lookup("THALVI_DATA_DIR")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
@@ -139,10 +145,12 @@ impl Config {
             tts_base_url,
             tts_api,
             tts_voice,
+            tts_voices,
             record,
             data_dir: PathBuf::from(data_dir),
             ack_enabled,
             llm_audio_input,
+            retire_days,
         })
     }
 }
@@ -167,6 +175,44 @@ fn parse_bg_llm(lookup: &impl Fn(&str) -> Option<String>) -> Result<Option<BgLlm
         model: required(lookup, "BG_LLM_MODEL", false)?,
         api_key: required(lookup, "BG_LLM_API_KEY", true)?,
     }))
+}
+
+fn parse_voices(default: &str, raw: Option<&str>) -> Result<Vec<String>, String> {
+    let mut voices = vec![default.to_string()];
+    let Some(raw) = raw.filter(|raw| !raw.trim().is_empty()) else {
+        return Ok(voices);
+    };
+    let mut listed: Vec<&str> = Vec::new();
+    for name in raw.split(',').map(str::trim) {
+        if name.is_empty() {
+            return Err(format!(
+                "TTS_VOICES must not contain an empty name: {raw:?}"
+            ));
+        }
+        if listed.contains(&name) {
+            return Err(format!("TTS_VOICES lists {name:?} twice"));
+        }
+        listed.push(name);
+    }
+    voices.extend(
+        listed
+            .into_iter()
+            .filter(|name| *name != default)
+            .map(str::to_string),
+    );
+    Ok(voices)
+}
+
+fn parse_retire_days(raw: Option<&str>) -> Result<Option<u64>, String> {
+    match raw.map(str::trim) {
+        None | Some("" | "off") => Ok(None),
+        Some(value) => match value.parse::<u64>() {
+            Ok(days) if days > 0 => Ok(Some(days)),
+            _ => Err(format!(
+                "THALVI_RETIRE_DAYS must be off or a positive number of days: {value:?}"
+            )),
+        },
+    }
 }
 
 fn parse_on_off(name: &str, raw: Option<&str>) -> Result<bool, String> {
@@ -362,6 +408,69 @@ mod tests {
                     let err = result.unwrap_err();
                     assert!(err.contains(name), "error {err:?} should name {name}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn voices_default_to_tts_voice_and_keep_it_first() {
+        type Expected<'a> = Result<Vec<&'a str>, &'a str>;
+        let cases: [(Option<&str>, Expected); 7] = [
+            (None, Ok(vec!["af_heart"])),
+            (Some("  "), Ok(vec!["af_heart"])),
+            (
+                Some("sohee, af_bella"),
+                Ok(vec!["af_heart", "sohee", "af_bella"]),
+            ),
+            (Some("af_bella,af_heart"), Ok(vec!["af_heart", "af_bella"])),
+            (Some("sohee,,af_bella"), Err("empty name")),
+            (Some("sohee,"), Err("empty name")),
+            (Some("sohee, sohee"), Err("twice")),
+        ];
+        for (value, expected) in cases {
+            let mut vars = full();
+            if let Some(value) = value {
+                vars.insert("TTS_VOICES", value.to_string());
+            }
+            let result = Config::from_lookup(|name| vars.get(name).cloned()).map(|c| c.tts_voices);
+            match expected {
+                Ok(names) => assert_eq!(
+                    result,
+                    Ok(names.into_iter().map(str::to_string).collect()),
+                    "value={value:?}"
+                ),
+                Err(part) => {
+                    let err = result.unwrap_err();
+                    assert!(
+                        err.contains("TTS_VOICES") && err.contains(part),
+                        "error {err:?} should name TTS_VOICES and say {part:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retirement_is_off_unless_given_a_positive_number_of_days() {
+        for (value, expected) in [
+            (None, Ok(None)),
+            (Some(""), Ok(None)),
+            (Some("off"), Ok(None)),
+            (Some("90"), Ok(Some(90))),
+            (Some("0"), Err(())),
+            (Some("-1"), Err(())),
+            (Some("often"), Err(())),
+        ] {
+            let mut vars = full();
+            if let Some(value) = value {
+                vars.insert("THALVI_RETIRE_DAYS", value.to_string());
+            }
+            let result = Config::from_lookup(|name| vars.get(name).cloned()).map(|c| c.retire_days);
+            if let Ok(days) = expected {
+                assert_eq!(result, Ok(days), "value={value:?}");
+            } else {
+                let error = result.unwrap_err();
+                assert!(error.contains("THALVI_RETIRE_DAYS"), "{error}");
             }
         }
     }

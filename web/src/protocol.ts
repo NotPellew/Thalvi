@@ -1,13 +1,21 @@
-export type Phase = "idle" | "starting" | "listening" | "thinking" | "speaking";
+export type Phase = "idle" | "starting" | "listening" | "thinking" | "working";
 
 export interface Turn {
   readonly role: "user" | "assistant";
   readonly text: string;
 }
 
+export interface TaskStep {
+  readonly id: string;
+  readonly label: string;
+  readonly status: "running" | "done" | "failed";
+  readonly detail?: string;
+}
+
 export type ServerMessage =
   | { type: "session"; id: string; turns: Turn[] }
   | { type: "state"; state: Phase }
+  | { type: "task"; step: TaskStep }
   | { type: "partial"; text: string }
   | { type: "user"; text: string }
   | { type: "reply"; text: string }
@@ -29,11 +37,16 @@ export function playedMessage(bytes: number): string {
   return JSON.stringify({ type: "played", bytes });
 }
 
+/** Picks the voice this connection's replies are spoken in. */
+export function voiceNameMessage(voice: string): string {
+  return JSON.stringify({ type: "voice_name", voice });
+}
+
 export function textMessage(text: string): string {
   return JSON.stringify({ type: "text", text });
 }
 
-const PHASES: readonly unknown[] = ["idle", "starting", "listening", "thinking", "speaking"];
+const PHASES: readonly unknown[] = ["idle", "starting", "listening", "thinking", "working"];
 
 function parseTurns(value: unknown): Turn[] | null {
   if (!Array.isArray(value)) return null;
@@ -45,6 +58,15 @@ function parseTurns(value: unknown): Turn[] | null {
     turns.push({ role, text });
   }
   return turns;
+}
+
+function parseTaskStep(value: unknown): TaskStep | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { id, label, status, detail } = value as Record<string, unknown>;
+  if (typeof id !== "string" || typeof label !== "string") return null;
+  if (status !== "running" && status !== "done" && status !== "failed") return null;
+  if (detail !== undefined && typeof detail !== "string") return null;
+  return detail === undefined ? { id, label, status } : { id, label, status, detail };
 }
 
 /** Returns the typed message, or null for anything unknown or malformed. */
@@ -65,6 +87,10 @@ export function parseServerMessage(raw: string): ServerMessage | null {
     }
     case "state":
       return PHASES.includes(state) ? { type, state: state as Phase } : null;
+    case "task": {
+      const step = parseTaskStep(fields["step"]);
+      return step ? { type, step } : null;
+    }
     case "partial":
     case "user":
     case "reply":

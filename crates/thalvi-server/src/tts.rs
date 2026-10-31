@@ -28,6 +28,17 @@ pub trait Tts: Send + Sync {
         &self,
         text: &str,
     ) -> impl std::future::Future<Output = Result<AudioStream, TtsError>> + Send;
+
+    /// Like [`Tts::synthesize`], in `voice` instead of the configured one.
+    ///
+    /// The default ignores `voice`, for engines with a single voice.
+    fn synthesize_with_voice(
+        &self,
+        text: &str,
+        _voice: &str,
+    ) -> impl std::future::Future<Output = Result<AudioStream, TtsError>> + Send {
+        self.synthesize(text)
+    }
 }
 
 /// Speech client backed by an OpenAI-compatible `/audio/speech` endpoint.
@@ -53,12 +64,18 @@ impl OpenAiTts {
         }
     }
 
-    /// Builds the JSON request body for one sentence.
+    /// Builds the JSON request body for one sentence in the configured voice.
     #[must_use]
     pub fn request_body(&self, text: &str) -> Value {
+        self.request_body_with_voice(text, &self.voice)
+    }
+
+    /// Builds the JSON request body for one sentence in `voice`.
+    #[must_use]
+    pub fn request_body_with_voice(&self, text: &str, voice: &str) -> Value {
         json!({
             "model": self.model,
-            "voice": self.voice,
+            "voice": voice,
             "input": text,
             "response_format": "pcm",
             "stream_format": "audio",
@@ -68,8 +85,19 @@ impl OpenAiTts {
 
 impl Tts for OpenAiTts {
     async fn synthesize(&self, text: &str) -> Result<AudioStream, TtsError> {
+        self.synthesize_with_voice(text, &self.voice).await
+    }
+
+    async fn synthesize_with_voice(
+        &self,
+        text: &str,
+        voice: &str,
+    ) -> Result<AudioStream, TtsError> {
         let url = format!("{}/audio/speech", self.base_url);
-        let mut request = self.client.post(&url).json(&self.request_body(text));
+        let mut request = self
+            .client
+            .post(&url)
+            .json(&self.request_body_with_voice(text, voice));
         if !self.api_key.is_empty() {
             request = request.bearer_auth(&self.api_key);
         }
@@ -105,11 +133,19 @@ impl Qwen3Tts {
 
 impl Tts for Qwen3Tts {
     async fn synthesize(&self, text: &str) -> Result<AudioStream, TtsError> {
+        self.synthesize_with_voice(text, &self.voice).await
+    }
+
+    async fn synthesize_with_voice(
+        &self,
+        text: &str,
+        voice: &str,
+    ) -> Result<AudioStream, TtsError> {
         let url = format!("{}/audio/speech/pcm-stream", self.base_url);
         let request = self
             .client
             .post(&url)
-            .json(&json!({"input": text, "voice": self.voice}));
+            .json(&json!({"input": text, "voice": voice}));
         let body = Box::pin(send(request).await?.bytes_stream());
         let frames =
             futures_util::stream::unfold(Some((body, BytesMut::new())), |state| async move {
@@ -160,7 +196,16 @@ async fn send(request: reqwest::RequestBuilder) -> Result<reqwest::Response, Tts
 
 #[cfg(test)]
 mod tests {
-    use super::OpenAiTts;
+    use std::sync::{Arc, Mutex};
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::extract::State;
+    use axum::routing::post;
+    use futures_util::StreamExt;
+    use serde_json::Value;
+
+    use super::{OpenAiTts, Qwen3Tts, Tts};
 
     #[test]
     fn request_body_matches_contract() {
@@ -176,5 +221,59 @@ mod tests {
         assert_eq!(body["input"], "Hello there.");
         assert_eq!(body["response_format"], "pcm");
         assert_eq!(body["stream_format"], "audio");
+    }
+
+    type Bodies = Arc<Mutex<Vec<Value>>>;
+
+    async fn record(State(bodies): State<Bodies>, axum::Json(body): axum::Json<Value>) -> Body {
+        bodies.lock().expect("bodies lock").push(body);
+        // A zero-length end frame, which Qwen3Tts needs and OpenAiTts treats as bytes.
+        Body::from(vec![0, 0, 0, 0])
+    }
+
+    async fn serve(path: &str) -> (String, Bodies) {
+        let bodies = Bodies::default();
+        let app = Router::new()
+            .route(path, post(record))
+            .with_state(Arc::clone(&bodies));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (format!("http://{addr}"), bodies)
+    }
+
+    #[tokio::test]
+    async fn requested_voice_reaches_each_engine_and_plain_synthesis_keeps_the_configured_one() {
+        let (url, openai_bodies) = serve("/audio/speech").await;
+        let openai = OpenAiTts::new(
+            url,
+            "kokoro".to_string(),
+            "af_heart".to_string(),
+            String::new(),
+        );
+        let (url, qwen_bodies) = serve("/audio/speech/pcm-stream").await;
+        let qwen = Qwen3Tts::new(url, "af_heart".to_string());
+
+        for stream in [
+            openai.synthesize_with_voice("Hi.", "sohee").await,
+            openai.synthesize("Hi.").await,
+            qwen.synthesize_with_voice("Hi.", "sohee").await,
+            qwen.synthesize("Hi.").await,
+        ] {
+            let mut stream = stream.expect("request accepted");
+            while stream.next().await.is_some() {}
+        }
+
+        for bodies in [openai_bodies, qwen_bodies] {
+            let voices: Vec<Value> = bodies
+                .lock()
+                .expect("bodies lock")
+                .iter()
+                .map(|body| body["voice"].clone())
+                .collect();
+            assert_eq!(voices, ["sohee", "af_heart"]);
+        }
     }
 }

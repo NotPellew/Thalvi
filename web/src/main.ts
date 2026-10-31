@@ -1,12 +1,17 @@
 import { Connection, sessionUrl } from "./connection.ts";
 import { Controller } from "./controller.ts";
 import { conversationsApi } from "./conversations.ts";
+import { Learnings, learningsApi } from "./learnings.ts";
+import { createLearningsView } from "./learnings-view.ts";
 import { Library } from "./library.ts";
 import { createLibraryView } from "./library-view.ts";
 import { micErrorMessage, openMic, type Mic } from "./mic.ts";
 import { Playback } from "./playback.ts";
+import { voiceNameMessage } from "./protocol.ts";
 import { loadSpeed, saveSpeed, type Speed } from "./speed.ts";
 import { createView } from "./view.ts";
+import { VoicePicker, voiceApi } from "./voice.ts";
+import { audioElementPlayer, createVoiceView } from "./voice-view.ts";
 import { holdWakeLock } from "./wake-lock.ts";
 
 const SESSION_KEY = "thalvi.session";
@@ -63,15 +68,28 @@ const connection = new Connection(
   {
     onOpen: () => {
       controller.opened();
+      void voicePicker.socketOpened();
     },
     onLost: () => {
       controller.lost();
+      voicePicker.socketLost();
     },
     onMessage: (data) => {
       controller.message(data);
     },
   },
 );
+
+const voicePicker = new VoicePicker({
+  api: voiceApi((input, init) => fetch(input, init)),
+  player: audioElementPlayer(),
+  storage: localStorage,
+  send: (voice) => {
+    connection.send(voiceNameMessage(voice));
+  },
+});
+createVoiceView(appRoot, voicePicker);
+void voicePicker.load();
 
 const library = new Library({
   api: conversationsApi((input, init) => fetch(input, init)),
@@ -84,6 +102,7 @@ const library = new Library({
   },
 });
 createLibraryView(appRoot, library);
+createLearningsView(appRoot, new Learnings(learningsApi((input, init) => fetch(input, init))));
 
 function releaseVoice(): void {
   const current = voiceAudio;

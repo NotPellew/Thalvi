@@ -115,6 +115,22 @@ TTS_BASE_URL=http://127.0.0.1:8011/v1
 TTS_VOICE=af_heart
 ```
 
+**Choosing a voice in the app.** `TTS_VOICES` lists the voices the app offers,
+comma-separated; `TTS_VOICE` stays the default and is always offered first.
+Names must be ones the running engine knows (see above). Tap **Voice** in the
+header to open the picker, which starts closed. **Preview** speaks a short
+phrase in the selected voice, only when tapped, and plays it on that device;
+it neither interrupts a reply nor turns voice on. **Apply** saves the choice in
+that browser only (other devices keep their own) and sends it to the live
+conversation, and again each time the connection reopens. A saved voice the
+server no longer offers falls back to `TTS_VOICE`. Previews are timed in the
+metrics (`voice_preview` events, `THALVI_RECORD=metrics`).
+
+```sh
+TTS_VOICE=af_heart
+TTS_VOICES=af_heart,af_bella,sohee
+```
+
 ## Audio input
 
 With `LLM_AUDIO_INPUT=on` the language model hears a spoken turn instead of
@@ -139,6 +155,19 @@ Titles start as the first line you said. Set all three of `BG_LLM_BASE_URL`,
 together or not at all) and a background model rewrites each title in three to
 six words after the first reply, off the reply path. A title you typed is
 never overwritten.
+
+Thalvi can use the read-only `search_history` tool to find short, timestamped
+keyword matches in the current and past conversations. Tool results are data,
+not instructions. The app shows **Working** while a search runs; its optional
+**Task steps** section starts collapsed and opens only when you tap it.
+
+With `THALVI_RETIRE_DAYS=90`, inactive conversations older than 90 days are
+replaced by a model-written summary on startup and then once a day. Durable
+preferences and user facts are saved separately in
+`$THALVI_DATA_DIR/learnings.json`; open **Conversations**, then **Learnings**,
+to read or edit them. A failed model call or write leaves the full transcript
+untouched. Unset or `off` disables retirement completely, so no session is
+changed or deleted automatically.
 
 ## Measure a setup
 
