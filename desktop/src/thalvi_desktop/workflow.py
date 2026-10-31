@@ -1,16 +1,23 @@
 """Owns delivery and confirmation after a capture has chosen its route."""
 
 import asyncio
-import json
+import contextlib
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from .capture import Ending, Request
 from .config import Config
+from .discord import (
+    AttemptUncertain,
+    DesktopComposer,
+    DiscordError,
+    PreviewComposer,
+    validate_body,
+)
 from .host import Hyprland, Target
-from .tasks import decide, execute
+from .metrics import Metrics
+from .tasks import DiscordMessage, decide, execute
 
 
 def notice(message: str) -> None:
@@ -45,35 +52,88 @@ class PreviewHost:
         return self.capture()
 
 
-class Metrics:
-    def __init__(self, path: Path | None):
-        self.path = path
-
-    async def record(self, event: str, started: float, outcome: str) -> None:
-        if self.path is None:
-            return
-        line = json.dumps(
-            {
-                "event": event,
-                "total_ms": round((time.monotonic() - started) * 1000),
-                "outcome": outcome,
-            }
-        )
-
-        def write() -> None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as stream:
-                stream.write(line + "\n")
-
-        await asyncio.to_thread(write)
-
-
 class Workflow:
     def __init__(
-        self, config: Config, host: Hyprland | PreviewHost, notify: Callable[[str], None] = notice
+        self,
+        config: Config,
+        host: Hyprland | PreviewHost,
+        notify: Callable[[str], None] = notice,
+        discord: PreviewComposer | DesktopComposer | None = None,
+        metrics: Metrics | None = None,
     ):
         self.config, self.host, self.notify = config, host, notify
-        self.metrics = Metrics(config.metrics)
+        self.metrics = metrics or Metrics(config.metrics)
+        self.discord = discord if discord is not None else PreviewComposer()
+
+    async def _preserve(self, body: str) -> None:
+        started = time.monotonic()
+        try:
+            await asyncio.to_thread(self.host.copy, body)
+        except (RuntimeError, OSError):
+            with contextlib.suppress(OSError):
+                await self.metrics.record("desktop_clipboard", started, "error")
+            self.notify(f"Clipboard recovery failed. Your message follows:\n{body}")
+        else:
+            with contextlib.suppress(OSError):
+                await self.metrics.record("desktop_clipboard", started, "ok")
+            self.notify("The message is on the clipboard.")
+
+    async def _discord_task(
+        self, task: DiscordMessage, confirm: Callable[[], Awaitable[bool]]
+    ) -> tuple[str, bool]:
+        try:
+            body = validate_body(task.message)
+        except ValueError as error:
+            self.notify(f"{error} Nothing was typed or sent.")
+            return "failed", False
+        try:
+            prepared = await self.discord.prepare(task.destination)
+        except (DiscordError, OSError, ValueError) as error:
+            self.notify(f"{error} Nothing was typed or sent.")
+            await self._preserve(task.message)
+            return "failed", False
+        try:
+            try:
+                await self.discord.enter_draft(prepared, body)
+            except (DiscordError, OSError, ValueError) as error:
+                self.notify(f"{error} Nothing was pressed; the draft may remain.")
+                await self._preserve(body)
+                return "failed", False
+            self.notify(
+                f"Send to {task.label}?\nDestination: {task.destination}\nMessage:\n{body}\n"
+                "Say yes to send, or never mind to cancel."
+            )
+            if not await confirm():
+                self.notify(
+                    "Not sent. Nothing was pressed; the draft remains in Discord. "
+                    "Check it before sending."
+                )
+                return "cancelled", True
+            try:
+                result = await self.discord.submit(prepared, body)
+            except asyncio.CancelledError:
+                if getattr(getattr(prepared, "session", None), "attempted", False):
+                    self.notify(
+                        "Submission may have completed; delivery is unconfirmed. "
+                        "Check the channel before retrying; nothing was retried."
+                    )
+                    await self._preserve(body)
+                raise
+            except AttemptUncertain as error:
+                self.notify(str(error))
+                await self._preserve(body)
+                return "uncertain", True
+            except (DiscordError, OSError, ValueError) as error:
+                self.notify(f"{error} The draft may remain; nothing was retried.")
+                await self._preserve(body)
+                return "failed", False
+            self.notify(result)
+            return "ok", True
+        finally:
+            try:
+                await self.discord.close(prepared)
+            except (DiscordError, OSError):
+                self.notify("The Discord debug connection could not be closed.")
 
     async def finish(
         self, request: Request, selected: Target, confirm: Callable[[], Awaitable[bool]]
@@ -88,6 +148,9 @@ class Workflow:
                 return True
             if request.ending == Ending.TASK:
                 task = decide(request.text, self.config)
+                if isinstance(task, DiscordMessage):
+                    outcome, success = await self._discord_task(task, confirm)
+                    return success
                 self.notify("Working on the configured task.")
                 result = await asyncio.to_thread(execute, task, self.config, self.host)
                 self.notify(result)

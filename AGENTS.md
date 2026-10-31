@@ -102,7 +102,8 @@ manager; lockfiles are committed.
 - Web (`web/`): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`,
   `npm run build`.
 - Desktop (`desktop/`): Python is pinned in `.python-version`, uv is pinned in
-  CI. Run `uv sync --locked`, `uv run ruff format --check .`,
+  CI, and emitted browser functions run on Node pinned in the root `.node-version`.
+  Run `uv sync --locked`, `uv run ruff format --check .`,
   `uv run ruff check .`, `uv run pytest -q`. This gate uses fakes instead of
   model weights, microphones, or real desktop apps.
 - Speech servers (`compose.yaml`, `speech/`): `docker compose --profile kokoro

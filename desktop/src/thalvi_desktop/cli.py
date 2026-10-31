@@ -12,7 +12,9 @@ from .audio import Audio
 from .capture import Capture, Confirmation, Ending
 from .client import capture, conversation
 from .config import Config, record
+from .discord import DesktopComposer, PreviewComposer
 from .host import desktop
+from .metrics import Metrics
 from .wake import Wake
 from .workflow import PreviewHost, Workflow, notice
 
@@ -28,7 +30,13 @@ async def recover(host, text: str) -> None:
 async def run(config: Config, once: bool, dry_run: bool) -> int:
     wake = await asyncio.to_thread(Wake, config)
     host = PreviewHost() if dry_run else desktop()
-    workflow = Workflow(config, host)
+    metrics = Metrics(config.metrics)
+    workflow = Workflow(
+        config,
+        host,
+        discord=PreviewComposer() if dry_run else DesktopComposer(config, metrics),
+        metrics=metrics,
+    )
     current: Capture | None = None
     async with Audio(config.device) as audio:
         notice("Waiting for a wake word. Ctrl+C stops and releases the microphone.")
@@ -107,7 +115,13 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
 
 async def replay(config: Config, path: Path, apply: bool) -> int:
     host = desktop() if apply else PreviewHost()
-    workflow = Workflow(config, host)
+    metrics = Metrics(config.metrics)
+    workflow = Workflow(
+        config,
+        host,
+        discord=DesktopComposer(config, metrics) if apply else PreviewComposer(),
+        metrics=metrics,
+    )
     events = iter(path.read_text(encoding="utf-8").splitlines())
     current = None
     selected = None

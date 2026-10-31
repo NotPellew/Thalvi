@@ -41,6 +41,17 @@ areas your change touches. Editing rules are in
   browser and app actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative
   interfaces and open-ended computer use before the scripted flow works.
+- **Discord Desktop through its local DevTools port.** Loopback-only, verified
+  window/process/executable/UID, bounded empty-composer guard, one Enter after
+  voice confirmation. Why: use the logged-in client across channels and DMs.
+  Rejected: channel webhooks and private REST.
+- **Discord submissions stay unconfirmed.** Report "submission attempted;
+  delivery unconfirmed" until a defined receipt exists. Why: acknowledgements
+  and optimistic UI are not receipts. Rejected: treating key acknowledgements as delivery.
+- **Only the observed Discord composer is recognized.** Accept the empty
+  composer form seen on Discord Desktop 1.0.168 at the exact route; refuse
+  drafts, attachments, banners, menus or unknown controls. Why: an unknown
+  state can send the wrong thing. Rejected: guessing selectors.
 - **Spoken acknowledgement.** With `THALVI_ACK=on`, a slow reply first plays a
   canned line (rotated, synthesized once and cached per session) when no first
   sentence arrives within 500 ms. Why: it covers the model's thinking gap with

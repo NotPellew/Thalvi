@@ -45,13 +45,8 @@ def decide(text: str, config: Config) -> Task:
 
 def execute(task: Task, config: Config, host: Hyprland) -> str:
     match task:
-        case DiscordMessage(destination, message, label):
-            host.copy(message)
-            host.open_url(destination)
-            return (
-                f"Asked Discord to open {label}. Message copied to the clipboard; "
-                "check the channel and paste and send it yourself."
-            )
+        case DiscordMessage():
+            raise RuntimeError("Discord messages run through the verified Discord composer.")
         case OpenUrl(url, label):
             host.open_url(url)
             return f"Asked the browser to open {label}."

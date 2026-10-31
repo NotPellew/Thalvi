@@ -9,6 +9,7 @@ import pytest
 from thalvi_desktop.capture import Capture, Ending, Request
 from thalvi_desktop.cli import replay
 from thalvi_desktop.config import Config
+from thalvi_desktop.discord import PreviewComposer
 from thalvi_desktop.workflow import PreviewHost, Workflow
 
 
@@ -153,6 +154,8 @@ def test_replay_cli_runs_without_microphone_models_or_desktop_side_effects(
         ),
         ({"server": "ws://user:secret@localhost"}, "credentials"),
         ({"endings": {"enter": "submit"}}, "Configure"),
+        ({"discord": {"debug_port": 0}}, "debug_port"),
+        ({"discord": {"debug_port": 9223, "token": "x"}}, "Unknown"),
         (
             {"scripts": [{"phrase": "focus", "action": "focus_app", "destination": "missing"}]},
             "No app",
@@ -167,31 +170,110 @@ def test_invalid_configuration_is_rejected_before_any_action(tmp_path, patch, me
         Config.load(path)
 
 
-def test_discord_message_prepares_without_typing_or_sending(config):
+def test_discord_preview_shows_destination_and_body_then_cancel_keeps_the_draft(config):
     async def behavior():
         host = PreviewHost(lambda _: None)
         notices = []
-        workflow = Workflow(config, host, notices.append)
+        discord = PreviewComposer()
+        workflow = Workflow(config, host, notices.append, discord=discord)
 
         async def confirm():
-            raise AssertionError("Preparation does not send")
+            two = "https://discord.com/channels/1566030981687677039/1566034064333340732"
+            assert any(two in line for line in notices)
+            assert any("Hello there!" in line for line in notices)
+            return False
 
         assert await workflow.finish(
             Request(Ending.TASK, "message the demo channel saying Hello there!"),
             host.capture(),
             confirm,
         )
-        assert host.operations == [
-            ("clipboard", "Hello there!", False),
-            (
-                "open_url",
-                "discord://discord.com/channels/1566030981687677039/1566034064333340732",
-                False,
-            ),
-        ]
-        assert "paste and send it yourself" in notices[-1]
+        assert host.operations == []
+        assert discord.operations == []
+        assert "draft remains in Discord" in notices[-1]
 
     asyncio.run(behavior())
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "https://discord.com/channels/123/456",
+        "discord://discord.com/channels/@me/456",
+    ],
+)
+def test_discord_destination_accepts_channels_and_dms(config, tmp_path, destination):
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "scripts": [
+                    {"phrase": "message", "action": "discord_message", "destination": destination}
+                ]
+            }
+        )
+    )
+    loaded = Config.load(path)
+    assert loaded.scripts[0].destination == destination.replace("discord://", "https://")
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "https://discord.com.evil/channels/123/456",
+        "https://user@discord.com/channels/123/456",
+        "https://discord.com/channels/123/456?token=x",
+        "https://discord.com/channels/123/abc",
+    ],
+)
+def test_discord_destination_rejects_other_urls(tmp_path, destination):
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "scripts": [
+                    {"phrase": "message", "action": "discord_message", "destination": destination}
+                ]
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="Discord destination"):
+        Config.load(path)
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_replay_previews_discord_without_connecting_to_the_debugger(
+    config, tmp_path, capsys, monkeypatch, confirmed
+):
+    import thalvi_desktop.cdp as cdp
+
+    def unreachable(*args, **kwargs):
+        raise AssertionError("Preview must not reach the debugger.")
+
+    monkeypatch.setattr(cdp, "fetch", unreachable)
+    fixture = tmp_path / "discord.jsonl"
+    fixture.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in [
+                {"wake": "capture"},
+                {"final": "message the demo channel saying Hello there do that"},
+                {"confirm": confirmed},
+            ]
+        )
+    )
+    assert asyncio.run(replay(config, fixture, apply=False)) == 0
+    output = capsys.readouterr().out
+    assert (
+        "Destination: https://discord.com/channels/1566030981687677039/1566034064333340732"
+        in output
+    )
+    assert "Hello there" in output
+    if confirmed:
+        assert "Preview · would insert" in output
+        assert "Submission attempted" not in output
+    else:
+        assert "draft remains in Discord" in output
 
 
 def test_empty_discord_message_is_recovered_as_an_unconfigured_task(config):

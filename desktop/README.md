@@ -70,20 +70,63 @@ history chooses the first. An unconfigured task preserves its text on the
 clipboard. `tasks.decide` returns `OpenUrl`, `FocusApp`, or `DiscordMessage`; a future
 model decision can return the same typed action to `tasks.execute`.
 
-Say “message the demo channel saying <message> do that” to copy the message
-and ask Discord Desktop to open **Thalvi Demo / #demo**. Check the channel,
-paste, and send it yourself. Automatic typing and sending are disabled: window
-titles do not establish that the composer is focused and empty. Opening a link
-is only a request to Discord, not proof that the channel opened. No test sends
-Discord messages.
+Say “message the demo channel saying <message> do that” to use the opt-in
+Discord Desktop path below. The destination accepts Discord channel and DM URLs
+such as `https://discord.com/channels/<guild-or-@me>/<channel>`; there is no
+per-channel allowlist. No test sends a real message.
+
+### Discord Desktop
+
+This is a local-debugger adapter, not a bot, webhook or private endpoint. Start
+Discord Desktop with its DevTools port open and accessibility enabled. Fully
+quit the existing instance before launching with these flags:
+
+```sh
+discord --force-renderer-accessibility --remote-debugging-port=9223
+```
+
+Set `discord.debug_port` in the config to the same port (9223 in the example).
+The client only talks to `127.0.0.1`, and checks that the listening socket, its
+executable, the Discord window, and the user ID all belong to this Discord
+process. Any other owner refuses the action. The debug port gives local
+processes full control of Discord, so open it only while testing and restart
+Discord normally afterwards.
+
+With the configured channel open and its message box empty, the task verifies
+the exact route and a bounded composer baseline: one focused message box, no
+draft, attachment, reply, edit, menu, dialog or unfamiliar control. It opens
+the exact channel if needed, inserts the text, shows the destination and exact
+body, and asks for the normal standalone voice confirmation. Immediately after
+yes it repeats the route, draft, region, and focus checks, then presses Enter
+once. A failed check presses nothing and keeps the body. Cancelling leaves the
+inserted draft in Discord for review; the client never clears a draft it cannot
+prove it owns. Preflight inspects the composer; inserting the draft changes
+Discord before the confirmation.
+
+Discord's acknowledgement and the editor clearing are not delivery receipts.
+Every completed attempt reports **submission attempted; delivery unconfirmed**.
+There is no "sent" result until a defined Discord receipt is observed. The
+initial read-only guard was exercised against Linux Discord Desktop 1.0.168.
+Live insertion and submission need separate qualification; an unfamiliar form
+or state refuses instead of guessing. The tests use inert local HTTP,
+WebSocket and DOM fixtures and never connect to real Discord.
 
 The other wake word opens native conversation. Speak naturally and interrupt
 by speaking; `stop conversation`, `end conversation` or `never mind` returns
 to wake listening. This client uses the server's existing interruption logic.
 
 Set `metrics` to a local path to opt into desktop action/flow timing and
-outcomes. Desktop metrics contain neither captured text nor destinations.
-Status and confirmation text appear in the foreground terminal.
+outcomes, including each local debug discovery, composer check, text insert and
+key press. Desktop metrics contain neither captured text, destinations, tokens
+nor debugger messages. Status and confirmation text appear in the foreground
+terminal.
+
+## Tests
+
+`uv run pytest -q` runs the adapter against local fake HTTP, WebSocket and
+`/proc` fixtures; it needs no Discord, microphone or model. The actual composer
+guard runs in the web toolchain against inert DOM fixtures (`npm test` in
+`web/`), not against the user's Discord.
 
 ## Replay without audio or app actions
 
@@ -94,6 +137,10 @@ uv run thalvi-desktop --config config.example.json replay examples/capture.jsonl
 
 Replay does not use a microphone, wake model or endpoint. It previews actions
 unless `--apply` is explicitly given; that flag really types into the focused
-window. The submit fixture includes an explicit confirmation event. Live
-voice recognition quality and native audio hardware need separate manual
-qualification; replay and stub-server tests do not establish those.
+window and, for a crafted Discord replay fixture whose confirmation is true,
+really uses the local Discord debugger and can press Enter. Use `--apply` only
+for an explicitly authorized live rehearsal. Without `--apply`, replay and
+preview never connect to Discord. Replay reads confirmation events from the
+fixture rather than live speech. Live voice recognition quality and native
+audio hardware need separate manual qualification; replay and stub-server
+tests do not establish those.

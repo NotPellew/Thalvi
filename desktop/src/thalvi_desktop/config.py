@@ -61,12 +61,15 @@ class Config:
     scripts: tuple[Script, ...]
     metrics: Path | None
     device: str | int | None
+    discord_port: int
 
     @classmethod
     def load(cls, path: Path) -> "Config":
         raw = record(json.loads(path.read_text()), "Desktop config")
         fields(
-            raw, {"server", "wake", "endings", "apps", "scripts", "metrics", "device"}, "desktop"
+            raw,
+            {"server", "wake", "endings", "apps", "scripts", "metrics", "device", "discord"},
+            "desktop",
         )
         server = url(raw.get("server", "ws://127.0.0.1:8080"), "server", {"ws", "wss"})
         parsed = urlsplit(server)
@@ -119,11 +122,16 @@ class Config:
             if action == "open_url":
                 destination = url(destination, "script URL", {"http", "https"})
             elif action == "discord_message":
+                parsed_destination = urlsplit(destination)
                 if (
-                    destination
-                    != "discord://discord.com/channels/1566030981687677039/1566034064333340732"
+                    parsed_destination.scheme not in {"https", "discord"}
+                    or parsed_destination.netloc != "discord.com"
+                    or not re.fullmatch(r"/channels/(?:[0-9]+|@me)/[0-9]+", parsed_destination.path)
+                    or parsed_destination.query
+                    or parsed_destination.fragment
                 ):
-                    raise ValueError("Discord destination must be the configured demo channel.")
+                    raise ValueError("Discord destination must be a Discord channel or DM URL.")
+                destination = "https://discord.com" + parsed_destination.path
             elif action == "focus_app":
                 if destination not in apps:
                     raise ValueError(f"No app named {destination!r} is configured.")
@@ -137,6 +145,11 @@ class Config:
         device = raw.get("device")
         if device is not None and (isinstance(device, bool) or not isinstance(device, (str, int))):
             raise ValueError("device must be a device name or index.")
+        discord = record(raw.get("discord", {}), "discord")
+        fields(discord, {"debug_port"}, "discord")
+        discord_port = discord.get("debug_port", 9223)
+        if type(discord_port) is not int or not 0 < discord_port < 65536:
+            raise ValueError("discord.debug_port must be between 1 and 65535.")
 
         def local(value: object) -> Path | None:
             if value is None:
@@ -159,4 +172,5 @@ class Config:
             tuple(scripts),
             local(raw.get("metrics")),
             device,
+            discord_port,
         )
