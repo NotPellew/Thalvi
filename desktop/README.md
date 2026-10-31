@@ -124,12 +124,24 @@ key press. Desktop metrics contain neither captured text, destinations, tokens
 nor debugger messages. Status and confirmation text appear in the foreground
 terminal.
 
-Wake-model loading and each detector call record their host elapsed time and
-outcome when metrics are enabled. Detector timings write in background batches
-of 125 records, with at most one batch writing and one waiting. A stalled writer
-can drop optional timings with a warning; it does not block the start cue.
-Shutdown closes the microphone before waiting for the remaining metrics.
-These timings measure local call cost, not perceived wake latency.
+Wake-model loading, the target-window lookup and each detector call record
+their host elapsed time and outcome when metrics are enabled. Detector outcomes
+are `none`, `capture`, `conversation`, `error` or `cancelled`. These timings
+measure local call cost, not perceived wake latency.
+
+With metrics enabled, the client also tracks peaks across every wake frame,
+reporting the first frame and then two-second windows as a coarse `quiet` or
+`activity` label. The terminal announces the first label and later changes.
+`quiet` means below the diagnostic threshold, not absent input. The level is
+signal strength for diagnosis: it is not voice-activity detection, does not
+prove speech, and never changes the wake decision. Microphone audio,
+transcripts, destinations and device paths are never recorded, and audio is
+not saved.
+
+Detector and level timings write in background batches of 125 records, with at
+most one batch writing and one waiting. A stalled writer can drop optional
+timings with a warning; it does not block the start cue. Shutdown closes the
+microphone before waiting for the remaining metrics.
 
 ## Tests
 

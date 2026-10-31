@@ -20,6 +20,13 @@ from .wake import Wake
 from .workflow import PreviewHost, Workflow, notice
 
 
+def wake_level(frame: bytes) -> str:
+    import numpy as np
+
+    peak = int(np.abs(np.frombuffer(frame, dtype="<i2").astype(np.int32)).max(initial=0))
+    return "activity" if peak >= 1000 else "quiet"
+
+
 async def recover(host, text: str) -> None:
     try:
         await asyncio.to_thread(host.copy, text)
@@ -64,6 +71,9 @@ async def _run(config: Config, once: bool, dry_run: bool) -> int:
         metrics=metrics,
     )
     current: Capture | None = None
+    sampling = metrics.path is not None
+    sampled, sampled_level = 0, None
+    window_activity = False
     async with contextlib.AsyncExitStack() as resources:
         resources.push_async_callback(flush_metrics)
         audio = await resources.enter_async_context(Audio(config.device))
@@ -71,10 +81,29 @@ async def _run(config: Config, once: bool, dry_run: bool) -> int:
         try:
             while True:
                 frame = await audio.next()
+                if sampling:
+                    sampled += 1
+                    level_started = time.monotonic()
+                    window_activity |= wake_level(frame) == "activity"
+                    if sampled == 1 or sampled % 25 == 0:
+                        sampled_level_now = "activity" if window_activity else "quiet"
+                        window_activity = False
+                        try:
+                            await metrics.record(
+                                "desktop_wake_level",
+                                level_started,
+                                sampled_level_now,
+                                buffered=True,
+                            )
+                        except OSError:
+                            notice("The optional desktop metrics could not be saved.")
+                        if sampled_level_now != sampled_level:
+                            sampled_level = sampled_level_now
+                            notice(f"Sampled wake audio: {sampled_level}.")
                 started, outcome = time.monotonic(), "error"
                 try:
                     mode = await asyncio.to_thread(wake.detect, frame)
-                    outcome = "ok"
+                    outcome = mode or "none"
                 except asyncio.CancelledError:
                     outcome = "cancelled"
                     raise
@@ -94,8 +123,25 @@ async def _run(config: Config, once: bool, dry_run: bool) -> int:
                         notice("Conversation waking. Use headphones in this native prototype.")
                         await conversation(config, audio, notice)
                     else:
+                        notice("Capture waking. Reading the target window.")
                         audio.set_input(False)
-                        selected = await asyncio.to_thread(host.capture)
+                        target_started, target_outcome = time.monotonic(), "error"
+                        try:
+                            selected = await asyncio.to_thread(host.capture)
+                            target_outcome = "ok"
+                        except asyncio.CancelledError:
+                            target_outcome = "cancelled"
+                            raise
+                        finally:
+                            try:
+                                await metrics.record(
+                                    "desktop_target_capture",
+                                    target_started,
+                                    target_outcome,
+                                    buffered=True,
+                                )
+                            except OSError:
+                                notice("The optional desktop metrics could not be saved.")
                         current = Capture(config.endings)
                         notice(f"Capture waking · target: {selected.app}.")
                         request = await capture(config, audio, current, notice, metrics=metrics)

@@ -13,26 +13,40 @@ from thalvi_desktop.config import Config
 from thalvi_desktop.workflow import PreviewHost
 
 
+def wake_frame(level, index):
+    if isinstance(level, int):
+        value = level
+    elif level == "pulse":
+        value = -32768 if 2 <= index <= 12 else 0
+    else:
+        value = 4000 if level == "activity" else 0
+    return value.to_bytes(2, "little", signed=True) * 3840
+
+
 @pytest.mark.parametrize(
-    "mode, failure, wake_frames",
+    "mode, failure, wake_frames, level",
     [
-        ("capture", None, 2),
-        ("conversation", None, 2),
-        ("capture", "flow", 2),
-        ("conversation", "flow", 2),
-        ("capture", "detect", 2),
-        ("capture", "cancel", 2),
-        ("capture", None, 125),
+        ("capture", None, 2, "quiet"),
+        ("conversation", None, 2, "activity"),
+        ("capture", "flow", 2, "quiet"),
+        ("conversation", "flow", 2, "quiet"),
+        ("capture", "detect", 2, "quiet"),
+        ("capture", "cancel", 2, "quiet"),
+        ("capture", None, 125, "pulse"),
+        ("capture", None, 2, 999),
+        ("capture", None, 2, -999),
+        ("capture", None, 2, 1000),
+        ("capture", None, 2, -1000),
     ],
 )
 def test_native_entry_routes_wakes_recovers_and_releases_audio(
-    monkeypatch, tmp_path, mode, failure, wake_frames
+    monkeypatch, tmp_path, mode, failure, wake_frames, level
 ):
     config = replace(
         Config.load(Path(__file__).parents[1] / "config.example.json"),
         metrics=tmp_path / "metrics.jsonl",
     )
-    events = []
+    events, notices = [], []
     recording, closed = asyncio.Event(), asyncio.Event()
     writer_started, release = threading.Event(), threading.Event()
     append = cli.Metrics._append
@@ -50,7 +64,7 @@ def test_native_entry_routes_wakes_recovers_and_releases_audio(
             self.frames = 0
 
         def detect(self, frame):
-            assert frame == bytes(7680)
+            assert len(frame) == 7680
             self.frames += 1
             events.append("detect")
             if self.frames < wake_frames:
@@ -68,7 +82,7 @@ def test_native_entry_routes_wakes_recovers_and_releases_audio(
         failed = False
 
         def __init__(self, _device):
-            pass
+            self.calls = 0
 
         async def __aenter__(self):
             events.append("opened")
@@ -79,7 +93,8 @@ def test_native_entry_routes_wakes_recovers_and_releases_audio(
             closed.set()
 
         async def next(self):
-            return bytes(7680)
+            self.calls += 1
+            return wake_frame(level, self.calls)
 
         def set_input(self, enabled):
             if enabled:
@@ -111,12 +126,16 @@ def test_native_entry_routes_wakes_recovers_and_releases_audio(
         if failure == "flow":
             raise RuntimeError("conversation failed")
 
+    def notice(message):
+        notices.append(message)
+        events.append(f"notice: {message}")
+
     monkeypatch.setattr(cli, "Wake", Wake)
     monkeypatch.setattr(cli, "Audio", Audio)
     monkeypatch.setattr(cli, "desktop", lambda: host)
     monkeypatch.setattr(cli, "capture", capture)
     monkeypatch.setattr(cli, "conversation", conversation)
-    monkeypatch.setattr(cli, "notice", lambda _: None)
+    monkeypatch.setattr(cli, "notice", notice)
 
     if failure in {"detect", "cancel"}:
         error = RuntimeError if failure == "detect" else asyncio.CancelledError
@@ -152,11 +171,37 @@ def test_native_entry_routes_wakes_recovers_and_releases_audio(
         assert host.operations == [("clipboard", "Keep this partial dictation", False)]
     else:
         assert host.operations == []
+    if mode == "capture" and failure not in {"detect", "cancel"}:
+        recognized = "notice: Capture waking. Reading the target window."
+        assert events.index(recognized) < events.index("target")
+    if mode == "conversation" and failure not in {"detect", "cancel"}:
+        recognized = "notice: Conversation waking. Use headphones in this native prototype."
+        assert events.index(recognized) < events.index("conversation")
+
+    if level == "pulse":
+        expected_levels = ["quiet", "activity", "quiet", "quiet", "quiet", "quiet"]
+    else:
+        active = level == "activity" or (isinstance(level, int) and abs(level) >= 1000)
+        expected_levels = ["activity" if active else "quiet"]
+    expected_notices = [
+        f"Sampled wake audio: {value}."
+        for index, value in enumerate(expected_levels)
+        if index == 0 or value != expected_levels[index - 1]
+    ]
+    assert [m for m in notices if m.startswith("Sampled wake audio:")] == expected_notices
 
     rows = [json.loads(line) for line in config.metrics.read_text().splitlines()]
     inference = [row for row in rows if row["event"] == "desktop_wake_inference"]
     assert len(inference) == wake_frames
-    assert inference[-1]["outcome"] == {"detect": "error", "cancel": "cancelled"}.get(failure, "ok")
+    expected = {"detect": "error", "cancel": "cancelled"}.get(
+        failure, {"capture": "capture", "conversation": "conversation"}[mode]
+    )
+    assert [row["outcome"] for row in inference] == ["none"] * (wake_frames - 1) + [expected]
+    levels = [row for row in rows if row["event"] == "desktop_wake_level"]
+    assert [row["outcome"] for row in levels] == expected_levels
+    targets = [row for row in rows if row["event"] == "desktop_target_capture"]
+    assert len(targets) == int(mode == "capture" and failure not in {"detect", "cancel"})
+    assert all(row["outcome"] == "ok" for row in targets)
     assert all(set(row) == {"event", "total_ms", "outcome"} for row in rows)
     assert "dictation" not in config.metrics.read_text()
 
@@ -193,7 +238,7 @@ def test_delivery_has_no_postdelivery_cue_and_idle_notice_is_truthful(monkeypatc
             self.calls += 1
             if self.calls > 1:
                 raise asyncio.CancelledError
-            return bytes(7680)
+            return wake_frame("activity", self.calls)
 
         def set_input(self, _enabled):
             pass
@@ -216,6 +261,11 @@ def test_delivery_has_no_postdelivery_cue_and_idle_notice_is_truthful(monkeypatc
     monkeypatch.setattr(cli, "desktop", lambda: host)
     monkeypatch.setattr(cli, "capture", capture)
     monkeypatch.setattr(cli, "notice", notice)
+
+    def unexpected_level(_frame):
+        raise AssertionError("Disabled diagnostics must not inspect input levels.")
+
+    monkeypatch.setattr(cli, "wake_level", unexpected_level)
     if once:
         assert asyncio.run(cli.run(config, once=True, dry_run=False)) == 0
         assert any(message.startswith("Finished.") for message in notices)
@@ -228,3 +278,5 @@ def test_delivery_has_no_postdelivery_cue_and_idle_notice_is_truthful(monkeypatc
     assert host.operations == [("deliver", "hello", False)]
     assert not any("action outcome is unchanged" in message for message in notices)
     assert not any("Nothing will be delivered automatically" in message for message in notices)
+    assert config.metrics is None
+    assert not any(message.startswith("Sampled wake audio:") for message in notices)
