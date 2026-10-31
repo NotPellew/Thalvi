@@ -139,28 +139,6 @@ def test_replay_cli_runs_without_microphone_models_or_desktop_side_effects(
     assert "Discarded" in output
 
 
-def test_replay_previews_discord_without_credentials_or_network(
-    config, tmp_path, capsys, monkeypatch
-):
-    monkeypatch.delenv("THALVI_DISCORD_WEBHOOK", raising=False)
-    fixture = tmp_path / "discord.jsonl"
-    fixture.write_text(
-        "\n".join(
-            json.dumps(event)
-            for event in [
-                {"wake": "capture"},
-                {"final": "message the demo channel saying Hello there do that"},
-                {"confirm": True},
-            ]
-        )
-    )
-    assert asyncio.run(replay(config, fixture, apply=False)) == 0
-    output = capsys.readouterr().out
-    assert "Send this message to Thalvi Demo / #demo?" in output
-    assert "would send to Thalvi Demo / #demo" in output
-    assert "Sent to" not in output
-
-
 @pytest.mark.parametrize(
     "patch,message",
     [
@@ -179,74 +157,6 @@ def test_replay_previews_discord_without_credentials_or_network(
             {"scripts": [{"phrase": "focus", "action": "focus_app", "destination": "missing"}]},
             "No app",
         ),
-        (
-            {
-                "scripts": [
-                    {
-                        "phrase": "message",
-                        "action": "discord_message",
-                        "destination": "discord://discord.com/channels/1/2",
-                        "webhook_env": "THALVI_DISCORD_WEBHOOK",
-                    }
-                ]
-            },
-            "demo channel",
-        ),
-        (
-            {
-                "scripts": [
-                    {
-                        "phrase": "message",
-                        "action": "discord_message",
-                        "destination": "https://discord.com/channels/"
-                        "1566030981687677039/1566034064333340732",
-                    }
-                ]
-            },
-            "exactly one",
-        ),
-        (
-            {
-                "scripts": [
-                    {
-                        "phrase": "message",
-                        "action": "discord_message",
-                        "destination": "https://discord.com/channels/"
-                        "1566030981687677039/1566034064333340732",
-                        "webhook_env": "THALVI_DISCORD_WEBHOOK",
-                        "webhook_file": "webhook.txt",
-                    }
-                ]
-            },
-            "exactly one",
-        ),
-        (
-            {
-                "scripts": [
-                    {
-                        "phrase": "message",
-                        "action": "discord_message",
-                        "destination": "https://discord.com/channels/"
-                        "1566030981687677039/1566034064333340732",
-                        "webhook_env": "not a name",
-                    }
-                ]
-            },
-            "environment",
-        ),
-        (
-            {
-                "scripts": [
-                    {
-                        "phrase": "open",
-                        "action": "open_url",
-                        "destination": "https://example.test",
-                        "webhook_env": "THALVI_DISCORD_WEBHOOK",
-                    }
-                ]
-            },
-            "Only discord_message",
-        ),
         ({"unknown": True}, "Unknown"),
     ],
 )
@@ -255,6 +165,33 @@ def test_invalid_configuration_is_rejected_before_any_action(tmp_path, patch, me
     path.write_text(json.dumps(patch))
     with pytest.raises(ValueError, match=message):
         Config.load(path)
+
+
+def test_discord_message_prepares_without_typing_or_sending(config):
+    async def behavior():
+        host = PreviewHost(lambda _: None)
+        notices = []
+        workflow = Workflow(config, host, notices.append)
+
+        async def confirm():
+            raise AssertionError("Preparation does not send")
+
+        assert await workflow.finish(
+            Request(Ending.TASK, "message the demo channel saying Hello there!"),
+            host.capture(),
+            confirm,
+        )
+        assert host.operations == [
+            ("clipboard", "Hello there!", False),
+            (
+                "open_url",
+                "discord://discord.com/channels/1566030981687677039/1566034064333340732",
+                False,
+            ),
+        ]
+        assert "paste and send it yourself" in notices[-1]
+
+    asyncio.run(behavior())
 
 
 def test_empty_discord_message_is_recovered_as_an_unconfigured_task(config):

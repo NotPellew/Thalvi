@@ -2,13 +2,7 @@
 
 from dataclasses import dataclass
 
-from .config import (
-    Config,
-    DiscordScript,
-    FocusAppScript,
-    OpenUrlScript,
-    WebhookSource,
-)
+from .config import Config
 from .host import Hyprland
 
 
@@ -26,11 +20,9 @@ class FocusApp:
 
 @dataclass(frozen=True)
 class DiscordMessage:
-    guild: str
-    channel: str
-    label: str
+    destination: str
     message: str
-    webhook: WebhookSource
+    label: str
 
 
 Task = OpenUrl | FocusApp | DiscordMessage
@@ -39,27 +31,27 @@ Task = OpenUrl | FocusApp | DiscordMessage
 def decide(text: str, config: Config) -> Task:
     phrase = " ".join(text.casefold().strip(" .!?\t\r\n").split())
     for script in config.scripts:
-        if isinstance(script, DiscordScript):
+        if script.action == "discord_message":
             prefix = script.phrase + " "
             if text.casefold().startswith(prefix) and text[len(prefix) :].strip():
-                return DiscordMessage(
-                    script.guild,
-                    script.channel,
-                    script.label,
-                    text[len(prefix) :].strip(),
-                    script.webhook,
-                )
+                return DiscordMessage(script.destination, text[len(prefix) :].strip(), script.label)
             continue
         if phrase == script.phrase:
-            if isinstance(script, OpenUrlScript):
-                return OpenUrl(script.url, script.label)
-            if isinstance(script, FocusAppScript):
-                return FocusApp(script.app, script.label)
+            if script.action == "open_url":
+                return OpenUrl(script.destination, script.label)
+            return FocusApp(script.destination, script.label)
     raise ValueError("That task isn't configured yet. Your captured text is kept.")
 
 
-def execute(task: OpenUrl | FocusApp, config: Config, host: Hyprland) -> str:
+def execute(task: Task, config: Config, host: Hyprland) -> str:
     match task:
+        case DiscordMessage(destination, message, label):
+            host.copy(message)
+            host.open_url(destination)
+            return (
+                f"Asked Discord to open {label}. Message copied to the clipboard; "
+                "check the channel and paste and send it yourself."
+            )
         case OpenUrl(url, label):
             host.open_url(url)
             return f"Asked the browser to open {label}."

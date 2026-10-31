@@ -28,7 +28,7 @@ async def recover(host, text: str) -> None:
 async def run(config: Config, once: bool, dry_run: bool) -> int:
     wake = await asyncio.to_thread(Wake, config)
     host = PreviewHost() if dry_run else desktop()
-    workflow = Workflow(config, host, preview=dry_run)
+    workflow = Workflow(config, host)
     current: Capture | None = None
     async with Audio(config.device) as audio:
         notice("Waiting for a wake word. Ctrl+C stops and releases the microphone.")
@@ -57,7 +57,7 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
                                         audio,
                                         Confirmation(),
                                         notice,
-                                        ready_message="Say yes to confirm or never mind to cancel.",
+                                        ready_message="Say yes to submit, or never mind to cancel.",
                                         fresh_audio=True,
                                     )
                             except TimeoutError as error:
@@ -107,7 +107,7 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
 
 async def replay(config: Config, path: Path, apply: bool) -> int:
     host = desktop() if apply else PreviewHost()
-    workflow = Workflow(config, host, preview=not apply)
+    workflow = Workflow(config, host)
     events = iter(path.read_text(encoding="utf-8").splitlines())
     current = None
     selected = None
@@ -159,9 +159,7 @@ def main() -> None:
     )
     replay_parser.add_argument("path", type=Path)
     replay_parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="Actually type into the focused window and send configured Discord messages.",
+        "--apply", action="store_true", help="Actually deliver to the focused desktop window."
     )
     args = parser.parse_args()
     try:

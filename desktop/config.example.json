@@ -20,7 +20,7 @@
   "scripts": [
     {"phrase": "open the project page", "action": "open_url", "destination": "https://github.com/NotPellew/Thalvi", "label": "the Thalvi project page"},
     {"phrase": "switch to T3 Code", "action": "focus_app", "destination": "t3", "label": "T3 Code"},
-    {"phrase": "message the demo channel saying", "action": "discord_message", "destination": "https://discord.com/channels/1566030981687677039/1566034064333340732", "label": "Thalvi Demo / #demo", "webhook_env": "THALVI_DISCORD_WEBHOOK"},
+    {"phrase": "message the demo channel saying", "action": "discord_message", "destination": "discord://discord.com/channels/1566030981687677039/1566034064333340732", "label": "Thalvi Demo / #demo"},
     {"phrase": "switch to Discord", "action": "focus_app", "destination": "discord", "label": "Discord Desktop"}
   ]
 }

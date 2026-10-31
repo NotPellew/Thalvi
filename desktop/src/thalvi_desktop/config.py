@@ -9,10 +9,6 @@ from urllib.parse import urlsplit
 
 from .capture import DEFAULT_ENDINGS, Ending
 
-DEMO_GUILD = "1566030981687677039"
-DEMO_CHANNEL = "1566034064333340732"
-DEMO_DESTINATION = f"https://discord.com/channels/{DEMO_GUILD}/{DEMO_CHANNEL}"
-
 
 def record(value: object, label: str) -> dict[str, object]:
     if not isinstance(value, dict) or not all(isinstance(k, str) for k in value):
@@ -46,35 +42,11 @@ class App:
 
 
 @dataclass(frozen=True)
-class WebhookSource:
-    env: str | None = None
-    file: Path | None = None
-
-
-@dataclass(frozen=True)
-class OpenUrlScript:
+class Script:
     phrase: str
-    url: str
+    action: str
+    destination: str
     label: str
-
-
-@dataclass(frozen=True)
-class FocusAppScript:
-    phrase: str
-    app: str
-    label: str
-
-
-@dataclass(frozen=True)
-class DiscordScript:
-    phrase: str
-    guild: str
-    channel: str
-    label: str
-    webhook: WebhookSource
-
-
-Script = OpenUrlScript | FocusAppScript | DiscordScript
 
 
 @dataclass(frozen=True)
@@ -134,64 +106,43 @@ class Config:
                 or re.fullmatch(r"[A-Za-z0-9_]+", shortcut[-1]) is None
             ):
                 raise ValueError("Input keys must be modifiers followed by one named key.")
-
-        def local(value: object) -> Path | None:
-            if value is None:
-                return None
-            result = Path(text(value, "local path")).expanduser()
-            return result if result.is_absolute() else path.parent / result
-
         definitions = raw.get("scripts", [])
         if not isinstance(definitions, list):
             raise ValueError("scripts must be a list.")
         scripts: list[Script] = []
         for definition in definitions:
             item = record(definition, "script")
-            fields(
-                item,
-                {"phrase", "action", "destination", "label", "webhook_env", "webhook_file"},
-                "script",
-            )
+            fields(item, {"phrase", "action", "destination", "label"}, "script")
             phrase = " ".join(text(item.get("phrase"), "script phrase").casefold().split())
             action = item.get("action")
             destination = text(item.get("destination"), "script destination")
-            label = text(item.get("label", phrase), "script label")
-            if action != "discord_message" and (
-                item.get("webhook_env") is not None or item.get("webhook_file") is not None
-            ):
-                raise ValueError("Only discord_message scripts take webhook credentials.")
             if action == "open_url":
-                script: Script = OpenUrlScript(
-                    phrase, url(destination, "script URL", {"http", "https"}), label
-                )
+                destination = url(destination, "script URL", {"http", "https"})
+            elif action == "discord_message":
+                if (
+                    destination
+                    != "discord://discord.com/channels/1566030981687677039/1566034064333340732"
+                ):
+                    raise ValueError("Discord destination must be the configured demo channel.")
             elif action == "focus_app":
                 if destination not in apps:
                     raise ValueError(f"No app named {destination!r} is configured.")
-                script = FocusAppScript(phrase, destination, label)
-            elif action == "discord_message":
-                if destination != DEMO_DESTINATION:
-                    raise ValueError("Discord destination must be the configured demo channel URL.")
-                env, credential = item.get("webhook_env"), item.get("webhook_file")
-                if (env is None) == (credential is None):
-                    raise ValueError(
-                        "discord_message needs exactly one of webhook_env or webhook_file."
-                    )
-                if env is not None:
-                    name = text(env, "webhook_env")
-                    if re.fullmatch(r"[A-Z][A-Z0-9_]*", name) is None:
-                        raise ValueError("webhook_env must name an uppercase environment variable.")
-                    source = WebhookSource(env=name)
-                else:
-                    source = WebhookSource(file=local(credential))
-                script = DiscordScript(phrase, DEMO_GUILD, DEMO_CHANNEL, label, source)
             else:
                 raise ValueError("Script action must be open_url, focus_app or discord_message.")
             if any(s.phrase == phrase for s in scripts):
                 raise ValueError("Script phrases must be distinct.")
-            scripts.append(script)
+            scripts.append(
+                Script(phrase, action, destination, text(item.get("label", phrase), "script label"))
+            )
         device = raw.get("device")
         if device is not None and (isinstance(device, bool) or not isinstance(device, (str, int))):
             raise ValueError("device must be a device name or index.")
+
+        def local(value: object) -> Path | None:
+            if value is None:
+                return None
+            result = Path(text(value, "local path")).expanduser()
+            return result if result.is_absolute() else path.parent / result
 
         capture_model = local(wake.get("capture_model"))
         conversation_model = local(wake.get("conversation_model"))
