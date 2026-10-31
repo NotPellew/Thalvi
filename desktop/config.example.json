@@ -1,0 +1,26 @@
+{
+  "server": "ws://127.0.0.1:8080",
+  "wake": {
+    "capture_model": "models/hey_jarvis_v0.1.onnx",
+    "conversation_model": "models/hey_mycroft_v0.1.onnx",
+    "model_dir": "models",
+    "threshold": 0.65
+  },
+  "endings": {
+    "paste that": "paste",
+    "submit": "submit",
+    "do that": "task",
+    "scratch that": "scratch",
+    "never mind": "cancel"
+  },
+  "apps": {
+    "t3": {"classes": ["com.t3tools.T3Code", "t3-code", "T3 Code"], "input_keys": []},
+    "discord": {"classes": ["discord", "vesktop"], "input_keys": []}
+  },
+  "scripts": [
+    {"phrase": "open the project page", "action": "open_url", "destination": "https://github.com/NotPellew/Thalvi", "label": "the Thalvi project page"},
+    {"phrase": "switch to T3 Code", "action": "focus_app", "destination": "t3", "label": "T3 Code"},
+    {"phrase": "message the demo channel saying", "action": "discord_message", "destination": "discord://discord.com/channels/1566030981687677039/1566034064333340732", "label": "Thalvi Demo / #demo"},
+    {"phrase": "switch to Discord", "action": "focus_app", "destination": "discord", "label": "Discord Desktop"}
+  ]
+}
