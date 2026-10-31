@@ -33,7 +33,8 @@ def config():
     return Config.load(Path(__file__).parents[1] / "config.example.json")
 
 
-def write_proc(root: Path, port: int, uid: int = 1000) -> Path:
+def write_proc(root: Path, port: int) -> Path:
+    uid = os.getuid()
     net = root / "net"
     net.mkdir(parents=True, exist_ok=True)
     header = "sl local_address rem_address st uid timeout inode\n"
@@ -278,7 +279,9 @@ def paced(config, port, proc):
     )
 
 
-def test_full_adapter_prepares_types_and_closes(config, tmp_path):
+@pytest.mark.parametrize("uid", [1000, 1001])
+def test_full_adapter_prepares_types_and_closes(config, tmp_path, monkeypatch, uid):
+    monkeypatch.setattr(os, "getuid", lambda: uid)
     page = FakePage()
 
     async def behavior():
