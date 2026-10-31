@@ -82,7 +82,7 @@ async def capture(
             else:
                 activation = asyncio.create_task(activate())
                 await asyncio.gather(connection, activation)
-        return await _capture_events(socket, audio, current, notice)
+        return await _capture_events(socket, audio, current, notice, metrics, confirmation)
     finally:
         tasks = [task for task in (connection, activation) if task is not None]
         for task in tasks:
@@ -94,7 +94,7 @@ async def capture(
         audio.set_input(True)
 
 
-async def _capture_events(socket, audio, current, notice):
+async def _capture_events(socket, audio, current, notice, metrics=None, confirmation=False):
     async def send_audio() -> None:
         while True:
             await socket.send(transcription_pcm(await audio.next()))
@@ -128,7 +128,26 @@ async def _capture_events(socket, audio, current, notice):
         if sender in done:
             await sender
             raise RuntimeError("Microphone audio ended. Nothing was delivered.")
-        return await receiver
+        request = await receiver
+        audio.set_input(False)
+        sender.cancel()
+        await asyncio.gather(sender, return_exceptions=True)
+        if not confirmation:
+            started = time.monotonic()
+            outcome = "ok"
+            try:
+                await audio.cue(660)
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                raise
+            except (RuntimeError, OSError) as error:
+                outcome = "error"
+                notice(f"{error} The accepted action will continue.")
+            finally:
+                if metrics:
+                    with suppress(OSError):
+                        await metrics.record("desktop_end_cue", started, outcome, buffered=True)
+        return request
     finally:
         sender.cancel()
         receiver.cancel()

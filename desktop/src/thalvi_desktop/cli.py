@@ -123,21 +123,6 @@ async def _run(config: Config, once: bool, dry_run: bool) -> int:
                         if not success and once:
                             return 1
                         current = None
-                        cue_started = time.monotonic()
-                        cue_outcome = "ok"
-                        try:
-                            await audio.cue(660)
-                        except asyncio.CancelledError:
-                            cue_outcome = "cancelled"
-                            raise
-                        except (RuntimeError, OSError) as error:
-                            cue_outcome = "error"
-                            notice(f"{error} The action outcome is unchanged.")
-                        finally:
-                            with contextlib.suppress(OSError):
-                                await metrics.record(
-                                    "desktop_completed_cue", cue_started, cue_outcome
-                                )
                     if mode == "conversation":
                         outcome = "ok"
                 except (

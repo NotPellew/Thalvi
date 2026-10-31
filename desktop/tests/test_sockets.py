@@ -353,3 +353,129 @@ def test_connection_failure_cancels_cue_and_records_outcomes(monkeypatch, config
         }
 
     asyncio.run(behavior())
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_end_cue_precedes_cleanup_and_delivery_and_can_be_cancelled(config, cancelled):
+    from thalvi_desktop.workflow import PreviewHost, Workflow
+
+    async def behavior():
+        cues = []
+        started = asyncio.Event()
+        release = asyncio.Event()
+        closed = asyncio.Event()
+        host = PreviewHost(lambda _: None)
+
+        class Audio(FakeAudio):
+            def set_input(self, enabled):
+                self.enabled = enabled
+                super().set_input(enabled)
+
+            async def cue(self, frequency):
+                cues.append(frequency)
+                if frequency == 660:
+                    assert not self.enabled
+                    started.set()
+                    await release.wait()
+
+        async def server(socket):
+            await socket.send('{"type":"ready"}')
+            await socket.recv()
+            for kind, text in [
+                ("partial", "paste that"),
+                ("final", "wrong scratch that"),
+                ("final", "near paste that please"),
+                ("final", "hello paste"),
+                ("final", "that"),
+            ]:
+                await socket.send(json.dumps({"type": kind, "text": text}))
+            await socket.wait_closed()
+            closed.set()
+
+        async with serve(server, "127.0.0.1", 0) as listener:
+            local = replace(config, server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}")
+
+            async def no_confirmation():
+                raise AssertionError("Paste does not need confirmation.")
+
+            async def flow():
+                request = await capture(local, Audio(), Capture(), lambda _: None)
+                assert await Workflow(local, host, lambda _: None).finish(
+                    request, host.capture(), no_confirmation
+                )
+
+            pending = asyncio.create_task(flow())
+            try:
+                await asyncio.wait_for(started.wait(), 1)
+                assert cues == [440, 660]
+                assert not closed.is_set() and not pending.done()
+                assert host.operations == []
+                if cancelled:
+                    pending.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await asyncio.wait_for(pending, 1)
+                else:
+                    release.set()
+                    await asyncio.wait_for(pending, 1)
+            finally:
+                release.set()
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+        assert cues == [440, 660]
+        assert host.operations == (
+            [] if cancelled else [("deliver", "near paste that please hello", False)]
+        )
+
+    asyncio.run(behavior())
+
+
+@pytest.mark.parametrize("confirmation,ending", [(False, "hello paste that"), (True, "yes")])
+def test_end_cue_failure_and_confirmation(config, confirmation, ending):
+    from thalvi_desktop.capture import Confirmation
+    from thalvi_desktop.workflow import PreviewHost, Workflow
+
+    async def behavior():
+        cues = []
+        notices = []
+
+        class Audio(FakeAudio):
+            async def cue(self, frequency):
+                cues.append(frequency)
+                if frequency == 660:
+                    raise RuntimeError("speaker failed")
+
+        async def server(socket):
+            await socket.send('{"type":"ready"}')
+            await socket.recv()
+            await socket.send(json.dumps({"type": "final", "text": ending}))
+            await socket.wait_closed()
+
+        async with serve(server, "127.0.0.1", 0) as listener:
+            local = replace(config, server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}")
+            result = await asyncio.wait_for(
+                capture(
+                    local,
+                    Audio(),
+                    Confirmation() if confirmation else Capture(),
+                    notices.append,
+                    confirmation=confirmation,
+                ),
+                1,
+            )
+        assert result == Request(
+            Ending.SUBMIT if confirmation else Ending.PASTE, "" if confirmation else "hello"
+        )
+        assert cues == ([880] if confirmation else [440, 660])
+        assert confirmation or any("speaker failed" in notice for notice in notices)
+        if not confirmation:
+            host = PreviewHost(lambda _: None)
+
+            async def no_confirmation():
+                raise AssertionError("Paste does not need confirmation.")
+
+            assert await Workflow(config, host, lambda _: None).finish(
+                result, host.capture(), no_confirmation
+            )
+            assert host.operations == [("deliver", "hello", False)]
+
+    asyncio.run(behavior())

@@ -41,6 +41,8 @@ areas your change touches. Editing rules are in
   eight-second recognizer startup budget; confirmations wait for ready plus
   their own cue. Why: keep dictation prompt and confirmations fresh.
   Rejected: transcribing pre-cue backlog or waiting on the network to speak.
+- **Ending acknowledgement.** Play 660 Hz when a dictation ending is accepted.
+  Why: signal capture has ended before delivery. Rejected: a post-delivery cue.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
   browser and app actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative

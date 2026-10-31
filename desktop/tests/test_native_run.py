@@ -162,7 +162,7 @@ def test_native_entry_routes_wakes_recovers_and_releases_audio(
 
 
 @pytest.mark.parametrize("once", [True, False])
-def test_delivery_cue_failure_keeps_success_and_idle_notice_is_truthful(monkeypatch, once):
+def test_delivery_has_no_postdelivery_cue_and_idle_notice_is_truthful(monkeypatch, once):
     config = Config.load(Path(__file__).parents[1] / "config.example.json")
     notices = []
     events = []
@@ -226,5 +226,5 @@ def test_delivery_cue_failure_keeps_success_and_idle_notice_is_truthful(monkeypa
         assert sum(message.startswith("Waiting for a wake word") for message in notices) == 2
         assert not any(message.startswith("Finished.") for message in notices)
     assert host.operations == [("deliver", "hello", False)]
-    assert any("action outcome is unchanged" in message for message in notices)
+    assert not any("action outcome is unchanged" in message for message in notices)
     assert not any("Nothing will be delivered automatically" in message for message in notices)
