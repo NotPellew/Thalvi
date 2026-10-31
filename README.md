@@ -133,6 +133,10 @@ TTS_VOICES=af_heart,af_bella,sohee
 
 ## Audio input
 
+For local wake words, dictation into a desktop window, and scripted computer
+actions, see the [native desktop client](desktop/README.md). The first target
+is Hyprland; phone use remains conversation-only.
+
 With `LLM_AUDIO_INPUT=on` the language model hears a spoken turn instead of
 reading its transcript: the turn's audio, as recorded and padded by 300 ms on
 each side, is sent as an OpenAI `input_audio` WAV part with no text beside it.

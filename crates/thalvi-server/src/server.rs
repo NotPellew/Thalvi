@@ -27,6 +27,7 @@ use crate::retirement::{RETIREMENT_SYSTEM_PROMPT, spawn_retirement};
 use crate::session::{VoiceChoices, handle_session};
 use crate::store::SessionStore;
 use crate::title::{TITLE_SYSTEM_PROMPT, Titler};
+use crate::transcription::handle_transcription;
 use crate::tts::{OpenAiTts, Qwen3Tts, Tts};
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -145,12 +146,28 @@ fn with_tts<T: Tts + Clone + 'static>(
     };
     Router::new()
         .route("/session", get(session_upgrade::<T>))
+        .route("/transcription", get(transcription_upgrade::<T>))
         .route("/voices", get(list_voices::<T>))
         .route("/voice/preview", post(preview_voice::<T>))
         .with_state(state)
         .merge(api::routes().with_state(store))
         .merge(learning_api::routes().with_state(learnings))
         .fallback_service(ServeDir::new(&config.web_dir))
+}
+
+async fn transcription_upgrade<T: Tts + Clone + 'static>(
+    State(state): State<AppState<T>>,
+    upgrade: WebSocketUpgrade,
+) -> impl IntoResponse {
+    let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+    upgrade.on_upgrade(move |socket| {
+        handle_transcription(
+            socket,
+            state.factory,
+            state.recording,
+            format!("capture-{id}"),
+        )
+    })
 }
 
 async fn session_upgrade<T: Tts + Clone + 'static>(

@@ -17,4 +17,5 @@ pub mod server;
 pub mod session;
 pub mod store;
 pub mod title;
+pub mod transcription;
 pub mod tts;

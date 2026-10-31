@@ -7,6 +7,10 @@ data/
 !.env.example
 *.log
 .DS_Store
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
 
 # Model weights and checkpoints
 *.safetensors

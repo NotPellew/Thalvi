@@ -6,14 +6,14 @@ areas your change touches. Editing rules are in
 
 ## Architecture
 
-- **Rust server, TypeScript web client.** The Rust server owns sessions, model
-  calls, and tools; the TypeScript client owns microphone, camera, playback,
-  and UI. Why: browser media APIs are first-class in TypeScript and awkward
-  through `web-sys`. Rejected: full Rust with a WASM UI (Leptos, Dioxus).
-- **Phone browser first.** The client is a mobile web app served over HTTPS,
-  which mobile browsers require for microphone and camera access. Why: no
-  app-store builds or signing in a 9-day hackathon. Rejected for now: a
-  native app; revisit once the web client works.
+- **Rust server with desktop and web clients.** Rust owns sessions and model
+  calls; the Python desktop client owns native audio, wake words and window
+  delivery; TypeScript owns browser media and UI. Why: use native wake/audio
+  libraries without moving model orchestration. Rejected: a WASM UI.
+- **Desktop demo first; phone conversation.** The server runs on the user's PC.
+  Hyprland is the first native target; GNOME, macOS and Windows need prototypes.
+  Why: hands-free desktop work is the short-term demo. Rejected for now:
+  phone-to-PC dictation and claiming untested platform parity.
 - **Self-hosted; parts swap by endpoint.** Config sets each part's address on a
   standard protocol (Chat Completions, OpenAI speech, MCP); Meta's realtime ASR
   and Qwen3-TTS's framed PCM stream are the custom adapters. Why: any provider
@@ -33,6 +33,25 @@ areas your change touches. Editing rules are in
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
   interrupts a reply by speaking. Why: hands and eyes are busy. Rejected:
   push-to-talk.
+- **Two wake entries, endings select the capture route.** One wake model starts
+  capture; paste, submit and task endings choose delivery. A separate model
+  starts conversation without per-turn endings. Why: defer the capture choice
+  without delaying conversation. Rejected: one wake phrase for both flows.
+- **Scripted decisions, typed actions.** The demo matches configured phrases to
+  browser and app actions; execution receives a typed action. Why: a later model
+  can choose the same actions. Rejected for now: a plugin runtime, speculative
+  interfaces and open-ended computer use before the scripted flow works.
+- **Live Discord actions are disabled.** Refuse before debugger discovery and
+  preserve the message on the clipboard. Why: trusted input can reach an
+  existing child editor outside the gate. Rejected: shipping the unsafe path,
+  channel webhooks and private REST.
+- **Experimental Discord input stays in inert tests.** Retain the CDP/Slate
+  fixture and the strict existing-frame failure as evidence. Why: passing
+  main-document tests does not establish frame safety. Rejected: calling the
+  adapter qualified or expanding target coordination before the browser demo.
+- **Discord submissions stay unconfirmed.** A key acknowledgement or optimistic
+  UI is not a delivery receipt. Why: submission and delivery are different
+  events. Rejected: reporting "sent" without a defined receipt.
 - **Spoken acknowledgement.** With `THALVI_ACK=on`, a slow reply first plays a
   canned line (rotated, synthesized once and cached per session) when no first
   sentence arrives within 500 ms. Why: it covers the model's thinking gap with
