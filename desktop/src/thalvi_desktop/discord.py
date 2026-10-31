@@ -2,17 +2,19 @@
 
 import asyncio
 import contextlib
+import json
 import os
+import secrets
 import time
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
 
 from . import cdp
-from .cdp import CDP, CDPError, debug_port
+from .cdp import CDP, CDPDisconnected, CDPError, CDPTimeout, debug_port
 from .cdp import Page as DebugPage
 from .config import App, Config
 from .host import Hyprland, Target
@@ -23,6 +25,7 @@ BODY_LIMIT = 2000
 POLL = 0.05
 GUARD = Path(__file__).with_name("discord_dom.js").read_text(encoding="utf-8").strip()
 GUARD_EXPR = GUARD.removesuffix(";")
+GATE = Path(__file__).with_name("discord_gate.js").read_text(encoding="utf-8").strip()
 
 REASONS = {
     "editor-missing": "The Discord message box was not found.",
@@ -40,6 +43,15 @@ REASONS = {
     "menu-open": "A Discord menu is open.",
     "dialog": "A Discord dialog is open.",
     "text": "The Discord composer has an unexpected banner or label.",
+    "target-mismatch": "The focused Discord field is not the message box.",
+    "gate-expired": "Discord did not process the message in time.",
+    "gate-pending": (
+        "Discord has an unresolved earlier input. "
+        "Check the composer and reload before trying again."
+    ),
+    "gate-consumed": "The Discord input was already used; nothing else was typed.",
+    "document-changed": "Discord changed pages before typing.",
+    "cancelled": "The Discord input was cancelled.",
 }
 
 
@@ -62,6 +74,10 @@ class DiscordRefused(DiscordError):
 
 class AttemptUncertain(DiscordError):
     """Enter may have reached Discord; the result must stay unconfirmed and unretried."""
+
+
+class InsertionUncertain(DiscordError):
+    """Typing may have reached Discord; the draft must stay unconfirmed and unretried."""
 
 
 def route_for(destination: str) -> str:
@@ -154,7 +170,15 @@ class ComposerPage(Protocol):
 
     async def verify(self, editor: str, route: str, draft: str, digest: str) -> Observation: ...
 
-    async def insert(self, editor: str, route: str, digest: str, text: str) -> Observation: ...
+    async def insert(
+        self,
+        editor: str,
+        route: str,
+        digest: str,
+        text: str,
+        on_send: Callable[[], None] | None = None,
+        before_input: Callable[[], Awaitable[None]] | None = None,
+    ) -> Observation: ...
 
     async def enter(
         self, editor: str, route: str, digest: str, text: str, on_send: Callable[[], None]
@@ -213,16 +237,17 @@ class CDPPage:
             raise DiscordError("Discord returned an invalid message box.")
         return object_id
 
-    async def _call(
+    async def _guard_call(
         self,
         editor: str,
         method: str,
+        parameters: str,
         arguments: list[object],
         on_send: Callable[[], None] | None = None,
     ) -> Observation:
         function = (
-            f"function(route, draft, digest, text) {{ const guard = ({GUARD_EXPR}); "
-            f"return guard.{method}(this, route, draft, digest, text); }}"
+            f"function({parameters}) {{ const guard = ({GUARD_EXPR}); "
+            f"return guard.{method}(this, {parameters}); }}"
         )
         try:
             result = await self.cdp.call(
@@ -253,25 +278,184 @@ class CDPPage:
                     False, "editor-missing", editor is None, "", "", False, "", editor
                 )
             raise
-        return await self._call(editor, "observe", [{"value": self.route}])
+        return await self._guard_call(editor, "observe", "route", [{"value": self.route}])
 
     async def verify(self, editor: str, route: str, draft: str, digest: str) -> Observation:
-        return await self._call(
+        return await self._guard_call(
             editor,
             "verify",
+            "route, draft, digest",
             [{"value": route}, {"value": draft}, {"value": digest}],
         )
 
-    async def insert(self, editor: str, route: str, digest: str, text: str) -> Observation:
-        return await self._call(
-            editor, "insert", [{"value": route}, {"value": ""}, {"value": digest}, {"value": text}]
+    async def _arm(
+        self, editor: str, route: str, digest: str, text: str, nonce: str
+    ) -> Observation:
+        return await self._guard_call(
+            editor,
+            "arm",
+            "route, draft, digest, text, nonce",
+            [
+                {"value": route},
+                {"value": ""},
+                {"value": digest},
+                {"value": text},
+                {"value": nonce},
+            ],
         )
+
+    async def _gate_outcome(self, nonce: str) -> dict[str, object]:
+        result = await self.cdp.call(
+            "Runtime.evaluate",
+            {
+                "expression": f"({GUARD_EXPR}).gateOutcome({json.dumps(nonce)})",
+                "returnByValue": True,
+            },
+        )
+        value = _nested_value(result, "gate outcome")
+        if not isinstance(value, dict):
+            raise DiscordError("Discord returned an invalid input gate.")
+        state, reason, events = value.get("state"), value.get("reason"), value.get("events")
+        if (
+            not isinstance(state, str)
+            or state not in {"armed", "allowed", "denied", "missing"}
+            or (reason is not None and not isinstance(reason, str))
+            or type(events) is not int
+        ):
+            raise DiscordError("Discord returned an invalid input gate.")
+        return {"state": state, "reason": reason, "events": events}
+
+    async def _disarm(self, nonce: str) -> None:
+        with contextlib.suppress(CDPError):
+            await self.cdp.call(
+                "Runtime.evaluate",
+                {
+                    "expression": f"({GUARD_EXPR}).disarm({json.dumps(nonce)})",
+                    "returnByValue": True,
+                },
+                timeout=1.0,
+            )
+
+    async def _deny_pending(self, nonce: str) -> None:
+        with contextlib.suppress(CDPError):
+            await self.cdp.call(
+                "Runtime.evaluate",
+                {
+                    "expression": f"({GUARD_EXPR}).denyPending({json.dumps(nonce)})",
+                    "returnByValue": True,
+                },
+                timeout=1.0,
+            )
+
+    async def _remove_script(self, identifier: str) -> None:
+        with contextlib.suppress(CDPError):
+            await self.cdp.call(
+                "Page.removeScriptToEvaluateOnNewDocument",
+                {"identifier": identifier},
+                timeout=1.0,
+            )
+
+    async def insert(
+        self,
+        editor: str,
+        route: str,
+        digest: str,
+        text: str,
+        on_send: Callable[[], None] | None = None,
+        before_input: Callable[[], Awaitable[None]] | None = None,
+    ) -> Observation:
+        nonce = secrets.token_hex(16)
+        await self.cdp.call("Page.enable")
+        script = await self.cdp.call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": (
+                    f"globalThis.__thalvi_gate_body__ = {json.dumps(text)};\n"
+                    f"globalThis.__thalvi_gate_nonce__ = {json.dumps(nonce)};\n"
+                    f"{GATE}"
+                )
+            },
+        )
+        identifier = script.get("identifier")
+        if not isinstance(identifier, str):
+            raise DiscordError("Discord did not install the input guard.")
+        transmitted = completed = False
+        try:
+            armed = await self._arm(editor, route, digest, text, nonce)
+            if not armed.ok:
+                return armed
+            if before_input is not None:
+                await before_input()
+
+            def mark_sent() -> None:
+                nonlocal transmitted
+                transmitted = True
+                if on_send is not None:
+                    on_send()
+
+            try:
+                await self.cdp.call("Input.insertText", {"text": text}, on_send=mark_sent)
+            except (CDPTimeout, CDPDisconnected) as error:
+                if not transmitted:
+                    raise
+                await self._deny_pending(nonce)
+                raise InsertionUncertain(
+                    "The Discord typing action failed. It may have been typed; "
+                    "nothing was retried. Check the composer."
+                ) from error
+            except CDPError as error:
+                if not transmitted:
+                    raise
+                if error.code is None:
+                    await self._deny_pending(nonce)
+                    raise InsertionUncertain(
+                        "The Discord typing action failed. It may have been typed; "
+                        "nothing was retried. Check the composer."
+                    ) from error
+                completed = True
+                raise DiscordError("Discord rejected the typing command.") from error
+            completed = True
+            try:
+                outcome = await self._gate_outcome(nonce)
+            except (CDPError, DiscordError) as error:
+                raise InsertionUncertain(
+                    "Discord did not confirm the typed message. It may have been typed; "
+                    "nothing was retried. Check the composer."
+                ) from error
+            state = outcome["state"]
+            if state == "allowed":
+                return armed
+            if state == "denied":
+                return Observation(
+                    False, outcome["reason"] or "structure", False, "", "", False, route, editor
+                )
+            if state == "missing":
+                raise InsertionUncertain(
+                    "Discord did not confirm the typed message. It may have been typed; "
+                    "nothing was retried. Check the composer."
+                )
+            raise InsertionUncertain(
+                "Discord did not report what happened to the typed message. It may have been "
+                "typed; nothing was retried. Check the composer."
+            )
+        except asyncio.CancelledError:
+            if transmitted and not completed:
+                await self._deny_pending(nonce)
+            raise
+        finally:
+            if completed or not transmitted:
+                await self._disarm(nonce)
+                await self._remove_script(identifier)
 
     async def enter(
         self, editor: str, route: str, digest: str, text: str, on_send: Callable[[], None]
     ) -> Observation:
-        return await self._call(
-            editor, "enter", [{"value": route}, {"value": text}, {"value": digest}], on_send
+        return await self._guard_call(
+            editor,
+            "enter",
+            "route, draft, digest",
+            [{"value": route}, {"value": text}, {"value": digest}],
+            on_send,
         )
 
     async def close(self) -> None:
@@ -279,9 +463,20 @@ class CDPPage:
 
 
 class ComposerSession:
-    def __init__(self, page: ComposerPage, route: str, deadline: float = 5.0):
+    def __init__(
+        self,
+        page: ComposerPage,
+        route: str,
+        deadline: float = 5.0,
+        metrics: Metrics | None = None,
+    ):
         self.page, self.route, self.deadline = page, route, deadline
+        self.metrics = metrics or Metrics(None)
         self.attempted = False
+        self.insert_sent = False
+        self.insert_completed = False
+        self.insert_confirmed = False
+        self.insert_uncertain = False
 
     async def prepare(self) -> Guarded:
         deadline = time.monotonic() + self.deadline
@@ -300,17 +495,54 @@ class ComposerSession:
             await asyncio.sleep(POLL)
 
     async def enter_draft(self, guarded: Guarded, body: str) -> None:
-        current = await self.page.insert(guarded.editor, guarded.route, guarded.digest, body)
-        if not current.ok:
-            raise DiscordRefused(current.reason)
-        deadline = time.monotonic() + self.deadline
-        while True:
-            current = await self.page.verify(guarded.editor, guarded.route, body, guarded.digest)
-            if current.ok:
-                return
-            if not current.retryable or time.monotonic() >= deadline:
+        validate_body(body)
+        started = time.monotonic()
+        outcome = "error"
+        self.insert_sent = self.insert_completed = self.insert_confirmed = False
+        self.insert_uncertain = False
+
+        def mark_sent() -> None:
+            self.insert_sent = True
+
+        try:
+            current = await self.page.insert(
+                guarded.editor,
+                guarded.route,
+                guarded.digest,
+                body,
+                on_send=mark_sent,
+            )
+            self.insert_completed = True
+            if not current.ok:
+                outcome = "refused"
                 raise DiscordRefused(current.reason)
-            await asyncio.sleep(POLL)
+            deadline = time.monotonic() + self.deadline
+            while True:
+                current = await self.page.verify(
+                    guarded.editor, guarded.route, body, guarded.digest
+                )
+                if current.ok:
+                    self.insert_confirmed = True
+                    outcome = "ok"
+                    return
+                if not current.retryable or time.monotonic() >= deadline:
+                    outcome = "refused"
+                    raise DiscordRefused(current.reason)
+                await asyncio.sleep(POLL)
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            self.insert_uncertain = self.insert_sent and not self.insert_confirmed
+            raise
+        except InsertionUncertain:
+            outcome = "uncertain"
+            self.insert_uncertain = self.insert_sent and not self.insert_confirmed
+            raise
+        except DiscordRefused:
+            outcome = "refused"
+            raise
+        finally:
+            with contextlib.suppress(OSError, asyncio.CancelledError):
+                await self.metrics.record("discord_draft", started, outcome)
 
     async def submit(self, guarded: Guarded, body: str) -> None:
         def mark_attempted() -> None:
@@ -498,6 +730,9 @@ class DesktopComposer:
             await self.metrics.record(event, started, outcome)
 
     async def prepare(self, destination: str) -> LiveGuarded:
+        raise DiscordUnavailable("Discord typing is disabled in this build.")
+
+    async def _inspect(self, destination: str) -> LiveGuarded:
         full = DISCORD_ORIGIN + route_for(destination)
         started = time.monotonic()
         try:
@@ -521,7 +756,7 @@ class DesktopComposer:
             route, search, fragment = await adapter.route_state()
             if route != full or search or fragment:
                 await adapter.navigate(destination)
-            composer = ComposerSession(adapter, full, self.deadline)
+            composer = ComposerSession(adapter, full, self.deadline, self.metrics)
             guarded = await composer.prepare()
             return LiveGuarded(full, composer, guarded)
         except BaseException:
@@ -529,11 +764,10 @@ class DesktopComposer:
             raise
 
     async def enter_draft(self, prepared: LiveGuarded, body: str) -> None:
-        await prepared.session.enter_draft(prepared.guarded, body)
+        raise DiscordUnavailable("Discord typing is disabled in this build.")
 
     async def submit(self, prepared: LiveGuarded, body: str) -> str:
-        await prepared.session.submit(prepared.guarded, body)
-        return "Submission attempted; delivery unconfirmed."
+        raise DiscordUnavailable("Discord typing is disabled in this build.")
 
     async def close(self, prepared: LiveGuarded) -> None:
         await prepared.session.close()

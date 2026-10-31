@@ -12,6 +12,7 @@ from .discord import (
     AttemptUncertain,
     DesktopComposer,
     DiscordError,
+    InsertionUncertain,
     PreviewComposer,
     validate_body,
 )
@@ -95,6 +96,28 @@ class Workflow:
         try:
             try:
                 await self.discord.enter_draft(prepared, body)
+            except InsertionUncertain as error:
+                self.notify(f"{error} Nothing was pressed.")
+                await self._preserve(body)
+                return "uncertain", False
+            except asyncio.CancelledError:
+                session = getattr(prepared, "session", None)
+                if getattr(session, "insert_uncertain", False):
+                    self.notify(
+                        "Typing may have completed; the draft is unconfirmed. "
+                        "Check Discord. Nothing was pressed or retried."
+                    )
+                    await self._preserve(body)
+                elif getattr(session, "insert_sent", False):
+                    self.notify(
+                        "Typing was interrupted; nothing was pressed. The draft may remain. "
+                        "Check Discord before sending."
+                    )
+                    await self._preserve(body)
+                else:
+                    self.notify("Cancelled before typing; nothing was typed.")
+                    await self._preserve(body)
+                raise
             except (DiscordError, OSError, ValueError) as error:
                 self.notify(f"{error} Nothing was pressed; the draft may remain.")
                 await self._preserve(body)

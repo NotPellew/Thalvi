@@ -15,7 +15,10 @@ from thalvi_desktop.config import Config
 from thalvi_desktop.discord import (
     AttemptUncertain,
     DesktopComposer,
+    DiscordError,
     DiscordRefused,
+    DiscordUnavailable,
+    InsertionUncertain,
     validate_body,
 )
 from thalvi_desktop.host import Target
@@ -57,10 +60,22 @@ class FakePage:
         self.structure = True
         self.entered: list[str] = []
         self.inserted: list[str] = []
+        self.inputs: list[str] = []
         self.navigated: list[str] = []
         self.fail_keydown = False
+        self.fail_input = False
+        self.fail_input_error = False
         self.enter_seen = None
         self.release_enter = None
+        self.input_seen = None
+        self.release_input = None
+        self.gate_state = None
+        self.gate_reason = None
+        self.gate_nonce = None
+        self.armed_text = None
+        self.armed_route = None
+        self.armed_digest = None
+        self.scripts: list[str] = []
 
     async def handle(self, socket):
         async for raw in socket:
@@ -68,14 +83,14 @@ class FakePage:
             method, params = message["method"], message.get("params", {})
             if method == "Runtime.evaluate":
                 expression = str(params.get("expression", ""))
-                if "findEditor" in expression:
+                if "findEditor()" in expression:
                     remote = (
                         {"type": "object", "objectId": "editor-1"}
                         if self.structure
                         else {"type": "object", "subtype": "null", "value": None}
                     )
                     result = {"result": {"result": remote}}
-                elif "location.origin" in expression:
+                elif expression.startswith("({route:"):
                     result = {
                         "result": {
                             "result": {
@@ -84,14 +99,40 @@ class FakePage:
                             }
                         }
                     }
+                elif ".gateOutcome(" in expression:
+                    result = {
+                        "result": {
+                            "result": {
+                                "type": "object",
+                                "value": {
+                                    "state": self.gate_state or "missing",
+                                    "reason": self.gate_reason,
+                                    "events": 1 if self.gate_state else 0,
+                                },
+                            }
+                        }
+                    }
+                elif ".disarm(" in expression:
+                    self.gate_state = None
+                    self.gate_reason = None
+                    result = {"result": {"result": {"type": "boolean", "value": True}}}
+                elif ".denyPending(" in expression:
+                    if self.gate_state == "armed":
+                        self.gate_state = "denied"
+                        self.gate_reason = "cancelled"
+                    result = {"result": {"result": {"type": "boolean", "value": True}}}
                 else:
                     result = {"error": {"code": -32601, "message": "unknown expression"}}
             elif method == "Runtime.callFunctionOn":
                 value = self.observe(params)
                 function = str(params["functionDeclaration"])
-                if value["ok"] and "guard.insert(" in function:
-                    self.draft = str(params["arguments"][3]["value"])
-                    self.inserted.append(self.draft)
+                if value["ok"] and "guard.arm(" in function:
+                    self.armed_text = str(params["arguments"][3]["value"])
+                    self.armed_route = str(params["arguments"][0]["value"])
+                    self.armed_digest = str(params["arguments"][2]["value"])
+                    self.gate_nonce = str(params["arguments"][4]["value"])
+                    self.gate_state = "armed"
+                    self.gate_reason = None
                 elif value["ok"] and "guard.enter(" in function:
                     self.entered.append("keyDown")
                     if self.enter_seen is not None:
@@ -101,6 +142,57 @@ class FakePage:
                         await socket.close()
                         return
                 result = {"result": {"result": {"type": "object", "value": value}}}
+            elif method == "Input.insertText":
+                text = str(params["text"])
+                self.inputs.append(text)
+                if self.fail_input:
+                    await socket.close()
+                    return
+                if self.fail_input_error:
+                    await socket.send(
+                        json.dumps(
+                            {
+                                "id": message["id"],
+                                "error": {"code": -32602, "message": "invalid input"},
+                            }
+                        )
+                    )
+                    continue
+                reason = None
+                if self.gate_state != "armed":
+                    reason = "structure-changed"
+                elif text != self.armed_text:
+                    reason = "structure"
+                elif self.route != self.armed_route:
+                    reason = "route-mismatch"
+                elif not self.focused:
+                    reason = "editor-unfocused"
+                elif self.draft:
+                    reason = "draft-mismatch"
+                elif self.digest != self.armed_digest or not self.structure:
+                    reason = "structure-changed"
+                if reason is None:
+                    self.gate_state = "allowed"
+                    self.draft = text
+                    self.inserted.append(text)
+                else:
+                    self.gate_state = "denied"
+                    self.gate_reason = reason
+                if self.input_seen is not None:
+                    self.input_seen.set()
+                    await self.release_input.wait()
+                result = {"result": {}}
+            elif method == "Page.enable":
+                result = {"result": {}}
+            elif method == "Page.addScriptToEvaluateOnNewDocument":
+                identifier = f"script-{len(self.scripts) + 1}"
+                self.scripts.append(identifier)
+                result = {"result": {"identifier": identifier}}
+            elif method == "Page.removeScriptToEvaluateOnNewDocument":
+                identifier = str(params.get("identifier"))
+                if identifier in self.scripts:
+                    self.scripts.remove(identifier)
+                result = {"result": {}}
             elif method == "Page.navigate":
                 self.route = str(params["url"])
                 self.navigated.append(self.route)
@@ -121,7 +213,7 @@ class FakePage:
             failure = ("editor-unfocused", False)
         if any(
             f"guard.{name}(" in str(params["functionDeclaration"])
-            for name in ("verify", "insert", "enter")
+            for name in ("verify", "arm", "enter")
         ):
             draft = arguments[1]["value"]
             digest = arguments[2]["value"]
@@ -192,8 +284,8 @@ def test_full_adapter_prepares_types_and_closes(config, tmp_path):
     async def behavior():
         async with fake_discord(tmp_path / "proc", page) as (port, proc):
             _, composer = paced(config, port, proc)
-            prepared = await composer.prepare(ROUTE)
-            await composer.enter_draft(prepared, validate_body("Hello there!"))
+            prepared = await composer._inspect(ROUTE)
+            await prepared.session.enter_draft(prepared.guarded, validate_body("Hello there!"))
             assert page.inserted == ["Hello there!"]
             await composer.close(prepared)
 
@@ -207,7 +299,7 @@ def test_adapter_navigates_to_the_configured_route(config, tmp_path):
     async def behavior():
         async with fake_discord(tmp_path / "proc", page) as (port, proc):
             _, composer = paced(config, port, proc)
-            prepared = await composer.prepare(ROUTE)
+            prepared = await composer._inspect(ROUTE)
             await composer.close(prepared)
 
     asyncio.run(behavior())
@@ -220,30 +312,30 @@ def test_adapter_refuses_a_changed_draft_after_the_barrier(config, tmp_path):
     async def behavior():
         async with fake_discord(tmp_path / "proc", page) as (port, proc):
             _, composer = paced(config, port, proc)
-            prepared = await composer.prepare(ROUTE)
-            await composer.enter_draft(prepared, "Hello there!")
+            prepared = await composer._inspect(ROUTE)
+            await prepared.session.enter_draft(prepared.guarded, "Hello there!")
             page.draft = "A user edit"
             with pytest.raises(DiscordRefused, match="changed after typing"):
-                await composer.submit(prepared, "Hello there!")
+                await prepared.session.submit(prepared.guarded, "Hello there!")
             await composer.close(prepared)
 
     asyncio.run(behavior())
     assert page.entered == []
 
 
-def test_adapter_enters_once_and_reports_unconfirmed(config, tmp_path):
+def test_experimental_session_enters_once(config, tmp_path):
     page = FakePage()
 
     async def behavior():
         async with fake_discord(tmp_path / "proc", page) as (port, proc):
             _, composer = paced(config, port, proc)
-            prepared = await composer.prepare(ROUTE)
-            await composer.enter_draft(prepared, "Hello there!")
-            notice = await composer.submit(prepared, "Hello there!")
+            prepared = await composer._inspect(ROUTE)
+            await prepared.session.enter_draft(prepared.guarded, "Hello there!")
+            notice = await prepared.session.submit(prepared.guarded, "Hello there!")
             await composer.close(prepared)
             return notice
 
-    assert asyncio.run(behavior()) == "Submission attempted; delivery unconfirmed."
+    assert asyncio.run(behavior()) is None
     assert page.entered == ["keyDown"]
 
 
@@ -254,14 +346,80 @@ def test_adapter_reports_an_uncertain_enter_without_a_second_press(config, tmp_p
     async def behavior():
         async with fake_discord(tmp_path / "proc", page) as (port, proc):
             _, composer = paced(config, port, proc)
-            prepared = await composer.prepare(ROUTE)
-            await composer.enter_draft(prepared, "Hello there!")
+            prepared = await composer._inspect(ROUTE)
+            await prepared.session.enter_draft(prepared.guarded, "Hello there!")
             with pytest.raises(AttemptUncertain):
-                await composer.submit(prepared, "Hello there!")
+                await prepared.session.submit(prepared.guarded, "Hello there!")
             await composer.close(prepared)
 
     asyncio.run(behavior())
     assert page.entered == ["keyDown"]
+
+
+def test_adapter_reports_an_uncertain_insert_after_connection_loss(config, tmp_path):
+    page = FakePage()
+    page.fail_input = True
+
+    async def behavior():
+        async with fake_discord(tmp_path / "proc", page) as (port, proc):
+            _, composer = paced(config, port, proc)
+            prepared = await composer._inspect(ROUTE)
+            with pytest.raises(InsertionUncertain):
+                await prepared.session.enter_draft(prepared.guarded, "Hello there!")
+            await composer.close(prepared)
+            return prepared.session.insert_uncertain
+
+    uncertain = asyncio.run(behavior())
+    assert uncertain is True
+    assert page.inputs == ["Hello there!"]
+    assert page.inserted == []
+    assert page.scripts == ["script-1"]
+
+
+def test_adapter_reports_a_rejected_insert_and_clears_the_gate(config, tmp_path):
+    page = FakePage()
+    page.fail_input_error = True
+
+    async def behavior():
+        async with fake_discord(tmp_path / "proc", page) as (port, proc):
+            _, composer = paced(config, port, proc)
+            prepared = await composer._inspect(ROUTE)
+            with pytest.raises(DiscordError, match="rejected the typing command"):
+                await prepared.session.enter_draft(prepared.guarded, "Hello there!")
+            await composer.close(prepared)
+
+    asyncio.run(behavior())
+    assert page.inputs == ["Hello there!"]
+    assert page.inserted == []
+    assert page.scripts == []
+    assert page.gate_state is None
+
+
+def test_adapter_cancels_after_the_wire_without_a_replay(config, tmp_path):
+    page = FakePage()
+
+    async def behavior():
+        page.input_seen, page.release_input = asyncio.Event(), asyncio.Event()
+        async with fake_discord(tmp_path / "proc", page) as (port, proc):
+            _, composer = paced(config, port, proc)
+            prepared = await composer._inspect(ROUTE)
+            pending = asyncio.create_task(
+                prepared.session.enter_draft(prepared.guarded, "Hello there!")
+            )
+            await asyncio.wait_for(page.input_seen.wait(), 1)
+            pending.cancel()
+            page.release_input.set()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            await composer.close(prepared)
+            return prepared.session.insert_uncertain, page.gate_state, page.draft
+
+    uncertain, gate, draft = asyncio.run(behavior())
+    assert uncertain is True
+    assert page.inputs == ["Hello there!"]
+    assert page.inserted == ["Hello there!"]
+    assert gate == "allowed"
+    assert draft == "Hello there!"
 
 
 def test_adapter_metrics_name_each_call_without_the_body(config, tmp_path):
@@ -279,9 +437,9 @@ def test_adapter_metrics_name_each_call_without_the_body(config, tmp_path):
                 deadline=1.0,
                 timeout=1.0,
             )
-            prepared = await composer.prepare(ROUTE)
-            await composer.enter_draft(prepared, "A private message")
-            await composer.submit(prepared, "A private message")
+            prepared = await composer._inspect(ROUTE)
+            await prepared.session.enter_draft(prepared.guarded, "A private message")
+            await prepared.session.submit(prepared.guarded, "A private message")
             await composer.close(prepared)
 
     asyncio.run(behavior())
@@ -296,7 +454,7 @@ def test_adapter_metrics_name_each_call_without_the_body(config, tmp_path):
 
 
 @pytest.mark.parametrize("change", ["route", "draft", "focus"])
-def test_guard_and_insert_share_browser_action_after_metrics_barrier(config, tmp_path, change):
+def test_guard_refuses_changes_after_the_prepare_observation(config, tmp_path, change):
     page = FakePage()
 
     async def behavior():
@@ -313,7 +471,7 @@ def test_guard_and_insert_share_browser_action_after_metrics_barrier(config, tmp
             composer = DesktopComposer(
                 local, GateMetrics(None), windows=lambda: [Target("0x1", 100, "discord")], root=proc
             )
-            pending = asyncio.create_task(composer.prepare(ROUTE))
+            pending = asyncio.create_task(composer._inspect(ROUTE))
             await asyncio.wait_for(blocked.wait(), 1)
             if change == "route":
                 page.route = "https://discord.com/channels/1/2"
@@ -324,48 +482,47 @@ def test_guard_and_insert_share_browser_action_after_metrics_barrier(config, tmp
             release.set()
             prepared = await pending
             with pytest.raises(DiscordRefused):
-                await composer.enter_draft(prepared, "Hello")
+                await prepared.session.enter_draft(prepared.guarded, "Hello")
             await composer.close(prepared)
             assert page.inserted == []
 
     asyncio.run(behavior())
 
 
-def test_workflow_cancel_after_send_preserves_body_and_reports_uncertainty(config, tmp_path):
-    page = FakePage()
-
+def test_live_workflow_refuses_discord_without_connecting_or_confirming(config, monkeypatch):
     async def behavior():
-        page.enter_seen, page.release_enter = asyncio.Event(), asyncio.Event()
-        async with fake_discord(tmp_path / "proc", page) as (port, proc):
-            local, composer = paced(config, port, proc)
-            host = PreviewHost(lambda _: None)
-            notices = []
-            workflow = Workflow(local, host, notices.append, discord=composer)
+        async def unexpected(*args, **kwargs):
+            pytest.fail("Disabled Discord actions must not inspect or connect.")
 
-            async def confirm():
-                return True
+        def windows():
+            pytest.fail("Disabled Discord actions must not inspect desktop windows.")
 
-            pending = asyncio.create_task(
-                workflow.finish(
-                    Request(Ending.TASK, "message the demo channel saying Hello there!"),
-                    host.capture(),
-                    confirm,
-                )
-            )
-            await asyncio.wait_for(page.enter_seen.wait(), 1)
-            pending.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(pending, 2)
-            assert host.operations == [("clipboard", "Hello there!", False)]
-            assert any("delivery is unconfirmed" in notice for notice in notices)
-            assert page.entered == ["keyDown"]
-            page.release_enter.set()
+        composer = DesktopComposer(config, Metrics(None), windows=windows)
+        monkeypatch.setattr("thalvi_desktop.discord.cdp.discover", unexpected)
+        host = PreviewHost(lambda _: None)
+        notices = []
+        workflow = Workflow(config, host, notices.append, discord=composer)
+
+        async def confirm():
+            pytest.fail("Disabled Discord actions must not request send confirmation.")
+
+        assert not await workflow.finish(
+            Request(Ending.TASK, "message the demo channel saying Hello there!"),
+            host.capture(),
+            confirm,
+        )
+        assert host.operations == [("clipboard", "Hello there!", False)]
+        assert any("Discord typing is disabled" in notice for notice in notices)
+
+        for method in (composer.enter_draft, composer.submit):
+            with pytest.raises(DiscordUnavailable, match="disabled"):
+                await method(None, "Hello there!")
 
     asyncio.run(behavior())
 
 
 @pytest.mark.parametrize("change", ["route", "draft", "focus"])
-def test_guard_and_enter_share_browser_action_after_metrics_barrier(config, tmp_path, change):
+def test_guard_refuses_changes_after_the_insert_verification(config, tmp_path, change):
     page = FakePage()
 
     async def behavior():
@@ -388,8 +545,8 @@ def test_guard_and_enter_share_browser_action_after_metrics_barrier(config, tmp_
             composer = DesktopComposer(
                 local, GateMetrics(), windows=lambda: [Target("0x1", 100, "discord")], root=proc
             )
-            prepared = await composer.prepare(ROUTE)
-            pending = asyncio.create_task(composer.enter_draft(prepared, "Hello"))
+            prepared = await composer._inspect(ROUTE)
+            pending = asyncio.create_task(prepared.session.enter_draft(prepared.guarded, "Hello"))
             await asyncio.wait_for(blocked.wait(), 1)
             if change == "route":
                 page.route = "https://discord.com/channels/1/2"
@@ -400,7 +557,7 @@ def test_guard_and_enter_share_browser_action_after_metrics_barrier(config, tmp_
             release.set()
             await pending
             with pytest.raises(DiscordRefused):
-                await composer.submit(prepared, "Hello")
+                await prepared.session.submit(prepared.guarded, "Hello")
             await composer.close(prepared)
             assert page.entered == []
 

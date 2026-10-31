@@ -12,7 +12,7 @@ dependencies = ["websockets==17.4", "numpy==2.5.4"]
 audio = ["sounddevice==0.5.6", "onnxruntime==1.31.1", "openwakeword==0.6.0"]
 
 [dependency-groups]
-dev = ["pytest==9.2.0", "ruff==0.17.3"]
+dev = ["playwright==1.63.0", "pytest==9.2.0", "ruff==0.17.3"]
 
 [project.scripts]
 thalvi-desktop = "thalvi_desktop.cli:main"

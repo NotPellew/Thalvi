@@ -70,46 +70,24 @@ history chooses the first. An unconfigured task preserves its text on the
 clipboard. `tasks.decide` returns `OpenUrl`, `FocusApp`, or `DiscordMessage`; a future
 model decision can return the same typed action to `tasks.execute`.
 
-Say “message the demo channel saying <message> do that” to use the opt-in
-Discord Desktop path below. The destination accepts Discord channel and DM URLs
-such as `https://discord.com/channels/<guild-or-@me>/<channel>`; there is no
-per-channel allowlist. No test sends a real message.
-
 ### Discord Desktop
 
-This is a local-debugger adapter, not a bot, webhook or private endpoint. Start
-Discord Desktop with its DevTools port open and accessibility enabled. Fully
-quit the existing instance before launching with these flags:
+Live Discord typing and submission are disabled. A scripted Discord request
+reports this and keeps the message on the clipboard without connecting to
+Discord, navigating, inserting text or pressing Enter. Preview still shows the
+proposed action. Channel and DM URLs remain accepted in configuration.
 
-```sh
-discord --force-renderer-accessibility --remote-debugging-port=9223
-```
+The experimental CDP adapter is retained for inert tests. Its trusted
+`Input.insertText` updates the real Slate model, unlike `execCommand`, but the
+input gate does not protect existing child documents or establish safety for
+out-of-process frames. An existing-frame regression is a strict expected
+failure. The later unresolved-input tombstone regression passes; a new arm or
+disarm cannot erase that uncertainty before a reload.
 
-Set `discord.debug_port` in the config to the same port (9223 in the example).
-The client only talks to `127.0.0.1`, and checks that the listening socket, its
-executable, the Discord window, and the user ID all belong to this Discord
-process. Any other owner refuses the action. The debug port gives local
-processes full control of Discord, so open it only while testing and restart
-Discord normally afterwards.
-
-With the configured channel open and its message box empty, the task verifies
-the exact route and a bounded composer baseline: one focused message box, no
-draft, attachment, reply, edit, menu, dialog or unfamiliar control. It opens
-the exact channel if needed, inserts the text, shows the destination and exact
-body, and asks for the normal standalone voice confirmation. Immediately after
-yes it repeats the route, draft, region, and focus checks, then presses Enter
-once. A failed check presses nothing and keeps the body. Cancelling leaves the
-inserted draft in Discord for review; the client never clears a draft it cannot
-prove it owns. Preflight inspects the composer; inserting the draft changes
-Discord before the confirmation.
-
-Discord's acknowledgement and the editor clearing are not delivery receipts.
-Every completed attempt reports **submission attempted; delivery unconfirmed**.
-There is no "sent" result until a defined Discord receipt is observed. The
-initial read-only guard was exercised against Linux Discord Desktop 1.0.168.
-Live insertion and submission need separate qualification; an unfamiliar form
-or state refuses instead of guessing. The tests use inert local HTTP,
-WebSocket and DOM fixtures and never connect to real Discord.
+The real-browser fixture establishes transport and Slate behavior, not safe
+live Discord control. Re-enabling the action requires closing the frame input
+boundary and separate live qualification. Discord acknowledgements and an
+optimistically cleared editor still would not establish delivery.
 
 The other wake word opens native conversation. Speak naturally and interrupt
 by speaking; `stop conversation`, `end conversation` or `never mind` returns
@@ -128,6 +106,21 @@ terminal.
 guard runs in the web toolchain against inert DOM fixtures (`npm test` in
 `web/`), not against the user's Discord.
 
+The real-browser gate is opt-in and uses Playwright's pinned Chromium plus a
+local CONNECT/TLS proxy that serves an inert Slate/React fixture as
+`https://discord.com`. It never reaches the network or real Discord:
+
+```sh
+cd desktop
+npm ci --prefix browser && npm run build --prefix browser
+uv run playwright install --with-deps chromium
+THALVI_BROWSER_TESTS=1 uv run pytest -q tests/test_discord_browser.py
+```
+
+Playwright is a dev-only dependency used to launch the pinned Chromium and
+observe the fixture. The fixture's React, Slate and esbuild packages are also
+dev-only and lock to the versions in `browser/package-lock.json`.
+
 ## Replay without audio or app actions
 
 ```sh
@@ -137,9 +130,8 @@ uv run thalvi-desktop --config config.example.json replay examples/capture.jsonl
 
 Replay does not use a microphone, wake model or endpoint. It previews actions
 unless `--apply` is explicitly given; that flag really types into the focused
-window and, for a crafted Discord replay fixture whose confirmation is true,
-really uses the local Discord debugger and can press Enter. Use `--apply` only
-for an explicitly authorized live rehearsal. Without `--apply`, replay and
+window. Live Discord requests remain disabled even with `--apply`. Use
+`--apply` only for an explicitly authorized live rehearsal. Without `--apply`, replay and
 preview never connect to Discord. Replay reads confirmation events from the
 fixture rather than live speech. Live voice recognition quality and native
 audio hardware need separate manual qualification; replay and stub-server

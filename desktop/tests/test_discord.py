@@ -6,6 +6,7 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,7 @@ from thalvi_desktop.discord import (
     CDPPage,
     ComposerSession,
     DiscordRefused,
+    InsertionUncertain,
     Observation,
     PreviewComposer,
     _listener_inode,
@@ -33,7 +35,12 @@ DESTINATION = ROUTE
 TASK = "message the demo channel saying Hello there!"
 
 
-@pytest.mark.parametrize("method", ["observe", "verify", "insert", "enter"])
+def test_composer_guard_does_not_use_exec_command():
+    source = Path(__file__).parents[1] / "src" / "thalvi_desktop" / "discord_dom.js"
+    assert "execCommand" not in source.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("method", ["observe", "verify", "arm", "enter"])
 def test_emitted_browser_function_executes_for_each_operation(method):
     class Browser:
         async def call(self, name, parameters, **_kwargs):
@@ -61,10 +68,11 @@ def test_emitted_browser_function_executes_for_each_operation(method):
         arguments = {
             "observe": (editor,),
             "verify": (editor, ROUTE, "", "baseline"),
-            "insert": (editor, ROUTE, "baseline", "marker"),
+            "arm": (editor, ROUTE, "baseline", "marker", "nonce"),
             "enter": (editor, ROUTE, "baseline", "marker", lambda: None),
         }
-        result = await getattr(page, method)(*arguments[method])
+        operation = page._arm if method == "arm" else getattr(page, method)
+        result = await operation(*arguments[method])
         assert result.ok is False
         assert result.reason == "editor-missing"
 
@@ -105,6 +113,7 @@ def test_route_accepts_channel_and_dm_paths_and_refuses_anything_else():
         ("delete\x7f", False),
         ("c1\x85", False),
         ("zero\u200bwidth", False),
+        ("byte\ufefforder", False),
         ("line\u2028separator", False),
     ],
 )
@@ -273,9 +282,11 @@ class ScriptedPage:
             )
         return observation(self)
 
-    async def insert(self, editor, route, digest, text):
+    async def insert(self, editor, route, digest, text, on_send=None, before_input=None):
         current = await self.verify(editor, route, "", digest)
         if current.ok:
+            if on_send is not None:
+                on_send()
             self.calls.append(("insert", text))
             self.draft = text
         return current
@@ -374,8 +385,8 @@ def test_session_waits_for_the_draft_to_appear_but_never_retries_enter():
         page = ScriptedPage()
         insert = page.insert
 
-        async def stale_insert(editor, route, digest, text):
-            result = await insert(editor, route, digest, text)
+        async def stale_insert(editor, route, digest, text, on_send=None, before_input=None):
+            result = await insert(editor, route, digest, text, on_send=on_send)
             page.draft = ""
             asyncio.get_running_loop().call_later(0.02, setattr, page, "draft", text)
             return result
@@ -509,6 +520,60 @@ def test_workflow_preparation_and_typing_failures_preserve_the_body(config):
     assert host.operations == [("clipboard", "Hello there!", False)]
     assert [call[0] for call in composer.calls] == ["prepare", "draft", "close"]
     assert "may remain" in notices[0]
+
+
+def test_workflow_uncertain_typing_preserves_the_body_and_presses_nothing(config):
+    composer = ScriptedComposer(
+        draft_error=InsertionUncertain("Typing may have completed; check Discord.")
+    )
+
+    async def confirm():
+        raise AssertionError("Uncertain typing must not ask for confirmation")
+
+    result, host, notices = run_finish(config, composer, confirm)
+    assert result is False
+    assert host.operations == [("clipboard", "Hello there!", False)]
+    assert any("may have completed" in line for line in notices)
+    assert any("Nothing was pressed" in line for line in notices)
+    assert [call[0] for call in composer.calls] == ["prepare", "draft", "close"]
+
+
+@pytest.mark.parametrize(
+    ("sent", "uncertain", "notice"),
+    [
+        (True, True, "Typing may have completed"),
+        (True, False, "Typing was interrupted"),
+        (False, False, "Cancelled before typing"),
+    ],
+)
+def test_workflow_cancel_during_typing_reports_the_draft_state(config, sent, uncertain, notice):
+    class Composer(ScriptedComposer):
+        async def prepare(self, destination):
+            self.calls.append(("prepare", destination))
+            session = SimpleNamespace(insert_sent=sent, insert_uncertain=uncertain)
+            return SimpleNamespace(session=session)
+
+        async def enter_draft(self, prepared, body):
+            self.calls.append(("draft", body))
+            raise asyncio.CancelledError
+
+    composer = Composer()
+
+    async def behavior():
+        host = PreviewHost(lambda _: None)
+        notices = []
+        workflow = Workflow(config, host, notices.append, discord=composer)
+        with pytest.raises(asyncio.CancelledError):
+            await workflow.finish(Request(Ending.TASK, TASK), host.capture(), confirm)
+        return host, notices
+
+    async def confirm():
+        return True
+
+    host, notices = asyncio.run(behavior())
+    assert host.operations == [("clipboard", "Hello there!", False)]
+    assert any(notice in line for line in notices)
+    assert calls_include(composer, "close")
 
 
 def test_workflow_uncertain_and_failed_submits_preserve_the_body_and_close(config):

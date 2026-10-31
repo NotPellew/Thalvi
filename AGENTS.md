@@ -106,6 +106,11 @@ manager; lockfiles are committed.
   Run `uv sync --locked`, `uv run ruff format --check .`,
   `uv run ruff check .`, `uv run pytest -q`. This gate uses fakes instead of
   model weights, microphones, or real desktop apps.
+- Desktop browser (`desktop/browser/`): from `desktop/`, `npm ci --prefix browser`,
+  `npm run build --prefix browser`, `uv run playwright install --with-deps chromium`,
+  then `THALVI_BROWSER_TESTS=1 uv run pytest -q tests/test_discord_browser.py`.
+  Runs the real Chromium and Slate fixture through a local fake `discord.com`;
+  it never reaches real Discord.
 - Speech servers (`compose.yaml`, `speech/`): `docker compose --profile kokoro
   --profile vllm-omni config -q`, `pipx run shellcheck-py==0.11.0.1
   speech/qwentts.sh`.

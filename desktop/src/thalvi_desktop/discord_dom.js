@@ -1,10 +1,13 @@
-// Owns the bounded Discord composer observation used through the local debugger.
+// Owns the bounded Discord composer observation and its one-shot input gate.
 // It never reads history, tokens or anything outside the editor's form region.
 (() => {
   "use strict";
 
   const EDITOR = 'div[role="textbox"][contenteditable="true"][data-slate-editor="true"][data-slate-node="value"]';
   const ORIGIN = "https://discord.com";
+  const GATE_KEY = "__thalvi_discord_gate__";
+  const GATE_DEFAULT_KEY = "__thalvi_discord_gate_default__";
+  const GATE_LIFETIME = 10000;
   const KNOWN_CONTROLS = new Set([
     "More message options",
     "Send a gift",
@@ -249,11 +252,113 @@
     return observation;
   };
 
-  const insert = (editor, route, draft, digest, text) => {
+  const selectionInside = (editor) => {
+    const selection = document.getSelection();
+    if (!selection || selection.rangeCount !== 1 || !selection.isCollapsed) return false;
+    const node = selection.anchorNode;
+    return node !== null && (node === editor || editor.contains(node));
+  };
+
+  const clearGate = () => {
+    const fallback = window[GATE_DEFAULT_KEY];
+    if (fallback && fallback.listener) {
+      document.removeEventListener("beforeinput", fallback.listener, true);
+      delete window[GATE_DEFAULT_KEY];
+    }
+    const gate = window[GATE_KEY];
+    if (!gate) return;
+    if (gate.listener) document.removeEventListener("beforeinput", gate.listener, true);
+    delete window[GATE_KEY];
+  };
+
+  const arm = (editor, route, draft, digest, text, nonce) => {
     const current = verify(editor, route, draft, digest);
     if (!current.ok) return current;
-    if (!document.execCommand("insertText", false, text)) return fail("structure", "insert-failed");
+    if (!selectionInside(editor)) {
+      return { ...current, ok: false, reason: "editor-unfocused", focused: false };
+    }
+    const prior = window[GATE_KEY];
+    if (prior && (prior.state === "armed" || prior.unresolved)) {
+      return { ...current, ok: false, reason: "gate-pending" };
+    }
+    clearGate();
+    const gate = {
+      nonce,
+      text,
+      state: "armed",
+      reason: null,
+      events: 0,
+      expires: performance.now() + GATE_LIFETIME,
+      listener: null,
+    };
+    gate.listener = (event) => {
+      if (!event.isTrusted) return;
+      if (event.inputType !== "insertText" || event.data !== text) return;
+      gate.events += 1;
+      if (gate.state !== "armed") {
+        if (gate.state === "allowed") {
+          gate.state = "denied";
+          gate.reason = "gate-consumed";
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      let reason = null;
+      if (performance.now() > gate.expires) {
+        reason = "gate-expired";
+      } else if (event.target !== editor) {
+        reason = "target-mismatch";
+      } else {
+        let observed = null;
+        try {
+          observed = verify(editor, route, draft, digest);
+        } catch {
+          reason = "structure";
+        }
+        if (reason === null && (!observed || !observed.ok)) {
+          reason = observed ? observed.reason || "structure" : "structure";
+        }
+        if (reason === null && !selectionInside(editor)) reason = "editor-unfocused";
+      }
+      if (reason !== null) {
+        gate.state = "denied";
+        gate.reason = reason;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      gate.state = "allowed";
+    };
+    document.addEventListener("beforeinput", gate.listener, true);
+    window[GATE_KEY] = gate;
     return current;
+  };
+
+  const gateOutcome = (nonce) => {
+    const gate = window[GATE_KEY];
+    if (!gate || gate.nonce !== nonce) return { state: "missing", reason: null, events: 0 };
+    return { state: gate.state, reason: gate.reason, events: gate.events };
+  };
+
+  const denyPending = (nonce) => {
+    const gate = window[GATE_KEY];
+    if (!gate || gate.nonce !== nonce || gate.state !== "armed") return false;
+    gate.state = "denied";
+    gate.reason = "cancelled";
+    gate.unresolved = true;
+    return true;
+  };
+
+  const disarm = (nonce) => {
+    const gate = window[GATE_KEY];
+    const fallback = window[GATE_DEFAULT_KEY];
+    if (gate && gate.unresolved) return false;
+    if (gate && gate.nonce !== nonce) return false;
+    if (!gate && !fallback) return false;
+    if (!gate && fallback.nonce !== nonce) return false;
+    clearGate();
+    return true;
   };
 
   const enter = (editor, route, draft, digest) => {
@@ -265,5 +370,5 @@
     return current;
   };
 
-  return { findEditor, observe, verify, insert, enter };
+  return { findEditor, observe, verify, arm, gateOutcome, denyPending, disarm, enter };
 })();

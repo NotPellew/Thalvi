@@ -80,6 +80,15 @@ function focus(element) {
   Object.defineProperty(document, "activeElement", { configurable: true, value: element });
 }
 
+function select(element) {
+  const selection = document.getSelection();
+  selection.removeAllRanges();
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.collapse(true);
+  selection.addRange(range);
+}
+
 function mount(mutate) {
   document.body.innerHTML = BASELINE;
   if (mutate) mutate(document.body);
@@ -99,6 +108,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (window.__thalvi_discord_gate__) {
+    guard.disarm(window.__thalvi_discord_gate__.nonce);
+  }
   vi.restoreAllMocks();
   delete document.activeElement;
 });
@@ -312,17 +324,50 @@ describe("Discord composer guarded actions", () => {
     expect(guard.observe(element, ROUTE).draft).toBe("");
   });
 
-  it("checks state inside the action before editing or dispatching", () => {
+  it("checks state inside enter before dispatching", () => {
     const element = mount();
     const baseline = guard.observe(element, ROUTE);
-    const insert = vi.fn(() => true);
-    document.execCommand = insert;
     focus(document.body);
-    expect(guard.insert(element, ROUTE, "", baseline.digest, "Hello").ok).toBe(false);
-    expect(insert).not.toHaveBeenCalled();
     const listener = vi.fn();
     element.addEventListener("keydown", listener);
     expect(guard.enter(element, ROUTE, "", baseline.digest).ok).toBe(false);
     expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("arms only with focus and a collapsed selection inside the editor", () => {
+    const element = mount();
+    const baseline = guard.observe(element, ROUTE);
+    focus(document.body);
+    expect(guard.arm(element, ROUTE, "", baseline.digest, "Hello", "nonce-1").ok).toBe(false);
+    expect(window.__thalvi_discord_gate__).toBeUndefined();
+    focus(element);
+    select(document.body);
+    expect(guard.arm(element, ROUTE, "", baseline.digest, "Hello", "nonce-1").reason).toBe(
+      "editor-unfocused",
+    );
+    select(element);
+    expect(guard.arm(element, ROUTE, "", baseline.digest, "Hello", "nonce-1").ok).toBe(true);
+  });
+
+  it("retains an unresolved authorization until the document is replaced", () => {
+    const element = mount();
+    select(element);
+    const baseline = guard.observe(element, ROUTE);
+    expect(guard.arm(element, ROUTE, "", baseline.digest, "Hello", "nonce-1").ok).toBe(true);
+    expect(guard.arm(element, ROUTE, "", baseline.digest, "Hello", "nonce-2").reason).toBe(
+      "gate-pending",
+    );
+    expect(guard.gateOutcome("nonce-2").state).toBe("missing");
+    expect(guard.gateOutcome("nonce-1").state).toBe("armed");
+    expect(guard.denyPending("nonce-1")).toBe(true);
+    expect(guard.gateOutcome("nonce-1")).toEqual({
+      state: "denied",
+      reason: "cancelled",
+      events: 0,
+    });
+    expect(guard.disarm("nonce-1")).toBe(false);
+    expect(guard.arm(element, ROUTE, "", baseline.digest, "new", "nonce-2").reason).toBe(
+      "gate-pending",
+    );
   });
 });
