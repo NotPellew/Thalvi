@@ -128,3 +128,32 @@ def test_overflow_stops_capture_and_playback_stop_discards_all_queued_audio(monk
         assert all(not stream.active for stream in streams)
 
     asyncio.run(behavior())
+
+
+def test_input_epoch_rejects_callbacks_already_scheduled_before_resume(monkeypatch):
+    streams = []
+
+    class Stream:
+        def __init__(self, **kwargs):
+            self.callback = kwargs["callback"]
+            streams.append(self)
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(RawInputStream=Stream))
+
+    async def behavior():
+        async with Audio() as audio:
+            streams[0].callback(b"old", 1, None, None)
+            audio.set_input(False)
+            streams[0].callback(b"during cue", 1, None, None)
+            audio.set_input(True)
+            streams[0].callback(b"fresh", 1, None, None)
+            assert await asyncio.wait_for(audio.next(), 1) == b"fresh"
+            assert audio.frames.empty()
+
+    asyncio.run(behavior())

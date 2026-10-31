@@ -15,6 +15,7 @@ class Ending(StrEnum):
 
 DEFAULT_ENDINGS = {
     "paste that": Ending.PASTE,
+    "finish dictation": Ending.PASTE,
     "submit": Ending.SUBMIT,
     "do that": Ending.TASK,
     "scratch that": Ending.SCRATCH,
@@ -42,28 +43,44 @@ class Capture:
         if self.finished:
             raise ValueError("This capture has already finished.")
         text = transcript.strip()
+        combined = " ".join([*self.pieces, text]).strip()
         ending = None
+        match = None
         for phrase in sorted(self.endings, key=len, reverse=True):
-            match = re.search(r"(?:^|\s)" + re.escape(phrase) + r"[\s.!?,;:]*$", text, re.I)
+            words = phrase.split()
+            pattern = r"[\s.!?,;:]+".join(map(re.escape, words))
+            match = re.search(r"(?:^|\s)" + pattern + r"[\s.!?,;:]*$", combined, re.I)
             if match:
                 ending = self.endings[phrase]
-                text = text[: match.start()].strip()
                 break
         if ending == Ending.CANCEL:
             self.pieces.clear()
             self.finished = True
             return Request(ending, "")
         if ending == Ending.SCRATCH:
-            if not text and self.pieces:
-                self.pieces.pop()
+            before = combined[: match.start()].strip()
+            remaining = len(before)
+            kept = []
+            for piece in [*self.pieces, text]:
+                if remaining < len(piece):
+                    break
+                kept.append(piece)
+                remaining -= len(piece) + 1
+            if remaining <= 0 and kept:
+                kept.pop()
+            self.pieces = kept
             return None
-        if text:
-            if len(self.text) + len(text) + 1 > 20_000:
-                raise ValueError("This capture is full. Finish or cancel it before continuing.")
-            self.pieces.append(text)
         if ending is not None:
+            combined = combined[: match.start()].strip()
+            if len(combined) > 20_000:
+                raise ValueError("This capture is full. Finish or cancel it before continuing.")
+            self.pieces = [combined] if combined else []
             self.finished = True
             return Request(ending, self.text)
+        if text:
+            if len(combined) > 20_000:
+                raise ValueError("This capture is full. Finish or cancel it before continuing.")
+            self.pieces.append(text)
         return None
 
 

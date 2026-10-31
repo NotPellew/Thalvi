@@ -21,6 +21,7 @@ class Audio:
         self.output_lock = threading.Lock()
         self.input_lock = threading.Lock()
         self.input_epoch = 0
+        self.input_enabled = True
 
     async def __aenter__(self) -> "Audio":
         try:
@@ -32,7 +33,7 @@ class Audio:
         loop = asyncio.get_running_loop()
 
         def offer(data: bytes, status: str, epoch: int) -> None:
-            if epoch != self.input_epoch or self.closed or self.failed:
+            if epoch != self.input_epoch or not self.input_enabled or self.closed or self.failed:
                 return
             if status or self.frames.full():
                 self.failed = True
@@ -87,10 +88,31 @@ class Audio:
         while not self.frames.empty():
             self.frames.get_nowait()
 
-    def reset_input(self) -> None:
+    def set_input(self, enabled: bool) -> None:
         with self.input_lock:
             self.input_epoch += 1
+            self.input_enabled = enabled
         self.discard()
+
+    def reset_input(self) -> None:
+        self.set_input(True)
+
+    async def cue(self, frequency: int) -> None:
+        import numpy as np
+        import sounddevice as sd
+
+        rate = 24_000
+        t = np.arange(int(rate * 0.12)) / rate
+        tone = (0.15 * np.sin(2 * np.pi * frequency * t) * np.sin(np.pi * t / 0.12)).astype(
+            np.float32
+        )
+        try:
+            await asyncio.to_thread(sd.play, tone, rate, blocking=True)
+        except asyncio.CancelledError:
+            sd.stop()
+            raise
+        except Exception as error:
+            raise RuntimeError("Audio feedback failed. Check the output device.") from error
 
     def play(self, pcm: bytes) -> None:
         if len(pcm) % 2:

@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import contextlib
 import json
 import time
 from pathlib import Path
@@ -28,6 +29,13 @@ async def recover(host, text: str) -> None:
 
 
 async def run(config: Config, once: bool, dry_run: bool) -> int:
+    result = await _run(config, once, dry_run)
+    if once:
+        notice("Finished. Microphone released.")
+    return result
+
+
+async def _run(config: Config, once: bool, dry_run: bool) -> int:
     metrics = Metrics(config.metrics)
     started, outcome = time.monotonic(), "error"
     try:
@@ -56,7 +64,9 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
         metrics=metrics,
     )
     current: Capture | None = None
-    async with Audio(config.device) as audio:
+    async with contextlib.AsyncExitStack() as resources:
+        resources.push_async_callback(flush_metrics)
+        audio = await resources.enter_async_context(Audio(config.device))
         notice("Waiting for a wake word. Ctrl+C stops and releases the microphone.")
         try:
             while True:
@@ -77,7 +87,6 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
                         notice("The optional desktop metrics could not be saved.")
                 if mode is None:
                     continue
-                await flush_metrics()
                 started = time.monotonic()
                 outcome = "failed"
                 try:
@@ -85,10 +94,11 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
                         notice("Conversation waking. Use headphones in this native prototype.")
                         await conversation(config, audio, notice)
                     else:
+                        audio.set_input(False)
                         selected = await asyncio.to_thread(host.capture)
                         current = Capture(config.endings)
                         notice(f"Capture waking · target: {selected.app}.")
-                        request = await capture(config, audio, current, notice)
+                        request = await capture(config, audio, current, notice, metrics=metrics)
 
                         async def confirm() -> bool:
                             try:
@@ -99,7 +109,8 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
                                         Confirmation(),
                                         notice,
                                         ready_message="Say yes to submit, or never mind to cancel.",
-                                        fresh_audio=True,
+                                        metrics=metrics,
+                                        confirmation=True,
                                     )
                             except TimeoutError as error:
                                 raise RuntimeError(
@@ -112,6 +123,21 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
                         if not success and once:
                             return 1
                         current = None
+                        cue_started = time.monotonic()
+                        cue_outcome = "ok"
+                        try:
+                            await audio.cue(660)
+                        except asyncio.CancelledError:
+                            cue_outcome = "cancelled"
+                            raise
+                        except (RuntimeError, OSError) as error:
+                            cue_outcome = "error"
+                            notice(f"{error} The action outcome is unchanged.")
+                        finally:
+                            with contextlib.suppress(OSError):
+                                await metrics.record(
+                                    "desktop_completed_cue", cue_started, cue_outcome
+                                )
                     if mode == "conversation":
                         outcome = "ok"
                 except (
@@ -137,12 +163,11 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
                     except OSError:
                         notice("The optional desktop metrics could not be saved.")
                     wake.reset()
-                    audio.discard()
+                    audio.set_input(True)
                 if once:
                     return 0
                 notice("Waiting for a wake word.")
         finally:
-            await flush_metrics()
             if current is not None and current.text:
                 await recover(host, current.text)
 

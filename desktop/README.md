@@ -49,13 +49,17 @@ using the configured transcription/conversation endpoints.
 
 ## Captures and tasks
 
-After the capture wake word, say the text, then an ending phrase. Pauses can
-produce separate transcription pieces but do not deliver or end the capture.
+After the capture wake word, wait for the local start tone to finish, then
+speak your text and ending phrase. Audio before the tone ends is discarded.
+Fresh audio is buffered while the recognizer connects; startup must complete
+within eight seconds. For confirmation, wait for its separate tone before
+answering. Pauses can produce separate transcription pieces but do not deliver
+or end the capture.
 All ending phrases can be changed in the config.
 
 | Ending | Result |
 | --- | --- |
-| paste that | Insert the collected text without Enter. |
+| paste that / finish dictation | Insert the collected text without Enter. |
 | submit | Ask for confirmation, then insert and press Enter. |
 | do that | Run the matching configured action. |
 | scratch that | Discard this piece, or the preceding piece if spoken alone. |
@@ -118,8 +122,10 @@ nor debugger messages. Status and confirmation text appear in the foreground
 terminal.
 
 Wake-model loading and each detector call record their host elapsed time and
-outcome when metrics are enabled. Detector timings buffer at most 125 records
-and flush at a wake or shutdown, avoiding a disk write on every audio frame.
+outcome when metrics are enabled. Detector timings write in background batches
+of 125 records, with at most one batch writing and one waiting. A stalled writer
+can drop optional timings with a warning; it does not block the start cue.
+Shutdown closes the microphone before waiting for the remaining metrics.
 These timings measure local call cost, not perceived wake latency.
 
 ## Tests

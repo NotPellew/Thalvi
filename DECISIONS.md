@@ -37,6 +37,10 @@ areas your change touches. Editing rules are in
   recognizes separate capture and conversation phrases. Why: defer the action
   choice until an ending without delaying conversation. Rejected: one phrase
   for both flows.
+- **Capture starts at a local cue.** Buffer fresh post-cue speech during the
+  eight-second recognizer startup budget; confirmations wait for ready plus
+  their own cue. Why: keep dictation prompt and confirmations fresh.
+  Rejected: transcribing pre-cue backlog or waiting on the network to speak.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
   browser and app actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative

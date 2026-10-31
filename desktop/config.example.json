@@ -7,6 +7,7 @@
   },
   "endings": {
     "paste that": "paste",
+    "finish dictation": "paste",
     "submit": "submit",
     "do that": "task",
     "scratch that": "scratch",
