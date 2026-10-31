@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { parseServerMessage, type ServerMessage } from "./protocol.ts";
+import { parseServerMessage, voiceNameMessage, type ServerMessage } from "./protocol.ts";
 
 describe("parseServerMessage", () => {
   const valid: [string, ServerMessage][] = [
     ['{"type":"state","state":"thinking"}', { type: "state", state: "thinking" }],
     ['{"type":"state","state":"idle"}', { type: "state", state: "idle" }],
     ['{"type":"state","state":"starting"}', { type: "state", state: "starting" }],
+    ['{"type":"state","state":"working"}', { type: "state", state: "working" }],
+    [
+      '{"type":"task","step":{"id":"call-1","label":"Searching conversations","status":"running"}}',
+      { type: "task", step: { id: "call-1", label: "Searching conversations", status: "running" } },
+    ],
+    [
+      '{"type":"task","step":{"id":"call-1","label":"Searching conversations","status":"done","detail":"2 matches"}}',
+      { type: "task", step: { id: "call-1", label: "Searching conversations", status: "done", detail: "2 matches" } },
+    ],
     ['{"type":"session","id":"abc","turns":[]}', { type: "session", id: "abc", turns: [] }],
     [
       '{"type":"session","id":"abc","turns":[{"role":"user","text":"hi"},{"role":"assistant","text":"Hello."}]}',
@@ -45,6 +54,10 @@ describe("parseServerMessage", () => {
     ["unknown type", '{"type":"telemetry","text":"x"}'],
     ["missing type", '{"text":"x"}'],
     ["unknown state", '{"type":"state","state":"dancing"}'],
+    ["server speaking phase, which is derived locally instead", '{"type":"state","state":"speaking"}'],
+    ["task without a step", '{"type":"task"}'],
+    ["task with an unknown status", '{"type":"task","step":{"id":"x","label":"Search","status":"waiting"}}'],
+    ["task with a non-string detail", '{"type":"task","step":{"id":"x","label":"Search","status":"done","detail":2}}'],
     ["non-string text", '{"type":"reply","text":7}'],
     ["voice turned on by the server", '{"type":"voice","on":true}'],
     ["voice without a flag", '{"type":"voice"}'],
@@ -60,5 +73,11 @@ describe("parseServerMessage", () => {
   ];
   it.each(ignored)("ignores %s", (_name, raw) => {
     expect(parseServerMessage(raw)).toBeNull();
+  });
+});
+
+describe("voiceNameMessage", () => {
+  it("names the voice for the live session", () => {
+    expect(JSON.parse(voiceNameMessage("af_heart"))).toEqual({ type: "voice_name", voice: "af_heart" });
   });
 });

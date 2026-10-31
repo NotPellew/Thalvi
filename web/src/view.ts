@@ -1,7 +1,7 @@
 import "./view.css";
 import { displayState, type DisplayState, type SessionState } from "./session.ts";
 import { SPEED_STEPS, formatSpeed, type Speed } from "./speed.ts";
-import type { Turn } from "./protocol.ts";
+import type { TaskStep, Turn } from "./protocol.ts";
 
 const STATES: Record<DisplayState, { label: string; hint: string }> = {
   connecting: { label: "Connecting", hint: "Reaching the server." },
@@ -11,6 +11,7 @@ const STATES: Record<DisplayState, { label: string; hint: string }> = {
   starting: { label: "Starting", hint: "Getting ready to listen." },
   listening: { label: "Listening", hint: "Go ahead, I am listening." },
   thinking: { label: "Thinking", hint: "Working on your answer. Tap the reticle to stop." },
+  working: { label: "Working", hint: "Using a tool. Tap the reticle to stop." },
   speaking: { label: "Speaking", hint: "Reading the answer aloud. Tap the reticle to stop." },
 };
 
@@ -44,7 +45,7 @@ export interface CollapseInput {
   readonly latestTall: boolean;
 }
 
-const LIVE_DISPLAYS: readonly DisplayState[] = ["starting", "listening", "thinking", "speaking"];
+const LIVE_DISPLAYS: readonly DisplayState[] = ["starting", "listening", "thinking", "working", "speaking"];
 
 /** The big orb stays only for a live voice exchange read at the bottom; anything else collapses it. */
 export function shouldCollapse(input: CollapseInput): boolean {
@@ -128,6 +129,7 @@ function coreIcon(display: DisplayState): IconName {
     case "listening":
       return "listening";
     case "thinking":
+    case "working":
       return "thinking";
     case "speaking":
       return "speaking";
@@ -206,6 +208,10 @@ const MARKUP = `
               <p>You can also paste a link below and say what to do with it.</p>
             </div>
             <div class="o-turns" aria-live="polite"></div>
+            <details class="o-tasks" hidden>
+              <summary><span>Task steps</span><span class="o-task-count"></span></summary>
+              <div class="o-task-list"></div>
+            </details>
             <p class="o-turn o-assistant o-pending" hidden><span class="o-who">Thalvi</span><span class="o-dots" role="img" aria-label="Thinking">${icon("thinking")}</span></p>
             <p class="o-turn o-user o-live" hidden><span class="o-who">Hearing you</span><span class="o-live-text"></span></p>
           </div>
@@ -282,6 +288,29 @@ function syncTurns(list: HTMLElement, turns: readonly Turn[], growing: boolean):
   });
 }
 
+function syncTasks(list: HTMLElement, tasks: readonly TaskStep[]): void {
+  const rows = tasks.map((task) => {
+    const row = document.createElement("div");
+    row.className = "o-task";
+    row.dataset["status"] = task.status;
+    const label = document.createElement("span");
+    label.className = "o-task-label";
+    label.textContent = task.label;
+    const status = document.createElement("span");
+    status.className = "o-task-status";
+    status.textContent = task.status === "running" ? "Running" : task.status === "done" ? "Done" : "Failed";
+    row.append(label, status);
+    if (task.detail) {
+      const detail = document.createElement("span");
+      detail.className = "o-task-detail";
+      detail.textContent = task.detail;
+      row.append(detail);
+    }
+    return row;
+  });
+  list.replaceChildren(...rows);
+}
+
 /** Builds the page inside `root`; the controller drives it through `render`. */
 export function createView(root: HTMLElement) {
   root.innerHTML = MARKUP;
@@ -297,6 +326,9 @@ export function createView(root: HTMLElement) {
   const noticeText = find(page, ".o-notice-text", HTMLSpanElement);
   const scroller = find(page, ".o-scroll", HTMLElement);
   const empty = find(page, ".o-empty", HTMLDivElement);
+  const tasks = find(page, ".o-tasks", HTMLDetailsElement);
+  const taskCount = find(page, ".o-task-count", HTMLSpanElement);
+  const taskList = find(page, ".o-task-list", HTMLDivElement);
   const list = find(page, ".o-turns", HTMLDivElement);
   const pending = find(page, ".o-pending", HTMLParagraphElement);
   const live = find(page, ".o-live", HTMLParagraphElement);
@@ -468,7 +500,7 @@ export function createView(root: HTMLElement) {
         page.classList.add("o-glitching");
         stateName.textContent = text.label;
         orbArt.innerHTML = orbSvg(display);
-        const busy = display === "speaking" || display === "thinking";
+        const busy = display === "speaking" || display === "thinking" || display === "working";
         if (busy) {
           coreIc.innerHTML = `${icon("stop")}<span class="o-lab">Stop</span>`;
         } else if (display === "idle") {
@@ -478,7 +510,7 @@ export function createView(root: HTMLElement) {
         }
       }
 
-      const busy = display === "speaking" || display === "thinking";
+      const busy = display === "speaking" || display === "thinking" || display === "working";
       const offline = display === "connecting" || display === "reconnecting" || display === "ended";
       orbAction = busy ? "stop" : offline ? "none" : "voice";
       orb.disabled = orbAction === "none" || (orbAction === "voice" && voiceBusy);
@@ -496,6 +528,9 @@ export function createView(root: HTMLElement) {
       voice.disabled = voiceBusy || ended;
 
       empty.hidden = s.turns.length > 0 || s.partial !== "";
+      tasks.hidden = s.tasks.length === 0;
+      taskCount.textContent = `${String(s.tasks.length)} ${s.tasks.length === 1 ? "step" : "steps"}`;
+      syncTasks(taskList, s.tasks);
       syncTurns(list, s.turns, s.replyOpen);
       pending.hidden = display !== "thinking" || s.turns.at(-1)?.role !== "user";
       live.hidden = s.partial === "";

@@ -17,6 +17,7 @@ describe("shouldCollapse", () => {
     ["speaking with voice on stays big", { ...live, display: "speaking" }, false],
     ["starting with voice on stays big", { ...live, display: "starting" }, false],
     ["thinking with voice on stays big", { ...live, display: "thinking" }, false],
+    ["working with voice on stays big", { ...live, display: "working" }, false],
     ["voice off collapses", { ...live, voice: false }, true],
     ["idle collapses", { ...live, display: "idle" }, true],
     ["connecting collapses", { ...live, display: "connecting" }, true],

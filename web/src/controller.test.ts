@@ -67,7 +67,7 @@ describe("Controller", () => {
     expect(controller.state.partial).toBe("");
     expect(shown()).toBe("thinking");
 
-    server({ type: "state", state: "speaking" });
+    server({ type: "state", state: "thinking" });
     server({ type: "reply", text: "It is " });
     server({ type: "reply", text: "noon." });
     controller.message(new ArrayBuffer(3840));
@@ -97,16 +97,16 @@ describe("Controller", () => {
     controller.playing(false);
     expect(shown()).toBe("thinking");
 
-    server({ type: "state", state: "speaking" });
+    server({ type: "state", state: "thinking" });
     controller.message(new ArrayBuffer(3840));
     controller.playing(true);
     expect(shown()).toBe("speaking");
   });
 
-  it("voice off tells the server, drops local audio and goes idle while the reply text continues", () => {
+  it("voice off tells the server, drops local audio and keeps thinking while the reply text continues", () => {
     const { controller, calls, server, shown } = online();
     controller.setVoice(true);
-    server({ type: "state", state: "speaking" });
+    server({ type: "state", state: "thinking" });
     server({ type: "reply", text: "Once upon" });
     server({ type: "partial", text: "and then" });
     controller.playing(true);
@@ -114,7 +114,7 @@ describe("Controller", () => {
 
     controller.setVoice(false);
     expect(calls).toEqual([VOICE_OFF, "flush"]);
-    expect(shown()).toBe("idle");
+    expect(shown()).toBe("thinking");
     expect(controller.state.playing).toBe(false);
     expect(controller.state.partial).toBe("");
 
@@ -140,6 +140,21 @@ describe("Controller", () => {
     expect(controller.state.playing).toBe(false);
     expect(shown()).toBe("idle");
     expect(controller.state.notice).toBe("The speech service refused the connection.");
+  });
+
+  it("shows Working and task progress without opening or closing the reply", () => {
+    const { controller, server, shown } = online();
+    server({ type: "user", text: "what did we decide?" });
+    server({ type: "state", state: "working" });
+    server({ type: "task", step: { id: "search-1", label: "Searching conversations", status: "running" } });
+    expect(shown()).toBe("working");
+    expect(controller.state.tasks).toEqual([
+      { id: "search-1", label: "Searching conversations", status: "running" },
+    ]);
+    server({ type: "task", step: { id: "search-1", label: "Searching conversations", status: "done", detail: "1 match" } });
+    server({ type: "reply", text: "We decided to keep it simple." });
+    expect(controller.state.replyOpen).toBe(true);
+    expect(controller.state.tasks[0]?.status).toBe("done");
   });
 
   it("shows Thinking for a text reply with voice off, then Idle with the reply closed", () => {
@@ -192,7 +207,7 @@ describe("Controller", () => {
     const { controller, calls, server } = online();
     controller.setVoice(true);
     server({ type: "user", text: "tell me a story" });
-    server({ type: "state", state: "speaking" });
+    server({ type: "state", state: "thinking" });
     server({ type: "reply", text: "Once upon" });
     controller.playing(true);
     calls.length = 0;
@@ -259,7 +274,7 @@ describe("Controller", () => {
   it("shows why the server ended the conversation, stops voice and reconnecting, and forgets it", () => {
     const { controller, calls, server, shown } = online();
     controller.setVoice(true);
-    server({ type: "state", state: "speaking" });
+    server({ type: "state", state: "thinking" });
     controller.playing(true);
     calls.length = 0;
 
@@ -305,7 +320,7 @@ describe("Controller", () => {
   it("shows Reconnecting when the link drops, then re-enables voice on the new connection", () => {
     const { controller, calls, server, shown } = online();
     controller.setVoice(true);
-    server({ type: "state", state: "speaking" });
+    server({ type: "state", state: "thinking" });
     calls.length = 0;
 
     controller.lost();
