@@ -186,7 +186,13 @@ def test_replay_cli_runs_without_microphone_models_or_desktop_side_effects(
 @pytest.mark.parametrize(
     "patch,message",
     [
-        ({"wake": {"capture_phrase": "Hey Mycroft"}}, "distinct"),
+        ({"wake": {"capture_model": "hey_mycroft_v0.1.onnx"}}, "distinct"),
+        *[
+            ({"wake": {"capture_threshold": value}}, "threshold")
+            for value in (True, 0, -1, 1.1, float("nan"), float("inf"), "0.5")
+        ],
+        ({"wake": {"conversation_threshold": 0}}, "threshold"),
+        ({"wake": {"capture_phrase": "Hey Thalvi"}}, "Unknown"),
         (
             {
                 "scripts": [

@@ -19,26 +19,19 @@ cp config.example.json ../data/desktop.json
 uv run thalvi-desktop --config ../data/desktop.json run
 ```
 
-Configure `wake.model_dir` to an existing sherpa-onnx
-`kws-zipformer-gigaspeech-3.3M-2024-01-01` directory containing `tokens.txt`,
-`bpe.model`, and the int8 encoder, decoder and joiner for epoch 12, average 2,
-chunk 16, left context 64. Paths are relative to the config file. Assets are
-never downloaded automatically. The model is from the [sherpa-onnx pretrained
-keyword models](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html);
-its model-specific licence has not been established, so this configuration is
-for private validation, not an asset redistribution claim.
+Python 3.11 is required. Configure `wake.model_dir` with existing
+`melspectrogram.onnx`, `embedding_model.onnx`, and `hey_mycroft_v0.1.onnx`,
+and `wake.capture_model` with the dedicated trained Hey Thalvi ONNX head.
+Both heads must accept float32 `[batch, 16, 96]` features and return a single
+float32 probability `[batch, 1]`. Longer contexts are rejected before opening
+audio because upstream startup and reset history cannot satisfy arbitrary lengths.
+Paths are relative to the config file; assets are never downloaded automatically.
+The example thresholds are provisional and require calibration. The trained head,
+backbone provenance, threshold and live performance are not yet qualified. Verify
+model and training data licenses separately before distribution or use.
 
-The capture wake phrase is “Hey Thalvi”; configure its phonetic spelling as
-`Hey Talvi` because the literal spelling did not detect in the local trial.
-`conversation_phrase` defaults to `Hey Mycroft` for the demo and has not been
-live qualified. The phrases must be distinct English-letter text supported by
-the model tokenizer. Both use the same model and stay local until a wake.
-
-Audio dependencies are optional so tests and replay need neither PortAudio nor
-weights. `sherpa-onnx` runs local CPU keyword inference, `sentencepiece`
-tokenizes configured phrases for its BPE model, `sounddevice` supplies native
-audio, NumPy converts audio formats, and `websockets` speaks the local server
-protocol. Keyword data is held in memory on Linux; model files are not modified.
+Audio dependencies are optional for replay and tests. openWakeWord and ONNX Runtime
+run local CPU inference; sounddevice supplies audio and NumPy converts frames.
 
 Use headphones for native conversation: this prototype has no acoustic echo
 cancellation. The phone/browser client retains its own media handling. The

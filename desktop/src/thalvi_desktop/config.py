@@ -1,6 +1,7 @@
 """Owns validation of desktop configuration and scripted task definitions."""
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,8 +53,9 @@ class Script:
 class Config:
     server: str
     model_dir: Path | None
-    capture_phrase: str
-    conversation_phrase: str
+    capture_model: Path | None
+    capture_threshold: float
+    conversation_threshold: float
     endings: dict[str, Ending]
     apps: dict[str, App]
     scripts: tuple[Script, ...]
@@ -74,22 +76,25 @@ class Config:
         if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
             raise ValueError("server must be the server root, without a path, query, or fragment.")
         wake = record(raw.get("wake", {}), "wake")
-        fields(wake, {"model_dir", "capture_phrase", "conversation_phrase"}, "wake")
-        capture_phrase = " ".join(
-            text(wake.get("capture_phrase", "Hey Talvi"), "wake.capture_phrase").upper().split()
+        fields(
+            wake,
+            {"model_dir", "capture_model", "capture_threshold", "conversation_threshold"},
+            "wake",
         )
-        conversation_phrase = " ".join(
-            text(wake.get("conversation_phrase", "Hey Mycroft"), "wake.conversation_phrase")
-            .upper()
-            .split()
-        )
-        if capture_phrase == conversation_phrase:
-            raise ValueError("Wake phrases must be distinct.")
-        if any(
-            re.fullmatch(r"[A-Z]+(?: [A-Z]+)*", phrase) is None
-            for phrase in (capture_phrase, conversation_phrase)
-        ):
-            raise ValueError("Wake phrases must contain only English letters and spaces.")
+
+        def threshold(name: str) -> float:
+            value = wake.get(name, 0.5)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not 0 < value <= 1
+            ):
+                raise ValueError(f"wake.{name} must be a finite number in (0, 1].")
+            return float(value)
+
+        capture_threshold = threshold("capture_threshold")
+        conversation_threshold = threshold("conversation_threshold")
         endings_raw = record(raw.get("endings", dict(DEFAULT_ENDINGS)), "endings")
         endings: dict[str, Ending] = {}
         for phrase, action in endings_raw.items():
@@ -163,11 +168,17 @@ class Config:
             result = Path(text(value, "local path")).expanduser()
             return result if result.is_absolute() else path.parent / result
 
+        model_dir = local(wake.get("model_dir"))
+        capture_model = local(wake.get("capture_model"))
+        if capture_model is not None and capture_model.stem == "hey_mycroft_v0.1":
+            raise ValueError("Wake model head keys must be distinct.")
+
         return cls(
             server.rstrip("/"),
-            local(wake.get("model_dir")),
-            capture_phrase,
-            conversation_phrase,
+            model_dir,
+            capture_model,
+            capture_threshold,
+            conversation_threshold,
             endings,
             apps,
             tuple(scripts),

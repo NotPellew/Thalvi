@@ -159,7 +159,7 @@ def test_native_entry_routes_wakes_recovers_and_releases_audio(
 
         assert asyncio.run(execute()) == int(failure is not None)
         assert events.count(mode) == 1
-        assert events.count("reset") == events.count("discard") == 1
+        assert events.count("reset") == events.count("discard") == 0
 
     assert events.count("opened") == events.count("closed") == 1
     if mode == "capture" and failure is None:
@@ -280,3 +280,111 @@ def test_delivery_has_no_postdelivery_cue_and_idle_notice_is_truthful(monkeypatc
     assert not any("Nothing will be delivered automatically" in message for message in notices)
     assert config.metrics is None
     assert not any(message.startswith("Sampled wake audio:") for message in notices)
+
+
+@pytest.mark.parametrize("reset_fails", [False, True])
+def test_continuous_reset_gates_audio_and_preserves_delivery(monkeypatch, tmp_path, reset_fails):
+    config = replace(
+        Config.load(Path(__file__).parents[1] / "config.example.json"),
+        metrics=tmp_path / "metrics.jsonl",
+    )
+    events, notices = [], []
+
+    class Wake:
+        def __init__(self, _config):
+            pass
+
+        def detect(self, _frame):
+            return "capture"
+
+        def reset(self):
+            events.append("reset")
+            if reset_fails:
+                raise RuntimeError("reset failed")
+
+    class Audio:
+        failed = False
+
+        def __init__(self, _device):
+            self.calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            events.append("released")
+
+        async def next(self):
+            self.calls += 1
+            if self.calls > 1:
+                raise asyncio.CancelledError
+            return wake_frame("quiet", 1)
+
+        def set_input(self, enabled):
+            events.append(enabled)
+
+    host = PreviewHost(lambda _: None)
+
+    async def capture(_config, _audio, current, _notice, **_kwargs):
+        return current.final("hello paste that")
+
+    monkeypatch.setattr(cli, "Wake", Wake)
+    monkeypatch.setattr(cli, "Audio", Audio)
+    monkeypatch.setattr(cli, "desktop", lambda: host)
+    monkeypatch.setattr(cli, "capture", capture)
+    monkeypatch.setattr(cli, "notice", notices.append)
+    if reset_fails:
+        assert asyncio.run(cli.run(config, once=False, dry_run=False)) == 1
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(cli.run(config, once=False, dry_run=False))
+    assert events == [False, False, "reset", *([] if reset_fails else [True]), "released"]
+    assert host.operations == [("deliver", "hello", False)]
+    assert sum(n.startswith("Waiting for a wake word") for n in notices) == (
+        1 if reset_fails else 2
+    )
+    assert not any("Nothing will be delivered" in n for n in notices)
+    rows = [json.loads(line) for line in config.metrics.read_text().splitlines()]
+    assert [row["outcome"] for row in rows if row["event"] == "desktop_wake_reset"] == [
+        "error" if reset_fails else "ok"
+    ]
+
+
+@pytest.mark.parametrize("gap", [False, True])
+def test_ambiguous_wake_notifies_once_until_it_clears_without_action(monkeypatch, gap):
+    config = Config.load(Path(__file__).parents[1] / "config.example.json")
+    notices, events = [], []
+    modes = ["ambiguous"] * 25 + ([None] + ["ambiguous"] * 25 if gap else [])
+
+    class Wake:
+        def __init__(self, _config):
+            self.modes = iter(modes)
+
+        def detect(self, _frame):
+            return next(self.modes)
+
+    class Audio:
+        def __init__(self, _device):
+            self.calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            events.append("released")
+
+        async def next(self):
+            self.calls += 1
+            if self.calls > len(modes):
+                raise asyncio.CancelledError
+            return wake_frame("quiet", 1)
+
+    host = PreviewHost(lambda _: None)
+    monkeypatch.setattr(cli, "Wake", Wake)
+    monkeypatch.setattr(cli, "Audio", Audio)
+    monkeypatch.setattr(cli, "desktop", lambda: host)
+    monkeypatch.setattr(cli, "notice", notices.append)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(cli.run(config, once=False, dry_run=False))
+    assert host.operations == [] and events == ["released"]
+    assert sum("ambiguous" in notice for notice in notices) == 1 + int(gap)

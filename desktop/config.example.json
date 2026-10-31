@@ -1,9 +1,10 @@
 {
   "server": "ws://127.0.0.1:8080",
   "wake": {
-    "model_dir": "models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01",
-    "capture_phrase": "Hey Talvi",
-    "conversation_phrase": "Hey Mycroft"
+    "model_dir": "models/openwakeword",
+    "capture_model": "models/hey_thalvi.onnx",
+    "capture_threshold": 0.5,
+    "conversation_threshold": 0.5
   },
   "endings": {
     "paste that": "paste",

@@ -1,6 +1,8 @@
-"""Owns local keyword detection using pre-existing ONNX model assets."""
+"""Owns local wake inference using explicitly provisioned ONNX assets."""
 
-import os
+import math
+from numbers import Real
+from typing import Literal
 
 from .audio import samples
 from .config import Config
@@ -9,77 +11,85 @@ from .config import Config
 class Wake:
     def __init__(self, config: Config):
         directory = config.model_dir
-        stem = "epoch-12-avg-2-chunk-16-left-64.int8.onnx"
-        names = [
-            "tokens.txt",
-            "bpe.model",
-            *(f"{part}-{stem}" for part in ("encoder", "decoder", "joiner")),
-        ]
-        if directory is None or not all((directory / name).is_file() for name in names):
-            raise RuntimeError(
-                "Configure an existing sherpa-onnx keyword model directory; "
-                "weights are not downloaded."
-            )
+        capture = config.capture_model
+        if directory is None or capture is None:
+            raise RuntimeError("Configure the wake model directory and trained capture model.")
+        mycroft = directory / "hey_mycroft_v0.1.onnx"
+        mel = directory / "melspectrogram.onnx"
+        embedding = directory / "embedding_model.onnx"
+        if capture.stem == mycroft.stem:
+            raise ValueError("Wake model head keys must be distinct.")
+        if not all(path.is_file() for path in (capture, mycroft, mel, embedding)):
+            raise RuntimeError("Wake model assets are missing; provision them before starting.")
+        self.keys = (capture.stem, mycroft.stem)
+        self.thresholds = (config.capture_threshold, config.conversation_threshold)
         try:
-            import sentencepiece as spm
-            import sherpa_onnx
+            from openwakeword.model import Model
 
-            tokenizer = spm.SentencePieceProcessor(model_file=str(directory / "bpe.model"))
-            valid = {
-                line.split()[0]
-                for line in (directory / "tokens.txt").read_text().splitlines()
-                if line.split()
-            }
-            lines = []
-            for phrase, mode in (
-                (config.capture_phrase, "capture"),
-                (config.conversation_phrase, "conversation"),
-            ):
-                tokens = tokenizer.encode(phrase, out_type=str)
-                if not tokens or any(token == "<unk>" or token not in valid for token in tokens):
-                    raise ValueError(f"Unsupported wake phrase: {phrase}")
-                lines.append(" ".join(tokens) + " @" + mode)
-            self.keywords = "\n".join(lines) + "\n"
-            fd = os.memfd_create("thalvi-keywords")
-            try:
-                os.write(fd, self.keywords.encode())
-                self.model = sherpa_onnx.KeywordSpotter(
-                    tokens=str(directory / names[0]),
-                    encoder=str(directory / names[2]),
-                    decoder=str(directory / names[3]),
-                    joiner=str(directory / names[4]),
-                    keywords_file=f"/proc/self/fd/{fd}",
-                    num_threads=1,
-                    provider="cpu",
-                )
-            finally:
-                os.close(fd)
-            self.reset()
+            self.model = Model(
+                wakeword_models=[str(capture), str(mycroft)],
+                inference_framework="onnx",
+                melspec_model_path=str(mel),
+                embedding_model_path=str(embedding),
+                ncpu=1,
+                vad_threshold=0,
+                enable_speex_noise_suppression=False,
+            )
+            for key in self.keys:
+                session = self.model.models[key]
+                inputs, outputs = session.get_inputs(), session.get_outputs()
+                if len(inputs) != 1 or len(outputs) != 1:
+                    raise ValueError("Wake head must have one input and output.")
+                inp, out = inputs[0], outputs[0]
+
+                def batch(dim):
+                    return dim == 1 or dim is None or isinstance(dim, str)
+
+                if (
+                    inp.type != "tensor(float)"
+                    or out.type != "tensor(float)"
+                    or len(inp.shape) != 3
+                    or len(out.shape) != 2
+                    or not batch(inp.shape[0])
+                    or not batch(out.shape[0])
+                    or type(inp.shape[1]) is not int
+                    or inp.shape[1] != 16
+                    or inp.shape[2] != 96
+                    or out.shape[1] != 1
+                ):
+                    raise ValueError("Wake head has an unsupported input or output shape.")
         except ImportError as error:
             raise RuntimeError(
                 "Install the desktop audio extra before loading wake models."
             ) from error
-        except ValueError:
-            raise
         except Exception as error:
-            raise RuntimeError(
-                "Wake model could not load. Check the model files and phrases."
-            ) from error
+            raise RuntimeError("Wake model could not load or has invalid metadata.") from error
 
-    def detect(self, frame: bytes) -> str | None:
+    def detect(self, frame: bytes) -> Literal["capture", "conversation", "ambiguous"] | None:
         try:
-            import numpy as np
-
             if len(frame) != 7680:
                 raise ValueError("Expected an 80 ms 48 kHz PCM frame.")
-            pcm = samples(frame, 3).astype(np.float32) / 32768.0
-            self.stream.accept_waveform(16000, pcm)
-            while self.model.is_ready(self.stream):
-                self.model.decode_stream(self.stream)
-                keyword = self.model.keyword_spotter.get_result(self.stream).keyword.strip()
-                if keyword:
-                    self.reset()
-                    return {"capture": "capture", "conversation": "conversation"}.get(keyword)
+            predictions = self.model.predict(samples(frame, 3))
+            scores = []
+            for key in self.keys:
+                value = predictions[key]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, Real)
+                    or not math.isfinite(value)
+                    or not 0 <= value <= 1
+                ):
+                    raise ValueError("Invalid wake score.")
+                scores.append(value)
+            hits = [
+                score >= threshold for score, threshold in zip(scores, self.thresholds, strict=True)
+            ]
+            if all(hits):
+                return "ambiguous"
+            if hits[0]:
+                return "capture"
+            if hits[1]:
+                return "conversation"
             return None
         except Exception as error:
             raise RuntimeError(
@@ -87,4 +97,4 @@ class Wake:
             ) from error
 
     def reset(self) -> None:
-        self.stream = self.model.create_stream()
+        self.model.reset()

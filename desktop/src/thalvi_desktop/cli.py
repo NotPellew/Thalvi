@@ -74,6 +74,7 @@ async def _run(config: Config, once: bool, dry_run: bool) -> int:
     sampling = metrics.path is not None
     sampled, sampled_level = 0, None
     window_activity = False
+    ambiguous = False
     async with contextlib.AsyncExitStack() as resources:
         resources.push_async_callback(flush_metrics)
         audio = await resources.enter_async_context(Audio(config.device))
@@ -114,6 +115,12 @@ async def _run(config: Config, once: bool, dry_run: bool) -> int:
                         )
                     except OSError:
                         notice("The optional desktop metrics could not be saved.")
+                if mode == "ambiguous":
+                    if not ambiguous:
+                        notice("Wake was ambiguous; still listening.")
+                    ambiguous = True
+                    continue
+                ambiguous = False
                 if mode is None:
                     continue
                 started = time.monotonic()
@@ -193,10 +200,30 @@ async def _run(config: Config, once: bool, dry_run: bool) -> int:
                         )
                     except OSError:
                         notice("The optional desktop metrics could not be saved.")
-                    wake.reset()
-                    audio.set_input(True)
                 if once:
                     return 0
+                audio.set_input(False)
+                reset_started, reset_outcome = time.monotonic(), "error"
+                try:
+                    await asyncio.to_thread(wake.reset)
+                    reset_outcome = "ok"
+                except asyncio.CancelledError:
+                    reset_outcome = "cancelled"
+                    raise
+                except Exception:
+                    notice(
+                        "Wake listening could not restart; microphone closing. "
+                        "The action outcome is unchanged."
+                    )
+                    return 1
+                finally:
+                    try:
+                        await metrics.record(
+                            "desktop_wake_reset", reset_started, reset_outcome, buffered=True
+                        )
+                    except OSError:
+                        notice("The optional desktop metrics could not be saved.")
+                audio.set_input(True)
                 notice("Waiting for a wake word.")
         finally:
             if current is not None and current.text:

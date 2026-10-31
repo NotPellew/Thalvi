@@ -33,10 +33,13 @@ areas your change touches. Editing rules are in
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
   interrupts a reply by speaking. Why: hands and eyes are busy. Rejected:
   push-to-talk.
-- **Two wake entries, endings select the capture route.** One local model
-  recognizes separate capture and conversation phrases. Why: defer the action
+- **Two wake entries, endings select the capture route.** One local inference pipeline
+  runs separate trained capture and conversation wake heads. Why: defer the action
   choice until an ending without delaying conversation. Rejected: one phrase
   for both flows.
+- **Wake context.** Both trained heads use 16 embedding frames. Why: this
+  supports first-frame inference with upstream startup and reset history.
+  Rejected: accepting longer contexts that need additional warm-up history.
 - **Capture starts at a local cue.** Buffer fresh post-cue speech during the
   eight-second recognizer startup budget; confirmations wait for ready plus
   their own cue. Why: keep dictation prompt and confirmations fresh.
