@@ -275,7 +275,7 @@ async def live(tmp_path: Path):
                 "--disable-quic",
                 "--site-per-process",
                 "--metrics-recording-only",
-                ROUTE,
+                "--no-startup-window",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -285,7 +285,8 @@ async def live(tmp_path: Path):
         threading.Thread(target=_drain, args=(process.stderr,), daemon=True).start()
         browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
         context = browser.contexts[0]
-        page = context.pages[0]
+        page = await context.new_page()
+        await page.goto(ROUTE)
         await page.wait_for_function(
             "window.__fixture && window.__fixture.ready === true", timeout=15000
         )
