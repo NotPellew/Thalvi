@@ -38,9 +38,13 @@ areas your change touches. Editing rules are in
   starts conversation without per-turn endings. Why: defer the capture choice
   without delaying conversation. Rejected: one wake phrase for both flows.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
-  browser and app actions; execution receives a typed action. Why: a later model
+  browser, app and Discord actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative
   interfaces and open-ended computer use before the scripted flow works.
+- **Discord demo uses a channel webhook.** Confirm messages, check the channel
+  and require a receipt before reporting success. Why: reliable delivery under
+  the webhook's identity without guessing at desktop input focus. Rejected for
+  the demo: typing and Enter into Discord or automating the user's account.
 - **Spoken acknowledgement.** With `THALVI_ACK=on`, a slow reply first plays a
   canned line (rotated, synthesized once and cached per session) when no first
   sentence arrives within 500 ms. Why: it covers the model's thinking gap with

@@ -64,25 +64,47 @@ the clipboard instead of being typed elsewhere. A typing failure may be
 partial, so it is reported and never retried automatically.
 
 The example scripts open the project page or focus T3 Code and Discord.
-App classes, input shortcuts, task phrases and URL destinations are config,
-not shell commands. When several app windows match, Hyprland's recent-focus
+App classes, input shortcuts, task phrases and destinations are config, not
+shell commands. When several app windows match, Hyprland's recent-focus
 history chooses the first. An unconfigured task preserves its text on the
-clipboard. `tasks.decide` returns `OpenUrl`, `FocusApp`, or `DiscordMessage`; a future
-model decision can return the same typed action to `tasks.execute`.
+clipboard. `tasks.decide` returns `OpenUrl`, `FocusApp`, or `DiscordMessage`;
+a future model decision can return the same typed action.
 
-Say “message the demo channel saying <message> do that” to copy the message
-and ask Discord Desktop to open **Thalvi Demo / #demo**. Check the channel,
-paste, and send it yourself. Automatic typing and sending are disabled: window
-titles do not establish that the composer is focused and empty. Opening a link
-is only a request to Discord, not proof that the channel opened. No test sends
-Discord messages.
+### Discord demo delivery
+
+Say “message the demo channel saying <message> do that”. Thalvi shows the
+destination and message, asks for a separate spoken confirmation, then sends
+once through the incoming webhook for **Thalvi Demo / #demo**. Saying no sends
+nothing. Nothing is typed into Discord Desktop.
+
+The webhook is a secret. Keep it out of Git and this config. Create an
+incoming webhook in the demo channel (Channel settings → Integrations →
+Webhooks) and either export `THALVI_DISCORD_WEBHOOK` before starting the
+client, or put the URL in a local file, `chmod 600` it, and set `webhook_file`
+in the script. `config.example.json` reads the environment variable. Discord
+shows the message under the webhook's name, not your account.
+
+Before posting, Thalvi reads the webhook's metadata and refuses unless it
+points at guild `1566030981687677039` and channel `1566034064333340732`.
+The URL must be a plain `https://discord.com/api/webhooks/<id>/<token>` URL;
+other hosts, ports, query strings, and redirects are refused. It posts with
+`wait=true`, mentions disabled, and reports success only when Discord returns
+the created message for that channel. A rejected request changes nothing and
+keeps the captured text; a timeout or lost response is reported as unconfirmed
+and never retried automatically, so check the channel first. The webhook token
+never appears in errors, notices, or metrics. `--dry-run` and `replay` preview
+the confirmation without reading credentials or contacting Discord.
+
+No automated test or CI run sends a real Discord message; live delivery needs
+separate manual qualification.
 
 The other wake word opens native conversation. Speak naturally and interrupt
 by speaking; `stop conversation`, `end conversation` or `never mind` returns
 to wake listening. This client uses the server's existing interruption logic.
 
 Set `metrics` to a local path to opt into desktop action/flow timing and
-outcomes. Desktop metrics contain neither captured text nor destinations.
+outcomes. Desktop metrics contain neither captured text, destinations, nor
+webhook tokens.
 Status and confirmation text appear in the foreground terminal.
 
 ## Replay without audio or app actions
@@ -94,6 +116,7 @@ uv run thalvi-desktop --config config.example.json replay examples/capture.jsonl
 
 Replay does not use a microphone, wake model or endpoint. It previews actions
 unless `--apply` is explicitly given; that flag really types into the focused
-window. The submit fixture includes an explicit confirmation event. Live
+window and sends configured Discord messages. The submit fixture includes an
+explicit confirmation event. Live
 voice recognition quality and native audio hardware need separate manual
 qualification; replay and stub-server tests do not establish those.
