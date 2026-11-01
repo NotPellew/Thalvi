@@ -22,6 +22,16 @@ DEFAULT_ENDINGS = {
     "never mind": Ending.CANCEL,
 }
 
+ARTIFACT = (
+    r"(?:\[[^\[\]\r\n]{1,32}\]|\([^()\r\n]{1,32}\)|"
+    r"<\|[^<>\r\n]{1,32}\|>|u+h+|u+m+|h+m+|m+h+|a+h+|e+r+m+)"
+)
+TRAILING_ARTIFACTS = re.compile(rf"[\s.!?,;:]*(?:{ARTIFACT}[\s.!?,;:]*){{1,2}}$", re.I)
+
+
+def trailing_artifacts(text: str) -> bool:
+    return TRAILING_ARTIFACTS.fullmatch(text) is not None
+
 
 @dataclass(frozen=True)
 class Request:
@@ -45,7 +55,11 @@ class Capture:
         for phrase in sorted(self.endings, key=len, reverse=True):
             words = phrase.split()
             pattern = r"[\s.!?,;:]+".join(map(re.escape, words))
-            match = re.search(r"(?:^|\s)" + pattern + r"[\s.!?,;:]*$", combined, re.I)
+            match = re.search(
+                r"(?:^|\s)" + pattern + rf"[\s.!?,;:]*(?:{ARTIFACT}[\s.!?,;:]*){{0,2}}$",
+                combined,
+                re.I,
+            )
             if match:
                 return self.endings[phrase], match
         return None, None

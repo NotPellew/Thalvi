@@ -55,3 +55,23 @@ def test_ending_armed_during_speech_waits_for_quiet():
     pending.since = 100
     assert pending.ready(102.499) is None
     assert pending.ready(102.5).text == "hello"
+
+
+def test_trailing_artifacts_do_not_restart_or_cancel_the_quiet_interval():
+    pending = Pending(Capture(), 2.5)
+    pending.final("hello submit", 10)
+    for text in ("[noise] uh", "(breathing)", "<|nospeech|>"):
+        pending.final(text, 11)
+    assert pending.ready(12.499) is None
+    request = pending.ready(12.5)
+    assert request is not None
+    assert request.text == "hello"
+
+
+def test_artifacts_after_intentional_continuation_do_not_revive_an_ending():
+    pending = Pending(Capture(), 2.5)
+    pending.final("hello submit", 10)
+    pending.continuation()
+    pending.final("[noise]", 11)
+    assert pending.ready(20) is None
+    assert pending.capture.text == "hello submit"

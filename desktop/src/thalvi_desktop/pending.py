@@ -3,7 +3,7 @@
 from copy import deepcopy
 from dataclasses import replace
 
-from .capture import Capture, Ending, Request
+from .capture import Capture, Ending, Request, trailing_artifacts
 
 
 class Pending:
@@ -18,12 +18,13 @@ class Pending:
         self.request = None
 
     def final(self, text: str, now: float, *, speech: bool = False) -> Request | None:
-        if not text.strip():
+        if not text.strip() or trailing_artifacts(text):
             return None
-        self.continuation()
+        previous = self.request
         trial = deepcopy(self.capture)
         request = trial.final(text)
         if request is None or request.ending == Ending.CANCEL:
+            self.request = None
             self.capture.pieces = trial.pieces
             self.capture.finished = trial.finished
             self.capture.scratched = trial.scratched
@@ -33,8 +34,9 @@ class Pending:
             raise ValueError("This capture is full. Finish or cancel it before continuing.")
         self.capture.pieces.append(text.strip())
         self.request = request
-        self.since = now
-        self.waiting_for_quiet = speech
+        if previous is None or request.ending != previous.ending or request.text != previous.text:
+            self.since = now
+            self.waiting_for_quiet = speech
         return None
 
     def ready(self, now: float) -> Request | None:

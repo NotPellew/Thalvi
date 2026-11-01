@@ -1154,10 +1154,13 @@ struct ScratchDir(std::path::PathBuf);
 
 impl ScratchDir {
     fn new(tag: &str) -> Self {
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let process = std::process::id();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_nanos());
-        Self(std::env::temp_dir().join(format!("thalvi-record-test-{tag}-{nanos}")))
+        Self(std::env::temp_dir().join(format!("thalvi-record-test-{tag}-{process}-{nanos}-{id}")))
     }
 }
 
@@ -1165,6 +1168,18 @@ impl Drop for ScratchDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn scratch_directories_with_the_same_tag_are_isolated() {
+    let first = ScratchDir::new("isolation");
+    let second = ScratchDir::new("isolation");
+    std::fs::create_dir_all(&first.0).unwrap();
+    std::fs::create_dir_all(&second.0).unwrap();
+    std::fs::write(first.0.join("marker"), b"first").unwrap();
+    std::fs::write(second.0.join("marker"), b"second").unwrap();
+    drop(first);
+    assert_eq!(std::fs::read(second.0.join("marker")).unwrap(), b"second");
 }
 
 fn recording_config(kinds: RecordKinds, data_dir: &ScratchDir) -> RecordingConfig {
