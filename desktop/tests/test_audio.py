@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+import threading
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 
 from thalvi_desktop.audio import Audio, samples, transcription_pcm
 from thalvi_desktop.config import Config
+from thalvi_desktop.cues import RATE, Cue, synthesize
 from thalvi_desktop.wake import Wake
 
 
@@ -246,18 +248,108 @@ def test_wake_missing_assets_and_backend_failure(monkeypatch, tmp_path):
         Wake(config)
 
 
-@pytest.mark.parametrize("duration", [None, 0.04])
-def test_feedback_playback_uses_the_requested_tone_duration(monkeypatch, duration):
-    played = []
+@pytest.mark.parametrize("prior", [True, False])
+@pytest.mark.parametrize("outcome", ["ok", "fail", "cancel"])
+def test_cue_playback_drops_microphone_frames_and_restores_prior_input(monkeypatch, outcome, prior):
+    streams, played, stopped = [], [], []
+    started, release = threading.Event(), threading.Event()
+
+    class Stream:
+        def __init__(self, **kwargs):
+            self.callback = kwargs["callback"]
+            streams.append(self)
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
 
     def play(tone, rate, *, blocking):
         played.append((tone, rate, blocking))
+        started.set()
+        assert release.wait(2)
+        if outcome == "fail":
+            raise OSError("no output device")
 
-    monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(play=play))
-    audio = Audio()
-    asyncio.run(audio.cue(440, **({"duration": duration} if duration is not None else {})))
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(RawInputStream=Stream, play=play, stop=lambda: stopped.append(True)),
+    )
+
+    async def behavior():
+        async with Audio() as audio:
+            audio.set_input(prior)
+            playing = asyncio.create_task(audio.play_cue(Cue.ACCEPTED))
+            assert await asyncio.to_thread(started.wait, 1)
+            streams[0].callback(b"during", 1, None, None)
+            await asyncio.sleep(0)
+            assert not audio.input_enabled and audio.frames.empty()
+            streams[0].callback(b"late", 1, None, None)
+            if outcome == "cancel":
+                playing.cancel()
+            release.set()
+            if outcome == "ok":
+                streams[0].callback(b"spanning", 1, None, None)
+                await playing
+            else:
+                error = RuntimeError if outcome == "fail" else asyncio.CancelledError
+                with pytest.raises(error):
+                    await playing
+            assert audio.input_enabled is prior
+            streams[0].callback(b"fresh", 1, None, None)
+            if prior:
+                assert await asyncio.wait_for(audio.next(), 1) == b"fresh"
+            assert audio.frames.empty()
+
+    asyncio.run(behavior())
     tone, rate, blocking = played.pop()
-    assert rate == 24_000 and blocking
-    assert tone.shape == (int(rate * (0.12 if duration is None else duration)),)
-    assert tone.dtype == np.float32 and np.isfinite(tone).all()
-    assert tone[0] == 0 and 0 < np.max(np.abs(tone)) <= 0.15
+    assert np.array_equal(tone, synthesize(Cue.ACCEPTED)) and rate == RATE and blocking
+    assert stopped == ([True] if outcome == "cancel" else [])
+
+
+def test_overlapping_cues_play_serially_and_keep_input_gated(monkeypatch):
+    streams, plays = [], []
+    started, release = [threading.Event() for _ in range(2)], [threading.Event() for _ in range(2)]
+
+    class Stream:
+        def __init__(self, **kwargs):
+            self.callback = kwargs["callback"]
+            streams.append(self)
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+    def play(tone, _rate, *, blocking):
+        index = len(plays)
+        plays.append(len(tone))
+        started[index].set()
+        assert release[index].wait(2)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(RawInputStream=Stream, play=play, stop=lambda: None),
+    )
+
+    async def behavior():
+        async with Audio() as audio:
+            first = asyncio.create_task(audio.play_cue(Cue.CANCELLED))
+            assert await asyncio.to_thread(started[0].wait, 1)
+            second = asyncio.create_task(audio.play_cue(Cue.PROVISIONAL))
+            await asyncio.sleep(0.05)
+            assert plays == [len(synthesize(Cue.CANCELLED))] and not audio.input_enabled
+            release[0].set()
+            assert await asyncio.to_thread(started[1].wait, 1)
+            assert not audio.input_enabled
+            streams[0].callback(b"during second", 1, None, None)
+            release[1].set()
+            await asyncio.wait_for(asyncio.gather(first, second), 1)
+            assert audio.input_enabled and audio.frames.empty()
+            assert plays == [len(synthesize(Cue.CANCELLED)), len(synthesize(Cue.PROVISIONAL))]
+
+    asyncio.run(behavior())

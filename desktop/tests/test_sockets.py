@@ -11,6 +11,7 @@ from websockets.asyncio.server import serve
 from thalvi_desktop.capture import Capture, Ending, Request
 from thalvi_desktop.client import capture, conversation
 from thalvi_desktop.config import Config
+from thalvi_desktop.cues import Cue, Cues
 
 
 class FakeAudio:
@@ -18,6 +19,7 @@ class FakeAudio:
         self.queue = asyncio.Queue()
         self.queue.put_nowait(bytes(7680))
         self.played = []
+        self.cues = []
         self.stopped = 0
         self.sent_bytes = self.played_bytes = 0
 
@@ -27,8 +29,8 @@ class FakeAudio:
         if enabled:
             self.queue.put_nowait(bytes(7680))
 
-    async def cue(self, _frequency, *, duration=0.12):
-        pass
+    async def play_cue(self, cue):
+        self.cues.append(cue)
 
     async def next(self):
         if self.queue.empty() and getattr(self, "quiet_frames", False):
@@ -235,10 +237,11 @@ def test_capture_discards_audio_until_ready_tone_finishes(config):
                 if enabled:
                     receiving.set()
 
-            async def cue(self, _frequency, *, duration=0.12):
-                cues.append((_frequency, duration))
-                cue_started.set()
-                await cue_allowed.wait()
+            async def play_cue(self, cue):
+                cues.append(cue)
+                if cue == Cue.WAKE:
+                    cue_started.set()
+                    await cue_allowed.wait()
 
         audio = Audio()
 
@@ -263,7 +266,7 @@ def test_capture_discards_audio_until_ready_tone_finishes(config):
             ready_allowed.set()
             assert await asyncio.wait_for(pending, 1) == Request(Ending.PASTE, "hello")
         assert received == [bytes([3, 0]) * 1920]
-        assert cues == [(440, 0.04), (660, 0.12)]
+        assert cues == [Cue.WAKE, Cue.PROVISIONAL, Cue.ACCEPTED]
 
     asyncio.run(behavior())
 
@@ -280,7 +283,8 @@ def test_start_cue_failure_cancels_connection_and_restores_input(config, failure
             def set_input(self, enabled):
                 self.enabled = enabled
 
-            async def cue(self, _frequency, *, duration=0.12):
+            async def play_cue(self, cue):
+                assert cue == Cue.WAKE
                 cue_started.set()
                 if failure == "error":
                     raise RuntimeError("cue failed")
@@ -320,8 +324,8 @@ def test_confirmation_waits_for_ready_then_cue_and_discards_prior_audio(config):
                 if enabled:
                     prompted.set()
 
-            async def cue(self, _frequency, *, duration=0.12):
-                assert duration == 0.12
+            async def play_cue(self, cue):
+                assert cue == Cue.WAKE
                 cue_started.set()
                 await allow_cue.wait()
 
@@ -369,7 +373,8 @@ def test_connection_failure_cancels_cue_and_records_outcomes(monkeypatch, config
             def set_input(self, enabled):
                 self.enabled = enabled
 
-            async def cue(self, _frequency, *, duration=0.12):
+            async def play_cue(self, cue):
+                assert cue == Cue.WAKE
                 cue_started.set()
                 try:
                     await asyncio.Event().wait()
@@ -412,9 +417,9 @@ def test_end_cue_precedes_cleanup_and_delivery_and_can_be_cancelled(config, canc
                 self.enabled = enabled
                 super().set_input(enabled)
 
-            async def cue(self, frequency, *, duration=0.12):
-                cues.append(frequency)
-                if frequency == 660:
+            async def play_cue(self, cue):
+                cues.append(cue)
+                if cue == Cue.ACCEPTED:
                     assert not self.enabled
                     started.set()
                     await release.wait()
@@ -448,7 +453,7 @@ def test_end_cue_precedes_cleanup_and_delivery_and_can_be_cancelled(config, canc
             pending = asyncio.create_task(flow())
             try:
                 await asyncio.wait_for(started.wait(), 1)
-                assert cues == [440, 660]
+                assert cues == [Cue.WAKE, Cue.PROVISIONAL, Cue.ACCEPTED]
                 assert not closed.is_set() and not pending.done()
                 assert host.operations == []
                 if cancelled:
@@ -462,7 +467,7 @@ def test_end_cue_precedes_cleanup_and_delivery_and_can_be_cancelled(config, canc
                 release.set()
                 pending.cancel()
                 await asyncio.gather(pending, return_exceptions=True)
-        assert cues == [440, 660]
+        assert cues == [Cue.WAKE, Cue.PROVISIONAL, Cue.ACCEPTED]
         assert host.operations == (
             [] if cancelled else [("deliver", "near paste that please hello", False)]
         )
@@ -480,9 +485,9 @@ def test_end_cue_failure_and_confirmation(config, confirmation, ending):
         notices = []
 
         class Audio(FakeAudio):
-            async def cue(self, frequency, *, duration=0.12):
-                cues.append(frequency)
-                if frequency == 660:
+            async def play_cue(self, cue):
+                cues.append(cue)
+                if cue == Cue.ACCEPTED:
                     raise RuntimeError("speaker failed")
 
         async def server(socket):
@@ -506,7 +511,7 @@ def test_end_cue_failure_and_confirmation(config, confirmation, ending):
         assert result == Request(
             Ending.SUBMIT if confirmation else Ending.PASTE, "" if confirmation else "hello"
         )
-        assert cues == ([880] if confirmation else [440, 660])
+        assert cues == ([Cue.WAKE] if confirmation else [Cue.WAKE, Cue.PROVISIONAL, Cue.ACCEPTED])
         assert confirmation or any("speaker failed" in notice for notice in notices)
         if not confirmation:
             host = PreviewHost(lambda _: None)
@@ -565,8 +570,8 @@ def test_pending_deadline_gives_fresh_audio_and_recognizer_events_priority(
             super().__init__()
             self.cues = []
 
-        async def cue(self, frequency, *, duration=0.12):
-            self.cues.append(frequency)
+        async def play_cue(self, cue):
+            self.cues.append(cue)
 
     async def behavior():
         socket, audio = Socket(), TestAudio()
@@ -609,7 +614,11 @@ def test_pending_deadline_gives_fresh_audio_and_recognizer_events_priority(
             else:
                 await asyncio.wait_for(cleared.wait(), 1)
                 assert not task.done()
-            assert 660 not in audio.cues
+                async with asyncio.timeout(1):
+                    while audio.cues[-1] != Cue.CANCELLED:
+                        await asyncio.sleep(0)
+            expected = [Cue.PROVISIONAL] + ([] if continuation == "error" else [Cue.CANCELLED])
+            assert audio.cues == expected
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -657,7 +666,7 @@ def test_vad_tail_waits_for_full_quiet_and_accepts(monkeypatch, backend):
             self.sent.put_nowait(None)
 
     class TestAudio(Audio):
-        async def cue(self, _frequency, *, duration=0.12):
+        async def play_cue(self, _cue):
             pass
 
     async def behavior():
@@ -784,6 +793,215 @@ def test_partial_during_original_speech_only_cancels_when_nonempty(monkeypatch, 
             assert cleared.is_set() == bool(partial)
             assert not task.done()
         finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(behavior())
+
+
+@pytest.mark.parametrize("disabled", [None, Cue.PROVISIONAL, Cue.CANCELLED])
+def test_provisional_ending_then_continued_speech_plays_provisional_then_cancelled(
+    monkeypatch, disabled
+):
+    from thalvi_desktop import client
+    from thalvi_desktop.pending import Pending
+
+    class Socket:
+        def __init__(self):
+            self.events = asyncio.Queue()
+            self.sent = asyncio.Event()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return await self.events.get()
+
+        async def send(self, _frame):
+            self.sent.set()
+
+    monkeypatch.setattr(client, "Pending", Pending)
+
+    async def behavior():
+        socket, audio = Socket(), FakeAudio()
+        heard = asyncio.Event()
+        cues = Cues(**{disabled.value: False}) if disabled else Cues()
+        task = asyncio.create_task(
+            client._capture_events(
+                socket,
+                audio,
+                Capture(),
+                lambda message: heard.set() if message.startswith("Hearing") else None,
+                cues=cues,
+            )
+        )
+        try:
+            await asyncio.wait_for(socket.sent.wait(), 1)
+            socket.events.put_nowait(json.dumps({"type": "final", "text": "hello paste that"}))
+            socket.events.put_nowait(json.dumps({"type": "partial", "text": "more words"}))
+            await asyncio.wait_for(heard.wait(), 1)
+            assert audio.cues == [c for c in (Cue.PROVISIONAL, Cue.CANCELLED) if c != disabled]
+            assert not task.done()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(behavior())
+
+
+@pytest.mark.parametrize("disabled", [None, Cue.WAKE, Cue.PROVISIONAL, Cue.ACCEPTED])
+def test_disabled_cues_are_skipped_and_played_cues_are_recorded(config, tmp_path, disabled):
+    from thalvi_desktop.metrics import Metrics
+
+    async def behavior():
+        async def server(socket):
+            await socket.send('{"type":"ready"}')
+            await socket.recv()
+            await socket.send('{"type":"final","text":"hello paste that"}')
+            await socket.wait_closed()
+
+        audio, metrics = FakeAudio(), Metrics(tmp_path / "metrics.jsonl")
+        cues = Cues(**{disabled.value: False}) if disabled else Cues()
+        async with serve(server, "127.0.0.1", 0) as listener:
+            local = replace(
+                config,
+                server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}",
+                cues=cues,
+            )
+            await asyncio.wait_for(
+                capture(local, audio, Capture(), lambda _: None, metrics=metrics), 2
+            )
+        assert audio.cues == [c for c in (Cue.WAKE, Cue.PROVISIONAL, Cue.ACCEPTED) if c != disabled]
+        await metrics.flush()
+        rows = [json.loads(line) for line in metrics.path.read_text().splitlines()]
+        assert [r["outcome"] for r in rows if r["event"] == "desktop_cue"] == (
+            [] if disabled == Cue.PROVISIONAL else ["provisional"]
+        )
+
+    asyncio.run(behavior())
+
+
+@pytest.mark.parametrize(
+    "cues, speech_fails, expected",
+    [
+        (Cues(), False, [Cue.WAKE]),
+        (Cues(wake=False), False, []),
+        (Cues(), True, [Cue.WAKE]),
+        (Cues(error=False), True, [Cue.WAKE]),
+    ],
+)
+def test_conversation_plays_wake_cue_and_raises_on_speech_failure(
+    config, cues, speech_fails, expected
+):
+    class Audio(FakeAudio):
+        def play(self, pcm):
+            raise RuntimeError("Speech playback could not open.")
+
+    async def behavior():
+        audio = Audio()
+
+        async def server(socket):
+            await socket.recv()
+            await socket.send('{"type":"state","state":"listening"}')
+            if speech_fails:
+                await socket.send(b"\0\0")
+            else:
+                await socket.send('{"type":"user","text":"never mind"}')
+            await socket.wait_closed()
+
+        async with serve(server, "127.0.0.1", 0) as listener:
+            local = replace(
+                config,
+                server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}",
+                cues=cues,
+            )
+            if speech_fails:
+                with pytest.raises(RuntimeError, match="could not open"):
+                    await asyncio.wait_for(conversation(local, audio, lambda _: None), 2)
+            else:
+                await asyncio.wait_for(conversation(local, audio, lambda _: None), 2)
+        assert audio.cues == expected
+
+    asyncio.run(behavior())
+
+
+def test_cancel_ending_plays_the_cancelled_cue_not_accepted(config):
+    async def behavior():
+        audio = FakeAudio()
+
+        async def server(socket):
+            await socket.send('{"type":"ready"}')
+            await socket.recv()
+            await socket.send('{"type":"final","text":"never mind"}')
+            await socket.wait_closed()
+
+        async with serve(server, "127.0.0.1", 0) as listener:
+            local = replace(config, server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}")
+            result = await asyncio.wait_for(capture(local, audio, Capture(), lambda _: None), 2)
+        assert result == Request(Ending.CANCEL, "")
+        assert audio.cues == [Cue.WAKE, Cue.CANCELLED]
+
+    asyncio.run(behavior())
+
+
+def test_provisional_cue_longer_than_frame_watchdog_keeps_capture(monkeypatch, config):
+    from thalvi_desktop import client
+
+    class Voice:
+        def speech(self, frame):
+            return frame[0] == 1
+
+    monkeypatch.setattr(client, "VoiceActivity", Voice)
+
+    class Socket:
+        def __init__(self):
+            self.events = asyncio.Queue()
+            self.sent = asyncio.Queue()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return await self.events.get()
+
+        async def send(self, _frame):
+            self.sent.put_nowait(None)
+
+    class Audio(FakeAudio):
+        def __init__(self):
+            super().__init__()
+            self.provisional_started = asyncio.Event()
+            self.provisional_release = asyncio.Event()
+
+        async def play_cue(self, cue):
+            self.cues.append(cue)
+            if cue == Cue.PROVISIONAL:
+                self.provisional_started.set()
+                await self.provisional_release.wait()
+
+        async def next(self):
+            if self.provisional_started.is_set() and not self.provisional_release.is_set():
+                await self.provisional_release.wait()
+            return await super().next()
+
+    async def behavior():
+        socket, audio = Socket(), Audio()
+        task = asyncio.create_task(client._capture_events(socket, audio, Capture(), lambda _: None))
+        try:
+            audio.queue.put_nowait(bytes([1, 0]) * 3840)
+            await asyncio.wait_for(socket.sent.get(), 1)
+            await asyncio.wait_for(socket.sent.get(), 1)
+            socket.events.put_nowait(json.dumps({"type": "final", "text": "hello paste that"}))
+            await asyncio.wait_for(audio.provisional_started.wait(), 1)
+            await asyncio.sleep(0.3)
+            assert not task.done()
+            audio.provisional_release.set()
+            audio.queue.put_nowait(bytes(7680))
+            result = await asyncio.wait_for(task, 2)
+            assert result == Request(Ending.PASTE, "hello")
+            assert audio.cues == [Cue.PROVISIONAL, Cue.ACCEPTED]
+        finally:
+            audio.provisional_release.set()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
