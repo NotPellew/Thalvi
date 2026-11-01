@@ -124,6 +124,12 @@ manager; lockfiles are committed.
 - The PR title becomes the merge commit's subject. The body states the
   problem, then the fix. Say `Closes #N` when the PR resolves an issue,
   `Refs #N` when it only touches one.
+- Use `.github/pull_request_template.md` for every PR body, including PRs
+  created through CLI tools; preserve its headings and remove instructional
+  comments.
+- When opening an issue, use the matching form in `.github/ISSUE_TEMPLATE/`.
+  For CLI-created issues, use its field labels as Markdown headings. Blank
+  issues remain available for cases neither form fits; issues are optional.
 
 ## Docs
 

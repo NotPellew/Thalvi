@@ -1,0 +1,45 @@
+name: Bug report
+description: Report broken behavior, a regression, or a reliability problem.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What goes wrong, and how does it affect using Thalvi?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Give the shortest known reproduction. If intermittent, describe when it happens and how often.
+      placeholder: |
+        1. Start Thalvi with ...
+        2. ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the version or commit, OS, client, and speech or model endpoints where relevant. Unknown details are fine.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Optional relevant errors, screenshots, recordings, or related issues. Remove secrets and private dictated content.
