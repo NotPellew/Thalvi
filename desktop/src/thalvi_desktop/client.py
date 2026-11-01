@@ -9,8 +9,9 @@ from contextlib import suppress
 from websockets.asyncio.client import connect
 
 from .audio import Audio, transcription_pcm
-from .capture import Capture, Request
+from .capture import Capture, Ending, Request
 from .config import Config, record
+from .cues import Cue, Cues
 from .metrics import Metrics
 from .pending import Pending
 from .vad import VoiceActivity
@@ -37,10 +38,8 @@ async def capture(
         cue_started = time.monotonic()
         outcome = "error"
         try:
-            if confirmation:
-                await audio.cue(880)
-            else:
-                await audio.cue(440, duration=0.04)
+            if config.cues.enabled(Cue.WAKE):
+                await audio.play_cue(Cue.WAKE)
             audio.set_input(True)
             notice(ready_message)
             outcome = "ok"
@@ -97,6 +96,7 @@ async def capture(
             confirmation,
             config.ending_pause,
             pending_notice,
+            config.cues,
         )
     finally:
         tasks = [task for task in (connection, activation) if task is not None]
@@ -118,10 +118,15 @@ async def _capture_events(
     confirmation=False,
     pause=2.5,
     pending_notice=None,
+    cues: Cues | None = None,
 ):
+    cues = cues or Cues()
     gate = None if confirmation else Pending(current, pause)
     vad = None if confirmation else VoiceActivity()
     changed = asyncio.Event()
+    active_cues = 0
+    cues_idle = asyncio.Event()
+    cues_idle.set()
     frame_seq = 0
     frame_changed = asyncio.Event()
     pause_outcome = "cancelled"
@@ -134,6 +139,28 @@ async def _capture_events(
             await metrics.record("desktop_ending_state", time.monotonic(), outcome, buffered=True)
         except OSError:
             notice("The optional ending diagnostics could not be saved.")
+
+    async def optional_cue(cue: Cue) -> None:
+        nonlocal active_cues
+        if not cues.enabled(cue):
+            return
+        active_cues += 1
+        cues_idle.clear()
+        frame_changed.set()
+        started = time.monotonic()
+        try:
+            await audio.play_cue(cue)
+        except RuntimeError as error:
+            notice(f"{error} Capture continues.")
+            return
+        finally:
+            active_cues -= 1
+            if not active_cues:
+                cues_idle.set()
+            frame_changed.set()
+        if metrics:
+            with suppress(OSError):
+                await metrics.record("desktop_cue", started, cue.value, buffered=True)
 
     async def send_audio() -> None:
         nonlocal frame_seq, local_speech
@@ -157,6 +184,7 @@ async def _capture_events(
                             pending_notice(None, pause)
                         notice("Speech continued. Keep speaking or say an ending again.")
                         await diagnostic("local_speech_cancelled")
+                        await optional_cue(Cue.CANCELLED)
             frame_seq += 1
             frame_changed.set()
             await socket.send(transcription_pcm(frame))
@@ -189,12 +217,16 @@ async def _capture_events(
                                 notice(
                                     f"Pause for {pause:g} seconds to confirm {gate.request.ending}."
                                 )
+                            if gate.request is not previous:
+                                await optional_cue(Cue.PROVISIONAL)
                     if request:
                         return request
                     notice("Capturing · " + current.text)
                     if gate is not None:
                         if previous is not None and text.strip():
                             await diagnostic("final_cancelled")
+                        if previous is not None and gate.request is None:
+                            await optional_cue(Cue.CANCELLED)
                         if gate.request is not None:
                             await diagnostic(
                                 "waiting_for_quiet" if gate.waiting_for_quiet else "pending"
@@ -209,6 +241,7 @@ async def _capture_events(
                         if pending_notice:
                             pending_notice(None, pause)
                         await diagnostic("speech_start_cancelled")
+                        await optional_cue(Cue.CANCELLED)
                 case "speech_end":
                     pass
                 case "partial":
@@ -221,10 +254,24 @@ async def _capture_events(
                         if pending_notice:
                             pending_notice(None, pause)
                         await diagnostic("partial_cancelled")
+                        await optional_cue(Cue.CANCELLED)
                     notice("Hearing (unconfirmed) · " + message["text"])
                 case _:
                     raise RuntimeError("Transcription returned an unknown event.")
         raise RuntimeError("Speech recognition disconnected. Nothing was delivered.")
+
+    async def wait_for_frame(candidate):
+        seen = frame_seq
+        while frame_seq == seen and gate.request is candidate:
+            frame_changed.clear()
+            if active_cues:
+                await cues_idle.wait()
+                continue
+            try:
+                async with asyncio.timeout(0.25):
+                    await frame_changed.wait()
+            except TimeoutError as error:
+                raise RuntimeError("Microphone audio stopped. Nothing was delivered.") from error
 
     async def wait_for_pause():
         while True:
@@ -234,14 +281,7 @@ async def _capture_events(
                 await changed.wait()
                 continue
             if gate.waiting_for_quiet:
-                frame_changed.clear()
-                try:
-                    async with asyncio.timeout(0.25):
-                        await frame_changed.wait()
-                except TimeoutError as error:
-                    raise RuntimeError(
-                        "Microphone audio stopped. Nothing was delivered."
-                    ) from error
+                await wait_for_frame(candidate)
                 continue
             remaining = gate.since + gate.seconds - asyncio.get_running_loop().time()
             if remaining > 0:
@@ -249,15 +289,7 @@ async def _capture_events(
                     async with asyncio.timeout(remaining):
                         await changed.wait()
                 continue
-            seen = frame_seq
-            frame_changed.clear()
-            try:
-                async with asyncio.timeout(0.25):
-                    while frame_seq == seen and gate.request is candidate:
-                        await frame_changed.wait()
-                        frame_changed.clear()
-            except TimeoutError as error:
-                raise RuntimeError("Microphone audio stopped. Nothing was delivered.") from error
+            await wait_for_frame(candidate)
             await asyncio.sleep(0)
             if gate.request is candidate:
                 if hasattr(audio, "frames") and not audio.frames.empty():
@@ -297,11 +329,12 @@ async def _capture_events(
         await asyncio.gather(sender, return_exceptions=True)
         if pause_outcome == "ok":
             await diagnostic("accepted")
-        if not confirmation:
+        end_cue = Cue.CANCELLED if request.ending == Ending.CANCEL else Cue.ACCEPTED
+        if not confirmation and cues.enabled(end_cue):
             started = time.monotonic()
             outcome = "ok"
             try:
-                await audio.cue(660)
+                await audio.play_cue(end_cue)
             except asyncio.CancelledError:
                 outcome = "cancelled"
                 raise
@@ -328,6 +361,8 @@ async def _capture_events(
 
 async def conversation(config: Config, audio: Audio, notice: Callable[[str], None]) -> None:
     audio.new_conversation()
+    if config.cues.enabled(Cue.WAKE):
+        await audio.play_cue(Cue.WAKE)
     async with connect(
         config.server + "/session", proxy=None, close_timeout=2, max_size=1_000_000
     ) as socket:

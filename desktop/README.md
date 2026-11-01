@@ -65,12 +65,12 @@ using the configured transcription/conversation endpoints.
 
 ## Captures and tasks
 
-After the capture wake word, wait for the local start tone to finish, then
-speak your text and ending phrase. Audio before the tone ends is discarded.
-The short lower tone signals that dictation is ready; wait until it finishes
-before speaking. A higher tone acknowledges an
-accepted ending, before delivery begins. The ending tone does not mean delivery
-succeeded.
+After the capture wake word, wait for the ascending chime to finish, then
+speak your text and ending phrase. Microphone blocks captured during a cue
+are discarded. An anticipatory cue marks a provisional ending; a descending
+cue marks cancellation or continued speech. A resolution chime acknowledges
+an accepted ending before delivery begins; it does not mean delivery succeeded.
+A dissonant cue signals an action or playback failure.
 Fresh audio is buffered while the recognizer connects; startup must complete
 within eight seconds. Ordinary pauses can produce separate transcription pieces
 but do not end the capture without an ending command. All ending phrases can be
@@ -88,7 +88,7 @@ from 2 to 3 seconds.
 An ending is provisional while the countdown runs. Local speech detection and
 recognizer continuations cancel it if you keep talking; the ending words then
 remain part of your dictation. Empty recognition results do not reactivate a
-canceled ending. The ending cue plays only after the quiet interval is accepted.
+canceled ending. The accepted cue plays after the quiet interval is accepted.
 The speech detector's trailing activity delays the start of the quiet interval;
 speech that resumes after quiet cancels it. Empty partial updates do not cancel
 an ending. Opt-in metrics record pending, quiet, cancellation and acceptance states.

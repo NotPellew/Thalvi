@@ -7,6 +7,7 @@
     "conversation_threshold": 0.5
   },
   "ending_pause": 2.5,
+  "cues": {"wake": true, "provisional": true, "cancelled": true, "accepted": true, "error": true},
   "endings": {
     "paste that": "paste",
     "finish dictation": "paste",

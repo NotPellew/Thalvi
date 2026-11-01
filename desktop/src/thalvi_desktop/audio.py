@@ -5,6 +5,8 @@ import queue
 import threading
 from contextlib import suppress
 
+from .cues import RATE, Cue, synthesize
+
 
 class Audio:
     def __init__(self, device: str | int | None = None):
@@ -22,6 +24,8 @@ class Audio:
         self.input_lock = threading.Lock()
         self.input_epoch = 0
         self.input_enabled = True
+        self.input_after = 0.0
+        self.cue_lock = asyncio.Lock()
 
     async def __aenter__(self) -> "Audio":
         try:
@@ -44,8 +48,10 @@ class Audio:
             else:
                 self.frames.put_nowait(data)
 
-        def callback(data, _frames, _time, status):
+        def callback(data, _frames, timing, status):
             with self.input_lock:
+                if not self.input_enabled or timing.inputBufferAdcTime < self.input_after:
+                    return
                 epoch = self.input_epoch
             loop.call_soon_threadsafe(offer, bytes(data), str(status) if status else "", epoch)
 
@@ -90,6 +96,8 @@ class Audio:
 
     def set_input(self, enabled: bool) -> None:
         with self.input_lock:
+            if enabled and self.input_stream is not None:
+                self.input_after = self.input_stream.time
             self.input_epoch += 1
             self.input_enabled = enabled
         self.discard()
@@ -97,22 +105,30 @@ class Audio:
     def reset_input(self) -> None:
         self.set_input(True)
 
-    async def cue(self, frequency: int, *, duration: float = 0.12) -> None:
-        import numpy as np
+    async def play_cue(self, cue: Cue) -> None:
         import sounddevice as sd
 
-        rate = 24_000
-        t = np.arange(int(rate * duration)) / rate
-        tone = (0.15 * np.sin(2 * np.pi * frequency * t) * np.sin(np.pi * t / duration)).astype(
-            np.float32
-        )
-        try:
-            await asyncio.to_thread(sd.play, tone, rate, blocking=True)
-        except asyncio.CancelledError:
-            sd.stop()
-            raise
-        except Exception as error:
-            raise RuntimeError("Audio feedback failed. Check the output device.") from error
+        async with self.cue_lock:
+            with self.input_lock:
+                was_enabled = self.input_enabled
+            self.set_input(False)
+            playback = asyncio.create_task(
+                asyncio.to_thread(sd.play, synthesize(cue), RATE, blocking=True)
+            )
+            try:
+                await asyncio.shield(playback)
+            except asyncio.CancelledError:
+                try:
+                    sd.stop()
+                finally:
+                    with suppress(Exception):
+                        await asyncio.shield(playback)
+                raise
+            except Exception as error:
+                raise RuntimeError("Audio feedback failed. Check the output device.") from error
+            finally:
+                if was_enabled:
+                    self.set_input(True)
 
     def play(self, pcm: bytes) -> None:
         if len(pcm) % 2:

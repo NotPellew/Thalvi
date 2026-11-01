@@ -11,6 +11,7 @@ import pytest
 
 from thalvi_desktop import cli
 from thalvi_desktop.config import Config
+from thalvi_desktop.cues import Cue, Cues
 from thalvi_desktop.workflow import PreviewHost
 
 
@@ -171,8 +172,9 @@ def test_native_entry_routes_wakes_recovers_and_releases_audio(
             if enabled:
                 events.append("discard")
 
-        async def cue(self, frequency):
-            if frequency == 440:
+        async def play_cue(self, cue):
+            events.append(f"cue: {cue.value}")
+            if cue == Cue.WAKE:
                 recording.set()
 
     class Host(PreviewHost):
@@ -185,7 +187,7 @@ def test_native_entry_routes_wakes_recovers_and_releases_audio(
     async def capture(_config, _audio, current, _notice, **_kwargs):
         assert events.count("detect") == wake_frames
         events.append("capture")
-        await _audio.cue(440)
+        await _audio.play_cue(Cue.WAKE)
         if failure == "flow":
             current.final("Keep this partial dictation")
             raise RuntimeError("speech failed")
@@ -314,7 +316,7 @@ def test_delivery_has_no_postdelivery_cue_and_idle_notice_is_truthful(monkeypatc
         def set_input(self, _enabled):
             pass
 
-        async def cue(self, _frequency):
+        async def play_cue(self, _cue):
             raise RuntimeError("speaker failed")
 
     host = PreviewHost(lambda _: None)
@@ -459,3 +461,74 @@ def test_ambiguous_wake_notifies_once_until_it_clears_without_action(monkeypatch
         asyncio.run(cli.run(config, once=False, dry_run=False))
     assert host.operations == [] and events == ["released"]
     assert sum("ambiguous" in notice for notice in notices) == 1 + int(gap)
+
+
+@pytest.mark.parametrize("error_cue", [True, False])
+@pytest.mark.parametrize("failure", ["flow", "unsuccessful"])
+def test_flow_failures_play_the_error_cue_after_telling_the_user(monkeypatch, failure, error_cue):
+    config = replace(
+        Config.load(Path(__file__).parents[1] / "config.example.json"),
+        cues=Cues(error=error_cue),
+    )
+    events = []
+
+    class Wake:
+        def __init__(self, _config):
+            pass
+
+        def detect(self, _frame):
+            return "capture"
+
+        def reset(self):
+            pass
+
+    class Audio:
+        failed = False
+
+        def __init__(self, _device):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def next(self):
+            return wake_frame("quiet", 1)
+
+        def set_input(self, _enabled):
+            pass
+
+        async def play_cue(self, cue):
+            events.append(cue)
+            raise RuntimeError("speaker failed")
+
+    class Host(PreviewHost):
+        def copy(self, text):
+            events.append("clipboard")
+
+    async def capture(_config, _audio, current, _notice, **_kwargs):
+        current.final("Keep this partial dictation")
+        if failure == "flow":
+            raise RuntimeError("speech failed")
+        return current.final("paste that")
+
+    async def finish(*_args):
+        return False
+
+    monkeypatch.setattr(cli, "Wake", Wake)
+    monkeypatch.setattr(cli, "Audio", Audio)
+    monkeypatch.setattr(cli, "desktop", lambda: Host(lambda _: None))
+    monkeypatch.setattr(cli, "capture", capture)
+    monkeypatch.setattr(cli.Workflow, "finish", lambda *_args: finish())
+    monkeypatch.setattr(cli, "notice", lambda message: events.append(f"notice: {message}"))
+
+    assert asyncio.run(cli.run(config, once=True, dry_run=False)) == 1
+    told = [e for e in events if isinstance(e, str) and e.startswith("notice: speech failed")]
+    assert bool(told) == (failure == "flow")
+    played = [e for e in events if isinstance(e, Cue)]
+    assert played == ([Cue.ERROR] if error_cue else [])
+    if failure == "flow":
+        order = [e for e in events if e in (told[0], Cue.ERROR, "clipboard")]
+        assert order == [told[0], *([Cue.ERROR] if error_cue else []), "clipboard"]

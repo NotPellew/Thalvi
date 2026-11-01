@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .capture import DEFAULT_ENDINGS, Ending
+from .cues import Cue, Cues
 
 
 def record(value: object, label: str) -> dict[str, object]:
@@ -63,6 +64,7 @@ class Config:
     device: str | int | None
     discord_port: int
     ending_pause: float = 2.5
+    cues: Cues = Cues()
 
     @classmethod
     def load(cls, path: Path) -> "Config":
@@ -79,6 +81,7 @@ class Config:
                 "device",
                 "discord",
                 "ending_pause",
+                "cues",
             },
             "desktop",
         )
@@ -193,6 +196,11 @@ class Config:
         ):
             raise ValueError("ending_pause must be a finite number between 2 and 3 seconds.")
 
+        cues_raw = record(raw.get("cues", {}), "cues")
+        fields(cues_raw, {cue.value for cue in Cue}, "cues")
+        if any(type(flag) is not bool for flag in cues_raw.values()):
+            raise ValueError("cues settings must be true or false.")
+
         return cls(
             server.rstrip("/"),
             model_dir,
@@ -206,4 +214,5 @@ class Config:
             device,
             discord_port,
             float(ending_pause),
+            Cues(**cues_raw),
         )
