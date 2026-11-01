@@ -148,6 +148,7 @@ async def _capture_events(
             started = time.monotonic()
             outcome = "ok"
             cue_active = True
+            audio.set_input(False)
             try:
                 await audio.cue(frequency, duration=0.08)
             except asyncio.CancelledError:
@@ -158,6 +159,7 @@ async def _capture_events(
                 notice(f"{error} Capture continues.")
             finally:
                 cue_active = False
+                audio.set_input(True)
                 if metrics:
                     with suppress(OSError):
                         await metrics.record(event, started, outcome, buffered=True)
@@ -167,7 +169,10 @@ async def _capture_events(
         if gate is None:
             return
         if gate.request is not None and gate.request is not cued:
+            replaced = cued
             cued = gate.request
+            if replaced is not None:
+                await feedback(CANCELLED_CUE_HZ, "desktop_cancel_cue")
             await feedback(PENDING_CUE_HZ, "desktop_pending_cue")
         elif gate.request is None and before is not None and cued is before:
             cued = None
