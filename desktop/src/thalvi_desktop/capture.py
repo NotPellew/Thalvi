@@ -35,30 +35,33 @@ class Capture:
     endings: dict[str, Ending] = field(default_factory=lambda: dict(DEFAULT_ENDINGS))
     pieces: list[str] = field(default_factory=list)
     finished: bool = False
+    scratched: bool = False
 
     @property
     def text(self) -> str:
         return " ".join(self.pieces)
+
+    def ending(self, combined: str):
+        for phrase in sorted(self.endings, key=len, reverse=True):
+            words = phrase.split()
+            pattern = r"[\s.!?,;:]+".join(map(re.escape, words))
+            match = re.search(r"(?:^|\s)" + pattern + r"[\s.!?,;:]*$", combined, re.I)
+            if match:
+                return self.endings[phrase], match
+        return None, None
 
     def final(self, transcript: str) -> Request | None:
         if self.finished:
             raise ValueError("This capture has already finished.")
         text = transcript.strip()
         combined = " ".join([*self.pieces, text]).strip()
-        ending = None
-        match = None
-        for phrase in sorted(self.endings, key=len, reverse=True):
-            words = phrase.split()
-            pattern = r"[\s.!?,;:]+".join(map(re.escape, words))
-            match = re.search(r"(?:^|\s)" + pattern + r"[\s.!?,;:]*$", combined, re.I)
-            if match:
-                ending = self.endings[phrase]
-                break
+        ending, match = self.ending(combined)
         if ending == Ending.CANCEL:
             self.pieces.clear()
             self.finished = True
             return Request(ending, "")
         if ending == Ending.SCRATCH:
+            self.scratched = True
             before = combined[: match.start()].strip()
             remaining = len(before)
             kept = []

@@ -208,3 +208,19 @@ preview never connect to Discord. Replay reads confirmation events from the
 fixture rather than live speech. Live voice recognition quality and native
 audio hardware need separate manual qualification; replay and stub-server
 tests do not establish those.
+
+To opt in to a second transcription after dictation finishes, add this to the
+desktop JSON configuration (the API key may be omitted):
+
+```json
+"stt": {
+  "secondary": {
+    "url": "http://127.0.0.1:9000/v1",
+    "model": "whisper-large-v3",
+    "api_key": "optional"
+  }
+}
+```
+
+The configured endpoint receives the complete dictation audio after its ending
+is accepted. If it fails, Thalvi uses the live transcript.

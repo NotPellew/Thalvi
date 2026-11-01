@@ -1040,3 +1040,331 @@ def test_cues_suspend_frame_watchdog_and_rearm_it_after_playback(monkeypatch, ov
             await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(behavior())
+
+
+def test_secondary_local_endpoint_receives_wav_and_replaces_accepted_text(config, tmp_path):
+    import email
+    import io
+    import threading
+    import wave
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from thalvi_desktop.config import SecondarySTT
+    from thalvi_desktop.metrics import Metrics
+
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            message = email.message_from_bytes(
+                (
+                    f"Content-Type: {self.headers['Content-Type']}\r\nMIME-Version: 1.0\r\n\r\n"
+                ).encode()
+                + body
+            )
+            parts = {
+                part.get_param("name", header="content-disposition"): part
+                for part in message.get_payload()
+            }
+            received.append((self.path, self.headers.get("Authorization"), parts))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"text":"More accurate words paste that"}')
+
+        def log_message(self, *_args):
+            pass
+
+    http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=http.serve_forever)
+    thread.start()
+    try:
+
+        async def behavior():
+            sent = []
+
+            async def server(socket):
+                await socket.send('{"type":"ready"}')
+                sent.append(await socket.recv())
+                await socket.send('{"type":"final","text":"live words paste that"}')
+                async for frame in socket:
+                    sent.append(frame)
+
+            async with serve(server, "127.0.0.1", 0) as listener:
+                local = replace(
+                    config,
+                    server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}",
+                    secondary_stt=SecondarySTT(
+                        f"http://127.0.0.1:{http.server_port}/v1", "model", "secret"
+                    ),
+                )
+                metrics = Metrics(tmp_path / "metrics.jsonl")
+                result = await asyncio.wait_for(
+                    capture(local, FakeAudio(), Capture(), lambda _: None, metrics=metrics), 3
+                )
+                await metrics.flush()
+            assert result == Request(Ending.PASTE, "More accurate words")
+            path, auth, parts = received[0]
+            assert (path, auth) == ("/v1/audio/transcriptions", "Bearer secret")
+            assert parts["model"].get_payload(decode=True) == b"model"
+            assert parts["file"].get_filename() == "capture.wav"
+            assert parts["file"].get_content_type() == "audio/wav"
+            with wave.open(io.BytesIO(parts["file"].get_payload(decode=True))) as wav:
+                assert (wav.getnchannels(), wav.getframerate(), wav.getsampwidth()) == (1, 24000, 2)
+                assert wav.readframes(wav.getnframes()) == b"".join(sent)
+            assert [
+                (r["event"], r["outcome"])
+                for r in map(json.loads, metrics.path.read_text().splitlines())
+                if r["event"] == "desktop_secondary_stt"
+            ] == [("desktop_secondary_stt", "ok")]
+
+        asyncio.run(behavior())
+    finally:
+        http.shutdown()
+        thread.join()
+        http.server_close()
+
+
+def test_secondary_truncated_response_uses_live_transcript():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from thalvi_desktop import client
+    from thalvi_desktop.config import SecondarySTT
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            self.wfile.write(b'{"text":')
+
+        def log_message(self, *_args):
+            pass
+
+    http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=http.serve_forever)
+    thread.start()
+    try:
+        notices = []
+        original = Request(Ending.PASTE, "live words")
+        result = asyncio.run(
+            client.secondary_transcription(
+                SecondarySTT(f"http://127.0.0.1:{http.server_port}/v1", "model"),
+                b"",
+                original,
+                {},
+                notices.append,
+                None,
+            )
+        )
+        assert result == original
+        assert any("Using the live transcript" in notice for notice in notices)
+    finally:
+        http.shutdown()
+        thread.join()
+        http.server_close()
+
+
+@pytest.mark.parametrize(
+    "failure", ["network", "malformed", "timeout", "different", "scratch", "empty"]
+)
+def test_secondary_failure_uses_live_transcript(config, monkeypatch, failure):
+    from thalvi_desktop import client
+    from thalvi_desktop.config import SecondarySTT
+
+    def secondary(*_args):
+        if failure == "network":
+            raise OSError("network")
+        if failure == "malformed":
+            raise ValueError("malformed")
+        if failure == "timeout":
+            raise TimeoutError()
+        if failure == "empty":
+            return ""
+        return "different scratch that" if failure == "scratch" else "different submit"
+
+    monkeypatch.setattr(client, "_secondary_request", secondary)
+    notices = []
+    original = Request(Ending.PASTE, "live words", True)
+    result = asyncio.run(
+        client.secondary_transcription(
+            SecondarySTT("http://localhost", "model"),
+            b"",
+            original,
+            config.endings,
+            notices.append,
+            None,
+        )
+    )
+    assert result == original
+    assert any("Using the live transcript" in notice for notice in notices)
+
+
+def test_secondary_cancellation_does_not_return_request(config, monkeypatch):
+    import threading
+
+    from thalvi_desktop import client
+    from thalvi_desktop.config import SecondarySTT
+
+    started, release = threading.Event(), threading.Event()
+
+    def secondary(*_args):
+        started.set()
+        release.wait(2)
+        return "words paste that"
+
+    monkeypatch.setattr(client, "_secondary_request", secondary)
+
+    async def behavior():
+        task = asyncio.create_task(
+            client.secondary_transcription(
+                SecondarySTT("http://localhost", "model"),
+                b"",
+                Request(Ending.PASTE, "live"),
+                config.endings,
+                lambda _: None,
+                None,
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+
+    asyncio.run(behavior())
+
+
+@pytest.mark.parametrize("confirmation,ending", [(False, "never mind"), (True, "yes")])
+def test_secondary_not_called_for_cancel_or_confirmation(config, monkeypatch, confirmation, ending):
+    from thalvi_desktop import client
+    from thalvi_desktop.capture import Confirmation
+    from thalvi_desktop.config import SecondarySTT
+
+    def unexpected(*_args):
+        pytest.fail("Secondary endpoint must not be called")
+
+    monkeypatch.setattr(client, "_secondary_request", unexpected)
+
+    async def behavior():
+        async def server(socket):
+            await socket.send('{"type":"ready"}')
+            await socket.recv()
+            await socket.send(json.dumps({"type": "final", "text": ending}))
+            await socket.wait_closed()
+
+        async with serve(server, "127.0.0.1", 0) as listener:
+            local = replace(
+                config,
+                server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}",
+                secondary_stt=SecondarySTT("http://localhost", "model"),
+            )
+            result = await asyncio.wait_for(
+                capture(
+                    local,
+                    FakeAudio(),
+                    Confirmation() if confirmation else Capture(),
+                    lambda _: None,
+                    confirmation=confirmation,
+                ),
+                2,
+            )
+        assert result.ending == (Ending.SUBMIT if confirmation else Ending.CANCEL)
+
+    asyncio.run(behavior())
+
+
+def test_secondary_not_called_after_scratch(config, monkeypatch):
+    from thalvi_desktop import client
+    from thalvi_desktop.config import SecondarySTT
+
+    def unexpected(*_args):
+        pytest.fail("A scratched capture must keep the live transcript")
+
+    monkeypatch.setattr(client, "_secondary_request", unexpected)
+
+    async def behavior():
+        async def server(socket):
+            await socket.send('{"type":"ready"}')
+            await socket.recv()
+            for text in [
+                "Keep first.",
+                "Throw this away scratch that.",
+                "Goodbye paste that.",
+            ]:
+                await socket.send(json.dumps({"type": "final", "text": text}))
+            await socket.wait_closed()
+
+        async with serve(server, "127.0.0.1", 0) as listener:
+            local = replace(
+                config,
+                server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}",
+                secondary_stt=SecondarySTT("http://localhost", "model"),
+            )
+            result = await asyncio.wait_for(
+                capture(local, FakeAudio(), Capture(), lambda _: None), 2
+            )
+        assert result == Request(Ending.PASTE, "Keep first. Goodbye")
+
+    asyncio.run(behavior())
+
+
+def test_secondary_config_validation_and_default(tmp_path):
+    from thalvi_desktop.config import SecondarySTT
+
+    path = tmp_path / "config.json"
+
+    def load(value):
+        path.write_text(json.dumps(value))
+        return Config.load(path)
+
+    assert load({}).secondary_stt is None
+    assert load({"stt": {}}).secondary_stt is None
+    assert load(
+        {"stt": {"secondary": {"url": "http://localhost/v1/", "model": " model "}}}
+    ).secondary_stt == SecondarySTT("http://localhost/v1", "model")
+    for item in [
+        {},
+        {"url": "http://localhost", "model": " "},
+        {"url": "ftp://localhost", "model": "x"},
+        {"url": "http://user@localhost", "model": "x"},
+        {"url": "http://localhost?x", "model": "x"},
+        {"url": "http://localhost#x", "model": "x"},
+        {"url": "http://localhost:not-a-port", "model": "x"},
+        {"url": "http://localhost:99999", "model": "x"},
+        {"url": "http://localhost", "model": "x", "api_key": 1},
+        {"url": "http://localhost", "model": "x", "extra": 1},
+    ]:
+        with pytest.raises(ValueError):
+            load({"stt": {"secondary": item}})
+    with pytest.raises(ValueError):
+        load({"stt": {"unknown": {}}})
+
+
+def test_disabled_secondary_does_not_buffer_or_call(config, monkeypatch):
+    from thalvi_desktop import client
+
+    async def events(*args):
+        assert args[-1] is None
+        return Request(Ending.PASTE, "live")
+
+    async def unexpected(*_args):
+        pytest.fail("Disabled secondary must not run")
+
+    monkeypatch.setattr(client, "_capture_events", events)
+    monkeypatch.setattr(client, "secondary_transcription", unexpected)
+
+    async def behavior():
+        async def server(socket):
+            await socket.send('{"type":"ready"}')
+            await socket.wait_closed()
+
+        async with serve(server, "127.0.0.1", 0) as listener:
+            local = replace(config, server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}")
+            assert await capture(local, FakeAudio(), Capture(), lambda _: None) == Request(
+                Ending.PASTE, "live"
+            )
+
+    asyncio.run(behavior())

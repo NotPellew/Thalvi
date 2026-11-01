@@ -26,6 +26,7 @@ class Pending:
         if request is None or request.ending == Ending.CANCEL:
             self.capture.pieces = trial.pieces
             self.capture.finished = trial.finished
+            self.capture.scratched = trial.scratched
             return request
         combined = " ".join([*self.capture.pieces, text.strip()]).strip()
         if len(combined) > 20_000:
