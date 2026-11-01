@@ -52,8 +52,8 @@ areas your change touches. Editing rules are in
   speech silence; continued speech cancels the pending ending. Submit asks
   for target confirmation during that pause. Why: hands-free control with
   time to interrupt. Rejected: immediate dispatch and a second spoken yes.
-- **Ending acknowledgement.** Play 660 Hz when a dictation ending is accepted.
-  Why: signal capture has ended before delivery. Rejected: a post-delivery cue.
+- **Musical earcons.** Five two- or three-note cues (wake, provisional ending, cancelled, accepted, error), each switchable under `cues` in the desktop config; the mic drops frames while one plays.
+  Why: distinct contours tell capture state apart without looking, and the mic never hears them. Rejected: one beep for every state, and a post-delivery cue.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
   browser and app actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative

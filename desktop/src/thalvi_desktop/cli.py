@@ -13,6 +13,7 @@ from .audio import Audio
 from .capture import Capture, Confirmation, Ending
 from .client import capture, conversation
 from .config import Config, record
+from .cues import Cue
 from .discord import DesktopComposer, PreviewComposer
 from .host import desktop
 from .metrics import Metrics
@@ -221,6 +222,9 @@ async def _run(config: Config, once: bool, dry_run: bool, resident=None) -> int:
                             resident.state("working", "Processing your request.", selected.app)
                         success = await workflow.finish(request, selected, confirm)
                         outcome = "ok" if success else "failed"
+                        if not success and config.cues.enabled(Cue.ERROR):
+                            with contextlib.suppress(RuntimeError):
+                                await audio.play_cue(Cue.ERROR)
                         if not success and once:
                             return 1
                         current = None
@@ -234,6 +238,9 @@ async def _run(config: Config, once: bool, dry_run: bool, resident=None) -> int:
                     WebSocketException,
                 ) as error:
                     notice(f"{error} Nothing will be delivered automatically.")
+                    if config.cues.enabled(Cue.ERROR):
+                        with contextlib.suppress(RuntimeError):
+                            await audio.play_cue(Cue.ERROR)
                     if current is not None and current.text:
                         await recover(host, current.text)
                     current = None
