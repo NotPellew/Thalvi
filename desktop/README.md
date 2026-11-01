@@ -68,9 +68,11 @@ using the configured transcription/conversation endpoints.
 After the capture wake word, wait for the local start tone to finish, then
 speak your text and ending phrase. Audio before the tone ends is discarded.
 The short lower tone signals that dictation is ready; wait until it finishes
-before speaking. A higher tone acknowledges an
-accepted ending, before delivery begins. The ending tone does not mean delivery
-succeeded.
+before speaking. A mid tone means an ending was heard and its countdown is
+running; a lower tone means continued speech cancelled that ending. A higher
+tone acknowledges an accepted ending, before delivery begins. The ending tone
+does not mean delivery succeeded. Microphone audio is dropped while these
+short tones play, so they are not transcribed.
 Fresh audio is buffered while the recognizer connects; startup must complete
 within eight seconds. Ordinary pauses can produce separate transcription pieces
 but do not end the capture without an ending command. All ending phrases can be
@@ -88,7 +90,7 @@ from 2 to 3 seconds.
 An ending is provisional while the countdown runs. Local speech detection and
 recognizer continuations cancel it if you keep talking; the ending words then
 remain part of your dictation. Empty recognition results do not reactivate a
-canceled ending. The ending cue plays only after the quiet interval is accepted.
+canceled ending. The accepted-ending cue plays only after the quiet interval is accepted.
 The speech detector's trailing activity delays the start of the quiet interval;
 speech that resumes after quiet cancels it. Empty partial updates do not cancel
 an ending. Opt-in metrics record pending, quiet, cancellation and acceptance states.

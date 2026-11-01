@@ -54,6 +54,11 @@ areas your change touches. Editing rules are in
   time to interrupt. Rejected: immediate dispatch and a second spoken yes.
 - **Ending acknowledgement.** Play 660 Hz when a dictation ending is accepted.
   Why: signal capture has ended before delivery. Rejected: a post-delivery cue.
+- **Ending feedback cues.** Play 520 Hz when an ending becomes provisional and
+  330 Hz when continued speech cancels it; mic frames are dropped while a cue
+  plays. Why: tell the states apart without looking, without the tone being
+  transcribed. Rejected: a delivery-success cue (acceptance precedes delivery,
+  and Discord delivery stays unconfirmed).
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
   browser and app actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative
