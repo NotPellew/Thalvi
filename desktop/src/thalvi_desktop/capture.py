@@ -27,6 +27,7 @@ DEFAULT_ENDINGS = {
 class Request:
     ending: Ending
     text: str
+    pause_confirmed: bool = False
 
 
 @dataclass

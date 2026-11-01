@@ -1,23 +1,38 @@
 # Native desktop client
 
-This foreground client owns the microphone, local wake detection, and the
-original target window. The Rust server still owns transcription and
-conversation. `/transcription` returns text without asking the chat model;
-`/session` keeps the existing conversational protocol.
+This resident client owns the microphone, local wake detection, and the
+original target window. The Rust server owns transcription and conversation.
+`/transcription` returns text without asking the chat model; `/session` keeps
+the conversational protocol. Capture works in the application you are using;
+there is no dedicated dictation editor.
 
 The first native target is Hyprland. It needs `hyprctl`, `wtype`, `wl-copy`,
 and `xdg-settings`. Other desktop adapters are not yet implemented or qualified.
-Python 3.12.14 is pinned; use uv 0.12.15. No code is copied from Hex-Hands-free.
+Python 3.11.16 is pinned; use uv 0.12.15. No code is copied from Hex-Hands-free.
 
 ## Run
 
-Start Thalvi normally, then from this directory:
+On Ubuntu, the resident interface uses the system GTK bindings and tray:
+
+```sh
+sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1
+```
+
+Start the Rust server normally, then from this directory:
 
 ```sh
 uv sync --locked --extra audio
 cp config.example.json ../data/desktop.json
-uv run thalvi-desktop --config ../data/desktop.json run
+uv run thalvi-desktop --config ../data/desktop.json app
 ```
+
+Enable listening once in the panel or tray, then click in an input in another
+application and say your wake phrase. The tray and notifications report capture,
+pending actions and failures without opening a window over your input. Closing
+the panel hides it; Quit stops the worker. Pause closes the microphone, and
+Cancel capture discards the current capture and returns to wake listening.
+The status panel keeps the most recent notice in memory; notifications do not
+include dictated text. When the tray is unavailable, the panel stays accessible.
 
 Python 3.11 is required. Configure `wake.model_dir` with existing
 `melspectrogram.onnx`, `embedding_model.onnx`, and `hey_mycroft_v0.1.onnx`,
@@ -32,10 +47,12 @@ model and training data licenses separately before distribution or use.
 
 Audio dependencies are optional for replay and tests. openWakeWord and ONNX Runtime
 run local CPU inference; sounddevice supplies audio and NumPy converts frames.
+WebRTC VAD checks speech locally so an ending's quiet interval does not depend
+only on delayed transcription updates.
 
 Use headphones for native conversation: this prototype has no acoustic echo
 cancellation. The phone/browser client retains its own media handling. The
-native microphone stays open until Ctrl+C; audio is not saved. No audio is
+native microphone stays open while listening is enabled; audio is not saved. No audio is
 sent to the server while waiting for a wake word. `--once` closes after one
 capture or conversation; `--dry-run` previews desktop actions while still
 using the configured transcription/conversation endpoints.
@@ -48,26 +65,32 @@ A lower tone signals that dictation is ready; a higher tone acknowledges an
 accepted ending, before delivery begins. The ending tone does not mean delivery
 succeeded.
 Fresh audio is buffered while the recognizer connects; startup must complete
-within eight seconds. For confirmation, wait for its separate tone before
-answering. Pauses can produce separate transcription pieces but do not deliver
-or end the capture.
-All ending phrases can be changed in the config.
+within eight seconds. Ordinary pauses can produce separate transcription pieces
+but do not end the capture without an ending command. All ending phrases can be
+changed in the config. `ending_pause` defaults to 2.5 seconds and accepts values
+from 2 to 3 seconds.
 
 | Ending | Result |
 | --- | --- |
-| paste that / finish dictation | Insert the collected text without Enter. |
-| submit | Ask for confirmation, then insert and press Enter. |
-| do that | Run the matching configured action. |
+| paste that / finish dictation | After the quiet interval, insert the text without Enter. |
+| submit | Show target confirmation during the quiet interval, then insert and press Enter. |
+| do that | After the quiet interval, run the matching configured action. |
 | scratch that | Discard this piece, or the preceding piece if spoken alone. |
 | never mind | Discard the capture and return to wake listening. |
 
-Submit initially confirms every target because Enter in an arbitrary window
-can send a message or execute a command. Confirmation accepts `yes`,
-`yes send it` or `confirm`; `no`, `never mind` or `cancel` stops it. A failed
-confirmation does not submit. The original window identity remains bound
-through confirmation. If it closes or cannot be focused, text is copied to
-the clipboard instead of being typed elsewhere. A typing failure may be
-partial, so it is reported and never retried automatically.
+An ending is provisional while the countdown runs. Local speech detection and
+recognizer continuations cancel it if you keep talking; the ending words then
+remain part of your dictation. Empty recognition results do not reactivate a
+canceled ending. The ending cue plays only after the quiet interval is accepted.
+For submit, the pending notification asks you to confirm the destination by
+pausing; no second spoken yes is needed. Cancel or keep speaking to stop it.
+
+The original window identity remains bound through the countdown and delivery.
+Keep the intended input selected while dictating: switching between fields
+inside one window is not tracked. If the original window closes or cannot be
+focused, text is kept on the clipboard instead of being typed elsewhere.
+Typing can be partial on failure or interruption; it is never retried
+automatically.
 
 The example scripts open the project page or focus T3 Code and Discord.
 App classes, input shortcuts, task phrases and URL destinations are config,

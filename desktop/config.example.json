@@ -6,6 +6,7 @@
     "capture_threshold": 0.5,
     "conversation_threshold": 0.5
   },
+  "ending_pause": 2.5,
   "endings": {
     "paste that": "paste",
     "finish dictation": "paste",

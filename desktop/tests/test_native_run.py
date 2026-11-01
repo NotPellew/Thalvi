@@ -5,12 +5,83 @@ import json
 import threading
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from thalvi_desktop import cli
 from thalvi_desktop.config import Config
 from thalvi_desktop.workflow import PreviewHost
+
+
+def test_pause_closes_audio_and_joins_old_wake_work_before_resume(monkeypatch, tmp_path):
+    async def behavior():
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        closed = asyncio.Event()
+        release = threading.Event()
+
+        class Wake:
+            running = False
+            history = "fresh"
+
+            def detect(self, frame):
+                self.running = True
+                loop.call_soon_threadsafe(entered.set)
+                try:
+                    assert release.wait(2)
+                    self.history = "old-frame"
+                    return None
+                finally:
+                    self.running = False
+
+            def reset(self):
+                assert not self.running
+                self.history = "fresh"
+
+        class Audio:
+            def __init__(self, _device):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                closed.set()
+
+            async def next(self):
+                return bytes(7680)
+
+        wake = Wake()
+        resident = SimpleNamespace(
+            wake=wake, host=PreviewHost(), notice=lambda _: None, state=lambda *args: None
+        )
+        monkeypatch.setattr(cli, "Audio", Audio)
+        monkeypatch.setattr(cli, "notice", lambda _: None)
+        config = replace(
+            Config.load(Path(__file__).parents[1] / "config.example.json"),
+            metrics=tmp_path / "metrics.jsonl",
+        )
+        task = asyncio.create_task(cli._run(config, False, False, resident))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            task.cancel()
+            await asyncio.wait_for(closed.wait(), 1)
+            assert wake.running
+            assert not task.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 1)
+            await asyncio.to_thread(wake.reset)
+            assert wake.history == "fresh"
+            records = [json.loads(line) for line in config.metrics.read_text().splitlines()]
+            assert all(row["event"] != "desktop_wake_load" for row in records)
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(behavior())
 
 
 def wake_frame(level, index):

@@ -1010,6 +1010,7 @@ mod tests {
         let store = SessionStore::open(&dir).unwrap_or_else(|e| panic!("{e}"));
         let attachment = store.attach(None).await;
         store.save(&attachment, &one("Do not lose this"), 1);
+        store.flush().await;
         store.release(attachment);
         let candidate = store
             .retirement_candidates(u64::MAX)

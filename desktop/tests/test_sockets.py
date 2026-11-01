@@ -31,6 +31,9 @@ class FakeAudio:
         pass
 
     async def next(self):
+        if self.queue.empty() and getattr(self, "quiet_frames", False):
+            await asyncio.sleep(0)
+            return bytes(7680)
         return await self.queue.get()
 
     def new_conversation(self):
@@ -46,6 +49,40 @@ class FakeAudio:
 
     def stop(self):
         self.stopped += 1
+
+
+@pytest.fixture(autouse=True)
+def instant_quiet_gate(monkeypatch):
+    from thalvi_desktop import client
+    from thalvi_desktop.pending import Pending
+
+    class SilentVoice:
+        def speech(self, _frame):
+            return False
+
+    class TestPending(Pending):
+        def __init__(self, capture, _seconds):
+            super().__init__(capture, 0)
+
+        def final(self, text, now):
+            result = super().final(text, now)
+            if self.request is not None:
+                for audio in audio_instances:
+                    audio.quiet_frames = True
+                    if audio.queue.empty():
+                        audio.queue.put_nowait(bytes(7680))
+            return result
+
+    audio_instances = []
+    original_init = FakeAudio.__init__
+
+    def init(audio):
+        original_init(audio)
+        audio_instances.append(audio)
+
+    monkeypatch.setattr(FakeAudio, "__init__", init)
+    monkeypatch.setattr(client, "VoiceActivity", SilentVoice)
+    monkeypatch.setattr(client, "Pending", TestPending)
 
 
 @pytest.fixture
@@ -210,6 +247,7 @@ def test_capture_discards_audio_until_ready_tone_finishes(config):
             await socket.send('{"type":"ready"}')
             received.append(await socket.recv())
             await socket.send('{"type":"final","text":"hello paste that"}')
+            await socket.wait_closed()
 
         async with serve(server, "127.0.0.1", 0) as listener:
             local = replace(config, server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}")
@@ -477,5 +515,89 @@ def test_end_cue_failure_and_confirmation(config, confirmation, ending):
                 result, host.capture(), no_confirmation
             )
             assert host.operations == [("deliver", "hello", False)]
+
+    asyncio.run(behavior())
+
+
+@pytest.mark.parametrize(
+    "continuation", ["voice", "queued_voice", "partial", "speech_start", "final", "error"]
+)
+def test_pending_deadline_gives_fresh_audio_and_recognizer_events_priority(
+    monkeypatch, continuation
+):
+    from thalvi_desktop import client
+    from thalvi_desktop.audio import Audio
+
+    class Voice:
+        def speech(self, frame):
+            return frame[0] == 1
+
+    monkeypatch.setattr(client, "VoiceActivity", Voice)
+
+    class Socket:
+        def __init__(self):
+            self.events = asyncio.Queue()
+            self.sent = asyncio.Event()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return await self.events.get()
+
+        async def send(self, _frame):
+            self.sent.set()
+
+        def offer(self, event):
+            self.events.put_nowait(json.dumps(event))
+
+    class TestAudio(Audio):
+        def __init__(self):
+            super().__init__()
+            self.cues = []
+
+        async def cue(self, frequency):
+            self.cues.append(frequency)
+
+    async def behavior():
+        socket, audio = Socket(), TestAudio()
+        pending, cleared = asyncio.Event(), asyncio.Event()
+
+        def on_pending(request, _seconds):
+            (pending if request else cleared).set()
+
+        task = asyncio.create_task(
+            client._capture_events(
+                socket, audio, Capture(), lambda _message: None, pending_notice=on_pending
+            )
+        )
+        try:
+            audio.frames.put_nowait(bytes(7680))
+            await asyncio.wait_for(socket.sent.wait(), 1)
+            socket.offer({"type": "final", "text": "hello submit"})
+            await asyncio.wait_for(pending.wait(), 1)
+            loop = asyncio.get_running_loop()
+            if continuation in {"voice", "queued_voice"}:
+                if continuation == "queued_voice":
+                    loop.call_soon(audio.frames.put_nowait, bytes(7680))
+                loop.call_soon(audio.frames.put_nowait, bytes([1]) + bytes(7679))
+            else:
+                event = {"type": continuation}
+                if continuation in {"partial", "final"}:
+                    event["text"] = "more words"
+                elif continuation == "error":
+                    event["message"] = "recognizer lost"
+                loop.call_soon(socket.offer, event)
+                loop.call_soon(audio.frames.put_nowait, bytes(7680))
+            if continuation == "error":
+                with pytest.raises(RuntimeError, match="recognizer lost"):
+                    await asyncio.wait_for(task, 1)
+            else:
+                await asyncio.wait_for(cleared.wait(), 1)
+                assert not task.done()
+            assert 660 not in audio.cues
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(behavior())

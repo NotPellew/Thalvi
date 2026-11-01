@@ -62,13 +62,24 @@ class Config:
     metrics: Path | None
     device: str | int | None
     discord_port: int
+    ending_pause: float = 2.5
 
     @classmethod
     def load(cls, path: Path) -> "Config":
         raw = record(json.loads(path.read_text()), "Desktop config")
         fields(
             raw,
-            {"server", "wake", "endings", "apps", "scripts", "metrics", "device", "discord"},
+            {
+                "server",
+                "wake",
+                "endings",
+                "apps",
+                "scripts",
+                "metrics",
+                "device",
+                "discord",
+                "ending_pause",
+            },
             "desktop",
         )
         server = url(raw.get("server", "ws://127.0.0.1:8080"), "server", {"ws", "wss"})
@@ -173,6 +184,15 @@ class Config:
         if capture_model is not None and capture_model.stem == "hey_mycroft_v0.1":
             raise ValueError("Wake model head keys must be distinct.")
 
+        ending_pause = raw.get("ending_pause", 2.5)
+        if (
+            isinstance(ending_pause, bool)
+            or not isinstance(ending_pause, (int, float))
+            or not math.isfinite(ending_pause)
+            or not 2 <= ending_pause <= 3
+        ):
+            raise ValueError("ending_pause must be a finite number between 2 and 3 seconds.")
+
         return cls(
             server.rstrip("/"),
             model_dir,
@@ -185,4 +205,5 @@ class Config:
             local(raw.get("metrics")),
             device,
             discord_port,
+            float(ending_pause),
         )

@@ -64,7 +64,9 @@ async fn capture_returns_incremental_text_without_answering_and_accepts_a_typed_
             vec![0_u8, 1, 2, 3]
         );
         for event in [
+            json!({"type":"speechStart","turnId":"1","audioProcessedMs":80}),
             json!({"type":"transcript","transcript":"first partial"}),
+            json!({"type":"speechEnd","turnId":"1","audioProcessedMs":160}),
             json!({"type":"speechComplete","turnId":"1","transcript":"first piece"}),
             json!({"type":"speechComplete","turnId":"2","transcript":"second piece paste that"}),
         ] {
@@ -88,7 +90,7 @@ async fn capture_returns_incremental_text_without_answering_and_accepts_a_typed_
         .await
         .unwrap();
     let mut events = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..5 {
         let event = tokio::time::timeout(Duration::from_secs(2), client.next())
             .await
             .unwrap()
@@ -99,7 +101,9 @@ async fn capture_returns_incremental_text_without_answering_and_accepts_a_typed_
     assert_eq!(
         events,
         [
+            json!({"type":"speech_start","turn_id":"1","audio_processed_ms":80}),
             json!({"type":"partial","text":"first partial"}),
+            json!({"type":"speech_end","turn_id":"1","audio_processed_ms":160}),
             json!({"type":"final","turn_id":"1","text":"first piece"}),
             json!({"type":"final","turn_id":"2","text":"second piece paste that"})
         ]

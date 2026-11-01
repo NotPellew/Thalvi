@@ -178,7 +178,7 @@ class Workflow:
                 result = await asyncio.to_thread(execute, task, self.config, self.host)
                 self.notify(result)
             else:
-                if request.ending == Ending.SUBMIT:
+                if request.ending == Ending.SUBMIT and not request.pause_confirmed:
                     self.notify(
                         f"Submit to {selected.app}? This presses Enter. "
                         f"Say yes or never mind.\n{request.text}"
