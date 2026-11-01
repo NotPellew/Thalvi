@@ -539,7 +539,9 @@ def test_capture_preserves_rolling_audio_through_target_and_transcription_startu
 
     from thalvi_desktop import client
 
-    monkeypatch.setattr(client, "VoiceActivity", lambda: SimpleNamespace(speech=lambda _: False))
+    monkeypatch.setattr(
+        client, "VoiceActivity", lambda: SimpleNamespace(speech=lambda _, pending=False: False)
+    )
 
     async def behavior():
         loop = asyncio.get_running_loop()

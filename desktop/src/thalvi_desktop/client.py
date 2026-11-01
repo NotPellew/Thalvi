@@ -3,13 +3,14 @@
 import asyncio
 import json
 import time
+from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 
 from websockets.asyncio.client import connect
 
 from .audio import Audio, transcription_pcm
-from .capture import Capture, Ending, Request
+from .capture import Capture, Ending, Request, trailing_artifacts
 from .config import Config, record
 from .cues import Cue, Cues
 from .metrics import Metrics
@@ -164,14 +165,26 @@ async def _capture_events(
     async def send_audio() -> None:
         nonlocal frame_seq, local_speech
         frames = iter(pre_roll)
+        continuation_frames = 0
+        held_frames = deque(maxlen=3)
+        relay_request = None
         while True:
             frame = next(frames, None)
             if frame is None:
                 frame = await audio.next()
+            if gate is not None and gate.capture.finished:
+                continue
+            outgoing = [frame]
             if gate is not None:
-                speech = vad.speech(frame)
-                previous_speech, local_speech = local_speech, speech
+                speech = vad.speech(frame, pending=gate.request is not None)
+                local_speech = speech
                 if gate.request is not None:
+                    if relay_request is not None and relay_request is not gate.request:
+                        relay_request = None
+                        continuation_frames = 0
+                        held_frames.clear()
+                    held_frames.append(frame)
+                    continuation_frames = continuation_frames + 1 if speech else 0
                     if gate.waiting_for_quiet and not speech:
                         gate.waiting_for_quiet = False
                         gate.since = asyncio.get_running_loop().time()
@@ -179,17 +192,26 @@ async def _capture_events(
                         if pending_notice:
                             pending_notice(gate.request, pause)
                         await diagnostic("quiet_started")
-                    elif speech and not previous_speech and not gate.waiting_for_quiet:
-                        gate.continuation()
-                        changed.set()
-                        if pending_notice:
-                            pending_notice(None, pause)
-                        notice("Speech continued. Keep speaking or say an ending again.")
-                        await diagnostic("local_speech_cancelled")
-                        await optional_cue(Cue.CANCELLED)
+                    if continuation_frames == 3:
+                        relay_request = gate.request
+                        await diagnostic("local_speech_relayed")
+                    if relay_request is None:
+                        frame_seq += 1
+                        frame_changed.set()
+                        continue
+                    if continuation_frames == 3:
+                        outgoing = list(held_frames)
+                else:
+                    continuation_frames = 0
+                    if held_frames and relay_request is None:
+                        held_frames.append(frame)
+                        outgoing = list(held_frames)
+                    relay_request = None
+                    held_frames.clear()
             frame_seq += 1
             frame_changed.set()
-            await socket.send(transcription_pcm(frame))
+            for buffered in outgoing:
+                await socket.send(transcription_pcm(buffered))
 
     async def receive() -> Request:
         async for raw in socket:
@@ -235,21 +257,17 @@ async def _capture_events(
                             )
                 case "error":
                     raise RuntimeError(str(message.get("message", "Speech recognition failed.")))
-                case "speech_start":
-                    if gate is not None and gate.request is not None:
-                        gate.continuation()
-                        changed.set()
-                        frame_changed.set()
-                        if pending_notice:
-                            pending_notice(None, pause)
-                        await diagnostic("speech_start_cancelled")
-                        await optional_cue(Cue.CANCELLED)
-                case "speech_end":
+                case "speech_start" | "speech_end":
                     pass
                 case "partial":
                     if not isinstance(message.get("text"), str):
                         raise RuntimeError("Transcription returned an invalid partial turn.")
-                    if message["text"].strip() and gate is not None and gate.request is not None:
+                    if (
+                        message["text"].strip()
+                        and not trailing_artifacts(message["text"])
+                        and gate is not None
+                        and gate.request is not None
+                    ):
                         gate.continuation()
                         changed.set()
                         frame_changed.set()
