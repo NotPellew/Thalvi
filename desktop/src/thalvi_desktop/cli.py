@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import json
 import time
+from collections import deque
 from pathlib import Path
 
 from websockets.exceptions import WebSocketException
@@ -86,6 +87,7 @@ async def _run(config: Config, once: bool, dry_run: bool, resident=None) -> int:
     sampled, sampled_level = 0, None
     window_activity = False
     ambiguous = False
+    pre_roll = deque(maxlen=7)
     async with contextlib.AsyncExitStack() as resources:
         resources.push_async_callback(flush_metrics)
         resources.push_async_callback(finish_wake_work)
@@ -96,6 +98,7 @@ async def _run(config: Config, once: bool, dry_run: bool, resident=None) -> int:
         try:
             while True:
                 frame = await audio.next()
+                pre_roll.append(frame)
                 if sampling:
                     sampled += 1
                     level_started = time.monotonic()
@@ -139,6 +142,8 @@ async def _run(config: Config, once: bool, dry_run: bool, resident=None) -> int:
                 ambiguous = False
                 if mode is None:
                     continue
+                wake_audio = tuple(pre_roll)
+                pre_roll.clear()
                 if resident:
                     resident.begin()
                     host = resident.host
@@ -152,7 +157,6 @@ async def _run(config: Config, once: bool, dry_run: bool, resident=None) -> int:
                     else:
                         if not resident:
                             notice("Capture waking. Reading the target window.")
-                        audio.set_input(False)
                         target_started, target_outcome = time.monotonic(), "error"
                         try:
                             selected = await asyncio.to_thread(host.capture)
@@ -194,6 +198,7 @@ async def _run(config: Config, once: bool, dry_run: bool, resident=None) -> int:
                             notice,
                             metrics=metrics,
                             pending_notice=pending_notice,
+                            pre_roll=wake_audio,
                         )
 
                         async def confirm(target_app=selected.app) -> bool:
