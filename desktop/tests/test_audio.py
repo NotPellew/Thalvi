@@ -244,3 +244,20 @@ def test_wake_missing_assets_and_backend_failure(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "openwakeword.model", SimpleNamespace(Model=Model))
     with pytest.raises(RuntimeError, match="could not load"):
         Wake(config)
+
+
+@pytest.mark.parametrize("duration", [None, 0.04])
+def test_feedback_playback_uses_the_requested_tone_duration(monkeypatch, duration):
+    played = []
+
+    def play(tone, rate, *, blocking):
+        played.append((tone, rate, blocking))
+
+    monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(play=play))
+    audio = Audio()
+    asyncio.run(audio.cue(440, **({"duration": duration} if duration is not None else {})))
+    tone, rate, blocking = played.pop()
+    assert rate == 24_000 and blocking
+    assert tone.shape == (int(rate * (0.12 if duration is None else duration)),)
+    assert tone.dtype == np.float32 and np.isfinite(tone).all()
+    assert tone[0] == 0 and 0 < np.max(np.abs(tone)) <= 0.15

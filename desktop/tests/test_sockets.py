@@ -27,7 +27,7 @@ class FakeAudio:
         if enabled:
             self.queue.put_nowait(bytes(7680))
 
-    async def cue(self, _frequency):
+    async def cue(self, _frequency, *, duration=0.12):
         pass
 
     async def next(self):
@@ -225,7 +225,7 @@ def test_capture_discards_audio_until_ready_tone_finishes(config):
         connected, ready_allowed, cue_started, cue_allowed, receiving = (
             asyncio.Event() for _ in range(5)
         )
-        received = []
+        received, cues = [], []
 
         class Audio(FakeAudio):
             def set_input(self, enabled):
@@ -235,7 +235,8 @@ def test_capture_discards_audio_until_ready_tone_finishes(config):
                 if enabled:
                     receiving.set()
 
-            async def cue(self, _frequency):
+            async def cue(self, _frequency, *, duration=0.12):
+                cues.append((_frequency, duration))
                 cue_started.set()
                 await cue_allowed.wait()
 
@@ -262,6 +263,7 @@ def test_capture_discards_audio_until_ready_tone_finishes(config):
             ready_allowed.set()
             assert await asyncio.wait_for(pending, 1) == Request(Ending.PASTE, "hello")
         assert received == [bytes([3, 0]) * 1920]
+        assert cues == [(440, 0.04), (660, 0.12)]
 
     asyncio.run(behavior())
 
@@ -278,7 +280,7 @@ def test_start_cue_failure_cancels_connection_and_restores_input(config, failure
             def set_input(self, enabled):
                 self.enabled = enabled
 
-            async def cue(self, _frequency):
+            async def cue(self, _frequency, *, duration=0.12):
                 cue_started.set()
                 if failure == "error":
                     raise RuntimeError("cue failed")
@@ -318,7 +320,8 @@ def test_confirmation_waits_for_ready_then_cue_and_discards_prior_audio(config):
                 if enabled:
                     prompted.set()
 
-            async def cue(self, _frequency):
+            async def cue(self, _frequency, *, duration=0.12):
+                assert duration == 0.12
                 cue_started.set()
                 await allow_cue.wait()
 
@@ -366,7 +369,7 @@ def test_connection_failure_cancels_cue_and_records_outcomes(monkeypatch, config
             def set_input(self, enabled):
                 self.enabled = enabled
 
-            async def cue(self, _frequency):
+            async def cue(self, _frequency, *, duration=0.12):
                 cue_started.set()
                 try:
                     await asyncio.Event().wait()
@@ -409,7 +412,7 @@ def test_end_cue_precedes_cleanup_and_delivery_and_can_be_cancelled(config, canc
                 self.enabled = enabled
                 super().set_input(enabled)
 
-            async def cue(self, frequency):
+            async def cue(self, frequency, *, duration=0.12):
                 cues.append(frequency)
                 if frequency == 660:
                     assert not self.enabled
@@ -477,7 +480,7 @@ def test_end_cue_failure_and_confirmation(config, confirmation, ending):
         notices = []
 
         class Audio(FakeAudio):
-            async def cue(self, frequency):
+            async def cue(self, frequency, *, duration=0.12):
                 cues.append(frequency)
                 if frequency == 660:
                     raise RuntimeError("speaker failed")
@@ -562,7 +565,7 @@ def test_pending_deadline_gives_fresh_audio_and_recognizer_events_priority(
             super().__init__()
             self.cues = []
 
-        async def cue(self, frequency):
+        async def cue(self, frequency, *, duration=0.12):
             self.cues.append(frequency)
 
     async def behavior():
@@ -654,7 +657,7 @@ def test_vad_tail_waits_for_full_quiet_and_accepts(monkeypatch, backend):
             self.sent.put_nowait(None)
 
     class TestAudio(Audio):
-        async def cue(self, _frequency):
+        async def cue(self, _frequency, *, duration=0.12):
             pass
 
     async def behavior():

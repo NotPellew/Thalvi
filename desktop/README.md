@@ -34,6 +34,12 @@ Cancel capture discards the current capture and returns to wake listening.
 The status panel keeps the most recent notice in memory; notifications do not
 include dictated text. When the tray is unavailable, the panel stays accessible.
 
+The Thalvi T icon carries a distinct shape for paused, wake listening, capturing,
+pending, working and error states. Its accessible description and tray title
+include the current state and pending seconds, without dictated text. Use the
+tray's Open status / settings entry, or middle-click the icon, to reopen the
+panel. The tray host controls how its title appears as a tooltip.
+
 Python 3.11 is required. Configure `wake.model_dir` with existing
 `melspectrogram.onnx`, `embedding_model.onnx`, and `hey_mycroft_v0.1.onnx`,
 and `wake.capture_model` with the dedicated trained Hey Thalvi ONNX head.
@@ -61,7 +67,8 @@ using the configured transcription/conversation endpoints.
 
 After the capture wake word, wait for the local start tone to finish, then
 speak your text and ending phrase. Audio before the tone ends is discarded.
-A lower tone signals that dictation is ready; a higher tone acknowledges an
+The short lower tone signals that dictation is ready; wait until it finishes
+before speaking. A higher tone acknowledges an
 accepted ending, before delivery begins. The ending tone does not mean delivery
 succeeded.
 Fresh audio is buffered while the recognizer connects; startup must complete
