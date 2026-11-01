@@ -90,6 +90,7 @@ def test_overflow_stops_capture_and_playback_stop_discards_all_queued_audio(monk
 
     class Stream:
         active = True
+        time = 0.0
 
         def __init__(self, **kwargs):
             self.callback = kwargs["callback"]
@@ -108,7 +109,7 @@ def test_overflow_stops_capture_and_playback_stop_discards_all_queued_audio(monk
     async def behavior():
         async with Audio() as audio:
             for _ in range(126):
-                streams[0].callback(bytes(7680), 3840, None, "")
+                streams[0].callback(bytes(7680), 3840, SimpleNamespace(inputBufferAdcTime=0.0), "")
             with pytest.raises(RuntimeError, match="audio was lost"):
                 await asyncio.wait_for(audio.next(), 1)
             audio.play(b"\x01\x02" * 1000)
@@ -130,6 +131,8 @@ def test_input_epoch_rejects_callbacks_already_scheduled_before_resume(monkeypat
     streams = []
 
     class Stream:
+        time = 0.0
+
         def __init__(self, **kwargs):
             self.callback = kwargs["callback"]
             streams.append(self)
@@ -144,11 +147,12 @@ def test_input_epoch_rejects_callbacks_already_scheduled_before_resume(monkeypat
 
     async def behavior():
         async with Audio() as audio:
-            streams[0].callback(b"old", 1, None, None)
+            timing = SimpleNamespace(inputBufferAdcTime=0.0)
+            streams[0].callback(b"old", 1, timing, None)
             audio.set_input(False)
-            streams[0].callback(b"during cue", 1, None, None)
+            streams[0].callback(b"during cue", 1, timing, None)
             audio.set_input(True)
-            streams[0].callback(b"fresh", 1, None, None)
+            streams[0].callback(b"fresh", 1, timing, None)
             assert await asyncio.wait_for(audio.next(), 1) == b"fresh"
             assert audio.frames.empty()
 
@@ -255,6 +259,8 @@ def test_cue_playback_drops_microphone_frames_and_restores_prior_input(monkeypat
     started, release = threading.Event(), threading.Event()
 
     class Stream:
+        time = 1.0
+
         def __init__(self, **kwargs):
             self.callback = kwargs["callback"]
             streams.append(self)
@@ -279,26 +285,38 @@ def test_cue_playback_drops_microphone_frames_and_restores_prior_input(monkeypat
     )
 
     async def behavior():
+        cancelled = asyncio.Event()
+
+        def stop():
+            stopped.append(True)
+            cancelled.set()
+
+        sys.modules["sounddevice"].stop = stop
         async with Audio() as audio:
             audio.set_input(prior)
             playing = asyncio.create_task(audio.play_cue(Cue.ACCEPTED))
             assert await asyncio.to_thread(started.wait, 1)
-            streams[0].callback(b"during", 1, None, None)
+            timing = SimpleNamespace(inputBufferAdcTime=1.0)
+            streams[0].callback(b"during", 1, timing, None)
             await asyncio.sleep(0)
             assert not audio.input_enabled and audio.frames.empty()
-            streams[0].callback(b"late", 1, None, None)
+            streams[0].callback(b"late", 1, timing, None)
             if outcome == "cancel":
                 playing.cancel()
+                await asyncio.wait_for(cancelled.wait(), 1)
+                assert not playing.done() and not audio.input_enabled
+            streams[0].time = 2.0
             release.set()
             if outcome == "ok":
-                streams[0].callback(b"spanning", 1, None, None)
                 await playing
             else:
                 error = RuntimeError if outcome == "fail" else asyncio.CancelledError
                 with pytest.raises(error):
                     await playing
             assert audio.input_enabled is prior
-            streams[0].callback(b"fresh", 1, None, None)
+            streams[0].callback(b"delayed cue block", 1, timing, None)
+            streams[0].callback(b"spanning", 1, SimpleNamespace(inputBufferAdcTime=1.99), None)
+            streams[0].callback(b"fresh", 1, SimpleNamespace(inputBufferAdcTime=2.0), None)
             if prior:
                 assert await asyncio.wait_for(audio.next(), 1) == b"fresh"
             assert audio.frames.empty()
@@ -314,6 +332,8 @@ def test_overlapping_cues_play_serially_and_keep_input_gated(monkeypatch):
     started, release = [threading.Event() for _ in range(2)], [threading.Event() for _ in range(2)]
 
     class Stream:
+        time = 0.0
+
         def __init__(self, **kwargs):
             self.callback = kwargs["callback"]
             streams.append(self)
@@ -341,12 +361,12 @@ def test_overlapping_cues_play_serially_and_keep_input_gated(monkeypatch):
             first = asyncio.create_task(audio.play_cue(Cue.CANCELLED))
             assert await asyncio.to_thread(started[0].wait, 1)
             second = asyncio.create_task(audio.play_cue(Cue.PROVISIONAL))
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0)
             assert plays == [len(synthesize(Cue.CANCELLED))] and not audio.input_enabled
             release[0].set()
             assert await asyncio.to_thread(started[1].wait, 1)
             assert not audio.input_enabled
-            streams[0].callback(b"during second", 1, None, None)
+            streams[0].callback(b"during second", 1, SimpleNamespace(inputBufferAdcTime=0.0), None)
             release[1].set()
             await asyncio.wait_for(asyncio.gather(first, second), 1)
             assert audio.input_enabled and audio.frames.empty()
