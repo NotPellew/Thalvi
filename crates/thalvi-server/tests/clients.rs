@@ -158,13 +158,7 @@ async fn chat_model_parses_sse_until_done_and_sends_stream_request() {
     while let Some(delta) = stream.next().await {
         deltas.push(delta.unwrap());
     }
-    assert_eq!(
-        deltas,
-        vec![
-            ChatEvent::Text("Hello ".to_string()),
-            ChatEvent::Text("café.".to_string())
-        ]
-    );
+    assert_eq!(deltas, vec!["Hello ".to_string(), "café.".to_string()]);
     let bodies = captured.bodies.lock().unwrap();
     assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0]["stream"], true);
@@ -203,9 +197,11 @@ async fn chat_model_sends_the_clip_and_surfaces_the_echo() {
     );
     let model = OpenAiChatModel::new(serve(app).await, "m".to_string(), String::new(), None);
     let mut stream = model
-        .stream_reply(
+        .stream_reply_with_tools(
             &[ChatMessage::user("two plus two".to_string())],
             Some(&[0, 1, 2, 3]),
+            &[],
+            &[],
         )
         .await
         .unwrap();
@@ -220,10 +216,51 @@ async fn chat_model_sends_the_clip_and_surfaces_the_echo() {
             ChatEvent::Text("Four.".to_string())
         ]
     );
+    let plain: Vec<_> = model
+        .stream_reply(
+            &[ChatMessage::user("two plus two".to_string())],
+            Some(&[0, 1, 2, 3]),
+        )
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    assert_eq!(plain, vec![Ok("Four.".to_string())]);
     let bodies = captured.bodies.lock().unwrap();
     let parts = bodies[0]["messages"][1]["content"].as_array().unwrap();
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0]["type"], "input_audio");
+}
+
+#[tokio::test]
+async fn truncated_model_streams_never_produce_executable_tool_calls() {
+    let fragment = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"function\":{\"name\":\"search_history\",\"arguments\":\"{}\"}}]}}]}\n";
+    for ending in [
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n",
+        "",
+    ] {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move {
+                Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(format!("{fragment}{ending}")))
+                    .unwrap()
+            }),
+        );
+        let model = OpenAiChatModel::new(serve(app).await, "m".to_string(), String::new(), None);
+        let stream = model
+            .stream_reply_with_tools(&[ChatMessage::user("search".to_string())], None, &[], &[])
+            .await
+            .unwrap();
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(events.len(), 1);
+        assert!(
+            events[0].is_err(),
+            "unfinished tool call must not run: {events:?}"
+        );
+    }
 }
 
 #[tokio::test]

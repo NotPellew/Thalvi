@@ -13,8 +13,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::Instrument;
 
-use crate::model::ChatEvent;
-use crate::model::{ChatMessage, ChatModel, Role};
+use crate::history::{self, HistoryMatch};
+use crate::model::{ChatEvent, ChatMessage, ChatModel, Role, ToolCall, ToolDefinition, ToolResult};
 use crate::recognizer::{Recognizer, RecognizerEvent, RecognizerFactory};
 use crate::recorder::{AudioBuffer, Recorder, RecordingConfig, start_recording};
 use crate::sentence::SentenceSplitter;
@@ -34,13 +34,89 @@ const ACK_LINES: [&str; 3] = [
 ];
 
 const MISHEARD_LINE: &str = "Sorry, I didn't catch that.";
+/// Most rounds of tool calls one reply may run before the model must answer in text.
+const MAX_TOOL_ROUNDS: usize = 3;
+const SEARCH_LABEL: &str = "Searching conversations";
+const UNKNOWN_TOOL_LABEL: &str = "Running a tool";
 
-type AckCache = Arc<std::sync::Mutex<std::collections::HashMap<&'static str, Bytes>>>;
+type AckCache = Arc<std::sync::Mutex<std::collections::HashMap<(String, &'static str), Bytes>>>;
 
 #[derive(Clone)]
 struct AckSettings {
     enabled: bool,
     cache: AckCache,
+}
+
+/// Everything one reply needs besides the model and the speech engine.
+#[derive(Clone)]
+struct ReplyContext {
+    ack: AckSettings,
+    /// The voice every speech call of this reply uses, fixed when the reply starts.
+    voice_name: String,
+    store: Arc<SessionStore>,
+    session_id: String,
+}
+
+/// The voices a connection may pick from and the one it starts with.
+#[derive(Clone)]
+pub struct VoiceChoices {
+    /// Voice used until the client picks another.
+    pub default: String,
+    /// Every voice the client may pick.
+    pub offered: Arc<[String]>,
+}
+
+/// A connection's reply settings: the context new replies start with and the voices on offer.
+struct ReplySettings {
+    context: ReplyContext,
+    offered: Arc<[String]>,
+}
+
+impl ReplySettings {
+    fn new(
+        ack_enabled: bool,
+        voices: VoiceChoices,
+        store: Arc<SessionStore>,
+        session_id: String,
+    ) -> Self {
+        Self {
+            context: ReplyContext {
+                ack: AckSettings {
+                    enabled: ack_enabled,
+                    cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+                },
+                voice_name: voices.default,
+                store,
+                session_id,
+            },
+            offered: voices.offered,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TaskStatus {
+    Running,
+    Done,
+    Failed,
+}
+
+impl TaskStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// One visible step of the work behind a reply.
+struct TaskStep {
+    id: String,
+    label: &'static str,
+    status: TaskStatus,
+    detail: Option<String>,
 }
 
 enum ReplyEvent {
@@ -51,9 +127,10 @@ enum ReplyEvent {
     Audio(Bytes),
     AckAudio(Bytes),
     FirstSentence(Instant),
-    ModelFinished(Instant),
+    ReplyLoopFinished(Instant),
     Finished,
     Failed(String),
+    Task(TaskStep),
 }
 
 enum RecognizerMessage {
@@ -72,15 +149,16 @@ struct ActiveReply {
     spoken_throughout: bool,
     speaking_sent: bool,
     first_delta_at: Option<Instant>,
-    model_finished_at: Option<Instant>,
+    reply_loop_finished_at: Option<Instant>,
     first_sentence_at: Option<Instant>,
     first_audio_at: Option<Instant>,
     ack_first_audio_at: Option<Instant>,
     audio_bytes: usize,
     /// Length of the user's audio sent to the model, when it heard the turn.
     input_audio_ms: Option<u64>,
-    /// The turn was not addressed to Thalvi, so it stays out of history.
+    /// The audio turn failed its echo check, so it stays out of history.
     misheard: bool,
+    voice_name: String,
 }
 
 /// Reply audio sent on this connection that the client may still be playing.
@@ -283,6 +361,25 @@ impl<M: ChatModel + 'static> Persistence<M> {
     }
 }
 
+async fn send_save_notice(sink: &mut (impl SinkExt<Message> + Unpin), sent: &mut bool) {
+    if *sent {
+        return;
+    }
+    *sent = true;
+    send_json(
+        sink,
+        &json!({"type": "error", "message": "This conversation couldn't be saved"}),
+    )
+    .await;
+}
+
+async fn wait_save_failed(save_error: &mut watch::Receiver<bool>) {
+    let signalled = save_error.wait_for(|failed| *failed).await.is_ok();
+    if !signalled {
+        std::future::pending::<()>().await;
+    }
+}
+
 const MAX_TEXT_CHARS: usize = 20_000;
 /// How long a client that is being let go may hold up the end of its session.
 const ENDED_SEND_WAIT: Duration = Duration::from_secs(2);
@@ -303,6 +400,7 @@ pub async fn handle_session<F, M, T>(
     recording_config: RecordingConfig,
     ack_enabled: bool,
     audio_input: bool,
+    voices: VoiceChoices,
 ) where
     F: RecognizerFactory + Send + Sync + 'static,
     F::Rec: Send + 'static,
@@ -329,10 +427,12 @@ pub async fn handle_session<F, M, T>(
     send_state(&mut sink, "idle").await;
     tracing::info!("session opened");
 
-    let ack = AckSettings {
-        enabled: ack_enabled,
-        cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    };
+    let mut settings = ReplySettings::new(
+        ack_enabled,
+        voices,
+        Arc::clone(&persistence.store),
+        session_id.clone(),
+    );
     let voice = watch::Sender::new(false);
     let mut voice_on = false;
     let mut recognizer: Option<RecognizerHandle> = None;
@@ -341,6 +441,8 @@ pub async fn handle_session<F, M, T>(
     let mut reply_rx: Option<mpsc::Receiver<ReplyEvent>> = None;
     let mut client_audio = ClientAudio::default();
     let mut detached = None;
+    let (mut save_error, mut save_notice_sent) =
+        (persistence.attachment.save_error_receiver(), false);
 
     loop {
         persistence.sync(&history, turn_log.next_turn, &turn_log.recorder);
@@ -361,13 +463,14 @@ pub async fn handle_session<F, M, T>(
                 detached = Some(reason);
                 break;
             }
+            () = wait_save_failed(&mut save_error), if !save_notice_sent => send_save_notice(&mut sink, &mut save_notice_sent).await,
             client_message = stream.next() => {
                 match client_message {
                     Some(Ok(Message::Binary(audio))) => {
                         forward_mic(&audio, recognizer.as_ref(), &mut turn_log);
                     }
                     Some(Ok(Message::Text(text))) => {
-                        handle_client_text(&text, &mut sink, &mut recognizer, &mut rec_rx, &factory, &voice, &mut voice_on, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut turn_log, ack.clone()).await;
+                        handle_client_text(&text, &mut sink, &mut recognizer, &mut rec_rx, &factory, &voice, &mut voice_on, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut turn_log, &mut settings).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
@@ -378,7 +481,7 @@ pub async fn handle_session<F, M, T>(
                 }
             }
             recognizer_message = recognizer_event => {
-                handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut rec_rx, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &voice, &mut voice_on, &mut turn_log, ack.clone()).await;
+                handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut rec_rx, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &voice, &mut voice_on, &mut turn_log, &settings).await;
             }
             event = reply_event => {
                 let Some(event) = event else {
@@ -426,7 +529,7 @@ async fn handle_client_text<F, M, T>(
     model: &Arc<M>,
     tts: &Arc<T>,
     turn_log: &mut TurnLog,
-    ack: AckSettings,
+    settings: &mut ReplySettings,
 ) where
     F: RecognizerFactory + Send + Sync + 'static,
     F::Rec: Send + 'static,
@@ -463,6 +566,17 @@ async fn handle_client_text<F, M, T>(
             )
             .await;
         }
+        ClientText::VoiceName(name) => {
+            if settings.offered.contains(&name) {
+                settings.context.voice_name = name;
+            } else {
+                send_json(
+                    sink,
+                    &json!({"type": "error", "message": "That voice isn't offered, so the voice was not changed."}),
+                )
+                .await;
+            }
+        }
         ClientText::Text(raw) => match validate_text(&raw) {
             Ok(text) => {
                 let turn = begin_turn(
@@ -479,7 +593,7 @@ async fn handle_client_text<F, M, T>(
                     text.clone(),
                     &[],
                     turn_log,
-                    ack.clone(),
+                    settings,
                 )
                 .await;
                 let mut fields = json!({"turn": turn, "source": "text"});
@@ -514,7 +628,7 @@ async fn handle_recognizer_message<M, T>(
     voice: &watch::Sender<bool>,
     voice_on: &mut bool,
     turn_log: &mut TurnLog,
-    ack: AckSettings,
+    settings: &ReplySettings,
 ) where
     M: ChatModel + 'static,
     T: Tts + 'static,
@@ -572,7 +686,7 @@ async fn handle_recognizer_message<M, T>(
                     text.clone(),
                     &clip,
                     turn_log,
-                    ack.clone(),
+                    settings,
                 )
                 .await;
                 record_voice_turn(turn_log, turn, &pending, &text, clip);
@@ -793,6 +907,7 @@ enum ClientText {
     Cancel,
     Played(u64),
     Voice(bool),
+    VoiceName(String),
     Text(String),
     Other,
 }
@@ -811,6 +926,12 @@ fn parse_client_text(text: &str) -> ClientText {
             .get("on")
             .and_then(serde_json::Value::as_bool)
             .map_or(ClientText::Other, ClientText::Voice),
+        Some("voice_name") => value
+            .get("voice")
+            .and_then(serde_json::Value::as_str)
+            .map_or(ClientText::Other, |name| {
+                ClientText::VoiceName(name.to_string())
+            }),
         Some("text") => ClientText::Text(
             value
                 .get("text")
@@ -851,7 +972,7 @@ async fn begin_turn<M, T>(
     text: String,
     clip: &[u8],
     turn_log: &mut TurnLog,
-    ack: AckSettings,
+    settings: &ReplySettings,
 ) -> u64
 where
     M: ChatModel + 'static,
@@ -884,7 +1005,7 @@ where
         audio.zip(caption),
         turn,
         turn_log.recorder.clone(),
-        ack,
+        settings.context.clone(),
     );
     *reply = Some(active);
     *reply_rx = Some(events_rx);
@@ -903,7 +1024,7 @@ fn start_reply<M, T>(
     audio: Option<(Vec<u8>, String)>,
     turn: u64,
     recorder: Recorder,
-    ack: AckSettings,
+    context: ReplyContext,
 ) -> (ActiveReply, mpsc::Receiver<ReplyEvent>)
 where
     M: ChatModel + 'static,
@@ -914,10 +1035,11 @@ where
     let input_audio_ms = audio
         .as_ref()
         .map(|(pcm, _)| u64::try_from(pcm.len()).unwrap_or(u64::MAX) / 48);
+    let voice_name = context.voice_name.clone();
     let active = ActiveReply {
         handle: tokio::spawn(
             run_reply(
-                model, tts, voice, history, audio, events_tx, turn, recorder, ack,
+                model, tts, voice, history, audio, events_tx, turn, recorder, context,
             )
             .in_current_span(),
         ),
@@ -928,13 +1050,14 @@ where
         spoken_throughout,
         speaking_sent: false,
         first_delta_at: None,
-        model_finished_at: None,
+        reply_loop_finished_at: None,
         first_sentence_at: None,
         first_audio_at: None,
         ack_first_audio_at: None,
         audio_bytes: 0,
         input_audio_ms,
         misheard: false,
+        voice_name,
     };
     (active, events_rx)
 }
@@ -968,9 +1091,9 @@ async fn handle_reply_event(
             }
             send_json(sink, &json!({"type": "reply", "text": text})).await;
         }
-        ReplyEvent::ModelFinished(at) => {
+        ReplyEvent::ReplyLoopFinished(at) => {
             if let Some(active) = reply {
-                active.model_finished_at = Some(at);
+                active.reply_loop_finished_at = Some(at);
             }
         }
         ReplyEvent::FirstSentence(at) => {
@@ -997,12 +1120,6 @@ async fn handle_reply_event(
             let _ = sink.send(Message::Binary(audio)).await;
         }
         ReplyEvent::Audio(audio) => {
-            if reply
-                .as_ref()
-                .is_some_and(|active| active.first_audio_at.is_none())
-            {
-                send_state(sink, "speaking").await;
-            }
             if let Some(active) = reply {
                 active.speaking_sent = true;
                 if active.first_audio_at.is_none() {
@@ -1031,6 +1148,9 @@ async fn handle_reply_event(
             send_json(sink, &json!({"type": "reply_end"})).await;
             send_state(sink, state.resting_state()).await;
         }
+        ReplyEvent::Task(step) => {
+            send_task_step(sink, &step).await;
+        }
         ReplyEvent::Failed(message) => {
             tracing::warn!(%message, "reply failed");
             if let Some(active) = reply.take() {
@@ -1045,8 +1165,27 @@ async fn handle_reply_event(
     }
 }
 
-fn model_ms(started_at: Instant, model_finished_at: Option<Instant>, recorded_at: Instant) -> u64 {
-    let end = model_finished_at.unwrap_or(recorded_at);
+/// Shows a task step, then the state the reply is in around it.
+async fn send_task_step(sink: &mut (impl SinkExt<Message> + Unpin), step: &TaskStep) {
+    let mut fields = json!({"id": step.id, "label": step.label, "status": step.status.as_str()});
+    if let Some(detail) = &step.detail {
+        fields["detail"] = json!(detail);
+    }
+    send_json(sink, &json!({"type": "task", "step": fields})).await;
+    let state = if step.status == TaskStatus::Running {
+        "working"
+    } else {
+        "thinking"
+    };
+    send_state(sink, state).await;
+}
+
+fn reply_loop_ms(
+    started_at: Instant,
+    reply_loop_finished_at: Option<Instant>,
+    recorded_at: Instant,
+) -> u64 {
+    let end = reply_loop_finished_at.unwrap_or(recorded_at);
     u64::try_from(end.duration_since(started_at).as_millis()).unwrap_or(u64::MAX)
 }
 
@@ -1067,9 +1206,9 @@ fn emit_reply_record(
         "reasoning_effort": recorder.reasoning_effort(),
         "first_token_ms": ms_since(active.first_delta_at),
         "first_sentence_ms": ms_since(active.first_sentence_at),
-        "model_ms": model_ms(active.started_at, active.model_finished_at, Instant::now()),
+        "reply_loop_ms": reply_loop_ms(active.started_at, active.reply_loop_finished_at, Instant::now()),
         "tts_model": recorder.tts_model(),
-        "voice": recorder.tts_voice(),
+        "voice": active.voice_name,
         "first_audio_ms": ms_since(active.first_audio_at),
         "ack_first_audio_ms": ms_since(active.ack_first_audio_at),
         "sentences": active.sent_sentences.len(),
@@ -1162,7 +1301,7 @@ fn cut_off_reply(
                             active.first_sentence_at = Some(at);
                         }
                     }
-                    ReplyEvent::ModelFinished(at) => active.model_finished_at = Some(at),
+                    ReplyEvent::ReplyLoopFinished(at) => active.reply_loop_finished_at = Some(at),
                     _ => {}
                 }
             }
@@ -1214,7 +1353,7 @@ async fn run_reply<M, T>(
     events: mpsc::Sender<ReplyEvent>,
     turn: u64,
     recorder: Recorder,
-    ack: AckSettings,
+    context: ReplyContext,
 ) where
     M: ChatModel + 'static,
     T: Tts + 'static,
@@ -1229,6 +1368,12 @@ async fn run_reply<M, T>(
             events.clone(),
             sentence_tx,
             Arc::clone(&failure_sent),
+            ToolRun {
+                store: Arc::clone(&context.store),
+                session_id: context.session_id.clone(),
+                recorder: recorder.clone(),
+                turn,
+            },
         )
         .in_current_span(),
     );
@@ -1241,7 +1386,8 @@ async fn run_reply<M, T>(
             turn,
             recorder,
             failure_sent,
-            ack,
+            context.ack,
+            context.voice_name,
         )
         .in_current_span(),
     );
@@ -1284,6 +1430,73 @@ async fn send_failed(
     }
 }
 
+/// What running a tool call needs besides the call.
+struct ToolRun {
+    store: Arc<SessionStore>,
+    session_id: String,
+    recorder: Recorder,
+    turn: u64,
+}
+
+struct ModelCall<'a> {
+    run: &'a ToolRun,
+    round: usize,
+    started: Instant,
+    recorded: bool,
+}
+
+impl<'a> ModelCall<'a> {
+    fn start(run: &'a ToolRun, round: usize) -> Self {
+        Self {
+            run,
+            round,
+            started: Instant::now(),
+            recorded: false,
+        }
+    }
+
+    fn finish(&mut self, outcome: &str, error: Option<&str>) {
+        if self.recorded {
+            return;
+        }
+        self.run.recorder.emit(
+            "model_call",
+            json!({
+                "turn": self.run.turn,
+                "round": self.round,
+                "model": self.run.recorder.llm_model(),
+                "reasoning_effort": self.run.recorder.reasoning_effort(),
+                "total_ms": u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "outcome": outcome,
+                "error": error,
+            }),
+        );
+        self.recorded = true;
+    }
+
+    async fn fail(
+        &mut self,
+        error: &crate::model::ModelError,
+        events: &mpsc::Sender<ReplyEvent>,
+        failure_sent: &AtomicBool,
+    ) -> bool {
+        self.finish("failed", Some(&error.to_string()));
+        send_failed(
+            events,
+            failure_sent,
+            format!("The language model could not reply: {error}"),
+        )
+        .await;
+        false
+    }
+}
+
+impl Drop for ModelCall<'_> {
+    fn drop(&mut self) {
+        self.finish("interrupted", None);
+    }
+}
+
 async fn produce_sentences<M>(
     model: Arc<M>,
     history: Vec<ChatMessage>,
@@ -1291,105 +1504,189 @@ async fn produce_sentences<M>(
     events: mpsc::Sender<ReplyEvent>,
     sentences: mpsc::UnboundedSender<String>,
     failure_sent: Arc<AtomicBool>,
+    tools: ToolRun,
 ) -> bool
 where
     M: ChatModel,
 {
-    let (clip, caption) = match audio {
-        Some((clip, caption)) => (Some(clip), Some(caption)),
-        None => (None, None),
-    };
-    let mut deltas = match model.stream_reply(&history, clip.as_deref()).await {
-        Ok(deltas) => deltas,
-        Err(error) => {
+    let (clip, caption) = audio.unzip();
+    let definitions = [history::tool_definition()];
+    let mut results: Vec<ToolResult> = Vec::new();
+    let mut splitter = SentenceSplitter::new();
+    let mut first_sentence_sent = false;
+    let mut ends_in_whitespace = true;
+    for round in 0..=MAX_TOOL_ROUNDS {
+        let mut round_start = true;
+        let mut heard = String::new();
+        let mut echo_checked = caption.is_none();
+        let offered: &[ToolDefinition] = if round < MAX_TOOL_ROUNDS {
+            &definitions
+        } else {
+            &[]
+        };
+        let mut model_call = ModelCall::start(&tools, round);
+        let mut stream = match model
+            .stream_reply_with_tools(&history, clip.as_deref(), offered, &results)
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => return model_call.fail(&error, &events, &failure_sent).await,
+        };
+        let mut calls: Vec<ToolCall> = Vec::new();
+        while let Some(event) = stream.next().await {
+            let mut delta = match event {
+                Ok(ChatEvent::Heard(fragment)) => {
+                    heard.push_str(&fragment);
+                    continue;
+                }
+                Ok(ChatEvent::Text(delta)) => delta,
+                Ok(ChatEvent::ToolCall(call)) => {
+                    calls.push(call);
+                    continue;
+                }
+                Err(error) => return model_call.fail(&error, &events, &failure_sent).await,
+            };
+            if delta.is_empty() {
+                continue;
+            }
+            if let Some(caption) = caption.as_deref().filter(|_| !echo_checked) {
+                echo_checked = true;
+                if echo_disagrees(&heard, caption) {
+                    model_call.finish("misheard", None);
+                    return reply_misheard(&events, &sentences).await;
+                }
+            }
+            if round_start && !ends_in_whitespace && !delta.starts_with(char::is_whitespace) {
+                delta.insert(0, ' ');
+            }
+            round_start = false;
+            ends_in_whitespace = delta.ends_with(char::is_whitespace);
+            if events.send(ReplyEvent::Delta(delta.clone())).await.is_err() {
+                return false;
+            }
+            for sentence in splitter.push(&delta) {
+                if !send_sentence(&events, &sentences, sentence, &mut first_sentence_sent).await {
+                    return false;
+                }
+            }
+        }
+        if let Some(caption) = caption.as_deref().filter(|_| !echo_checked)
+            && echo_disagrees(&heard, caption)
+        {
+            model_call.finish("misheard", None);
+            return reply_misheard(&events, &sentences).await;
+        }
+        model_call.finish("ok", None);
+        if let Some(tail) = splitter.finish()
+            && !send_sentence(&events, &sentences, tail, &mut first_sentence_sent).await
+        {
+            return false;
+        }
+        if calls.is_empty() {
+            break;
+        }
+        if round == MAX_TOOL_ROUNDS {
             send_failed(
                 &events,
                 &failure_sent,
-                format!("The language model could not reply: {error}"),
+                "The language model kept searching instead of answering.".to_string(),
             )
             .await;
             return false;
         }
-    };
-    let mut splitter = SentenceSplitter::new();
-    let mut first_sentence_sent = false;
-    let mut heard = String::new();
-    let mut echo_checked = caption.is_none();
-    while let Some(delta) = deltas.next().await {
-        let delta = match delta {
-            Ok(ChatEvent::Heard(fragment)) => {
-                heard.push_str(&fragment);
-                continue;
-            }
-            Ok(ChatEvent::Text(delta)) => delta,
-            Err(error) => {
-                send_failed(
-                    &events,
-                    &failure_sent,
-                    format!("The language model could not reply: {error}"),
-                )
-                .await;
+        for call in calls {
+            let Some(result) = run_tool_call(call, &history, &tools, &events).await else {
                 return false;
-            }
-        };
-        if let Some(caption) = caption.as_deref().filter(|_| !echo_checked) {
-            echo_checked = true;
-            if echo_disagrees(&heard, caption) {
-                return reply_misheard(&events, &sentences).await;
-            }
-        }
-        if events.send(ReplyEvent::Delta(delta.clone())).await.is_err() {
-            return false;
-        }
-        for sentence in splitter.push(&delta) {
-            if !first_sentence_sent {
-                first_sentence_sent = true;
-                if events
-                    .send(ReplyEvent::FirstSentence(Instant::now()))
-                    .await
-                    .is_err()
-                {
-                    return false;
-                }
-            }
-            if sentences.send(sentence).is_err() {
-                return false;
-            }
+            };
+            results.push(result);
         }
     }
-    if let Some(caption) = caption.as_deref().filter(|_| !echo_checked)
-        && echo_disagrees(&heard, caption)
-    {
-        return reply_misheard(&events, &sentences).await;
-    }
-    if let Some(tail) = splitter.finish() {
-        if !first_sentence_sent
-            && events
-                .send(ReplyEvent::FirstSentence(Instant::now()))
-                .await
-                .is_err()
+    events
+        .send(ReplyEvent::ReplyLoopFinished(Instant::now()))
+        .await
+        .is_ok()
+}
+
+/// Hands one finished sentence to speech, marking the first one. False when the reply is gone.
+async fn send_sentence(
+    events: &mpsc::Sender<ReplyEvent>,
+    sentences: &mpsc::UnboundedSender<String>,
+    sentence: String,
+    first_sentence_sent: &mut bool,
+) -> bool {
+    if !*first_sentence_sent {
+        *first_sentence_sent = true;
+        if events
+            .send(ReplyEvent::FirstSentence(Instant::now()))
+            .await
+            .is_err()
         {
             return false;
         }
-        if sentences.send(tail).is_err() {
-            return false;
-        }
     }
-    if events
-        .send(ReplyEvent::ModelFinished(Instant::now()))
-        .await
-        .is_err()
-    {
-        return false;
-    }
-    true
+    sentences.send(sentence).is_ok()
 }
 
-/// Logs the echo next to the caption; true when the guard should discard the answer.
+/// Runs one model tool call against the live history and the saved conversations, showing it
+/// as a task step. A call that cannot run becomes a failed step and an error result for the
+/// model. None when the reply is gone.
+async fn run_tool_call(
+    call: ToolCall,
+    history: &[ChatMessage],
+    run: &ToolRun,
+    events: &mpsc::Sender<ReplyEvent>,
+) -> Option<ToolResult> {
+    let known = call.name == history::tool_definition().name;
+    let label = if known {
+        SEARCH_LABEL
+    } else {
+        UNKNOWN_TOOL_LABEL
+    };
+    let step = |status, detail| {
+        ReplyEvent::Task(TaskStep {
+            id: call.id.clone(),
+            label,
+            status,
+            detail,
+        })
+    };
+    events.send(step(TaskStatus::Running, None)).await.ok()?;
+    let started = Instant::now();
+    let outcome: Result<Vec<HistoryMatch>, String> = if known {
+        history::parse_arguments(&call.arguments)
+            .map(|query| run.store.search_history(&run.session_id, history, &query))
+    } else {
+        Err("That tool doesn't exist.".to_string())
+    };
+    let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let tool = if known { call.name.as_str() } else { "unknown" };
+    let (content, event, fields) = match &outcome {
+        Ok(matches) => {
+            let detail = match matches.len() {
+                1 => "1 match".to_string(),
+                count => format!("{count} matches"),
+            };
+            (
+                history::result_content(matches),
+                step(TaskStatus::Done, Some(detail)),
+                json!({"turn": run.turn, "tool": tool, "total_ms": total_ms, "outcome": "ok", "matches": matches.len()}),
+            )
+        }
+        Err(message) => (
+            json!({"error": message}).to_string(),
+            step(TaskStatus::Failed, Some(message.clone())),
+            json!({"turn": run.turn, "tool": tool, "total_ms": total_ms, "outcome": "failed", "error": message}),
+        ),
+    };
+    run.recorder.emit("tool", fields);
+    events.send(event).await.ok()?;
+    Some(ToolResult { call, content })
+}
+
+/// True when the guard should discard the answer.
 /// An endpoint that sends no echo is trusted.
 fn echo_disagrees(heard: &str, caption: &str) -> bool {
     let echo = (!heard.trim().is_empty()).then_some(heard.trim());
-    tracing::info!(heard = ?echo, caption = ?caption, "audio turn heard");
     echo.is_some_and(|echo| crate::heard::disagrees(echo, caption))
 }
 
@@ -1402,7 +1699,7 @@ async fn reply_misheard(
         ReplyEvent::Misheard,
         ReplyEvent::Delta(MISHEARD_LINE.to_string()),
         ReplyEvent::FirstSentence(now),
-        ReplyEvent::ModelFinished(now),
+        ReplyEvent::ReplyLoopFinished(now),
     ] {
         if events.send(event).await.is_err() {
             return false;
@@ -1424,6 +1721,7 @@ async fn consume_sentences<T>(
     recorder: Recorder,
     failure_sent: Arc<AtomicBool>,
     ack: AckSettings,
+    voice_name: String,
 ) -> bool
 where
     T: Tts,
@@ -1435,7 +1733,18 @@ where
             Ok(None) => return true,
             Err(_) => {
                 let line = ACK_LINES[usize::try_from(turn.saturating_sub(1) % 3).unwrap_or(0)];
-                if !speak_ack(&tts, &mut voice, &events, line, turn, &recorder, &ack.cache).await {
+                if !speak_ack(
+                    &tts,
+                    &mut voice,
+                    &events,
+                    line,
+                    turn,
+                    &recorder,
+                    &ack.cache,
+                    &voice_name,
+                )
+                .await
+                {
                     return false;
                 }
             }
@@ -1451,6 +1760,7 @@ where
             turn,
             &recorder,
             &failure_sent,
+            &voice_name,
         )
         .await
     {
@@ -1466,6 +1776,7 @@ where
                 turn,
                 &recorder,
                 &failure_sent,
+                &voice_name,
             )
             .await
         {
@@ -1477,12 +1788,16 @@ where
 
 fn lock_ack_cache(
     ack_cache: &AckCache,
-) -> std::sync::MutexGuard<'_, std::collections::HashMap<&'static str, Bytes>> {
+) -> std::sync::MutexGuard<'_, std::collections::HashMap<(String, &'static str), Bytes>> {
     ack_cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session state is passed explicitly rather than bundled into a context type"
+)]
 async fn speak_ack<T: Tts>(
     tts: &Arc<T>,
     voice: &mut watch::Receiver<bool>,
@@ -1491,11 +1806,12 @@ async fn speak_ack<T: Tts>(
     turn: u64,
     recorder: &Recorder,
     ack_cache: &AckCache,
+    voice_name: &str,
 ) -> bool {
     tokio::select! {
         biased;
         () = voice_turned_off(voice) => true,
-        keep_going = synthesize_ack(tts, events, line, turn, recorder, ack_cache) => keep_going,
+        keep_going = synthesize_ack(tts, events, line, turn, recorder, ack_cache, voice_name) => keep_going,
     }
 }
 
@@ -1506,28 +1822,30 @@ async fn synthesize_ack<T: Tts>(
     turn: u64,
     recorder: &Recorder,
     ack_cache: &AckCache,
+    voice_name: &str,
 ) -> bool {
     let started = Instant::now();
     let total_ms =
         |started: Instant| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let cached = lock_ack_cache(ack_cache).get(line).cloned();
+    let key = (voice_name.to_string(), line);
+    let cached = lock_ack_cache(ack_cache).get(&key).cloned();
     if let Some(pcm) = cached {
         if events.send(ReplyEvent::AckAudio(pcm)).await.is_err() {
             return false;
         }
         recorder.emit(
             "ack",
-            json!({"turn": turn, "cached": true, "total_ms": total_ms(started)}),
+            json!({"turn": turn, "cached": true, "total_ms": total_ms(started), "voice": voice_name}),
         );
         return true;
     }
-    let mut audio = match tts.synthesize(line).await {
+    let mut audio = match tts.synthesize_with_voice(line, voice_name).await {
         Ok(audio) => audio,
         Err(error) => {
             tracing::warn!(%error, "acknowledgement synthesis failed");
             recorder.emit(
                 "ack",
-                json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "outcome": "failed"}),
+                json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "outcome": "failed", "voice": voice_name}),
             );
             return true;
         }
@@ -1546,7 +1864,7 @@ async fn synthesize_ack<T: Tts>(
                 tracing::warn!(%error, "acknowledgement synthesis failed");
                 recorder.emit(
                     "ack",
-                    json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "outcome": "failed"}),
+                    json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "outcome": "failed", "voice": voice_name}),
                 );
                 return true;
             }
@@ -1555,20 +1873,24 @@ async fn synthesize_ack<T: Tts>(
     if pcm.is_empty() {
         recorder.emit(
             "ack",
-            json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "outcome": "failed"}),
+            json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "outcome": "failed", "voice": voice_name}),
         );
         return true;
     }
-    lock_ack_cache(ack_cache).insert(line, Bytes::from(pcm));
+    lock_ack_cache(ack_cache).insert(key, Bytes::from(pcm));
     recorder.emit(
         "ack",
-        json!({"turn": turn, "cached": false, "total_ms": total_ms(started)}),
+        json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "voice": voice_name}),
     );
     true
 }
 
 /// Speaks one sentence, giving it up as soon as voice turns off.
 /// Returns false when the reply should stop (failure reported or session gone).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session state is passed explicitly rather than bundled into a context type"
+)]
 async fn speak_sentence<T: Tts>(
     tts: &Arc<T>,
     voice: &mut watch::Receiver<bool>,
@@ -1577,11 +1899,12 @@ async fn speak_sentence<T: Tts>(
     turn: u64,
     recorder: &Recorder,
     failure_sent: &AtomicBool,
+    voice_name: &str,
 ) -> bool {
     tokio::select! {
         biased;
         () = voice_turned_off(voice) => true,
-        keep_going = synthesize_sentence(tts, events, sentence, turn, recorder, failure_sent) => keep_going,
+        keep_going = synthesize_sentence(tts, events, sentence, turn, recorder, failure_sent, voice_name) => keep_going,
     }
 }
 
@@ -1598,6 +1921,7 @@ async fn synthesize_sentence<T: Tts>(
     turn: u64,
     recorder: &Recorder,
     failure_sent: &AtomicBool,
+    voice_name: &str,
 ) -> bool {
     let tts_started = Instant::now();
     let mut first_byte_at: Option<Instant> = None;
@@ -1609,7 +1933,7 @@ async fn synthesize_sentence<T: Tts>(
     {
         return false;
     }
-    let mut audio = match tts.synthesize(sentence).await {
+    let mut audio = match tts.synthesize_with_voice(sentence, voice_name).await {
         Ok(audio) => audio,
         Err(error) => {
             send_failed(
@@ -1650,6 +1974,7 @@ async fn synthesize_sentence<T: Tts>(
         "tts_sentence",
         json!({
             "turn": turn,
+            "voice": voice_name,
             "chars": sentence.chars().count(),
             "first_byte_ms": ms_since(first_byte_at),
             "total_ms": u64::try_from(tts_started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -1903,18 +2228,21 @@ async fn run_recognizer<F>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ACK_LINES, AckCache, AckSettings, ActiveReply, ForwardClock, ReplyEvent, model_ms,
-        record_assistant_history, run_reply,
+        ACK_LINES, AckCache, AckSettings, ActiveReply, ForwardClock, ReplyContext, ReplyEvent,
+        record_assistant_history, reply_loop_ms, run_reply,
     };
     use crate::model::{ChatEvent, ChatMessage, ChatModel, DeltaStream, ModelError};
     use crate::recorder::{RecordingConfig, start_recording};
+    use crate::store::SessionStore;
     use crate::tts::{AudioStream, Tts, TtsError};
     use bytes::Bytes;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::{Notify, mpsc, watch};
     use tokio::time::Instant;
+
+    static UNIT_STORES: AtomicUsize = AtomicUsize::new(0);
 
     struct FakeModel;
 
@@ -1925,11 +2253,49 @@ mod tests {
             _audio: Option<&[u8]>,
         ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
             let deltas = vec![
-                Ok(ChatEvent::Text("First. ".to_string())),
-                Ok(ChatEvent::Text("Second. ".to_string())),
-                Ok(ChatEvent::Text("Third.".to_string())),
+                Ok("First. ".to_string()),
+                Ok("Second. ".to_string()),
+                Ok("Third.".to_string()),
             ];
             let stream: DeltaStream = Box::pin(futures_util::stream::iter(deltas));
+            std::future::ready(Ok(stream))
+        }
+    }
+
+    struct EchoToolModel {
+        echo: &'static str,
+    }
+
+    impl ChatModel for EchoToolModel {
+        fn stream_reply(
+            &self,
+            history: &[ChatMessage],
+            audio: Option<&[u8]>,
+        ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
+            FakeModel.stream_reply(history, audio)
+        }
+
+        fn stream_reply_with_tools(
+            &self,
+            _history: &[ChatMessage],
+            _audio: Option<&[u8]>,
+            _tools: &[crate::model::ToolDefinition],
+            results: &[crate::model::ToolResult],
+        ) -> impl std::future::Future<Output = Result<crate::model::EventStream, ModelError>> + Send
+        {
+            let events = if results.is_empty() {
+                vec![
+                    Ok(ChatEvent::Heard(self.echo.to_string())),
+                    Ok(ChatEvent::ToolCall(crate::model::ToolCall {
+                        id: "search".to_string(),
+                        name: "search_history".to_string(),
+                        arguments: r#"{"query":"demo"}"#.to_string(),
+                    })),
+                ]
+            } else {
+                vec![Ok(ChatEvent::Text("Answer.".to_string()))]
+            };
+            let stream: crate::model::EventStream = Box::pin(futures_util::stream::iter(events));
             std::future::ready(Ok(stream))
         }
     }
@@ -1942,8 +2308,8 @@ mod tests {
             _history: &[ChatMessage],
             _audio: Option<&[u8]>,
         ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
-            let deltas: Vec<Result<ChatEvent, ModelError>> = (1..=12)
-                .map(|index| Ok(ChatEvent::Text(format!("Sentence {index}. "))))
+            let deltas: Vec<Result<String, ModelError>> = (1..=12)
+                .map(|index| Ok(format!("Sentence {index}. ")))
                 .collect();
             let stream: DeltaStream = Box::pin(futures_util::stream::iter(deltas));
             std::future::ready(Ok(stream))
@@ -1977,6 +2343,59 @@ mod tests {
         release: Arc<Notify>,
     }
 
+    struct ToolTimingModel {
+        first_finished: Arc<Notify>,
+        next_started: Arc<Notify>,
+        outcome: &'static str,
+    }
+
+    impl ChatModel for ToolTimingModel {
+        fn stream_reply(
+            &self,
+            history: &[ChatMessage],
+            audio: Option<&[u8]>,
+        ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
+            FakeModel.stream_reply(history, audio)
+        }
+
+        fn stream_reply_with_tools(
+            &self,
+            _history: &[ChatMessage],
+            _audio: Option<&[u8]>,
+            _tools: &[crate::model::ToolDefinition],
+            results: &[crate::model::ToolResult],
+        ) -> impl std::future::Future<Output = Result<crate::model::EventStream, ModelError>> + Send
+        {
+            use crate::model::{ChatEvent, ToolCall};
+            if !results.is_empty() {
+                self.next_started.notify_one();
+                let result: Result<crate::model::EventStream, ModelError> = match self.outcome {
+                    "failed" => Err(ModelError("model failed".to_string())),
+                    "interrupted" => Ok(Box::pin(futures_util::stream::pending())),
+                    _ => Ok(Box::pin(futures_util::stream::iter([Ok(ChatEvent::Text(
+                        "Answer.".to_string(),
+                    ))]))),
+                };
+                return std::future::ready(result);
+            }
+            let mut event = Some(Ok(ChatEvent::ToolCall(ToolCall {
+                id: "search".to_string(),
+                name: "search_history".to_string(),
+                arguments: r#"{"query":"demo"}"#.to_string(),
+            })));
+            let finished = Arc::clone(&self.first_finished);
+            let stream: crate::model::EventStream =
+                Box::pin(futures_util::stream::poll_fn(move |_| {
+                    let next = event.take();
+                    if next.is_none() {
+                        finished.notify_one();
+                    }
+                    std::task::Poll::Ready(next)
+                }));
+            std::future::ready(Ok(stream))
+        }
+    }
+
     impl ChatModel for GatedModel {
         fn stream_reply(
             &self,
@@ -1986,7 +2405,7 @@ mod tests {
             let release = Arc::clone(&self.release);
             let stream: DeltaStream = Box::pin(futures_util::stream::once(async move {
                 release.notified().await;
-                Ok(ChatEvent::Text("First answer.".to_string()))
+                Ok("First answer.".to_string())
             }));
             std::future::ready(Ok(stream))
         }
@@ -2024,6 +2443,23 @@ mod tests {
         Arc::new(Mutex::new(std::collections::HashMap::new()))
     }
 
+    fn context(ack: AckSettings) -> ReplyContext {
+        let dir = std::env::temp_dir().join(format!(
+            "thalvi-session-unit-{}-{}",
+            std::process::id(),
+            UNIT_STORES.fetch_add(1, Ordering::SeqCst)
+        ));
+        let store = SessionStore::open(&dir).expect("scratch store");
+        // Nothing here saves, so the directory is only needed to open the store.
+        let _ = std::fs::remove_dir_all(&dir);
+        ReplyContext {
+            ack,
+            voice_name: "af_heart".to_string(),
+            store: Arc::new(store),
+            session_id: "unit".to_string(),
+        }
+    }
+
     fn describe(event: &ReplyEvent) -> String {
         match event {
             ReplyEvent::Misheard => "misheard".to_string(),
@@ -2034,7 +2470,8 @@ mod tests {
             ReplyEvent::Finished => "finished".to_string(),
             ReplyEvent::Failed(message) => format!("failed:{message}"),
             ReplyEvent::FirstSentence(_) => "first_sentence".to_string(),
-            ReplyEvent::ModelFinished(_) => "model_finished".to_string(),
+            ReplyEvent::ReplyLoopFinished(_) => "reply_loop_finished".to_string(),
+            ReplyEvent::Task(step) => format!("task:{}", step.status.as_str()),
         }
     }
 
@@ -2044,6 +2481,83 @@ mod tests {
             .expect("event should arrive within timeout")
             .expect("events channel should stay open");
         describe(&event)
+    }
+
+    #[tokio::test]
+    async fn audio_echo_guards_tool_calls_and_accepts_matching_short_reply() {
+        for (echo, rejected) in [("no", true), ("yes", false)] {
+            let tts = Arc::new(FakeTts {
+                spoken: Arc::new(Mutex::new(Vec::new())),
+                entered: Arc::new(Notify::new()),
+                release: Arc::new(Notify::new()),
+                block_first: AtomicBool::new(false),
+            });
+            let (_voice_tx, voice_rx) = watch::channel(false);
+            let (events_tx, mut events_rx) = mpsc::channel(64);
+            let recorder =
+                start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
+            let handle = tokio::spawn(run_reply(
+                Arc::new(EchoToolModel { echo }),
+                tts,
+                voice_rx,
+                vec![ChatMessage::user("yes".to_string())],
+                Some((vec![0, 0], "yes".to_string())),
+                events_tx,
+                1,
+                recorder,
+                context(AckSettings {
+                    enabled: false,
+                    cache: new_ack_cache(),
+                }),
+            ));
+            let seen = collect_until_finished(&mut events_rx).await;
+            handle.await.expect("reply task should finish");
+            assert_eq!(seen.contains(&"misheard".to_string()), rejected, "{seen:?}");
+            assert_eq!(
+                seen.iter().any(|event| event.starts_with("task:")),
+                !rejected,
+                "{seen:?}"
+            );
+            assert_eq!(
+                seen.iter().any(|event| event == "delta:Answer."),
+                !rejected,
+                "{seen:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn checking_an_audio_echo_keeps_speech_text_out_of_normal_logs() {
+        struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for CapturedLog {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&captured);
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(move || CapturedLog(Arc::clone(&output)))
+            .finish();
+        let heard = "invented speech one";
+        let caption = "unrelated caption two";
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("capture control");
+            assert!(super::echo_disagrees(heard, caption));
+        });
+        let log = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("capture control"));
+        assert!(!log.contains(heard));
+        assert!(!log.contains(caption));
     }
 
     #[tokio::test]
@@ -2069,10 +2583,10 @@ mod tests {
             events_tx,
             1,
             recorder,
-            AckSettings {
+            context(AckSettings {
                 enabled: false,
                 cache: new_ack_cache(),
-            },
+            }),
         ));
         tokio::time::timeout(Duration::from_secs(5), entered.notified())
             .await
@@ -2150,22 +2664,22 @@ mod tests {
             events_tx,
             1,
             recorder,
-            AckSettings {
+            context(AckSettings {
                 enabled: false,
                 cache: new_ack_cache(),
-            },
+            }),
         ));
         tokio::time::timeout(Duration::from_secs(5), entered.notified())
             .await
             .expect("tts should start within timeout");
         let mut deltas = 0;
-        let mut model_finished = false;
-        while !model_finished {
+        let mut reply_loop_finished = false;
+        while !reply_loop_finished {
             let description = next_description(&mut events_rx).await;
             if description.starts_with("delta:") {
                 deltas += 1;
             }
-            model_finished = description == "model_finished";
+            reply_loop_finished = description == "reply_loop_finished";
         }
         assert_eq!(
             deltas, 12,
@@ -2174,7 +2688,7 @@ mod tests {
         assert_eq!(
             spoken.lock().expect("spoken lock").as_slice(),
             ["Sentence 1."],
-            "model_finished should be stamped before tts works through the queue"
+            "reply_loop_finished should be stamped before tts works through the queue"
         );
         release.notify_one();
         loop {
@@ -2207,10 +2721,10 @@ mod tests {
             events_tx,
             1,
             recorder,
-            AckSettings {
+            context(AckSettings {
                 enabled: false,
                 cache: new_ack_cache(),
-            },
+            }),
         ));
         let mut seen = Vec::new();
         loop {
@@ -2269,10 +2783,10 @@ mod tests {
             events_tx,
             1,
             recorder,
-            AckSettings {
+            context(AckSettings {
                 enabled: true,
                 cache: new_ack_cache(),
-            },
+            }),
         ));
         let first = next_description(&mut events_rx).await;
         assert_eq!(first, "ack_audio", "ack should arrive before any sentence");
@@ -2319,10 +2833,10 @@ mod tests {
             events_tx,
             1,
             recorder,
-            AckSettings {
+            context(AckSettings {
                 enabled: true,
                 cache: new_ack_cache(),
-            },
+            }),
         ));
         let seen = collect_until_finished(&mut events_rx).await;
         handle.await.expect("reply task should finish");
@@ -2367,10 +2881,10 @@ mod tests {
                 events_tx,
                 turn,
                 recorder,
-                AckSettings {
+                context(AckSettings {
                     enabled: true,
                     cache: Arc::clone(&cache),
-                },
+                }),
             ));
             let first = next_description(&mut events_rx).await;
             assert_eq!(first, "ack_audio", "turn {turn} should speak an ack");
@@ -2389,6 +2903,87 @@ mod tests {
             .filter(|text| text.as_str() == ACK_LINES[0])
             .count();
         assert_eq!(ack_calls, 1, "cached ack should be synthesized only once");
+    }
+
+    struct VoiceTts {
+        requests: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl Tts for VoiceTts {
+        fn synthesize(
+            &self,
+            _text: &str,
+        ) -> impl std::future::Future<Output = Result<AudioStream, TtsError>> + Send {
+            std::future::ready(Err(TtsError("the reply must pick its voice".to_string())))
+        }
+
+        fn synthesize_with_voice(
+            &self,
+            text: &str,
+            voice: &str,
+        ) -> impl std::future::Future<Output = Result<AudioStream, TtsError>> + Send {
+            self.requests
+                .lock()
+                .expect("requests lock")
+                .push((text.to_string(), voice.to_string()));
+            let audio: AudioStream = Box::pin(futures_util::stream::iter(vec![Ok(
+                Bytes::from_static(b"audio"),
+            )]));
+            std::future::ready(Ok(audio))
+        }
+    }
+
+    #[tokio::test]
+    async fn acknowledgements_and_sentences_use_the_reply_voice_and_are_cached_per_voice() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let tts = Arc::new(VoiceTts {
+            requests: Arc::clone(&requests),
+        });
+        let cache = new_ack_cache();
+        // Turns 1, 4 and 7 draw the same acknowledgement line.
+        for (turn, voice) in [(1_u64, "af_heart"), (4, "sohee"), (7, "sohee")] {
+            let release = Arc::new(Notify::new());
+            let (_voice_tx, voice_rx) = watch::channel(true);
+            let (events_tx, mut events_rx) = mpsc::channel(64);
+            let recorder =
+                start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
+            let handle = tokio::spawn(run_reply(
+                Arc::new(GatedModel {
+                    release: Arc::clone(&release),
+                }),
+                Arc::clone(&tts),
+                voice_rx,
+                Vec::new(),
+                None,
+                events_tx,
+                turn,
+                recorder,
+                ReplyContext {
+                    voice_name: voice.to_string(),
+                    ..context(AckSettings {
+                        enabled: true,
+                        cache: Arc::clone(&cache),
+                    })
+                },
+            ));
+            assert_eq!(next_description(&mut events_rx).await, "ack_audio");
+            release.notify_one();
+            collect_until_finished(&mut events_rx).await;
+            handle.await.expect("reply task should finish");
+        }
+        let ack = ACK_LINES[0].to_string();
+        let answer = "First answer.".to_string();
+        assert_eq!(
+            *requests.lock().expect("requests lock"),
+            [
+                (ack.clone(), "af_heart".to_string()),
+                (answer.clone(), "af_heart".to_string()),
+                (ack, "sohee".to_string()),
+                (answer.clone(), "sohee".to_string()),
+                (answer, "sohee".to_string()),
+            ],
+            "each voice synthesizes the acknowledgement once; the second sohee reply replays it"
+        );
     }
 
     #[tokio::test]
@@ -2414,10 +3009,10 @@ mod tests {
             events_tx,
             1,
             recorder,
-            AckSettings {
+            context(AckSettings {
                 enabled: true,
                 cache: new_ack_cache(),
-            },
+            }),
         ));
         tokio::time::timeout(Duration::from_secs(5), entered.notified())
             .await
@@ -2454,13 +3049,14 @@ mod tests {
             spoken_throughout: true,
             speaking_sent,
             first_delta_at: None,
-            model_finished_at: None,
+            reply_loop_finished_at: None,
             first_sentence_at: None,
             first_audio_at: None,
             ack_first_audio_at: None,
             audio_bytes: 0,
             input_audio_ms: None,
             misheard: false,
+            voice_name: "af_heart".to_string(),
         };
         let mut history = Vec::new();
         record_assistant_history(&mut history, &make_active(true), false);
@@ -2478,12 +3074,119 @@ mod tests {
     }
 
     #[test]
-    fn model_ms_ends_at_model_finish_when_known_and_at_record_time_otherwise() {
+    fn reply_loop_ms_ends_at_model_finish_when_known_and_at_record_time_otherwise() {
         let started = Instant::now();
-        let model_finished = started + Duration::from_millis(120);
+        let reply_loop_finished = started + Duration::from_millis(120);
         let recorded = started + Duration::from_millis(5_000);
-        assert_eq!(model_ms(started, Some(model_finished), recorded), 120);
-        assert_eq!(model_ms(started, None, recorded), 5_000);
+        assert_eq!(
+            reply_loop_ms(started, Some(reply_loop_finished), recorded),
+            120
+        );
+        assert_eq!(reply_loop_ms(started, None, recorded), 5_000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn each_model_call_records_its_outcome_without_the_delay_between_tool_rounds() {
+        for outcome in ["ok", "failed", "interrupted"] {
+            let dir = std::env::temp_dir().join(format!(
+                "thalvi-model-timing-{}-{outcome}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            let mut config = RecordingConfig::disabled();
+            config.kinds.metrics = true;
+            config.data_dir = dir.clone();
+            let recording = start_recording(config, "timing".to_string());
+            let first_finished = Arc::new(Notify::new());
+            let next_started = Arc::new(Notify::new());
+            let model = Arc::new(ToolTimingModel {
+                first_finished: Arc::clone(&first_finished),
+                next_started: Arc::clone(&next_started),
+                outcome,
+            });
+            let store = context(AckSettings {
+                enabled: false,
+                cache: new_ack_cache(),
+            })
+            .store;
+            let (events, mut received) = mpsc::channel(1);
+            let reservation = events.clone();
+            let permit = reservation.reserve().await.expect("reserve event capacity");
+            let (sentences, _sentence_rx) = mpsc::unbounded_channel();
+            let started = Instant::now();
+            let producer = tokio::spawn(super::produce_sentences(
+                model,
+                Vec::new(),
+                None,
+                events,
+                sentences,
+                Arc::new(AtomicBool::new(false)),
+                super::ToolRun {
+                    store,
+                    session_id: "unit".to_string(),
+                    recorder: recording.recorder.clone(),
+                    turn: 1,
+                },
+            ));
+            tokio::time::timeout(Duration::from_secs(5), first_finished.notified())
+                .await
+                .expect("first model call finished");
+            tokio::time::advance(Duration::from_secs(5)).await;
+            drop(permit);
+            drop(reservation);
+            loop {
+                let event = tokio::time::timeout(Duration::from_secs(5), received.recv())
+                    .await
+                    .expect("tool event arrived")
+                    .expect("tool events");
+                if matches!(event, ReplyEvent::Task(step) if step.status == super::TaskStatus::Done)
+                {
+                    break;
+                }
+            }
+            tokio::time::timeout(Duration::from_secs(5), next_started.notified())
+                .await
+                .expect("next model call started");
+            if outcome == "interrupted" {
+                producer.abort();
+            }
+            let mut loop_finished = None;
+            while let Some(event) = tokio::time::timeout(Duration::from_secs(5), received.recv())
+                .await
+                .expect("model event arrived")
+            {
+                if let ReplyEvent::ReplyLoopFinished(at) = event {
+                    loop_finished = Some(at);
+                }
+            }
+            let _ = producer.await;
+            if outcome == "ok" {
+                assert_eq!(
+                    loop_finished.expect("loop complete") - started,
+                    Duration::from_secs(5)
+                );
+            }
+            recording.finish(5_000).await;
+            let date = std::fs::read_dir(dir.join("recordings"))
+                .expect("recording directory")
+                .next()
+                .expect("dated recordings")
+                .expect("date entry")
+                .path();
+            let lines =
+                std::fs::read_to_string(date.join("timing.jsonl")).expect("recorded metrics");
+            let calls: Vec<serde_json::Value> = lines
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("metric JSON"))
+                .filter(|line: &serde_json::Value| line["event"] == "model_call")
+                .collect();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0]["outcome"], "ok");
+            assert_eq!(calls[1]["outcome"], outcome);
+            assert_eq!(calls[0]["total_ms"], 0);
+            assert_eq!(calls[1]["total_ms"], 0);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

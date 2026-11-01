@@ -27,7 +27,7 @@ async fn main() {
     let app = match router(&config) {
         Ok(app) => app,
         Err(error) => {
-            eprintln!("could not open saved sessions: {error}");
+            eprintln!("could not open saved data: {error}");
             std::process::exit(1);
         }
     };

@@ -18,10 +18,13 @@ use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use thalvi_server::api;
-use thalvi_server::model::{ChatEvent, ChatMessage, ChatModel, DeltaStream, ModelError};
+use thalvi_server::model::{
+    ChatEvent, ChatMessage, ChatModel, DeltaStream, EventStream, ModelError, ToolCall,
+    ToolDefinition, ToolResult,
+};
 use thalvi_server::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerFactory};
 use thalvi_server::recorder::{RecordKinds, RecordingConfig};
-use thalvi_server::session::handle_session;
+use thalvi_server::session::{VoiceChoices, handle_session};
 use thalvi_server::store::SessionStore;
 use thalvi_server::title::Titler;
 use thalvi_server::tts::{AudioStream, Tts, TtsError};
@@ -124,6 +127,7 @@ impl Recognizer for FakeRecognizer {
 enum ModelChunk {
     Delta(String),
     Heard(String),
+    Tool(ToolCall),
     Wait(Arc<Notify>),
     Fail,
 }
@@ -136,12 +140,21 @@ impl Drop for DropGuard {
     }
 }
 
+/// What the model was offered and shown on one call.
+#[derive(Clone)]
+struct ToolRound {
+    offered: Vec<String>,
+    results: Vec<ToolResult>,
+}
+
 #[derive(Clone, Default)]
 struct FakeModel {
     calls: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
     clips: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
     scripts: Arc<Mutex<VecDeque<Vec<ModelChunk>>>>,
     dropped: Arc<AtomicUsize>,
+    /// The tool names offered and the tool results shown on each call.
+    tool_rounds: Arc<Mutex<Vec<ToolRound>>>,
 }
 
 impl FakeModel {
@@ -157,14 +170,12 @@ impl FakeModel {
     fn clips(&self) -> Vec<Option<Vec<u8>>> {
         self.clips.lock().unwrap().clone()
     }
-}
 
-impl ChatModel for FakeModel {
-    async fn stream_reply(
-        &self,
-        history: &[ChatMessage],
-        audio: Option<&[u8]>,
-    ) -> Result<DeltaStream, ModelError> {
+    fn tool_rounds(&self) -> Vec<ToolRound> {
+        self.tool_rounds.lock().unwrap().clone()
+    }
+
+    fn next_events(&self, history: &[ChatMessage], audio: Option<&[u8]>) -> EventStream {
         self.calls.lock().unwrap().push(history.to_vec());
         self.clips.lock().unwrap().push(audio.map(<[u8]>::to_vec));
         let chunks = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
@@ -178,6 +189,9 @@ impl ChatModel for FakeModel {
                     }
                     Some(ModelChunk::Heard(text)) => {
                         Some((Ok(ChatEvent::Heard(text)), (chunks, guard)))
+                    }
+                    Some(ModelChunk::Tool(call)) => {
+                        Some((Ok(ChatEvent::ToolCall(call)), (chunks, guard)))
                     }
                     Some(ModelChunk::Wait(notify)) => {
                         notify.notified().await;
@@ -194,7 +208,38 @@ impl ChatModel for FakeModel {
         .filter(|item| {
             std::future::ready(!matches!(item, Ok(ChatEvent::Text(text)) if text.is_empty()))
         });
-        Ok(Box::pin(stream))
+        Box::pin(stream)
+    }
+}
+
+impl ChatModel for FakeModel {
+    async fn stream_reply(
+        &self,
+        history: &[ChatMessage],
+        audio: Option<&[u8]>,
+    ) -> Result<DeltaStream, ModelError> {
+        let events = self.next_events(history, audio);
+        Ok(Box::pin(events.filter_map(|event| {
+            std::future::ready(match event {
+                Ok(ChatEvent::Text(text)) => Some(Ok(text)),
+                Ok(ChatEvent::Heard(_) | ChatEvent::ToolCall(_)) => None,
+                Err(error) => Some(Err(error)),
+            })
+        })))
+    }
+
+    async fn stream_reply_with_tools(
+        &self,
+        history: &[ChatMessage],
+        audio: Option<&[u8]>,
+        tools: &[ToolDefinition],
+        tool_results: &[ToolResult],
+    ) -> Result<EventStream, ModelError> {
+        self.tool_rounds.lock().unwrap().push(ToolRound {
+            offered: tools.iter().map(|tool| tool.name.clone()).collect(),
+            results: tool_results.to_vec(),
+        });
+        Ok(self.next_events(history, audio))
     }
 }
 
@@ -211,6 +256,7 @@ enum TtsScript {
 #[derive(Clone, Default)]
 struct FakeTts {
     inputs: Arc<Mutex<Vec<String>>>,
+    voices: Arc<Mutex<Vec<String>>>,
     scripts: Arc<Mutex<VecDeque<TtsScript>>>,
     dropped: Arc<AtomicUsize>,
 }
@@ -223,9 +269,23 @@ impl FakeTts {
     fn inputs(&self) -> Vec<String> {
         self.inputs.lock().unwrap().clone()
     }
+
+    /// The voice of each synthesis request, in order.
+    fn voices(&self) -> Vec<String> {
+        self.voices.lock().unwrap().clone()
+    }
 }
 
 impl Tts for FakeTts {
+    async fn synthesize_with_voice(
+        &self,
+        text: &str,
+        voice: &str,
+    ) -> Result<AudioStream, TtsError> {
+        self.voices.lock().unwrap().push(voice.to_string());
+        self.synthesize(text).await
+    }
+
     async fn synthesize(&self, text: &str) -> Result<AudioStream, TtsError> {
         self.inputs.lock().unwrap().push(text.to_string());
         let script = self
@@ -394,6 +454,10 @@ async fn start_full(
                                 recording,
                                 ack_enabled,
                                 audio_input,
+                                VoiceChoices {
+                                    default: "af_heart".to_string(),
+                                    offered: ["af_heart".to_string(), "sohee".to_string()].into(),
+                                },
                             )
                             .await;
                             closed.fetch_add(1, Ordering::SeqCst);
@@ -1715,8 +1779,7 @@ async fn turning_voice_on_mid_reply_keeps_the_reply_state_until_it_ends() {
 }
 
 #[tokio::test]
-async fn an_acknowledgement_is_heard_while_still_thinking_and_speaking_starts_with_the_real_answer()
-{
+async fn an_acknowledgement_and_real_audio_keep_the_underlying_thinking_state() {
     let mut harness = start_with_ack(RecordingConfig::disabled(), None, true).await;
     voice_on(&mut harness).await;
     let gate = Arc::new(Notify::new());
@@ -1755,11 +1818,10 @@ async fn an_acknowledgement_is_heard_while_still_thinking_and_speaking_starts_wi
         audios(&answer),
         vec![Bytes::from("AUDIO:Take the ring road.")]
     );
-    let speaking = answer
-        .iter()
-        .position(|item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "speaking"))
-        .expect("speaking state before the real audio");
-    assert!(speaking < answer.len() - 1, "{answer:?}");
+    assert!(
+        !has_state(&answer, "speaking"),
+        "the client derives speaking from playback, not a stale server phase: {answer:?}"
+    );
     harness.server.abort();
 }
 
@@ -2311,7 +2373,6 @@ async fn a_voice_turn_whose_echo_disagrees_gets_the_fallback_and_leaves_no_histo
             .collect();
         assert_eq!(replies, spoken, "echo {echo:?}");
         assert_eq!(harness.tts.inputs(), [spoken], "echo {echo:?}");
-        assert!(has_state(&received, "speaking"), "echo {echo:?}");
 
         harness
             .model
@@ -2333,4 +2394,566 @@ async fn a_voice_turn_whose_echo_disagrees_gets_the_fallback_and_leaves_no_histo
         assert_eq!(texts, expected, "echo {echo:?}");
         harness.server.abort();
     }
+}
+#[tokio::test]
+async fn voice_echo_admits_matching_short_reply_and_rejects_tool_on_mismatch() {
+    for (echo, accepted) in [("yes", true), ("no", false)] {
+        let mut harness = start_full(RecordingConfig::disabled(), None, false, true).await;
+        harness.model.add_script(vec![
+            ModelChunk::Heard(echo.to_string()),
+            search_call("call-1", r#"{"query":"anything"}"#),
+        ]);
+        if accepted {
+            harness.model.add_script(vec![
+                ModelChunk::Heard("yes".to_string()),
+                ModelChunk::Delta("Done.".to_string()),
+            ]);
+        }
+        voice_on(&mut harness).await;
+        for _ in 0..10 {
+            harness
+                .client
+                .send(ClientMessage::Binary(vec![3_u8; 3840].into()))
+                .await
+                .unwrap();
+        }
+        wait_until(|| harness.factory.audio_received().len() == 10).await;
+        let connection = harness.factory.latest_connection();
+        harness.factory.complete_turn(connection, "yes");
+        let received = collect_until(&mut harness.client, |item| {
+            matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+        }).await;
+        assert_eq!(!tasks(&received).is_empty(), accepted);
+        assert_eq!(
+            reply_text(&received),
+            if accepted {
+                "Done."
+            } else {
+                "Sorry, I didn't catch that."
+            }
+        );
+        harness
+            .model
+            .add_script(vec![ModelChunk::Delta("Fine.".to_string())]);
+        send_json(&mut harness, &json!({"type": "text", "text": "next"})).await;
+        finish_reply(&mut harness).await;
+        let calls = harness.model.calls();
+        let texts: Vec<&str> = calls
+            .last()
+            .unwrap()
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            if accepted {
+                vec!["yes", "Done.", "next"]
+            } else {
+                vec!["next"]
+            }
+        );
+        harness.server.abort();
+    }
+}
+
+// ---------- history search tool, selected voice, save notice ----------
+
+fn search_call(id: &str, arguments: &str) -> ModelChunk {
+    ModelChunk::Tool(ToolCall {
+        id: id.to_string(),
+        name: "search_history".to_string(),
+        arguments: arguments.to_string(),
+    })
+}
+
+fn tasks(received: &[Received]) -> Vec<Value> {
+    received
+        .iter()
+        .filter_map(|item| match item {
+            Received::Json(v) if v["type"] == "task" => Some(v["step"].clone()),
+            Received::Json(_) | Received::Audio(_) => None,
+        })
+        .collect()
+}
+
+/// The states and task statuses in the order the client saw them.
+fn progress(received: &[Received]) -> Vec<String> {
+    received
+        .iter()
+        .filter_map(|item| match item {
+            Received::Json(v) if v["type"] == "state" => Some(format!("state:{}", v["state"])),
+            Received::Json(v) if v["type"] == "task" => {
+                Some(format!("task:{}", v["step"]["status"]))
+            }
+            Received::Json(_) | Received::Audio(_) => None,
+        })
+        .collect()
+}
+
+async fn finish_reply(harness: &mut Harness) -> Vec<Received> {
+    collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_end"),
+    )
+    .await
+}
+
+async fn save_past_conversation(harness: &Harness, text: &str) -> String {
+    let past = harness.store.attach(None).await;
+    harness
+        .store
+        .save(&past, &[ChatMessage::user(text.to_string())], 1);
+    let id = past.id.clone();
+    harness.store.release(past);
+    harness.store.flush().await;
+    id
+}
+
+#[tokio::test]
+async fn a_history_search_feeds_the_follow_up_call_and_shows_task_steps() {
+    let mut harness = start().await;
+    let past_id =
+        save_past_conversation(&harness, "We settled the road briefing route earlier").await;
+    harness
+        .model
+        .add_script(vec![search_call("call-1", r#"{"query":"road briefing"}"#)]);
+    harness.model.add_script(vec![ModelChunk::Delta(
+        "You chose the north route.".to_string(),
+    )]);
+    send_json(
+        &mut harness,
+        &json!({"type": "text", "text": "what did we decide about the road briefing?"}),
+    )
+    .await;
+    let received = finish_reply(&mut harness).await;
+
+    assert_eq!(
+        tasks(&received),
+        vec![
+            json!({"id": "call-1", "label": "Searching conversations", "status": "running"}),
+            json!({"id": "call-1", "label": "Searching conversations", "status": "done", "detail": "2 matches"}),
+        ]
+    );
+    assert_eq!(
+        progress(&received),
+        [
+            "state:\"thinking\"",
+            "task:\"running\"",
+            "state:\"working\"",
+            "task:\"done\"",
+            "state:\"thinking\"",
+        ]
+    );
+    assert_eq!(reply_text(&received), "You chose the north route.");
+
+    let rounds = harness.model.tool_rounds();
+    assert_eq!(rounds.len(), 2);
+    assert_eq!(rounds[0].offered, ["search_history"]);
+    assert_eq!(rounds[0].results, []);
+    assert_eq!(
+        rounds[1].offered,
+        ["search_history"],
+        "the follow-up may search again"
+    );
+    assert_eq!(rounds[1].results.len(), 1);
+    assert_eq!(rounds[1].results[0].call.id, "call-1");
+    let result: Value = serde_json::from_str(&rounds[1].results[0].content).unwrap();
+    assert_eq!(result["count"], 2);
+    let sessions: Vec<&str> = result["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|found| found["session_id"].as_str())
+        .collect();
+    assert!(
+        sessions.contains(&past_id.as_str()) && sessions.contains(&harness.session_id.as_str()),
+        "the search covers a saved conversation and the live one: {sessions:?}"
+    );
+
+    let calls = harness.model.calls();
+    assert_eq!(
+        calls[0], calls[1],
+        "tool output is not added to the history"
+    );
+    harness.client.close(None).await.unwrap();
+    wait_closed(&harness, 1).await;
+    let turns = harness.reconnect(Some(&harness.session_id.clone())).await;
+    let texts: Vec<&str> = turns
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|turn| turn["text"].as_str())
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "what did we decide about the road briefing?",
+            "You chose the north route."
+        ]
+    );
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn finishing_a_search_returns_to_thinking_after_preamble_audio() {
+    let mut harness = start().await;
+    voice_on(&mut harness).await;
+    harness.model.add_script(vec![
+        ModelChunk::Delta("One moment.".to_string()),
+        search_call("call-1", r#"{"query":"anything"}"#),
+    ]);
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("The answer.".to_string())]);
+    send_json(&mut harness, &json!({"type": "text", "text": "search"})).await;
+    let received = finish_reply(&mut harness).await;
+    let text: String = received
+        .iter()
+        .filter_map(|message| match message {
+            Received::Json(value) if value["type"] == "reply" => value["text"].as_str(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "One moment. The answer.");
+    let progress = progress(&received);
+    let done = progress
+        .iter()
+        .position(|event| event == "task:\"done\"")
+        .expect("search completion");
+    assert_eq!(
+        progress.get(done + 1).map(String::as_str),
+        Some("state:\"thinking\"")
+    );
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn a_current_scope_search_skips_saved_conversations() {
+    let mut harness = start().await;
+    save_past_conversation(&harness, "The cabin code is saved in another chat").await;
+    harness.model.add_script(vec![search_call(
+        "call-1",
+        r#"{"query":"cabin","scope":"current"}"#,
+    )]);
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Only this chat.".to_string())]);
+    send_json(
+        &mut harness,
+        &json!({"type": "text", "text": "cabin code?"}),
+    )
+    .await;
+    let received = finish_reply(&mut harness).await;
+    assert_eq!(tasks(&received)[1]["detail"], "1 match");
+}
+
+#[tokio::test]
+async fn an_invalid_or_unknown_tool_call_fails_its_step_and_the_reply_still_finishes() {
+    for (name, arguments, detail) in [
+        (
+            "search_history",
+            r#"{"query":""}"#,
+            "The history search query can't be empty.",
+        ),
+        (
+            "search_history",
+            r#"{"query":"x","semantic":true}"#,
+            "Send query text and optionally scope current or all.",
+        ),
+        ("delete_everything", "{}", "That tool doesn't exist."),
+    ] {
+        let mut harness = start().await;
+        harness.model.add_script(vec![ModelChunk::Tool(ToolCall {
+            id: "bad-1".to_string(),
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+        })]);
+        harness.model.add_script(vec![ModelChunk::Delta(
+            "I could not look that up.".to_string(),
+        )]);
+        send_json(&mut harness, &json!({"type": "text", "text": "find it"})).await;
+        let received = finish_reply(&mut harness).await;
+
+        let steps = tasks(&received);
+        assert_eq!(steps.len(), 2, "{name} {arguments}: {steps:?}");
+        assert_eq!(steps[1]["status"], "failed", "{name} {arguments}");
+        assert_eq!(steps[1]["detail"], detail, "{name} {arguments}");
+        assert_eq!(steps[1]["id"], "bad-1");
+        assert!(!has_type(&received, "error"), "{name}: {received:?}");
+        assert_eq!(reply_text(&received), "I could not look that up.");
+        let rounds = harness.model.tool_rounds();
+        let result: Value = serde_json::from_str(&rounds[1].results[0].content).unwrap();
+        assert_eq!(result["error"], detail, "{name} {arguments}");
+        harness.server.abort();
+    }
+}
+
+#[tokio::test]
+async fn a_model_that_keeps_searching_is_stopped_after_a_few_rounds() {
+    let mut harness = start().await;
+    for round in 0..4 {
+        harness.model.add_script(vec![search_call(
+            &format!("loop-{round}"),
+            r#"{"query":"x"}"#,
+        )]);
+    }
+    send_json(&mut harness, &json!({"type": "text", "text": "hmm"})).await;
+    let received = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "error"),
+    )
+    .await;
+    assert_eq!(
+        tasks(&received).len(),
+        6,
+        "three searches ran, then the model was cut off: {received:?}"
+    );
+    let offered: Vec<usize> = harness
+        .model
+        .tool_rounds()
+        .iter()
+        .map(|round| round.offered.len())
+        .collect();
+    assert_eq!(offered, [1, 1, 1, 0], "the last call must answer in text");
+    assert!(
+        matches!(received.last(), Some(Received::Json(v)) if v["message"] == "The language model kept searching instead of answering."),
+        "{received:?}"
+    );
+    assert!(
+        has_type(&received, "reply_end"),
+        "the reply ends: {received:?}"
+    );
+    let after = recv(&mut harness.client).await;
+    assert!(
+        matches!(&after, Received::Json(v) if v["type"] == "reply_end")
+            || has_type(&received, "reply_end"),
+        "the reply ends: {after:?}"
+    );
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn tool_calls_record_latency_outcome_and_match_count_in_metrics() {
+    let kinds = RecordKinds {
+        metrics: true,
+        text: false,
+        audio: false,
+    };
+    let data_dir = ScratchDir::new("tool-metrics");
+    let mut harness = start_with_recording(recording_config(kinds, &data_dir)).await;
+    harness
+        .model
+        .add_script(vec![search_call("c1", r#"{"query":"look"}"#)]);
+    harness
+        .model
+        .add_script(vec![search_call("c2", r#"{"query":""}"#)]);
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Done.".to_string())]);
+    send_json(&mut harness, &json!({"type": "text", "text": "look"})).await;
+    finish_reply(&mut harness).await;
+    let session = harness.session_id.clone();
+    harness.client.close(None).await.unwrap();
+    wait_closed(&harness, 1).await;
+    harness.server.abort();
+
+    let events = |lines: &[Value]| -> Vec<Value> {
+        lines
+            .iter()
+            .filter(|line| line["event"] == "tool")
+            .cloned()
+            .collect()
+    };
+    wait_until(|| events(&read_recorded_lines_blocking(&data_dir.0, &session)).len() == 2).await;
+    let tools = events(&read_recorded_lines_blocking(&data_dir.0, &session));
+    assert_eq!(tools[0]["tool"], "search_history");
+    assert_eq!(tools[0]["outcome"], "ok");
+    assert_eq!(
+        tools[0]["matches"], 1,
+        "the live user turn matches nothing else: {tools:?}"
+    );
+    assert!(tools[0]["total_ms"].is_u64());
+    assert_eq!(tools[1]["outcome"], "failed");
+    assert_eq!(
+        tools[1]["error"],
+        "The history search query can't be empty."
+    );
+    let lines = read_recorded_lines_blocking(&data_dir.0, &session);
+    let calls: Vec<_> = lines
+        .iter()
+        .filter(|line| line["event"] == "model_call")
+        .collect();
+    assert_eq!(calls.len(), 3);
+    for (round, call) in calls.iter().enumerate() {
+        assert_eq!(call["round"], round);
+        assert_eq!(call["outcome"], "ok");
+        assert!(call["total_ms"].is_u64());
+    }
+    let reply = lines
+        .iter()
+        .find(|line| line["event"] == "reply")
+        .expect("reply metric");
+    assert!(reply["reply_loop_ms"].is_u64());
+    assert!(reply.get("model_ms").is_none());
+}
+
+#[tokio::test]
+async fn an_unknown_voice_name_is_refused_and_replies_keep_the_default() {
+    let mut harness = start().await;
+    send_json(
+        &mut harness,
+        &json!({"type": "voice_name", "voice": "nobody"}),
+    )
+    .await;
+    let refused = recv(&mut harness.client).await;
+    assert!(
+        matches!(&refused, Received::Json(v) if v["type"] == "error" && v["message"].as_str().is_some_and(|m| m.contains("isn't offered"))),
+        "{refused:?}"
+    );
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Hi.".to_string())]);
+    voice_on(&mut harness).await;
+    harness.factory.complete_turn(0, "hello");
+    collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+    })
+    .await;
+    assert_eq!(harness.tts.voices(), ["af_heart"]);
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn a_chosen_voice_applies_from_the_next_reply_not_mid_reply() {
+    let mut harness = start().await;
+    voice_on(&mut harness).await;
+    let gate = Arc::new(Notify::new());
+    harness.model.add_script(vec![
+        ModelChunk::Delta("First sentence. ".to_string()),
+        ModelChunk::Wait(Arc::clone(&gate)),
+        ModelChunk::Delta("Second sentence.".to_string()),
+    ]);
+    harness.factory.complete_turn(0, "one");
+    collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Audio(_))
+    })
+    .await;
+    send_json(
+        &mut harness,
+        &json!({"type": "voice_name", "voice": "sohee"}),
+    )
+    .await;
+    expect_quiet_until_marker(&mut harness).await;
+    gate.notify_one();
+    collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+    })
+    .await;
+    assert_eq!(harness.tts.voices(), ["af_heart", "af_heart"]);
+
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Next reply.".to_string())]);
+    harness.factory.complete_turn(0, "two");
+    collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+    })
+    .await;
+    assert_eq!(harness.tts.voices(), ["af_heart", "af_heart", "sohee"]);
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn reply_metrics_name_the_voice_actually_used() {
+    let kinds = RecordKinds {
+        metrics: true,
+        text: false,
+        audio: false,
+    };
+    let data_dir = ScratchDir::new("voice-metrics");
+    let mut harness = start_with_recording(recording_config(kinds, &data_dir)).await;
+    send_json(
+        &mut harness,
+        &json!({"type": "voice_name", "voice": "sohee"}),
+    )
+    .await;
+    voice_on(&mut harness).await;
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Hi.".to_string())]);
+    harness.factory.complete_turn(0, "hello");
+    collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+    })
+    .await;
+    let session = harness.session_id.clone();
+    harness.client.close(None).await.unwrap();
+    wait_closed(&harness, 1).await;
+    harness.server.abort();
+    wait_until(|| {
+        read_recorded_lines_blocking(&data_dir.0, &session)
+            .iter()
+            .any(|line| line["event"] == "reply")
+    })
+    .await;
+    let lines = read_recorded_lines_blocking(&data_dir.0, &session);
+    let reply = lines.iter().find(|line| line["event"] == "reply").unwrap();
+    assert_eq!(reply["voice"], "sohee");
+    let sentence = lines
+        .iter()
+        .find(|line| line["event"] == "tts_sentence")
+        .unwrap();
+    assert_eq!(sentence["voice"], "sohee");
+}
+
+#[tokio::test]
+async fn a_failed_live_save_sends_one_notice_while_the_reply_finishes() {
+    let mut harness = start().await;
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("First.".to_string())]);
+    send_json(&mut harness, &json!({"type": "text", "text": "one"})).await;
+    finish_reply(&mut harness).await;
+    harness.store.flush().await;
+
+    // Replacing the store directory with a file makes every later write fail.
+    let sessions_dir = harness.dir.0.join("sessions");
+    std::fs::remove_dir_all(&sessions_dir).unwrap();
+    std::fs::write(&sessions_dir, b"not a directory").unwrap();
+
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Second.".to_string())]);
+    send_json(&mut harness, &json!({"type": "text", "text": "two"})).await;
+    let mut received = Vec::new();
+    while !(has_type(&received, "reply_end") && notices(&received) > 0) {
+        received.push(recv(&mut harness.client).await);
+    }
+    assert_eq!(reply_text(&received), "Second.");
+
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Third.".to_string())]);
+    send_json(&mut harness, &json!({"type": "text", "text": "three"})).await;
+    finish_reply(&mut harness).await;
+    send_json(&mut harness, &json!({"type": "text", "text": ""})).await;
+    let mut later = Vec::new();
+    loop {
+        let item = recv(&mut harness.client).await;
+        let marker = matches!(&item, Received::Json(v) if v["type"] == "error" && v["message"].as_str().is_some_and(|m| m.contains("empty")));
+        later.push(item);
+        if marker {
+            break;
+        }
+    }
+    assert_eq!(notices(&received), 1);
+    assert_eq!(notices(&later), 0, "the notice is sent once: {later:?}");
+    harness.server.abort();
+}
+
+fn notices(received: &[Received]) -> usize {
+    received
+        .iter()
+        .filter(|item| matches!(item, Received::Json(v) if v["type"] == "error" && v["message"] == "This conversation couldn't be saved"))
+        .count()
 }

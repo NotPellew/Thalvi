@@ -30,11 +30,11 @@ fn edit_distance(a: &[String], b: &[String]) -> usize {
     row[b.len()]
 }
 
-/// Whether the model's echo disagrees with the caption, or the caption is too short to trust.
+/// Whether the model's echo disagrees with the caption, or the caption has no words.
 #[must_use]
 pub fn disagrees(heard: &str, caption: &str) -> bool {
     let caption = words(caption);
-    if caption.len() < 2 {
+    if caption.is_empty() {
         return true;
     }
     let distance = edit_distance(&words(heard), &caption);
@@ -76,7 +76,12 @@ mod tests {
             ),
             ("the user said: lights", "turn on the lights", true),
             ("", "turn on the lights", true),
-            ("The user said: \"atmosphere\"", " atmosphere,", true),
+            ("The user said: \"yes\"", "Yes.", false),
+            ("The user said: \"no\"", "no", false),
+            ("The user said: \"stop\"", "stop", false),
+            ("The user said: \"yes\"", "no", true),
+            ("", "yes", true),
+            ("The user said: \"atmosphere\"", " atmosphere,", false),
             ("anything at all", "", true),
         ];
         for (heard, caption, expected) in cases {
