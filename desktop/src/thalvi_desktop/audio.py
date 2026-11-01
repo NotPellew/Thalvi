@@ -97,13 +97,13 @@ class Audio:
     def reset_input(self) -> None:
         self.set_input(True)
 
-    async def cue(self, frequency: int) -> None:
+    async def cue(self, frequency: int, *, duration: float = 0.12) -> None:
         import numpy as np
         import sounddevice as sd
 
         rate = 24_000
-        t = np.arange(int(rate * 0.12)) / rate
-        tone = (0.15 * np.sin(2 * np.pi * frequency * t) * np.sin(np.pi * t / 0.12)).astype(
+        t = np.arange(int(rate * duration)) / rate
+        tone = (0.15 * np.sin(2 * np.pi * frequency * t) * np.sin(np.pi * t / duration)).astype(
             np.float32
         )
         try:

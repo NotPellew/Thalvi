@@ -67,7 +67,8 @@ using the configured transcription/conversation endpoints.
 
 After the capture wake word, wait for the local start tone to finish, then
 speak your text and ending phrase. Audio before the tone ends is discarded.
-A lower tone signals that dictation is ready; a higher tone acknowledges an
+The short lower tone signals that dictation is ready; wait until it finishes
+before speaking. A higher tone acknowledges an
 accepted ending, before delivery begins. The ending tone does not mean delivery
 succeeded.
 Fresh audio is buffered while the recognizer connects; startup must complete

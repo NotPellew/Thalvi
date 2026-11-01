@@ -37,7 +37,10 @@ async def capture(
         cue_started = time.monotonic()
         outcome = "error"
         try:
-            await audio.cue(880 if confirmation else 440)
+            if confirmation:
+                await audio.cue(880)
+            else:
+                await audio.cue(440, duration=0.04)
             audio.set_input(True)
             notice(ready_message)
             outcome = "ok"
