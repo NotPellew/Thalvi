@@ -411,7 +411,7 @@ def test_continuous_reset_gates_audio_and_preserves_delivery(monkeypatch, tmp_pa
     else:
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(cli.run(config, once=False, dry_run=False))
-    assert events == [False, False, "reset", *([] if reset_fails else [True]), "released"]
+    assert events == [False, "reset", *([] if reset_fails else [True]), "released"]
     assert host.operations == [("deliver", "hello", False)]
     assert sum(n.startswith("Waiting for a wake word") for n in notices) == (
         1 if reset_fails else 2
@@ -532,3 +532,95 @@ def test_flow_failures_play_the_error_cue_after_telling_the_user(monkeypatch, fa
     if failure == "flow":
         order = [e for e in events if e in (told[0], Cue.ERROR, "clipboard")]
         assert order == [told[0], *([Cue.ERROR] if error_cue else []), "clipboard"]
+
+
+def test_capture_preserves_rolling_audio_through_target_and_transcription_startup(monkeypatch):
+    from websockets.asyncio.server import serve
+
+    from thalvi_desktop import client
+
+    monkeypatch.setattr(
+        client, "VoiceActivity", lambda: SimpleNamespace(speech=lambda _, pending=False: False)
+    )
+
+    async def behavior():
+        loop = asyncio.get_running_loop()
+        received = []
+        cues = []
+
+        def frame(marker):
+            return bytes([marker, 0]) * 3840
+
+        class Audio:
+            def __init__(self, _device):
+                self.queue = asyncio.Queue()
+                self.enabled = True
+                self.failed = False
+                for marker in range(1, 11):
+                    self.offer(marker)
+
+            def offer(self, marker):
+                if self.enabled:
+                    self.queue.put_nowait(frame(marker))
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                pass
+
+            async def next(self):
+                return await self.queue.get()
+
+            def set_input(self, enabled):
+                self.enabled = enabled
+                while not self.queue.empty():
+                    self.queue.get_nowait()
+
+            async def play_cue(self, cue):
+                cues.append(cue)
+
+        class Wake:
+            def __init__(self, _config):
+                pass
+
+            def detect(self, data):
+                return "capture" if data == frame(10) else None
+
+        audio = Audio(None)
+        host = PreviewHost(lambda _: None)
+        original_capture = host.capture
+
+        def capture_target():
+            loop.call_soon_threadsafe(audio.offer, 11)
+            loop.call_soon_threadsafe(audio.offer, 12)
+            return original_capture()
+
+        host.capture = capture_target
+        monkeypatch.setattr(cli, "Audio", lambda _device: audio)
+        monkeypatch.setattr(cli, "Wake", Wake)
+        monkeypatch.setattr(cli, "desktop", lambda: host)
+        monkeypatch.setattr(cli, "notice", lambda _: None)
+
+        async def server(socket):
+            audio.offer(13)
+            audio.offer(14)
+            await socket.send('{"type":"ready"}')
+            while True:
+                payload = await socket.recv()
+                received.append(payload)
+                if payload == bytes([14, 0]) * 1920:
+                    break
+            await socket.send('{"type":"final","text":"never mind"}')
+            await socket.wait_closed()
+
+        async with serve(server, "127.0.0.1", 0) as listener:
+            config = replace(
+                Config.load(Path(__file__).parents[1] / "config.example.json"),
+                server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}",
+            )
+            assert await asyncio.wait_for(cli.run(config, once=True, dry_run=False), 3) == 0
+        assert received == [bytes([marker, 0]) * 1920 for marker in range(4, 15)]
+        assert Cue.WAKE not in cues
+
+    asyncio.run(behavior())

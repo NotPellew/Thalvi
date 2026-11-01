@@ -27,8 +27,10 @@ async def capture(
     metrics: Metrics | None = None,
     confirmation: bool = False,
     pending_notice: Callable[[Request, float], None] | None = None,
+    pre_roll: tuple[bytes, ...] = (),
 ) -> Request:
-    audio.set_input(False)
+    if confirmation:
+        audio.set_input(False)
     socket = None
     connection = None
     activation = None
@@ -50,12 +52,7 @@ async def capture(
         finally:
             if metrics:
                 with suppress(OSError):
-                    await metrics.record(
-                        "desktop_ready_cue" if confirmation else "desktop_start_cue",
-                        cue_started,
-                        outcome,
-                        buffered=True,
-                    )
+                    await metrics.record("desktop_ready_cue", cue_started, outcome, buffered=True)
 
     async def open_ready():
         nonlocal socket, connection_outcome
@@ -86,8 +83,8 @@ async def capture(
                 activation = asyncio.create_task(activate())
                 await activation
             else:
-                activation = asyncio.create_task(activate())
-                await asyncio.gather(connection, activation)
+                notice(ready_message)
+                await connection
         return await _capture_events(
             socket,
             audio,
@@ -98,6 +95,7 @@ async def capture(
             config.ending_pause,
             pending_notice,
             config.cues,
+            pre_roll,
         )
     finally:
         tasks = [task for task in (connection, activation) if task is not None]
@@ -120,6 +118,7 @@ async def _capture_events(
     pause=2.5,
     pending_notice=None,
     cues: Cues | None = None,
+    pre_roll: tuple[bytes, ...] = (),
 ):
     cues = cues or Cues()
     gate = None if confirmation else Pending(current, pause)
@@ -165,11 +164,14 @@ async def _capture_events(
 
     async def send_audio() -> None:
         nonlocal frame_seq, local_speech
+        frames = iter(pre_roll)
         continuation_frames = 0
         held_frames = deque(maxlen=3)
         relay_request = None
         while True:
-            frame = await audio.next()
+            frame = next(frames, None)
+            if frame is None:
+                frame = await audio.next()
             if gate is not None and gate.capture.finished:
                 continue
             outgoing = [frame]
