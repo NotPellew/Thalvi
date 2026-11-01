@@ -87,14 +87,15 @@ from 2 to 3 seconds.
 
 An ending is provisional while the countdown runs. Trailing punctuation and up
 to two recognized filler or non-speech markers are removed with the ending.
-Further microphone audio is withheld from the recognizer while the ending is
-pending; isolated noise is discarded, while three consecutive speech frames
-cancel the ending and are forwarded so continued dictation is not clipped.
-Recognizer continuations also cancel it; the ending words then remain part of
-your dictation. Empty and artifact-only recognition results neither restart the
+Microphone audio is withheld from the recognizer while an ending is pending,
+and a stricter speech detector filters trailing noise. Three consecutive speech
+frames (240 ms) are buffered and relayed so the recognizer can distinguish real
+continuation without clipping its beginning. Only meaningful recognizer
+continuations cancel the ending; the ending words then remain part of your
+dictation. Empty and artifact-only recognition results neither restart the
 quiet interval nor reactivate a canceled ending. The accepted cue plays after
 the quiet interval is accepted. The speech detector's trailing activity delays
-the start of the quiet interval; speech that resumes after quiet cancels it.
+the start of the quiet interval.
 Empty partial updates do not cancel an ending. Opt-in metrics record pending,
 quiet, cancellation and acceptance states.
 For submit, the pending notification asks you to confirm the destination by
