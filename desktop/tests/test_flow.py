@@ -61,6 +61,17 @@ def test_endings_span_final_boundaries_and_inserted_punctuation(finals, expected
 
 
 @pytest.mark.parametrize(
+    "ending,route",
+    [("paste that", Ending.PASTE), ("submit", Ending.SUBMIT), ("do that", Ending.TASK)],
+)
+@pytest.mark.parametrize(
+    "tail", ["...", " [noise]", " (breathing)", " <|nospeech|>", " uh", ", um... [MUSIC]"]
+)
+def test_endings_strip_bounded_trailing_artifacts(ending, route, tail):
+    assert Capture().final(f"Keep this {ending}{tail}") == Request(route, "Keep this")
+
+
+@pytest.mark.parametrize(
     "finals, expected_pieces",
     [
         (["scratch that"], ["First"]),
@@ -80,7 +91,16 @@ def test_scratch_across_finals_keeps_earlier_piece_boundaries(finals, expected_p
     assert current.text == " ".join(expected_pieces[:-1])
 
 
-@pytest.mark.parametrize("text", ["taste that.", "finish dictation later", "submitter"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "taste that.",
+        "finish dictation later",
+        "submitter",
+        "submit um okay",
+        "submit um uh hmm",
+    ],
+)
 def test_near_matches_remain_literal_dictation(text):
     current = Capture()
     assert current.final(text) is None

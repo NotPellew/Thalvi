@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 
@@ -164,12 +165,19 @@ async def _capture_events(
 
     async def send_audio() -> None:
         nonlocal frame_seq, local_speech
+        continuation_frames = 0
+        held_frames = deque(maxlen=3)
         while True:
             frame = await audio.next()
+            if gate is not None and gate.capture.finished:
+                continue
+            outgoing = [frame]
             if gate is not None:
                 speech = vad.speech(frame)
-                previous_speech, local_speech = local_speech, speech
+                local_speech = speech
                 if gate.request is not None:
+                    held_frames.append(frame)
+                    continuation_frames = continuation_frames + 1 if speech else 0
                     if gate.waiting_for_quiet and not speech:
                         gate.waiting_for_quiet = False
                         gate.since = asyncio.get_running_loop().time()
@@ -177,7 +185,7 @@ async def _capture_events(
                         if pending_notice:
                             pending_notice(gate.request, pause)
                         await diagnostic("quiet_started")
-                    elif speech and not previous_speech and not gate.waiting_for_quiet:
+                    elif continuation_frames == 3 and not gate.waiting_for_quiet:
                         gate.continuation()
                         changed.set()
                         if pending_notice:
@@ -185,9 +193,21 @@ async def _capture_events(
                         notice("Speech continued. Keep speaking or say an ending again.")
                         await diagnostic("local_speech_cancelled")
                         await optional_cue(Cue.CANCELLED)
+                    if gate.request is not None:
+                        frame_seq += 1
+                        frame_changed.set()
+                        continue
+                    outgoing = list(held_frames)
+                else:
+                    continuation_frames = 0
+                    if held_frames:
+                        held_frames.append(frame)
+                        outgoing = list(held_frames)
+                held_frames.clear()
             frame_seq += 1
             frame_changed.set()
-            await socket.send(transcription_pcm(frame))
+            for buffered in outgoing:
+                await socket.send(transcription_pcm(buffered))
 
     async def receive() -> Request:
         async for raw in socket:
