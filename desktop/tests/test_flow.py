@@ -48,6 +48,8 @@ def test_scratch_discards_only_the_latest_piece_and_cancel_discards_everything()
     "finals, expected",
     [
         (["Keep this paste.", "that!"], Request(Ending.PASTE, "Keep this")),
+        (["Keep this taste", "that."], Request(Ending.PASTE, "Keep this")),
+        (["Keep this", "paystat"], Request(Ending.PASTE, "Keep this")),
         (["Keep this finish", "dictation."], Request(Ending.PASTE, "Keep this")),
         (["Keep this do", "that."], Request(Ending.TASK, "Keep this")),
         (["Keep this never.", "mind"], Request(Ending.CANCEL, "")),

@@ -9,6 +9,8 @@
   "ending_pause": 2.5,
   "endings": {
     "paste that": "paste",
+    "taste that": "paste",
+    "paystat": "paste",
     "finish dictation": "paste",
     "submit": "submit",
     "do that": "task",

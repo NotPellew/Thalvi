@@ -15,12 +15,18 @@ class Ending(StrEnum):
 
 DEFAULT_ENDINGS = {
     "paste that": Ending.PASTE,
+    "taste that": Ending.PASTE,
+    "paystat": Ending.PASTE,
     "finish dictation": Ending.PASTE,
     "submit": Ending.SUBMIT,
     "do that": Ending.TASK,
     "scratch that": Ending.SCRATCH,
     "never mind": Ending.CANCEL,
 }
+
+# Misrecognitions of "paste that" that count as an ending only after dictated
+# text, so a dictation that is itself "taste that" stays literal.
+ALIASES_REQUIRING_TEXT = frozenset({"taste that", "paystat"})
 
 
 @dataclass(frozen=True)
@@ -52,6 +58,12 @@ class Capture:
             pattern = r"[\s.!?,;:]+".join(map(re.escape, words))
             match = re.search(r"(?:^|\s)" + pattern + r"[\s.!?,;:]*$", combined, re.I)
             if match:
+                if (
+                    phrase.casefold() in ALIASES_REQUIRING_TEXT
+                    and not combined[: match.start()].strip()
+                ):
+                    match = None
+                    continue
                 ending = self.endings[phrase]
                 break
         if ending == Ending.CANCEL:
