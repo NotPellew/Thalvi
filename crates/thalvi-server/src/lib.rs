@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod config;
+pub mod heard;
 pub mod history;
 pub mod judge;
 pub mod learning;

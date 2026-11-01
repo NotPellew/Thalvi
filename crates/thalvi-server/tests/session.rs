@@ -126,6 +126,7 @@ impl Recognizer for FakeRecognizer {
 
 enum ModelChunk {
     Delta(String),
+    Heard(String),
     Tool(ToolCall),
     Wait(Arc<Notify>),
     Fail,
@@ -186,6 +187,9 @@ impl FakeModel {
                     Some(ModelChunk::Delta(text)) => {
                         Some((Ok(ChatEvent::Text(text)), (chunks, guard)))
                     }
+                    Some(ModelChunk::Heard(text)) => {
+                        Some((Ok(ChatEvent::Heard(text)), (chunks, guard)))
+                    }
                     Some(ModelChunk::Tool(call)) => {
                         Some((Ok(ChatEvent::ToolCall(call)), (chunks, guard)))
                     }
@@ -218,7 +222,7 @@ impl ChatModel for FakeModel {
         Ok(Box::pin(events.filter_map(|event| {
             std::future::ready(match event {
                 Ok(ChatEvent::Text(text)) => Some(Ok(text)),
-                Ok(ChatEvent::ToolCall(_)) => None,
+                Ok(ChatEvent::Heard(_) | ChatEvent::ToolCall(_)) => None,
                 Err(error) => Some(Err(error)),
             })
         })))
@@ -2317,6 +2321,138 @@ async fn only_a_voice_turn_carries_its_padded_clip_and_only_with_audio_input_on(
             vec![first, Value::Null],
             "audio_input={audio_input} record_audio={record_audio}"
         );
+    }
+}
+
+#[tokio::test]
+async fn a_voice_turn_whose_echo_disagrees_gets_the_fallback_and_leaves_no_history() {
+    let cases = [
+        (
+            Some("The user said: \"turn on the lights\""),
+            "Lights are on.",
+            "Lights are on.",
+        ),
+        (
+            Some("The user said: \"play some jazz\""),
+            "Playing jazz.",
+            "Sorry, I didn't catch that.",
+        ),
+        (None, "Lights are on.", "Lights are on."),
+    ];
+    for (echo, answer, spoken) in cases {
+        let mut harness = start_full(RecordingConfig::disabled(), None, false, true).await;
+        harness.model.add_script(
+            echo.map(|echo| ModelChunk::Heard(echo.to_string()))
+                .into_iter()
+                .chain([ModelChunk::Delta(answer.to_string())])
+                .collect(),
+        );
+        voice_on(&mut harness).await;
+        for _ in 0..10 {
+            harness
+                .client
+                .send(ClientMessage::Binary(vec![3_u8; 3840].into()))
+                .await
+                .unwrap();
+        }
+        wait_until(|| harness.factory.audio_received().len() == 10).await;
+        let connection = harness.factory.latest_connection();
+        harness
+            .factory
+            .complete_turn(connection, "turn on the lights");
+        let received = collect_until(&mut harness.client, |item| {
+            matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+        })
+        .await;
+        let replies: String = received
+            .iter()
+            .filter_map(|item| match item {
+                Received::Json(v) if v["type"] == "reply" => v["text"].as_str(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replies, spoken, "echo {echo:?}");
+        assert_eq!(harness.tts.inputs(), [spoken], "echo {echo:?}");
+
+        harness
+            .model
+            .add_script(vec![ModelChunk::Delta("Fine.".to_string())]);
+        send_json(&mut harness, &json!({"type": "text", "text": "and typed"})).await;
+        let _ = collect_until(&mut harness.client, |item| {
+            matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+        })
+        .await;
+        let texts: Vec<String> = harness.model.calls()[1]
+            .iter()
+            .map(|message| message.content.clone())
+            .collect();
+        let expected: &[&str] = if spoken == answer {
+            &["turn on the lights", answer, "and typed"]
+        } else {
+            &["and typed"]
+        };
+        assert_eq!(texts, expected, "echo {echo:?}");
+        harness.server.abort();
+    }
+}
+#[tokio::test]
+async fn voice_echo_admits_matching_short_reply_and_rejects_tool_on_mismatch() {
+    for (echo, accepted) in [("yes", true), ("no", false)] {
+        let mut harness = start_full(RecordingConfig::disabled(), None, false, true).await;
+        harness.model.add_script(vec![
+            ModelChunk::Heard(echo.to_string()),
+            search_call("call-1", r#"{"query":"anything"}"#),
+        ]);
+        if accepted {
+            harness.model.add_script(vec![
+                ModelChunk::Heard("yes".to_string()),
+                ModelChunk::Delta("Done.".to_string()),
+            ]);
+        }
+        voice_on(&mut harness).await;
+        for _ in 0..10 {
+            harness
+                .client
+                .send(ClientMessage::Binary(vec![3_u8; 3840].into()))
+                .await
+                .unwrap();
+        }
+        wait_until(|| harness.factory.audio_received().len() == 10).await;
+        let connection = harness.factory.latest_connection();
+        harness.factory.complete_turn(connection, "yes");
+        let received = collect_until(&mut harness.client, |item| {
+            matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+        }).await;
+        assert_eq!(!tasks(&received).is_empty(), accepted);
+        assert_eq!(
+            reply_text(&received),
+            if accepted {
+                "Done."
+            } else {
+                "Sorry, I didn't catch that."
+            }
+        );
+        harness
+            .model
+            .add_script(vec![ModelChunk::Delta("Fine.".to_string())]);
+        send_json(&mut harness, &json!({"type": "text", "text": "next"})).await;
+        finish_reply(&mut harness).await;
+        let calls = harness.model.calls();
+        let texts: Vec<&str> = calls
+            .last()
+            .unwrap()
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            if accepted {
+                vec!["yes", "Done.", "next"]
+            } else {
+                vec!["next"]
+            }
+        );
+        harness.server.abort();
     }
 }
 

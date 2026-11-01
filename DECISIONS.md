@@ -85,6 +85,10 @@ areas your change touches. Editing rules are in
   it, while earlier turns stay text. Why: the model was trained on audio only,
   and old clips would grow every request. Rejected: audio plus transcript
   (off-distribution), audio for the whole history.
+- **Heard guard.** For audio-model echoes, reject empty captions or >50% word
+  disagreement, replace the answer with "Sorry, I didn't catch that.", and omit
+  the turn from history. Allow matching one-word replies. Why: avoid invented
+  requests without blocking short answers. Rejected: a two-word minimum.
 - **Keyword history search.** `search_history` searches the current and past
   sessions and returns short excerpts as data; task steps stay collapsed. Why:
   recover earlier details without whole-history context. Rejected: embeddings

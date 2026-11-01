@@ -33,6 +33,7 @@ const ACK_LINES: [&str; 3] = [
     "One moment.",
 ];
 
+const MISHEARD_LINE: &str = "Sorry, I didn't catch that.";
 /// Most rounds of tool calls one reply may run before the model must answer in text.
 const MAX_TOOL_ROUNDS: usize = 3;
 const SEARCH_LABEL: &str = "Searching conversations";
@@ -119,6 +120,8 @@ struct TaskStep {
 }
 
 enum ReplyEvent {
+    /// The model's echo disagreed with the caption; the reply is the fallback line instead.
+    Misheard,
     Delta(String),
     Sentence(String),
     Audio(Bytes),
@@ -153,6 +156,8 @@ struct ActiveReply {
     audio_bytes: usize,
     /// Length of the user's audio sent to the model, when it heard the turn.
     input_audio_ms: Option<u64>,
+    /// The audio turn failed its echo check, so it stays out of history.
+    misheard: bool,
     voice_name: String,
 }
 
@@ -988,6 +993,7 @@ where
     turn_log.next_turn += 1;
     let turn = turn_log.next_turn;
     let audio = (turn_log.audio_input && !clip.is_empty()).then(|| clip.to_vec());
+    let caption = audio.is_some().then(|| text.clone());
     history.push(ChatMessage::user(text.clone()));
     send_json(sink, &json!({"type": "user", "text": text})).await;
     send_state(sink, "thinking").await;
@@ -996,7 +1002,7 @@ where
         Arc::clone(tts),
         voice.subscribe(),
         history.clone(),
-        audio,
+        audio.zip(caption),
         turn,
         turn_log.recorder.clone(),
         settings.context.clone(),
@@ -1015,7 +1021,7 @@ fn start_reply<M, T>(
     tts: Arc<T>,
     voice: watch::Receiver<bool>,
     history: Vec<ChatMessage>,
-    audio: Option<Vec<u8>>,
+    audio: Option<(Vec<u8>, String)>,
     turn: u64,
     recorder: Recorder,
     context: ReplyContext,
@@ -1028,7 +1034,7 @@ where
     let spoken_throughout = *voice.borrow();
     let input_audio_ms = audio
         .as_ref()
-        .map(|pcm| u64::try_from(pcm.len()).unwrap_or(u64::MAX) / 48);
+        .map(|(pcm, _)| u64::try_from(pcm.len()).unwrap_or(u64::MAX) / 48);
     let voice_name = context.voice_name.clone();
     let active = ActiveReply {
         handle: tokio::spawn(
@@ -1050,6 +1056,7 @@ where
         ack_first_audio_at: None,
         audio_bytes: 0,
         input_audio_ms,
+        misheard: false,
         voice_name,
     };
     (active, events_rx)
@@ -1070,6 +1077,11 @@ async fn handle_reply_event(
     turn_log: &mut TurnLog,
 ) {
     match event {
+        ReplyEvent::Misheard => {
+            if let Some(active) = reply {
+                active.misheard = true;
+            }
+        }
         ReplyEvent::Delta(text) => {
             if let Some(active) = reply {
                 if active.first_delta_at.is_none() {
@@ -1216,6 +1228,10 @@ fn emit_reply_record(
 
 /// Stores what the user got: a finished reply in full, a cut-off one as far as it was spoken.
 fn record_assistant_history(history: &mut Vec<ChatMessage>, active: &ActiveReply, finished: bool) {
+    if active.misheard {
+        history.pop();
+        return;
+    }
     let spoken = active.sent_sentences.join(" ");
     let heard_only_ack = active.speaking_sent && spoken.trim().is_empty();
     let text =
@@ -1277,6 +1293,7 @@ fn cut_off_reply(
         if let Some(receiver) = reply_rx.as_mut() {
             while let Ok(event) = receiver.try_recv() {
                 match event {
+                    ReplyEvent::Misheard => active.misheard = true,
                     ReplyEvent::Sentence(sentence) => active.sent_sentences.push(sentence),
                     ReplyEvent::Delta(text) => active.text.push_str(&text),
                     ReplyEvent::FirstSentence(at) => {
@@ -1332,7 +1349,7 @@ async fn run_reply<M, T>(
     tts: Arc<T>,
     voice: watch::Receiver<bool>,
     history: Vec<ChatMessage>,
-    audio: Option<Vec<u8>>,
+    audio: Option<(Vec<u8>, String)>,
     events: mpsc::Sender<ReplyEvent>,
     turn: u64,
     recorder: Recorder,
@@ -1456,6 +1473,22 @@ impl<'a> ModelCall<'a> {
         );
         self.recorded = true;
     }
+
+    async fn fail(
+        &mut self,
+        error: &crate::model::ModelError,
+        events: &mpsc::Sender<ReplyEvent>,
+        failure_sent: &AtomicBool,
+    ) -> bool {
+        self.finish("failed", Some(&error.to_string()));
+        send_failed(
+            events,
+            failure_sent,
+            format!("The language model could not reply: {error}"),
+        )
+        .await;
+        false
+    }
 }
 
 impl Drop for ModelCall<'_> {
@@ -1467,7 +1500,7 @@ impl Drop for ModelCall<'_> {
 async fn produce_sentences<M>(
     model: Arc<M>,
     history: Vec<ChatMessage>,
-    audio: Option<Vec<u8>>,
+    audio: Option<(Vec<u8>, String)>,
     events: mpsc::Sender<ReplyEvent>,
     sentences: mpsc::UnboundedSender<String>,
     failure_sent: Arc<AtomicBool>,
@@ -1476,6 +1509,7 @@ async fn produce_sentences<M>(
 where
     M: ChatModel,
 {
+    let (clip, caption) = audio.unzip();
     let definitions = [history::tool_definition()];
     let mut results: Vec<ToolResult> = Vec::new();
     let mut splitter = SentenceSplitter::new();
@@ -1483,6 +1517,8 @@ where
     let mut ends_in_whitespace = true;
     for round in 0..=MAX_TOOL_ROUNDS {
         let mut round_start = true;
+        let mut heard = String::new();
+        let mut echo_checked = caption.is_none();
         let offered: &[ToolDefinition] = if round < MAX_TOOL_ROUNDS {
             &definitions
         } else {
@@ -1490,42 +1526,35 @@ where
         };
         let mut model_call = ModelCall::start(&tools, round);
         let mut stream = match model
-            .stream_reply_with_tools(&history, audio.as_deref(), offered, &results)
+            .stream_reply_with_tools(&history, clip.as_deref(), offered, &results)
             .await
         {
             Ok(stream) => stream,
-            Err(error) => {
-                model_call.finish("failed", Some(&error.to_string()));
-                send_failed(
-                    &events,
-                    &failure_sent,
-                    format!("The language model could not reply: {error}"),
-                )
-                .await;
-                return false;
-            }
+            Err(error) => return model_call.fail(&error, &events, &failure_sent).await,
         };
         let mut calls: Vec<ToolCall> = Vec::new();
         while let Some(event) = stream.next().await {
             let mut delta = match event {
+                Ok(ChatEvent::Heard(fragment)) => {
+                    heard.push_str(&fragment);
+                    continue;
+                }
                 Ok(ChatEvent::Text(delta)) => delta,
                 Ok(ChatEvent::ToolCall(call)) => {
                     calls.push(call);
                     continue;
                 }
-                Err(error) => {
-                    model_call.finish("failed", Some(&error.to_string()));
-                    send_failed(
-                        &events,
-                        &failure_sent,
-                        format!("The language model could not reply: {error}"),
-                    )
-                    .await;
-                    return false;
-                }
+                Err(error) => return model_call.fail(&error, &events, &failure_sent).await,
             };
             if delta.is_empty() {
                 continue;
+            }
+            if let Some(caption) = caption.as_deref().filter(|_| !echo_checked) {
+                echo_checked = true;
+                if echo_disagrees(&heard, caption) {
+                    model_call.finish("misheard", None);
+                    return reply_misheard(&events, &sentences).await;
+                }
             }
             if round_start && !ends_in_whitespace && !delta.starts_with(char::is_whitespace) {
                 delta.insert(0, ' ');
@@ -1540,6 +1569,12 @@ where
                     return false;
                 }
             }
+        }
+        if let Some(caption) = caption.as_deref().filter(|_| !echo_checked)
+            && echo_disagrees(&heard, caption)
+        {
+            model_call.finish("misheard", None);
+            return reply_misheard(&events, &sentences).await;
         }
         model_call.finish("ok", None);
         if let Some(tail) = splitter.finish()
@@ -1646,6 +1681,31 @@ async fn run_tool_call(
     run.recorder.emit("tool", fields);
     events.send(event).await.ok()?;
     Some(ToolResult { call, content })
+}
+
+/// True when the guard should discard the answer.
+/// An endpoint that sends no echo is trusted.
+fn echo_disagrees(heard: &str, caption: &str) -> bool {
+    let echo = (!heard.trim().is_empty()).then_some(heard.trim());
+    echo.is_some_and(|echo| crate::heard::disagrees(echo, caption))
+}
+
+async fn reply_misheard(
+    events: &mpsc::Sender<ReplyEvent>,
+    sentences: &mpsc::UnboundedSender<String>,
+) -> bool {
+    let now = Instant::now();
+    for event in [
+        ReplyEvent::Misheard,
+        ReplyEvent::Delta(MISHEARD_LINE.to_string()),
+        ReplyEvent::FirstSentence(now),
+        ReplyEvent::ReplyLoopFinished(now),
+    ] {
+        if events.send(event).await.is_err() {
+            return false;
+        }
+    }
+    sentences.send(MISHEARD_LINE.to_string()).is_ok()
 }
 
 #[expect(
@@ -2171,7 +2231,7 @@ mod tests {
         ACK_LINES, AckCache, AckSettings, ActiveReply, ForwardClock, ReplyContext, ReplyEvent,
         record_assistant_history, reply_loop_ms, run_reply,
     };
-    use crate::model::{ChatMessage, ChatModel, DeltaStream, ModelError};
+    use crate::model::{ChatEvent, ChatMessage, ChatModel, DeltaStream, ModelError};
     use crate::recorder::{RecordingConfig, start_recording};
     use crate::store::SessionStore;
     use crate::tts::{AudioStream, Tts, TtsError};
@@ -2198,6 +2258,44 @@ mod tests {
                 Ok("Third.".to_string()),
             ];
             let stream: DeltaStream = Box::pin(futures_util::stream::iter(deltas));
+            std::future::ready(Ok(stream))
+        }
+    }
+
+    struct EchoToolModel {
+        echo: &'static str,
+    }
+
+    impl ChatModel for EchoToolModel {
+        fn stream_reply(
+            &self,
+            history: &[ChatMessage],
+            audio: Option<&[u8]>,
+        ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
+            FakeModel.stream_reply(history, audio)
+        }
+
+        fn stream_reply_with_tools(
+            &self,
+            _history: &[ChatMessage],
+            _audio: Option<&[u8]>,
+            _tools: &[crate::model::ToolDefinition],
+            results: &[crate::model::ToolResult],
+        ) -> impl std::future::Future<Output = Result<crate::model::EventStream, ModelError>> + Send
+        {
+            let events = if results.is_empty() {
+                vec![
+                    Ok(ChatEvent::Heard(self.echo.to_string())),
+                    Ok(ChatEvent::ToolCall(crate::model::ToolCall {
+                        id: "search".to_string(),
+                        name: "search_history".to_string(),
+                        arguments: r#"{"query":"demo"}"#.to_string(),
+                    })),
+                ]
+            } else {
+                vec![Ok(ChatEvent::Text("Answer.".to_string()))]
+            };
+            let stream: crate::model::EventStream = Box::pin(futures_util::stream::iter(events));
             std::future::ready(Ok(stream))
         }
     }
@@ -2364,6 +2462,7 @@ mod tests {
 
     fn describe(event: &ReplyEvent) -> String {
         match event {
+            ReplyEvent::Misheard => "misheard".to_string(),
             ReplyEvent::Delta(text) => format!("delta:{text}"),
             ReplyEvent::Sentence(sentence) => format!("sentence:{sentence}"),
             ReplyEvent::Audio(_) => "audio".to_string(),
@@ -2382,6 +2481,83 @@ mod tests {
             .expect("event should arrive within timeout")
             .expect("events channel should stay open");
         describe(&event)
+    }
+
+    #[tokio::test]
+    async fn audio_echo_guards_tool_calls_and_accepts_matching_short_reply() {
+        for (echo, rejected) in [("no", true), ("yes", false)] {
+            let tts = Arc::new(FakeTts {
+                spoken: Arc::new(Mutex::new(Vec::new())),
+                entered: Arc::new(Notify::new()),
+                release: Arc::new(Notify::new()),
+                block_first: AtomicBool::new(false),
+            });
+            let (_voice_tx, voice_rx) = watch::channel(false);
+            let (events_tx, mut events_rx) = mpsc::channel(64);
+            let recorder =
+                start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
+            let handle = tokio::spawn(run_reply(
+                Arc::new(EchoToolModel { echo }),
+                tts,
+                voice_rx,
+                vec![ChatMessage::user("yes".to_string())],
+                Some((vec![0, 0], "yes".to_string())),
+                events_tx,
+                1,
+                recorder,
+                context(AckSettings {
+                    enabled: false,
+                    cache: new_ack_cache(),
+                }),
+            ));
+            let seen = collect_until_finished(&mut events_rx).await;
+            handle.await.expect("reply task should finish");
+            assert_eq!(seen.contains(&"misheard".to_string()), rejected, "{seen:?}");
+            assert_eq!(
+                seen.iter().any(|event| event.starts_with("task:")),
+                !rejected,
+                "{seen:?}"
+            );
+            assert_eq!(
+                seen.iter().any(|event| event == "delta:Answer."),
+                !rejected,
+                "{seen:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn checking_an_audio_echo_keeps_speech_text_out_of_normal_logs() {
+        struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for CapturedLog {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&captured);
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(move || CapturedLog(Arc::clone(&output)))
+            .finish();
+        let heard = "invented speech one";
+        let caption = "unrelated caption two";
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("capture control");
+            assert!(super::echo_disagrees(heard, caption));
+        });
+        let log = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("capture control"));
+        assert!(!log.contains(heard));
+        assert!(!log.contains(caption));
     }
 
     #[tokio::test]
@@ -2879,6 +3055,7 @@ mod tests {
             ack_first_audio_at: None,
             audio_bytes: 0,
             input_audio_ms: None,
+            misheard: false,
             voice_name: "af_heart".to_string(),
         };
         let mut history = Vec::new();

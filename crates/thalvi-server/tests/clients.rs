@@ -11,7 +11,7 @@ use axum::response::Response;
 use axum::routing::post;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use thalvi_server::model::{ChatMessage, ChatModel, OpenAiChatModel};
+use thalvi_server::model::{ChatEvent, ChatMessage, ChatModel, OpenAiChatModel};
 use thalvi_server::recognizer::{
     MetaRecognizerFactory, Recognizer, RecognizerError, RecognizerEvent, RecognizerFactory,
 };
@@ -171,7 +171,7 @@ async fn chat_model_parses_sse_until_done_and_sends_stream_request() {
 }
 
 #[tokio::test]
-async fn chat_model_sends_the_clip_and_skips_reasoning_deltas() {
+async fn chat_model_sends_the_clip_and_surfaces_the_echo() {
     let captured = Captured::default();
     let captured2 = captured.clone();
     let app = Router::new().route(
@@ -197,9 +197,11 @@ async fn chat_model_sends_the_clip_and_skips_reasoning_deltas() {
     );
     let model = OpenAiChatModel::new(serve(app).await, "m".to_string(), String::new(), None);
     let mut stream = model
-        .stream_reply(
+        .stream_reply_with_tools(
             &[ChatMessage::user("two plus two".to_string())],
             Some(&[0, 1, 2, 3]),
+            &[],
+            &[],
         )
         .await
         .unwrap();
@@ -207,7 +209,23 @@ async fn chat_model_sends_the_clip_and_skips_reasoning_deltas() {
     while let Some(delta) = stream.next().await {
         deltas.push(delta.unwrap());
     }
-    assert_eq!(deltas, vec!["Four.".to_string()]);
+    assert_eq!(
+        deltas,
+        vec![
+            ChatEvent::Heard("hm".to_string()),
+            ChatEvent::Text("Four.".to_string())
+        ]
+    );
+    let plain: Vec<_> = model
+        .stream_reply(
+            &[ChatMessage::user("two plus two".to_string())],
+            Some(&[0, 1, 2, 3]),
+        )
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    assert_eq!(plain, vec![Ok("Four.".to_string())]);
     let bodies = captured.bodies.lock().unwrap();
     let parts = bodies[0]["messages"][1]["content"].as_array().unwrap();
     assert_eq!(parts.len(), 1);
