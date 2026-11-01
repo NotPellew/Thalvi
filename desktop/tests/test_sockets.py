@@ -59,7 +59,7 @@ def instant_quiet_gate(monkeypatch):
     from thalvi_desktop.pending import Pending
 
     class SilentVoice:
-        def speech(self, _frame):
+        def speech(self, _frame, *, pending=False):
             return False
 
     class TestPending(Pending):
@@ -527,9 +527,7 @@ def test_end_cue_failure_and_confirmation(config, confirmation, ending):
     asyncio.run(behavior())
 
 
-@pytest.mark.parametrize(
-    "continuation", ["voice", "queued_voice", "partial", "speech_start", "final", "error"]
-)
+@pytest.mark.parametrize("continuation", ["partial", "final", "error"])
 @pytest.mark.parametrize("metrics_on", [False, True])
 def test_pending_deadline_gives_fresh_audio_and_recognizer_events_priority(
     monkeypatch, continuation, metrics_on
@@ -538,7 +536,7 @@ def test_pending_deadline_gives_fresh_audio_and_recognizer_events_priority(
     from thalvi_desktop.audio import Audio
 
     class Voice:
-        def speech(self, frame):
+        def speech(self, frame, *, pending=False):
             return frame[0] == 1
 
     monkeypatch.setattr(client, "VoiceActivity", Voice)
@@ -595,19 +593,14 @@ def test_pending_deadline_gives_fresh_audio_and_recognizer_events_priority(
             await asyncio.wait_for(socket.sent.wait(), 1)
             socket.offer({"type": "final", "text": "hello submit"})
             await asyncio.wait_for(pending.wait(), 1)
-            loop = asyncio.get_running_loop()
-            if continuation in {"voice", "queued_voice"}:
-                if continuation == "queued_voice":
-                    loop.call_soon(audio.frames.put_nowait, bytes(7680))
-                loop.call_soon(audio.frames.put_nowait, bytes([1]) + bytes(7679))
+            event = {"type": continuation}
+            if continuation in {"partial", "final"}:
+                event["text"] = "more words"
             else:
-                event = {"type": continuation}
-                if continuation in {"partial", "final"}:
-                    event["text"] = "more words"
-                elif continuation == "error":
-                    event["message"] = "recognizer lost"
-                loop.call_soon(socket.offer, event)
-                loop.call_soon(audio.frames.put_nowait, bytes(7680))
+                event["message"] = "recognizer lost"
+            loop = asyncio.get_running_loop()
+            loop.call_soon(socket.offer, event)
+            loop.call_soon(audio.frames.put_nowait, bytes(7680))
             if continuation == "error":
                 with pytest.raises(RuntimeError, match="recognizer lost"):
                     await asyncio.wait_for(task, 1)
@@ -619,6 +612,130 @@ def test_pending_deadline_gives_fresh_audio_and_recognizer_events_priority(
                         await asyncio.sleep(0)
             expected = [Cue.PROVISIONAL] + ([] if continuation == "error" else [Cue.CANCELLED])
             assert audio.cues == expected
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(behavior())
+
+
+def test_pending_relays_sustained_audio_without_local_cancellation(monkeypatch):
+    from thalvi_desktop import client
+    from thalvi_desktop.audio import Audio, transcription_pcm
+    from thalvi_desktop.pending import Pending
+
+    class Voice:
+        def speech(self, frame, *, pending=False):
+            if frame[0] == 2:
+                return not pending
+            return frame[0] in {1, 3}
+
+    class Socket:
+        def __init__(self):
+            self.events = asyncio.Queue()
+            self.sent = asyncio.Queue()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return await self.events.get()
+
+        async def send(self, frame):
+            self.sent.put_nowait(frame)
+
+    class TestAudio(Audio):
+        async def play_cue(self, _cue):
+            pass
+
+    monkeypatch.setattr(client, "VoiceActivity", Voice)
+    monkeypatch.setattr(client, "Pending", Pending)
+
+    async def behavior():
+        socket, audio = Socket(), TestAudio()
+        armed, cleared, heard = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        clock = [100.0]
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
+
+        def notice(message):
+            if message.startswith("Hearing"):
+                heard.set()
+
+        task = asyncio.create_task(
+            client._capture_events(
+                socket,
+                audio,
+                Capture(),
+                notice,
+                pending_notice=lambda request, _: (armed if request else cleared).set(),
+            )
+        )
+
+        async def drain():
+            async with asyncio.timeout(1):
+                while not audio.frames.empty():
+                    await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        try:
+            audio.frames.put_nowait(bytes(7680))
+            await asyncio.wait_for(socket.sent.get(), 1)
+            socket.events.put_nowait(json.dumps({"type": "final", "text": "hello paste that"}))
+            await asyncio.wait_for(armed.wait(), 1)
+
+            noise = bytes([2]) + bytes(7679)
+            for _ in range(3):
+                audio.frames.put_nowait(noise)
+            await drain()
+            assert not cleared.is_set()
+            assert socket.sent.empty()
+
+            clock[0] += 2.49
+            audio.frames.put_nowait(bytes(7680))
+            await drain()
+            assert not task.done()
+
+            sustained_noise = bytes([3]) + bytes(7679)
+            for _ in range(3):
+                audio.frames.put_nowait(sustained_noise)
+            assert [await asyncio.wait_for(socket.sent.get(), 1) for _ in range(3)] == [
+                transcription_pcm(sustained_noise)
+            ] * 3
+            assert not cleared.is_set()
+            assert not task.done()
+
+            socket.events.put_nowait(json.dumps({"type": "speech_start"}))
+            socket.events.put_nowait(json.dumps({"type": "partial", "text": "[noise]"}))
+            await asyncio.wait_for(heard.wait(), 1)
+            assert not cleared.is_set()
+
+            speech = bytes([1]) + bytes(7679)
+            for _ in range(3):
+                audio.frames.put_nowait(speech)
+            assert [await asyncio.wait_for(socket.sent.get(), 1) for _ in range(3)] == [
+                transcription_pcm(speech)
+            ] * 3
+            assert not cleared.is_set()
+            socket.events.put_nowait(json.dumps({"type": "partial", "text": "more words"}))
+            await asyncio.wait_for(cleared.wait(), 1)
+
+            audio.frames.put_nowait(bytes(7680))
+            await asyncio.wait_for(socket.sent.get(), 1)
+            armed.clear()
+            socket.events.put_nowait(json.dumps({"type": "final", "text": "more words submit"}))
+            await asyncio.wait_for(armed.wait(), 1)
+            clock[0] += 2.5
+            audio.frames.put_nowait(bytes(7680))
+            await drain()
+            assert socket.sent.empty()
+            audio.frames.put_nowait(bytes(7680))
+            await drain()
+            assert socket.sent.empty()
+            assert await asyncio.wait_for(task, 1) == Request(
+                Ending.SUBMIT, "hello paste that more words", pause_confirmed=True
+            )
+            assert socket.sent.empty()
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -640,7 +757,7 @@ def test_vad_tail_waits_for_full_quiet_and_accepts(monkeypatch, backend):
         def __init__(self):
             self.frames = 0
 
-        def speech(self, _frame):
+        def speech(self, _frame, *, pending=False):
             self.frames += 1
             return self.frames <= 8
 
@@ -696,6 +813,11 @@ def test_vad_tail_waits_for_full_quiet_and_accepts(monkeypatch, backend):
             if task.done():
                 return
             audio.frames.put_nowait(data)
+            if pending.is_set():
+                while not audio.frames.empty():
+                    await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                return
             sent = asyncio.create_task(socket.sent.get())
             try:
                 await asyncio.wait({task, sent}, return_when=asyncio.FIRST_COMPLETED)
@@ -742,14 +864,14 @@ def test_vad_tail_waits_for_full_quiet_and_accepts(monkeypatch, backend):
     asyncio.run(behavior())
 
 
-@pytest.mark.parametrize("partial", ["", "hello paste that", "new words"])
-def test_partial_during_original_speech_only_cancels_when_nonempty(monkeypatch, partial):
+@pytest.mark.parametrize("partial", ["", "[noise]", "uh", "hello paste that", "new words"])
+def test_partial_during_pending_only_cancels_for_meaningful_text(monkeypatch, partial):
     from thalvi_desktop import client
     from thalvi_desktop.audio import Audio
     from thalvi_desktop.pending import Pending
 
     class Voice:
-        def speech(self, _frame):
+        def speech(self, _frame, *, pending=False):
             return True
 
     class Socket:
@@ -794,7 +916,7 @@ def test_partial_during_original_speech_only_cancels_when_nonempty(monkeypatch, 
             await asyncio.wait_for(armed.wait(), 1)
             socket.events.put_nowait(json.dumps({"type": "partial", "text": partial}))
             await asyncio.wait_for(heard.wait(), 1)
-            assert cleared.is_set() == bool(partial)
+            assert cleared.is_set() == (partial in {"hello paste that", "new words"})
             assert not task.done()
         finally:
             task.cancel()
@@ -954,7 +1076,7 @@ def test_cues_suspend_frame_watchdog_and_rearm_it_after_playback(monkeypatch, ov
     from thalvi_desktop.pending import Pending
 
     class Voice:
-        def speech(self, frame):
+        def speech(self, frame, *, pending=False):
             return frame[0] == 1
 
     monkeypatch.setattr(client, "VoiceActivity", Voice)
@@ -1008,18 +1130,19 @@ def test_cues_suspend_frame_watchdog_and_rearm_it_after_playback(monkeypatch, ov
         try:
             await socket.sent.get()
             socket.events.put_nowait(json.dumps({"type": "final", "text": "hello paste that"}))
-            assert await audio.started.get() == Cue.PROVISIONAL
+            assert await asyncio.wait_for(audio.started.get(), 1) == Cue.PROVISIONAL
             await audio.requested.get()
             if overlap:
                 audio.releases[0].set()
-                audio.queue.put_nowait(bytes([1, 0]) * 3840)
-                assert await audio.started.get() == Cue.CANCELLED
+                for _ in range(3):
+                    audio.queue.put_nowait(bytes([1, 0]) * 3840)
+                socket.events.put_nowait(json.dumps({"type": "partial", "text": "more words"}))
+                assert await asyncio.wait_for(audio.started.get(), 1) == Cue.CANCELLED
                 await audio.requested.get()
+                audio.releases[1].set()
                 socket.events.put_nowait(json.dumps({"type": "final", "text": "more words submit"}))
                 assert await audio.requested.get() == Cue.PROVISIONAL
-                audio.releases[1].set()
-                assert await audio.started.get() == Cue.PROVISIONAL
-                await socket.sent.get()
+                assert await asyncio.wait_for(audio.started.get(), 1) == Cue.PROVISIONAL
             await advance(0.4)
             assert not task.done()
             audio.releases[2 if overlap else 0].set()
