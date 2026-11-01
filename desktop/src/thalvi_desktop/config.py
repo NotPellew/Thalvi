@@ -4,6 +4,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -50,11 +51,17 @@ class Script:
     label: str
 
 
+class SecondaryAPI(StrEnum):
+    OPENAI = "openai"
+    META = "meta"
+
+
 @dataclass(frozen=True)
 class SecondarySTT:
     url: str
     model: str
     api_key: str = ""
+    api: SecondaryAPI = SecondaryAPI.OPENAI
 
 
 @dataclass(frozen=True)
@@ -215,7 +222,7 @@ class Config:
         secondary = None
         if "secondary" in stt:
             item = record(stt["secondary"], "stt.secondary")
-            fields(item, {"url", "model", "api_key"}, "stt.secondary")
+            fields(item, {"url", "model", "api_key", "api"}, "stt.secondary")
             base = url(item.get("url"), "stt.secondary.url", {"http", "https"})
             parsed = urlsplit(base)
             try:
@@ -228,7 +235,10 @@ class Config:
             if not isinstance(key, str):
                 raise ValueError("stt.secondary.api_key must be text.")
             secondary = SecondarySTT(
-                base.rstrip("/"), text(item.get("model"), "stt.secondary.model"), key
+                base.rstrip("/"),
+                text(item.get("model"), "stt.secondary.model"),
+                key,
+                SecondaryAPI(item.get("api", "openai")),
             )
 
         return cls(

@@ -1042,14 +1042,18 @@ def test_cues_suspend_frame_watchdog_and_rearm_it_after_playback(monkeypatch, ov
     asyncio.run(behavior())
 
 
-def test_secondary_local_endpoint_receives_wav_and_replaces_accepted_text(config, tmp_path):
+@pytest.mark.parametrize("api", ["openai", "meta"])
+@pytest.mark.parametrize("valid_response", [True, False])
+def test_secondary_local_endpoint_receives_wav_and_replaces_accepted_text(
+    config, tmp_path, api, valid_response
+):
     import email
     import io
     import threading
     import wave
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    from thalvi_desktop.config import SecondarySTT
+    from thalvi_desktop.config import SecondaryAPI, SecondarySTT
     from thalvi_desktop.metrics import Metrics
 
     received = []
@@ -1068,9 +1072,15 @@ def test_secondary_local_endpoint_receives_wav_and_replaces_accepted_text(config
                 for part in message.get_payload()
             }
             received.append((self.path, self.headers.get("Authorization"), parts))
+            assert self.headers.get("Accept") == "application/json"
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b'{"text":"More accurate words paste that"}')
+            field = "transcript" if api == "meta" else "text"
+            self.wfile.write(
+                json.dumps(
+                    {field: "More accurate words paste that" if valid_response else None}
+                ).encode()
+            )
 
         def log_message(self, *_args):
             pass
@@ -1095,7 +1105,10 @@ def test_secondary_local_endpoint_receives_wav_and_replaces_accepted_text(config
                     config,
                     server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}",
                     secondary_stt=SecondarySTT(
-                        f"http://127.0.0.1:{http.server_port}/v1", "model", "secret"
+                        f"http://127.0.0.1:{http.server_port}/v1",
+                        "model",
+                        "secret",
+                        SecondaryAPI(api),
                     ),
                 )
                 metrics = Metrics(tmp_path / "metrics.jsonl")
@@ -1103,20 +1116,35 @@ def test_secondary_local_endpoint_receives_wav_and_replaces_accepted_text(config
                     capture(local, FakeAudio(), Capture(), lambda _: None, metrics=metrics), 3
                 )
                 await metrics.flush()
-            assert result == Request(Ending.PASTE, "More accurate words")
+            assert result == Request(
+                Ending.PASTE, "More accurate words" if valid_response else "live words"
+            )
             path, auth, parts = received[0]
-            assert (path, auth) == ("/v1/audio/transcriptions", "Bearer secret")
-            assert parts["model"].get_payload(decode=True) == b"model"
-            assert parts["file"].get_filename() == "capture.wav"
-            assert parts["file"].get_content_type() == "audio/wav"
-            with wave.open(io.BytesIO(parts["file"].get_payload(decode=True))) as wav:
+            if api == "meta":
+                assert (path, auth) == ("/v1/asr/transcribe", "Bearer secret")
+                assert set(parts) == {"request", "audio"}
+                assert parts["request"].get_content_type() == "application/json"
+                assert json.loads(parts["request"].get_payload(decode=True)) == {
+                    "mode": "PUSH_TO_TALK",
+                    "model": "model",
+                    "audioEncoding": "WAV",
+                }
+                audio_part = parts["audio"]
+            else:
+                assert (path, auth) == ("/v1/audio/transcriptions", "Bearer secret")
+                assert set(parts) == {"model", "file"}
+                assert parts["model"].get_payload(decode=True) == b"model"
+                audio_part = parts["file"]
+            assert audio_part.get_filename() == "capture.wav"
+            assert audio_part.get_content_type() == "audio/wav"
+            with wave.open(io.BytesIO(audio_part.get_payload(decode=True))) as wav:
                 assert (wav.getnchannels(), wav.getframerate(), wav.getsampwidth()) == (1, 24000, 2)
                 assert wav.readframes(wav.getnframes()) == b"".join(sent)
             assert [
                 (r["event"], r["outcome"])
                 for r in map(json.loads, metrics.path.read_text().splitlines())
                 if r["event"] == "desktop_secondary_stt"
-            ] == [("desktop_secondary_stt", "ok")]
+            ] == [("desktop_secondary_stt", "ok" if valid_response else "error")]
 
         asyncio.run(behavior())
     finally:
@@ -1312,7 +1340,7 @@ def test_secondary_not_called_after_scratch(config, monkeypatch):
 
 
 def test_secondary_config_validation_and_default(tmp_path):
-    from thalvi_desktop.config import SecondarySTT
+    from thalvi_desktop.config import SecondaryAPI, SecondarySTT
 
     path = tmp_path / "config.json"
 
@@ -1325,6 +1353,9 @@ def test_secondary_config_validation_and_default(tmp_path):
     assert load(
         {"stt": {"secondary": {"url": "http://localhost/v1/", "model": " model "}}}
     ).secondary_stt == SecondarySTT("http://localhost/v1", "model")
+    assert load(
+        {"stt": {"secondary": {"api": "meta", "url": "https://api.meta.ai/v1", "model": "m"}}}
+    ).secondary_stt == SecondarySTT("https://api.meta.ai/v1", "m", api=SecondaryAPI.META)
     for item in [
         {},
         {"url": "http://localhost", "model": " "},
@@ -1335,6 +1366,8 @@ def test_secondary_config_validation_and_default(tmp_path):
         {"url": "http://localhost:not-a-port", "model": "x"},
         {"url": "http://localhost:99999", "model": "x"},
         {"url": "http://localhost", "model": "x", "api_key": 1},
+        {"url": "http://localhost", "model": "x", "api": "unknown"},
+        {"url": "http://localhost", "model": "x", "api": None},
         {"url": "http://localhost", "model": "x", "extra": 1},
     ]:
         with pytest.raises(ValueError):

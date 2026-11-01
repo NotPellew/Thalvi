@@ -16,7 +16,7 @@ from websockets.asyncio.client import connect
 
 from .audio import Audio, transcription_pcm
 from .capture import Capture, Ending, Request
-from .config import Config, SecondarySTT, record
+from .config import Config, SecondaryAPI, SecondarySTT, record
 from .cues import Cue, Cues
 from .metrics import Metrics
 from .pending import Pending
@@ -388,25 +388,37 @@ def _secondary_request(settings: SecondarySTT, pcm: bytes) -> str:
         wav.setframerate(24000)
         wav.writeframes(pcm)
     boundary = uuid.uuid4().hex
+    if settings.api == SecondaryAPI.META:
+        endpoint, audio_field, text_field = "/asr/transcribe", "audio", "transcript"
+        parameters = (
+            'Content-Disposition: form-data; name="request"\r\n'
+            "Content-Type: application/json\r\n\r\n"
+            + json.dumps({"mode": "PUSH_TO_TALK", "model": settings.model, "audioEncoding": "WAV"})
+        )
+    else:
+        endpoint, audio_field, text_field = "/audio/transcriptions", "file", "text"
+        parameters = 'Content-Disposition: form-data; name="model"\r\n\r\n' + settings.model
     body = (
         (
-            f'--{boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n'
-            f"{settings.model}\r\n--{boundary}\r\n"
-            'Content-Disposition: form-data; name="file"; filename="capture.wav"\r\n'
+            f"--{boundary}\r\n{parameters}\r\n--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{audio_field}"; filename="capture.wav"\r\n'
             "Content-Type: audio/wav\r\n\r\n"
         ).encode()
         + output.getvalue()
         + f"\r\n--{boundary}--\r\n".encode()
     )
-    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    headers = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Accept": "application/json",
+    }
     if settings.api_key:
         headers["Authorization"] = "Bearer " + settings.api_key
-    request = urllib.request.Request(settings.url + "/audio/transcriptions", body, headers)
+    request = urllib.request.Request(settings.url + endpoint, body, headers)
     with urllib.request.urlopen(request, timeout=10) as response:
         result = json.load(response)
-    if not isinstance(result, dict) or not isinstance(result.get("text"), str):
+    if not isinstance(result, dict) or not isinstance(result.get(text_field), str):
         raise ValueError("Invalid transcription response")
-    return result["text"]
+    return result[text_field]
 
 
 async def secondary_transcription(settings, pcm, request, endings, notice, metrics):
