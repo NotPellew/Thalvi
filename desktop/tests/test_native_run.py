@@ -273,7 +273,7 @@ def test_native_entry_routes_wakes_recovers_and_releases_audio(
     targets = [row for row in rows if row["event"] == "desktop_target_capture"]
     assert len(targets) == int(mode == "capture" and failure not in {"detect", "cancel"})
     assert all(row["outcome"] == "ok" for row in targets)
-    assert all(set(row) == {"event", "total_ms", "outcome"} for row in rows)
+    assert all(set(row) == {"timestamp", "event", "total_ms", "outcome"} for row in rows)
     assert "dictation" not in config.metrics.read_text()
 
 

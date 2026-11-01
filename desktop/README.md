@@ -137,8 +137,10 @@ to wake listening. This client uses the server's existing interruption logic.
 Set `metrics` to a local path to opt into desktop action/flow timing and
 outcomes, including each local debug discovery, composer check, text insert and
 key press. Desktop metrics contain neither captured text, destinations, tokens
-nor debugger messages. Status and confirmation text appear in the foreground
-terminal.
+nor debugger messages. Each record includes its UTC creation time. New logs rotate
+at 5 MiB and retain two numbered backups; new log files are private to the user.
+Existing oversized logs are preserved until they age out of those backups.
+Status and confirmation text appear in the foreground terminal.
 
 Wake-model loading, the target-window lookup and each detector call record
 their host elapsed time and outcome when metrics are enabled. Detector outcomes

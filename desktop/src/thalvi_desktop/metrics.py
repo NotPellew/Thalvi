@@ -2,8 +2,13 @@
 
 import asyncio
 import json
+import os
+import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
+
+_WRITE_LOCK = threading.Lock()
 
 
 class Metrics:
@@ -20,6 +25,7 @@ class Metrics:
             return
         line = json.dumps(
             {
+                "timestamp": datetime.now(UTC).isoformat(),
                 "event": event,
                 "total_ms": round((time.monotonic() - started) * 1000, 3)
                 if buffered
@@ -64,6 +70,23 @@ class Metrics:
             writer.result()
 
     def _append(self, text: str) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as stream:
-            stream.write(text)
+        limit = 5 * 1024 * 1024
+        with _WRITE_LOCK:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            for line in text.splitlines(keepends=True):
+                data = line.encode("utf-8")
+                if len(data) > limit:
+                    raise OSError("A metrics record exceeds the log size limit.")
+                try:
+                    size = self.path.stat().st_size
+                except FileNotFoundError:
+                    size = 0
+                if size + len(data) > limit:
+                    first = self.path.with_name(self.path.name + ".1")
+                    second = self.path.with_name(self.path.name + ".2")
+                    if first.exists():
+                        first.replace(second)
+                    self.path.replace(first)
+                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                with os.fdopen(fd, "ab") as stream:
+                    stream.write(data)
