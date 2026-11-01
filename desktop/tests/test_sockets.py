@@ -226,7 +226,8 @@ def test_confirmation_discards_old_audio_and_only_accepts_standalone_affirmation
     "pre_roll, finals, expected",
     [
         (True, ["Hey Talvi, write the report paste that"], "Write the report"),
-        (True, ["Hey, Starving.", "Write the report paste that"], "Write the report"),
+        (True, ["Hey, Salvi.", "Write the report paste that"], "Write the report"),
+        (True, ["Hey, thanks. Write the report paste that"], "Thanks. Write the report"),
         (True, ["Hey Salvi. Write the", "report paste that"], "Write the report"),
         (True, ["Hey, write the report paste that"], "Write the report"),
         (True, ["Tilvi write the report paste that"], "Write the report"),

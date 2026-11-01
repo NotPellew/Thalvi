@@ -32,8 +32,8 @@ TRAILING_ARTIFACTS = re.compile(rf"[\s.!?,;:]*(?:{ARTIFACT}[\s.!?,;:]*){{1,2}}$"
 SEPARATOR = r"[\s.!?,;:]"
 WAKE_NAME = r"[a-z]{0,3}[aeiouy][lr][vb](?:ie|ee|ey|i|y)(?![\w'’])"
 LEADING_WAKE = re.compile(
-    rf"{SEPARATOR}*(?:(?:hey|hay|hi|okay|ok)"
-    rf"(?:{SEPARATOR}+(?:{WAKE_NAME}|[\w'’-]+(?=[.!?,;:])))?(?![\w'’])|{WAKE_NAME}){SEPARATOR}*",
+    rf"{SEPARATOR}*(?:(?:hey|hay|hi|okay|ok)(?:{SEPARATOR}+{WAKE_NAME})?(?![\w'’])|{WAKE_NAME})"
+    rf"{SEPARATOR}*",
     re.I,
 )
 
