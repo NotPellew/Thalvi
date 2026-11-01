@@ -12,11 +12,12 @@ class Pending:
         self.seconds = seconds
         self.request: Request | None = None
         self.since = 0.0
+        self.waiting_for_quiet = False
 
     def continuation(self) -> None:
         self.request = None
 
-    def final(self, text: str, now: float) -> Request | None:
+    def final(self, text: str, now: float, *, speech: bool = False) -> Request | None:
         if not text.strip():
             return None
         self.continuation()
@@ -32,10 +33,11 @@ class Pending:
         self.capture.pieces.append(text.strip())
         self.request = request
         self.since = now
+        self.waiting_for_quiet = speech
         return None
 
     def ready(self, now: float) -> Request | None:
-        if self.request is None or now - self.since < self.seconds:
+        if self.request is None or self.waiting_for_quiet or now - self.since < self.seconds:
             return None
         request = replace(self.request, pause_confirmed=self.request.ending == Ending.SUBMIT)
         self.request = None

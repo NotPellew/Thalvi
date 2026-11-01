@@ -45,3 +45,13 @@ def test_scratch_preserves_previous_final_after_continuation():
     pending.continuation()
     pending.final("scratch that", 2)
     assert pending.capture.text == "first piece"
+
+
+def test_ending_armed_during_speech_waits_for_quiet():
+    pending = Pending(Capture(), 2.5)
+    pending.final("hello paste that", 10, speech=True)
+    assert pending.ready(100) is None
+    pending.waiting_for_quiet = False
+    pending.since = 100
+    assert pending.ready(102.499) is None
+    assert pending.ready(102.5).text == "hello"

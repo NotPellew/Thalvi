@@ -122,17 +122,38 @@ async def _capture_events(
     frame_seq = 0
     frame_changed = asyncio.Event()
     pause_outcome = "cancelled"
+    local_speech = False
+
+    async def diagnostic(outcome):
+        if metrics is None:
+            return
+        try:
+            await metrics.record("desktop_ending_state", time.monotonic(), outcome, buffered=True)
+        except OSError:
+            notice("The optional ending diagnostics could not be saved.")
 
     async def send_audio() -> None:
-        nonlocal frame_seq
+        nonlocal frame_seq, local_speech
         while True:
             frame = await audio.next()
-            if gate is not None and vad.speech(frame) and gate.request is not None:
-                gate.continuation()
-                changed.set()
-                if pending_notice:
-                    pending_notice(None, pause)
-                notice("Speech continued. Keep speaking or say an ending again.")
+            if gate is not None:
+                speech = vad.speech(frame)
+                previous_speech, local_speech = local_speech, speech
+                if gate.request is not None:
+                    if gate.waiting_for_quiet and not speech:
+                        gate.waiting_for_quiet = False
+                        gate.since = asyncio.get_running_loop().time()
+                        changed.set()
+                        if pending_notice:
+                            pending_notice(gate.request, pause)
+                        await diagnostic("quiet_started")
+                    elif speech and not previous_speech and not gate.waiting_for_quiet:
+                        gate.continuation()
+                        changed.set()
+                        if pending_notice:
+                            pending_notice(None, pause)
+                        notice("Speech continued. Keep speaking or say an ending again.")
+                        await diagnostic("local_speech_cancelled")
             frame_seq += 1
             frame_changed.set()
             await socket.send(transcription_pcm(frame))
@@ -151,7 +172,9 @@ async def _capture_events(
                         request = current.final(text)
                     else:
                         previous = gate.request
-                        request = gate.final(text, asyncio.get_running_loop().time())
+                        request = gate.final(
+                            text, asyncio.get_running_loop().time(), speech=local_speech
+                        )
                         changed.set()
                         frame_changed.set()
                         if previous is not None and gate.request is not previous and pending_notice:
@@ -166,6 +189,13 @@ async def _capture_events(
                     if request:
                         return request
                     notice("Capturing · " + current.text)
+                    if gate is not None:
+                        if previous is not None and text.strip():
+                            await diagnostic("final_cancelled")
+                        if gate.request is not None:
+                            await diagnostic(
+                                "waiting_for_quiet" if gate.waiting_for_quiet else "pending"
+                            )
                 case "error":
                     raise RuntimeError(str(message.get("message", "Speech recognition failed.")))
                 case "speech_start":
@@ -175,17 +205,19 @@ async def _capture_events(
                         frame_changed.set()
                         if pending_notice:
                             pending_notice(None, pause)
+                        await diagnostic("speech_start_cancelled")
                 case "speech_end":
                     pass
                 case "partial":
-                    if gate is not None and gate.request is not None:
+                    if not isinstance(message.get("text"), str):
+                        raise RuntimeError("Transcription returned an invalid partial turn.")
+                    if message["text"].strip() and gate is not None and gate.request is not None:
                         gate.continuation()
                         changed.set()
                         frame_changed.set()
                         if pending_notice:
                             pending_notice(None, pause)
-                    if not isinstance(message.get("text"), str):
-                        raise RuntimeError("Transcription returned an invalid partial turn.")
+                        await diagnostic("partial_cancelled")
                     notice("Hearing (unconfirmed) · " + message["text"])
                 case _:
                     raise RuntimeError("Transcription returned an unknown event.")
@@ -198,10 +230,21 @@ async def _capture_events(
             if candidate is None:
                 await changed.wait()
                 continue
+            if gate.waiting_for_quiet:
+                frame_changed.clear()
+                try:
+                    async with asyncio.timeout(0.25):
+                        await frame_changed.wait()
+                except TimeoutError as error:
+                    raise RuntimeError(
+                        "Microphone audio stopped. Nothing was delivered."
+                    ) from error
+                continue
             remaining = gate.since + gate.seconds - asyncio.get_running_loop().time()
             if remaining > 0:
                 with suppress(TimeoutError):
-                    await asyncio.wait_for(changed.wait(), remaining)
+                    async with asyncio.timeout(remaining):
+                        await changed.wait()
                 continue
             seen = frame_seq
             frame_changed.clear()
@@ -249,6 +292,8 @@ async def _capture_events(
         audio.set_input(False)
         sender.cancel()
         await asyncio.gather(sender, return_exceptions=True)
+        if pause_outcome == "ok":
+            await diagnostic("accepted")
         if not confirmation:
             started = time.monotonic()
             outcome = "ok"

@@ -82,6 +82,9 @@ An ending is provisional while the countdown runs. Local speech detection and
 recognizer continuations cancel it if you keep talking; the ending words then
 remain part of your dictation. Empty recognition results do not reactivate a
 canceled ending. The ending cue plays only after the quiet interval is accepted.
+The speech detector's trailing activity delays the start of the quiet interval;
+speech that resumes after quiet cancels it. Empty partial updates do not cancel
+an ending. Opt-in metrics record pending, quiet, cancellation and acceptance states.
 For submit, the pending notification asks you to confirm the destination by
 pausing; no second spoken yes is needed. Cancel or keep speaking to stop it.
 
