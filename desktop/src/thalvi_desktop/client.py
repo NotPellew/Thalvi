@@ -1,8 +1,14 @@
 """Owns the native capture and conversation sockets to the local Rust server."""
 
 import asyncio
+import http.client
+import io
 import json
 import time
+import urllib.error
+import urllib.request
+import uuid
+import wave
 from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
@@ -11,7 +17,7 @@ from websockets.asyncio.client import connect
 
 from .audio import Audio, transcription_pcm
 from .capture import Capture, Ending, Request, trailing_artifacts
-from .config import Config, record
+from .config import Config, SecondaryAPI, SecondarySTT, record
 from .cues import Cue, Cues
 from .metrics import Metrics
 from .pending import Pending
@@ -85,7 +91,8 @@ async def capture(
             else:
                 notice(ready_message)
                 await connection
-        return await _capture_events(
+        pcm = bytearray() if config.secondary_stt and not confirmation else None
+        request = await _capture_events(
             socket,
             audio,
             current,
@@ -96,7 +103,17 @@ async def capture(
             pending_notice,
             config.cues,
             pre_roll,
+            pcm,
         )
+        if (
+            pcm is not None
+            and not current.scratched
+            and request.ending in {Ending.PASTE, Ending.SUBMIT, Ending.TASK}
+        ):
+            request = await secondary_transcription(
+                config.secondary_stt, bytes(pcm), request, current.endings, notice, metrics
+            )
+        return request
     finally:
         tasks = [task for task in (connection, activation) if task is not None]
         for task in tasks:
@@ -119,6 +136,7 @@ async def _capture_events(
     pending_notice=None,
     cues: Cues | None = None,
     pre_roll: tuple[bytes, ...] = (),
+    pcm: bytearray | None = None,
 ):
     cues = cues or Cues()
     gate = None if confirmation else Pending(current, pause)
@@ -211,7 +229,10 @@ async def _capture_events(
             frame_seq += 1
             frame_changed.set()
             for buffered in outgoing:
-                await socket.send(transcription_pcm(buffered))
+                frame_pcm = transcription_pcm(buffered)
+                await socket.send(frame_pcm)
+                if pcm is not None:
+                    pcm.extend(frame_pcm)
 
     async def receive() -> Request:
         async for raw in socket:
@@ -377,6 +398,80 @@ async def _capture_events(
                 await metrics.record(
                     "desktop_ending_pause", gate.since, pause_outcome, buffered=True
                 )
+
+
+def _secondary_request(settings: SecondarySTT, pcm: bytes) -> str:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(24000)
+        wav.writeframes(pcm)
+    boundary = uuid.uuid4().hex
+    if settings.api == SecondaryAPI.META:
+        endpoint, audio_field, text_field = "/asr/transcribe", "audio", "transcript"
+        parameters = (
+            'Content-Disposition: form-data; name="request"\r\n'
+            "Content-Type: application/json\r\n\r\n"
+            + json.dumps({"mode": "PUSH_TO_TALK", "model": settings.model, "audioEncoding": "WAV"})
+        )
+    else:
+        endpoint, audio_field, text_field = "/audio/transcriptions", "file", "text"
+        parameters = 'Content-Disposition: form-data; name="model"\r\n\r\n' + settings.model
+    body = (
+        (
+            f"--{boundary}\r\n{parameters}\r\n--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{audio_field}"; filename="capture.wav"\r\n'
+            "Content-Type: audio/wav\r\n\r\n"
+        ).encode()
+        + output.getvalue()
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
+    headers = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Accept": "application/json",
+    }
+    if settings.api_key:
+        headers["Authorization"] = "Bearer " + settings.api_key
+    request = urllib.request.Request(settings.url + endpoint, body, headers)
+    with urllib.request.urlopen(request, timeout=10) as response:
+        result = json.load(response)
+    if not isinstance(result, dict) or not isinstance(result.get(text_field), str):
+        raise ValueError("Invalid transcription response")
+    return result[text_field]
+
+
+async def secondary_transcription(settings, pcm, request, endings, notice, metrics):
+    started = time.monotonic()
+    outcome = "error"
+    try:
+        async with asyncio.timeout(10):
+            transcript = await asyncio.to_thread(_secondary_request, settings, pcm)
+        parser = Capture(endings)
+        ending, _ = parser.ending(transcript.strip())
+        if ending is not None and ending != request.ending:
+            raise ValueError("Secondary ending differs")
+        parsed = parser.final(transcript)
+        if parsed is None and not transcript.strip():
+            raise ValueError("Empty transcription")
+        outcome = "ok"
+        return Request(
+            request.ending, parsed.text if parsed else transcript.strip(), request.pause_confirmed
+        )
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    except (TimeoutError, urllib.error.URLError) as error:
+        if isinstance(error, TimeoutError) or isinstance(error.reason, TimeoutError):
+            outcome = "timeout"
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError, http.client.HTTPException):
+        pass
+    finally:
+        if metrics:
+            with suppress(Exception):
+                await metrics.record("desktop_secondary_stt", started, outcome, buffered=True)
+    notice("The second transcription failed. Using the live transcript.")
+    return request
 
 
 async def conversation(config: Config, audio: Audio, notice: Callable[[str], None]) -> None:

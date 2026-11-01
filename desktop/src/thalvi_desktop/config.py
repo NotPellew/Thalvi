@@ -4,6 +4,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -50,6 +51,19 @@ class Script:
     label: str
 
 
+class SecondaryAPI(StrEnum):
+    OPENAI = "openai"
+    META = "meta"
+
+
+@dataclass(frozen=True)
+class SecondarySTT:
+    url: str
+    model: str
+    api_key: str = ""
+    api: SecondaryAPI = SecondaryAPI.OPENAI
+
+
 @dataclass(frozen=True)
 class Config:
     server: str
@@ -65,6 +79,7 @@ class Config:
     discord_port: int
     ending_pause: float = 2.5
     cues: Cues = Cues()
+    secondary_stt: SecondarySTT | None = None
 
     @classmethod
     def load(cls, path: Path) -> "Config":
@@ -82,6 +97,7 @@ class Config:
                 "discord",
                 "ending_pause",
                 "cues",
+                "stt",
             },
             "desktop",
         )
@@ -201,6 +217,30 @@ class Config:
         if any(type(flag) is not bool for flag in cues_raw.values()):
             raise ValueError("cues settings must be true or false.")
 
+        stt = record(raw.get("stt", {}), "stt")
+        fields(stt, {"secondary"}, "stt")
+        secondary = None
+        if "secondary" in stt:
+            item = record(stt["secondary"], "stt.secondary")
+            fields(item, {"url", "model", "api_key", "api"}, "stt.secondary")
+            base = url(item.get("url"), "stt.secondary.url", {"http", "https"})
+            parsed = urlsplit(base)
+            try:
+                _ = parsed.port
+            except ValueError as error:
+                raise ValueError("stt.secondary.url must have a valid port.") from error
+            if "@" in parsed.netloc or "?" in base or "#" in base:
+                raise ValueError("stt.secondary.url must not contain a query or fragment.")
+            key = item.get("api_key", "")
+            if not isinstance(key, str):
+                raise ValueError("stt.secondary.api_key must be text.")
+            secondary = SecondarySTT(
+                base.rstrip("/"),
+                text(item.get("model"), "stt.secondary.model"),
+                key,
+                SecondaryAPI(item.get("api", "openai")),
+            )
+
         return cls(
             server.rstrip("/"),
             model_dir,
@@ -215,4 +255,5 @@ class Config:
             discord_port,
             float(ending_pause),
             Cues(**cues_raw),
+            secondary,
         )

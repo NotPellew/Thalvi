@@ -214,3 +214,35 @@ preview never connect to Discord. Replay reads confirmation events from the
 fixture rather than live speech. Live voice recognition quality and native
 audio hardware need separate manual qualification; replay and stub-server
 tests do not establish those.
+
+To opt in to a second transcription after dictation finishes, add this to the
+desktop JSON configuration (the API key may be omitted):
+
+```json
+"stt": {
+  "secondary": {
+    "url": "http://127.0.0.1:9000/v1",
+    "model": "whisper-large-v3",
+    "api_key": "optional"
+  }
+}
+```
+
+The configured endpoint receives the complete dictation audio after its ending
+is accepted. If it fails, Thalvi uses the live transcript.
+
+For [Meta's recording API](https://dev.meta.ai/docs/speech-to-text), set
+`stt.secondary` to:
+
+```json
+{
+  "api": "meta",
+  "url": "https://api.meta.ai/v1",
+  "model": "muse-voice-transcribe-1.0",
+  "api_key": "your-meta-api-key"
+}
+```
+
+This uses `/v1/asr/transcribe`; omitting `api` uses the OpenAI-compatible
+`/audio/transcriptions` route. Meta's recording and realtime endpoints run the
+same model, so a second pass does not guarantee improved accuracy.
