@@ -1,0 +1,31 @@
+name: Task or improvement
+description: Propose an improvement, investigation, or development task.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What need or problem should this address, and why does it matter?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the result we want. An implementation plan is not required.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What observable results would show this is done? For investigations, state what evidence or decision is needed.
+      placeholder: |
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and related issues
+      description: Optional constraints, evidence, or links needed to understand the task.
