@@ -44,6 +44,49 @@ def test_scratch_discards_only_the_latest_piece_and_cancel_discards_everything()
     assert capture.text == ""
 
 
+@pytest.mark.parametrize(
+    "finals, expected",
+    [
+        (["Keep this paste.", "that!"], Request(Ending.PASTE, "Keep this")),
+        (["Keep this finish", "dictation."], Request(Ending.PASTE, "Keep this")),
+        (["Keep this do", "that."], Request(Ending.TASK, "Keep this")),
+        (["Keep this never.", "mind"], Request(Ending.CANCEL, "")),
+        (["Keep this", "submit."], Request(Ending.SUBMIT, "Keep this")),
+    ],
+)
+def test_endings_span_final_boundaries_and_inserted_punctuation(finals, expected):
+    current = Capture()
+    assert current.final(finals[0]) is None
+    assert current.final(finals[1]) == expected
+
+
+@pytest.mark.parametrize(
+    "finals, expected_pieces",
+    [
+        (["scratch that"], ["First"]),
+        (["scratch.", "that"], ["First"]),
+        (["Discard this scratch", "that"], ["First", "Second"]),
+        (["Discard this scratch that"], ["First", "Second"]),
+    ],
+)
+def test_scratch_across_finals_keeps_earlier_piece_boundaries(finals, expected_pieces):
+    current = Capture()
+    current.final("First")
+    current.final("Second")
+    for text in finals:
+        assert current.final(text) is None
+    assert current.text == " ".join(expected_pieces)
+    assert current.final("scratch that") is None
+    assert current.text == " ".join(expected_pieces[:-1])
+
+
+@pytest.mark.parametrize("text", ["taste that.", "finish dictation later", "submitter"])
+def test_near_matches_remain_literal_dictation(text):
+    current = Capture()
+    assert current.final(text) is None
+    assert current.text == text
+
+
 def test_configurable_endings_match_whole_phrases_only():
     capture = Capture({"send this": Ending.SUBMIT})
     assert capture.final("Resend this") is None
@@ -143,7 +186,13 @@ def test_replay_cli_runs_without_microphone_models_or_desktop_side_effects(
 @pytest.mark.parametrize(
     "patch,message",
     [
-        ({"wake": {"threshold": True}}, "threshold"),
+        ({"wake": {"capture_model": "hey_mycroft_v0.1.onnx"}}, "distinct"),
+        *[
+            ({"wake": {"capture_threshold": value}}, "threshold")
+            for value in (True, 0, -1, 1.1, float("nan"), float("inf"), "0.5")
+        ],
+        ({"wake": {"conversation_threshold": 0}}, "threshold"),
+        ({"wake": {"capture_phrase": "Hey Thalvi"}}, "Unknown"),
         (
             {
                 "scripts": [

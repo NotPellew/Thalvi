@@ -1,13 +1,15 @@
 {
   "server": "ws://127.0.0.1:8080",
   "wake": {
-    "capture_model": "models/hey_jarvis_v0.1.onnx",
-    "conversation_model": "models/hey_mycroft_v0.1.onnx",
-    "model_dir": "models",
-    "threshold": 0.65
+    "model_dir": "models/openwakeword",
+    "capture_model": "models/hey_thalvi.onnx",
+    "capture_threshold": 0.5,
+    "conversation_threshold": 0.5
   },
+  "ending_pause": 2.5,
   "endings": {
     "paste that": "paste",
+    "finish dictation": "paste",
     "submit": "submit",
     "do that": "task",
     "scratch that": "scratch",

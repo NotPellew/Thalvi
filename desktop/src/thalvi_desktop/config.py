@@ -52,23 +52,34 @@ class Script:
 @dataclass(frozen=True)
 class Config:
     server: str
-    capture_model: Path | None
-    conversation_model: Path | None
     model_dir: Path | None
-    threshold: float
+    capture_model: Path | None
+    capture_threshold: float
+    conversation_threshold: float
     endings: dict[str, Ending]
     apps: dict[str, App]
     scripts: tuple[Script, ...]
     metrics: Path | None
     device: str | int | None
     discord_port: int
+    ending_pause: float = 2.5
 
     @classmethod
     def load(cls, path: Path) -> "Config":
         raw = record(json.loads(path.read_text()), "Desktop config")
         fields(
             raw,
-            {"server", "wake", "endings", "apps", "scripts", "metrics", "device", "discord"},
+            {
+                "server",
+                "wake",
+                "endings",
+                "apps",
+                "scripts",
+                "metrics",
+                "device",
+                "discord",
+                "ending_pause",
+            },
             "desktop",
         )
         server = url(raw.get("server", "ws://127.0.0.1:8080"), "server", {"ws", "wss"})
@@ -76,14 +87,25 @@ class Config:
         if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
             raise ValueError("server must be the server root, without a path, query, or fragment.")
         wake = record(raw.get("wake", {}), "wake")
-        fields(wake, {"capture_model", "conversation_model", "model_dir", "threshold"}, "wake")
-        threshold = wake.get("threshold", 0.65)
-        if (
-            type(threshold) not in (int, float)
-            or not math.isfinite(threshold)
-            or not 0 < threshold < 1
-        ):
-            raise ValueError("wake.threshold must be between zero and one.")
+        fields(
+            wake,
+            {"model_dir", "capture_model", "capture_threshold", "conversation_threshold"},
+            "wake",
+        )
+
+        def threshold(name: str) -> float:
+            value = wake.get(name, 0.5)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not 0 < value <= 1
+            ):
+                raise ValueError(f"wake.{name} must be a finite number in (0, 1].")
+            return float(value)
+
+        capture_threshold = threshold("capture_threshold")
+        conversation_threshold = threshold("conversation_threshold")
         endings_raw = record(raw.get("endings", dict(DEFAULT_ENDINGS)), "endings")
         endings: dict[str, Ending] = {}
         for phrase, action in endings_raw.items():
@@ -157,20 +179,31 @@ class Config:
             result = Path(text(value, "local path")).expanduser()
             return result if result.is_absolute() else path.parent / result
 
+        model_dir = local(wake.get("model_dir"))
         capture_model = local(wake.get("capture_model"))
-        conversation_model = local(wake.get("conversation_model"))
-        if capture_model is not None and capture_model == conversation_model:
-            raise ValueError("Capture and conversation need different wake models.")
+        if capture_model is not None and capture_model.stem == "hey_mycroft_v0.1":
+            raise ValueError("Wake model head keys must be distinct.")
+
+        ending_pause = raw.get("ending_pause", 2.5)
+        if (
+            isinstance(ending_pause, bool)
+            or not isinstance(ending_pause, (int, float))
+            or not math.isfinite(ending_pause)
+            or not 2 <= ending_pause <= 3
+        ):
+            raise ValueError("ending_pause must be a finite number between 2 and 3 seconds.")
+
         return cls(
             server.rstrip("/"),
+            model_dir,
             capture_model,
-            conversation_model,
-            local(wake.get("model_dir")),
-            float(threshold),
+            capture_threshold,
+            conversation_threshold,
             endings,
             apps,
             tuple(scripts),
             local(raw.get("metrics")),
             device,
             discord_port,
+            float(ending_pause),
         )

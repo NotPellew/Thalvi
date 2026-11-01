@@ -5,7 +5,9 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 
 from .config import App, record
@@ -38,6 +40,75 @@ def run(argv: Sequence[str], stdin: str | None = None) -> str:
             f"Desktop tool {argv[0]} failed; check the target before trying again."
         ) from error
     return result.stdout
+
+
+class CommandRunner:
+    """Owns desktop processes for one cancellable capture."""
+
+    def __init__(self):
+        self.cancelled = threading.Event()
+        self.lock = threading.Lock()
+        self.children: set[subprocess.Popen] = set()
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+        with self.lock:
+            children = tuple(self.children)
+            for child in children:
+                if child.poll() is None:
+                    with suppress(ProcessLookupError):
+                        child.kill()
+        for child in children:
+            child.wait()
+
+    def __call__(self, argv: Sequence[str], stdin: str | None = None) -> str:
+        child = None
+        try:
+            with self.lock:
+                if self.cancelled.is_set():
+                    raise RuntimeError("The action was cancelled.")
+                child = subprocess.Popen(
+                    argv,
+                    stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                self.children.add(child)
+                if self.cancelled.is_set():
+                    with suppress(ProcessLookupError):
+                        child.kill()
+                    raise RuntimeError("The action was cancelled.")
+            # Input is authorized here; cancellation after this point kills the owned child.
+            with self.lock:
+                if self.cancelled.is_set():
+                    raise RuntimeError("The action was cancelled.")
+            try:
+                output, _ = child.communicate(input=stdin, timeout=8)
+            except subprocess.TimeoutExpired as error:
+                with suppress(ProcessLookupError):
+                    child.kill()
+                child.communicate()
+                raise RuntimeError(
+                    f"Desktop tool {argv[0]} took too long; check before trying again."
+                ) from error
+            if self.cancelled.is_set():
+                raise RuntimeError("The action was cancelled.")
+            if child.returncode:
+                raise RuntimeError(
+                    f"Desktop tool {argv[0]} failed; check the target before trying again."
+                )
+            return output
+        except FileNotFoundError as error:
+            raise RuntimeError(f"Desktop tool {argv[0]} is not installed.") from error
+        finally:
+            if child is not None:
+                with self.lock:
+                    if child.poll() is None:
+                        with suppress(ProcessLookupError):
+                            child.kill()
+                    self.children.discard(child)
+                child.wait()
 
 
 def target(value: object) -> Target:

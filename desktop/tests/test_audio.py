@@ -22,48 +22,65 @@ def test_microphone_frames_have_the_exact_formats_used_by_wake_and_recognizer():
         transcription_pcm(bytes(6))
 
 
-def test_wake_uses_explicit_existing_models_without_downloads(monkeypatch, tmp_path):
+def test_wake_routes_scores_and_validates_backend(monkeypatch, tmp_path):
     config = Config.load(Path(__file__).parents[1] / "config.example.json")
-    paths = [
-        tmp_path / name
-        for name in (
-            "capture.onnx",
-            "conversation.onnx",
-            "embedding_model.onnx",
-            "melspectrogram.onnx",
-        )
-    ]
-    for path in paths:
-        path.touch()
-    predictions = {"capture": 0.1, "conversation": 0.1}
-    calls = []
+    for name in (
+        "capture.onnx",
+        "hey_mycroft_v0.1.onnx",
+        "melspectrogram.onnx",
+        "embedding_model.onnx",
+    ):
+        (tmp_path / name).touch()
+    scores = {"capture": 0.0, "hey_mycroft_v0.1": 0.0}
+    resets = []
+
+    class Session:
+        def get_inputs(self):
+            return [SimpleNamespace(type="tensor(float)", shape=[1, 16, 96])]
+
+        def get_outputs(self):
+            return [SimpleNamespace(type="tensor(float)", shape=[1, 1])]
 
     class Model:
         def __init__(self, **kwargs):
-            calls.append(kwargs)
+            assert kwargs["wakeword_models"] == [
+                str(tmp_path / "capture.onnx"),
+                str(tmp_path / "hey_mycroft_v0.1.onnx"),
+            ]
+            assert kwargs["inference_framework"] == "onnx" and kwargs["ncpu"] == 1
+            self.models = {key: Session() for key in scores}
 
         def predict(self, frame):
-            assert frame.shape == (1280,)
-            assert frame.dtype == np.dtype("int16")
-            return predictions
+            assert frame.shape == (1280,) and frame.dtype == np.int16 and frame[0] == -32768
+            return scores
 
         def reset(self):
-            calls.append("reset")
+            resets.append(True)
 
+    monkeypatch.setitem(sys.modules, "openwakeword", SimpleNamespace(__path__=[]))
     monkeypatch.setitem(sys.modules, "openwakeword.model", SimpleNamespace(Model=Model))
-    wake = Wake(
-        replace(config, capture_model=paths[0], conversation_model=paths[1], model_dir=tmp_path)
-    )
-    frame = bytes(7680)
-    assert wake.detect(frame) is None
-    predictions["capture"] = 0.8
-    assert wake.detect(frame) == "capture"
-    predictions["conversation"] = 0.9
-    assert wake.detect(frame) == "conversation"
-    assert calls[0]["inference_framework"] == "onnx"
-    assert calls[0]["melspec_model_path"] == str(paths[3])
+    wake = Wake(replace(config, model_dir=tmp_path, capture_model=tmp_path / "capture.onnx"))
+    frame = np.full(3840, -32768, dtype="<i2").tobytes()
+    for a, b, expected in [
+        (0, 0, None),
+        (0.5, 0, "capture"),
+        (0, 0.5, "conversation"),
+        (0.5, 0.5, "ambiguous"),
+    ]:
+        scores["capture"], scores["hey_mycroft_v0.1"] = a, b
+        assert wake.detect(frame) == expected
+    for value in (float("nan"), float("inf"), -0.1, 1.1, None, [0.5], True):
+        scores["capture"] = value
+        with pytest.raises(RuntimeError, match="Wake detection failed"):
+            wake.detect(frame)
+    del scores["capture"]
+    with pytest.raises(RuntimeError, match="Wake detection failed"):
+        wake.detect(frame)
+    assert not resets
     wake.reset()
-    assert calls[-1] == "reset"
+    assert resets == [True]
+    with pytest.raises(RuntimeError, match="Wake detection failed"):
+        wake.detect(b"bad")
 
 
 def test_overflow_stops_capture_and_playback_stop_discards_all_queued_audio(monkeypatch):
@@ -105,3 +122,125 @@ def test_overflow_stops_capture_and_playback_stop_discards_all_queued_audio(monk
         assert all(not stream.active for stream in streams)
 
     asyncio.run(behavior())
+
+
+def test_input_epoch_rejects_callbacks_already_scheduled_before_resume(monkeypatch):
+    streams = []
+
+    class Stream:
+        def __init__(self, **kwargs):
+            self.callback = kwargs["callback"]
+            streams.append(self)
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(RawInputStream=Stream))
+
+    async def behavior():
+        async with Audio() as audio:
+            streams[0].callback(b"old", 1, None, None)
+            audio.set_input(False)
+            streams[0].callback(b"during cue", 1, None, None)
+            audio.set_input(True)
+            streams[0].callback(b"fresh", 1, None, None)
+            assert await asyncio.wait_for(audio.next(), 1) == b"fresh"
+            assert audio.frames.empty()
+
+    asyncio.run(behavior())
+
+
+@pytest.mark.parametrize(
+    "input_shape, output_shape, input_type, output_type, valid",
+    [
+        ([None, 16, 96], ["batch", 1], "tensor(float)", "tensor(float)", True),
+        ([1, 16, 96], [1, 1], "tensor(float)", "tensor(float)", True),
+        ([1, 0, 96], [1, 1], "tensor(float)", "tensor(float)", False),
+        ([1, 15, 96], [1, 1], "tensor(float)", "tensor(float)", False),
+        ([1, 17, 96], [1, 1], "tensor(float)", "tensor(float)", False),
+        ([1, 120, 96], [1, 1], "tensor(float)", "tensor(float)", False),
+        ([1, 121, 96], [1, 1], "tensor(float)", "tensor(float)", False),
+        ([1, "time", 96], [1, 1], "tensor(float)", "tensor(float)", False),
+        ([2, 16, 96], [1, 1], "tensor(float)", "tensor(float)", False),
+        ([1, 16, 95], [1, 1], "tensor(float)", "tensor(float)", False),
+        ([1, 16, 96], [1, 2], "tensor(float)", "tensor(float)", False),
+        ([1, 16, 96], [1, 1], "tensor(double)", "tensor(float)", False),
+        ([1, 16, 96], [1, 1], "tensor(float)", "tensor(int64)", False),
+    ],
+)
+def test_wake_head_contract_on_first_detection_and_after_reset(
+    monkeypatch, tmp_path, input_shape, output_shape, input_type, output_type, valid
+):
+    config = Config.load(Path(__file__).parents[1] / "config.example.json")
+    for name in (
+        "capture.onnx",
+        "hey_mycroft_v0.1.onnx",
+        "melspectrogram.onnx",
+        "embedding_model.onnx",
+    ):
+        (tmp_path / name).touch()
+
+    class Session:
+        def get_inputs(self):
+            return [SimpleNamespace(type=input_type, shape=input_shape)]
+
+        def get_outputs(self):
+            return [SimpleNamespace(type=output_type, shape=output_shape)]
+
+    class Model:
+        def __init__(self, **_kwargs):
+            self.models = {key: Session() for key in ("capture", "hey_mycroft_v0.1")}
+            self.reset()
+
+        def predict(self, _frame):
+            self.history += 1
+            features = np.zeros((1, self.history, 96), dtype=np.float32)
+            for session in self.models.values():
+                context = session.get_inputs()[0].shape[1]
+                assert features[:, -context:, :].shape == (1, context, 96)
+            return {key: 0.0 for key in self.models}
+
+        def reset(self):
+            self.history = 41
+
+    monkeypatch.setitem(sys.modules, "openwakeword", SimpleNamespace(__path__=[]))
+    monkeypatch.setitem(sys.modules, "openwakeword.model", SimpleNamespace(Model=Model))
+    config = replace(config, model_dir=tmp_path, capture_model=tmp_path / "capture.onnx")
+    if valid:
+        wake = Wake(config)
+        frame = bytes(7680)
+        assert wake.detect(frame) is None
+        wake.reset()
+        assert wake.detect(frame) is None
+    else:
+        with pytest.raises(RuntimeError, match="invalid metadata"):
+            Wake(config)
+
+
+def test_wake_missing_assets_and_backend_failure(monkeypatch, tmp_path):
+    config = replace(
+        Config.load(Path(__file__).parents[1] / "config.example.json"),
+        model_dir=tmp_path,
+        capture_model=tmp_path / "capture.onnx",
+    )
+    with pytest.raises(RuntimeError, match="assets are missing"):
+        Wake(config)
+    for name in (
+        "capture.onnx",
+        "hey_mycroft_v0.1.onnx",
+        "melspectrogram.onnx",
+        "embedding_model.onnx",
+    ):
+        (tmp_path / name).touch()
+
+    class Model:
+        def __init__(self, **_kwargs):
+            raise OSError("backend failed")
+
+    monkeypatch.setitem(sys.modules, "openwakeword", SimpleNamespace(__path__=[]))
+    monkeypatch.setitem(sys.modules, "openwakeword.model", SimpleNamespace(Model=Model))
+    with pytest.raises(RuntimeError, match="could not load"):
+        Wake(config)

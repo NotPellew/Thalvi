@@ -135,7 +135,8 @@ async fn relay<R: Recognizer>(socket: &mut WebSocket, recognizer: &mut R) -> Res
             event = recognizer.next_event() => match event {
                 Some(Ok(RecognizerEvent::Partial {text})) => send(socket,json!({"type":"partial","text":text})).await?,
                 Some(Ok(RecognizerEvent::SpeechComplete {turn_id,text})) => send(socket,json!({"type":"final","turn_id":turn_id,"text":text})).await?,
-                Some(Ok(RecognizerEvent::SpeechStart {..} | RecognizerEvent::SpeechEnd {..})) => {},
+                Some(Ok(RecognizerEvent::SpeechStart {turn_id, audio_processed_ms})) => send(socket,json!({"type":"speech_start","turn_id":turn_id,"audio_processed_ms":audio_processed_ms})).await?,
+                Some(Ok(RecognizerEvent::SpeechEnd {turn_id, audio_processed_ms})) => send(socket,json!({"type":"speech_end","turn_id":turn_id,"audio_processed_ms":audio_processed_ms})).await?,
                 Some(Ok(RecognizerEvent::Error {message})) => return Err(message),
                 Some(Err(error)) => return Err(error.to_string()),
                 None => return Err("Speech recognition closed. Your capture was not delivered.".to_string()),

@@ -166,7 +166,7 @@ class Workflow:
         event = "desktop_task" if request.ending == Ending.TASK else "desktop_delivery"
         try:
             if request.ending == Ending.CANCEL:
-                self.notify("Discarded. Waiting for a wake word.")
+                self.notify("Discarded.")
                 outcome = "cancelled"
                 return True
             if request.ending == Ending.TASK:
@@ -178,7 +178,7 @@ class Workflow:
                 result = await asyncio.to_thread(execute, task, self.config, self.host)
                 self.notify(result)
             else:
-                if request.ending == Ending.SUBMIT:
+                if request.ending == Ending.SUBMIT and not request.pause_confirmed:
                     self.notify(
                         f"Submit to {selected.app}? This presses Enter. "
                         f"Say yes or never mind.\n{request.text}"
@@ -191,7 +191,7 @@ class Workflow:
                     await asyncio.to_thread(
                         self.host.deliver, selected, request.text, request.ending == Ending.SUBMIT
                     )
-                self.notify("Delivered. Waiting for a wake word.")
+                self.notify("Delivered.")
             outcome = "ok"
             return True
         except asyncio.CancelledError:

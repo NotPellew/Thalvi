@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import contextlib
 import json
 import time
 from pathlib import Path
@@ -19,6 +20,13 @@ from .wake import Wake
 from .workflow import PreviewHost, Workflow, notice
 
 
+def wake_level(frame: bytes) -> str:
+    import numpy as np
+
+    peak = int(np.abs(np.frombuffer(frame, dtype="<i2").astype(np.int32)).max(initial=0))
+    return "activity" if peak >= 1000 else "quiet"
+
+
 async def recover(host, text: str) -> None:
     try:
         await asyncio.to_thread(host.copy, text)
@@ -28,23 +36,112 @@ async def recover(host, text: str) -> None:
 
 
 async def run(config: Config, once: bool, dry_run: bool) -> int:
-    wake = await asyncio.to_thread(Wake, config)
-    host = PreviewHost() if dry_run else desktop()
+    result = await _run(config, once, dry_run)
+    if once:
+        notice("Finished. Microphone released.")
+    return result
+
+
+async def _run(config: Config, once: bool, dry_run: bool, resident=None) -> int:
     metrics = Metrics(config.metrics)
+    if resident:
+        wake = resident.wake
+    else:
+        started, outcome = time.monotonic(), "error"
+        try:
+            wake = await asyncio.to_thread(Wake, config)
+            outcome = "ok"
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        finally:
+            try:
+                await metrics.record("desktop_wake_load", started, outcome)
+            except OSError:
+                notice("The optional desktop metrics could not be saved.")
+
+    inflight_wake = None
+
+    async def finish_wake_work():
+        if inflight_wake is not None:
+            await asyncio.gather(inflight_wake, return_exceptions=True)
+
+    async def flush_metrics() -> None:
+        try:
+            await metrics.flush()
+        except OSError:
+            notice("The optional desktop metrics could not be saved.")
+
+    host = resident.host if resident else (PreviewHost() if dry_run else desktop())
     workflow = Workflow(
         config,
         host,
         discord=PreviewComposer() if dry_run else DesktopComposer(config, metrics),
         metrics=metrics,
+        notify=resident.notice if resident else notice,
     )
     current: Capture | None = None
-    async with Audio(config.device) as audio:
+    sampling = metrics.path is not None
+    sampled, sampled_level = 0, None
+    window_activity = False
+    ambiguous = False
+    async with contextlib.AsyncExitStack() as resources:
+        resources.push_async_callback(flush_metrics)
+        resources.push_async_callback(finish_wake_work)
+        audio = await resources.enter_async_context(Audio(config.device))
+        if resident:
+            resident.state("listening", "Listening for a wake word.")
         notice("Waiting for a wake word. Ctrl+C stops and releases the microphone.")
         try:
             while True:
-                mode = await asyncio.to_thread(wake.detect, await audio.next())
+                frame = await audio.next()
+                if sampling:
+                    sampled += 1
+                    level_started = time.monotonic()
+                    window_activity |= wake_level(frame) == "activity"
+                    if sampled == 1 or sampled % 25 == 0:
+                        sampled_level_now = "activity" if window_activity else "quiet"
+                        window_activity = False
+                        try:
+                            await metrics.record(
+                                "desktop_wake_level",
+                                level_started,
+                                sampled_level_now,
+                                buffered=True,
+                            )
+                        except OSError:
+                            notice("The optional desktop metrics could not be saved.")
+                        if sampled_level_now != sampled_level:
+                            sampled_level = sampled_level_now
+                            notice(f"Sampled wake audio: {sampled_level}.")
+                started, outcome = time.monotonic(), "error"
+                try:
+                    inflight_wake = asyncio.create_task(asyncio.to_thread(wake.detect, frame))
+                    mode = await asyncio.shield(inflight_wake)
+                    inflight_wake = None
+                    outcome = mode or "none"
+                except asyncio.CancelledError:
+                    outcome = "cancelled"
+                    raise
+                finally:
+                    try:
+                        await metrics.record(
+                            "desktop_wake_inference", started, outcome, buffered=True
+                        )
+                    except OSError:
+                        notice("The optional desktop metrics could not be saved.")
+                if mode == "ambiguous":
+                    if not ambiguous:
+                        notice("Wake was ambiguous; still listening.")
+                    ambiguous = True
+                    continue
+                ambiguous = False
                 if mode is None:
                     continue
+                if resident:
+                    resident.begin()
+                    host = resident.host
+                    workflow.host = host
                 started = time.monotonic()
                 outcome = "failed"
                 try:
@@ -52,12 +149,57 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
                         notice("Conversation waking. Use headphones in this native prototype.")
                         await conversation(config, audio, notice)
                     else:
-                        selected = await asyncio.to_thread(host.capture)
+                        if not resident:
+                            notice("Capture waking. Reading the target window.")
+                        audio.set_input(False)
+                        target_started, target_outcome = time.monotonic(), "error"
+                        try:
+                            selected = await asyncio.to_thread(host.capture)
+                            target_outcome = "ok"
+                        except asyncio.CancelledError:
+                            target_outcome = "cancelled"
+                            raise
+                        finally:
+                            try:
+                                await metrics.record(
+                                    "desktop_target_capture",
+                                    target_started,
+                                    target_outcome,
+                                    buffered=True,
+                                )
+                            except OSError:
+                                notice("The optional desktop metrics could not be saved.")
+                        if resident:
+                            resident.state("capturing", "Capturing speech.", selected.app)
                         current = Capture(config.endings)
                         notice(f"Capture waking · target: {selected.app}.")
-                        request = await capture(config, audio, current, notice)
 
-                        async def confirm() -> bool:
+                        def pending_notice(request, seconds, target_app=selected.app):
+                            if request is None:
+                                if resident:
+                                    resident.state("capturing", "Speech continued.", target_app)
+                            elif resident:
+                                resident.pending(request, seconds, target_app)
+                            else:
+                                notice(
+                                    f"Confirm {request.ending} to {target_app}: pause {seconds:g} "
+                                    "seconds to continue; keep speaking or cancel."
+                                )
+
+                        request = await capture(
+                            config,
+                            audio,
+                            current,
+                            notice,
+                            metrics=metrics,
+                            pending_notice=pending_notice,
+                        )
+
+                        async def confirm(target_app=selected.app) -> bool:
+                            if resident:
+                                resident.state(
+                                    "confirming", "Waiting for confirmation.", target_app
+                                )
                             try:
                                 async with asyncio.timeout(30):
                                     result = await capture(
@@ -66,7 +208,8 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
                                         Confirmation(),
                                         notice,
                                         ready_message="Say yes to submit, or never mind to cancel.",
-                                        fresh_audio=True,
+                                        metrics=metrics,
+                                        confirmation=True,
                                     )
                             except TimeoutError as error:
                                 raise RuntimeError(
@@ -74,6 +217,8 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
                                 ) from error
                             return result.ending == Ending.SUBMIT
 
+                        if resident:
+                            resident.state("working", "Processing your request.", selected.app)
                         success = await workflow.finish(request, selected, confirm)
                         outcome = "ok" if success else "failed"
                         if not success and once:
@@ -103,10 +248,35 @@ async def run(config: Config, once: bool, dry_run: bool) -> int:
                         )
                     except OSError:
                         notice("The optional desktop metrics could not be saved.")
-                    wake.reset()
-                    audio.discard()
                 if once:
                     return 0
+                audio.set_input(False)
+                reset_started, reset_outcome = time.monotonic(), "error"
+                try:
+                    inflight_wake = asyncio.create_task(asyncio.to_thread(wake.reset))
+                    await asyncio.shield(inflight_wake)
+                    inflight_wake = None
+                    reset_outcome = "ok"
+                except asyncio.CancelledError:
+                    reset_outcome = "cancelled"
+                    raise
+                except Exception:
+                    notice(
+                        "Wake listening could not restart; microphone closing. "
+                        "The action outcome is unchanged."
+                    )
+                    return 1
+                finally:
+                    try:
+                        await metrics.record(
+                            "desktop_wake_reset", reset_started, reset_outcome, buffered=True
+                        )
+                    except OSError:
+                        notice("The optional desktop metrics could not be saved.")
+                audio.set_input(True)
+                if resident:
+                    resident.end()
+                    resident.state("listening", "Listening for a wake word.")
                 notice("Waiting for a wake word.")
         finally:
             if current is not None and current.text:
@@ -168,6 +338,7 @@ def main() -> None:
     live.add_argument(
         "--dry-run", action="store_true", help="Transcribe, but preview all desktop operations."
     )
+    sub.add_parser("app", help="Open the resident desktop app.")
     replay_parser = sub.add_parser(
         "replay", help="Replay JSONL text fixtures without microphone or model calls."
     )
@@ -177,6 +348,10 @@ def main() -> None:
     )
     args = parser.parse_args()
     try:
+        if args.command == "app":
+            from .app import launch
+
+            raise SystemExit(launch(args.config.resolve()))
         config = Config.load(args.config)
         result = asyncio.run(
             run(config, args.once, args.dry_run)

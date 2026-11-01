@@ -14,6 +14,10 @@ areas your change touches. Editing rules are in
   Hyprland is the first native target; GNOME, macOS and Windows need prototypes.
   Why: hands-free desktop work is the short-term demo. Rejected for now:
   phone-to-PC dictation and claiming untested platform parity.
+- **Resident desktop UI.** System GTK 3 owns the tray and status panel; the
+  pinned Python environment owns wake/audio work. Why: keep platform GTK
+  bindings separate from model dependencies and leave the input focused.
+  Rejected: using a dedicated test editor as the desktop interface.
 - **Self-hosted; parts swap by endpoint.** Config sets each part's address on a
   standard protocol (Chat Completions, OpenAI speech, MCP); Meta's realtime ASR
   and Qwen3-TTS's framed PCM stream are the custom adapters. Why: any provider
@@ -33,10 +37,23 @@ areas your change touches. Editing rules are in
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
   interrupts a reply by speaking. Why: hands and eyes are busy. Rejected:
   push-to-talk.
-- **Two wake entries, endings select the capture route.** One wake model starts
-  capture; paste, submit and task endings choose delivery. A separate model
-  starts conversation without per-turn endings. Why: defer the capture choice
-  without delaying conversation. Rejected: one wake phrase for both flows.
+- **Two wake entries, endings select the capture route.** One local inference pipeline
+  runs separate trained capture and conversation wake heads. Why: defer the action
+  choice until an ending without delaying conversation. Rejected: one phrase
+  for both flows.
+- **Wake context.** Both trained heads use 16 embedding frames. Why: this
+  supports first-frame inference with upstream startup and reset history.
+  Rejected: accepting longer contexts that need additional warm-up history.
+- **Capture starts at a local cue.** Buffer fresh post-cue speech during the
+  eight-second recognizer startup budget; explicit spoken confirmations wait
+  for ready plus their own cue. Why: keep dictation and confirmations fresh.
+  Rejected: transcribing pre-cue backlog or waiting on the network to speak.
+- **Silence commits capture.** Paste, submit and tasks wait 2.5 seconds of
+  speech silence; continued speech cancels the pending ending. Submit asks
+  for target confirmation during that pause. Why: hands-free control with
+  time to interrupt. Rejected: immediate dispatch and a second spoken yes.
+- **Ending acknowledgement.** Play 660 Hz when a dictation ending is accepted.
+  Why: signal capture has ended before delivery. Rejected: a post-delivery cue.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
   browser and app actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative

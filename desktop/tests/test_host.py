@@ -158,3 +158,109 @@ def test_open_url_rejects_unsupported_default_browser():
     with pytest.raises(RuntimeError, match="default browser"):
         Hyprland(command).open_url("https://example.com")
     assert calls == [["xdg-settings", "get", "default-web-browser"]]
+
+
+def test_cancelled_runner_never_starts_a_later_command(monkeypatch):
+    from thalvi_desktop.host import CommandRunner
+
+    runner = CommandRunner()
+    runner.cancel()
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("cancelled command started")
+
+    monkeypatch.setattr("thalvi_desktop.host.subprocess.Popen", unexpected)
+    with pytest.raises(RuntimeError, match="cancelled"):
+        runner(["wtype", "-"], "private text")
+
+
+@pytest.mark.parametrize("stage", ["spawn", "before_feed", "after_feed"])
+def test_cancel_kills_owned_child_and_blocks_later_input(monkeypatch, stage):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from thalvi_desktop.host import CommandRunner
+
+    entered = threading.Event()
+    release = threading.Event()
+    killed = threading.Event()
+    reaped = threading.Event()
+    consumed = []
+    runner = CommandRunner()
+
+    class Child:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+            killed.set()
+
+        def wait(self):
+            assert killed.wait(2)
+            reaped.set()
+            return self.returncode
+
+        def communicate(self, input=None, timeout=None):
+            assert timeout == 8
+            if stage == "before_feed":
+                entered.set()
+                assert release.wait(2)
+            if not killed.is_set() and input is not None:
+                consumed.append(input)
+            if stage == "after_feed":
+                entered.set()
+                assert release.wait(2)
+            assert killed.is_set()
+            return "", ""
+
+    def popen(*_args, **_kwargs):
+        if stage == "spawn":
+            entered.set()
+            assert release.wait(2)
+        return Child()
+
+    monkeypatch.setattr("thalvi_desktop.host.subprocess.Popen", popen)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        delivery = pool.submit(runner, ["fake-input"], "body")
+        assert entered.wait(2)
+        cancellation = pool.submit(runner.cancel)
+        assert runner.cancelled.wait(2)
+        if stage == "spawn":
+            release.set()
+        assert killed.wait(2)
+        if stage != "spawn":
+            release.set()
+        cancellation.result(timeout=2)
+        with pytest.raises(RuntimeError, match="cancelled"):
+            delivery.result(timeout=2)
+    assert reaped.is_set()
+    assert consumed == (["body"] if stage == "after_feed" else [])
+    with pytest.raises(RuntimeError, match="cancelled"):
+        runner(["fake-input"], "later")
+
+
+def test_command_runner_reaps_child_after_unexpected_exception(monkeypatch):
+    from thalvi_desktop.host import CommandRunner
+
+    calls = []
+
+    class Child:
+        def poll(self):
+            return None
+
+        def kill(self):
+            calls.append("kill")
+
+        def wait(self):
+            calls.append("wait")
+
+        def communicate(self, **_kwargs):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("thalvi_desktop.host.subprocess.Popen", lambda *_a, **_kw: Child())
+    with pytest.raises(KeyboardInterrupt):
+        CommandRunner()(["fake-input"], "body")
+    assert calls == ["kill", "wait"]
