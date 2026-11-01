@@ -24,6 +24,24 @@ PHASES = {
 }
 ACTIVE = {"listening", "capturing", "pending", "confirming", "working"}
 CAPTURE = {"capturing", "pending", "confirming", "working"}
+TRAY_STATES = {
+    "loading": ("working", "Loading"),
+    "paused": ("paused", "Paused"),
+    "listening": ("listening", "Listening for wake words"),
+    "capturing": ("capturing", "Capturing speech"),
+    "pending": ("pending", "Ending pending"),
+    "confirming": ("pending", "Waiting for confirmation"),
+    "working": ("working", "Working"),
+    "error": ("error", "Needs attention"),
+    "stopped": ("paused", "Stopped"),
+}
+
+
+def tray_state(phase, remaining=0):
+    icon, description = TRAY_STATES[phase]
+    if phase == "pending":
+        description += f" — {math.ceil(max(0, remaining))} seconds; keep speaking or Cancel to stop"
+    return str(Path(__file__).with_name("icons") / f"thalvi-{icon}.svg"), f"Thalvi: {description}"
 
 
 def pending_prompt(event, seconds):
@@ -193,6 +211,7 @@ def main():
             )
             self.window, self.worker = None, None
             self.tray_available, self.last_phase = False, None
+            self.last_tray_state = None
             self.pending_event, self.pending_deadline = None, 0.0
 
         def do_activate(self):
@@ -288,25 +307,26 @@ def main():
                     return
                 self.indicator = Indicator.Indicator.new(
                     "thalvi",
-                    "audio-input-microphone",
+                    tray_state("loading")[0],
                     Indicator.IndicatorCategory.APPLICATION_STATUS,
                 )
                 self.indicator.set_status(Indicator.IndicatorStatus.ACTIVE)
                 menu = Gtk.Menu()
+                status_item = Gtk.MenuItem(label="Open status / settings")
+                status_item.connect("activate", lambda *_: self.window.present())
+                menu.append(status_item)
                 self.tray_toggle = Gtk.MenuItem(label="Enable listening")
                 self.tray_toggle.connect("activate", self.toggle_listening)
                 menu.append(self.tray_toggle)
                 self.tray_cancel = Gtk.MenuItem(label="Cancel capture")
                 self.tray_cancel.connect("activate", lambda *_: self.worker.command("cancel"))
                 menu.append(self.tray_cancel)
-                item = Gtk.MenuItem(label="Open status / settings")
-                item.connect("activate", lambda *_: self.window.present())
-                menu.append(item)
                 item = Gtk.MenuItem(label="Quit")
                 item.connect("activate", lambda *_: self.quit_app())
                 menu.append(item)
                 menu.show_all()
                 self.indicator.set_menu(menu)
+                self.indicator.set_secondary_activate_target(status_item)
             except Exception:
                 self.tray_available = False
 
@@ -332,7 +352,7 @@ def main():
             active = phase in ACTIVE
             self.status.set_text(f"{phase.capitalize()} — {worker.message}")
             event = worker.event
-            detail = ""
+            detail, remaining = "", 0
             if phase == "pending":
                 if event is not self.pending_event:
                     self.pending_event = event
@@ -346,6 +366,12 @@ def main():
             self.toggle.set_sensitive(phase == "paused" or active)
             self.cancel.set_sensitive(phase in CAPTURE and worker.capture_id is not None)
             if self.tray_available:
+                state = tray_state(phase, remaining)
+                if state != self.last_tray_state:
+                    icon, description = state
+                    self.indicator.set_icon_full(icon, description)
+                    self.indicator.set_title(description)
+                    self.last_tray_state = state
                 self.tray_toggle.set_label("Pause listening" if active else "Enable listening")
                 self.tray_toggle.set_sensitive(phase == "paused" or active)
                 self.tray_cancel.set_sensitive(phase in CAPTURE and worker.capture_id is not None)
