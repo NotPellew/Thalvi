@@ -29,8 +29,26 @@ ARTIFACT = (
 TRAILING_ARTIFACTS = re.compile(rf"[\s.!?,;:]*(?:{ARTIFACT}[\s.!?,;:]*){{1,2}}$", re.I)
 
 
+SEPARATOR = r"[\s.!?,;:]"
+WAKE_NAME = r"[a-z]{0,3}[aeiouy][lr][vb](?:ie|ee|ey|i|y)(?![\w'’])"
+LEADING_WAKE = re.compile(
+    rf"{SEPARATOR}*(?:(?:hey|hay|hi|okay|ok)"
+    rf"(?:{SEPARATOR}+(?:{WAKE_NAME}|[\w'’-]+(?=[.!?,;:])))?(?![\w'’])|{WAKE_NAME}){SEPARATOR}*",
+    re.I,
+)
+
+
 def trailing_artifacts(text: str) -> bool:
     return TRAILING_ARTIFACTS.fullmatch(text) is not None
+
+
+def strip_wake(text: str) -> str:
+    """Remove the wake phrase, as recognizers render it, from a transcript that began at wake."""
+    match = LEADING_WAKE.match(text)
+    if match is None:
+        return text
+    rest = text[match.end() :]
+    return rest[:1].upper() + rest[1:]
 
 
 @dataclass(frozen=True)

@@ -222,6 +222,47 @@ def test_confirmation_discards_old_audio_and_only_accepts_standalone_affirmation
     asyncio.run(behavior())
 
 
+@pytest.mark.parametrize(
+    "pre_roll, finals, expected",
+    [
+        (True, ["Hey Talvi, write the report paste that"], "Write the report"),
+        (True, ["Hey, Starving.", "Write the report paste that"], "Write the report"),
+        (True, ["Hey Salvi. Write the", "report paste that"], "Write the report"),
+        (True, ["Hey, write the report paste that"], "Write the report"),
+        (True, ["Tilvi write the report paste that"], "Write the report"),
+        (True, ["Write the report paste that"], "Write the report"),
+        (True, ["Heavy rain is expected paste that"], "Heavy rain is expected"),
+        (True, ["Write to Talvi.", "Hey Talvi paste that"], "Write to Talvi. Hey Talvi"),
+        (False, ["Hey Talvi, write the report paste that"], "Hey Talvi, write the report"),
+    ],
+)
+def test_wake_phrase_is_stripped_only_from_the_start_of_wake_audio(
+    config, pre_roll, finals, expected
+):
+    async def behavior():
+        async def server(socket):
+            await socket.send('{"type":"ready"}')
+            for text in finals:
+                await socket.send(json.dumps({"type": "final", "text": text}))
+            await socket.wait_closed()
+
+        async with serve(server, "127.0.0.1", 0) as listener:
+            local = replace(config, server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}")
+            result = await asyncio.wait_for(
+                capture(
+                    local,
+                    FakeAudio(),
+                    Capture(config.endings),
+                    lambda _: None,
+                    pre_roll=(bytes(7680),) if pre_roll else (),
+                ),
+                2,
+            )
+        assert result == Request(Ending.PASTE, expected)
+
+    asyncio.run(behavior())
+
+
 def test_capture_buffers_audio_without_wake_cue_during_startup(config):
     async def behavior():
         connected, ready_allowed = (asyncio.Event() for _ in range(2))
@@ -1174,7 +1215,11 @@ def test_secondary_local_endpoint_receives_wav_and_replaces_accepted_text(
             field = "transcript" if api == "meta" else "text"
             self.wfile.write(
                 json.dumps(
-                    {field: "More accurate words paste that [noise]" if valid_response else None}
+                    {
+                        field: "Hey Thalvi, more accurate words paste that [noise]"
+                        if valid_response
+                        else None
+                    }
                 ).encode()
             )
 

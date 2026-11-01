@@ -16,7 +16,7 @@ from contextlib import suppress
 from websockets.asyncio.client import connect
 
 from .audio import Audio, transcription_pcm
-from .capture import Capture, Ending, Request, trailing_artifacts
+from .capture import Capture, Ending, Request, strip_wake, trailing_artifacts
 from .config import Config, SecondaryAPI, SecondarySTT, record
 from .cues import Cue, Cues
 from .metrics import Metrics
@@ -111,7 +111,13 @@ async def capture(
             and request.ending in {Ending.PASTE, Ending.SUBMIT, Ending.TASK}
         ):
             request = await secondary_transcription(
-                config.secondary_stt, bytes(pcm), request, current.endings, notice, metrics
+                config.secondary_stt,
+                bytes(pcm),
+                request,
+                current.endings,
+                notice,
+                metrics,
+                after_wake=bool(pre_roll),
             )
         return request
     finally:
@@ -149,6 +155,7 @@ async def _capture_events(
     frame_changed = asyncio.Event()
     pause_outcome = "cancelled"
     local_speech = False
+    wake_leads = bool(pre_roll)
 
     async def diagnostic(outcome):
         if metrics is None:
@@ -235,6 +242,7 @@ async def _capture_events(
                     pcm.extend(frame_pcm)
 
     async def receive() -> Request:
+        nonlocal wake_leads
         async for raw in socket:
             if not isinstance(raw, str):
                 raise RuntimeError("Transcription returned audio instead of text.")
@@ -244,6 +252,9 @@ async def _capture_events(
                     text = message.get("text")
                     if not isinstance(text, str):
                         raise RuntimeError("Transcription returned an invalid final turn.")
+                    if wake_leads and text.strip():
+                        wake_leads = False
+                        text = strip_wake(text)
                     if gate is None:
                         request = current.final(text)
                     else:
@@ -441,12 +452,16 @@ def _secondary_request(settings: SecondarySTT, pcm: bytes) -> str:
     return result[text_field]
 
 
-async def secondary_transcription(settings, pcm, request, endings, notice, metrics):
+async def secondary_transcription(
+    settings, pcm, request, endings, notice, metrics, *, after_wake=False
+):
     started = time.monotonic()
     outcome = "error"
     try:
         async with asyncio.timeout(10):
             transcript = await asyncio.to_thread(_secondary_request, settings, pcm)
+        if after_wake:
+            transcript = strip_wake(transcript.strip())
         parser = Capture(endings)
         ending, _ = parser.ending(transcript.strip())
         if ending is not None and ending != request.ending:

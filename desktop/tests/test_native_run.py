@@ -556,7 +556,7 @@ def test_capture_preserves_rolling_audio_through_target_and_transcription_startu
                 self.queue = asyncio.Queue()
                 self.enabled = True
                 self.failed = False
-                for marker in range(1, 11):
+                for marker in range(1, 15):
                     self.offer(marker)
 
             def offer(self, marker):
@@ -585,15 +585,15 @@ def test_capture_preserves_rolling_audio_through_target_and_transcription_startu
                 pass
 
             def detect(self, data):
-                return "capture" if data == frame(10) else None
+                return "capture" if data == frame(14) else None
 
         audio = Audio(None)
         host = PreviewHost(lambda _: None)
         original_capture = host.capture
 
         def capture_target():
-            loop.call_soon_threadsafe(audio.offer, 11)
-            loop.call_soon_threadsafe(audio.offer, 12)
+            loop.call_soon_threadsafe(audio.offer, 15)
+            loop.call_soon_threadsafe(audio.offer, 16)
             return original_capture()
 
         host.capture = capture_target
@@ -603,13 +603,13 @@ def test_capture_preserves_rolling_audio_through_target_and_transcription_startu
         monkeypatch.setattr(cli, "notice", lambda _: None)
 
         async def server(socket):
-            audio.offer(13)
-            audio.offer(14)
+            audio.offer(17)
+            audio.offer(18)
             await socket.send('{"type":"ready"}')
             while True:
                 payload = await socket.recv()
                 received.append(payload)
-                if payload == bytes([14, 0]) * 1920:
+                if payload == bytes([18, 0]) * 1920:
                     break
             await socket.send('{"type":"final","text":"never mind"}')
             await socket.wait_closed()
@@ -620,7 +620,7 @@ def test_capture_preserves_rolling_audio_through_target_and_transcription_startu
                 server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}",
             )
             assert await asyncio.wait_for(cli.run(config, once=True, dry_run=False), 3) == 0
-        assert received == [bytes([marker, 0]) * 1920 for marker in range(4, 15)]
+        assert received == [bytes([marker, 0]) * 1920 for marker in range(3, 19)]
         assert Cue.WAKE not in cues
 
     asyncio.run(behavior())

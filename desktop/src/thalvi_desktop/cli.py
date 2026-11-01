@@ -87,7 +87,7 @@ async def _run(config: Config, once: bool, dry_run: bool, resident=None) -> int:
     sampled, sampled_level = 0, None
     window_activity = False
     ambiguous = False
-    pre_roll = deque(maxlen=7)
+    pre_roll = deque(maxlen=12)
     async with contextlib.AsyncExitStack() as resources:
         resources.push_async_callback(flush_metrics)
         resources.push_async_callback(finish_wake_work)
