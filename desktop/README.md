@@ -65,14 +65,14 @@ using the configured transcription/conversation endpoints.
 
 ## Captures and tasks
 
-After the capture wake word, wait for the ascending chime to finish, then
-speak your text and ending phrase. Microphone blocks captured during a cue
-are discarded. An anticipatory cue marks a provisional ending; a descending
+After the capture wake word, keep speaking your text and ending phrase; initial
+capture plays no cue, and speech that follows the wake phrase without a pause is
+kept. Microphone blocks captured during a later cue are discarded. An anticipatory cue marks a provisional ending; a descending
 cue marks cancellation or continued speech. A resolution chime acknowledges
 an accepted ending before delivery begins; it does not mean delivery succeeded.
 A dissonant cue signals an action or playback failure.
-Fresh audio is buffered while the recognizer connects; startup must complete
-within eight seconds. Ordinary pauses can produce separate transcription pieces
+Audio is buffered while the target window is read and the recognizer connects;
+startup must complete within eight seconds. Ordinary pauses can produce separate transcription pieces
 but do not end the capture without an ending command. All ending phrases can be
 changed in the config. `ending_pause` defaults to 2.5 seconds and accepts values
 from 2 to 3 seconds.
@@ -174,7 +174,7 @@ not saved.
 
 Detector and level timings write in background batches of 125 records, with at
 most one batch writing and one waiting. A stalled writer can drop optional
-timings with a warning; it does not block the start cue. Shutdown closes the
+timings with a warning; it does not delay capture. Shutdown closes the
 microphone before waiting for the remaining metrics.
 
 ## Tests
