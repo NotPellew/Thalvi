@@ -769,7 +769,7 @@ fn record_voice_turn(
         fields["text"] = json!(text);
     }
     if recorder.audio_enabled() && !clip.is_empty() {
-        recorder.emit_wav(turn, clip);
+        recorder.emit_wav(turn.to_string(), clip);
         if recorder.metrics_enabled() || recorder.text_enabled() {
             fields["audio"] = json!(format!("{turn}.wav"));
         }

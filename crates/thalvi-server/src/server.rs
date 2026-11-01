@@ -165,7 +165,7 @@ async fn transcription_upgrade<T: Tts + Clone + 'static>(
             socket,
             state.factory,
             state.recording,
-            format!("capture-{id}"),
+            format!("capture-{id:x}-{:x}", crate::recorder::now_ms()),
         )
     })
 }
