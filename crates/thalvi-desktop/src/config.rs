@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::capture::{CaptureLimits, EndingPauses, Endings};
 use crate::cues::Cues;
@@ -42,8 +42,12 @@ pub struct DesktopConfig {
     pub capture_limits: CaptureLimits,
     pub endings: Endings,
     pub stt: SttConfig,
+    pub apps: BTreeMap<String, App>,
     /// Phrases the task ending runs, in file order.
     pub scripts: Vec<Script>,
+    pub overlay: OverlayConfig,
+    /// The input device to open; `None` is the system default.
+    pub microphone: Option<String>,
     /// From `THALVI_RECORD`, never from the file.
     pub record: RecordKinds,
 }
@@ -69,6 +73,31 @@ struct RawDesktopConfig {
     apps: BTreeMap<String, RawApp>,
     #[serde(default)]
     scripts: Vec<RawScript>,
+    #[serde(default)]
+    overlay: OverlayConfig,
+    #[serde(default)]
+    microphone: Option<String>,
+}
+
+/// What the status overlay shows; both are on by default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverlayConfig {
+    /// Show the overlay while a capture is under way.
+    #[serde(default = "on")]
+    pub show: bool,
+    /// Show the dictated text in the overlay.
+    #[serde(default = "on")]
+    pub draft: bool,
+}
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        Self {
+            show: true,
+            draft: true,
+        }
+    }
 }
 
 impl TryFrom<RawDesktopConfig> for DesktopConfig {
@@ -88,6 +117,10 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
             }
             scripts.push(script);
         }
+        let microphone = raw
+            .microphone
+            .map(|name| nonempty(&name, "microphone"))
+            .transpose()?;
         Ok(Self {
             server: raw.server,
             wake: raw.wake,
@@ -96,7 +129,10 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
             capture_limits: raw.capture_limits,
             endings: raw.endings,
             stt: raw.stt,
+            apps,
             scripts,
+            overlay: raw.overlay,
+            microphone,
             record: RecordKinds::default(),
         })
     }
@@ -272,12 +308,119 @@ fn nonempty(value: &str, label: &str) -> Result<String, String> {
 }
 
 /// Speech-to-text settings beyond the live server stream.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SttConfig {
     /// Re-transcribes each accepted capture on this endpoint when set.
     #[serde(default)]
     pub secondary: Option<SecondaryStt>,
+}
+
+/// A config in the form of its file; `record` is never part of it.
+#[derive(Serialize)]
+struct FileForm<'a> {
+    server: &'a ServerUrl,
+    wake: &'a WakeConfig,
+    cues: &'a Cues,
+    ending_pause: &'a EndingPauses,
+    capture_limits: &'a CaptureLimits,
+    endings: &'a Endings,
+    stt: &'a SttConfig,
+    apps: BTreeMap<&'a str, FileApp<'a>>,
+    scripts: Vec<FileScript<'a>>,
+    overlay: &'a OverlayConfig,
+    microphone: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct FileApp<'a> {
+    classes: &'a [String],
+    executables: &'a [String],
+    input_keys: Vec<String>,
+}
+
+impl<'a> From<&'a App> for FileApp<'a> {
+    fn from(app: &'a App) -> Self {
+        let keys = app.shortcut.iter().flat_map(|shortcut| {
+            shortcut
+                .modifiers
+                .iter()
+                .map(|modifier| {
+                    match modifier {
+                        Modifier::Ctrl => "ctrl",
+                        Modifier::Shift => "shift",
+                        Modifier::Alt => "alt",
+                        Modifier::Logo => "logo",
+                    }
+                    .to_owned()
+                })
+                .chain(std::iter::once(shortcut.key.clone()))
+        });
+        Self {
+            classes: &app.classes,
+            executables: &app.executables,
+            input_keys: keys.collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct FileScript<'a> {
+    phrase: &'a str,
+    action: &'static str,
+    destination: &'a str,
+    label: &'a str,
+}
+
+impl Serialize for DesktopConfig {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let scripts = self
+            .scripts
+            .iter()
+            .map(|script| {
+                let (action, destination) = match &script.action {
+                    ScriptAction::OpenUrl(url) => ("open_url", url.as_str()),
+                    ScriptAction::FocusApp(app) => {
+                        let name = self
+                            .apps
+                            .iter()
+                            .find_map(|(name, known)| (known == app).then_some(name))
+                            .ok_or_else(|| {
+                                serde::ser::Error::custom("script app is not configured")
+                            })?;
+                        ("focus_app", name.as_str())
+                    }
+                    ScriptAction::DiscordMessage { destination } => {
+                        ("discord_message", destination.as_str())
+                    }
+                };
+                Ok(FileScript {
+                    phrase: &script.phrase,
+                    action,
+                    destination,
+                    label: &script.label,
+                })
+            })
+            .collect::<Result<Vec<_>, S::Error>>()?;
+        FileForm {
+            server: &self.server,
+            wake: &self.wake,
+            cues: &self.cues,
+            ending_pause: &self.ending_pause,
+            capture_limits: &self.capture_limits,
+            endings: &self.endings,
+            stt: &self.stt,
+            apps: self
+                .apps
+                .iter()
+                .map(|(name, app)| (name.as_str(), FileApp::from(app)))
+                .collect(),
+            scripts,
+            overlay: &self.overlay,
+            microphone: self.microphone.as_deref(),
+        }
+        .serialize(serializer)
+    }
 }
 
 impl DesktopConfig {
@@ -845,6 +988,82 @@ mod tests {
                 }
                 (other, expected) => panic!("{raw:?}: {other:?} vs {expected:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn the_config_serializes_to_the_file_form_it_was_read_from() {
+        let full = r#"{
+            "server": "wss://thalvi.example:9000/",
+            "stt": {"secondary": {"url": "http://127.0.0.1:9/v1/", "model": "m", "api_key": "k", "api": "meta"}},
+            "wake": {"capture": {"model": "/models/me.onnx", "threshold": 0.7},
+                     "conversation": {"model": "hey_jarvis"}},
+            "cues": {"wake": false, "error": false},
+            "ending_pause": {"paste": 1, "submit": 3, "task": 2.5},
+            "capture_limits": {"idle": 90, "max": 120},
+            "endings": {"Send It": "submit", "paste": "paste", "do it": "task",
+                        "scratch": "scratch", "cancel": "cancel"},
+            "apps": {"editor": {"classes": ["Code"], "executables": ["Code.exe"],
+                                "input_keys": ["ctrl", "Shift", "p"]},
+                     "term": {"classes": ["kitty"]}},
+            "scripts": [
+                {"phrase": "open site", "action": "open_url", "destination": "https://y.com/a"},
+                {"phrase": "switch to editor", "action": "focus_app", "destination": "editor",
+                 "label": "the editor"},
+                {"phrase": "message demo saying", "action": "discord_message",
+                 "destination": "https://discord.com/channels/1/2"}
+            ],
+            "overlay": {"show": false, "draft": true},
+            "microphone": " USB Mic "
+        }"#;
+        for json in ["{}", full] {
+            let config = DesktopConfig::from_json_str(json, Some("metrics,audio")).unwrap();
+            let written = serde_json::to_string(&config).unwrap();
+            let again = DesktopConfig::from_json_str(&written, None).unwrap();
+            assert_eq!(
+                again,
+                DesktopConfig {
+                    record: RecordKinds::default(),
+                    ..config
+                },
+                "{written}"
+            );
+            assert!(!written.contains("record"), "{written}");
+        }
+    }
+
+    #[test]
+    fn overlay_and_microphone_default_and_are_validated() {
+        let config = parse("{}").unwrap();
+        assert_eq!(
+            config.overlay,
+            OverlayConfig {
+                show: true,
+                draft: true
+            }
+        );
+        assert_eq!(config.microphone, None);
+
+        let config = parse(r#"{"overlay": {"draft": false}, "microphone": " USB Mic "}"#).unwrap();
+        assert_eq!(
+            config.overlay,
+            OverlayConfig {
+                show: true,
+                draft: false
+            }
+        );
+        assert_eq!(config.microphone.as_deref(), Some("USB Mic"));
+
+        for (json, expected) in [
+            (
+                r#"{"microphone": "  "}"#,
+                "microphone must be nonempty text.",
+            ),
+            (r#"{"overlay": {"show": "yes"}}"#, "invalid type"),
+            (r#"{"overlay": {"size": 3}}"#, "unknown field `size`"),
+        ] {
+            let error = parse(json).unwrap_err();
+            assert!(error.to_string().contains(expected), "{json}: {error}");
         }
     }
 

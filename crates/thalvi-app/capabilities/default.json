@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The overlay and the settings window listen to Thalvi's events and call its commands.",
+  "windows": ["overlay", "settings"],
+  "permissions": ["core:event:default"]
+}

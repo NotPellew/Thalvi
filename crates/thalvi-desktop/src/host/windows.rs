@@ -3,6 +3,7 @@
 mod win32;
 
 use std::fmt;
+use std::path::Path;
 
 use super::{App, Host, HostError, Modifier, TypedText, WebUrl};
 pub use win32::Real;
@@ -229,6 +230,20 @@ impl<A: Win32> Host for Windows<A> {
         } else {
             Err(nothing_typed("Windows could not open the web address."))
         }
+    }
+
+    fn open_folder(&self, path: &Path) -> Result<(), HostError> {
+        // Opening a folder with the shell's "open" verb shows it in Explorer.
+        if self.api.open_url(&path.to_string_lossy()) {
+            Ok(())
+        } else {
+            Err(nothing_typed("Windows could not open the folder."))
+        }
+    }
+
+    fn prepare_overlay(&self) -> Result<(), HostError> {
+        // Tauri's non-focusable window (WS_EX_NOACTIVATE) already never takes focus.
+        Ok(())
     }
 }
 
@@ -820,10 +835,13 @@ mod tests {
 
         desktop.copy("kept").unwrap();
         desktop.open_url(&url).unwrap();
+        desktop
+            .open_folder(Path::new(r"C:\Users\me\thalvi"))
+            .unwrap();
         assert_eq!(desktop.api.read(|state| state.clipboard.clone()), ["kept"]);
         assert_eq!(
             desktop.api.read(|state| state.opened.clone()),
-            ["https://github.com/NotPellew/Thalvi"]
+            ["https://github.com/NotPellew/Thalvi", r"C:\Users\me\thalvi"]
         );
 
         desktop.api.with(|state| {
@@ -837,6 +855,10 @@ mod tests {
         assert_eq!(
             nothing_typed_text(desktop.open_url(&url).unwrap_err()),
             "Windows could not open the web address."
+        );
+        assert_eq!(
+            nothing_typed_text(desktop.open_folder(Path::new("x")).unwrap_err()),
+            "Windows could not open the folder."
         );
     }
 

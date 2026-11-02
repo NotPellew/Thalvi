@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::Path;
 use std::sync::Mutex;
 
 use crate::host::{App, Host, HostError, TypedText, WebUrl};
@@ -88,5 +89,13 @@ impl Host for FakeHost {
 
     fn open_url(&self, url: &WebUrl) -> Result<(), HostError> {
         self.record("open_url", format!("open_url:{}", url.as_str()))
+    }
+
+    fn open_folder(&self, path: &Path) -> Result<(), HostError> {
+        self.record("open_folder", format!("open_folder:{}", path.display()))
+    }
+
+    fn prepare_overlay(&self) -> Result<(), HostError> {
+        self.record("prepare_overlay", "prepare_overlay".to_owned())
     }
 }

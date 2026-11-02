@@ -6,6 +6,10 @@ mod hyprland;
 mod windows;
 
 use std::fmt;
+use std::path::Path;
+
+/// The title of the status overlay window, by which a desktop recognises it.
+pub const OVERLAY_TITLE: &str = "Thalvi overlay";
 
 /// The host for the desktop Thalvi runs on.
 #[cfg(target_os = "linux")]
@@ -146,6 +150,19 @@ pub trait Host: Send + Sync {
     /// # Errors
     /// Why the browser could not be asked.
     fn open_url(&self, url: &WebUrl) -> Result<(), HostError>;
+
+    /// Opens the folder `path` in the file manager.
+    ///
+    /// # Errors
+    /// Why the file manager could not be asked.
+    fn open_folder(&self, path: &Path) -> Result<(), HostError>;
+
+    /// Makes the window titled [`OVERLAY_TITLE`] float at the top of the screen above other
+    /// windows without ever taking focus. Call before the window first appears.
+    ///
+    /// # Errors
+    /// Why the desktop could not be told; the overlay must then stay hidden.
+    fn prepare_overlay(&self) -> Result<(), HostError>;
 }
 
 #[cfg(test)]

@@ -1,0 +1,209 @@
+import { beforeEach, describe, expect, it } from "vitest";
+import type { Status } from "./contract.ts";
+import { mountOverlay } from "./overlay.ts";
+import { manualClock, SETTINGS, settle, stubBackend } from "./testing.ts";
+
+let root: HTMLElement;
+
+beforeEach(() => {
+  document.body.innerHTML = '<div id="overlay"></div>';
+  root = document.getElementById("overlay") as HTMLElement;
+});
+
+function pick(selector: string): HTMLElement {
+  const found = root.querySelector<HTMLElement>(selector);
+  if (!found) throw new Error(`missing ${selector}`);
+  return found;
+}
+
+function mount(settings = SETTINGS) {
+  const stub = stubBackend(settings);
+  const clock = manualClock();
+  mountOverlay(root, stub.backend, clock);
+  return { ...stub, clock };
+}
+
+const SENTENCE = "Call me back";
+const pending = (waitingForQuiet: boolean, pauseMs = 2500): Status => ({
+  state: "pending",
+  target: "Slack",
+  route: "submit",
+  text: SENTENCE,
+  waitingForQuiet,
+  pauseMs,
+});
+
+describe("each status", () => {
+  const cases: { name: string; status: Status; hidden: boolean; label: string; target: string; draft: boolean }[] = [
+    { name: "paused", status: { state: "paused" }, hidden: true, label: "", target: "", draft: false },
+    { name: "listening", status: { state: "listening" }, hidden: true, label: "", target: "", draft: false },
+    { name: "starting", status: { state: "starting", target: "Slack" }, hidden: false, label: "LISTENING", target: "→ Slack", draft: false },
+    {
+      name: "capturing",
+      status: { state: "capturing", target: null, committed: "Hello", partial: "wor" },
+      hidden: false,
+      label: "LISTENING",
+      target: "",
+      draft: true,
+    },
+    { name: "pending, waiting for quiet", status: pending(true), hidden: false, label: "QUIET", target: "→ Slack", draft: true },
+    { name: "pending, counting", status: pending(false), hidden: false, label: "SUBMIT IN 2 s", target: "→ Slack", draft: true },
+    { name: "pending, short pause", status: pending(false, 700), hidden: false, label: "SUBMIT IN 1 s", target: "→ Slack", draft: true },
+    { name: "working", status: { state: "working", target: "Slack", route: "task", cancellable: false }, hidden: false, label: "WORKING", target: "→ Slack", draft: false },
+    { name: "failed", status: { state: "failed", notice: "Server unreachable." }, hidden: false, label: "Server unreachable.", target: "", draft: false },
+  ];
+  it.each(cases)("$name", async ({ status, hidden, label, target, draft }) => {
+    const { emit } = mount();
+    await settle();
+    emit(status);
+    expect(root.hidden).toBe(hidden);
+    expect(pick(".lbl").textContent).toBe(label);
+    expect(pick(".tgt").textContent).toBe(target);
+    expect(pick(".draft").hidden).toBe(!draft);
+  });
+
+  const done: { name: string; route: "paste" | "submit" | "task"; target: string | null; text: string }[] = [
+    { name: "pasted", route: "paste", target: "Slack", text: "✓ Pasted into Slack" },
+    { name: "sent", route: "submit", target: "Slack", text: "✓ Sent to Slack" },
+    { name: "task", route: "task", target: "Slack", text: "✓ Opened the docs" },
+    { name: "no target", route: "paste", target: null, text: "✓ Opened the docs" },
+  ];
+  it.each(done)("done, $name", ({ route, target, text }) => {
+    const { emit } = mount();
+    emit({ state: "done", target, route, notice: "Opened the docs" });
+    expect(root.hidden).toBe(false);
+    expect(pick(".lbl").textContent).toBe(text);
+  });
+});
+
+describe("draft", () => {
+  it("shows settled text, the live partial and a caret while capturing", () => {
+    const { emit } = mount();
+    emit({ state: "capturing", target: null, committed: "Hello there", partial: "wor" });
+    expect(pick(".c").textContent).toBe("Hello there");
+    expect(pick(".p").textContent).toBe("wor");
+    expect(pick(".caret").hidden).toBe(false);
+  });
+
+  it("marks the ending when pending", () => {
+    const { emit } = mount();
+    emit(pending(true));
+    expect(pick(".c").textContent).toBe(SENTENCE);
+    expect(pick(".end").textContent).toBe("submit");
+    expect(pick(".caret").hidden).toBe(true);
+  });
+
+  it("is hidden when overlay.draft is off, leaving the pill", async () => {
+    const { emit } = mount({ ...SETTINGS, overlay: { show: true, draft: false } });
+    await settle();
+    emit({ state: "capturing", target: "Slack", committed: "secret", partial: null });
+    expect(pick(".draft").hidden).toBe(true);
+    expect(pick(".lbl").textContent).toBe("LISTENING");
+  });
+
+  it("follows a settings change at the next idle moment", async () => {
+    const { emit, backend } = mount();
+    await settle();
+    backend.getSettings.mockResolvedValue({ ...SETTINGS, overlay: { show: true, draft: false } });
+    emit({ state: "listening" });
+    await settle();
+    emit({ state: "capturing", target: null, committed: "x", partial: null });
+    expect(pick(".draft").hidden).toBe(true);
+  });
+});
+
+describe("countdown", () => {
+  const bar = () => pick(".cd b").style.transform;
+
+  it("starts when waitingForQuiet turns false and resets when it turns true again", () => {
+    const { emit, clock } = mount();
+    emit(pending(true));
+    expect(bar()).toBe("scaleX(1)");
+    clock.advance(5000);
+    expect(bar()).toBe("scaleX(1)");
+
+    emit(pending(false));
+    clock.advance(1000);
+    expect(bar()).toBe("scaleX(0.600)");
+    expect(pick(".lbl").textContent).toBe("SUBMIT IN 1 s");
+
+    emit(pending(true));
+    clock.advance(1000);
+    expect(bar()).toBe("scaleX(1)");
+    expect(pick(".lbl").textContent).toBe("QUIET");
+
+    emit(pending(false));
+    clock.advance(500);
+    expect(bar()).toBe("scaleX(0.800)");
+  });
+
+  it("keeps running when the same pending state is announced again", () => {
+    const { emit, clock } = mount();
+    emit(pending(false));
+    clock.advance(1000);
+    emit(pending(false));
+    clock.advance(500);
+    expect(bar()).toBe("scaleX(0.400)");
+  });
+});
+
+describe("level bars", () => {
+  const middle = () => parseFloat(/scaleY\(([\d.]+)\)/.exec((root.querySelectorAll("i")[4] as HTMLElement).style.transform)?.[1] ?? "NaN");
+
+  it("rise with the mic level and settle when it ends", () => {
+    const { emit, level, clock } = mount();
+    emit({ state: "capturing", target: null, committed: "", partial: null });
+    for (let frame = 0; frame < 10; frame += 1) clock.advance(16);
+    const quiet = middle();
+    level(1);
+    for (let frame = 0; frame < 10; frame += 1) clock.advance(16);
+    const loud = middle();
+    level(0);
+    for (let frame = 0; frame < 60; frame += 1) clock.advance(16);
+    expect(loud).toBeGreaterThan(0.6);
+    expect(quiet).toBeLessThan(0.3);
+    expect(middle()).toBeLessThan(0.3);
+  });
+
+  it("go flat during the countdown", () => {
+    const { emit, level, clock } = mount();
+    emit({ state: "capturing", target: null, committed: "", partial: null });
+    level(1);
+    clock.advance(16);
+    emit(pending(false));
+    clock.advance(16);
+    expect(middle()).toBeCloseTo(4 / 22, 2);
+  });
+});
+
+describe("the cancel button", () => {
+  it("shows while a capture can still be cancelled and hides once delivery starts", async () => {
+    const { emit } = mount();
+    await settle();
+    const shown = (status: Status): boolean => {
+      emit(status);
+      return !pick(".x").hidden;
+    };
+    expect(shown({ state: "capturing", target: null, committed: "", partial: null })).toBe(true);
+    expect(shown({ state: "working", target: "Slack", route: "task", cancellable: true })).toBe(true);
+    expect(shown({ state: "working", target: "Slack", route: "task", cancellable: false })).toBe(false);
+    expect(shown({ state: "done", target: "Slack", route: "task", notice: "Done" })).toBe(false);
+  });
+});
+
+describe("backend calls", () => {
+  it("cancel asks the backend to cancel the capture", () => {
+    const { emit, backend } = mount();
+    emit({ state: "starting", target: null });
+    pick(".x").click();
+    expect(backend.cancelCapture).toHaveBeenCalledOnce();
+  });
+
+  it("an event that arrives before the first status wins", async () => {
+    const stub = stubBackend(SETTINGS, { state: "paused" });
+    mountOverlay(root, stub.backend, manualClock());
+    stub.emit({ state: "starting", target: "Slack" });
+    await settle();
+    expect(root.hidden).toBe(false);
+  });
+});

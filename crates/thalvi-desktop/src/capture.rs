@@ -4,6 +4,7 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
@@ -26,7 +27,7 @@ const DEFAULT_ENDINGS: [(&str, Ending); 6] = [
 ];
 
 /// What a spoken ending phrase does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Ending {
     Paste,
@@ -98,6 +99,16 @@ impl TryFrom<BTreeMap<String, Ending>> for Endings {
             return Err(EndingsError::Incomplete);
         }
         Ok(Self::longest_first(entries))
+    }
+}
+
+impl Serialize for Endings {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (phrase, ending) in &self.0 {
+            map.serialize_entry(phrase, ending)?;
+        }
+        map.end()
     }
 }
 
@@ -180,6 +191,16 @@ impl TryFrom<RawEndingPauses> for EndingPauses {
     }
 }
 
+impl Serialize for EndingPauses {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry("paste", &self.paste.as_secs_f64())?;
+        map.serialize_entry("submit", &self.submit.as_secs_f64())?;
+        map.serialize_entry("task", &self.task.as_secs_f64())?;
+        map.end()
+    }
+}
+
 impl Default for EndingPauses {
     fn default() -> Self {
         Self {
@@ -246,6 +267,15 @@ impl TryFrom<RawCaptureLimits> for CaptureLimits {
             idle: limit("idle", (10, 600), raw.idle, defaults.idle)?,
             max: limit("max", (60, 3600), raw.max, defaults.max)?,
         })
+    }
+}
+
+impl Serialize for CaptureLimits {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("idle", &self.idle.as_secs())?;
+        map.serialize_entry("max", &self.max.as_secs())?;
+        map.end()
     }
 }
 

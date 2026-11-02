@@ -104,11 +104,16 @@ pinned toolchain, its commands here, and its CI job; one that ships on Windows
 also runs its gate on `windows-latest`. npm is the package manager; lockfiles
 are committed.
 
-- Server and Rust desktop (`crates/`): on Linux, install `libasound2-dev`,
-  then `cargo fmt --all -- --check`, `cargo lint`,
+- Server and Rust desktop (`crates/`): on Linux, install `libasound2-dev
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev`, build the desktop UI
+  first (`npm ci` and `npm run build` in `crates/thalvi-app/ui`, Node pinned in
+  `.node-version`), then `cargo fmt --all -- --check`, `cargo lint`,
   `cargo test --workspace --locked`, `RUSTDOCFLAGS="-D warnings" cargo docs`.
-- Rust desktop on Windows (`windows-latest`): `cargo fmt --all -- --check`,
-  `cargo lint`, `cargo test -p thalvi-desktop --locked`.
+- Rust desktop on Windows (`windows-latest`): build the desktop UI the same
+  way, then `cargo fmt --all -- --check`, `cargo lint`,
+  `cargo test -p thalvi-desktop -p thalvi-app --locked`.
+- Desktop UI (`crates/thalvi-app/ui/`): `npm ci`, `npm run typecheck`,
+  `npm run lint`, `npm test`, `npm run build`.
 - Web (`web/`): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`,
   `npm run build`.
 - Desktop (`desktop/`): Python is pinned in `.python-version`, uv is pinned in

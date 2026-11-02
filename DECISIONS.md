@@ -18,10 +18,10 @@ areas your change touches. Editing rules are in
   the clipboard only: it exposes neither the focused window nor focus by ID.
   Why: the desktops we can qualify. Rejected: KDE, X11 and macOS until needed,
   and claiming untested platform parity.
-- **Rust desktop app with a Tauri UI.** One process runs engine, tray and panel;
-  the Python/GTK client stays until the Rust app matches it on Hyprland. Why:
-  one UI for Linux and Windows, in TypeScript like the web client, no UI IPC.
-  Rejected: egui (weaker accessibility), a native UI per OS (two to sync).
+- **Rust desktop app with a Tauri UI.** One process runs engine, tray, a top
+  overlay and a settings window; the overlay never takes focus (Hyprland window
+  rules via the host, a non-activating window on Windows). Why: one TypeScript
+  UI, no IPC. Rejected: layer-shell webview (blank), GTK-only overlay, egui.
 - **Local recognition in the desktop app.** A local model runs behind the same
   recognizer interface as the server client. Why: dictation without server,
   network or key. Rejected: hosting the local model behind the server.

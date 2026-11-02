@@ -10,7 +10,7 @@ use std::{
 };
 
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
@@ -84,7 +84,7 @@ pub enum ServerUrlError {
 }
 
 /// The validated root of the Thalvi server, as `ws://host:port` or `wss://host:port`.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "String")]
 pub struct ServerUrl(String);
 

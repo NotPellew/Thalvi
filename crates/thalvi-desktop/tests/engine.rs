@@ -278,6 +278,36 @@ fn the_voice_fixture_is_speech_to_both_detector_modes() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_microphone_level_follows_the_capture_frames_and_is_zero_outside_it() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let level = rig.handle.level();
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            assert_eq!(*level.borrow(), 0.0, "nothing is loud before a frame");
+
+            // -30 dBFS sits 60% of the way from -60 dBFS to -10 dBFS.
+            rig.feed.send([1036; FRAME_SAMPLES]);
+            settle().await;
+            assert!((*level.borrow() - 0.6).abs() < 0.01, "{}", *level.borrow());
+            rig.feed.send([i16::MAX; FRAME_SAMPLES]);
+            settle().await;
+            assert_eq!(*level.borrow(), 1.0);
+            rig.feed.send(quiet(1));
+            settle().await;
+            assert_eq!(*level.borrow(), 0.0);
+
+            rig.feed.send([i16::MAX; FRAME_SAMPLES]);
+            settle().await;
+            rig.finals("never mind").await;
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(*level.borrow(), 0.0, "the level ends with the capture");
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_wake_cue_and_the_connection_overlap_and_only_audio_after_both_is_sent() {
     LocalSet::new()
         .run_until(async {

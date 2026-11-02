@@ -27,7 +27,7 @@ pub enum Cue {
 }
 
 /// Which cues are switched on; all are by default.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "one switch per cue, named as in the config"

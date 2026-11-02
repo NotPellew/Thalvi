@@ -42,6 +42,31 @@ pub fn submit_notice(state: &EngineState, window: &str) -> Option<String> {
     }
 }
 
+/// What delivering a capture came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Finished {
+    /// The text reached its destination; otherwise it is kept on the clipboard when possible.
+    pub delivered: bool,
+    /// Says what happened and where the dictated text went.
+    pub notice: String,
+}
+
+impl Finished {
+    fn delivered(notice: String) -> Self {
+        Self {
+            delivered: true,
+            notice,
+        }
+    }
+
+    fn kept(notice: String) -> Self {
+        Self {
+            delivered: false,
+            notice,
+        }
+    }
+}
+
 /// Delivers accepted captures through one desktop host.
 pub struct Delivery<H> {
     host: Arc<H>,
@@ -66,8 +91,8 @@ where
         )
     }
 
-    /// Acts on how a capture ended and returns the notice for the user; `None` when the user
-    /// cancelled and there is nothing to report.
+    /// Acts on how a capture ended and says what came of it; `None` when the user cancelled and
+    /// there is nothing to report.
     ///
     /// Text that cannot be delivered is put on the clipboard, and the notice says whether anything
     /// may have been typed.
@@ -77,16 +102,16 @@ where
         bound: &Bound<H::Target>,
         config: &DesktopConfig,
         recorder: &Recorder,
-    ) -> Option<String> {
+    ) -> Option<Finished> {
         match outcome {
             CaptureOutcome::Cancelled => None,
             CaptureOutcome::Failed {
                 error,
                 recoverable_text,
-            } => Some(match recoverable_text {
+            } => Some(Finished::kept(match recoverable_text {
                 Some(text) => self.keep(recorder, text, &error.to_string()).await,
                 None => error.to_string(),
-            }),
+            })),
             CaptureOutcome::Accepted(request) => Some(match request.route {
                 CaptureRoute::Paste => self.type_in(recorder, bound, &request.text, false).await,
                 CaptureRoute::Submit => self.type_in(recorder, bound, &request.text, true).await,
@@ -101,9 +126,9 @@ where
         bound: &Bound<H::Target>,
         text: &str,
         enter: bool,
-    ) -> String {
+    ) -> Finished {
         if text.is_empty() && !enter {
-            return "There was nothing to type.".to_owned();
+            return Finished::kept("There was nothing to type.".to_owned());
         }
         let result = match (&bound.0, TypedText::new(text)) {
             (Ok(target), Ok(typed)) => {
@@ -119,15 +144,17 @@ where
             ))),
         };
         match result {
-            Ok(()) => "Delivered.".to_owned(),
-            Err(error) => self.keep(recorder, text, &error.to_string()).await,
+            Ok(()) => Finished::delivered("Delivered.".to_owned()),
+            Err(error) => Finished::kept(self.keep(recorder, text, &error.to_string()).await),
         }
     }
 
-    async fn run_task(&self, recorder: &Recorder, config: &DesktopConfig, text: &str) -> String {
+    async fn run_task(&self, recorder: &Recorder, config: &DesktopConfig, text: &str) -> Finished {
         let task = match tasks::decide(text, config) {
             Ok(task) => task,
-            Err(error) => return self.keep(recorder, text, &error.to_string()).await,
+            Err(error) => {
+                return Finished::kept(self.keep(recorder, text, &error.to_string()).await);
+            }
         };
         let (call, keep) = match &task {
             Task::OpenUrl { .. } => ("open_url", text.to_owned()),
@@ -138,8 +165,8 @@ where
             .call(recorder, call, move |host| tasks::execute(&task, host))
             .await
         {
-            Ok(notice) => notice,
-            Err(error) => self.keep(recorder, &keep, &error.to_string()).await,
+            Ok(notice) => Finished::delivered(notice),
+            Err(error) => Finished::kept(self.keep(recorder, &keep, &error.to_string()).await),
         }
     }
 
@@ -220,13 +247,69 @@ mod tests {
         })
     }
 
-    async fn run(host: FakeHost, outcome: CaptureOutcome) -> (Option<String>, Vec<String>) {
+    async fn finish(host: FakeHost, outcome: CaptureOutcome) -> (Option<Finished>, Vec<String>) {
         let delivery = Delivery::new(host);
         let recorder = Recorder::disabled();
         let config = DesktopConfig::from_json_str(CONFIG, None).unwrap();
         let bound = delivery.bind(&recorder).await;
-        let notice = delivery.finish(&outcome, &bound, &config, &recorder).await;
-        (notice, delivery.host.calls())
+        let finished = delivery.finish(&outcome, &bound, &config, &recorder).await;
+        (finished, delivery.host.calls())
+    }
+
+    async fn run(host: FakeHost, outcome: CaptureOutcome) -> (Option<String>, Vec<String>) {
+        let (finished, calls) = finish(host, outcome).await;
+        (finished.map(|finished| finished.notice), calls)
+    }
+
+    #[tokio::test]
+    async fn only_text_that_reached_its_destination_counts_as_delivered() {
+        let deliver_fails =
+            || FakeHost::default().failing("deliver", HostError::NothingTyped("No.".to_owned()));
+        let failed = CaptureOutcome::Failed {
+            error: CaptureError::MicStopped,
+            recoverable_text: Some("kept".to_owned()),
+        };
+        for (host, outcome, expected) in [
+            (
+                FakeHost::default(),
+                accepted(CaptureRoute::Paste, "hi"),
+                Some(true),
+            ),
+            (
+                FakeHost::default(),
+                accepted(CaptureRoute::Submit, "hi"),
+                Some(true),
+            ),
+            (
+                FakeHost::default(),
+                accepted(CaptureRoute::Task, "switch to editor"),
+                Some(true),
+            ),
+            (
+                deliver_fails(),
+                accepted(CaptureRoute::Paste, "hi"),
+                Some(false),
+            ),
+            (
+                FakeHost::default(),
+                accepted(CaptureRoute::Paste, ""),
+                Some(false),
+            ),
+            (
+                FakeHost::default(),
+                accepted(CaptureRoute::Task, "unknown phrase"),
+                Some(false),
+            ),
+            (FakeHost::default(), failed, Some(false)),
+            (FakeHost::default(), CaptureOutcome::Cancelled, None),
+        ] {
+            let (finished, _) = finish(host, outcome.clone()).await;
+            assert_eq!(
+                finished.map(|finished| finished.delivered),
+                expected,
+                "{outcome:?}"
+            );
+        }
     }
 
     fn calls(calls: &[&str]) -> Vec<String> {
