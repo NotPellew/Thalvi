@@ -1,6 +1,6 @@
 // The settings pages: each builds its rows against the draft and edits it in place.
 
-import type { Backend, Ending, ScriptActionKind, SecondaryApi, Settings } from "./contract.ts";
+import type { Backend, Ending, ScriptActionKind, SecondaryApi, Settings, SttEngine } from "./contract.ts";
 import { errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
@@ -38,6 +38,11 @@ const APIS: readonly (readonly [SecondaryApi, string])[] = [
   ["openai", "OpenAI-style"],
   ["meta", "Meta"],
 ];
+const ENGINES: readonly (readonly [SttEngine, string])[] = [
+  ["local", "On this computer"],
+  ["server", "Through the server"],
+];
+const SPEECH_MODEL = "nemotron_160ms";
 const CUES: readonly (readonly [keyof Settings["cues"], string, string])[] = [
   ["wake", "Wake", "Thalvi heard the wake phrase and is listening."],
   ["provisional", "Ending heard", "An ending phrase was heard; the countdown has begun."],
@@ -229,6 +234,22 @@ function wake(context: PageContext): HTMLElement[] {
 }
 
 function recognition({ draft, controls }: PageContext): HTMLElement[] {
+  const engine = controls.select(ENGINES, draft.stt.engine, (value) => {
+    draft.stt.engine = value;
+    syncModel();
+  });
+  const speechModel = controls.text(draft.stt.model ?? "", syncModel, { placeholder: SPEECH_MODEL });
+  const modelInput = speechModel.field as HTMLInputElement;
+
+  function syncModel(): void {
+    const model = modelInput.value.trim();
+    if (draft.stt.engine === "local" && model !== "") {
+      draft.stt.model = model;
+    } else {
+      delete draft.stt.model;
+    }
+  }
+
   const secondary = draft.stt.secondary ?? null;
   const url = controls.text(secondary?.url ?? "", sync, { placeholder: "http://127.0.0.1:9000/v1" });
   const model = controls.text(secondary?.model ?? "", sync);
@@ -250,6 +271,13 @@ function recognition({ draft, controls }: PageContext): HTMLElement[] {
         };
   }
   return [
+    group("Dictation"),
+    row("Recognize speech", "Where your dictation is turned into text. Conversation mode always uses the server.", engine),
+    row(
+      "Speech model",
+      `For recognition on this computer: ${SPEECH_MODEL} or the folder of a model. Empty uses ${SPEECH_MODEL}. The first use downloads about 650 MB.`,
+      speechModel,
+    ),
     group("Second transcription"),
     row("Endpoint address", "Transcribes each accepted capture again here. Leave all four fields empty to turn it off.", url),
     row("Model", null, model),
