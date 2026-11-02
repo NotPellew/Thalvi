@@ -89,9 +89,8 @@ impl ServerUrl {
     /// # Errors
     /// Fails when `value` is not a `ws` or `wss` server root without credentials.
     pub fn parse(value: &str) -> Result<Self, ServerUrlError> {
-        let url = reqwest::Url::parse(value.trim()).map_err(|_| ServerUrlError::Invalid)?;
+        let url = reqwest::Url::parse(value).map_err(|_| ServerUrlError::Invalid)?;
         if !matches!(url.scheme(), "ws" | "wss")
-            || url.host_str().is_none()
             || !url.username().is_empty()
             || url.password().is_some()
         {

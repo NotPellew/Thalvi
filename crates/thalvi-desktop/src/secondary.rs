@@ -71,9 +71,8 @@ impl SecondaryStt {
         api_key: String,
         api: SecondaryApi,
     ) -> Result<Self, SecondarySttError> {
-        let parsed = reqwest::Url::parse(url.trim()).map_err(|_| SecondarySttError::Url)?;
+        let parsed = reqwest::Url::parse(url).map_err(|_| SecondarySttError::Url)?;
         if !matches!(parsed.scheme(), "http" | "https")
-            || parsed.host_str().is_none()
             || !parsed.username().is_empty()
             || parsed.password().is_some()
             || parsed.query().is_some()
