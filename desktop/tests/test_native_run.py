@@ -534,7 +534,7 @@ def test_flow_failures_play_the_error_cue_after_telling_the_user(monkeypatch, fa
         assert order == [told[0], *([Cue.ERROR] if error_cue else []), "clipboard"]
 
 
-def test_capture_preserves_rolling_audio_through_target_and_transcription_startup(monkeypatch):
+def test_capture_sends_only_speech_after_the_wake_cue_through_startup(monkeypatch):
     from websockets.asyncio.server import serve
 
     from thalvi_desktop import client
@@ -620,7 +620,7 @@ def test_capture_preserves_rolling_audio_through_target_and_transcription_startu
                 server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}",
             )
             assert await asyncio.wait_for(cli.run(config, once=True, dry_run=False), 3) == 0
-        assert received == [bytes([marker, 0]) * 1920 for marker in range(4, 15)]
-        assert Cue.WAKE not in cues
+        assert received == [bytes([marker, 0]) * 1920 for marker in (13, 14)]
+        assert cues[0] == Cue.WAKE
 
     asyncio.run(behavior())

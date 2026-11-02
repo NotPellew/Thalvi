@@ -51,15 +51,15 @@ areas your change touches. Editing rules are in
 - **Wake context.** Both trained heads use 16 embedding frames. Why: this
   supports first-frame inference with upstream startup and reset history.
   Rejected: accepting longer contexts that need additional warm-up history.
-- **Capture starts at wake.** Keep 560 ms of rolling audio through wake detection and
-  buffer subsequent speech during target capture and recognizer startup; confirmations
-  wait for ready and a cue, then take fresh speech. Why: preserve immediate dictation
-  and unambiguous confirmations. Rejected: waiting for a cue before dictation.
+- **Capture starts after the wake cue.** Dictation plays the wake cue at once and sends
+  only later speech, buffered while the recognizer connects; confirmations wait for ready,
+  then the cue. Why: wake audio leaked the phrase into 1 in 5 live transcripts even with
+  stripping. Rejected: pre-wake audio, cutting it at the wake, and stripping the phrase.
 - **Silence commits capture.** Paste, submit and tasks wait 2.5 seconds of
   speech silence; continued speech cancels the pending ending. Submit asks
   for target confirmation during that pause. Why: hands-free control with
   time to interrupt. Rejected: immediate dispatch and a second spoken yes.
-- **Musical earcons.** Five two- or three-note cues (wake, provisional ending, cancelled, accepted, error), each switchable under `cues` in the desktop config; initial capture has no wake cue, and the mic drops frames while a cue plays.
+- **Musical earcons.** Five two- or three-note cues (wake, provisional ending, cancelled, accepted, error), each switchable under `cues` in the desktop config; the mic drops frames while a cue plays.
   Why: distinct contours tell capture state apart without looking, and the mic never hears them. Rejected: one beep for every state, and a post-delivery cue.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
   browser and app actions; execution receives a typed action. Why: a later model

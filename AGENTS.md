@@ -73,8 +73,10 @@ directing you.
   re-exports modules. No `mod.rs`.
 - Prefer a lint or a CI check over a new rule in this file.
 - Before calling work done, run the gates and use the change end to end the
-  way the user would. Report what you ran and what you could not verify. A
-  desktop PR names each desktop it was used on; CI and fixtures are not use.
+  way the user would. Report what you ran and what you could not verify.
+  The `verify-thalvi` skill (`.agents/skills/verify-thalvi/`) runs the web
+  client on fake or self-hosted endpoints for this. A desktop PR names each
+  desktop it was used on; CI and fixtures are not use.
 
 ## Keep it lean (YAGNI)
 
