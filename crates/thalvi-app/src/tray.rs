@@ -168,6 +168,8 @@ pub fn can_cancel(status: &Status) -> bool {
 /// The tray icon and the menu items that follow the status.
 pub struct Tray {
     icon: tauri::tray::TrayIcon,
+    /// The state in words; Linux trays show no tooltip, but they show menus.
+    header: MenuItem<Wry>,
     toggle: MenuItem<Wry>,
     cancel: MenuItem<Wry>,
 }
@@ -176,6 +178,7 @@ impl Tray {
     /// # Errors
     /// Fails when the tray icon or its menu cannot be created.
     pub fn new(app: &AppHandle, status: &Status) -> tauri::Result<Self> {
+        let header = MenuItem::with_id(app, "state", title(status), false, None::<&str>)?;
         let toggle = MenuItem::with_id(app, TOGGLE, toggle_text(status), true, None::<&str>)?;
         let cancel = MenuItem::with_id(
             app,
@@ -186,7 +189,7 @@ impl Tray {
         )?;
         let settings = MenuItem::with_id(app, SETTINGS, "Settings…", true, None::<&str>)?;
         let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
-        let menu = Menu::with_items(app, &[&toggle, &cancel, &settings, &quit])?;
+        let menu = Menu::with_items(app, &[&header, &toggle, &cancel, &settings, &quit])?;
         let icon = TrayIconBuilder::with_id("thalvi")
             .icon(Image::new_owned(
                 Icon::of(status).pixels(),
@@ -199,6 +202,7 @@ impl Tray {
             .build(app)?;
         Ok(Self {
             icon,
+            header,
             toggle,
             cancel,
         })
@@ -207,6 +211,7 @@ impl Tray {
     pub fn show(&self, status: &Status) {
         let _ = self.icon.set_icon(Some(Icon::of(status).image()));
         let _ = self.icon.set_tooltip(Some(title(status)));
+        let _ = self.header.set_text(title(status));
         let _ = self.toggle.set_text(toggle_text(status));
         let _ = self.cancel.set_enabled(can_cancel(status));
     }
