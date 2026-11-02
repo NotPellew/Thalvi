@@ -6,6 +6,7 @@ pub mod config;
 pub mod cues;
 pub mod engine;
 pub mod frame;
+pub mod host;
 pub mod metrics;
 pub mod models;
 pub mod recognizer;
