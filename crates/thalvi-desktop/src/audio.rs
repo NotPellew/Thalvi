@@ -582,7 +582,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a microphone"]
     async fn default_microphone_delivers_16khz_frames_in_real_time() {
-        let mut microphone = Microphone::new(InputGate::default());
+        let gate = InputGate::default();
+        let mut microphone = Microphone::new(gate.clone());
         let mut frames = microphone.open().expect("a default microphone");
         let started = Instant::now();
         let mut count = 0_u32;
@@ -597,6 +598,11 @@ mod tests {
             "{count} frames in {:?}, expected about {expected:.1}",
             started.elapsed()
         );
+        gate.set_enabled(false);
+        gate.set_enabled(true);
+        next(&mut frames)
+            .await
+            .expect("real capture timestamps let frames through after the gate reopens");
         microphone.pause();
         assert!(!microphone.is_open());
         assert_eq!(next(&mut frames).await, Err(AudioError::Closed));
