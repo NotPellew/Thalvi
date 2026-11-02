@@ -1282,7 +1282,10 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
             let wav = std::fs::read_dir(&day)
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
-                .find(|path| path.to_string_lossy().contains("/capture-"))
+                .find(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with("capture-"))
+                })
                 .unwrap();
             assert_eq!(
                 std::fs::metadata(wav).unwrap().len(),
