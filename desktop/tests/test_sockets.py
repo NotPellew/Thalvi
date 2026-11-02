@@ -230,6 +230,7 @@ def test_confirmation_discards_old_audio_and_only_accepts_standalone_affirmation
         (True, ["Hey, thanks. Write the report paste that"], "Thanks. Write the report"),
         (True, ["Hey Salvi. Write the", "report paste that"], "Write the report"),
         (True, ["Hey, write the report paste that"], "Write the report"),
+        (True, ["Hey Tavi, write the report paste that"], "Write the report"),
         (True, ["Tilvi write the report paste that"], "Write the report"),
         (True, ["Write the report paste that"], "Write the report"),
         (True, ["Heavy rain is expected paste that"], "Heavy rain is expected"),
