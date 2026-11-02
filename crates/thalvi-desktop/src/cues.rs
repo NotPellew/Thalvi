@@ -156,7 +156,13 @@ impl Playback {
 
     fn set(&self, next: Phase) {
         let mut phase = self.phase();
-        if matches!(*phase, Phase::Playing) {
+        let replaces = match (&*phase, &next) {
+            (Phase::Playing, _) => true,
+            // Stopping or a device error still counts while the tail is sounding.
+            (Phase::Drained(_), Phase::Cancelled | Phase::Failed(_)) => true,
+            _ => false,
+        };
+        if replaces {
             *phase = next;
             self.changed.notify_all();
         }
@@ -548,6 +554,56 @@ mod tests {
             playback.wait(Duration::from_millis(30)),
             Err(CueError::Stalled)
         );
+    }
+
+    #[test]
+    fn the_first_cancel_or_error_wins_even_after_the_last_sample_is_handed_over() {
+        let error = cpal::Error::new(ErrorKind::DeviceNotAvailable);
+        let other = cpal::Error::new(ErrorKind::DeviceBusy);
+        let tail = || Phase::Drained(Instant::now() + Duration::from_secs(2));
+        let cases: [(&str, Vec<Phase>, Result<(), CueError>); 5] = [
+            (
+                "cancel during the tail",
+                vec![tail(), Phase::Cancelled],
+                Ok(()),
+            ),
+            (
+                "error during the tail",
+                vec![tail(), Phase::Failed(error.clone())],
+                Err(CueError::Failed(error.clone())),
+            ),
+            (
+                "drain does not undo an error",
+                vec![Phase::Failed(error.clone()), tail()],
+                Err(CueError::Failed(error.clone())),
+            ),
+            (
+                "drain does not undo a cancel",
+                vec![Phase::Cancelled, tail()],
+                Ok(()),
+            ),
+            (
+                "a later cancel or error does not replace an error",
+                vec![
+                    Phase::Failed(error.clone()),
+                    Phase::Cancelled,
+                    Phase::Failed(other),
+                ],
+                Err(CueError::Failed(error)),
+            ),
+        ];
+        for (name, phases, expected) in cases {
+            let playback = Playback::new();
+            for phase in phases {
+                playback.set(phase);
+            }
+            let started = Instant::now();
+            assert_eq!(playback.wait(Duration::from_secs(5)), expected, "{name}");
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "{name}: must not wait out the tail"
+            );
+        }
     }
 
     #[test]
