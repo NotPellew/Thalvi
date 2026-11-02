@@ -37,6 +37,9 @@ const READY_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// How long a pending ending may go without microphone audio before the capture fails.
 const MIC_WATCHDOG: Duration = Duration::from_millis(250);
+
+/// How long any capture may go without microphone audio before it fails.
+const MIC_TIMEOUT: Duration = Duration::from_secs(3);
 /// Consecutive speech frames, 240 ms, that make audio held back during a pending ending count as
 /// the user continuing.
 const CONTINUATION_FRAMES: u8 = 3;
@@ -712,8 +715,12 @@ where
             }
         }
         loop {
-            let watchdog = (live.text.pending().is_some() && live.cues.is_empty())
-                .then(|| live.last_audio + MIC_WATCHDOG);
+            let limit = if live.text.pending().is_some() {
+                MIC_WATCHDOG
+            } else {
+                MIC_TIMEOUT
+            };
+            let watchdog = live.cues.is_empty().then(|| live.last_audio + limit);
             let step = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => Step::Cancel,

@@ -985,6 +985,66 @@ async fn the_microphone_watchdog_waits_while_a_cue_is_playing() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_capture_fails_when_the_microphone_gives_no_audio_for_three_seconds() {
+    LocalSet::new()
+        .run_until(async {
+            // Unplugged mid-capture: the last frame arrived at 960.
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello world").await;
+            rig.at(3959).await;
+            assert!(!task.is_finished(), "2999 ms without audio");
+            rig.at(3960).await;
+            assert_eq!(rig.started(Cue::Error), [3960]);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: CaptureError::MicStopped,
+                    recoverable_text: Some("Hello world".to_owned())
+                }
+            );
+
+            // A gap just under the limit, then audio again, is only a pause.
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.at(3859).await;
+            rig.feed.send(quiet(1));
+            rig.feed_until(8000, Kind::Quiet).await;
+            assert!(!task.is_finished());
+            rig.handle.cancel();
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+
+            // Cues mute the microphone, so the limit starts when the cue ends.
+            let (mut rig, engine, frames) = Rig::new("{}");
+            rig.cues.set_length(Cue::Cancelled, ms(5000));
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello submit").await;
+            rig.at(1100).await;
+            rig.finals("and more").await;
+            assert_eq!(rig.started(Cue::Cancelled), [1100]);
+            rig.at(6099).await;
+            assert!(!task.is_finished(), "the cue is still playing");
+            rig.at(9099).await;
+            assert!(!task.is_finished(), "3 s after the cue ended is not yet");
+            rig.at(9100).await;
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: CaptureError::MicStopped,
+                    recoverable_text: Some("Hello submit and more".to_owned())
+                }
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn wake_words_are_reported_and_an_ambiguous_one_only_once() {
     LocalSet::new()
         .run_until(async {
