@@ -133,9 +133,8 @@ TTS_VOICES=af_heart,af_bella,sohee
 
 ## Audio input
 
-For local wake words, dictation into a desktop window, and scripted computer
-actions, see the [native desktop client](desktop/README.md). The first target
-is Hyprland; phone use remains conversation-only.
+Wake words, dictation into other windows and scripted actions are in the
+[desktop app](#desktop-app); the phone is conversation-only.
 
 With `LLM_AUDIO_INPUT=on` the language model hears a spoken turn instead of
 reading its transcript: the turn's audio, as recorded and padded by 300 ms on
@@ -172,6 +171,40 @@ preferences and user facts are saved separately in
 to read or edit them. A failed model call or write leaves the full transcript
 untouched. Unset or `off` disables retirement completely, so no session is
 changed or deleted automatically.
+
+## Desktop app
+
+A tray app for the desktop. Say "Hey Thalvi" in any window, then dictate. The
+text is typed into the window you were in when you ended with "paste that" (or
+"finish dictation"), or typed and sent with Enter on "submit". "Do that" runs a
+configured action such as opening a site or focusing an app, "scratch that"
+drops the last piece, and "never mind" drops the capture. A pill and live draft
+at the top of the screen show what it is doing and never take focus; the tray
+pauses, cancels and opens Settings, which edit the config file.
+
+| Desktop | Support |
+| --- | --- |
+| Hyprland | Full |
+| Windows | Full |
+| GNOME | Not yet ([#101](https://github.com/NotPellew/Thalvi/issues/101)) |
+
+Needs, besides Rust (`rust-toolchain.toml`) and Node (`.node-version`):
+
+- **Linux:** `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev` to build;
+  `hyprctl`, `wtype` and `wl-copy` to run.
+- **Windows:** the MSVC build tools. WebView2 ships with Windows 11.
+
+```sh
+npm ci --prefix crates/thalvi-app/ui && npm run build --prefix crates/thalvi-app/ui
+cargo run --release -p thalvi-app   # or: cargo install --path crates/thalvi-app
+```
+
+The first run downloads the wake models. The app streams to the server's
+`/transcription`, `ws://127.0.0.1:8080` unless `server` says otherwise. The
+config is `desktop.json` in `thalvi/` under the user config directory
+(`~/.config` on Linux, `%APPDATA%` on Windows); without one the defaults apply.
+`THALVI_RECORD=metrics,text,audio` records timings, dictated text and
+microphone audio locally, each opt-in.
 
 ## Measure a setup
 

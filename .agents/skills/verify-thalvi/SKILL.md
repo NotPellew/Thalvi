@@ -7,9 +7,9 @@ description: Launch and drive Thalvi's web client (typed and spoken conversation
 
 Thalvi's main surface is the web client the Rust server serves at `/`. A user
 types or talks in it, hears spoken replies, and manages saved conversations.
-The other surfaces are not covered here. The desktop client (`desktop/`, wake
-words, dictation into Hyprland windows) has its own fakes-based gate in
-AGENTS.md. The `measure` binary is a CLI covered by `tests/measure_bin.rs`.
+The other surfaces are not covered here. The desktop app (`crates/thalvi-app`,
+wake words, dictation into other windows) is covered by the Rust and desktop UI
+gates in AGENTS.md. The `measure` binary is a CLI covered by `tests/measure_bin.rs`.
 
 A run has one of two modes. Neither reaches a paid service or needs a key.
 
