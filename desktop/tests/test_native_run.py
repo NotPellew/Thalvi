@@ -620,7 +620,7 @@ def test_capture_preserves_rolling_audio_through_target_and_transcription_startu
                 server=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}",
             )
             assert await asyncio.wait_for(cli.run(config, once=True, dry_run=False), 3) == 0
-        assert received == [bytes([marker, 0]) * 1920 for marker in range(4, 15)]
+        assert received == [bytes([marker, 0]) * 1920 for marker in range(8, 15)]
         assert Cue.WAKE not in cues
 
     asyncio.run(behavior())

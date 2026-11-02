@@ -44,10 +44,10 @@ areas your change touches. Editing rules are in
 - **Wake context.** Both trained heads use 16 embedding frames. Why: this
   supports first-frame inference with upstream startup and reset history.
   Rejected: accepting longer contexts that need additional warm-up history.
-- **Capture starts at wake.** Keep 560 ms of rolling audio through wake detection and
-  buffer subsequent speech during target capture and recognizer startup; confirmations
-  wait for ready and a cue, then take fresh speech. Why: preserve immediate dictation
-  and unambiguous confirmations. Rejected: waiting for a cue before dictation.
+- **Capture starts at wake.** Send 240 ms before detection plus speech buffered through
+  startup, so the recognizer hears the first word but not the wake phrase; confirmations
+  take fresh speech after a cue. Why: 560 ms leaked the phrase in 14 of 30 takes, 240 ms
+  in none. Rejected: waiting for a cue before dictation, and stripping the phrase.
 - **Silence commits capture.** Paste, submit and tasks wait 2.5 seconds of
   speech silence; continued speech cancels the pending ending. Submit asks
   for target confirmation during that pause. Why: hands-free control with
