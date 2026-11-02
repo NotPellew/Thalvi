@@ -37,7 +37,6 @@ const READY_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// How long a pending ending may go without microphone audio before the capture fails.
 const MIC_WATCHDOG: Duration = Duration::from_millis(250);
-
 /// Consecutive speech frames, 240 ms, that make audio held back during a pending ending count as
 /// the user continuing.
 const CONTINUATION_FRAMES: u8 = 3;
@@ -844,15 +843,25 @@ where
         }
         if live.relayed {
             live.held.clear();
+            self.pause_for_speech(live);
             return self.send(live, std::slice::from_ref(frame)).await;
         }
         if live.speech_run >= CONTINUATION_FRAMES {
             live.relayed = true;
             self.ending_state("local_speech_relayed");
+            self.pause_for_speech(live);
             let out: Vec<Frame> = live.held.drain(..).collect();
             return self.send(live, &out).await;
         }
         Ok(())
+    }
+
+    /// Stops a running countdown while the user is heard speaking, before any words come back.
+    fn pause_for_speech(&self, live: &mut Live<R::Session>) {
+        if live.speech && live.text.on_local_speech() {
+            self.ending_state("local_speech_paused");
+            self.publish(live);
+        }
     }
 
     /// Sends `frames`, giving up when the user cancels while the recognizer is not taking audio.

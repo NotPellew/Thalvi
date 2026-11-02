@@ -64,9 +64,10 @@ areas your change touches. Editing rules are in
   then the cue. Why: wake audio leaked the phrase into 1 in 5 live transcripts even with
   stripping. Rejected: pre-wake audio, cutting it at the wake, and stripping the phrase.
 - **Silence commits capture.** Paste, submit and tasks wait 2.5 seconds of
-  speech silence; continued speech cancels the pending ending. Submit asks
-  for target confirmation during that pause. Why: hands-free control with
-  time to interrupt. Rejected: immediate dispatch and a second spoken yes.
+  speech silence; recognized speech cancels the pending ending, and local
+  speech pauses the countdown until quiet returns. Submit asks for target
+  confirmation during that pause. Why: hands-free control with time to
+  interrupt. Rejected: immediate dispatch and a second spoken yes.
 - **Check, then type.** Delivery re-verifies the bound window just before injecting
   input, which goes to whatever window is focused; a switch in those milliseconds
   can misdirect it. Why: neither Hyprland nor Windows can address input to one window.

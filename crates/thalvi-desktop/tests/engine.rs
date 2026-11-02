@@ -481,7 +481,8 @@ async fn an_ending_is_delivered_once_the_quiet_pause_has_passed() {
             route: CaptureRoute::Paste,
             text: "Hello",
             provisional_at: &[1000],
-            commit: 3500,
+            // Noise without words delays the commit: the pause restarts at the first quiet frame.
+            commit: 1840 + 2500,
         },
     ];
     LocalSet::new()
@@ -563,6 +564,101 @@ async fn speech_while_an_ending_is_pending_is_held_until_it_lasts_then_cancels_t
                 accepted(CaptureRoute::Submit, "Hello submit more words")
             );
             assert_eq!(rig.started(Cue::Provisional), [1000, 3000]);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_speech_stops_the_countdown_until_quiet_returns_unless_words_cancel_the_ending() {
+    // What the user does after "paste that" at 1000, and, in its last step, 1 ms before the paste is accepted.
+    let cases: [(&str, &[(u64, Kind)]); 3] = [
+        // Observed on Hyprland: talking from 1.5 s, no partial before the old 2.5 s countdown ended.
+        (
+            "talking",
+            &[
+                (2480, Kind::Quiet),
+                (3400, Kind::Voice),
+                (5939, Kind::Quiet),
+            ],
+        ),
+        // A cough: three speech frames, no words.
+        (
+            "cough",
+            &[
+                (2000, Kind::Quiet),
+                (2240, Kind::Voice),
+                (4819, Kind::Quiet),
+            ],
+        ),
+        // Speaking again after a short quiet gap pauses the countdown again.
+        (
+            "resuming",
+            &[
+                (2000, Kind::Quiet),
+                (2240, Kind::Voice),
+                (3000, Kind::Quiet),
+                (3400, Kind::Voice),
+                (5939, Kind::Quiet),
+            ],
+        ),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for (name, script) in cases {
+                let (mut rig, engine, frames) = Rig::new("{}");
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals("Hello paste that").await;
+                let pending = |waiting_for_quiet| EngineState::PendingEnding {
+                    route: CaptureRoute::Paste,
+                    text: "Hello".to_owned(),
+                    waiting_for_quiet,
+                };
+                for (until, kind) in script {
+                    rig.feed_until(*until, *kind).await;
+                    assert!(!task.is_finished(), "{name}: still pending at {until}");
+                    if matches!(kind, Kind::Voice) {
+                        assert_eq!(rig.state(), pending(true), "{name}: speech at {until}");
+                    }
+                }
+                assert_eq!(rig.state(), pending(false), "{name}: counting again");
+                // The script ends 1 ms before the pause does.
+                rig.at(script[script.len() - 1].0 + 1).await;
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Paste, "Hello"),
+                    "{name}"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn words_recognized_while_the_countdown_waits_for_quiet_still_cancel_the_ending() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello paste that").await;
+            rig.feed_until(2480, Kind::Quiet).await;
+            rig.feed_until(3000, Kind::Voice).await;
+            rig.partial("and also").await;
+            assert_eq!(rig.started(Cue::Cancelled), [3000]);
+            assert_eq!(
+                rig.state(),
+                EngineState::Capturing {
+                    committed: "Hello paste that".to_owned(),
+                    partial: Some("and also".to_owned())
+                }
+            );
+            rig.feed_until(6000, Kind::Quiet).await;
+            assert!(!task.is_finished(), "the cancelled ending is not delivered");
+            rig.handle.cancel();
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
         })
         .await;
 }

@@ -377,6 +377,21 @@ impl CaptureSession {
         }
     }
 
+    /// Reports local speech while an ending is pending; returns whether it stopped a running
+    /// countdown, which restarts at the next quiet frame. A recognized partial still cancels.
+    pub fn on_local_speech(&mut self) -> bool {
+        match self.pending.as_mut() {
+            Some(PendingEnding {
+                window: window @ QuietWindow::CountingDown { .. },
+                ..
+            }) => {
+                *window = QuietWindow::WaitingForQuiet;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Delivers the armed ending once its quiet window has lasted the whole pause.
     pub fn poll_ready(&mut self, now: Instant) -> Option<CaptureRequest> {
         let ready_at = self.ready_at()?;
@@ -620,6 +635,24 @@ mod tests {
                 .map(|request| request.text),
             Some("hello".to_owned())
         );
+    }
+
+    #[test]
+    fn local_speech_stops_a_running_countdown_until_quiet_returns() {
+        let base = Instant::now();
+        let mut session = session();
+        assert!(!session.on_local_speech(), "no ending pending");
+        session
+            .on_final("hello paste that", ms(base, 0), false)
+            .unwrap();
+        assert!(session.on_local_speech());
+        assert!(!session.on_local_speech(), "already waiting for quiet");
+        assert_eq!(session.ready_at(), None);
+        assert_eq!(session.poll_ready(ms(base, 100_000)), None);
+
+        assert!(session.on_quiet_frame(ms(base, 3_000)));
+        assert_eq!(session.poll_ready(ms(base, 5_499)), None);
+        assert!(session.poll_ready(ms(base, 5_500)).is_some());
     }
 
     #[test]
