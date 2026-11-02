@@ -33,10 +33,8 @@ async def capture(
     metrics: Metrics | None = None,
     confirmation: bool = False,
     pending_notice: Callable[[Request, float], None] | None = None,
-    pre_roll: tuple[bytes, ...] = (),
 ) -> Request:
-    if confirmation:
-        audio.set_input(False)
+    audio.set_input(False)
     socket = None
     connection = None
     activation = None
@@ -86,11 +84,9 @@ async def capture(
             connection = asyncio.create_task(open_ready())
             if confirmation:
                 await connection
-                activation = asyncio.create_task(activate())
-                await activation
-            else:
-                notice(ready_message)
-                await connection
+            activation = asyncio.create_task(activate())
+            await activation
+            await connection
         pcm = bytearray() if config.secondary_stt and not confirmation else None
         request = await _capture_events(
             socket,
@@ -102,7 +98,6 @@ async def capture(
             config.ending_pause,
             pending_notice,
             config.cues,
-            pre_roll,
             pcm,
         )
         if (
@@ -135,7 +130,6 @@ async def _capture_events(
     pause=2.5,
     pending_notice=None,
     cues: Cues | None = None,
-    pre_roll: tuple[bytes, ...] = (),
     pcm: bytearray | None = None,
 ):
     cues = cues or Cues()
@@ -182,14 +176,11 @@ async def _capture_events(
 
     async def send_audio() -> None:
         nonlocal frame_seq, local_speech
-        frames = iter(pre_roll)
         continuation_frames = 0
         held_frames = deque(maxlen=3)
         relay_request = None
         while True:
-            frame = next(frames, None)
-            if frame is None:
-                frame = await audio.next()
+            frame = await audio.next()
             if gate is not None and gate.capture.finished:
                 continue
             outgoing = [frame]
