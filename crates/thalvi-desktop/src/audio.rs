@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{
-    ErrorKind, FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig,
+    ErrorKind, FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig, StreamInstant,
     SupportedStreamConfig, SupportedStreamConfigRange,
 };
 use futures_util::task::AtomicWaker;
@@ -73,21 +73,31 @@ struct Sink {
     producer: Producer<Tagged>,
     gate: InputGate,
     seen_epoch: u64,
+    /// Audio captured before this instant predates the last gate change and is dropped.
+    boundary: StreamInstant,
     channels: u16,
     shared: Arc<Shared>,
 }
 
 impl Sink {
-    fn feed<T>(&mut self, data: &[T])
+    /// Converts one callback's `data`, which the device captured at `capture`.
+    ///
+    /// When the gate changed, `callback` becomes the boundary. This chunk and every later one
+    /// captured before it are dropped, because backends can deliver packets recorded during a cue
+    /// well after input is back on.
+    fn feed<T>(&mut self, data: &[T], callback: StreamInstant, capture: StreamInstant)
     where
         T: SizedSample,
         f32: FromSample<T>,
     {
         let (enabled, epoch) = self.gate.state();
-        if !enabled || epoch != self.seen_epoch {
-            // Input just came back on: this chunk may still hold the cue, so it goes too.
-            self.framer.reset();
+        let changed = epoch != self.seen_epoch;
+        if changed {
             self.seen_epoch = epoch;
+            self.boundary = callback;
+        }
+        if !enabled || changed || capture < self.boundary {
+            self.framer.reset();
             return;
         }
         let Self {
@@ -239,6 +249,7 @@ impl Microphone {
             producer,
             gate: self.gate.clone(),
             seen_epoch: epoch,
+            boundary: StreamInstant::ZERO,
             channels: chosen.channels().max(1),
             shared: Arc::clone(&shared),
         };
@@ -297,7 +308,10 @@ where
 {
     device.build_input_stream(
         config,
-        move |data: &[T], _| sink.feed(data),
+        move |data: &[T], info| {
+            let stamp = info.timestamp();
+            sink.feed(data, stamp.callback, stamp.capture);
+        },
         on_error,
         Some(OPEN_TIMEOUT),
     )
@@ -340,6 +354,7 @@ mod tests {
             producer,
             gate: gate.clone(),
             seen_epoch: epoch,
+            boundary: StreamInstant::ZERO,
             channels,
             shared: Arc::clone(&shared),
         };
@@ -357,6 +372,15 @@ mod tests {
         vec![value; FRAME_SAMPLES]
     }
 
+    /// Feeds a chunk that was captured at the moment it was delivered.
+    fn live<T>(sink: &mut Sink, data: &[T])
+    where
+        T: SizedSample,
+        f32: FromSample<T>,
+    {
+        sink.feed(data, StreamInstant::ZERO, StreamInstant::ZERO);
+    }
+
     async fn next(frames: &mut Frames) -> Result<Frame, AudioError> {
         tokio::time::timeout(TEST_TIMEOUT, frames.next())
             .await
@@ -371,7 +395,7 @@ mod tests {
         let stereo: Vec<i16> = (0..FRAME_SAMPLES * 3)
             .flat_map(|_| [3_000, 1_000])
             .collect();
-        sink.feed(&stereo);
+        live(&mut sink, &stereo);
         let frame = next(&mut frames).await.expect("frame");
         assert!(frame.iter().all(|&s| s == 2_000));
     }
@@ -383,7 +407,7 @@ mod tests {
         let waiting = tokio::spawn(async move { next(&mut frames).await.map(|f| f[0]) });
         tokio::task::yield_now().await;
         let capture = std::thread::spawn(move || {
-            sink.feed(&block(7));
+            live(&mut sink, &block(7));
             sink
         });
         assert_eq!(waiting.await.expect("task"), Ok(7));
@@ -394,16 +418,34 @@ mod tests {
     async fn frames_are_dropped_while_the_gate_is_off_and_the_first_chunk_after_it() {
         let gate = InputGate::default();
         let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
-        sink.feed(&block(1));
+        live(&mut sink, &block(1));
         next(&mut frames).await.expect("frame before the cue");
 
         gate.set_enabled(false);
-        sink.feed(&block(2));
-        sink.feed(&block(3));
+        live(&mut sink, &block(2));
+        live(&mut sink, &block(3));
         gate.set_enabled(true);
-        sink.feed(&block(4)); // in flight when the cue ended
-        sink.feed(&block(5));
-        sink.feed(&block(6));
+        live(&mut sink, &block(4)); // in flight when the cue ended
+        live(&mut sink, &block(5));
+        live(&mut sink, &block(6));
+
+        assert_eq!(next(&mut frames).await.expect("frame")[0], 5);
+        assert_eq!(next(&mut frames).await.expect("frame")[0], 6);
+    }
+
+    #[tokio::test]
+    async fn packets_recorded_during_a_cue_stay_out_even_when_delivered_after_it() {
+        let at = StreamInstant::from_millis;
+        let gate = InputGate::default();
+        let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
+        gate.set_enabled(false);
+        sink.feed(&block(1), at(100), at(90)); // during the cue
+        gate.set_enabled(true);
+        sink.feed(&block(2), at(500), at(450)); // first callback after the cue
+        sink.feed(&block(3), at(501), at(300)); // backlog from the cue, delivered late
+        sink.feed(&block(4), at(502), at(420)); // backlog, captured just before the boundary
+        sink.feed(&block(5), at(503), at(500)); // fresh, captured exactly at the boundary
+        sink.feed(&block(6), at(583), at(583));
 
         assert_eq!(next(&mut frames).await.expect("frame")[0], 5);
         assert_eq!(next(&mut frames).await.expect("frame")[0], 6);
@@ -413,12 +455,12 @@ mod tests {
     async fn queued_frames_and_a_partial_frame_do_not_survive_a_gate_change() {
         let gate = InputGate::default();
         let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
-        sink.feed(&block(1));
-        sink.feed(&block(2)[..FRAME_SAMPLES / 2]);
+        live(&mut sink, &block(1));
+        live(&mut sink, &block(2)[..FRAME_SAMPLES / 2]);
         gate.set_enabled(false);
         gate.set_enabled(true);
-        sink.feed(&block(3)); // dropped as the chunk in flight
-        sink.feed(&block(4));
+        live(&mut sink, &block(3)); // dropped as the chunk in flight
+        live(&mut sink, &block(4));
         assert_eq!(next(&mut frames).await.expect("frame")[0], 4);
     }
 
@@ -426,7 +468,7 @@ mod tests {
     async fn a_lost_device_ends_capture_even_with_frames_queued() {
         let gate = InputGate::default();
         let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
-        sink.feed(&block(1));
+        live(&mut sink, &block(1));
         sink.shared.report(ErrorKind::DeviceNotAvailable.into());
         assert_eq!(next(&mut frames).await, Err(AudioError::DeviceLost));
         assert_eq!(next(&mut frames).await, Err(AudioError::DeviceLost));
@@ -437,7 +479,7 @@ mod tests {
         let gate = InputGate::default();
         let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
         sink.shared.report(ErrorKind::RealtimeDenied.into());
-        sink.feed(&block(1));
+        live(&mut sink, &block(1));
         assert_eq!(next(&mut frames).await.expect("frame")[0], 1);
     }
 
@@ -446,7 +488,7 @@ mod tests {
         let gate = InputGate::default();
         let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
         for _ in 0..=QUEUE_FRAMES {
-            sink.feed(&block(1));
+            live(&mut sink, &block(1));
         }
         assert_eq!(next(&mut frames).await, Err(AudioError::Dropped));
     }
