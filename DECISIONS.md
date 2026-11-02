@@ -22,9 +22,10 @@ areas your change touches. Editing rules are in
   overlay and a settings window; the overlay never takes focus (Hyprland window
   rules via the host, a non-activating window on Windows). Why: one TypeScript
   UI, no IPC. Rejected: layer-shell webview (blank), GTK-only overlay, egui.
-- **Local recognition in the desktop app.** A local model runs behind the same
-  recognizer interface as the server client. Why: dictation without server,
-  network or key. Rejected: hosting the local model behind the server.
+- **Local recognition in the desktop app.** `stt.engine: local` runs Nemotron Speech
+  Streaming 0.6B (int8 ONNX) on `ort` behind the recognizer interface. Why: offline; 6.0% word
+  errors on 57 clips, 0.8 s p95 partial lag on 4 cores. Rejected: Moonshine (7.4%, p95 2.6 s on
+  the Windows PC), Zipformer (28%), hosting it behind the server.
 - **Self-hosted; parts swap by endpoint.** Config sets each part's address on a
   standard protocol (Chat Completions, OpenAI speech, MCP); Meta's realtime ASR
   and Qwen3-TTS's framed PCM stream are the custom adapters. Why: any provider
