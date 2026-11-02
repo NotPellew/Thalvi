@@ -11,7 +11,7 @@ use crate::status::Status;
 pub const LABEL: &str = "overlay";
 
 const WIDTH: f64 = 460.0;
-/// Room for the classic pill under its gap and for the holo and gunmetal module with its shadow.
+/// Room for the neon pill under its gap and for the holo and gunmetal module with its shadow.
 /// A fixed-size GTK window is never lower than this, and a mapped one cannot be resized, so every
 /// look uses the one size.
 const HEIGHT: f64 = 200.0;

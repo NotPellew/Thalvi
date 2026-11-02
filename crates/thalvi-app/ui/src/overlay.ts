@@ -84,7 +84,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
     looping = false;
     if (!live()) return;
     const now = clock.now();
-    if (look !== "classic") {
+    if (look !== "neon") {
       skin.draw(now, level);
     } else if (!flat) {
       shown += (level - shown) * (level > shown ? 0.6 : 0.2);

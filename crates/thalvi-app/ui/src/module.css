@@ -1,7 +1,7 @@
 /* The holo and gunmetal overlay: a 370 x 84 module hanging from the top edge. */
 
-#overlay[data-look="classic"] .module,
-#overlay:not([data-look="classic"]) :is(.pill, .draft) { display: none; }
+#overlay[data-look="neon"] .module,
+#overlay:not([data-look="neon"]) :is(.pill, .draft) { display: none; }
 
 #overlay:is([data-look="holo"], [data-look="gunmetal"]) { display: block; padding: 0; }
 

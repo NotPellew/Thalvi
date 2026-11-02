@@ -71,10 +71,10 @@ describe("the overlay in the holo and gunmetal looks", () => {
     await settle();
     expect(root.dataset["look"]).toBe("holo");
 
-    backend.getSettings.mockResolvedValue({ ...SETTINGS, look: "classic" });
+    backend.getSettings.mockResolvedValue({ ...SETTINGS, look: "neon" });
     saved();
     await settle();
-    expect(root.dataset["look"]).toBe("classic");
+    expect(root.dataset["look"]).toBe("neon");
   });
 
   const states: { name: string; status: Status; tone: string; label: string; tag: boolean; line: string; message: string }[] = [
@@ -250,10 +250,10 @@ describe("the overlay in the holo and gunmetal looks", () => {
       expect(run(clock, 1000)).toBeLessThanOrEqual(11);
     });
 
-    it("is not drawn in the classic look, behind a label, or while the overlay is idle", async () => {
-      const classic = await mount("classic");
-      classic.emit({ state: "capturing", target: null, committed: "", partial: null });
-      expect(run(classic.clock, 500)).toBe(0);
+    it("is not drawn in the neon look, behind a label, or while the overlay is idle", async () => {
+      const neon = await mount("neon");
+      neon.emit({ state: "capturing", target: null, committed: "", partial: null });
+      expect(run(neon.clock, 500)).toBe(0);
 
       document.body.innerHTML = '<div id="overlay"></div>';
       root = pick(document.body, "#overlay");
@@ -277,7 +277,7 @@ describe("the settings window's look", () => {
     root = pick(document.body, "#settings");
   });
 
-  async function open(look: Look = "classic") {
+  async function open(look: Look = "neon") {
     const stub = stubBackend({ ...SETTINGS, look });
     mountSettings(root, stub.backend);
     await settle();
@@ -294,7 +294,7 @@ describe("the settings window's look", () => {
   it("wears the saved look and offers the three looks on the General page", async () => {
     await open("gunmetal");
     expect(root.dataset["look"]).toBe("gunmetal");
-    expect(Array.from(root.querySelectorAll(".lk")).map((choice) => choice.textContent)).toEqual(["Classic", "Holo", "Gunmetal"]);
+    expect(Array.from(root.querySelectorAll(".lk")).map((choice) => choice.textContent)).toEqual(["Gunmetal", "Holo", "Neon"]);
     expect(radio("gunmetal").checked).toBe(true);
   });
 
@@ -311,7 +311,7 @@ describe("the settings window's look", () => {
     radio("gunmetal").click();
     button("Revert").click();
     await settle();
-    expect(root.dataset["look"]).toBe("classic");
+    expect(root.dataset["look"]).toBe("neon");
   });
 
   it("puts each heading and the rows after it in one group the looks can frame", async () => {

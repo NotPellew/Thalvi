@@ -5,9 +5,9 @@ import { uid } from "./controls.ts";
 import { el } from "./dom.ts";
 
 export const LOOKS: readonly (readonly [Look, string])[] = [
-  ["classic", "Classic"],
-  ["holo", "Holo"],
   ["gunmetal", "Gunmetal"],
+  ["holo", "Holo"],
+  ["neon", "Neon"],
 ];
 
 /** Tells the stylesheets which look `root` wears; gunmetal is the default. */

@@ -68,7 +68,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
   let status: Status = { state: "listening" };
   let level = 0;
   const requested = params.get("look");
-  const look = LOOKS.find(([name]) => name === requested)?.[0] ?? "classic";
+  const look = LOOKS.find(([name]) => name === requested)?.[0] ?? "gunmetal";
   const savedListeners: (() => void)[] = [];
   const statusListeners: ((status: Status) => void)[] = [];
   const levelListeners: ((level: number) => void)[] = [];

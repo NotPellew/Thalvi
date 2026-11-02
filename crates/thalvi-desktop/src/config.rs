@@ -88,7 +88,7 @@ struct RawDesktopConfig {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "String", rename_all = "lowercase")]
 pub enum Look {
-    Classic,
+    Neon,
     Holo,
     #[default]
     Gunmetal,
@@ -99,10 +99,10 @@ impl TryFrom<String> for Look {
 
     fn try_from(name: String) -> Result<Self, String> {
         match name.as_str() {
-            "classic" => Ok(Self::Classic),
+            "neon" => Ok(Self::Neon),
             "holo" => Ok(Self::Holo),
             "gunmetal" => Ok(Self::Gunmetal),
-            _ => Err("look must be classic, holo or gunmetal.".to_owned()),
+            _ => Err("look must be gunmetal, holo or neon.".to_owned()),
         }
     }
 }
@@ -1233,17 +1233,17 @@ mod tests {
     fn look_defaults_to_gunmetal_and_rejects_unknown_names() {
         assert_eq!(parse("{}").unwrap().look, Look::Gunmetal);
         for (name, look) in [
-            ("classic", Look::Classic),
+            ("neon", Look::Neon),
             ("holo", Look::Holo),
             ("gunmetal", Look::Gunmetal),
         ] {
             let config = parse(&format!(r#"{{"look": "{name}"}}"#)).unwrap();
             assert_eq!(config.look, look);
         }
-        for json in [r#"{"look": "neon"}"#, r#"{"look": "Holo"}"#] {
+        for json in [r#"{"look": "classic"}"#, r#"{"look": "Holo"}"#] {
             let error = parse(json).unwrap_err().to_string();
             assert!(
-                error.contains("look must be classic, holo or gunmetal."),
+                error.contains("look must be gunmetal, holo or neon."),
                 "{json}: {error}"
             );
         }

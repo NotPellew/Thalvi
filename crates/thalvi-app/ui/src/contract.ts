@@ -28,7 +28,7 @@ export type Ending = "paste" | "submit" | "task" | "scratch" | "cancel";
 export type ScriptActionKind = "open_url" | "focus_app" | "discord_message";
 export type SecondaryApi = "openai" | "meta";
 export type SttEngine = "server" | "local";
-export type Look = "classic" | "holo" | "gunmetal";
+export type Look = "gunmetal" | "holo" | "neon";
 
 export interface HeadSettings {
   model: string;
