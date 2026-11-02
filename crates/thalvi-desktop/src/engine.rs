@@ -20,8 +20,8 @@ use tokio::time::Instant;
 
 use crate::audio::{AudioError, Frames, InputGate};
 use crate::capture::{
-    CaptureFullError, CaptureRequest, CaptureRoute, CaptureSession, Endings, FinalStep,
-    PauseDuration, QuietWindow, has_words,
+    CaptureFullError, CaptureLimits, CaptureRequest, CaptureRoute, CaptureSession, EndingPauses,
+    Endings, FinalStep, QuietWindow, has_words,
 };
 use crate::config::DesktopConfig;
 use crate::cues::{Cue, CueEngine, CueError, Cues};
@@ -41,8 +41,6 @@ const MIC_WATCHDOG: Duration = Duration::from_millis(250);
 /// How long any capture may go without microphone audio before it fails.
 const MIC_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// How long a capture may go without recognized words before it ends, keeping the text.
-const IDLE_LIMIT: Duration = Duration::from_secs(60);
 /// Consecutive speech frames, 240 ms, that make audio held back during a pending ending count as
 /// the user continuing.
 const CONTINUATION_FRAMES: u8 = 3;
@@ -177,10 +175,23 @@ pub enum CaptureError {
     Audio(#[from] AudioError),
     #[error("Microphone audio stopped. Nothing was delivered.")]
     MicStopped,
-    #[error("No ending heard for a minute.")]
-    NoEnding,
+    #[error("No words heard for {}.", plain_duration(*.0))]
+    NoEnding(Duration),
+    #[error("Capture stopped after {} without an ending.", plain_duration(*.0))]
+    TooLong(Duration),
     #[error(transparent)]
     Full(#[from] CaptureFullError),
+}
+
+/// Whole minutes read as minutes, anything else as seconds.
+fn plain_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let (count, unit) = if seconds > 0 && seconds.is_multiple_of(60) {
+        (seconds / 60, "minute")
+    } else {
+        (seconds, "second")
+    };
+    format!("{count} {unit}{}", if count == 1 { "" } else { "s" })
 }
 
 impl CaptureError {
@@ -192,7 +203,8 @@ impl CaptureError {
             Self::NotReady => "not_ready",
             Self::Audio(_) => "audio",
             Self::MicStopped => "mic_stopped",
-            Self::NoEnding => "no_ending",
+            Self::NoEnding(_) => "no_ending",
+            Self::TooLong(_) => "too_long",
             Self::Full(_) => "full",
         }
     }
@@ -262,7 +274,8 @@ pub struct Engine<R, W, C> {
     gate: InputGate,
     vad: VadDetector,
     endings: Endings,
-    pause: PauseDuration,
+    pauses: EndingPauses,
+    limits: CaptureLimits,
     secondary: Option<SecondaryStt>,
     http: reqwest::Client,
     recorder: Recorder,
@@ -301,6 +314,7 @@ struct Live<S> {
     /// Whether the latest frame was speech.
     speech: bool,
     last_audio: Instant,
+    started: Instant,
     /// When the recognizer last returned words.
     last_words: Instant,
     cues: FuturesUnordered<LocalBoxFuture<'static, CueEnd>>,
@@ -343,6 +357,7 @@ enum Step {
     Quiet,
     Silent,
     Idle,
+    TooLong,
 }
 
 async fn until(at: Option<Instant>) {
@@ -397,7 +412,8 @@ where
             gate: parts.gate,
             vad: VadDetector::new(),
             endings: config.endings.clone(),
-            pause: config.ending_pause,
+            pauses: config.ending_pause,
+            limits: config.capture_limits,
             secondary: config.stt.secondary.clone(),
             http: parts.http,
             recorder,
@@ -706,7 +722,7 @@ where
         };
         let live = Live {
             session,
-            text: CaptureSession::new(self.endings.clone(), self.pause),
+            text: CaptureSession::new(self.endings.clone(), self.pauses),
             partial: None,
             sent: Vec::new(),
             keep_sent: self.secondary.is_some() || self.recorder.kinds().audio,
@@ -715,6 +731,7 @@ where
             relayed: false,
             speech: false,
             last_audio: Instant::now(),
+            started: Instant::now(),
             last_words: Instant::now(),
             cues: FuturesUnordered::new(),
         };
@@ -749,7 +766,8 @@ where
                 Some(end) = live.cues.next() => Step::Cue(end),
                 () = until(live.text.ready_at()) => Step::Quiet,
                 () = until(watchdog) => Step::Silent,
-                () = tokio::time::sleep_until(live.last_words + IDLE_LIMIT) => Step::Idle,
+                () = tokio::time::sleep_until(live.last_words + self.limits.idle()) => Step::Idle,
+                () = tokio::time::sleep_until(live.started + self.limits.max()) => Step::TooLong,
             };
             let done = match step {
                 Step::Cancel => Some(Done::Stopped),
@@ -777,7 +795,8 @@ where
                 }
                 Step::Quiet => self.on_quiet(live),
                 Step::Silent => Some(Done::Failed(CaptureError::MicStopped)),
-                Step::Idle => Some(Done::Failed(CaptureError::NoEnding)),
+                Step::Idle => Some(Done::Failed(CaptureError::NoEnding(self.limits.idle()))),
+                Step::TooLong => Some(Done::Failed(CaptureError::TooLong(self.limits.max()))),
             };
             if let Some(done) = done {
                 return done;
@@ -832,7 +851,7 @@ where
 
     fn on_quiet(&self, live: &mut Live<R::Session>) -> Option<Done> {
         let now = Instant::now();
-        let since = live.text.ready_at().map(|at| at - self.pause.get());
+        let since = live.text.quiet_since();
         let request = live.text.poll_ready(now)?;
         self.ending_state("accepted");
         if let Some(since) = since {
@@ -901,13 +920,21 @@ where
         }
     }
 
-    /// Sends `frames`, giving up when the user cancels while the recognizer is not taking audio.
+    /// Sends `frames`, giving up when the user cancels or a capture limit passes while the
+    /// recognizer is not taking audio.
     async fn send(&mut self, live: &mut Live<R::Session>, frames: &[Frame]) -> Result<(), Stop> {
+        let limits = self.limits;
         for frame in frames {
             tokio::select! {
                 biased;
                 _ = self.cancel.changed() => return Err(Stop::Cancelled),
                 sent = live.session.send_frame(frame) => sent.map_err(|e| Stop::Failed(e.into()))?,
+                () = tokio::time::sleep_until(live.last_words + limits.idle()) => {
+                    return Err(Stop::Failed(CaptureError::NoEnding(limits.idle())));
+                }
+                () = tokio::time::sleep_until(live.started + limits.max()) => {
+                    return Err(Stop::Failed(CaptureError::TooLong(limits.max())));
+                }
             }
             if live.keep_sent {
                 live.sent.push(*frame);
@@ -1047,7 +1074,7 @@ where
 
     /// The secondary transcript without its ending phrase, when it ends the way the user did.
     fn agreed(&self, raw: &str, route: CaptureRoute) -> Option<String> {
-        let mut parser = CaptureSession::new(self.endings.clone(), self.pause);
+        let mut parser = CaptureSession::new(self.endings.clone(), self.pauses);
         let text = match parser.on_final(raw, Instant::now(), false).ok()? {
             FinalStep::Armed(pending) if pending.route == route => pending.text,
             FinalStep::Continue { .. } if !parser.scratched() => parser.text(),

@@ -32,6 +32,9 @@ type TestEngine = Engine<FakeRecognizer, FakeWake, FakeCuePlayer>;
 
 const FRAME_MS: u64 = 80;
 
+/// The paste pause the countdown tests below were written around, longer than the default.
+const SLOW_PASTE: &str = r#"{"ending_pause": {"paste": 2.5}}"#;
+
 #[derive(Clone, Copy)]
 enum Kind {
     Quiet,
@@ -426,7 +429,7 @@ async fn an_ending_is_delivered_once_the_quiet_pause_has_passed() {
             route: CaptureRoute::Paste,
             text: "First sentence. Second",
             provisional_at: &[2000],
-            commit: 4500,
+            commit: 2000 + 700,
         },
         Case {
             name: "an ending split across finals",
@@ -439,7 +442,7 @@ async fn an_ending_is_delivered_once_the_quiet_pause_has_passed() {
             route: CaptureRoute::Paste,
             text: "Keep this",
             provisional_at: &[1400],
-            commit: 3900,
+            commit: 1400 + 700,
         },
         Case {
             name: "breaths and artifacts neither cancel nor restart the pause",
@@ -467,7 +470,7 @@ async fn an_ending_is_delivered_once_the_quiet_pause_has_passed() {
             route: CaptureRoute::Paste,
             text: "Hello",
             provisional_at: &[1000],
-            commit: 1840 + 2500,
+            commit: 1840 + 700,
         },
         Case {
             name: "sustained noise and an artifact partial do not cancel the ending",
@@ -482,7 +485,7 @@ async fn an_ending_is_delivered_once_the_quiet_pause_has_passed() {
             text: "Hello",
             provisional_at: &[1000],
             // Noise without words delays the commit: the pause restarts at the first quiet frame.
-            commit: 1840 + 2500,
+            commit: 1840 + 700,
         },
     ];
     LocalSet::new()
@@ -605,7 +608,7 @@ async fn local_speech_stops_the_countdown_until_quiet_returns_unless_words_cance
     LocalSet::new()
         .run_until(async {
             for (name, script) in cases {
-                let (mut rig, engine, frames) = Rig::new("{}");
+                let (mut rig, engine, frames) = Rig::new(SLOW_PASTE);
                 let task = capture_task(engine, frames);
                 rig.open().await;
                 rig.feed_until(1000, Kind::Quiet).await;
@@ -639,7 +642,7 @@ async fn local_speech_stops_the_countdown_until_quiet_returns_unless_words_cance
 async fn words_recognized_while_the_countdown_waits_for_quiet_still_cancel_the_ending() {
     LocalSet::new()
         .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
+            let (mut rig, engine, frames) = Rig::new(SLOW_PASTE);
             let task = capture_task(engine, frames);
             rig.open().await;
             rig.feed_until(1000, Kind::Quiet).await;
@@ -657,6 +660,44 @@ async fn words_recognized_while_the_countdown_waits_for_quiet_still_cancel_the_e
             );
             rig.feed_until(6000, Kind::Quiet).await;
             assert!(!task.is_finished(), "the cancelled ending is not delivered");
+            rig.handle.cancel();
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_paste_still_yields_to_speech_inside_its_short_window() {
+    LocalSet::new()
+        .run_until(async {
+            // Local speech pauses the countdown; the paste waits for quiet and the full 0.7 s again.
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello paste that").await;
+            rig.feed_until(1200, Kind::Quiet).await;
+            rig.feed_until(1600, Kind::Voice).await;
+            rig.feed_until(2400, Kind::Quiet).await;
+            assert!(
+                !task.is_finished(),
+                "speech at 1.2 s moved the paste past 1.7 s"
+            );
+            rig.feed_until(3000, Kind::Quiet).await;
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "Hello"));
+            assert!(rig.started(Cue::Accepted)[0] > 2400);
+
+            // Recognized words cancel the pending paste.
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello paste that").await;
+            rig.feed_until(1300, Kind::Quiet).await;
+            rig.partial("and also").await;
+            assert_eq!(rig.started(Cue::Cancelled), [1300]);
+            rig.feed_until(3000, Kind::Quiet).await;
+            assert!(!task.is_finished(), "the cancelled paste is not delivered");
             rig.handle.cancel();
             assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
         })
@@ -748,7 +789,7 @@ async fn cancelling_from_outside_stops_whatever_the_capture_is_doing() {
     LocalSet::new()
         .run_until(async {
             for moment in [Moment::Starting, Moment::Countdown, Moment::AcceptedCue] {
-                let (mut rig, engine, frames) = Rig::new("{}");
+                let (mut rig, engine, frames) = Rig::new(SLOW_PASTE);
                 let task = capture_task(engine, frames);
                 match moment {
                     Moment::Starting => {
@@ -960,7 +1001,7 @@ async fn a_failed_capture_says_what_happened_keeps_the_text_and_returns_to_liste
 async fn the_microphone_watchdog_waits_while_a_cue_is_playing() {
     LocalSet::new()
         .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
+            let (mut rig, engine, frames) = Rig::new(SLOW_PASTE);
             rig.cues.set_length(Cue::Provisional, ms(1000));
             let task = capture_task(engine, frames);
             rig.open().await;
@@ -1068,12 +1109,149 @@ async fn a_capture_without_words_for_a_minute_ends_and_keeps_its_text() {
             assert_eq!(
                 finished(task).await,
                 CaptureOutcome::Failed {
-                    error: CaptureError::NoEnding,
+                    error: CaptureError::NoEnding(Duration::from_secs(60)),
                     recoverable_text: Some("Hello world".to_owned())
                 }
             );
         })
         .await;
+}
+
+/// Milliseconds after the wake word at which the capture opens; the five-minute cap counts from here.
+const CAPTURE_OPENS: u64 = 230;
+
+#[tokio::test(start_paused = true)]
+async fn a_capture_that_keeps_hearing_words_is_stopped_after_five_minutes_and_keeps_its_text() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            let words: Vec<String> = (1..=9).map(|n| format!("word{n}")).collect();
+            for (n, word) in (1..).zip(&words) {
+                rig.feed_until(n * 30_000, Kind::Quiet).await;
+                rig.finals(word).await;
+            }
+            rig.feed_until(CAPTURE_OPENS + 299_920, Kind::Quiet).await;
+            assert!(!task.is_finished(), "words keep the idle limit away");
+            assert_eq!(rig.started(Cue::Error).len(), 0);
+
+            rig.at(CAPTURE_OPENS + 300_000).await;
+            assert_eq!(rig.started(Cue::Error), [CAPTURE_OPENS + 300_000]);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: CaptureError::TooLong(Duration::from_secs(300)),
+                    recoverable_text: Some(words.join(" "))
+                }
+            );
+            assert_eq!(
+                CaptureError::TooLong(Duration::from_secs(300)).to_string(),
+                "Capture stopped after 5 minutes without an ending."
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_ending_still_pending_when_the_five_minutes_pass_is_not_delivered() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            for n in 1..=5 {
+                rig.feed_until(n * 50_000, Kind::Quiet).await;
+                rig.finals("more").await;
+            }
+            rig.feed_until(299_000, Kind::Voice).await;
+            rig.finals("Almost done submit").await;
+            rig.feed_until(CAPTURE_OPENS + 299_920, Kind::Voice).await;
+            assert!(!task.is_finished(), "speech keeps the countdown waiting");
+
+            rig.at(CAPTURE_OPENS + 300_000).await;
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: CaptureError::TooLong(Duration::from_secs(300)),
+                    recoverable_text: Some("more more more more more Almost done".to_owned())
+                }
+            );
+            assert_eq!(rig.started(Cue::Accepted).len(), 0);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn configured_capture_limits_replace_the_defaults() {
+    LocalSet::new()
+        .run_until(async {
+            let config = r#"{"capture_limits": {"idle": 20, "max": 90}}"#;
+
+            let (mut rig, engine, frames) = Rig::new(config);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(10_000, Kind::Quiet).await;
+            rig.finals("Hello").await;
+            rig.feed_until(29_920, Kind::Quiet).await;
+            assert!(!task.is_finished());
+            rig.at(30_000).await;
+            let idle = CaptureError::NoEnding(Duration::from_secs(20));
+            assert_eq!(idle.to_string(), "No words heard for 20 seconds.");
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: idle,
+                    recoverable_text: Some("Hello".to_owned())
+                }
+            );
+
+            let (mut rig, engine, frames) = Rig::new(config);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            for n in 1..=5 {
+                rig.feed_until(n * 15_000, Kind::Quiet).await;
+                rig.finals("more").await;
+            }
+            rig.feed_until(CAPTURE_OPENS + 89_920, Kind::Quiet).await;
+            assert!(!task.is_finished());
+            rig.at(CAPTURE_OPENS + 90_000).await;
+            let long = CaptureError::TooLong(Duration::from_secs(90));
+            assert_eq!(
+                long.to_string(),
+                "Capture stopped after 90 seconds without an ending."
+            );
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: long,
+                    recoverable_text: Some("more more more more more".to_owned())
+                }
+            );
+        })
+        .await;
+}
+
+#[test]
+fn the_time_notices_read_whole_minutes_as_minutes_and_the_rest_as_seconds() {
+    for (seconds, words) in [
+        (10, "10 seconds"),
+        (60, "1 minute"),
+        (90, "90 seconds"),
+        (120, "2 minutes"),
+        (600, "10 minutes"),
+        (3600, "60 minutes"),
+    ] {
+        let seconds = Duration::from_secs(seconds);
+        assert_eq!(
+            CaptureError::NoEnding(seconds).to_string(),
+            format!("No words heard for {words}.")
+        );
+        assert_eq!(
+            CaptureError::TooLong(seconds).to_string(),
+            format!("Capture stopped after {words} without an ending.")
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -1189,7 +1367,9 @@ async fn serve(reply: Reply) -> (String, tokio::sync::mpsc::UnboundedReceiver<us
 }
 
 fn with_secondary(url: &str, api: &str) -> String {
-    format!(r#"{{"stt": {{"secondary": {{"url": "{url}", "model": "m", "api": "{api}"}}}}}}"#)
+    format!(
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"secondary": {{"url": "{url}", "model": "m", "api": "{api}"}}}}}}"#
+    )
 }
 
 /// A capture that says "live words paste that" at 1000 and is delivered at 3500.
@@ -1885,6 +2065,57 @@ async fn cancelling_works_while_the_recognizer_has_stopped_taking_audio() {
                     "{name}: cancel is not waiting for the send"
                 );
                 assert_eq!(finished(task).await, CaptureOutcome::Cancelled, "{name}");
+                assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel), "{name}");
+                assert!(rig.gate.is_enabled(), "{name}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_capture_limits_still_end_a_capture_whose_recognizer_stopped_taking_audio() {
+    LocalSet::new()
+        .run_until(async {
+            // Words at 5 s, then the server stops reading: idle 10 s ends it at 15 s, long
+            // before the 60 s maximum. Without words the maximum is the only limit that can fire.
+            for (name, limit, words, at, error) in [
+                (
+                    "idle",
+                    r#"{"idle": 10, "max": 600}"#,
+                    true,
+                    15_000,
+                    CaptureError::NoEnding(Duration::from_secs(10)),
+                ),
+                (
+                    "max",
+                    r#"{"idle": 600, "max": 60}"#,
+                    false,
+                    CAPTURE_OPENS + 60_000,
+                    CaptureError::TooLong(Duration::from_secs(60)),
+                ),
+            ] {
+                let (mut rig, engine, frames) =
+                    Rig::new(&format!(r#"{{"capture_limits": {limit}}}"#));
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(5_000, Kind::Quiet).await;
+                if words {
+                    rig.finals("Hello").await;
+                }
+                rig.server.stall_sends();
+                rig.feed_until(5_160, Kind::Quiet).await;
+                rig.at(at - 1).await;
+                assert!(!task.is_finished(), "{name}: not before the limit");
+                rig.at(at).await;
+                assert_eq!(
+                    finished(task).await,
+                    CaptureOutcome::Failed {
+                        error,
+                        recoverable_text: words.then(|| "Hello".to_owned())
+                    },
+                    "{name}"
+                );
+                assert_eq!(rig.started(Cue::Error), [at], "{name}");
                 assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel), "{name}");
                 assert!(rig.gate.is_enabled(), "{name}");
             }

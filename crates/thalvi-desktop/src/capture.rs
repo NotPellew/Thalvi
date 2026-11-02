@@ -138,38 +138,137 @@ impl Endings {
     }
 }
 
-/// The silence the user must keep after an ending before it is delivered.
+/// The speech silence the user must keep after each delivering ending before it is delivered.
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
-#[serde(try_from = "f64")]
-pub struct PauseDuration(Duration);
+#[serde(try_from = "RawEndingPauses")]
+pub struct EndingPauses {
+    paste: Duration,
+    submit: Duration,
+    task: Duration,
+}
 
-/// The pause was outside what the user can interrupt comfortably.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("The ending pause must be a number of seconds from 2 to 3.")]
-pub struct PauseError;
+/// A pause was outside the range the user may choose. Shown as written.
+#[derive(Clone, Copy, Debug, PartialEq, thiserror::Error)]
+#[error("The {ending} pause must be a number of seconds from 0 to 5.")]
+pub struct PauseError {
+    ending: &'static str,
+}
 
-impl TryFrom<f64> for PauseDuration {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEndingPauses {
+    paste: Option<f64>,
+    submit: Option<f64>,
+    task: Option<f64>,
+}
+
+impl TryFrom<RawEndingPauses> for EndingPauses {
     type Error = PauseError;
 
-    fn try_from(seconds: f64) -> Result<Self, PauseError> {
-        if (2.0..=3.0).contains(&seconds) {
-            Ok(Self(Duration::from_secs_f64(seconds)))
-        } else {
-            Err(PauseError)
+    fn try_from(raw: RawEndingPauses) -> Result<Self, PauseError> {
+        let defaults = Self::default();
+        let pause = |ending: &'static str, seconds: Option<f64>, default: Duration| match seconds {
+            None => Ok(default),
+            Some(seconds) if (0.0..=5.0).contains(&seconds) => Ok(Duration::from_secs_f64(seconds)),
+            Some(_) => Err(PauseError { ending }),
+        };
+        Ok(Self {
+            paste: pause("paste", raw.paste, defaults.paste)?,
+            submit: pause("submit", raw.submit, defaults.submit)?,
+            task: pause("task", raw.task, defaults.task)?,
+        })
+    }
+}
+
+impl Default for EndingPauses {
+    fn default() -> Self {
+        Self {
+            paste: Duration::from_millis(700),
+            submit: Duration::from_millis(2500),
+            task: Duration::from_millis(2500),
         }
     }
 }
 
-impl Default for PauseDuration {
-    fn default() -> Self {
-        Self(Duration::from_millis(2500))
+impl EndingPauses {
+    #[must_use]
+    pub fn get(self, route: CaptureRoute) -> Duration {
+        match route {
+            CaptureRoute::Paste => self.paste,
+            CaptureRoute::Submit => self.submit,
+            CaptureRoute::Task => self.task,
+        }
     }
 }
 
-impl PauseDuration {
+/// How long a capture may stay open without words, and in total, before it is stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawCaptureLimits")]
+pub struct CaptureLimits {
+    idle: Duration,
+    max: Duration,
+}
+
+/// A limit was outside what a capture can sensibly use. Shown as written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("The {limit} limit must be a whole number of seconds from {min} to {max}.")]
+pub struct LimitError {
+    limit: &'static str,
+    min: u64,
+    max: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCaptureLimits {
+    idle: Option<u64>,
+    max: Option<u64>,
+}
+
+impl TryFrom<RawCaptureLimits> for CaptureLimits {
+    type Error = LimitError;
+
+    fn try_from(raw: RawCaptureLimits) -> Result<Self, LimitError> {
+        let defaults = Self::default();
+        let limit =
+            |limit: &'static str, range: (u64, u64), seconds: Option<u64>, default| match seconds {
+                None => Ok(default),
+                Some(seconds) if (range.0..=range.1).contains(&seconds) => {
+                    Ok(Duration::from_secs(seconds))
+                }
+                Some(_) => Err(LimitError {
+                    limit,
+                    min: range.0,
+                    max: range.1,
+                }),
+            };
+        Ok(Self {
+            idle: limit("idle", (10, 600), raw.idle, defaults.idle)?,
+            max: limit("max", (60, 3600), raw.max, defaults.max)?,
+        })
+    }
+}
+
+impl Default for CaptureLimits {
+    fn default() -> Self {
+        Self {
+            idle: Duration::from_secs(60),
+            max: Duration::from_secs(300),
+        }
+    }
+}
+
+impl CaptureLimits {
+    /// How long a capture may go without recognized words.
     #[must_use]
-    pub fn get(self) -> Duration {
-        self.0
+    pub fn idle(self) -> Duration {
+        self.idle
+    }
+
+    /// How long a capture may stay open, however many words it receives.
+    #[must_use]
+    pub fn max(self) -> Duration {
+        self.max
     }
 }
 
@@ -221,7 +320,7 @@ pub struct CaptureFullError;
 #[derive(Clone, Debug)]
 pub struct CaptureSession {
     endings: Endings,
-    pause: PauseDuration,
+    pauses: EndingPauses,
     pieces: Vec<String>,
     scratched: bool,
     pending: Option<PendingEnding>,
@@ -229,10 +328,10 @@ pub struct CaptureSession {
 
 impl CaptureSession {
     #[must_use]
-    pub fn new(endings: Endings, pause: PauseDuration) -> Self {
+    pub fn new(endings: Endings, pauses: EndingPauses) -> Self {
         Self {
             endings,
-            pause,
+            pauses,
             pieces: Vec::new(),
             scratched: false,
             pending: None,
@@ -256,13 +355,20 @@ impl CaptureSession {
         self.pending.as_ref()
     }
 
+    /// When the armed ending's running countdown started; `None` until quiet starts.
+    #[must_use]
+    pub fn quiet_since(&self) -> Option<Instant> {
+        match self.pending.as_ref()?.window {
+            QuietWindow::CountingDown { since } => Some(since),
+            QuietWindow::WaitingForQuiet => None,
+        }
+    }
+
     /// When the armed ending is delivered if the quiet continues; `None` until quiet starts.
     #[must_use]
     pub fn ready_at(&self) -> Option<Instant> {
-        match self.pending.as_ref()?.window {
-            QuietWindow::CountingDown { since } => Some(since + self.pause.get()),
-            QuietWindow::WaitingForQuiet => None,
-        }
+        let pause = self.pauses.get(self.pending.as_ref()?.route);
+        Some(self.quiet_since()? + pause)
     }
 
     /// Applies one final transcript. `speech` is whether the user is audibly speaking right now.
@@ -528,7 +634,7 @@ mod tests {
     use super::*;
 
     fn session() -> CaptureSession {
-        CaptureSession::new(Endings::default(), PauseDuration::default())
+        CaptureSession::new(Endings::default(), EndingPauses::default())
     }
 
     fn ms(base: Instant, millis: u64) -> Instant {
@@ -569,10 +675,10 @@ mod tests {
 
     #[test]
     fn an_ending_delivers_the_capture_only_after_the_whole_pause() {
-        for (ending, route) in [
-            ("paste that", CaptureRoute::Paste),
-            ("SUBMIT!", CaptureRoute::Submit),
-            ("do that.", CaptureRoute::Task),
+        for (ending, route, pause) in [
+            ("paste that", CaptureRoute::Paste, 700),
+            ("SUBMIT!", CaptureRoute::Submit, 2500),
+            ("do that.", CaptureRoute::Task, 2500),
         ] {
             let mut session = session();
             let base = Instant::now();
@@ -590,9 +696,9 @@ mod tests {
             }
             let step = session.on_final(ending, base, false).unwrap();
             assert_eq!(armed_parts(&step), armed(route, expected), "{ending}");
-            assert_eq!(session.poll_ready(ms(base, 2499)), None, "{ending}");
+            assert_eq!(session.poll_ready(ms(base, pause - 1)), None, "{ending}");
             assert_eq!(
-                session.poll_ready(ms(base, 2500)),
+                session.poll_ready(ms(base, pause)),
                 Some(CaptureRequest {
                     route,
                     text: expected.to_owned()
@@ -630,11 +736,11 @@ mod tests {
                 since: ms(base, 10_000)
             })
         );
-        assert_eq!(session.ready_at(), Some(ms(base, 12_500)));
-        assert_eq!(session.poll_ready(ms(base, 12_499)), None);
+        assert_eq!(session.ready_at(), Some(ms(base, 10_700)));
+        assert_eq!(session.poll_ready(ms(base, 10_699)), None);
         assert_eq!(
             session
-                .poll_ready(ms(base, 12_500))
+                .poll_ready(ms(base, 10_700))
                 .map(|request| request.text),
             Some("hello".to_owned())
         );
@@ -654,8 +760,8 @@ mod tests {
         assert_eq!(session.poll_ready(ms(base, 100_000)), None);
 
         assert!(session.on_quiet_frame(ms(base, 3_000)));
-        assert_eq!(session.poll_ready(ms(base, 5_499)), None);
-        assert!(session.poll_ready(ms(base, 5_500)).is_some());
+        assert_eq!(session.poll_ready(ms(base, 3_699)), None);
+        assert!(session.poll_ready(ms(base, 3_700)).is_some());
     }
 
     #[test]
@@ -847,6 +953,7 @@ mod tests {
         for text in [
             "taste that.",
             "finish dictation later",
+            "Please paste that into the document",
             "submitter",
             "submit um okay",
             "submit um uh hmm",
@@ -874,7 +981,7 @@ mod tests {
             ("cancel", Ending::Cancel),
         ])
         .unwrap();
-        let mut session = CaptureSession::new(custom, PauseDuration::default());
+        let mut session = CaptureSession::new(custom, EndingPauses::default());
         let now = Instant::now();
         for literal in ["Resend this", "A literal send this inside the sentence"] {
             assert_eq!(
@@ -1028,18 +1135,81 @@ mod tests {
     }
 
     #[test]
-    fn the_pause_must_be_between_two_and_three_seconds() {
-        for (seconds, valid) in [
-            (2.0, true),
-            (2.5, true),
-            (3.0, true),
-            (1.999, false),
-            (3.001, false),
-            (f64::NAN, false),
-            (f64::INFINITY, false),
+    fn each_ending_has_its_own_pause_from_zero_to_five_seconds() {
+        let ms = |paste, submit, task| Ok([paste, submit, task].map(Duration::from_millis));
+        for (json, expected) in [
+            ("{}", ms(700, 2500, 2500)),
+            (
+                r#"{"paste": 0, "submit": 5, "task": 1.5}"#,
+                ms(0, 5000, 1500),
+            ),
+            (r#"{"submit": 0.7}"#, ms(700, 700, 2500)),
+            (
+                r#"{"paste": -0.001}"#,
+                Err("The paste pause must be a number of seconds from 0 to 5."),
+            ),
+            (r#"{"submit": 5.001}"#, Err("submit pause must be")),
+            (r#"{"task": 6}"#, Err("task pause must be")),
+            (r#"{"paste": "0.7"}"#, Err("invalid type")),
+            (r#"{"task": null, "paste": true}"#, Err("invalid type")),
+            ("2.5", Err("invalid type")),
+            (r#"{"scratch": 1}"#, Err("unknown field `scratch`")),
         ] {
-            assert_eq!(PauseDuration::try_from(seconds).is_ok(), valid, "{seconds}");
+            let result = serde_json::from_str::<EndingPauses>(json);
+            match (result, expected) {
+                (Ok(pauses), Ok(expected)) => assert_eq!(
+                    [
+                        CaptureRoute::Paste,
+                        CaptureRoute::Submit,
+                        CaptureRoute::Task
+                    ]
+                    .map(|route| pauses.get(route)),
+                    expected,
+                    "{json}"
+                ),
+                (Err(error), Err(expected)) => {
+                    assert!(error.to_string().contains(expected), "{json}: {error}");
+                }
+                (result, expected) => panic!("{json}: {result:?} vs {expected:?}"),
+            }
         }
-        assert_eq!(PauseDuration::default().get(), Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn the_capture_limits_have_their_own_ranges() {
+        let secs = |idle, max| Ok([idle, max].map(Duration::from_secs));
+        for (json, expected) in [
+            ("{}", secs(60, 300)),
+            (r#"{"idle": 10, "max": 3600}"#, secs(10, 3600)),
+            (r#"{"idle": 600, "max": 60}"#, secs(600, 60)),
+            (r#"{"idle": 90}"#, secs(90, 300)),
+            (r#"{"max": 900}"#, secs(60, 900)),
+            (
+                r#"{"idle": 9}"#,
+                Err("The idle limit must be a whole number of seconds from 10 to 600."),
+            ),
+            (r#"{"idle": 601}"#, Err("idle limit must be")),
+            (
+                r#"{"max": 59}"#,
+                Err("The max limit must be a whole number of seconds from 60 to 3600."),
+            ),
+            (r#"{"max": 3601}"#, Err("max limit must be")),
+            (r#"{"idle": "60"}"#, Err("invalid type")),
+            (r#"{"max": 60.5}"#, Err("invalid type")),
+            (r#"{"idle": -1}"#, Err("invalid value")),
+            ("60", Err("invalid type")),
+            (r#"{"min": 1}"#, Err("unknown field `min`")),
+        ] {
+            let result = serde_json::from_str::<CaptureLimits>(json);
+            match (result, expected) {
+                (Ok(limits), Ok(expected)) => {
+                    assert_eq!([limits.idle(), limits.max()], expected, "{json}");
+                }
+                (Err(error), Err(expected)) => {
+                    assert!(error.to_string().contains(expected), "{json}: {error}");
+                }
+                (result, expected) => panic!("{json}: {result:?} vs {expected:?}"),
+            }
+        }
     }
 }
