@@ -4,6 +4,7 @@ import type { Backend, Settings } from "./contract.ts";
 import { errorText } from "./contract.ts";
 import { createControls } from "./controls.ts";
 import { el } from "./dom.ts";
+import { applyLook } from "./look.ts";
 import { buildPages, type Page, type PageContext } from "./settings-pages.ts";
 
 export const SAVED_TEXT = "Saved — applies after the current capture";
@@ -70,7 +71,8 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     const microphones = await backend.listMicrophones().catch((error: unknown) => ({ error: errorText(error) }));
     draft = structuredClone(loaded);
     baseline = JSON.stringify(draft);
-    pages = buildPages({ draft, backend, controls: createControls(changed), microphones, live });
+    applyLook(root, draft.look);
+    pages = buildPages({ draft, backend, root, controls: createControls(changed), microphones, live });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {
       const button = el("button", { type: "button", "data-page": page.id }, page.title);

@@ -1,5 +1,6 @@
 import "./theme.css";
 import "./settings.css";
+import "./settings-looks.css";
 import { chooseBackend } from "./boot.ts";
 import { mountSettings } from "./settings.ts";
 

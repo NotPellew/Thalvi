@@ -5,6 +5,7 @@ import { errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
 import { el } from "./dom.ts";
+import { applyLook, lookPicker } from "./look.ts";
 
 export interface PageContext {
   draft: Settings;
@@ -12,6 +13,8 @@ export interface PageContext {
   controls: Controls;
   /** Microphone names, or why they could not be listed. */
   microphones: string[] | { error: string };
+  /** The settings window, so a look picked here shows at once. */
+  root: HTMLElement;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
   live: { level: (level: number) => void; listening: (on: boolean) => void };
 }
@@ -113,7 +116,7 @@ function miniField(label: string, field: Field): HTMLElement {
   return el("label", { class: "mini" }, el("span", {}, label), field.node);
 }
 
-function general({ draft, backend, controls, live }: PageContext): HTMLElement[] {
+function general({ draft, backend, controls, live, root }: PageContext): HTMLElement[] {
   const server = controls.text(draft.server, (value) => {
     draft.server = value;
   }, { placeholder: "ws://127.0.0.1:8080" });
@@ -137,6 +140,12 @@ function general({ draft, backend, controls, live }: PageContext): HTMLElement[]
       node: el("span", { class: "stack" }, listening.node, problem),
       field: input,
     }),
+    row("Look", "How the overlay and this window look. The overlay changes after the current capture.",
+      lookPicker(draft.look, (look) => {
+        draft.look = look;
+        applyLook(root, look);
+        controls.touched();
+      })),
   ];
 }
 
@@ -503,9 +512,28 @@ const PAGES: readonly (readonly [string, string, (context: PageContext) => HTMLE
   ["about", "About", about],
 ];
 
+/** Wraps each group heading and the rows after it in a box the looks can frame. */
+function grouped(nodes: HTMLElement[]): HTMLElement[] {
+  const result: HTMLElement[] = [];
+  let current: HTMLElement | null = null;
+  for (const node of nodes) {
+    if (node instanceof HTMLDataListElement) {
+      result.push(node);
+      continue;
+    }
+    if (node.hasAttribute("data-group")) current = null;
+    if (current === null) {
+      current = el("div", { class: "grp" });
+      result.push(current);
+    }
+    current.append(node);
+  }
+  return result;
+}
+
 export function buildPages(context: PageContext): Page[] {
   return PAGES.map(([id, title, build]) => {
-    const node = el("section", { "data-page": id, "aria-labelledby": `page-${id}` }, el("h3", { id: `page-${id}` }, title), ...build(context));
+    const node = el("section", { "data-page": id, "aria-labelledby": `page-${id}` }, el("h3", { id: `page-${id}` }, title), ...grouped(build(context)));
     return { id, title, node };
   });
 }
