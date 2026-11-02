@@ -24,10 +24,10 @@ pub use gate::InputGate;
 
 use crate::frame::Frame;
 
-/// Frames queued between the capture thread and the consumer: 10 s, as the Python client did.
+/// Frames queued between the capture thread and the consumer: 10 s.
 const QUEUE_FRAMES: usize = 125;
 
-/// The device rate asked for first, as the Python client did.
+/// The device rate asked for first.
 const PREFERRED_RATE: u32 = 48_000;
 
 /// Sample formats the capture callback converts, best first.

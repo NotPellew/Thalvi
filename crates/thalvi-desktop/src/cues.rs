@@ -10,7 +10,7 @@ use cpal::{ErrorKind, FromSample, OutputCallbackInfo, SampleFormat, SizedSample,
 
 use crate::audio::InputGate;
 
-/// Peak level of every cue, as in the Python client.
+/// Peak level of every cue.
 const AMPLITUDE: f64 = 0.15;
 
 /// How long past a cue's own length playback may take before the output counts as stuck.
@@ -388,8 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn every_cue_has_the_notes_and_lengths_of_the_python_client() {
-        // (cue, [(Hz, seconds)]) from cues.py, with the samples each note takes at 24 kHz.
+    fn every_cue_has_its_notes_and_lengths() {
         let table: [(Cue, &[Note]); 5] = [
             (Cue::Wake, &[(523.25, 0.09, 2160), (783.99, 0.14, 3360)]),
             (
