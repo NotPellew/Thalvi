@@ -206,11 +206,11 @@ function endingsTable({ draft, controls }: PageContext): HTMLElement {
 
 function wake(context: PageContext): HTMLElement[] {
   const { draft, controls } = context;
-  const pause = (key: "paste" | "submit" | "task", label: string, min: number): HTMLElement =>
+  const pause = (key: "paste" | "submit" | "task", label: string): HTMLElement =>
     row(
       label,
-      `Time to keep talking or cancel, ${String(min)} to 3 s.`,
-      controls.number(draft.ending_pause[key], { min, max: 3, step: 0.1, unit: "s" }, (value) => {
+      "Time to keep talking or cancel, 0 to 5 s.",
+      controls.number(draft.ending_pause[key], { min: 0, max: 5, step: 0.1, unit: "s" }, (value) => {
         draft.ending_pause[key] = value;
       }),
     );
@@ -222,9 +222,9 @@ function wake(context: PageContext): HTMLElement[] {
     group("Endings"),
     row("Ending phrases", "Say one to finish a capture. Every action needs at least one phrase.", endingsTable(context)),
     group("Quiet before acting"),
-    pause("paste", "Quiet before paste", 0.5),
-    pause("submit", "Quiet before paste and Enter", 2),
-    pause("task", "Quiet before running a task", 2),
+    pause("paste", "Quiet before paste"),
+    pause("submit", "Quiet before paste and Enter"),
+    pause("task", "Quiet before running a task"),
   ];
 }
 

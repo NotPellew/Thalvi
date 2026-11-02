@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use thalvi_desktop::config::DesktopConfig;
+use thalvi_desktop::config::{ConfigError, DesktopConfig};
 
 /// Where the config lives and what `THALVI_RECORD` asked for.
 #[derive(Clone, Debug)]
@@ -58,7 +58,15 @@ impl Store {
             settings.remove("recordings");
         }
         let config = DesktopConfig::from_json_str(&settings.to_string(), self.record.as_deref())
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match error {
+                // The window writes this JSON itself, so a line and column would mean nothing.
+                ConfigError::Invalid(error) => {
+                    let text = error.to_string();
+                    let position = format!(" at line {} column {}", error.line(), error.column());
+                    text.strip_suffix(&position).unwrap_or(&text).to_owned()
+                }
+                error => error.to_string(),
+            })?;
         let json = serde_json::to_string_pretty(&config)
             .map_err(|error| format!("The settings could not be written: {error}"))?;
         write_atomically(&self.path, &json).map_err(|error| {
@@ -231,9 +239,9 @@ mod tests {
         let exists = store.path.exists() || store.path.parent().unwrap().exists();
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(
-            error.contains("The paste pause must be a number of seconds"),
-            "{error}"
+        assert_eq!(
+            error,
+            "The paste pause must be a number of seconds from 0 to 5."
         );
         assert!(!exists, "nothing is created for invalid settings");
     }
