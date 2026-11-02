@@ -9,6 +9,7 @@ pub mod engine;
 pub mod fbank;
 pub mod frame;
 pub mod host;
+pub mod local;
 pub mod metrics;
 pub mod models;
 pub mod recognizer;
