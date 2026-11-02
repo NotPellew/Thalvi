@@ -2,6 +2,8 @@
 
 mod win32;
 
+use std::fmt;
+
 use super::{App, Host, HostError, Modifier, TypedText, WebUrl};
 pub use win32::Real;
 
@@ -61,6 +63,12 @@ pub trait Win32: Send + Sync {
 pub struct Target {
     window: Hwnd,
     identity: Identity,
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.identity.executable)
+    }
 }
 
 /// The Windows desktop.

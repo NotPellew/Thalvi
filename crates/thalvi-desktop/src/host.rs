@@ -106,8 +106,9 @@ pub struct App {
 ///
 /// Every method returns a typed reason when this desktop cannot do it, never a silent no-op.
 pub trait Host: Send + Sync {
-    /// A window as bound at wake. Equal targets are the same live window, never a reused handle.
-    type Target: Clone + PartialEq + fmt::Debug + Send + 'static;
+    /// A window as bound at wake. Equal targets are the same live window, never a reused handle;
+    /// `Display` names it in notices, without its title.
+    type Target: Clone + PartialEq + fmt::Debug + fmt::Display + Send + 'static;
 
     /// Binds the focused window.
     ///

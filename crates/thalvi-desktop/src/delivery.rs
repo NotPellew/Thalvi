@@ -50,7 +50,6 @@ pub struct Delivery<H> {
 impl<H> Delivery<H>
 where
     H: Host + 'static,
-    H::Target: Display,
 {
     #[must_use]
     pub fn new(host: H) -> Self {
