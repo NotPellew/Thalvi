@@ -591,14 +591,15 @@ fn is_separator(c: char) -> bool {
     c.is_whitespace() || matches!(c, '.' | '!' | '?' | ',' | ';' | ':')
 }
 
-/// Whether `chars` is only separators and `min..=max` artifacts, each followed by separators.
-/// Whether `transcript` holds words, not only one or two artifacts such as `[noise]` or `uh`.
+/// Whether `transcript` holds words, not only punctuation or one or two artifacts such as
+/// `[noise]` or `uh`.
 #[must_use]
 pub fn has_words(transcript: &str) -> bool {
-    let text = transcript.trim();
-    !text.is_empty() && !artifacts_to_end(&text.chars().collect::<Vec<_>>(), 1, 2)
+    let chars: Vec<char> = transcript.chars().collect();
+    !chars.iter().all(|c| is_separator(*c)) && !artifacts_to_end(&chars, 1, 2)
 }
 
+/// Whether `chars` is only separators and `min..=max` artifacts, each followed by separators.
 fn artifacts_to_end(chars: &[char], min: usize, max: usize) -> bool {
     let skipped = chars.iter().take_while(|c| is_separator(**c)).count();
     let rest = &chars[skipped..];
@@ -904,6 +905,27 @@ mod tests {
                 "{artifact}"
             );
         }
+    }
+
+    #[test]
+    fn punctuation_alone_is_not_words_and_cannot_cancel_an_armed_ending() {
+        let base = Instant::now();
+        for noise in [".", "...", " ? ", ",", "!?", "\n"] {
+            assert!(!has_words(noise), "{noise:?}");
+            let mut session = session();
+            session
+                .on_final("hello submit", ms(base, 10_000), false)
+                .unwrap();
+            assert!(!session.on_partial(noise), "{noise:?}");
+            assert_eq!(
+                session
+                    .poll_ready(ms(base, 12_500))
+                    .map(|request| request.text),
+                Some("hello".to_owned()),
+                "{noise:?}"
+            );
+        }
+        assert!(has_words("a."));
     }
 
     #[test]
