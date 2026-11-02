@@ -128,6 +128,7 @@ mod tests {
 
     use super::*;
     use crate::capture::Ending;
+    use crate::cues::Cue;
     use crate::models::CatalogHead;
     use crate::wake::HeadModel;
 
@@ -193,6 +194,29 @@ mod tests {
                 audio: true
             }
         );
+    }
+
+    #[test]
+    fn each_cue_switch_turns_off_only_its_own_cue() {
+        let all = [
+            Cue::Wake,
+            Cue::Provisional,
+            Cue::Cancelled,
+            Cue::Accepted,
+            Cue::Error,
+        ];
+        for (key, off) in [
+            ("wake", Cue::Wake),
+            ("provisional", Cue::Provisional),
+            ("cancelled", Cue::Cancelled),
+            ("accepted", Cue::Accepted),
+            ("error", Cue::Error),
+        ] {
+            let config = parse(&format!(r#"{{"cues": {{"{key}": false}}}}"#)).unwrap();
+            for cue in all {
+                assert_eq!(config.cues.enabled(cue), cue != off, "{key} {cue:?}");
+            }
+        }
     }
 
     #[test]

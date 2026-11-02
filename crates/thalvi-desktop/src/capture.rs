@@ -814,7 +814,7 @@ mod tests {
     fn configured_endings_match_whole_phrases_longest_first() {
         let custom = endings(&[
             ("  Send   THIS ", Ending::Submit),
-            ("please send this", Ending::Paste),
+            ("so send this", Ending::Paste),
             ("paste", Ending::Paste),
             ("do it", Ending::Task),
             ("scratch", Ending::Scratch),
@@ -841,7 +841,7 @@ mod tests {
                 "Resend this A literal send this inside the sentence Final words"
             )
         );
-        let step = session.on_final("ok please send this", now, false).unwrap();
+        let step = session.on_final("ok so send this", now, false).unwrap();
         assert_eq!(armed_parts(&step).0, CaptureRoute::Paste);
     }
 
