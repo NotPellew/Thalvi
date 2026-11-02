@@ -196,6 +196,14 @@ pub enum ModelError {
         kind.noun()
     )]
     Checksum { kind: ModelKind, file: String },
+    #[error("The stored {} {file} was damaged, so it was removed. {cause}", kind.noun())]
+    Replaced {
+        kind: ModelKind,
+        file: String,
+        /// Why fetching it again failed.
+        #[source]
+        cause: Box<ModelError>,
+    },
     #[error("Could not save the {} {file} in {}: {source}", kind.noun(), dir.display())]
     Io {
         kind: ModelKind,
@@ -227,18 +235,38 @@ impl ModelStore {
         Self { dir: dir.into() }
     }
 
-    /// Returns the path of the verified file, downloading it first if it is missing or damaged.
+    /// Returns the path of the verified file, downloading it first if it is missing. A stored file
+    /// that does not match its checksum is deleted before anything else.
     ///
     /// # Errors
     /// Fails when the download fails, the checksum does not match (the file is deleted), or the
-    /// directory cannot be written.
+    /// directory cannot be written. When a damaged stored file was removed first, the error says so.
     pub async fn fetch(&self, asset: &Asset<'_>) -> Result<PathBuf, ModelError> {
         let path = self.dir.join(asset.file_name);
-        if is_verified(&path, asset).await {
-            return Ok(path);
+        let damaged = match stored(&path, asset).await {
+            Stored::Intact => return Ok(path),
+            Stored::Missing => false,
+            Stored::Damaged => {
+                tokio::fs::remove_file(&path)
+                    .await
+                    .map_err(|source| ModelError::Io {
+                        kind: asset.kind,
+                        file: asset.file_name.to_owned(),
+                        dir: self.dir.clone(),
+                        source,
+                    })?;
+                true
+            }
+        };
+        match self.download(asset, &path).await {
+            Ok(()) => Ok(path),
+            Err(cause) if damaged => Err(ModelError::Replaced {
+                kind: asset.kind,
+                file: asset.file_name.to_owned(),
+                cause: Box::new(cause),
+            }),
+            Err(error) => Err(error),
         }
-        self.download(asset, &path).await?;
-        Ok(path)
     }
 
     async fn download(&self, asset: &Asset<'_>, path: &Path) -> Result<(), ModelError> {
@@ -302,26 +330,41 @@ impl Drop for Partial {
     }
 }
 
-/// Whether the file on disk is the pinned one; streamed, because speech models are large.
-async fn is_verified(path: &Path, asset: &Asset<'_>) -> bool {
+/// What is on disk under a pinned name.
+enum Stored {
+    Missing,
+    Intact,
+    Damaged,
+}
+
+/// Checks the file on disk against the pin; streamed, because speech models are large.
+async fn stored(path: &Path, asset: &Asset<'_>) -> Stored {
     let (path, sha256) = (path.to_owned(), asset.sha256.to_owned());
     tokio::task::spawn_blocking(move || {
         use std::io::Read;
-        let Ok(mut file) = std::fs::File::open(path) else {
-            return false;
+        let mut file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Stored::Missing,
+            Err(_) => return Stored::Damaged,
         };
         let mut hasher = Sha256::new();
         let mut buffer = vec![0; 1 << 20];
         loop {
             match file.read(&mut buffer) {
-                Ok(0) => return hex(&hasher.finalize()) == sha256,
+                Ok(0) => {
+                    return if hex(&hasher.finalize()) == sha256 {
+                        Stored::Intact
+                    } else {
+                        Stored::Damaged
+                    };
+                }
                 Ok(read) => hasher.update(&buffer[..read]),
-                Err(_) => return false,
+                Err(_) => return Stored::Damaged,
             }
         }
     })
     .await
-    .unwrap_or(false)
+    .unwrap_or(Stored::Damaged)
 }
 
 fn hex(digest: &[u8]) -> String {

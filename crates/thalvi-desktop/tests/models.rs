@@ -236,3 +236,31 @@ async fn a_download_that_is_cancelled_leaves_no_partial_file() {
     assert!(task.await.expect_err("cancelled").is_cancelled());
     assert_eq!(leftovers(&dir), Vec::<String>::new());
 }
+
+#[tokio::test]
+async fn a_damaged_file_is_removed_even_when_it_cannot_be_downloaded_again() {
+    let (address, _server) = serve().await;
+    let dir = dir("damaged-offline");
+    fs::create_dir_all(&dir).expect("dir");
+    fs::write(dir.join("good.onnx"), b"half a mod").expect("damaged file");
+    let url = format!("http://{address}/gone.onnx");
+    let sha = sha256(GOOD);
+    let asset = Asset {
+        kind: ModelKind::Speech,
+        file_name: "good.onnx",
+        url: &url,
+        size: GOOD.len() as u64,
+        sha256: &sha,
+    };
+
+    let error = ModelStore::in_dir(&dir)
+        .fetch(&asset)
+        .await
+        .expect_err("cannot download");
+    assert!(matches!(error, ModelError::Replaced { .. }));
+    assert_eq!(
+        error.to_string(),
+        "The stored speech model good.onnx was damaged, so it was removed. Could not download the speech model good.onnx. Check the internet connection and try again."
+    );
+    assert_eq!(leftovers(&dir), Vec::<String>::new());
+}
