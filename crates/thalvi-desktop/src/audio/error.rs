@@ -9,6 +9,8 @@ use cpal::ErrorKind;
 pub enum AudioError {
     /// No input device exists.
     NoDevice,
+    /// The microphone chosen in the settings is not connected.
+    DeviceMissing(String),
     /// The system refused access to the microphone.
     PermissionDenied,
     /// Another app holds the microphone.
@@ -32,6 +34,12 @@ impl fmt::Display for AudioError {
         f.write_str(match self {
             Self::NoDevice => {
                 "No microphone was found. Plug one in or set a default input in the system sound settings."
+            }
+            Self::DeviceMissing(name) => {
+                return write!(
+                    f,
+                    "The microphone {name:?} is not connected. Plug it in or choose another one in Thalvi's settings."
+                );
             }
             Self::PermissionDenied => {
                 "The microphone is blocked. Allow Thalvi to use it in the system privacy settings."
@@ -123,6 +131,14 @@ mod tests {
         assert_eq!(
             AudioError::from_stream(other.clone()),
             Some(AudioError::StreamFailed(other))
+        );
+    }
+
+    #[test]
+    fn a_missing_chosen_microphone_is_named_in_the_notice() {
+        assert_eq!(
+            AudioError::DeviceMissing("USB Mic".to_owned()).to_string(),
+            "The microphone \"USB Mic\" is not connected. Plug it in or choose another one in Thalvi's settings."
         );
     }
 

@@ -127,7 +127,7 @@ async fn listen_and_deliver(config: DesktopConfig, host: Desktop) -> Result<(), 
     let wake = wake.map_err(|error| error.to_string())?;
 
     let gate = InputGate::default();
-    let mut microphone = Microphone::new(gate.clone());
+    let mut microphone = Microphone::new(gate.clone(), config.microphone.clone());
     let (microphone, frames) = tokio::task::spawn_blocking(move || {
         let frames = microphone.open();
         (microphone, frames)

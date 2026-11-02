@@ -224,19 +224,52 @@ impl Frames {
     }
 }
 
-/// Opens and closes the default microphone.
+/// The names of the input devices, each once, in the order the system lists them.
+///
+/// # Errors
+///
+/// [`AudioError::OpenFailed`] when the system cannot list its devices.
+pub fn list_microphones() -> Result<Vec<String>, AudioError> {
+    let devices = cpal::default_host()
+        .input_devices()
+        .map_err(AudioError::from_open)?;
+    let mut names: Vec<String> = Vec::new();
+    for name in devices.map(|device| device.to_string()) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+/// The item named `name`, never another one.
+fn named<T>(items: impl IntoIterator<Item = (String, T)>, name: &str) -> Result<T, AudioError> {
+    items
+        .into_iter()
+        .find_map(|(known, item)| (known == name).then_some(item))
+        .ok_or_else(|| AudioError::DeviceMissing(name.to_owned()))
+}
+
+/// Opens and closes a microphone.
 ///
 /// Closing the stream is what turns the operating system's microphone indicator off.
 pub struct Microphone {
     gate: InputGate,
+    /// The device to open; `None` follows the system default.
+    device: Option<String>,
     open: Option<(Stream, Arc<Shared>)>,
 }
 
 impl Microphone {
-    /// A closed microphone whose captured audio is dropped while `gate` is off.
+    /// A closed microphone whose captured audio is dropped while `gate` is off; it opens the
+    /// input device named `device`, or the system default when `None`.
     #[must_use]
-    pub fn new(gate: InputGate) -> Self {
-        Self { gate, open: None }
+    pub fn new(gate: InputGate, device: Option<String>) -> Self {
+        Self {
+            gate,
+            device,
+            open: None,
+        }
     }
 
     /// Whether a stream is open.
@@ -245,7 +278,7 @@ impl Microphone {
         self.open.is_some()
     }
 
-    /// Opens the current default microphone, closing any stream already open.
+    /// Opens the chosen microphone, or the current default one, closing any stream already open.
     ///
     /// Use this to resume after [`pause`](Self::pause) or to follow a new default device after an
     /// [`AudioError::DeviceLost`] or [`AudioError::DeviceChanged`]. It blocks while the device
@@ -253,12 +286,20 @@ impl Microphone {
     ///
     /// # Errors
     ///
-    /// Why the microphone could not be opened.
+    /// Why the microphone could not be opened; [`AudioError::DeviceMissing`] when the chosen
+    /// device is not connected, in which case no other device is opened.
     pub fn open(&mut self) -> Result<Frames, AudioError> {
         self.pause();
-        let device = cpal::default_host()
-            .default_input_device()
-            .ok_or(AudioError::NoDevice)?;
+        let host = cpal::default_host();
+        let device = match &self.device {
+            Some(name) => named(
+                host.input_devices()
+                    .map_err(AudioError::from_open)?
+                    .map(|device| (device.to_string(), device)),
+                name,
+            )?,
+            None => host.default_input_device().ok_or(AudioError::NoDevice)?,
+        };
         let default = device
             .default_input_config()
             .map_err(AudioError::from_open)?;
@@ -552,6 +593,16 @@ mod tests {
     }
 
     #[test]
+    fn a_chosen_device_is_found_by_name_and_never_replaced() {
+        let devices = || vec![("default".to_owned(), 1), ("USB Mic".to_owned(), 2)];
+        assert_eq!(named(devices(), "USB Mic"), Ok(2));
+        assert_eq!(
+            named(devices(), "Headset"),
+            Err(AudioError::DeviceMissing("Headset".to_owned()))
+        );
+    }
+
+    #[test]
     fn config_prefers_fewest_channels_at_48khz_in_a_known_format() {
         let range = |channels, min, max, format| {
             SupportedStreamConfigRange::new(
@@ -605,7 +656,7 @@ mod tests {
     #[ignore = "needs a microphone"]
     async fn default_microphone_delivers_16khz_frames_in_real_time() {
         let gate = InputGate::default();
-        let mut microphone = Microphone::new(gate.clone());
+        let mut microphone = Microphone::new(gate.clone(), None);
         let mut frames = microphone.open().expect("a default microphone");
         let started = Instant::now();
         let mut count = 0_u32;
