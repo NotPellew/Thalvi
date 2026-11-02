@@ -5,6 +5,7 @@
 //! 512-point power spectrum and 128 Slaney mel bins up to 8 kHz.
 
 use std::f32::consts::PI;
+use std::sync::Arc;
 
 /// Mel bins per feature frame.
 pub const MEL_BINS: usize = 128;
@@ -121,11 +122,17 @@ impl Fft {
     }
 }
 
-/// Turns a stream of samples into log-mel frames as soon as each frame's window is complete.
-pub struct LogMel {
+/// What every stream computes with, built once.
+struct Tables {
     window: [f32; WINDOW],
     filters: Vec<Filter>,
     fft: Fft,
+}
+
+/// Turns a stream of samples into log-mel frames as soon as each frame's window is complete.
+#[derive(Clone)]
+pub struct LogMel {
+    tables: Arc<Tables>,
     /// Samples not yet dropped; the first is sample number `offset` of the stream.
     samples: Vec<f32>,
     offset: usize,
@@ -145,9 +152,11 @@ impl LogMel {
         let window =
             std::array::from_fn(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / WINDOW as f32).cos());
         Self {
-            window,
-            filters: filters(),
-            fft: Fft::new(),
+            tables: Arc::new(Tables {
+                window,
+                filters: filters(),
+                fft: Fft::new(),
+            }),
             samples: Vec::new(),
             offset: 0,
             frames: 0,
@@ -194,13 +203,13 @@ impl LogMel {
         wave[0] -= PRE_EMPHASIS * wave[0];
         let mut re = [0.0; FFT_SIZE];
         let mut im = [0.0; FFT_SIZE];
-        for (i, (value, weight)) in wave.iter().zip(&self.window).enumerate() {
+        for (i, (value, weight)) in wave.iter().zip(&self.tables.window).enumerate() {
             re[i] = value * weight;
         }
-        self.fft.run(&mut re, &mut im);
+        self.tables.fft.run(&mut re, &mut im);
         let power: [f32; SPECTRUM] = std::array::from_fn(|i| re[i] * re[i] + im[i] * im[i]);
         std::array::from_fn(|bin| {
-            let filter = &self.filters[bin];
+            let filter = &self.tables.filters[bin];
             let energy: f32 = filter
                 .weights
                 .iter()

@@ -41,7 +41,7 @@ async fn clip_frames() -> Vec<Frame> {
 
 #[tokio::test]
 #[ignore = "needs the speech model files in THALVI_SPEECH_MODEL"]
-async fn the_clip_is_recognized_as_partials_that_grow_and_finals_at_each_pause() {
+async fn the_clip_is_recognized_in_full_as_partials_that_grow_and_a_final() {
     let dir = PathBuf::from(std::env::var("THALVI_SPEECH_MODEL").expect("THALVI_SPEECH_MODEL"));
     let model = Transducer::load(&TransducerFiles {
         encoder: dir.join("encoder.int8.onnx"),
@@ -65,8 +65,7 @@ async fn the_clip_is_recognized_as_partials_that_grow_and_finals_at_each_pause()
     assert_eq!(
         finals,
         [
-            "After early nightfall the yellow lamps would light up here and there",
-            "Quarter of the brothels",
+            "After early nightfall the yellow lamps would light up here and there the squalid quarter of the brothels"
         ]
     );
     assert!(events.contains(&RecognizerEvent::Partial(

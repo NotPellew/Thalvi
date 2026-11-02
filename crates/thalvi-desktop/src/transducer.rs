@@ -8,11 +8,11 @@ use ort::session::Session;
 use ort::value::Tensor;
 
 use crate::fbank::{LogMel, MEL_BINS, MelFrame};
-use crate::frame::Frame;
-use crate::local::{ModelSource, SpeechModel, SpeechStream};
+use crate::local::{ModelSource, SpeechModel};
 use crate::models::{CatalogSpeech, ModelStore};
-use crate::recognizer::{RecognizerError, RecognizerEvent};
+use crate::recognizer::RecognizerError;
 use crate::runtime;
+use crate::segments::{FrameDecoder, Segments};
 
 /// Silence after speech that ends a stretch of it, as a `Final`.
 const ENDPOINT_MS: usize = 600;
@@ -20,7 +20,6 @@ const ENDPOINT_MS: usize = 600;
 const FRAME_MS: usize = 10;
 /// The most tokens one encoder frame may emit.
 const MAX_TOKENS_PER_FRAME: usize = 10;
-const PCM_SCALE: f32 = 32768.0;
 
 /// The files of one exported model.
 #[derive(Clone, Debug)]
@@ -169,28 +168,24 @@ impl Transducer {
 }
 
 impl SpeechModel for Transducer {
-    type Stream = TransducerStream;
+    type Stream = Segments<TransducerStream>;
 
-    fn stream(&self) -> TransducerStream {
-        let mut stream = TransducerStream {
+    fn stream(&self) -> Segments<TransducerStream> {
+        let shape = Arc::clone(&self.shape);
+        let endpoint_blanks = ENDPOINT_MS.div_ceil(shape.subsampling * FRAME_MS);
+        let decoder = TransducerStream {
             sessions: Arc::clone(&self.sessions),
-            shape: Arc::clone(&self.shape),
-            tokens: Arc::clone(&self.tokens),
+            carried: Carried::empty(&shape),
+            shape,
             mel: LogMel::new(),
             features: VecDeque::new(),
-            encoder: EncoderCache::default(),
-            predictor: None,
-            spoken: Vec::new(),
-            trailing_blanks: 0,
-            shown: String::new(),
         };
-        stream.encoder = EncoderCache::empty(&stream.shape);
-        stream
+        Segments::new(decoder, Arc::clone(&self.tokens), endpoint_blanks)
     }
 }
 
 /// What the encoder carries from one chunk to the next.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct EncoderCache {
     channel: Vec<f32>,
     time: Vec<f32>,
@@ -207,25 +202,44 @@ impl EncoderCache {
     }
 }
 
+/// What the model carries from chunk to chunk, and across the end of a stretch of speech.
+#[derive(Clone)]
+struct Carried {
+    encoder: EncoderCache,
+    /// `None` until the next decode, then the predictor primed with the blank token.
+    predictor: Option<Predictor>,
+}
+
+impl Carried {
+    fn empty(shape: &Shape) -> Self {
+        Self {
+            encoder: EncoderCache::empty(shape),
+            predictor: None,
+        }
+    }
+
+    /// The text starts afresh but the encoder keeps what it heard: without that context the first
+    /// words after a pause are lost.
+    fn next_segment(&mut self) {
+        self.predictor = None;
+    }
+}
+
 /// The predictor's output for the last token and its recurrent state.
+#[derive(Clone)]
 struct Predictor {
     output: Vec<f32>,
     states: [Vec<f32>; 2],
 }
 
 /// One recognition on a [`Transducer`].
+#[derive(Clone)]
 pub struct TransducerStream {
     sessions: Arc<Mutex<Sessions>>,
     shape: Arc<Shape>,
-    tokens: Arc<Vec<String>>,
     mel: LogMel,
     features: VecDeque<MelFrame>,
-    encoder: EncoderCache,
-    /// `None` until the next decode, then the predictor primed with the blank token.
-    predictor: Option<Predictor>,
-    spoken: Vec<usize>,
-    trailing_blanks: usize,
-    shown: String,
+    carried: Carried,
 }
 
 fn failed(reason: impl std::fmt::Display) -> RecognizerError {
@@ -238,25 +252,6 @@ fn dims(shape: &[usize]) -> Vec<usize> {
 }
 
 impl TransducerStream {
-    fn text(&self) -> String {
-        self.spoken
-            .iter()
-            .filter_map(|id| self.tokens.get(*id))
-            .flat_map(|piece| piece.chars())
-            .map(|c| if c == '\u{2581}' { ' ' } else { c })
-            .collect::<String>()
-            .trim()
-            .to_owned()
-    }
-
-    fn restart(&mut self) {
-        self.encoder = EncoderCache::empty(&self.shape);
-        self.predictor = None;
-        self.spoken.clear();
-        self.trailing_blanks = 0;
-        self.shown.clear();
-    }
-
     fn run_encoder(
         &mut self,
         sessions: &mut Sessions,
@@ -277,15 +272,15 @@ impl TransducerStream {
                 .map_err(failed)?,
             Tensor::from_array((
                 dims(&[1, c0, c1, c2]),
-                std::mem::take(&mut self.encoder.channel)
+                std::mem::take(&mut self.carried.encoder.channel)
             ))
             .map_err(failed)?,
             Tensor::from_array((
                 dims(&[1, t0, t1, t2]),
-                std::mem::take(&mut self.encoder.time)
+                std::mem::take(&mut self.carried.encoder.time)
             ))
             .map_err(failed)?,
-            Tensor::from_array((dims(&[1]), vec![self.encoder.length])).map_err(failed)?,
+            Tensor::from_array((dims(&[1]), vec![self.carried.encoder.length])).map_err(failed)?,
         ];
         let outputs = sessions.encoder.run(inputs).map_err(failed)?;
         let (shape, encoded) = outputs[0].try_extract_tensor::<f32>().map_err(failed)?;
@@ -295,11 +290,11 @@ impl TransducerStream {
             .ok_or_else(|| failed("the encoder returned an unexpected shape"))?;
         let encoded = encoded.to_vec();
         let (_, channel) = outputs[2].try_extract_tensor::<f32>().map_err(failed)?;
-        self.encoder.channel = channel.to_vec();
+        self.carried.encoder.channel = channel.to_vec();
         let (_, time) = outputs[3].try_extract_tensor::<f32>().map_err(failed)?;
-        self.encoder.time = time.to_vec();
+        self.carried.encoder.time = time.to_vec();
         let (_, length) = outputs[4].try_extract_tensor::<i64>().map_err(failed)?;
-        self.encoder.length = length.first().copied().unwrap_or(0);
+        self.carried.encoder.length = length.first().copied().unwrap_or(0);
         Ok((encoded, frames))
     }
 
@@ -335,16 +330,18 @@ impl TransducerStream {
         sessions: &mut Sessions,
         encoded: &[f32],
         frames: usize,
-    ) -> Result<(), RecognizerError> {
+    ) -> Result<Vec<Vec<usize>>, RecognizerError> {
         let dim = self.shape.encoder_dim;
         let blank = self.shape.blank;
-        let mut predictor = if let Some(predictor) = self.predictor.take() {
+        let mut predictor = if let Some(predictor) = self.carried.predictor.take() {
             predictor
         } else {
             let zeros = || vec![0.0; self.shape.layers * self.shape.hidden];
             self.run_predictor(sessions, blank, [zeros(), zeros()])?
         };
+        let mut emitted = Vec::with_capacity(frames);
         for t in 0..frames {
+            let mut tokens = Vec::new();
             let frame: Vec<f32> = (0..dim).map(|c| encoded[c * frames + t]).collect();
             for _ in 0..MAX_TOKENS_PER_FRAME {
                 let inputs = ort::inputs![
@@ -367,46 +364,39 @@ impl TransducerStream {
                         .0
                 };
                 if best == blank {
-                    self.trailing_blanks += 1;
                     break;
                 }
-                self.spoken.push(best);
-                self.trailing_blanks = 0;
+                tokens.push(best);
                 predictor = self.run_predictor(sessions, best, predictor.states)?;
             }
+            emitted.push(tokens);
         }
-        self.predictor = Some(predictor);
-        Ok(())
-    }
-
-    fn silent_long_enough(&self) -> bool {
-        self.trailing_blanks * self.shape.subsampling * FRAME_MS >= ENDPOINT_MS
+        self.carried.predictor = Some(predictor);
+        Ok(emitted)
     }
 }
 
-impl SpeechStream for TransducerStream {
-    fn accept(&mut self, frame: &Frame) -> Result<Vec<RecognizerEvent>, RecognizerError> {
-        let samples: Vec<f32> = frame.iter().map(|s| f32::from(*s) / PCM_SCALE).collect();
+impl FrameDecoder for TransducerStream {
+    fn push(&mut self, samples: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
         let mut mel = Vec::new();
-        self.mel.push(&samples, &mut mel);
+        self.mel.push(samples, &mut mel);
         self.features.extend(mel);
         let sessions = Arc::clone(&self.sessions);
-        let mut events = Vec::new();
+        let mut emitted = Vec::new();
         while self.features.len() >= self.shape.window {
             let mut sessions = sessions.lock().unwrap_or_else(PoisonError::into_inner);
             let (encoded, frames) = self.run_encoder(&mut sessions)?;
-            self.decode(&mut sessions, &encoded, frames)?;
-            drop(sessions);
-            let text = self.text();
-            if !self.spoken.is_empty() && self.silent_long_enough() {
-                events.push(RecognizerEvent::Final(text));
-                self.restart();
-            } else if text != self.shown {
-                events.push(RecognizerEvent::Partial(text.clone()));
-                self.shown = text;
-            }
+            emitted.extend(self.decode(&mut sessions, &encoded, frames)?);
         }
-        Ok(events)
+        Ok(emitted)
+    }
+
+    fn lookahead(&self, silence: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        self.clone().push(silence)
+    }
+
+    fn next_segment(&mut self) {
+        self.carried.next_segment();
     }
 }
 
@@ -487,5 +477,30 @@ impl ModelSource for TransducerSource {
             .await
             .map_err(|_| RecognizerError::new("The speech model could not be loaded."))?
             .map_err(|error| RecognizerError::new(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_stretch_of_speech_starts_the_text_afresh_but_keeps_the_encoder_context() {
+        let mut carried = Carried {
+            encoder: EncoderCache {
+                channel: vec![1.0, 2.0],
+                time: vec![3.0],
+                length: 7,
+            },
+            predictor: Some(Predictor {
+                output: vec![0.5],
+                states: [vec![0.1], vec![0.2]],
+            }),
+        };
+        carried.next_segment();
+        assert!(carried.predictor.is_none());
+        assert_eq!(carried.encoder.channel, [1.0, 2.0]);
+        assert_eq!(carried.encoder.time, [3.0]);
+        assert_eq!(carried.encoder.length, 7);
     }
 }

@@ -16,6 +16,7 @@ pub mod models;
 pub mod recognizer;
 pub mod runtime;
 pub mod secondary;
+pub mod segments;
 pub mod tasks;
 pub mod transducer;
 pub mod vad;
