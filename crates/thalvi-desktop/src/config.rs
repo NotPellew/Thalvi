@@ -7,6 +7,8 @@ use serde::{Deserialize, Deserializer};
 use crate::capture::{Endings, PauseDuration};
 use crate::cues::Cues;
 use crate::metrics::RecordKinds;
+use crate::recognizer::ServerUrl;
+use crate::secondary::SecondaryStt;
 use crate::wake::WakeConfig;
 
 /// Why the desktop config could not be used. Messages are shown to the user as written.
@@ -32,6 +34,8 @@ pub enum ConfigError {
 #[serde(deny_unknown_fields)]
 pub struct DesktopConfig {
     #[serde(default)]
+    pub server: ServerUrl,
+    #[serde(default)]
     pub wake: WakeConfig,
     #[serde(default, deserialize_with = "cues")]
     pub cues: Cues,
@@ -39,9 +43,20 @@ pub struct DesktopConfig {
     pub ending_pause: PauseDuration,
     #[serde(default)]
     pub endings: Endings,
+    #[serde(default)]
+    pub stt: SttConfig,
     /// From `THALVI_RECORD`, never from the file.
     #[serde(skip)]
     pub record: RecordKinds,
+}
+
+/// Speech-to-text settings beyond the live server stream.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SttConfig {
+    /// Re-transcribes each accepted capture on this endpoint when set.
+    #[serde(default)]
+    pub secondary: Option<SecondaryStt>,
 }
 
 impl DesktopConfig {
@@ -130,6 +145,7 @@ mod tests {
     use crate::capture::Ending;
     use crate::cues::Cue;
     use crate::models::CatalogHead;
+    use crate::secondary::SecondaryApi;
     use crate::wake::HeadModel;
 
     fn parse(json: &str) -> Result<DesktopConfig, ConfigError> {
@@ -139,6 +155,12 @@ mod tests {
     #[test]
     fn an_empty_config_uses_the_defaults() {
         let config = parse("{}").unwrap();
+        assert_eq!(
+            config.server,
+            ServerUrl::parse("ws://127.0.0.1:8080").unwrap()
+        );
+        assert_eq!(config.stt, SttConfig::default());
+        assert_eq!(config.stt.secondary, None);
         assert_eq!(config.wake, WakeConfig::default());
         assert_eq!(config.cues, Cues::default());
         assert_eq!(config.ending_pause.get(), Duration::from_millis(2500));
@@ -150,6 +172,8 @@ mod tests {
     fn every_setting_is_read() {
         let config = DesktopConfig::from_json_str(
             r#"{
+                "server": "wss://thalvi.example:9000/",
+                "stt": {"secondary": {"url": "http://127.0.0.1:9/v1/", "model": " m ", "api": "meta"}},
                 "wake": {"capture": {"model": "hey_jarvis", "threshold": 0.7}},
                 "cues": {"wake": false, "error": false},
                 "ending_pause": 3,
@@ -161,6 +185,22 @@ mod tests {
             Some("metrics, audio"),
         )
         .unwrap();
+        assert_eq!(
+            config.server,
+            ServerUrl::parse("wss://thalvi.example:9000").unwrap()
+        );
+        assert_eq!(
+            config.stt.secondary,
+            Some(
+                SecondaryStt::new(
+                    "http://127.0.0.1:9/v1",
+                    "m",
+                    String::new(),
+                    SecondaryApi::Meta
+                )
+                .unwrap()
+            )
+        );
         assert_eq!(
             config.wake.capture().model,
             HeadModel::Catalog(CatalogHead::HeyJarvis)
@@ -225,6 +265,31 @@ mod tests {
             "scratch": "scratch", "cancel": "cancel""#;
         for (json, expected) in [
             (r#"{"apps": {}}"#.to_owned(), "unknown field `apps`"),
+            (
+                r#"{"server": "http://127.0.0.1:8080"}"#.to_owned(),
+                "server must be a ws or wss URL",
+            ),
+            (
+                r#"{"server": "ws://127.0.0.1:8080/session"}"#.to_owned(),
+                "server root",
+            ),
+            (
+                r#"{"stt": {"primary": {}}}"#.to_owned(),
+                "unknown field `primary`",
+            ),
+            (
+                r#"{"stt": {"secondary": {"url": "ftp://x", "model": "m"}}}"#.to_owned(),
+                "stt.secondary.url must be an http or https URL",
+            ),
+            (
+                r#"{"stt": {"secondary": {"url": "http://x", "model": " "}}}"#.to_owned(),
+                "stt.secondary.model must be nonempty",
+            ),
+            (
+                r#"{"stt": {"secondary": {"url": "http://x", "model": "m", "api": "azure"}}}"#
+                    .to_owned(),
+                "unknown variant `azure`",
+            ),
             (
                 r#"{"metrics": "m.jsonl"}"#.to_owned(),
                 "unknown field `metrics`",
