@@ -183,6 +183,21 @@ pub enum CaptureError {
     Full(#[from] CaptureFullError),
 }
 
+impl CaptureError {
+    /// A short name for the metrics, without any text.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Recognizer(_) => "recognizer",
+            Self::NotReady => "not_ready",
+            Self::Audio(_) => "audio",
+            Self::MicStopped => "mic_stopped",
+            Self::NoEnding => "no_ending",
+            Self::Full(_) => "full",
+        }
+    }
+}
+
 /// How a capture ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CaptureOutcome {
@@ -531,17 +546,13 @@ where
         };
         self.gate.set_enabled(true);
         self.set_state(EngineState::Listening);
-        let flow = match &outcome {
-            CaptureOutcome::Accepted(_) => "ok",
-            CaptureOutcome::Cancelled => "cancelled",
-            CaptureOutcome::Failed { .. } => "failed",
+        let (flow, fields) = match &outcome {
+            CaptureOutcome::Accepted(_) => ("ok", Value::Null),
+            CaptureOutcome::Cancelled => ("cancelled", Value::Null),
+            CaptureOutcome::Failed { error, .. } => ("failed", json!({"reason": error.kind()})),
         };
-        self.recorder.metric(
-            Event::CaptureFlow,
-            flow,
-            Some(started.elapsed()),
-            Value::Null,
-        );
+        self.recorder
+            .metric(Event::CaptureFlow, flow, Some(started.elapsed()), fields);
         outcome
     }
 

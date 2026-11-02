@@ -1473,9 +1473,16 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
                 44 + 2560 * u64::try_from(rig.sent().len()).unwrap(),
                 "only audio sent after the cue is recorded"
             );
+        })
+        .await;
+}
 
+#[tokio::test(start_paused = true)]
+async fn a_failed_capture_records_which_kind_of_failure_and_its_calls() {
+    LocalSet::new()
+        .run_until(async {
             let dir = record_dir("failed");
-            let recorder = Recorder::in_dir(all, &dir).unwrap();
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
             let (mut rig, engine, frames) = Rig::recording("{}", recorder);
             let task = capture_task(engine, frames);
             rig.wake_word().await;
@@ -1485,7 +1492,13 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
                 finished(task).await,
                 CaptureOutcome::Failed { .. }
             ));
-            let seen = events(&read_lines(&dir.join("metrics.jsonl")));
+            let lines = read_lines(&dir.join("metrics.jsonl"));
+            let flow = lines
+                .iter()
+                .find(|line| line["event"] == "desktop_capture_flow")
+                .unwrap();
+            assert_eq!(flow["reason"], "recognizer", "a failure says which kind");
+            let seen = events(&lines);
             for expected in [
                 ("desktop_transcription_ready", "error"),
                 ("desktop_end_cue", "ok"),
