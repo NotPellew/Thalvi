@@ -1839,6 +1839,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webrtc-vad",
+ "windows",
 ]
 
 [[package]]
