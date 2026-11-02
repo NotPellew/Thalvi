@@ -1247,6 +1247,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "thalvi-desktop"
+version = "0.1.0"
+
+[[package]]
 name = "thalvi-server"
 version = "0.1.0"
 dependencies = [
