@@ -1,4 +1,4 @@
-//! Runs the capture engine on the default microphone and prints what it hears; it delivers nothing.
+//! Runs the capture engine on the default microphone and delivers what it hears to the desktop.
 
 use std::path::PathBuf;
 use std::pin::pin;
@@ -8,13 +8,16 @@ use std::time::Instant;
 use serde_json::Value;
 use thalvi_desktop::audio::{InputGate, Microphone};
 use thalvi_desktop::config::DesktopConfig;
+use thalvi_desktop::delivery::{self, Delivery};
 use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineState, Parts, WakeTrigger,
 };
+use thalvi_desktop::host::Desktop;
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::ModelStore;
 use thalvi_desktop::recognizer::ServerRecognizer;
 use thalvi_desktop::wake::WakeEngine;
+use tokio::sync::watch;
 use tokio::task::LocalSet;
 
 fn main() -> ExitCode {
@@ -56,14 +59,18 @@ fn run() -> Result<(), String> {
         }
     }
     .map_err(|error| error.to_string())?;
+    let host = Desktop::detect().map_err(|error| error.to_string())?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("Thalvi could not start: {error}"))?;
-    LocalSet::new().block_on(&runtime, listen_and_print(config))
+    LocalSet::new().block_on(&runtime, listen_and_deliver(config, host))
 }
 
-fn describe(state: &EngineState) -> String {
+fn describe(state: &EngineState, window: Option<&str>) -> String {
+    if let Some(notice) = window.and_then(|window| delivery::submit_notice(state, window)) {
+        return notice;
+    }
     match state {
         EngineState::Listening => "Listening for a wake word.".to_owned(),
         EngineState::StartingCapture => "Wake word heard. Starting capture.".to_owned(),
@@ -112,7 +119,7 @@ fn report(outcome: &CaptureOutcome) {
     }
 }
 
-async fn listen_and_print(config: DesktopConfig) -> Result<(), String> {
+async fn listen_and_deliver(config: DesktopConfig, host: Desktop) -> Result<(), String> {
     let recorder = Recorder::per_user(config.record).map_err(|error| error.to_string())?;
     let store = ModelStore::per_user().map_err(|error| error.to_string())?;
     println!("Loading the wake word models.");
@@ -152,17 +159,22 @@ async fn listen_and_print(config: DesktopConfig) -> Result<(), String> {
         recorder,
     );
 
+    let delivery = Delivery::new(host);
+    let (window_tx, window) = watch::channel(None::<String>);
     let mut states = handle.state();
     tokio::spawn(async move {
         loop {
-            println!("{}", describe(&states.borrow_and_update()));
+            println!(
+                "{}",
+                describe(&states.borrow_and_update(), window.borrow().as_deref())
+            );
             if states.changed().await.is_err() {
                 break;
             }
         }
     });
     println!("Transcribing through {}.", config.server);
-    println!("This build prints what it hears and delivers nothing. Ctrl+C stops it.");
+    println!("Ctrl+C stops it.");
 
     let mut interrupt = pin!(tokio::signal::ctrl_c());
     let result: Result<(), String> = Box::pin(async {
@@ -176,17 +188,28 @@ async fn listen_and_print(config: DesktopConfig) -> Result<(), String> {
                     println!("Conversation wake heard. This build has no conversation.");
                 }
                 WakeTrigger::Capture => {
-                    let mut capture = pin!(engine.capture(&mut frames));
-                    let (outcome, interrupted) = tokio::select! {
-                        outcome = &mut capture => (outcome, false),
-                        _ = &mut interrupt => {
-                            handle.cancel();
-                            ((&mut capture).await, true)
+                    let bound = delivery.bind(engine.recorder()).await;
+                    window_tx.send_replace(bound.window());
+                    let (outcome, interrupted) = {
+                        let mut capture = pin!(engine.capture(&mut frames));
+                        tokio::select! {
+                            outcome = &mut capture => (outcome, false),
+                            _ = &mut interrupt => {
+                                handle.cancel();
+                                ((&mut capture).await, true)
+                            }
                         }
                     };
+                    window_tx.send_replace(None);
                     report(&outcome);
                     if interrupted {
                         return Ok(());
+                    }
+                    if let Some(notice) = delivery
+                        .finish(&outcome, &bound, &config, engine.recorder())
+                        .await
+                    {
+                        println!("{notice}");
                     }
                 }
             }
