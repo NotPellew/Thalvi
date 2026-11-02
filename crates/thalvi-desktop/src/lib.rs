@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod capture;
+pub mod chosen;
 pub mod config;
 pub mod cues;
 pub mod delivery;

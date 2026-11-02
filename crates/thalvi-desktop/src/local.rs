@@ -71,7 +71,17 @@ impl<S: ModelSource> LocalRecognizer<S> {
 
     async fn model(&self) -> Result<&Arc<S::Model>, RecognizerError> {
         self.model
-            .get_or_try_init(|| async { self.source.load().await.map(Arc::new) })
+            .get_or_try_init(|| async {
+                let started = Instant::now();
+                let loaded = self.source.load().await;
+                self.metrics.metric(
+                    Event::SpeechLoad,
+                    if loaded.is_ok() { "ok" } else { "error" },
+                    Some(started.elapsed()),
+                    json!({"model": self.name}),
+                );
+                loaded.map(Arc::new)
+            })
             .await
     }
 }

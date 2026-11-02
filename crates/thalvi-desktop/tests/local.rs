@@ -148,8 +148,8 @@ fn rig(
 }
 
 impl Rig {
-    /// Waits for the worker to finish and returns the metrics line it wrote.
-    async fn metric(self) -> Value {
+    /// Waits for the worker to finish and returns every metrics line written.
+    async fn metrics(self) -> Vec<Value> {
         let done = self.done;
         tokio::task::spawn_blocking(move || done.recv_timeout(WAIT))
             .await
@@ -157,7 +157,18 @@ impl Rig {
             .expect("the worker finishes");
         self.recorder.finish().await;
         let text = std::fs::read_to_string(self.dir.join("metrics.jsonl")).expect("metrics");
-        serde_json::from_str(text.lines().next().expect("one line")).expect("json")
+        text.lines()
+            .map(|line| serde_json::from_str(line).expect("json"))
+            .collect()
+    }
+
+    /// The recognition's metrics line.
+    async fn metric(self) -> Value {
+        let lines = self.metrics().await;
+        lines
+            .into_iter()
+            .find(|line| line["event"] == "desktop_local_stt")
+            .expect("a recognition line")
     }
 }
 
@@ -280,4 +291,19 @@ async fn a_model_that_cannot_be_fetched_is_reported_and_fetched_again_on_the_nex
     session.send_frame(&FRAME).await.expect("sends");
     assert_eq!(session.next_event().await, Ok(partial("hello")));
     session.cancel().await;
+
+    let loads: Vec<(Value, Value)> = rig
+        .metrics()
+        .await
+        .into_iter()
+        .filter(|line| line["event"] == "desktop_speech_load")
+        .map(|line| (line["outcome"].clone(), line["model"].clone()))
+        .collect();
+    assert_eq!(
+        loads,
+        [
+            ("error".into(), "fake-model".into()),
+            ("ok".into(), "fake-model".into())
+        ]
+    );
 }
