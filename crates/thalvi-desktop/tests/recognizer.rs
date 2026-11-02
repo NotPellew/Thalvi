@@ -331,6 +331,16 @@ fn upsampler_keeps_constants_and_extremes_in_range() {
     }
 }
 
+#[test]
+fn upsampler_rounds_to_the_nearest_sample() {
+    for (a, b, rounded) in [(1, 0, 1), (-1, 0, -1)] {
+        let alternating: Frame = std::array::from_fn(|i| if i % 2 == 0 { a } else { b });
+        let out = Upsampler::default().push(&alternating);
+        assert_eq!(out[..3], [a, a, rounded], "first pair of {a},{b}");
+        assert_eq!(out[3..6], [b, rounded, rounded], "second pair of {a},{b}");
+    }
+}
+
 #[tokio::test]
 async fn cancel_tells_the_server_then_closes_and_close_only_closes() {
     let (url, mut rx) = recording().await;
@@ -378,6 +388,7 @@ fn server_urls_are_validated_once_and_normalised() {
         ("ws://", ServerUrlError::Invalid),
         ("ws://user@host", ServerUrlError::Invalid),
         ("ws://user:pass@host", ServerUrlError::Invalid),
+        ("ws://:pass@host", ServerUrlError::Invalid),
         ("ws://host:99999", ServerUrlError::Invalid),
         ("ws://host/api", ServerUrlError::NotRoot),
         ("ws://host/?a=1", ServerUrlError::NotRoot),
