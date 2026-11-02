@@ -1423,6 +1423,11 @@ async fn the_secondary_transcription_replaces_the_text_of_the_frames_that_were_s
                     "meta",
                     r#"{"transcript": "Polished words paste that [noise]"}"#,
                 ),
+                // The second pass heard the ending twice; the user said it once.
+                (
+                    "meta",
+                    r#"{"transcript": "Polished words paste that. Paste that."}"#,
+                ),
             ] {
                 let (url, mut uploads) = serve(Reply::Json(reply)).await;
                 let (mut rig, engine, frames) = Rig::new(&with_secondary(&url, api));
