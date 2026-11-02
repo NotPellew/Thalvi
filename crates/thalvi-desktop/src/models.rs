@@ -317,7 +317,16 @@ impl ModelStore {
                 file: asset.file_name.to_owned(),
             });
         }
-        tokio::fs::rename(&part.0, path).await.map_err(io)
+        // Another fetch of this asset may have finished first, and Windows will not replace a
+        // file that is open: then the file that is there, if intact, is the one to use.
+        let intact = || async { matches!(stored(path, asset).await, Stored::Intact) };
+        if intact().await {
+            return Ok(());
+        }
+        match tokio::fs::rename(&part.0, path).await {
+            Err(source) if !intact().await => Err(io(source)),
+            _ => Ok(()),
+        }
     }
 }
 

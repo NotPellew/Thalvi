@@ -6,7 +6,8 @@ use std::fmt::Write;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -262,4 +263,89 @@ async fn a_damaged_file_is_removed_even_when_it_cannot_be_downloaded_again() {
         "The stored speech model good.onnx was damaged, so it was removed. Could not download the speech model good.onnx. Check the internet connection and try again."
     );
     assert_eq!(leftovers(&dir), Vec::<String>::new());
+}
+
+fn asset<'a>(url: &'a str, sha: &'a str) -> Asset<'a> {
+    Asset {
+        kind: ModelKind::Speech,
+        file_name: "good.onnx",
+        url,
+        size: GOOD.len() as u64,
+        sha256: sha,
+    }
+}
+
+#[tokio::test]
+async fn two_fetches_of_one_asset_at_once_both_succeed() {
+    let (address, _server) = serve().await;
+    let dir = dir("twice");
+    let url = format!("http://{address}/good.onnx");
+    let sha = sha256(GOOD);
+    let store = ModelStore::in_dir(&dir);
+
+    let asset = asset(&url, &sha);
+
+    let (first, second) = tokio::join!(store.fetch(&asset), store.fetch(&asset));
+
+    assert_eq!(first.expect("first"), second.expect("second"));
+    assert_eq!(fs::read(dir.join("good.onnx")).expect("saved"), GOOD);
+    assert_eq!(leftovers(&dir), ["good.onnx"]);
+}
+
+/// Serves `GOOD`, but first stores it as the final file the way a fetch that finished earlier
+/// would have, and keeps that file open so that Windows will not replace it.
+async fn serve_after_another_fetch_finished(
+    dir: PathBuf,
+    held: Arc<Mutex<Vec<fs::File>>>,
+) -> SocketAddr {
+    let app = Router::new().route(
+        "/good.onnx",
+        get(move || {
+            let (dir, held) = (dir.clone(), Arc::clone(&held));
+            async move {
+                fs::create_dir_all(&dir).expect("dir");
+                let mut options = fs::OpenOptions::new();
+                options.write(true).create(true).truncate(true);
+                #[cfg(windows)]
+                std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 1);
+                let mut file = options.open(dir.join("good.onnx")).expect("final file");
+                std::io::Write::write_all(&mut file, GOOD).expect("written");
+                file.set_modified(SystemTime::now() - Duration::from_hours(1))
+                    .expect("backdated");
+                held.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(file);
+                GOOD
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    address
+}
+
+#[tokio::test]
+async fn a_file_that_another_fetch_stored_first_is_used_and_not_replaced() {
+    let dir = dir("raced");
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let address = serve_after_another_fetch_finished(dir.clone(), Arc::clone(&held)).await;
+    let url = format!("http://{address}/good.onnx");
+    let sha = sha256(GOOD);
+
+    let path = ModelStore::in_dir(&dir)
+        .fetch(&asset(&url, &sha))
+        .await
+        .expect("uses the stored file");
+
+    assert_eq!(fs::read(&path).expect("readable"), GOOD);
+    let age = SystemTime::now()
+        .duration_since(fs::metadata(&path).expect("meta").modified().expect("time"))
+        .expect("past");
+    assert!(age > Duration::from_mins(30), "replaced: {age:?}");
+    assert_eq!(leftovers(&dir), ["good.onnx"]);
 }
