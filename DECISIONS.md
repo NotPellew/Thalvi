@@ -77,17 +77,10 @@ areas your change touches. Editing rules are in
   browser and app actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative
   interfaces and open-ended computer use before the scripted flow works.
-- **Live Discord actions are disabled.** Refuse before debugger discovery and
-  preserve the message on the clipboard. Why: trusted input can reach an
-  existing child editor outside the gate. Rejected: shipping the unsafe path,
-  channel webhooks and private REST.
-- **Experimental Discord input stays in inert tests.** Retain the CDP/Slate
-  fixture and the strict existing-frame failure as evidence. Why: passing
-  main-document tests does not establish frame safety. Rejected: calling the
-  adapter qualified or expanding target coordination before the browser demo.
-- **Discord submissions stay unconfirmed.** A key acknowledgement or optimistic
-  UI is not a delivery receipt. Why: submission and delivery are different
-  events. Rejected: reporting "sent" without a defined receipt.
+- **Live Discord actions are disabled.** `discord_message` is refused before any host
+  call and the message stays on the clipboard. Why: trusted input can reach an existing
+  child editor outside the gate, and a key acknowledgement is no delivery receipt.
+  Rejected: shipping the unsafe path, channel webhooks and private REST.
 - **Spoken acknowledgement.** With `THALVI_ACK=on`, a slow reply first plays a
   canned line (rotated, synthesized once and cached per session) when no first
   sentence arrives within 500 ms. Why: it covers the model's thinking gap with

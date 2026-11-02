@@ -5,7 +5,7 @@ use crate::frame::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
 /// Averages device samples down to 16 kHz and cuts them into [`Frame`]s.
 ///
 /// Each output sample is the mean of the input span it covers, so 48 kHz is a mean of three
-/// samples like the Python client, and rates that are not a multiple of 16 kHz still work.
+/// samples, and rates that are not a multiple of 16 kHz still work.
 pub struct Framer {
     in_rate: u32,
     sum: f64,
@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn frames_hold_the_mean_of_each_input_span() {
-        // 48 kHz averages triples like the Python client; 16 kHz passes through; 32 kHz averages pairs.
+        // 48 kHz averages triples; 16 kHz passes through; 32 kHz averages pairs.
         for (rate, per_output) in [(48_000, 3_i32), (16_000, 1), (32_000, 2)] {
             let width = usize::try_from(per_output).unwrap_or(1);
             let input: Vec<i16> = (0..FRAME_SAMPLES * width)
