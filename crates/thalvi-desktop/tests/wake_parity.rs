@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
-use thalvi_desktop::models::{Asset, ModelStore};
+use thalvi_desktop::models::{Asset, ModelKind, ModelStore};
 use thalvi_desktop::wake::{WakeConfig, WakeEngine, WakeEvent, WakeFrame};
 
 /// Largest accepted absolute difference between a Rust and a Python score (scores are 0 to 1).
@@ -15,8 +15,10 @@ const TOLERANCE: f32 = 1e-4;
 
 /// openWakeWord's own positive test clip, from its Apache-2.0 repository, pinned by commit.
 const CLIP: Asset<'static> = Asset {
+    kind: ModelKind::Wake,
     file_name: "hey_mycroft_test.wav",
     url: "https://raw.githubusercontent.com/dscripka/openWakeWord/368c03716d1e92591906a84949bc477f3a834455/tests/data/hey_mycroft_test.wav",
+    size: 30_508,
     sha256: "8d728ce1dbd54a97c6cddf0c80acec3113285407a967368f4abe476119c1a8c6",
 };
 

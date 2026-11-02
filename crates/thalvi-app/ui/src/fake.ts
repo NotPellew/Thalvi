@@ -19,7 +19,7 @@ const SETTINGS: Settings = {
     "scratch that": "scratch",
     "never mind": "cancel",
   },
-  stt: { secondary: null },
+  stt: { engine: "server", secondary: null },
   apps: { slack: { classes: ["Slack"], executables: ["slack.exe"], input_keys: [] } },
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com/docs", label: "docs" }],
   overlay: { show: true, draft: true },

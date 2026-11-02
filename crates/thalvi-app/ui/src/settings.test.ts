@@ -160,6 +160,41 @@ describe("tables", () => {
   });
 });
 
+describe("where speech is recognized", () => {
+  it("saves the engine, and the model only for the local engine", async () => {
+    const stub = await open();
+    goTo("recognition");
+    expect(control("Recognize speech", "select").value).toBe("server");
+    expect(Array.from(control("Recognize speech", "select").options).map((option) => option.textContent)).toEqual([
+      "On this computer",
+      "Through the server",
+    ]);
+    type(control("Speech model", "input"), "/models/mine");
+    choose(control("Recognize speech", "select"), "local");
+    button("Save").click();
+    expect(sent(stub).stt.engine).toBe("local");
+    expect(sent(stub).stt.model).toBe("/models/mine");
+
+    await settle();
+    type(control("Speech model", "input"), "  ");
+    button("Save").click();
+    expect(stub.backend.saveSettings.mock.calls[1]?.[0].stt).toEqual({ engine: "local", secondary: null });
+
+    await settle();
+    type(control("Speech model", "input"), "nemotron_160ms");
+    choose(control("Recognize speech", "select"), "server");
+    button("Save").click();
+    expect(stub.backend.saveSettings.mock.calls[2]?.[0].stt).toEqual({ engine: "server", secondary: null });
+  });
+
+  it("shows the saved local model", async () => {
+    await open({ ...SETTINGS, stt: { engine: "local", model: "nemotron_160ms", secondary: null } });
+    goTo("recognition");
+    expect(control("Recognize speech", "select").value).toBe("local");
+    expect(control("Speech model", "input").value).toBe("nemotron_160ms");
+  });
+});
+
 describe("second transcription", () => {
   it("is saved as an object when filled and as null when cleared", async () => {
     const stub = await open();

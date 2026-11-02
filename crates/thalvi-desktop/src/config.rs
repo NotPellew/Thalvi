@@ -9,8 +9,10 @@ use crate::capture::{CaptureLimits, EndingPauses, Endings};
 use crate::cues::Cues;
 use crate::host::{App, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
+use crate::models::CatalogSpeech;
 use crate::recognizer::ServerUrl;
 use crate::secondary::SecondaryStt;
+use crate::transducer::SpeechChoice;
 use crate::wake::WakeConfig;
 
 /// Why the desktop config could not be used. Messages are shown to the user as written.
@@ -307,13 +309,99 @@ fn nonempty(value: &str, label: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
-/// Speech-to-text settings beyond the live server stream.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+/// Where dictation is recognized.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SttEngine {
+    /// Streams audio to the Thalvi server's `/transcription` route.
+    #[default]
+    Server,
+    /// Recognizes on this machine; opens no server connection.
+    Local(SpeechChoice),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EngineName {
+    Server,
+    Local,
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawStt {
+    #[serde(default)]
+    secondary: Option<SecondaryStt>,
+    #[serde(default)]
+    engine: Option<EngineName>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+impl TryFrom<RawStt> for SttConfig {
+    type Error = String;
+
+    fn try_from(raw: RawStt) -> Result<Self, String> {
+        let engine = match (raw.engine, raw.model) {
+            (None | Some(EngineName::Server), None) => SttEngine::Server,
+            (None | Some(EngineName::Server), Some(_)) => {
+                return Err("stt.model only applies when stt.engine is local.".to_owned());
+            }
+            (Some(EngineName::Local), None) => {
+                SttEngine::Local(SpeechChoice::Catalog(CatalogSpeech::ALL[0]))
+            }
+            (Some(EngineName::Local), Some(model)) => {
+                let choice = if let Some(catalog) = CatalogSpeech::ALL
+                    .iter()
+                    .find(|catalog| catalog.name() == model)
+                {
+                    SpeechChoice::Catalog(*catalog)
+                } else if model.contains(['/', '\\']) {
+                    SpeechChoice::Folder(PathBuf::from(model))
+                } else {
+                    return Err(format!(
+                        "Unknown speech model \"{model}\". Use {} or the path of a folder holding encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.",
+                        CatalogSpeech::ALL.map(CatalogSpeech::name).join(", ")
+                    ));
+                };
+                SttEngine::Local(choice)
+            }
+        };
+        Ok(Self {
+            secondary: raw.secondary,
+            engine,
+        })
+    }
+}
+
+/// Speech-to-text settings.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(try_from = "RawStt")]
 pub struct SttConfig {
     /// Re-transcribes each accepted capture on this endpoint when set.
-    #[serde(default)]
     pub secondary: Option<SecondaryStt>,
+    pub engine: SttEngine,
+}
+
+impl Serialize for SttConfig {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct FileStt<'a> {
+            secondary: &'a Option<SecondaryStt>,
+            engine: &'static str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            model: Option<String>,
+        }
+        let (engine, model) = match &self.engine {
+            SttEngine::Server => ("server", None),
+            SttEngine::Local(choice) => ("local", Some(choice.label())),
+        };
+        FileStt {
+            secondary: &self.secondary,
+            engine,
+            model,
+        }
+        .serialize(serializer)
+    }
 }
 
 /// A config in the form of its file; `record` is never part of it.
@@ -531,6 +619,31 @@ mod tests {
         assert_eq!(config.capture_limits, CaptureLimits::default());
         assert_eq!(config.endings, Endings::default());
         assert_eq!(config.record, RecordKinds::default());
+    }
+
+    #[test]
+    fn dictation_is_recognized_on_the_server_unless_a_local_model_is_chosen() {
+        for (json, engine) in [
+            (r#"{"stt": {"engine": "server"}}"#, SttEngine::Server),
+            (
+                r#"{"stt": {"engine": "local"}}"#,
+                SttEngine::Local(SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms)),
+            ),
+            (
+                r#"{"stt": {"engine": "local", "model": "nemotron_160ms"}}"#,
+                SttEngine::Local(SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms)),
+            ),
+            (
+                r#"{"stt": {"engine": "local", "model": "/models/mine"}}"#,
+                SttEngine::Local(SpeechChoice::Folder("/models/mine".into())),
+            ),
+            (
+                r#"{"stt": {"engine": "local", "model": "C:\\models\\mine"}}"#,
+                SttEngine::Local(SpeechChoice::Folder("C:\\models\\mine".into())),
+            ),
+        ] {
+            assert_eq!(parse(json).unwrap().stt.engine, engine, "{json}");
+        }
     }
 
     #[test]
@@ -773,6 +886,24 @@ mod tests {
     }
 
     #[test]
+    fn speech_recognition_settings_that_cannot_work_are_rejected_in_plain_words() {
+        for (json, expected) in [
+            (
+                r#"{"stt": {"model": "nemotron_160ms"}}"#,
+                "stt.model only applies when stt.engine is local.",
+            ),
+            (
+                r#"{"stt": {"engine": "local", "model": "whisper"}}"#,
+                "Unknown speech model \"whisper\". Use nemotron_160ms or the path of a folder",
+            ),
+            (r#"{"stt": {"engine": "cloud"}}"#, "unknown variant `cloud`"),
+        ] {
+            let error = parse(json).unwrap_err();
+            assert!(error.to_string().contains(expected), "{json}: {error}");
+        }
+    }
+
+    #[test]
     fn invalid_settings_are_rejected_in_plain_words() {
         let valid_endings = r#""paste": "paste", "send": "submit", "do it": "task",
             "scratch": "scratch", "cancel": "cancel""#;
@@ -995,7 +1126,8 @@ mod tests {
     fn the_config_serializes_to_the_file_form_it_was_read_from() {
         let full = r#"{
             "server": "wss://thalvi.example:9000/",
-            "stt": {"secondary": {"url": "http://127.0.0.1:9/v1/", "model": "m", "api_key": "k", "api": "meta"}},
+            "stt": {"engine": "local", "model": "/models/speech",
+                    "secondary": {"url": "http://127.0.0.1:9/v1/", "model": "m", "api_key": "k", "api": "meta"}},
             "wake": {"capture": {"model": "/models/me.onnx", "threshold": 0.7},
                      "conversation": {"model": "hey_jarvis"}},
             "cues": {"wake": false, "error": false},

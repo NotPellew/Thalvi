@@ -41,7 +41,8 @@ impl Visibility {
             Status::Starting { .. }
             | Status::Capturing { .. }
             | Status::Pending { .. }
-            | Status::Working { .. } => Self::Show,
+            | Status::Working { .. }
+            | Status::Loading { .. } => Self::Show,
             Status::Done { .. } => Self::ShowFor(DONE_FOR),
             Status::Failed { .. } => Self::ShowFor(FAILED_FOR),
         }
@@ -171,6 +172,12 @@ mod tests {
                     notice: String::new(),
                 },
                 Visibility::ShowFor(Duration::from_secs(4)),
+            ),
+            (
+                Status::Loading {
+                    notice: String::new(),
+                },
+                Visibility::Show,
             ),
         ];
         for (status, expected) in statuses {

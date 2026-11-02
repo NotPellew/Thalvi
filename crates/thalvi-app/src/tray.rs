@@ -38,7 +38,7 @@ impl Icon {
             Status::Listening | Status::Done { .. } => Self::Listening,
             Status::Starting { .. } | Status::Capturing { .. } => Self::Capturing,
             Status::Pending { .. } => Self::Pending,
-            Status::Working { .. } => Self::Working,
+            Status::Working { .. } | Status::Loading { .. } => Self::Working,
             Status::Failed { .. } => Self::Error,
         }
     }
@@ -142,6 +142,7 @@ pub fn title(status: &Status) -> String {
             seconds(*pause_ms)
         ),
         Status::Working { .. } => "working".to_owned(),
+        Status::Loading { .. } => "loading the speech model".to_owned(),
         Status::Failed { .. } => "something went wrong".to_owned(),
     };
     format!("Thalvi: {state}")
@@ -309,6 +310,13 @@ mod tests {
                 },
                 Icon::Error,
                 "Thalvi: something went wrong",
+            ),
+            (
+                Status::Loading {
+                    notice: "Loading the speech model.".to_owned(),
+                },
+                Icon::Working,
+                "Thalvi: loading the speech model",
             ),
         ]
     }

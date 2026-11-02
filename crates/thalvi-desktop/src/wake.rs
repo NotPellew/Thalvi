@@ -8,16 +8,15 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use ort::environment::Environment;
 use ort::session::Session;
 use ort::value::{Outlet, Tensor, TensorElementType};
 use serde::{Deserialize, Serialize};
 
 use crate::frame::Frame;
 use crate::models::{self, CatalogHead, ModelError, ModelStore};
+use crate::runtime;
 
 const MEL_BINS: usize = 32;
 const EMBEDDING_WINDOW: usize = 76;
@@ -360,20 +359,12 @@ async fn head_path(head: &HeadConfig, store: &ModelStore) -> Result<PathBuf, Wak
     }
 }
 
-fn environment() -> Result<&'static Environment, WakeError> {
-    static ENVIRONMENT: OnceLock<Result<Environment, String>> = OnceLock::new();
-    ENVIRONMENT
-        .get_or_init(|| ort::init().build().map_err(|error| error.to_string()))
-        .as_ref()
-        .map_err(|reason| WakeError::Runtime(reason.clone()))
-}
-
 fn open(path: &Path) -> Result<Session, WakeError> {
     let load = |reason: ort::Error| WakeError::Load {
         model: path.display().to_string(),
         reason: reason.to_string(),
     };
-    let environment = environment()?;
+    let environment = runtime::environment().map_err(WakeError::Runtime)?;
     let build = || -> ort::Result<Session> {
         Session::builder(environment)?
             .with_intra_threads(1)?

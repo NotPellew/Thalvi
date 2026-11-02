@@ -2,16 +2,22 @@
 
 pub mod audio;
 pub mod capture;
+pub mod chosen;
 pub mod config;
 pub mod cues;
 pub mod delivery;
 pub mod engine;
+pub mod fbank;
 pub mod frame;
 pub mod host;
+pub mod local;
 pub mod metrics;
 pub mod models;
 pub mod recognizer;
+pub mod runtime;
 pub mod secondary;
+pub mod segments;
 pub mod tasks;
+pub mod transducer;
 pub mod vad;
 pub mod wake;
