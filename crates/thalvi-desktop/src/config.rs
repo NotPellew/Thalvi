@@ -687,12 +687,12 @@ mod tests {
                 "unknown field `chime`",
             ),
             (
-                r#"{"ending_pause": {"submit": 1.9}}"#.to_owned(),
-                "submit pause must be a number of seconds from 2 to 3",
+                r#"{"ending_pause": {"submit": 5.5}}"#.to_owned(),
+                "submit pause must be a number of seconds from 0 to 5",
             ),
             (
-                r#"{"ending_pause": {"paste": 0.4}}"#.to_owned(),
-                "paste pause must be a number of seconds from 0.5 to 3",
+                r#"{"ending_pause": {"paste": -1}}"#.to_owned(),
+                "paste pause must be a number of seconds from 0 to 5",
             ),
             (r#"{"ending_pause": 2.5}"#.to_owned(), "invalid type"),
             (r#"{"ending_pause": true}"#.to_owned(), "invalid type"),
