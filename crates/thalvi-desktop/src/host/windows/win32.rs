@@ -10,7 +10,7 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use ::windows::Win32::Foundation::{
-    CloseHandle, FILETIME, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM,
+    CloseHandle, FILETIME, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, RECT,
 };
 use ::windows::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
@@ -25,6 +25,7 @@ use ::windows::Win32::System::Threading::{
     GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
+use ::windows::Win32::UI::HiDpi::GetDpiForSystem;
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
     KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY,
@@ -32,8 +33,9 @@ use ::windows::Win32::UI::Input::KeyboardAndMouse::{
 use ::windows::Win32::UI::Shell::ShellExecuteW;
 use ::windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongW,
-    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SW_RESTORE, SW_SHOWNORMAL,
-    SetForegroundWindow, ShowWindow, WS_EX_TOOLWINDOW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SPI_GETWORKAREA, SW_RESTORE,
+    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, ShowWindow,
+    SystemParametersInfoW, WS_EX_TOOLWINDOW,
 };
 use ::windows::core::{BOOL, PCWSTR, PWSTR, w};
 
@@ -317,5 +319,22 @@ impl Win32 for Real {
         };
         // ShellExecuteW reports success as a value above 32.
         result.0 as usize > 32
+    }
+
+    fn work_area_top(&self) -> Option<f64> {
+        let mut area = RECT::default();
+        // SAFETY: SPI_GETWORKAREA fills the RECT that `area` points to, which outlives the call.
+        unsafe {
+            SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some((&raw mut area).cast()),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+        }
+        .ok()?;
+        // SAFETY: GetDpiForSystem takes no arguments.
+        let dpi = unsafe { GetDpiForSystem() };
+        Some(f64::from(area.top) * 96.0 / f64::from(dpi.max(96)))
     }
 }

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use thalvi_desktop::config::DesktopConfig;
-use thalvi_desktop::host::{Desktop, Host};
+use thalvi_desktop::host::Desktop;
 
 use crate::commands;
 use crate::launch::{Command, Launch};
@@ -135,10 +135,8 @@ fn start() -> Result<(), String> {
 
 fn create_windows(app: &AppHandle) -> tauri::Result<()> {
     let state = app.state::<AppState>();
-    match state.host.prepare_overlay() {
-        Ok(()) => {
-            overlay::create(app)?;
-        }
+    match overlay::create(app, &state.host) {
+        Ok(_) => {}
         Err(error) => {
             // An overlay the desktop cannot keep unfocused would take focus from the user's app.
             println!("{error} The status overlay stays off.");

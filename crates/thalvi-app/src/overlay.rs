@@ -3,16 +3,50 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
-use thalvi_desktop::host::OVERLAY_TITLE;
+use tauri::{AppHandle, LogicalPosition, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use thalvi_desktop::host::{Desktop, Host, OVERLAY_TITLE};
 
 use crate::status::Status;
 
 pub const LABEL: &str = "overlay";
 
 const WIDTH: f64 = 460.0;
-const HEIGHT: f64 = 150.0;
-const TOP: f64 = 56.0;
+/// Room for the classic pill under its gap and for the holo and gunmetal module with its shadow.
+/// A fixed-size GTK window is never lower than this, and a mapped one cannot be resized, so every
+/// look uses the one size.
+const HEIGHT: f64 = 200.0;
+
+/// Where the overlay window goes, in logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    left: f64,
+    top: f64,
+}
+
+impl Frame {
+    /// The window centred on a screen `screen_width` wide and `top` below its top edge.
+    #[must_use]
+    pub fn new(screen_width: f64, top: f64) -> Self {
+        Self {
+            left: ((screen_width - WIDTH) / 2.0).max(0.0),
+            top,
+        }
+    }
+
+    /// The frame on the primary monitor, below whatever the desktop reserves at its top.
+    fn on_screen(app: &AppHandle, host: &Desktop) -> Result<Self, String> {
+        let top = host
+            .prepare_overlay(WIDTH, HEIGHT)
+            .map_err(|error| error.to_string())?;
+        let screen_width = app
+            .primary_monitor()
+            .map_err(|error| error.to_string())?
+            .map_or(0.0, |monitor| {
+                f64::from(monitor.size().width) / monitor.scale_factor()
+            });
+        Ok(Self::new(screen_width, top))
+    }
+}
 
 /// How long a delivery's confirmation stays on screen.
 const DONE_FOR: Duration = Duration::from_secs(1);
@@ -52,19 +86,13 @@ impl Visibility {
 /// Creates the hidden overlay window; the desktop keeps it unfocused (see `Host::prepare_overlay`).
 ///
 /// # Errors
-/// Fails when the window cannot be created.
-pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
-    let left = app
-        .primary_monitor()?
-        .map_or(0.0, |monitor| {
-            let width = f64::from(monitor.size().width) / monitor.scale_factor();
-            (width - WIDTH) / 2.0
-        })
-        .max(0.0);
+/// Why the desktop could not place the window or why it could not be created.
+pub fn create(app: &AppHandle, host: &Desktop) -> Result<WebviewWindow, String> {
+    let frame = Frame::on_screen(app, host)?;
     WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("overlay.html".into()))
         .title(OVERLAY_TITLE)
         .inner_size(WIDTH, HEIGHT)
-        .position(left, TOP)
+        .position(frame.left, frame.top)
         .decorations(false)
         .transparent(true)
         .shadow(false)
@@ -75,6 +103,21 @@ pub fn create(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .focused(false)
         .visible(false)
         .build()
+        .map_err(|error| error.to_string())
+}
+
+/// Places the overlay window again, below whatever the desktop reserves at the top now.
+///
+/// # Errors
+/// Why the desktop could not place the window or why it could not be moved; it then stays as it was.
+pub fn replace(app: &AppHandle, host: &Desktop) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return Ok(());
+    };
+    let frame = Frame::on_screen(app, host)?;
+    window
+        .set_position(LogicalPosition::new(frame.left, frame.top))
+        .map_err(|error| error.to_string())
 }
 
 /// Shows and hides the overlay window as the status asks.
@@ -120,6 +163,15 @@ mod tests {
     use thalvi_desktop::capture::CaptureRoute;
 
     use super::*;
+
+    #[test]
+    fn the_frame_is_centred_and_hangs_below_the_panel() {
+        for top in [0.0, 40.0] {
+            assert_eq!(Frame::new(2048.0, top), Frame { left: 794.0, top });
+        }
+        // A screen narrower than the window starts at its left edge.
+        assert_eq!(Frame::new(300.0, 0.0).left, 0.0);
+    }
 
     #[test]
     fn the_overlay_shows_from_the_wake_word_and_hides_after_the_confirmation() {
