@@ -22,10 +22,10 @@ areas your change touches. Editing rules are in
   overlay and a settings window; the overlay never takes focus (Hyprland window
   rules via the host, a non-activating window on Windows). Why: one TypeScript
   UI, no IPC. Rejected: layer-shell webview (blank), GTK-only overlay, egui.
-- **Three looks for the desktop UI.** `look` picks classic (default), holo or gunmetal for the overlay
+- **Three looks for the desktop UI.** `look` picks gunmetal (default), holo or classic for the overlay
   and settings window; the overlay hangs from the top of the usable screen area, one 460 × 200 size
-  for all looks. Why: the new designs ship as options, today's UI stays; resizing re-centres it on
-  Hyprland. Rejected: replacing classic, y = 0 (a bar covers it), a window size per look.
+  for all looks. Why: the developer chose gunmetal, the others stay as options; resizing re-centres it
+  on Hyprland. Rejected: dropping classic, y = 0 (a bar covers it), a window size per look.
 - **Local recognition in the desktop app.** `stt.engine: local` runs Nemotron Speech
   Streaming 0.6B (int8 ONNX) on `ort` behind the recognizer interface. Why: offline; 6.0% word
   errors on 57 clips, 0.8 s p95 partial lag on 4 cores. Rejected: Moonshine (7.4%, p95 2.6 s on

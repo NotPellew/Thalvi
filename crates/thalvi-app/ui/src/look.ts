@@ -10,7 +10,7 @@ export const LOOKS: readonly (readonly [Look, string])[] = [
   ["gunmetal", "Gunmetal"],
 ];
 
-/** Tells the stylesheets which look `root` wears; classic is the plain default. */
+/** Tells the stylesheets which look `root` wears; gunmetal is the default. */
 export function applyLook(root: HTMLElement, look: Look): void {
   root.dataset["look"] = look;
 }

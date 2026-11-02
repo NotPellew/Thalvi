@@ -25,7 +25,7 @@ const SETTINGS: Settings = {
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com/docs", label: "docs" }],
   overlay: { show: true, draft: true },
   microphone: null,
-  look: "classic",
+  look: "gunmetal",
   recordings: { metrics: true, text: false, audio: false },
 };
 

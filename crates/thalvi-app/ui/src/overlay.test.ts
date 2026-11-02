@@ -151,8 +151,9 @@ describe("countdown", () => {
 describe("level bars", () => {
   const middle = () => parseFloat(/scaleY\(([\d.]+)\)/.exec((root.querySelectorAll("i")[4] as HTMLElement).style.transform)?.[1] ?? "NaN");
 
-  it("rise with the mic level and settle when it ends", () => {
+  it("rise with the mic level and settle when it ends", async () => {
     const { emit, level, clock } = mount();
+    await settle();
     emit({ state: "capturing", target: null, committed: "", partial: null });
     for (let frame = 0; frame < 10; frame += 1) clock.advance(16);
     const quiet = middle();
@@ -166,8 +167,9 @@ describe("level bars", () => {
     expect(middle()).toBeLessThan(0.3);
   });
 
-  it("go flat during the countdown", () => {
+  it("go flat during the countdown", async () => {
     const { emit, level, clock } = mount();
+    await settle();
     emit({ state: "capturing", target: null, committed: "", partial: null });
     level(1);
     clock.advance(16);

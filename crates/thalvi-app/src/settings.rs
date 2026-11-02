@@ -177,7 +177,7 @@ mod tests {
             json!({"metrics": true, "text": false, "audio": true})
         );
         assert_eq!(settings["microphone"], Value::Null);
-        assert_eq!(settings["look"], json!("classic"));
+        assert_eq!(settings["look"], json!("gunmetal"));
         assert_eq!(settings["overlay"], json!({"show": true, "draft": true}));
     }
 

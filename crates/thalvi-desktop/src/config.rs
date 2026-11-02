@@ -84,13 +84,13 @@ struct RawDesktopConfig {
     look: Look,
 }
 
-/// How the overlay and the settings window look; `Classic` is the plain pill and window.
+/// How the overlay and the settings window look; `Gunmetal` unless the user picks another.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "String", rename_all = "lowercase")]
 pub enum Look {
-    #[default]
     Classic,
     Holo,
+    #[default]
     Gunmetal,
 }
 
@@ -1230,8 +1230,8 @@ mod tests {
     }
 
     #[test]
-    fn look_defaults_to_classic_and_rejects_unknown_names() {
-        assert_eq!(parse("{}").unwrap().look, Look::Classic);
+    fn look_defaults_to_gunmetal_and_rejects_unknown_names() {
+        assert_eq!(parse("{}").unwrap().look, Look::Gunmetal);
         for (name, look) in [
             ("classic", Look::Classic),
             ("holo", Look::Holo),

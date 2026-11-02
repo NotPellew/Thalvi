@@ -54,7 +54,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
   const skin = createModule(requestCancel);
   root.append(pill, draft, skin.node);
   root.hidden = true;
-  applyLook(root, "classic");
+  applyLook(root, "gunmetal");
 
   let status: Status = { state: "paused" };
   let showDraft = true;
@@ -65,7 +65,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
   let route: Route = "paste";
   let looping = false;
   let flat = true;
-  let look: Look = "classic";
+  let look: Look = "gunmetal";
 
   function requestCancel(): void {
     backend.cancelCapture().catch((error: unknown) => {
