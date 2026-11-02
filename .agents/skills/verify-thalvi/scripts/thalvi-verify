@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# Launches, checks, drives and stops one isolated Thalvi verification run on local fake endpoints.
+# Upper-case run variables (RUN_DIR, URL, ports, PGIDs) come from the sourced RUN_DIR/run.env.
+# shellcheck disable=SC2153
+set -euo pipefail
+
+SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(git -C "$SCRIPTS" rev-parse --show-toplevel)"
+WEBSOCKETS="websockets==17.4"
+
+usage() {
+  cat <<'EOF'
+thalvi-verify up                      build, launch, print RUN_DIR
+thalvi-verify doctor RUN_DIR          read-only health and identity check
+thalvi-verify say RUN_DIR "words"     queue the transcript of the next mic speech burst
+thalvi-verify ab RUN_DIR <args...>    agent-browser in this run's session, fake mic attached
+thalvi-verify state RUN_DIR STATE     wait (25 s) until the page's data-state is STATE
+thalvi-verify reply RUN_DIR "text"    wait (25 s) until the last Thalvi turn contains text and the
+                                      state is idle or listening; print that turn
+thalvi-verify down RUN_DIR            stop what this run started; keep RUN_DIR/evidence
+EOF
+  exit 2
+}
+
+source_hash() {
+  { git -C "$REPO" rev-parse HEAD; git -C "$REPO" diff HEAD -- crates web Cargo.lock; } | sha256sum | cut -c1-16
+}
+
+load() {
+  [[ -n "${1:-}" && -f "$1/run.env" ]] || { echo "not a verification run: ${1:-<missing RUN_DIR>}" >&2; exit 2; }
+  # shellcheck disable=SC1091
+  source "$1/run.env"
+}
+
+free_ports() {
+  python3 -I -c '
+import socket
+socks = [socket.socket() for _ in range(3)]
+for s in socks: s.bind(("127.0.0.1", 0))
+print(" ".join(str(s.getsockname()[1]) for s in socks))'
+}
+
+wait_for() {
+  local what="$1" check="$2"
+  for _ in $(seq 1 100); do
+    if eval "$check" >/dev/null 2>&1; then return 0; fi
+    sleep 0.2
+  done
+  echo "timed out waiting for $what" >&2
+  return 1
+}
+
+up() {
+  local run_id run_dir app_port http_port asr_port
+  run_id="$(date +%Y%m%d-%H%M%S)-$$"
+  run_dir="/tmp/thalvi-verify-$run_id"
+  mkdir -p "$run_dir/data" "$run_dir/evidence"
+  echo "RUN_DIR=$run_dir"
+
+  [[ -d "$REPO/web/node_modules" ]] || npm ci --prefix "$REPO/web" >"$run_dir/build.log" 2>&1
+  npm run build --prefix "$REPO/web" -- --outDir "$run_dir/web" --emptyOutDir >>"$run_dir/build.log" 2>&1
+  cargo build --locked --manifest-path "$REPO/Cargo.toml" -p thalvi-server --bin thalvi >>"$run_dir/build.log" 2>&1
+  cp "$REPO/target/debug/thalvi" "$run_dir/thalvi"
+
+  read -r app_port http_port asr_port <<<"$(free_ports)"
+  python3 -I "$SCRIPTS/fake_endpoints.py" wav "$run_dir/mic.wav"
+  printf '{"next_id":1,"learnings":[{"id":"l1","text":"Prefers metric units in recipes.","source_session":null,"updated_ms":%s}]}' \
+    "$(date +%s000)" >"$run_dir/data/learnings.json"
+  : >"$run_dir/asr-queue.txt"
+
+  setsid uv run --quiet --no-project --with "$WEBSOCKETS" python -I "$SCRIPTS/fake_endpoints.py" \
+    serve "$run_dir" "$http_port" "$asr_port" >"$run_dir/fakes.log" 2>&1 </dev/null &
+  local fakes_pgid=$!
+  # Empty environment and a cwd under /tmp: no shell variable or repository .env can reach a paid endpoint.
+  (cd "$run_dir" && exec setsid env -i HOME="$HOME" PATH="$PATH" RUST_LOG=info \
+    THALVI_ADDR="127.0.0.1:$app_port" THALVI_WEB_DIR="$run_dir/web" THALVI_DATA_DIR="$run_dir/data" \
+    THALVI_RECORD=metrics,text THALVI_ACK=off THALVI_RETIRE_DAYS=off LLM_AUDIO_INPUT=off \
+    LLM_BASE_URL="http://127.0.0.1:$http_port/v1" LLM_MODEL=fake-chat LLM_API_KEY= LLM_REASONING_EFFORT= \
+    STT_URL="ws://127.0.0.1:$asr_port" STT_MODEL=fake-asr STT_API_KEY=fake \
+    TTS_API=openai TTS_BASE_URL="http://127.0.0.1:$http_port/v1" TTS_MODEL=fake-tts TTS_API_KEY= \
+    TTS_VOICE=fake_heart TTS_VOICES=fake_heart,fake_bella \
+    ./thalvi >"$run_dir/server.log" 2>&1 </dev/null) &
+  local server_pgid=$!
+
+  cat >"$run_dir/run.env" <<EOF
+RUN_DIR=$run_dir
+URL=http://127.0.0.1:$app_port/
+APP_PORT=$app_port
+FAKE_HTTP_PORT=$http_port
+FAKE_ASR_PORT=$asr_port
+SERVER_PGID=$server_pgid
+FAKES_PGID=$fakes_pgid
+BROWSER_SESSION=thalvi-verify-$run_id
+SOURCE_HASH=$(source_hash)
+BINARY_SHA=$(sha256sum "$run_dir/thalvi" | cut -c1-16)
+EOF
+  load "$run_dir"
+  wait_for "fake endpoints" "curl -sf http://127.0.0.1:$http_port/health"
+  wait_for "Thalvi voices" "curl -sf ${URL}voices | grep -q '\"default\":\"fake_heart\"'"
+  doctor "$run_dir"
+  echo "URL=$URL"
+}
+
+owned_port() {
+  local port="$1" pgid="$2" pid
+  pid="$(ss -Hltnp "sport = :$port" | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)"
+  [[ -n "$pid" && "$(ps -o pgid= -p "$pid" | tr -d ' ')" == "$pgid" ]]
+}
+
+doctor() {
+  load "$1"
+  local failed=0
+  check() { if eval "$2" >/dev/null 2>&1; then echo "ok    $1"; else echo "FAIL  $1"; failed=1; fi; }
+  check "server process group $SERVER_PGID alive" "kill -0 -$SERVER_PGID"
+  check "fake endpoints group $FAKES_PGID alive" "kill -0 -$FAKES_PGID"
+  check "app port $APP_PORT owned by this run" "owned_port $APP_PORT $SERVER_PGID"
+  check "fake ports $FAKE_HTTP_PORT/$FAKE_ASR_PORT owned by this run" \
+    "owned_port $FAKE_HTTP_PORT $FAKES_PGID && owned_port $FAKE_ASR_PORT $FAKES_PGID"
+  check "page serves the Thalvi web client" "curl -sf $URL | grep -q '<title>Thalvi</title>'"
+  check "server uses the fake voices" "curl -sf ${URL}voices | grep -q '\"voices\":\\[\"fake_heart\",\"fake_bella\"\\]'"
+  check "model, recognizer and speech all point at this run's fakes" \
+    "[[ \$(tr '\\0' '\\n' </proc/$SERVER_PGID/environ | grep -cE '^(LLM_BASE_URL|TTS_BASE_URL)=http://127.0.0.1:$FAKE_HTTP_PORT/v1\$|^STT_URL=ws://127.0.0.1:$FAKE_ASR_PORT\$') == 3 ]]"
+  check "running binary matches the checkout (source $SOURCE_HASH)" "[[ \$(source_hash) == $SOURCE_HASH ]]"
+  echo "run $RUN_DIR binary $BINARY_SHA url $URL"
+  return "$failed"
+}
+
+say() {
+  load "$1"
+  printf '%s\n' "$2" >>"$RUN_DIR/asr-queue.txt"
+}
+
+ab() {
+  load "$1"
+  shift
+  agent-browser --session "$BROWSER_SESSION" \
+    --args "--use-fake-ui-for-media-stream,--use-fake-device-for-media-stream,--use-file-for-fake-audio-capture=$RUN_DIR/mic.wav,--autoplay-policy=no-user-gesture-required" \
+    "$@"
+}
+
+state() {
+  ab "$1" wait --fn "document.querySelector('.orb-app')?.dataset.state === '$2'" >/dev/null \
+    || { echo "page never reached state $2" >&2; exit 1; }
+  echo "state $2"
+}
+
+reply() {
+  local text
+  text="$(python3 -I -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$2")"
+  ab "$1" wait --fn "(() => {
+    const state = document.querySelector('.orb-app')?.dataset.state;
+    const last = [...document.querySelectorAll('.o-turns .o-assistant')].at(-1)?.textContent ?? '';
+    return (state === 'idle' || state === 'listening') && last.includes($text);
+  })()" >/dev/null || { echo "no settled reply containing $text" >&2; exit 1; }
+  ab "$1" eval "[...document.querySelectorAll('.o-turns .o-assistant')].at(-1).innerText"
+}
+
+down() {
+  load "$1"
+  agent-browser --session "$BROWSER_SESSION" close >/dev/null 2>&1 || true
+  for pgid in "$SERVER_PGID" "$FAKES_PGID"; do
+    kill -TERM -- "-$pgid" 2>/dev/null || true
+  done
+  wait_for "run processes to exit" "! kill -0 -$SERVER_PGID 2>/dev/null && ! kill -0 -$FAKES_PGID 2>/dev/null" \
+    || kill -KILL -- "-$SERVER_PGID" "-$FAKES_PGID" 2>/dev/null || true
+  echo "stopped; evidence kept in $RUN_DIR/evidence"
+}
+
+case "${1:-}" in
+  up) up ;;
+  doctor) doctor "${2:-}" ;;
+  say) [[ $# -eq 3 ]] || usage; say "$2" "$3" ;;
+  ab) [[ $# -ge 3 ]] || usage; ab "${@:2}" ;;
+  state) [[ $# -eq 3 ]] || usage; state "$2" "$3" ;;
+  reply) [[ $# -eq 3 ]] || usage; reply "$2" "$3" ;;
+  down) down "${2:-}" ;;
+  *) usage ;;
+esac
