@@ -206,6 +206,12 @@ config is `desktop.json` in `thalvi/` under the user config directory
 `THALVI_RECORD=metrics,text,audio` records timings, dictated text and
 microphone audio locally, each opt-in.
 
+**Second-pass transcription** in Settings → Speech recognition is off by
+default, including for older configs that only name an endpoint. Turning it
+off keeps the endpoint and key, and accepted captures make no second request.
+Turn it on to use the saved endpoint; Save validates it before applying it to
+subsequent captures.
+
 To dictate without the server or a network, set `"stt": {"engine": "local"}` in
 the config or choose "On this computer" under Speech recognition in Settings.
 The first use downloads about 650 MB (the pill says so); after that it works

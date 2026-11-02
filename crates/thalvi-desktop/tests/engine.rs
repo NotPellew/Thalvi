@@ -1398,7 +1398,13 @@ async fn serve(reply: Reply) -> (String, tokio::sync::mpsc::UnboundedReceiver<us
 
 fn with_secondary(url: &str, api: &str) -> String {
     format!(
-        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"secondary": {{"url": "{url}", "model": "m", "api": "{api}"}}}}}}"#
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"secondary": {{"enabled": true, "url": "{url}", "model": "m", "api": "{api}"}}}}}}"#
+    )
+}
+
+fn with_secondary_off(url: &str) -> String {
+    format!(
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"secondary": {{"enabled": false, "url": "{url}", "model": "m", "api": "openai"}}}}}}"#
     )
 }
 
@@ -1441,6 +1447,39 @@ async fn the_secondary_transcription_replaces_the_text_of_the_frames_that_were_s
                 // Every frame from the end of the wake cue to the end of the capture.
                 assert_eq!(uploads.recv().await, Some(rig.sent().len()), "{api}");
                 assert_eq!(rig.notices().len(), 0, "{api}");
+                assert_eq!(rig.state(), EngineState::Listening);
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_secondary_call_or_working_step_when_the_switch_is_off() {
+    LocalSet::new()
+        .run_until(async {
+            for config_of in [
+                with_secondary_off as fn(&str) -> String,
+                (|url: &str| {
+                    format!(
+                        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"secondary": {{"url": "{url}", "model": "m", "api": "openai"}}}}}}"#
+                    )
+                }) as fn(&str) -> String,
+            ] {
+                let (url, mut uploads) =
+                    serve(Reply::Json(r#"{"text": "Polished words paste that"}"#)).await;
+                let (mut rig, engine, frames) = Rig::new(&config_of(&url));
+                let task = capture_task(engine, frames);
+                live_words(&mut rig).await;
+                assert!(
+                    !matches!(rig.state(), EngineState::TranscribingSecondary { .. }),
+                    "no secondary working step"
+                );
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Paste, "live words")
+                );
+                assert!(uploads.try_recv().is_err(), "no secondary request");
+                assert_eq!(rig.notices().len(), 0);
                 assert_eq!(rig.state(), EngineState::Listening);
             }
         })

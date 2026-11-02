@@ -34,6 +34,8 @@ pub enum SecondarySttError {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSecondaryStt {
+    #[serde(default)]
+    enabled: bool,
     url: String,
     model: String,
     #[serde(default)]
@@ -42,10 +44,11 @@ struct RawSecondaryStt {
     api: SecondaryApi,
 }
 
-/// Validated settings of the secondary transcription endpoint.
+/// Settings of the secondary transcription endpoint; it runs only when `enabled`.
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "RawSecondaryStt")]
 pub struct SecondaryStt {
+    enabled: bool,
     url: String,
     model: String,
     api_key: String,
@@ -55,6 +58,7 @@ pub struct SecondaryStt {
 impl fmt::Debug for SecondaryStt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SecondaryStt")
+            .field("enabled", &self.enabled)
             .field("url", &self.url)
             .field("model", &self.model)
             .field("api", &self.api)
@@ -64,15 +68,26 @@ impl fmt::Debug for SecondaryStt {
 
 impl SecondaryStt {
     /// # Errors
-    /// Fails when `url` is not an `http` or `https` base URL without credentials, query or fragment, or `model` is blank.
+    /// Fails when `enabled` and `url` is not an `http` or `https` base URL without credentials, query or fragment, or `model` is blank. When not `enabled`, the endpoint is kept as written without validation.
     pub fn new(
         url: &str,
         model: &str,
         api_key: String,
         api: SecondaryApi,
+        enabled: bool,
     ) -> Result<Self, SecondarySttError> {
-        let parsed = reqwest::Url::parse(url).map_err(|_| SecondarySttError::Url)?;
+        if !enabled {
+            return Ok(Self {
+                enabled,
+                url: url.trim().trim_end_matches('/').to_string(),
+                model: model.trim().to_string(),
+                api_key,
+                api,
+            });
+        }
+        let parsed = reqwest::Url::parse(url.trim()).map_err(|_| SecondarySttError::Url)?;
         if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
             || !parsed.username().is_empty()
             || parsed.password().is_some()
             || parsed.query().is_some()
@@ -85,11 +100,18 @@ impl SecondaryStt {
             return Err(SecondarySttError::Model);
         }
         Ok(Self {
+            enabled,
             url: parsed.as_str().trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key,
             api,
         })
+    }
+
+    /// Whether the secondary transcription runs.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled
     }
 
     /// The model named in each request.
@@ -109,7 +131,7 @@ impl TryFrom<RawSecondaryStt> for SecondaryStt {
     type Error = SecondarySttError;
 
     fn try_from(raw: RawSecondaryStt) -> Result<Self, Self::Error> {
-        Self::new(&raw.url, &raw.model, raw.api_key, raw.api)
+        Self::new(&raw.url, &raw.model, raw.api_key, raw.api, raw.enabled)
     }
 }
 

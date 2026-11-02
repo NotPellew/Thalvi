@@ -196,21 +196,44 @@ describe("where speech is recognized", () => {
 });
 
 describe("second transcription", () => {
-  it("is saved as an object when filled and as null when cleared", async () => {
+  it("stays off until the switch is flipped, and keeps its fields when flipped off", async () => {
     const stub = await open();
     goTo("recognition");
+    expect(control("Second-pass transcription", "input").checked).toBe(false);
+    expect(control("Endpoint address", "input").disabled).toBe(true);
+    flip(control("Second-pass transcription", "input"));
+    expect(control("Endpoint address", "input").disabled).toBe(false);
     type(control("Endpoint address", "input"), "http://127.0.0.1:9000/v1");
     type(control("Model", "input"), "whisper");
     type(control("API key", "input"), "k");
     choose(control("API", "select"), "meta");
     button("Save").click();
-    expect(sent(stub).stt.secondary).toEqual({ url: "http://127.0.0.1:9000/v1", model: "whisper", api: "meta", api_key: "k" });
+    expect(sent(stub).stt.secondary).toEqual({ enabled: true, url: "http://127.0.0.1:9000/v1", model: "whisper", api: "meta", api_key: "k" });
     expect(control("API key", "input").type).toBe("password");
 
     await settle();
-    for (const label of ["Endpoint address", "Model", "API key"]) type(control(label, "input"), "");
+    flip(control("Second-pass transcription", "input"));
+    expect(control("Endpoint address", "input").value).toBe("http://127.0.0.1:9000/v1");
+    expect(control("Endpoint address", "input").disabled).toBe(true);
     button("Save").click();
-    expect(stub.backend.saveSettings.mock.calls[1]?.[0].stt.secondary).toBeNull();
+    expect(stub.backend.saveSettings.mock.calls[1]?.[0].stt.secondary).toEqual({
+      enabled: false,
+      url: "http://127.0.0.1:9000/v1",
+      model: "whisper",
+      api: "meta",
+      api_key: "k",
+    });
+  });
+
+  it("shows a saved off endpoint with the switch off and its fields kept", async () => {
+    await open({
+      ...SETTINGS,
+      stt: { engine: "server", secondary: { enabled: false, url: "http://127.0.0.1:9000/v1", model: "whisper", api: "meta", api_key: "k" } },
+    });
+    goTo("recognition");
+    expect(control("Second-pass transcription", "input").checked).toBe(false);
+    expect(control("Endpoint address", "input").value).toBe("http://127.0.0.1:9000/v1");
+    expect(control("Model", "input").value).toBe("whisper");
   });
 });
 

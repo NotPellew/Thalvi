@@ -49,7 +49,7 @@ async fn serve(status: u16, reply: &'static str) -> (String, mpsc::UnboundedRece
 }
 
 fn settings(url: &str, api: SecondaryApi, key: &str) -> SecondaryStt {
-    SecondaryStt::new(url, "the-model", key.to_string(), api).expect("valid settings")
+    SecondaryStt::new(url, "the-model", key.to_string(), api, true).expect("valid settings")
 }
 
 fn ramp(index: usize) -> Frame {
@@ -277,28 +277,29 @@ async fn a_silent_endpoint_times_out_after_ten_seconds() {
 fn settings_are_validated_once_where_they_are_read() {
     let parse = |value: serde_json::Value| serde_json::from_value::<SecondaryStt>(value);
 
-    let minimal =
-        parse(serde_json::json!({"url": " https://api.example.com/v1/ ", "model": " m "}))
-            .expect("minimal settings");
+    let minimal = parse(
+        serde_json::json!({"enabled": true, "url": " https://api.example.com/v1/ ", "model": " m "}),
+    )
+    .expect("minimal settings");
+    assert!(minimal.enabled());
     assert_eq!(
         minimal,
         SecondaryStt::new(
             "https://api.example.com/v1",
             "m",
             String::new(),
-            SecondaryApi::OpenAi
+            SecondaryApi::OpenAi,
+            true
         )
         .unwrap()
     );
     assert_eq!(
-        parse(
-            serde_json::json!({"url": "https://api.example.com/v1", "model": "m", "api": "openai"})
-        )
+        parse(serde_json::json!({"enabled": true, "url": "https://api.example.com/v1", "model": "m", "api": "openai"}))
         .expect("the openai api by name"),
         minimal
     );
     let meta = parse(serde_json::json!({
-        "url": "http://localhost:9000", "model": "m", "api_key": "hunter2", "api": "meta"
+        "enabled": true, "url": "http://localhost:9000", "model": "m", "api_key": "hunter2", "api": "meta"
     }))
     .expect("full settings");
     assert_eq!(
@@ -307,7 +308,8 @@ fn settings_are_validated_once_where_they_are_read() {
             "http://localhost:9000",
             "m",
             "hunter2".into(),
-            SecondaryApi::Meta
+            SecondaryApi::Meta,
+            true
         )
         .unwrap()
     );
@@ -320,43 +322,43 @@ fn settings_are_validated_once_where_they_are_read() {
     let model_error = SecondarySttError::Model.to_string();
     let invalid = [
         (
-            serde_json::json!({"url": "ftp://h", "model": "m"}),
+            serde_json::json!({"enabled": true, "url": "ftp://h", "model": "m"}),
             url_error.clone(),
         ),
         (
-            serde_json::json!({"url": "ws://h", "model": "m"}),
+            serde_json::json!({"enabled": true, "url": "ws://h", "model": "m"}),
             url_error.clone(),
         ),
         (
-            serde_json::json!({"url": "http://", "model": "m"}),
+            serde_json::json!({"enabled": true, "url": "http://", "model": "m"}),
             url_error.clone(),
         ),
         (
-            serde_json::json!({"url": "http://user:pw@h", "model": "m"}),
+            serde_json::json!({"enabled": true, "url": "http://user:pw@h", "model": "m"}),
             url_error.clone(),
         ),
         (
-            serde_json::json!({"url": "http://user@h", "model": "m"}),
+            serde_json::json!({"enabled": true, "url": "http://user@h", "model": "m"}),
             url_error.clone(),
         ),
         (
-            serde_json::json!({"url": "http://:pw@h", "model": "m"}),
+            serde_json::json!({"enabled": true, "url": "http://:pw@h", "model": "m"}),
             url_error.clone(),
         ),
         (
-            serde_json::json!({"url": "http://h:99999", "model": "m"}),
+            serde_json::json!({"enabled": true, "url": "http://h:99999", "model": "m"}),
             url_error.clone(),
         ),
         (
-            serde_json::json!({"url": "http://h/v1?x=1", "model": "m"}),
+            serde_json::json!({"enabled": true, "url": "http://h/v1?x=1", "model": "m"}),
             url_error.clone(),
         ),
         (
-            serde_json::json!({"url": "http://h/v1#x", "model": "m"}),
+            serde_json::json!({"enabled": true, "url": "http://h/v1#x", "model": "m"}),
             url_error,
         ),
         (
-            serde_json::json!({"url": "http://h", "model": "  "}),
+            serde_json::json!({"enabled": true, "url": "http://h", "model": "  "}),
             model_error,
         ),
     ];
@@ -373,4 +375,21 @@ fn settings_are_validated_once_where_they_are_read() {
     ] {
         assert!(parse(value.clone()).is_err(), "{value}");
     }
+}
+
+#[test]
+fn the_switch_defaults_off_and_off_keeps_the_endpoint() {
+    let parse = |value: serde_json::Value| serde_json::from_value::<SecondaryStt>(value);
+    let legacy = parse(serde_json::json!({"url": "https://api.example.com/v1", "model": "m"}))
+        .expect("legacy settings stay off");
+    assert!(!legacy.enabled(), "present without a switch stays off");
+    let off = parse(serde_json::json!({
+        "enabled": false, "url": "http://localhost:9000", "model": "m", "api_key": "hunter2", "api": "meta"
+    }))
+    .expect("off settings keep the endpoint");
+    assert!(!off.enabled());
+    assert_eq!(
+        serde_json::to_value(&off).unwrap(),
+        serde_json::json!({"enabled": false, "url": "http://localhost:9000", "model": "m", "api_key": "hunter2", "api": "meta"})
+    );
 }

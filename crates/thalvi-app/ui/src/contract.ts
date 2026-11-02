@@ -36,6 +36,7 @@ export interface HeadSettings {
 }
 
 export interface SecondarySettings {
+  enabled: boolean;
   url: string;
   model: string;
   api: SecondaryApi;
