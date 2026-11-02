@@ -221,11 +221,10 @@ async fn a_download_that_is_cancelled_leaves_no_partial_file() {
         })
     };
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .any(|entry| entry.expect("entry").metadata().expect("meta").len() > 0)
-        {
+        // A directory listing can report an open file as empty on Windows; ask the file itself.
+        while !fs::read_dir(&dir).into_iter().flatten().any(|entry| {
+            fs::metadata(entry.expect("entry").path()).is_ok_and(|meta| meta.len() > 0)
+        }) {
             tokio::task::yield_now().await;
         }
     })
