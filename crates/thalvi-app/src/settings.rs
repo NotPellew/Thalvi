@@ -98,11 +98,24 @@ fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
     temporary.push(".tmp");
     let temporary = PathBuf::from(temporary);
     let written =
-        std::fs::write(&temporary, contents).and_then(|()| std::fs::rename(&temporary, path));
+        write_private(&temporary, contents).and_then(|()| std::fs::rename(&temporary, path));
     if written.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
     written
+}
+
+/// Writes a new file only its owner can read: the config can hold an API key.
+fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let _ = std::fs::remove_file(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    // On Windows a file under the per-user %APPDATA% is readable by its owner only.
+    options.open(path)?.write_all(contents.as_bytes())
 }
 
 #[cfg(test)]
@@ -182,6 +195,30 @@ mod tests {
         );
         assert!(!written.contains("recordings") && !written.contains("record"));
         assert_eq!(leftovers, ["desktop.json"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_config_stays_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (store, dir) = store("private", None);
+        let mut settings = settings_json(&store_defaults()).unwrap();
+        settings["stt"] =
+            json!({"secondary": {"url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k"}});
+        // A leftover from an earlier crash must not lend its permissions to the new file.
+        std::fs::create_dir_all(store.path.parent().unwrap()).unwrap();
+        let leftover = store.path.with_extension("json.tmp");
+        std::fs::write(&leftover, "old").unwrap();
+        std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        store.save(settings.clone()).unwrap();
+        let first = std::fs::metadata(&store.path).unwrap().permissions().mode() & 0o777;
+        store.save(settings).unwrap();
+        let again = std::fs::metadata(&store.path).unwrap().permissions().mode() & 0o777;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!((first, again), (0o600, 0o600));
     }
 
     #[test]
