@@ -1,5 +1,6 @@
 //! The capture engine on a paused clock, with a fake microphone, wake word, cues and recognizer.
 
+#![expect(clippy::expect_used, reason = "a test fails by panicking")]
 #![expect(clippy::unwrap_used, reason = "a test fails by panicking")]
 
 use std::cell::RefCell;
@@ -246,6 +247,14 @@ fn capture_task(mut engine: TestEngine, mut frames: FakeFrames) -> JoinHandle<Ca
     })
 }
 
+/// The result of `task`, failing instead of waiting forever when it never ends.
+async fn finished<T>(task: JoinHandle<T>) -> T {
+    tokio::time::timeout(Duration::from_secs(120), task)
+        .await
+        .expect("the task never ended")
+        .unwrap()
+}
+
 fn accepted(route: CaptureRoute, text: &str) -> CaptureOutcome {
     CaptureOutcome::Accepted(CaptureRequest {
         route,
@@ -307,7 +316,7 @@ async fn the_wake_cue_and_the_connection_overlap_and_only_audio_after_both_is_se
 
             rig.at(800).await;
             rig.finals("never mind").await;
-            assert_eq!(task.await.unwrap(), CaptureOutcome::Cancelled);
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
             assert_eq!(
                 rig.cue_log(),
                 [
@@ -360,7 +369,7 @@ async fn a_wake_cue_that_is_off_or_fails_still_reopens_the_gate_and_the_capture_
                 };
                 assert_eq!(rig.notices(), expected, "{config}");
                 rig.handle.cancel();
-                assert_eq!(task.await.unwrap(), CaptureOutcome::Cancelled);
+                assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
             }
         })
         .await;
@@ -487,7 +496,7 @@ async fn an_ending_is_delivered_once_the_quiet_pause_has_passed() {
                 rig.at(case.commit).await;
                 assert_eq!(rig.started(Cue::Accepted), [case.commit], "{}", case.name);
                 assert_eq!(
-                    task.await.unwrap(),
+                    finished(task).await,
                     accepted(case.route, case.text),
                     "{}",
                     case.name
@@ -549,7 +558,7 @@ async fn speech_while_an_ending_is_pending_is_held_until_it_lasts_then_cancels_t
             assert!(!task.is_finished());
             rig.at(5500).await;
             assert_eq!(
-                task.await.unwrap(),
+                finished(task).await,
                 accepted(CaptureRoute::Submit, "Hello submit more words")
             );
             assert_eq!(rig.started(Cue::Provisional), [1000, 3000]);
@@ -585,7 +594,7 @@ async fn audio_held_back_by_a_cancelled_ending_is_sent_with_the_next_frame() {
             );
 
             rig.handle.cancel();
-            assert_eq!(task.await.unwrap(), CaptureOutcome::Cancelled);
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
         })
         .await;
 }
@@ -604,7 +613,7 @@ async fn an_ending_heard_only_in_a_partial_never_arms() {
             assert_eq!(rig.started(Cue::Provisional).len(), 0);
             assert!(matches!(rig.state(), EngineState::Capturing { .. }));
             rig.finals("never mind").await;
-            assert_eq!(task.await.unwrap(), CaptureOutcome::Cancelled);
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
         })
         .await;
 }
@@ -623,7 +632,7 @@ async fn never_mind_cancels_at_once_without_waiting_or_a_provisional_cue() {
             assert_eq!(rig.started(Cue::Cancelled), [1500]);
             rig.at(1600).await;
             assert!(task.is_finished(), "no pause is waited out");
-            assert_eq!(task.await.unwrap(), CaptureOutcome::Cancelled);
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
             assert_eq!(rig.started(Cue::Provisional).len(), 0);
             assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
             assert!(rig.gate.is_enabled());
@@ -662,7 +671,7 @@ async fn cancelling_from_outside_stops_whatever_the_capture_is_doing() {
                     }
                 }
                 rig.handle.cancel();
-                assert_eq!(task.await.unwrap(), CaptureOutcome::Cancelled);
+                assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
                 let log = rig.cue_log();
                 match moment {
                     Moment::Starting => {
@@ -697,7 +706,7 @@ async fn a_cancel_while_listening_does_not_cancel_the_next_capture() {
             rig.feed_until(1000, Kind::Quiet).await;
             rig.finals("Hello paste that").await;
             rig.feed_until(3500, Kind::Quiet).await;
-            assert_eq!(task.await.unwrap(), accepted(CaptureRoute::Paste, "Hello"));
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "Hello"));
         })
         .await;
 }
@@ -830,7 +839,7 @@ async fn a_failed_capture_says_what_happened_keeps_the_text_and_returns_to_liste
                 let task = capture_task(engine, frames);
                 inflict(&mut rig, &task, fault).await;
                 assert_eq!(
-                    task.await.unwrap(),
+                    finished(task).await,
                     CaptureOutcome::Failed {
                         error: error.clone(),
                         recoverable_text
@@ -860,13 +869,15 @@ async fn the_microphone_watchdog_waits_while_a_cue_is_playing() {
             rig.open().await;
             rig.feed_until(1000, Kind::Quiet).await;
             rig.finals("Hello paste that").await;
+            rig.at(1300).await;
+            assert!(!task.is_finished(), "no timeout while the cue plays");
             rig.at(2000).await;
             rig.at(2249).await;
             assert!(!task.is_finished(), "the cue ended at 2000");
             rig.at(2250).await;
             assert_eq!(rig.started(Cue::Error), [2250]);
             assert_eq!(
-                task.await.unwrap(),
+                finished(task).await,
                 CaptureOutcome::Failed {
                     error: CaptureError::MicStopped,
                     recoverable_text: Some("Hello".to_owned())
@@ -909,7 +920,7 @@ async fn wake_words_are_reported_and_an_ambiguous_one_only_once() {
             );
             rig.wake.fire(WakeEvent::Capture);
             rig.feed.send(quiet(5));
-            let (first, second) = task.await.unwrap();
+            let (first, second) = finished(task).await;
             assert_eq!(
                 (first, second),
                 (WakeTrigger::Conversation, WakeTrigger::Capture)
@@ -938,7 +949,7 @@ async fn listening_stops_with_a_plain_error_when_the_microphone_or_the_wake_mode
                 } else {
                     rig.feed.fail(AudioError::DeviceLost);
                 }
-                let error = task.await.unwrap().unwrap_err();
+                let error = finished(task).await.unwrap_err();
                 match (wake_fails, error) {
                     (true, ListenError::Wake(_))
                     | (false, ListenError::Audio(AudioError::DeviceLost)) => {}
@@ -1022,7 +1033,7 @@ async fn the_secondary_transcription_replaces_the_text_of_the_frames_that_were_s
                 let task = capture_task(engine, frames);
                 live_words(&mut rig).await;
                 assert_eq!(
-                    task.await.unwrap(),
+                    finished(task).await,
                     accepted(CaptureRoute::Paste, "Polished words"),
                     "{api}"
                 );
@@ -1061,7 +1072,7 @@ async fn the_live_transcript_is_kept_with_a_notice_when_the_secondary_cannot_sta
                 let task = capture_task(engine, frames);
                 live_words(&mut rig).await;
                 assert_eq!(
-                    task.await.unwrap(),
+                    finished(task).await,
                     accepted(CaptureRoute::Paste, "live words"),
                     "{name}"
                 );
@@ -1089,7 +1100,7 @@ async fn cancelling_during_the_secondary_transcription_abandons_it() {
             );
             assert!(!rig.gate.is_enabled(), "no audio is wanted meanwhile");
             rig.handle.cancel();
-            assert_eq!(task.await.unwrap(), CaptureOutcome::Cancelled);
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
             assert_eq!(rig.server.calls().last(), Some(&FakeCall::Close));
             assert!(rig.gate.is_enabled());
             assert_eq!(rig.notices().len(), 0);
@@ -1114,7 +1125,7 @@ async fn scratching_skips_the_secondary_and_only_the_final_ending_plays_a_provis
             rig.feed_until(4499, Kind::Quiet).await;
             rig.at(4500).await;
             assert_eq!(
-                task.await.unwrap(),
+                finished(task).await,
                 accepted(CaptureRoute::Paste, "Keep. Good")
             );
             assert_eq!(rig.started(Cue::Provisional), [2000]);
@@ -1163,7 +1174,7 @@ async fn the_state_follows_the_capture() {
             rig.partial("and more").await;
             assert_eq!(rig.state(), capturing("Hello paste that", Some("and more")));
             rig.handle.cancel();
-            assert_eq!(task.await.unwrap(), CaptureOutcome::Cancelled);
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
             assert_eq!(rig.state(), EngineState::Listening);
         })
         .await;
@@ -1221,7 +1232,7 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
             let task = capture_task(engine, frames);
             live_words(&mut rig).await;
             assert_eq!(
-                task.await.unwrap(),
+                finished(task).await,
                 accepted(CaptureRoute::Paste, "Polished words")
             );
             let metrics = read_lines(&dir.join("metrics.jsonl"));
@@ -1288,7 +1299,10 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
             rig.wake_word().await;
             rig.server
                 .fail("Thalvi could not reach speech recognition.");
-            assert!(matches!(task.await.unwrap(), CaptureOutcome::Failed { .. }));
+            assert!(matches!(
+                finished(task).await,
+                CaptureOutcome::Failed { .. }
+            ));
             let seen = events(&read_lines(&dir.join("metrics.jsonl")));
             for expected in [
                 ("desktop_transcription_ready", "error"),
@@ -1320,7 +1334,7 @@ async fn a_new_ending_withholds_audio_again_after_speech_was_relayed() {
             rig.feed_until(2640, Kind::Quiet).await;
             assert_eq!(rig.sent().len(), sent, "quiet audio is held again");
             rig.handle.cancel();
-            assert_eq!(task.await.unwrap(), CaptureOutcome::Cancelled);
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
         })
         .await;
 }
@@ -1344,7 +1358,34 @@ async fn quiet_hiss_does_not_count_as_speech_to_a_pending_ending() {
             rig.feed_until(1360, Kind::Hiss).await;
             assert_eq!(rig.state(), waiting(false));
             rig.handle.cancel();
-            assert_eq!(task.await.unwrap(), CaptureOutcome::Cancelled);
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_final_that_continues_after_an_ending_cancels_it_with_a_cue() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello submit").await;
+            rig.feed_until(1500, Kind::Quiet).await;
+            rig.finals("and then some more").await;
+            assert_eq!(rig.started(Cue::Cancelled), [1500]);
+            assert_eq!(
+                rig.state(),
+                EngineState::Capturing {
+                    committed: "Hello submit and then some more".to_owned(),
+                    partial: None
+                }
+            );
+            rig.feed_until(6000, Kind::Quiet).await;
+            assert!(!task.is_finished(), "the cancelled ending is not delivered");
+            rig.handle.cancel();
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
         })
         .await;
 }

@@ -885,11 +885,7 @@ where
         sent: &[Frame],
         scratched: bool,
     ) -> CaptureOutcome {
-        let Some(settings) = self
-            .secondary
-            .as_ref()
-            .filter(|_| !scratched && !sent.is_empty())
-        else {
+        let Some(settings) = self.secondary.as_ref().filter(|_| !scratched) else {
             return CaptureOutcome::Accepted(request);
         };
         self.set_state(EngineState::TranscribingSecondary {
