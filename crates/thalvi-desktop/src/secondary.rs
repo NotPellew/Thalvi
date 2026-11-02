@@ -2,7 +2,7 @@
 
 use std::{fmt, time::Duration};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{frame::Frame, recognizer::Upsampler};
@@ -12,7 +12,7 @@ const SAMPLE_RATE: u32 = 24_000;
 const BOUNDARY: &str = "thalvi-capture-boundary-7d1f0c2a9b3e";
 
 /// Which transcription API the secondary endpoint speaks.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SecondaryApi {
     #[default]
@@ -43,7 +43,7 @@ struct RawSecondaryStt {
 }
 
 /// Validated settings of the secondary transcription endpoint.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "RawSecondaryStt")]
 pub struct SecondaryStt {
     url: String,

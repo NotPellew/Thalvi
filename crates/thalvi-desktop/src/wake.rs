@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use ort::environment::Environment;
 use ort::session::Session;
 use ort::value::{Outlet, Tensor, TensorElementType};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::frame::Frame;
 use crate::models::{self, CatalogHead, ModelError, ModelStore};
@@ -71,6 +71,15 @@ pub enum HeadModel {
     File(PathBuf),
 }
 
+impl Serialize for HeadModel {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Catalog(head) => serializer.serialize_str(head.name()),
+            Self::File(path) => path.serialize(serializer),
+        }
+    }
+}
+
 impl TryFrom<String> for HeadModel {
     type Error = ConfigError;
 
@@ -89,7 +98,7 @@ impl TryFrom<String> for HeadModel {
 }
 
 /// The score at or above which a head wakes Thalvi.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 #[serde(try_from = "f32")]
 pub struct Threshold(f32);
 
@@ -113,7 +122,7 @@ impl Threshold {
 }
 
 /// One head's model and threshold.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeadConfig {
     pub model: HeadModel,
@@ -133,7 +142,7 @@ fn default_head(head: CatalogHead) -> HeadConfig {
 }
 
 /// Both heads, validated once when read: the two models differ.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(try_from = "RawWakeConfig")]
 pub struct WakeConfig {
     capture: HeadConfig,
