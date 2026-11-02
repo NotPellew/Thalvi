@@ -238,6 +238,7 @@ pub enum ListenError {
 pub struct EngineHandle {
     cancel: Arc<watch::Sender<u64>>,
     state: watch::Receiver<EngineState>,
+    level: watch::Receiver<f32>,
 }
 
 impl EngineHandle {
@@ -251,6 +252,24 @@ impl EngineHandle {
     pub fn state(&self) -> watch::Receiver<EngineState> {
         self.state.clone()
     }
+
+    /// The loudness of the latest frame of the capture, 0 to 1; 0 outside a capture.
+    #[must_use]
+    pub fn level(&self) -> watch::Receiver<f32> {
+        self.level.clone()
+    }
+}
+
+/// Loudness of `frame`: its RMS from -60 dBFS (0) to -10 dBFS (1).
+fn loudness(frame: &Frame) -> f32 {
+    let energy: f64 = frame.iter().map(|&s| f64::from(s).powi(2)).sum();
+    #[expect(clippy::cast_precision_loss, reason = "a frame length is exact in f64")]
+    let samples = FRAME_SAMPLES as f64;
+    let rms = (energy / samples).sqrt();
+    let db = 20.0 * (rms / 32_768.0).max(1e-9).log10();
+    #[expect(clippy::cast_possible_truncation, reason = "a level between 0 and 1")]
+    let level = ((db + 60.0) / 50.0).clamp(0.0, 1.0) as f32;
+    level
 }
 
 /// What the engine runs on.
@@ -281,6 +300,7 @@ pub struct Engine<R, W, C> {
     recorder: Recorder,
     notice: Box<dyn Fn(&str)>,
     state: watch::Sender<EngineState>,
+    level: watch::Sender<f32>,
     /// Keeps the cancel channel open so waiting on it never ends.
     _cancel_tx: Arc<watch::Sender<u64>>,
     cancel: watch::Receiver<u64>,
@@ -398,11 +418,13 @@ where
         recorder: Recorder,
     ) -> (Self, EngineHandle) {
         let (state, state_rx) = watch::channel(EngineState::Listening);
+        let (level, level_rx) = watch::channel(0.0);
         let (cancel_tx, cancel) = watch::channel(0);
         let cancel_tx = Arc::new(cancel_tx);
         let handle = EngineHandle {
             cancel: Arc::clone(&cancel_tx),
             state: state_rx,
+            level: level_rx,
         };
         let engine = Self {
             recognizer: parts.recognizer,
@@ -419,6 +441,7 @@ where
             recorder,
             notice: parts.notice,
             state,
+            level,
             _cancel_tx: cancel_tx,
             cancel,
             level_frames: 0,
@@ -561,6 +584,7 @@ where
             Err(done) => self.conclude(done, None).await,
         };
         self.gate.set_enabled(true);
+        self.level.send_replace(0.0);
         self.set_state(EngineState::Listening);
         let (flow, fields) = match &outcome {
             CaptureOutcome::Accepted(_) => ("ok", Value::Null),
@@ -875,6 +899,7 @@ where
     async fn on_frame(&mut self, live: &mut Live<R::Session>, frame: &Frame) -> Result<(), Stop> {
         let now = Instant::now();
         live.last_audio = now;
+        self.level.send_replace(loudness(frame));
         let pending = live.text.pending().is_some();
         live.speech = self.vad.speech(frame, pending);
         if !pending {

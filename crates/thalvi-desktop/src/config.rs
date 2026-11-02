@@ -82,10 +82,6 @@ struct RawDesktopConfig {
 /// What the status overlay shows; both are on by default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "one switch per part of the overlay, named as in the config"
-)]
 pub struct OverlayConfig {
     /// Show the overlay while a capture is under way.
     #[serde(default = "on")]
