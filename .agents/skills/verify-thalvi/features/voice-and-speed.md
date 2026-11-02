@@ -29,26 +29,32 @@ Preconditions:
 Steps:
 
 - **Open picker.** Choose `Voice`.
-  - Run `$V ab $R click 'button.o-voice-chip'` and
-    `$V ab $R snapshot -i -c -s '#o-vp'`.
+  - Run `$V ab $R click 'button.o-voice-chip'`,
+    `$V ab $R wait --fn 'document.querySelectorAll("select[aria-label=\"Voice to try\"] option").length === 2'`,
+    then `$V ab $R snapshot -i -c -s '#o-vp'`.
   - The combobox `Voice to try` offers `fake_heart (in use)` and `fake_bella`.
   - `Apply` is disabled.
 - **Preview.** Select `fake_bella` and choose `Preview`.
   - Run `$V ab $R select 'select[aria-label="Voice to try"]' fake_bella` and
     `$V ab $R click '.o-vp-preview'`.
-  - Then run `$V ab $R wait --fn 'document.querySelector(".o-vp-preview").textContent === "Stop"'`,
-    then wait for `Preview` again.
+  - The brief `Loading…` and `Stop` labels can pass between commands. Record
+    the preview flow and wait for `.o-vp-preview` to return to `Preview`;
+    require the matching request and successful `voice_preview` metric below,
+    and an empty `.o-vp-note` (no playback error) before Apply. The label
+    alone can also pass before the async work starts.
   - `fakes.jsonl` has `tts_request` with `"voice": "fake_bella"` and
     `"input": "Hello, this is how I sound."`
-  - Voice stays off.
+  - A preview log under `R/data/recordings/` has `event: voice_preview` and
+    `outcome: ok`. Voice stays off.
 - **Apply.** Choose `Apply`.
   - Run `$V ab $R click '.o-vp-apply'`.
   - `.o-vp-note` reads `Using fake_bella on this device.`, and
     `localStorage["thalvi.voice"]` is `fake_bella`.
+  - Capture the open picker here as `voice-applied.png`, before reloading.
 - **Applied voice speaks.** Queue a turn and turn voice on.
   - Run `$V say $R "Which voice do you use now"`,
     `$V ab $R click 'button[aria-label="Start talking"]'` and
-    `$V reply $R "Which voice do you use now. That is all."`.
+    `$V reply $R --after "Which voice do you use now"`.
   - The reply's `tts_request` lines use `"voice": "fake_bella"`.
   - Turn voice off with `$V ab $R click 'button.o-voice'`.
 - **Speed.** Choose the speed chip, then `1.5×`.
@@ -58,16 +64,18 @@ Steps:
     `localStorage["thalvi.speed"]` is `1.5`.
   - After `$V ab $R reload` and `$V state $R idle`, the chip still reads
     `1.5×`.
-- **Proof.** Screenshot the open picker after Apply, and keep the
+- **Proof.** Keep the screenshot captured immediately after Apply and the
   `tts_request` lines for the preview and the reply.
 
 ## Gotchas
 
 - The fake speech engine knows only `fake_heart` and `fake_bella`. Other names
   get HTTP 400, as a real engine does for an unknown voice.
-- Preview audio plays to a null sink in headless Chromium. `Stop` on the button
-  proves playback started, not that it was audible.
+- Preview audio plays to a null sink in headless Chromium. `Stop` means the
+  UI entered its playing state and attempted playback; `audio.play()` can
+  still fail. A successful preview metric proves synthesis, not client playback or audibility.
 - `localStorage` survives `down`/`up` only if the agent-browser session is
   reused. Each run has a new session, so it starts empty.
-- Speed changes the playback rate on the client only. The server and
+- This recipe proves speed selection and persistence, not audible stretching
+  quality. Speed changes the playback rate on the client only. The server and
   `tts_request` lines do not change.

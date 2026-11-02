@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Local stand-ins for Thalvi's chat model, speech synthesis and Meta realtime ASR.
 
 Run: uv run --no-project --with websockets==17.4 python -I fake_endpoints.py \

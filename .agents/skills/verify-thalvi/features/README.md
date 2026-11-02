@@ -21,12 +21,16 @@ index before driving the app, then use the matching feature file as the recipe.
 
 ## Driving conventions
 
-- Recipes run in file order within one run. A recipe that needs a fresh state
-  says so; get one with `down` and `up`.
+- Run recipes in the index order below, or independently. Each recipe names
+  its own preconditions. Conversations creates its rice seed in a new
+  conversation; history search creates a separate seed even if rice was deleted.
+  Voice picker needs untouched browser preferences; use a fresh run if needed.
 - Prefer accessible names and stable classes (see the handle table in
   `SKILL.md`) over coordinates or refs from an older snapshot.
-- After sending or speaking a turn, wait with `$V reply $R "<expected text>"`,
-  never with `$V state $R idle`, which passes before the server answers. Use
+- After sending or speaking a turn, wait with
+  `$V reply $R --after "<unique user text>"`, then assert its expected answer.
+  A phrase already in an older reply can pass before the new turn is echoed.
+  Never wait with `$V state $R idle`, which passes before the server answers. Use
   `state` only for a state the page is not in yet. Never sleep for a fixed
   time.
 - After `open`, `reload`, `New conversation` or reopening, run
@@ -43,8 +47,9 @@ index before driving the app, then use the matching feature file as the recipe.
   `<feature>-<step>`. Record a `.webm` for flows that unfold over time (speaking,
   stopping, barge-in). Start the recording with the URL before the first turn
   (see `SKILL.md`, Evidence).
-- Side-effect proof: the matching lines of `R/fakes.jsonl` and the stored file
-  under `R/data/`.
+- Side-effect proof: the matching lines of `R/fakes.jsonl`, recording metrics
+  and the stored file under `R/data/`. Cancellation metrics are authoritative;
+  fake cancellation logs are conditional on another stream write.
 - Report a path you could not reach with the command you tried and the
   precondition that was missing. Never report one entry point as verified
   through another.
@@ -73,3 +78,9 @@ user-visible behavior. It then has exactly four H2 sections, in this order:
   Working state, collapsed Task steps, and cross-conversation matches.
 - [Voice picker and speed](./voice-and-speed.md) covers previewing and applying
   a voice, and playback speed.
+
+Recent desktop features are outside this web map: local dictation recognition
+(`crates/thalvi-desktop/src/local.rs`) and native overlay/settings looks
+(`crates/thalvi-app/ui/src/look.ts`). Their prerequisites include a launched
+native app, model files and an actual supported desktop session; these recipes
+do not verify them.
