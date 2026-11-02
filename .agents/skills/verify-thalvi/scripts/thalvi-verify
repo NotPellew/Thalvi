@@ -63,7 +63,7 @@ up() {
     *) usage ;;
   esac
   run_id="$(date +%Y%m%d-%H%M%S)-$$"
-  run_dir="/tmp/thalvi-verify-$run_id"
+  run_dir="${TMPDIR:-/var/tmp}/thalvi-verify-$run_id"
   mkdir -p "$run_dir/data" "$run_dir/evidence"
   echo "RUN_DIR=$run_dir"
   if [[ "$mode" == local ]]; then
@@ -96,7 +96,7 @@ up() {
   setsid uv run --quiet --no-project --with "$WEBSOCKETS" python -I "$SCRIPTS/fake_endpoints.py" \
     serve "$run_dir" "$http_port" "$asr_port" >"$run_dir/fakes.log" 2>&1 </dev/null &
   local fakes_pgid=$!
-  # Empty environment and a cwd under /tmp: no shell variable or repository .env can reach a paid endpoint.
+  # Empty environment and a cwd outside the repo keep shell variables and its .env out.
   (cd "$run_dir" && exec setsid env -i HOME="$HOME" PATH="$PATH" RUST_LOG=info \
     THALVI_ADDR="127.0.0.1:$app_port" THALVI_WEB_DIR="$run_dir/web" THALVI_DATA_DIR="$run_dir/data" \
     THALVI_RECORD=metrics,text THALVI_ACK=off THALVI_RETIRE_DAYS=off LLM_AUDIO_INPUT=off \

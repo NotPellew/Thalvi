@@ -7,9 +7,11 @@ description: Launch and drive Thalvi's web client (typed and spoken conversation
 
 Thalvi's main surface is the web client the Rust server serves at `/`. A user
 types or talks in it, hears spoken replies, and manages saved conversations.
-The other surfaces are not covered here. The desktop app (`crates/thalvi-app`,
-wake words, dictation into other windows) is covered by the Rust and desktop UI
-gates in AGENTS.md. The `measure` binary is a CLI covered by `tests/measure_bin.rs`.
+The other surfaces are not driven here. The desktop app (`crates/thalvi-app`,
+wake words, dictation into other windows) needs the Rust and desktop UI gates
+plus real use on each claimed desktop, as AGENTS.md requires. These web recipes
+establish no native desktop behavior. The `measure` binary has CLI tests in
+`crates/thalvi-server/tests/measure_bin.rs`; it is not driven here.
 
 A run has one of two modes. Neither reaches a paid service or needs a key.
 
@@ -24,8 +26,8 @@ A run has one of two modes. Neither reaches a paid service or needs a key.
 - Use `--local` when the claim needs real model replies, real tool calls, real
   synthesized audio, or real latency.
 
-The server starts with an empty environment from a working directory under
-`/tmp`, so no `.env` file or shell variable can leak in. In `--local` mode,
+The server starts with an empty environment from a working directory outside
+the repository, so no `.env` file or shell variable can leak in. In `--local` mode,
 every endpoint must resolve to loopback, a private LAN or a tailnet, and no API
 key is sent.
 
@@ -43,8 +45,10 @@ $V up            # fake mode
 $V up --local    # self-hosted model and speech
 ```
 
-`up` creates `/tmp/thalvi-verify-<id>/` with an empty data directory, which is
-the `R` for every later command. It then:
+`up` creates `${TMPDIR:-/var/tmp}/thalvi-verify-<id>/` with an empty data
+directory, which is the `R` for every later command. Use an absolute `TMPDIR`
+outside the repository; `/var/tmp` keeps builds and evidence off small tmpfs
+mounts. It then:
 
 1. With `--local`, checks the self-hosted endpoints first. It fails fast with
    the command that fixes a missing service.
@@ -162,12 +166,12 @@ Handles that stay stable:
 
 Waits:
 
-- Wait for a finished reply with `$V reply $R "<expected text>"`. It returns
-  once the last Thalvi turn contains the text and the state is `idle` or
-  `listening`.
-- When the reply text is unknown, as with `--local`, use
-  `$V reply $R --after "<user text>"`. It waits until the last turn is
-  Thalvi's, right after a user turn containing that text.
+- Prefer `$V reply $R --after "<unique user text>"`. It waits until the last
+  turn is Thalvi's, right after the matching user turn, and the state is `idle`
+  or `listening`. Use a phrase not already present in this conversation.
+- `$V reply $R "<expected text>"` checks the most recent assistant turn and a
+  settled state. It can match an older answer before or after a new user echo.
+  Never use a generic suffix such as `That is all.` for successive turns.
 - `reply` allows 25 s, or 125 s with `--local`.
 - Do not wait for `idle` right after Send. The page is still idle before the
   server answers, so the wait passes at once, and the next send cancels the
@@ -232,7 +236,11 @@ Evidence goes in `R/evidence/`, outside the repository. Never commit it.
   - `model_call`: round, outcome, `total_ms`, error;
   - `tts_sentence`: voice, `first_byte_ms`, `audio_ms`;
   - `reply`: outcome, `first_token_ms`, `first_audio_ms`, text;
-  - `turn`, `stt_connect`.
+  - `turn`, `stt_connect`;
+  - `interrupt`: turn and reason (`cancel` or `speech start`);
+  - `voice_preview`: synthesis outcome and timings, in its own preview log.
+
+  Preview metrics establish synthesis, not successful client playback.
 
   With `--local`, these are the real latencies of the self-hosted model and
   speech engine. Report them as that, never as Meta's latency.
@@ -251,8 +259,12 @@ Evidence goes in `R/evidence/`, outside the repository. Never commit it.
   - the read-only API views: `curl <URL>sessions` and `curl <URL>learnings`
 
 A claim needs the user action and the resulting state, plus the side effect
-where one exists. For example, a stopped reply shows `tts_cancelled` and the
-page back in `listening`.
+where one exists. For example, a stopped spoken reply shows an `interrupt`
+metric with reason
+`cancel`, a partial reply and the page back in `listening`. Fake
+`llm_cancelled`/`tts_cancelled` events are supporting evidence only: they occur
+when a later stream write sees the closed connection, and may be absent after
+the stream has finished.
 
 Do not report any of these as verified in either mode:
 
@@ -260,6 +272,8 @@ Do not report any of these as verified in either mode:
 - Meta ASR's real endpointing or recognition;
 - audio you can hear (headless Chromium plays to a null sink);
 - physical microphone, echo or wake-word behavior;
+- audio-model input and the heard guard (`LLM_AUDIO_INPUT=off`), or the optional
+  spoken acknowledgement (`THALVI_ACK=off`);
 - phone browsers and the `tailscale serve` path.
 
 Fake mode also proves no model quality, tool choice, synthesized audio or
@@ -283,19 +297,24 @@ ss -Hltn | grep -E ":($APP_PORT|$FAKE_HTTP_PORT|$FAKE_ASR_PORT)\b"
 ```
 
 That should print nothing. After a failed `up`, run `down` on the printed
-`RUN_DIR` too.
+`RUN_DIR` if `run.env` exists. Before that file is written, build and endpoint
+preflight failures have not started app or fake processes; keep the build log.
 
 ## Helpers
 
 All helpers need `uv`, `python3`, `node`/`npm`, `cargo`, `agent-browser`, `ss`
 and `curl` on `PATH`.
 
-- `scripts/thalvi-verify`: `up [--local]`, `doctor R`, `say R "<words>"`,
+- `.agents/skills/verify-thalvi/scripts/thalvi-verify`:
+  `up [--local]`, `doctor R`, `say R "<words>"`,
   `ab R <agent-browser args>`, `state R <state>`,
   `reply R "<text>"` or `reply R --after "<user text>"`, `down R`. Run it with
   no arguments for usage.
-- `scripts/fake_endpoints.py`: the fakes. `up` starts it with
+- `.agents/skills/verify-thalvi/scripts/fake_endpoints.py`: the fakes.
+  `up` starts it with
   `uv run --no-project --with websockets==17.4`.
-  `python3 -I scripts/fake_endpoints.py wav <path>` writes the microphone clip.
-- `scripts/local_endpoints.py`: `resolve <repo>` picks and checks the
+  `.agents/skills/verify-thalvi/scripts/fake_endpoints.py wav <path>` writes
+  the microphone clip.
+- `.agents/skills/verify-thalvi/scripts/local_endpoints.py`:
+  `resolve <repo>` picks and checks the
   `--local` settings; `check <env file>` probes them.

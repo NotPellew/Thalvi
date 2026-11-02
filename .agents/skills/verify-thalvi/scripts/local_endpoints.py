@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Chooses and checks the self-hosted model and speech endpoints for `thalvi-verify up --local`.
 
 Run: python3 -I local_endpoints.py resolve REPO   prints KEY=VALUE lines for run.env
