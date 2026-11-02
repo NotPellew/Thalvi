@@ -1,0 +1,73 @@
+# Voice picker and speed
+
+The Voice chip opens a picker, closed at start, where the user previews
+another voice on their own device and applies it to replies in this browser.
+The speed chip sets reply playback speed, which persists across reloads.
+
+## Sub-features
+
+- `voice-list` lists the offered voices, with the applied one marked
+  `(in use)`.
+- `voice-preview` speaks the preview phrase in the selected voice only when
+  tapped. The button reads `Loading…`, then `Stop`, then `Preview` again.
+- `voice-apply` saves the choice in this browser and uses it for the next
+  spoken reply.
+- `speed-set` picks one of eight speeds; the chip and storage follow.
+
+## How to get to it (user POV)
+
+- Choose `Voice` in the header, pick a voice, then `Preview` or `Apply`.
+- Choose the speed chip (`1×`), then a speed such as `1.5×`.
+
+## Driving it with thalvi-verify
+
+Preconditions:
+
+- Baseline from `features/README.md`, page at `idle`, voice off, nothing in
+  `localStorage`.
+
+Steps:
+
+- **Open picker.** Choose `Voice`.
+  - Run `$V ab $R click 'button.o-voice-chip'` and
+    `$V ab $R snapshot -i -c -s '#o-vp'`.
+  - The combobox `Voice to try` offers `fake_heart (in use)` and `fake_bella`.
+  - `Apply` is disabled.
+- **Preview.** Select `fake_bella` and choose `Preview`.
+  - Run `$V ab $R select 'select[aria-label="Voice to try"]' fake_bella` and
+    `$V ab $R click '.o-vp-preview'`.
+  - Then run `$V ab $R wait --fn 'document.querySelector(".o-vp-preview").textContent === "Stop"'`,
+    then wait for `Preview` again.
+  - `fakes.jsonl` has `tts_request` with `"voice": "fake_bella"` and
+    `"input": "Hello, this is how I sound."`
+  - Voice stays off.
+- **Apply.** Choose `Apply`.
+  - Run `$V ab $R click '.o-vp-apply'`.
+  - `.o-vp-note` reads `Using fake_bella on this device.`, and
+    `localStorage["thalvi.voice"]` is `fake_bella`.
+- **Applied voice speaks.** Queue a turn and turn voice on.
+  - Run `$V say $R "Which voice do you use now"`,
+    `$V ab $R click 'button[aria-label="Start talking"]'` and
+    `$V reply $R "Which voice do you use now. That is all."`.
+  - The reply's `tts_request` lines use `"voice": "fake_bella"`.
+  - Turn voice off with `$V ab $R click 'button.o-voice'`.
+- **Speed.** Choose the speed chip, then `1.5×`.
+  - Run `$V ab $R click '.o-speed-chip'` and
+    `$V ab $R click 'button[aria-label="Playback speed 1.5×"]'`.
+  - The chip's label is `Playback speed 1.5×`, and
+    `localStorage["thalvi.speed"]` is `1.5`.
+  - After `$V ab $R reload` and `$V state $R idle`, the chip still reads
+    `1.5×`.
+- **Proof.** Screenshot the open picker after Apply, and keep the
+  `tts_request` lines for the preview and the reply.
+
+## Gotchas
+
+- The fake speech engine knows only `fake_heart` and `fake_bella`. Other names
+  get HTTP 400, as a real engine does for an unknown voice.
+- Preview audio plays to a null sink in headless Chromium. `Stop` on the button
+  proves playback started, not that it was audible.
+- `localStorage` survives `down`/`up` only if the agent-browser session is
+  reused. Each run has a new session, so it starts empty.
+- Speed changes the playback rate on the client only. The server and
+  `tts_request` lines do not change.
