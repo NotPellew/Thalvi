@@ -156,12 +156,11 @@ impl Playback {
 
     fn set(&self, next: Phase) {
         let mut phase = self.phase();
-        let replaces = match (&*phase, &next) {
-            (Phase::Playing, _) => true,
-            // Stopping or a device error still counts while the tail is sounding.
-            (Phase::Drained(_), Phase::Cancelled | Phase::Failed(_)) => true,
-            _ => false,
-        };
+        // Stopping or a device error still counts while the tail is sounding.
+        let replaces = matches!(
+            (&*phase, &next),
+            (Phase::Playing, _) | (Phase::Drained(_), Phase::Cancelled | Phase::Failed(_))
+        );
         if replaces {
             *phase = next;
             self.changed.notify_all();
