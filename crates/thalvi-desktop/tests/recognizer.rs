@@ -199,9 +199,11 @@ async fn connect_failures_say_why() {
 }
 
 #[tokio::test]
-async fn events_arrive_in_order_and_speech_markers_are_skipped() {
+async fn events_arrive_in_order_and_speech_markers_and_pings_are_skipped() {
     let url = scripted(vec![
+        Message::Ping(vec![1].into()),
         ready(),
+        Message::Ping(vec![2].into()),
         text(r#"{"type":"speech_start","turn_id":"t","audio_processed_ms":0}"#),
         text(r#"{"type":"partial","text":"he"}"#),
         text(r#"{"type":"speech_end","turn_id":"t","audio_processed_ms":80}"#),

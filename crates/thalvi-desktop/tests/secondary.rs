@@ -333,6 +333,10 @@ fn settings_are_validated_once_where_they_are_read() {
             url_error.clone(),
         ),
         (
+            serde_json::json!({"url": "http://:pw@h", "model": "m"}),
+            url_error.clone(),
+        ),
+        (
             serde_json::json!({"url": "http://h:99999", "model": "m"}),
             url_error.clone(),
         ),
