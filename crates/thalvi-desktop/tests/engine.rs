@@ -1076,6 +1076,71 @@ async fn a_capture_without_words_for_a_minute_ends_and_keeps_its_text() {
         .await;
 }
 
+/// Milliseconds after the wake word at which the capture opens; the five-minute cap counts from here.
+const CAPTURE_OPENS: u64 = 230;
+
+#[tokio::test(start_paused = true)]
+async fn a_capture_that_keeps_hearing_words_is_stopped_after_five_minutes_and_keeps_its_text() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            let words: Vec<String> = (1..=9).map(|n| format!("word{n}")).collect();
+            for (n, word) in (1..).zip(&words) {
+                rig.feed_until(n * 30_000, Kind::Quiet).await;
+                rig.finals(word).await;
+            }
+            rig.feed_until(CAPTURE_OPENS + 299_920, Kind::Quiet).await;
+            assert!(!task.is_finished(), "words keep the idle limit away");
+            assert!(rig.started(Cue::Error).is_empty());
+
+            rig.at(CAPTURE_OPENS + 300_000).await;
+            assert_eq!(rig.started(Cue::Error), [CAPTURE_OPENS + 300_000]);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: CaptureError::TooLong,
+                    recoverable_text: Some(words.join(" "))
+                }
+            );
+            assert_eq!(
+                CaptureError::TooLong.to_string(),
+                "Capture stopped after five minutes without an ending."
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_ending_still_pending_when_the_five_minutes_pass_is_not_delivered() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            for n in 1..=5 {
+                rig.feed_until(n * 50_000, Kind::Quiet).await;
+                rig.finals("more").await;
+            }
+            rig.feed_until(299_000, Kind::Voice).await;
+            rig.finals("Almost done submit").await;
+            rig.feed_until(CAPTURE_OPENS + 299_920, Kind::Voice).await;
+            assert!(!task.is_finished(), "speech keeps the countdown waiting");
+
+            rig.at(CAPTURE_OPENS + 300_000).await;
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: CaptureError::TooLong,
+                    recoverable_text: Some("more more more more more Almost done".to_owned())
+                }
+            );
+            assert!(rig.started(Cue::Accepted).is_empty());
+        })
+        .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn wake_words_are_reported_and_an_ambiguous_one_only_once() {
     LocalSet::new()

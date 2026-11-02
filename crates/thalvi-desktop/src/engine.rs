@@ -43,6 +43,10 @@ const MIC_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How long a capture may go without recognized words before it ends, keeping the text.
 const IDLE_LIMIT: Duration = Duration::from_secs(60);
+
+/// How long a capture may stay open, however many words it receives, before it is stopped.
+const MAX_CAPTURE: Duration = Duration::from_secs(300);
+
 /// Consecutive speech frames, 240 ms, that make audio held back during a pending ending count as
 /// the user continuing.
 const CONTINUATION_FRAMES: u8 = 3;
@@ -179,6 +183,8 @@ pub enum CaptureError {
     MicStopped,
     #[error("No ending heard for a minute.")]
     NoEnding,
+    #[error("Capture stopped after five minutes without an ending.")]
+    TooLong,
     #[error(transparent)]
     Full(#[from] CaptureFullError),
 }
@@ -193,6 +199,7 @@ impl CaptureError {
             Self::Audio(_) => "audio",
             Self::MicStopped => "mic_stopped",
             Self::NoEnding => "no_ending",
+            Self::TooLong => "too_long",
             Self::Full(_) => "full",
         }
     }
@@ -301,6 +308,7 @@ struct Live<S> {
     /// Whether the latest frame was speech.
     speech: bool,
     last_audio: Instant,
+    started: Instant,
     /// When the recognizer last returned words.
     last_words: Instant,
     cues: FuturesUnordered<LocalBoxFuture<'static, CueEnd>>,
@@ -343,6 +351,7 @@ enum Step {
     Quiet,
     Silent,
     Idle,
+    TooLong,
 }
 
 async fn until(at: Option<Instant>) {
@@ -715,6 +724,7 @@ where
             relayed: false,
             speech: false,
             last_audio: Instant::now(),
+            started: Instant::now(),
             last_words: Instant::now(),
             cues: FuturesUnordered::new(),
         };
@@ -750,6 +760,7 @@ where
                 () = until(live.text.ready_at()) => Step::Quiet,
                 () = until(watchdog) => Step::Silent,
                 () = tokio::time::sleep_until(live.last_words + IDLE_LIMIT) => Step::Idle,
+                () = tokio::time::sleep_until(live.started + MAX_CAPTURE) => Step::TooLong,
             };
             let done = match step {
                 Step::Cancel => Some(Done::Stopped),
@@ -778,6 +789,7 @@ where
                 Step::Quiet => self.on_quiet(live),
                 Step::Silent => Some(Done::Failed(CaptureError::MicStopped)),
                 Step::Idle => Some(Done::Failed(CaptureError::NoEnding)),
+                Step::TooLong => Some(Done::Failed(CaptureError::TooLong)),
             };
             if let Some(done) = done {
                 return done;
