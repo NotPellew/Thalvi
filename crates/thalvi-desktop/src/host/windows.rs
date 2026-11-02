@@ -99,9 +99,7 @@ impl<A: Win32> Windows<A> {
         self.api
             .process(target.window)
             .filter(|process| process.identity == target.identity)
-            .ok_or_else(|| {
-                nothing_typed("The window closed. Nothing was typed; the text is on the clipboard.")
-            })
+            .ok_or_else(|| nothing_typed("The window closed. Nothing was typed."))
     }
 
     fn check_input_reaches(&self, process: &Process) -> Result<(), HostError> {
@@ -109,12 +107,11 @@ impl<A: Win32> Windows<A> {
             Some(level) if level <= self.own_integrity => Ok(()),
             Some(_) => Err(nothing_typed(
                 "That window runs with more permissions than Thalvi, such as an administrator \
-                 window, and Windows drops typing into it. Nothing was typed; the text is on the \
-                 clipboard.",
+                 window, and Windows drops typing into it. Nothing was typed.",
             )),
             None => Err(nothing_typed(
                 "Thalvi could not check whether that window runs as an administrator. Nothing \
-                 was typed; the text is on the clipboard.",
+                 was typed.",
             )),
         }
     }
@@ -162,14 +159,11 @@ impl<A: Win32> Host for Windows<A> {
         let process = self.live_process(target)?;
         self.check_input_reaches(&process)?;
         if !self.in_front(target.window) {
-            return Err(nothing_typed(
-                "The window changed. Nothing was typed; the text is on the clipboard.",
-            ));
+            return Err(nothing_typed("The window changed. Nothing was typed."));
         }
         self.send(
             &typing_events(text.as_str(), enter),
-            "Typing stopped partway. Some of the text may have been typed; the text is on the \
-             clipboard.",
+            "Typing stopped partway. Some of the text may have been typed.",
         )
     }
 
@@ -557,7 +551,7 @@ mod tests {
             } else {
                 assert_eq!(
                     nothing_typed_text(result.unwrap_err()),
-                    "The window changed. Nothing was typed; the text is on the clipboard."
+                    "The window changed. Nothing was typed."
                 );
             }
         }
@@ -595,10 +589,7 @@ mod tests {
             let notice =
                 nothing_typed_text(desktop.deliver(&target, &text("hi"), true).unwrap_err());
 
-            assert_eq!(
-                notice, "The window closed. Nothing was typed; the text is on the clipboard.",
-                "{case}"
-            );
+            assert_eq!(notice, "The window closed. Nothing was typed.", "{case}");
             assert!(
                 desktop
                     .api
