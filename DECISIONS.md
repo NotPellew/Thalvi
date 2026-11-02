@@ -11,9 +11,9 @@ areas your change touches. Editing rules are in
   delivery; TypeScript owns browser media and UI. Why: use native wake/audio
   libraries without moving model orchestration. Rejected: a WASM UI.
 - **Two products, one repo.** Desktop voice control and the conversational
-  assistant are separate tracks; desktop reaches the server only through
-  `/transcription` and `/session`. Why: different platforms, thin boundary.
-  Rejected for now: separate repos, phone-to-PC dictation.
+  assistant are separate tracks, joined only by `/transcription` and
+  `/session`. Why: different platforms, thin boundary. Rejected for now:
+  phone-to-PC dictation; separate repos until desktop needs its own releases.
 - **Desktop on Hyprland, GNOME Wayland and Windows.** GNOME gets dictation on
   the clipboard only: it exposes neither the focused window nor focus by ID.
   Why: the desktops we can qualify. Rejected: KDE, X11 and macOS until needed,
