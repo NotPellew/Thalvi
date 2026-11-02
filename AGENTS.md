@@ -16,9 +16,9 @@ directing you.
 - Every commit message and PR title follows Conventional Commits:
   `type(scope): summary`, the summary not starting with a capital letter.
   Types: `feat fix docs refactor test chore ci build perf`. Scopes: `server web
-  ci deps docs`. The commit-msg hook checks this, and CI runs it on every
-  commit and the PR title. Run `git config core.hooksPath .githooks` once per
-  clone.
+  desktop ci deps docs`. The commit-msg hook checks this, and CI runs it on
+  every commit and the PR title. Run `git config core.hooksPath .githooks` once
+  per clone.
 - Never commit secrets, model weights, datasets, audio or camera captures,
   logs, plans or scratch notes, or PR screenshots. A committed secret is
   rotated; deleting the file does not fix it.
@@ -65,6 +65,9 @@ directing you.
   narrate history; the commit carries that. Rust `///` states an item's
   contract, and every module starts with a `//!` line saying what it owns,
   so `grep -rm1 '^//!'` maps the code.
+- Desktop OS code lives in `#[cfg(target_os)]` modules behind the desktop host
+  interface; shared logic has no `cfg`. Every host implements every method; what
+  a desktop can't do returns a typed reason the user sees, never a no-op.
 - Rust: `crates/` is flat, directory name = crate name. Dependency versions
   and lints are set at the workspace root. `lib.rs` only declares and
   re-exports modules. No `mod.rs`.
@@ -72,7 +75,8 @@ directing you.
 - Before calling work done, run the gates and use the change end to end the
   way the user would. Report what you ran and what you could not verify.
   The `verify-thalvi` skill (`.agents/skills/verify-thalvi/`) runs the web
-  client on fake or self-hosted endpoints for this.
+  client on fake or self-hosted endpoints for this. A desktop PR names each
+  desktop it was used on; CI and fixtures are not use.
 
 ## Keep it lean (YAGNI)
 
@@ -96,8 +100,9 @@ can't break and doesn't slow down the next change.
 ## Gates
 
 CI runs exactly these as required checks on `main`. A new component adds its
-pinned toolchain, its commands here, and its CI job. npm is the package
-manager; lockfiles are committed.
+pinned toolchain, its commands here, and its CI job; one that ships on Windows
+also runs its gate on `windows-latest`. npm is the package manager; lockfiles
+are committed.
 
 - Server (`crates/`): `cargo fmt --all -- --check`, `cargo lint`,
   `cargo test --workspace --locked`, `RUSTDOCFLAGS="-D warnings" cargo docs`.
@@ -129,6 +134,8 @@ manager; lockfiles are committed.
 - Use `.github/pull_request_template.md` for every PR body, including PRs
   created through CLI tools; preserve its headings and remove instructional
   comments.
+- Label every issue `area:desktop` or `area:conversation`, plus `windows`
+  when Windows behaviour is involved.
 - When opening an issue, use the matching form in `.github/ISSUE_TEMPLATE/`.
   For CLI-created issues, use its field labels as Markdown headings. Blank
   issues remain available for cases neither form fits; issues are optional.

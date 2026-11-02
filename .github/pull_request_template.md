@@ -6,6 +6,11 @@
 
 <!-- What changes, and why does it solve the problem? -->
 
+## Platforms
+
+<!-- Desktop app changes: which of Hyprland, GNOME and Windows was this used on,
+and how (a real session, CI only)? What stayed unverified? Write n/a otherwise. -->
+
 ## Verification
 
 <!-- Tests and manual checks run, with observed results.

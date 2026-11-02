@@ -7,17 +7,24 @@ areas your change touches. Editing rules are in
 ## Architecture
 
 - **Rust server with desktop and web clients.** Rust owns sessions and model
-  calls; the Python desktop client owns native audio, wake words and window
+  calls; the desktop client owns native audio, wake words and window
   delivery; TypeScript owns browser media and UI. Why: use native wake/audio
   libraries without moving model orchestration. Rejected: a WASM UI.
-- **Desktop demo first; phone conversation.** The server runs on the user's PC.
-  Hyprland is the first native target; GNOME, macOS and Windows need prototypes.
-  Why: hands-free desktop work is the short-term demo. Rejected for now:
-  phone-to-PC dictation and claiming untested platform parity.
-- **Resident desktop UI.** System GTK 3 owns the tray and status panel; the
-  pinned Python environment owns wake/audio work. Why: keep platform GTK
-  bindings separate from model dependencies and leave the input focused.
-  Rejected: using a dedicated test editor as the desktop interface.
+- **Two products, one repo.** Desktop voice control and the conversational
+  assistant are separate tracks, joined only by `/transcription` and
+  `/session`. Why: different platforms, thin boundary. Rejected for now:
+  phone-to-PC dictation; separate repos until desktop needs its own releases.
+- **Desktop on Hyprland, GNOME Wayland and Windows.** GNOME gets dictation on
+  the clipboard only: it exposes neither the focused window nor focus by ID.
+  Why: the desktops we can qualify. Rejected: KDE, X11 and macOS until needed,
+  and claiming untested platform parity.
+- **Rust desktop app with a Tauri UI.** One process runs engine, tray and panel;
+  the Python/GTK client stays until the Rust app matches it on Hyprland. Why:
+  one UI for Linux and Windows, in TypeScript like the web client, no UI IPC.
+  Rejected: egui (weaker accessibility), a native UI per OS (two to sync).
+- **Local recognition in the desktop app.** A local model runs behind the same
+  recognizer interface as the server client. Why: dictation without server,
+  network or key. Rejected: hosting the local model behind the server.
 - **Self-hosted; parts swap by endpoint.** Config sets each part's address on a
   standard protocol (Chat Completions, OpenAI speech, MCP); Meta's realtime ASR
   and Qwen3-TTS's framed PCM stream are the custom adapters. Why: any provider
@@ -113,6 +120,10 @@ areas your change touches. Editing rules are in
   approve their own PRs. Revisit if a second contributor joins.
 - **Issues are optional.** Why: in a 9-day solo build, PRs and the commit
   history are record enough. Rejected: an issue for every change.
+- **`unsafe` only for Win32.** The workspace denies `unsafe`; only the Windows
+  host module opts out, each block with `// SAFETY:`. Why: typing and window
+  checks need raw Win32 calls. Rejected: `forbid` with wrapper crates (none
+  covers the checks), clipboard-only Windows, `unsafe` allowed everywhere.
 - **Commit checks run on `pull_request`.** They need only read access, and
   changes to them take effect in the PR that makes them. Rejected:
   `pull_request_target`, which runs the base branch's workflow definition.
