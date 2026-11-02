@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer};
 
-use crate::capture::{EndingPauses, Endings};
+use crate::capture::{CaptureLimits, EndingPauses, Endings};
 use crate::cues::Cues;
 use crate::host::{App, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
@@ -39,6 +39,7 @@ pub struct DesktopConfig {
     pub wake: WakeConfig,
     pub cues: Cues,
     pub ending_pause: EndingPauses,
+    pub capture_limits: CaptureLimits,
     pub endings: Endings,
     pub stt: SttConfig,
     /// Phrases the task ending runs, in file order.
@@ -58,6 +59,8 @@ struct RawDesktopConfig {
     cues: Cues,
     #[serde(default)]
     ending_pause: EndingPauses,
+    #[serde(default)]
+    capture_limits: CaptureLimits,
     #[serde(default)]
     endings: Endings,
     #[serde(default)]
@@ -90,6 +93,7 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
             wake: raw.wake,
             cues: raw.cues,
             ending_pause: raw.ending_pause,
+            capture_limits: raw.capture_limits,
             endings: raw.endings,
             stt: raw.stt,
             scripts,
@@ -381,6 +385,7 @@ mod tests {
         assert_eq!(config.wake, WakeConfig::default());
         assert_eq!(config.cues, Cues::default());
         assert_eq!(config.ending_pause, EndingPauses::default());
+        assert_eq!(config.capture_limits, CaptureLimits::default());
         assert_eq!(config.endings, Endings::default());
         assert_eq!(config.record, RecordKinds::default());
     }
@@ -394,6 +399,7 @@ mod tests {
                 "wake": {"capture": {"model": "hey_jarvis", "threshold": 0.7}},
                 "cues": {"wake": false, "error": false},
                 "ending_pause": {"paste": 1, "submit": 3},
+                "capture_limits": {"idle": 90},
                 "endings": {
                     "Send It": "submit", "paste": "paste", "do it": "task",
                     "scratch": "scratch", "cancel": "cancel"
@@ -443,6 +449,10 @@ mod tests {
                 Duration::from_secs(3),
                 Duration::from_millis(2500)
             ]
+        );
+        assert_eq!(
+            [config.capture_limits.idle(), config.capture_limits.max()],
+            [Duration::from_secs(90), Duration::from_secs(300)]
         );
         assert_eq!(
             config.endings,
@@ -686,6 +696,19 @@ mod tests {
             ),
             (r#"{"ending_pause": 2.5}"#.to_owned(), "invalid type"),
             (r#"{"ending_pause": true}"#.to_owned(), "invalid type"),
+            (
+                r#"{"capture_limits": {"idle": 9}}"#.to_owned(),
+                "idle limit must be a whole number of seconds from 10 to 600",
+            ),
+            (
+                r#"{"capture_limits": {"max": 3601}}"#.to_owned(),
+                "max limit must be a whole number of seconds from 60 to 3600",
+            ),
+            (r#"{"capture_limits": 60}"#.to_owned(), "invalid type"),
+            (
+                r#"{"capture_limits": {"min": 1}}"#.to_owned(),
+                "unknown field `min`",
+            ),
             (
                 r#"{"endings": {"enter": "submit"}}"#.to_owned(),
                 "Configure paste, submit, task, scratch, and cancel",

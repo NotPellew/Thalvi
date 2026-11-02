@@ -1109,7 +1109,7 @@ async fn a_capture_without_words_for_a_minute_ends_and_keeps_its_text() {
             assert_eq!(
                 finished(task).await,
                 CaptureOutcome::Failed {
-                    error: CaptureError::NoEnding,
+                    error: CaptureError::NoEnding(Duration::from_secs(60)),
                     recoverable_text: Some("Hello world".to_owned())
                 }
             );
@@ -1141,13 +1141,13 @@ async fn a_capture_that_keeps_hearing_words_is_stopped_after_five_minutes_and_ke
             assert_eq!(
                 finished(task).await,
                 CaptureOutcome::Failed {
-                    error: CaptureError::TooLong,
+                    error: CaptureError::TooLong(Duration::from_secs(300)),
                     recoverable_text: Some(words.join(" "))
                 }
             );
             assert_eq!(
-                CaptureError::TooLong.to_string(),
-                "Capture stopped after five minutes without an ending."
+                CaptureError::TooLong(Duration::from_secs(300)).to_string(),
+                "Capture stopped after 5 minutes without an ending."
             );
         })
         .await;
@@ -1173,13 +1173,85 @@ async fn an_ending_still_pending_when_the_five_minutes_pass_is_not_delivered() {
             assert_eq!(
                 finished(task).await,
                 CaptureOutcome::Failed {
-                    error: CaptureError::TooLong,
+                    error: CaptureError::TooLong(Duration::from_secs(300)),
                     recoverable_text: Some("more more more more more Almost done".to_owned())
                 }
             );
             assert_eq!(rig.started(Cue::Accepted).len(), 0);
         })
         .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn configured_capture_limits_replace_the_defaults() {
+    LocalSet::new()
+        .run_until(async {
+            let config = r#"{"capture_limits": {"idle": 20, "max": 90}}"#;
+
+            let (mut rig, engine, frames) = Rig::new(config);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(10_000, Kind::Quiet).await;
+            rig.finals("Hello").await;
+            rig.feed_until(29_920, Kind::Quiet).await;
+            assert!(!task.is_finished());
+            rig.at(30_000).await;
+            let idle = CaptureError::NoEnding(Duration::from_secs(20));
+            assert_eq!(idle.to_string(), "No words heard for 20 seconds.");
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: idle,
+                    recoverable_text: Some("Hello".to_owned())
+                }
+            );
+
+            let (mut rig, engine, frames) = Rig::new(config);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            for n in 1..=5 {
+                rig.feed_until(n * 15_000, Kind::Quiet).await;
+                rig.finals("more").await;
+            }
+            rig.feed_until(CAPTURE_OPENS + 89_920, Kind::Quiet).await;
+            assert!(!task.is_finished());
+            rig.at(CAPTURE_OPENS + 90_000).await;
+            let long = CaptureError::TooLong(Duration::from_secs(90));
+            assert_eq!(
+                long.to_string(),
+                "Capture stopped after 90 seconds without an ending."
+            );
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: long,
+                    recoverable_text: Some("more more more more more".to_owned())
+                }
+            );
+        })
+        .await;
+}
+
+#[test]
+fn the_time_notices_read_whole_minutes_as_minutes_and_the_rest_as_seconds() {
+    for (seconds, words) in [
+        (10, "10 seconds"),
+        (60, "1 minute"),
+        (90, "90 seconds"),
+        (120, "2 minutes"),
+        (600, "10 minutes"),
+        (3600, "60 minutes"),
+    ] {
+        let seconds = Duration::from_secs(seconds);
+        assert_eq!(
+            CaptureError::NoEnding(seconds).to_string(),
+            format!("No words heard for {words}.")
+        );
+        assert_eq!(
+            CaptureError::TooLong(seconds).to_string(),
+            format!("Capture stopped after {words} without an ending.")
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]

@@ -206,6 +206,77 @@ impl EndingPauses {
     }
 }
 
+/// How long a capture may stay open without words, and in total, before it is stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawCaptureLimits")]
+pub struct CaptureLimits {
+    idle: Duration,
+    max: Duration,
+}
+
+/// A limit was outside what a capture can sensibly use. Shown as written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("The {limit} limit must be a whole number of seconds from {min} to {max}.")]
+pub struct LimitError {
+    limit: &'static str,
+    min: u64,
+    max: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCaptureLimits {
+    idle: Option<u64>,
+    max: Option<u64>,
+}
+
+impl TryFrom<RawCaptureLimits> for CaptureLimits {
+    type Error = LimitError;
+
+    fn try_from(raw: RawCaptureLimits) -> Result<Self, LimitError> {
+        let defaults = Self::default();
+        let limit =
+            |limit: &'static str, range: (u64, u64), seconds: Option<u64>, default| match seconds {
+                None => Ok(default),
+                Some(seconds) if (range.0..=range.1).contains(&seconds) => {
+                    Ok(Duration::from_secs(seconds))
+                }
+                Some(_) => Err(LimitError {
+                    limit,
+                    min: range.0,
+                    max: range.1,
+                }),
+            };
+        Ok(Self {
+            idle: limit("idle", (10, 600), raw.idle, defaults.idle)?,
+            max: limit("max", (60, 3600), raw.max, defaults.max)?,
+        })
+    }
+}
+
+impl Default for CaptureLimits {
+    fn default() -> Self {
+        Self {
+            idle: Duration::from_secs(60),
+            max: Duration::from_secs(300),
+        }
+    }
+}
+
+impl CaptureLimits {
+    /// How long a capture may go without recognized words.
+    #[must_use]
+    pub fn idle(self) -> Duration {
+        self.idle
+    }
+
+    /// How long a capture may stay open, however many words it receives.
+    #[must_use]
+    pub fn max(self) -> Duration {
+        self.max
+    }
+}
+
 /// Where an armed ending is in its silence window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuietWindow {
@@ -1108,6 +1179,44 @@ mod tests {
                     expected,
                     "{json}"
                 ),
+                (Err(error), Err(expected)) => {
+                    assert!(error.to_string().contains(expected), "{json}: {error}");
+                }
+                (result, expected) => panic!("{json}: {result:?} vs {expected:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_capture_limits_have_their_own_ranges() {
+        let secs = |idle, max| Ok([idle, max].map(Duration::from_secs));
+        for (json, expected) in [
+            ("{}", secs(60, 300)),
+            (r#"{"idle": 10, "max": 3600}"#, secs(10, 3600)),
+            (r#"{"idle": 600, "max": 60}"#, secs(600, 60)),
+            (r#"{"idle": 90}"#, secs(90, 300)),
+            (r#"{"max": 900}"#, secs(60, 900)),
+            (
+                r#"{"idle": 9}"#,
+                Err("The idle limit must be a whole number of seconds from 10 to 600."),
+            ),
+            (r#"{"idle": 601}"#, Err("idle limit must be")),
+            (
+                r#"{"max": 59}"#,
+                Err("The max limit must be a whole number of seconds from 60 to 3600."),
+            ),
+            (r#"{"max": 3601}"#, Err("max limit must be")),
+            (r#"{"idle": "60"}"#, Err("invalid type")),
+            (r#"{"max": 60.5}"#, Err("invalid type")),
+            (r#"{"idle": -1}"#, Err("invalid value")),
+            ("60", Err("invalid type")),
+            (r#"{"min": 1}"#, Err("unknown field `min`")),
+        ] {
+            let result = serde_json::from_str::<CaptureLimits>(json);
+            match (result, expected) {
+                (Ok(limits), Ok(expected)) => {
+                    assert_eq!([limits.idle(), limits.max()], expected, "{json}");
+                }
                 (Err(error), Err(expected)) => {
                     assert!(error.to_string().contains(expected), "{json}: {error}");
                 }

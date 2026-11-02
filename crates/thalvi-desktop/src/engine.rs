@@ -20,8 +20,8 @@ use tokio::time::Instant;
 
 use crate::audio::{AudioError, Frames, InputGate};
 use crate::capture::{
-    CaptureFullError, CaptureRequest, CaptureRoute, CaptureSession, EndingPauses, Endings,
-    FinalStep, QuietWindow, has_words,
+    CaptureFullError, CaptureLimits, CaptureRequest, CaptureRoute, CaptureSession, EndingPauses,
+    Endings, FinalStep, QuietWindow, has_words,
 };
 use crate::config::DesktopConfig;
 use crate::cues::{Cue, CueEngine, CueError, Cues};
@@ -40,12 +40,6 @@ const MIC_WATCHDOG: Duration = Duration::from_millis(250);
 
 /// How long any capture may go without microphone audio before it fails.
 const MIC_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// How long a capture may go without recognized words before it ends, keeping the text.
-const IDLE_LIMIT: Duration = Duration::from_secs(60);
-
-/// How long a capture may stay open, however many words it receives, before it is stopped.
-const MAX_CAPTURE: Duration = Duration::from_secs(300);
 
 /// Consecutive speech frames, 240 ms, that make audio held back during a pending ending count as
 /// the user continuing.
@@ -181,12 +175,23 @@ pub enum CaptureError {
     Audio(#[from] AudioError),
     #[error("Microphone audio stopped. Nothing was delivered.")]
     MicStopped,
-    #[error("No ending heard for a minute.")]
-    NoEnding,
-    #[error("Capture stopped after five minutes without an ending.")]
-    TooLong,
+    #[error("No words heard for {}.", plain_duration(*.0))]
+    NoEnding(Duration),
+    #[error("Capture stopped after {} without an ending.", plain_duration(*.0))]
+    TooLong(Duration),
     #[error(transparent)]
     Full(#[from] CaptureFullError),
+}
+
+/// Whole minutes read as minutes, anything else as seconds.
+fn plain_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let (count, unit) = if seconds > 0 && seconds.is_multiple_of(60) {
+        (seconds / 60, "minute")
+    } else {
+        (seconds, "second")
+    };
+    format!("{count} {unit}{}", if count == 1 { "" } else { "s" })
 }
 
 impl CaptureError {
@@ -198,8 +203,8 @@ impl CaptureError {
             Self::NotReady => "not_ready",
             Self::Audio(_) => "audio",
             Self::MicStopped => "mic_stopped",
-            Self::NoEnding => "no_ending",
-            Self::TooLong => "too_long",
+            Self::NoEnding(_) => "no_ending",
+            Self::TooLong(_) => "too_long",
             Self::Full(_) => "full",
         }
     }
@@ -270,6 +275,7 @@ pub struct Engine<R, W, C> {
     vad: VadDetector,
     endings: Endings,
     pauses: EndingPauses,
+    limits: CaptureLimits,
     secondary: Option<SecondaryStt>,
     http: reqwest::Client,
     recorder: Recorder,
@@ -407,6 +413,7 @@ where
             vad: VadDetector::new(),
             endings: config.endings.clone(),
             pauses: config.ending_pause,
+            limits: config.capture_limits,
             secondary: config.stt.secondary.clone(),
             http: parts.http,
             recorder,
@@ -759,8 +766,8 @@ where
                 Some(end) = live.cues.next() => Step::Cue(end),
                 () = until(live.text.ready_at()) => Step::Quiet,
                 () = until(watchdog) => Step::Silent,
-                () = tokio::time::sleep_until(live.last_words + IDLE_LIMIT) => Step::Idle,
-                () = tokio::time::sleep_until(live.started + MAX_CAPTURE) => Step::TooLong,
+                () = tokio::time::sleep_until(live.last_words + self.limits.idle()) => Step::Idle,
+                () = tokio::time::sleep_until(live.started + self.limits.max()) => Step::TooLong,
             };
             let done = match step {
                 Step::Cancel => Some(Done::Stopped),
@@ -788,8 +795,8 @@ where
                 }
                 Step::Quiet => self.on_quiet(live),
                 Step::Silent => Some(Done::Failed(CaptureError::MicStopped)),
-                Step::Idle => Some(Done::Failed(CaptureError::NoEnding)),
-                Step::TooLong => Some(Done::Failed(CaptureError::TooLong)),
+                Step::Idle => Some(Done::Failed(CaptureError::NoEnding(self.limits.idle()))),
+                Step::TooLong => Some(Done::Failed(CaptureError::TooLong(self.limits.max()))),
             };
             if let Some(done) = done {
                 return done;
