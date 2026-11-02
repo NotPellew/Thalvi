@@ -16,9 +16,9 @@ directing you.
 - Every commit message and PR title follows Conventional Commits:
   `type(scope): summary`, the summary not starting with a capital letter.
   Types: `feat fix docs refactor test chore ci build perf`. Scopes: `server web
-  ci deps docs`. The commit-msg hook checks this, and CI runs it on every
-  commit and the PR title. Run `git config core.hooksPath .githooks` once per
-  clone.
+  desktop ci deps docs`. The commit-msg hook checks this, and CI runs it on
+  every commit and the PR title. Run `git config core.hooksPath .githooks` once
+  per clone.
 - Never commit secrets, model weights, datasets, audio or camera captures,
   logs, plans or scratch notes, or PR screenshots. A committed secret is
   rotated; deleting the file does not fix it.
