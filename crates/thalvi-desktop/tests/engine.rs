@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
+use serde_json::json;
 use thalvi_desktop::audio::{AudioError, InputGate};
 use thalvi_desktop::capture::{CaptureRequest, CaptureRoute};
 use thalvi_desktop::config::DesktopConfig;
@@ -480,7 +481,8 @@ async fn an_ending_is_delivered_once_the_quiet_pause_has_passed() {
             route: CaptureRoute::Paste,
             text: "Hello",
             provisional_at: &[1000],
-            commit: 3500,
+            // Noise without words delays the commit: the pause restarts at the first quiet frame.
+            commit: 1840 + 2500,
         },
     ];
     LocalSet::new()
@@ -562,6 +564,101 @@ async fn speech_while_an_ending_is_pending_is_held_until_it_lasts_then_cancels_t
                 accepted(CaptureRoute::Submit, "Hello submit more words")
             );
             assert_eq!(rig.started(Cue::Provisional), [1000, 3000]);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_speech_stops_the_countdown_until_quiet_returns_unless_words_cancel_the_ending() {
+    // What the user does after "paste that" at 1000, and, in its last step, 1 ms before the paste is accepted.
+    let cases: [(&str, &[(u64, Kind)]); 3] = [
+        // Observed on Hyprland: talking from 1.5 s, no partial before the old 2.5 s countdown ended.
+        (
+            "talking",
+            &[
+                (2480, Kind::Quiet),
+                (3400, Kind::Voice),
+                (5939, Kind::Quiet),
+            ],
+        ),
+        // A cough: three speech frames, no words.
+        (
+            "cough",
+            &[
+                (2000, Kind::Quiet),
+                (2240, Kind::Voice),
+                (4819, Kind::Quiet),
+            ],
+        ),
+        // Speaking again after a short quiet gap pauses the countdown again.
+        (
+            "resuming",
+            &[
+                (2000, Kind::Quiet),
+                (2240, Kind::Voice),
+                (3000, Kind::Quiet),
+                (3400, Kind::Voice),
+                (5939, Kind::Quiet),
+            ],
+        ),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for (name, script) in cases {
+                let (mut rig, engine, frames) = Rig::new("{}");
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals("Hello paste that").await;
+                let pending = |waiting_for_quiet| EngineState::PendingEnding {
+                    route: CaptureRoute::Paste,
+                    text: "Hello".to_owned(),
+                    waiting_for_quiet,
+                };
+                for (until, kind) in script {
+                    rig.feed_until(*until, *kind).await;
+                    assert!(!task.is_finished(), "{name}: still pending at {until}");
+                    if matches!(kind, Kind::Voice) {
+                        assert_eq!(rig.state(), pending(true), "{name}: speech at {until}");
+                    }
+                }
+                assert_eq!(rig.state(), pending(false), "{name}: counting again");
+                // The script ends 1 ms before the pause does.
+                rig.at(script[script.len() - 1].0 + 1).await;
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Paste, "Hello"),
+                    "{name}"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn words_recognized_while_the_countdown_waits_for_quiet_still_cancel_the_ending() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello paste that").await;
+            rig.feed_until(2480, Kind::Quiet).await;
+            rig.feed_until(3000, Kind::Voice).await;
+            rig.partial("and also").await;
+            assert_eq!(rig.started(Cue::Cancelled), [3000]);
+            assert_eq!(
+                rig.state(),
+                EngineState::Capturing {
+                    committed: "Hello paste that".to_owned(),
+                    partial: Some("and also".to_owned())
+                }
+            );
+            rig.feed_until(6000, Kind::Quiet).await;
+            assert!(!task.is_finished(), "the cancelled ending is not delivered");
+            rig.handle.cancel();
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
         })
         .await;
 }
@@ -881,6 +978,98 @@ async fn the_microphone_watchdog_waits_while_a_cue_is_playing() {
                 CaptureOutcome::Failed {
                     error: CaptureError::MicStopped,
                     recoverable_text: Some("Hello".to_owned())
+                }
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capture_fails_when_the_microphone_gives_no_audio_for_three_seconds() {
+    LocalSet::new()
+        .run_until(async {
+            // Unplugged mid-capture: the last frame arrived at 960.
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello world").await;
+            rig.at(3959).await;
+            assert!(!task.is_finished(), "2999 ms without audio");
+            rig.at(3960).await;
+            assert_eq!(rig.started(Cue::Error), [3960]);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: CaptureError::MicStopped,
+                    recoverable_text: Some("Hello world".to_owned())
+                }
+            );
+
+            // A gap just under the limit, then audio again, is only a pause.
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.at(3859).await;
+            rig.feed.send(quiet(1));
+            rig.feed_until(8000, Kind::Quiet).await;
+            assert!(!task.is_finished());
+            rig.handle.cancel();
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+
+            // Cues mute the microphone, so the limit starts when the cue ends.
+            let (mut rig, engine, frames) = Rig::new("{}");
+            rig.cues.set_length(Cue::Cancelled, ms(5000));
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello submit").await;
+            rig.at(1100).await;
+            rig.finals("and more").await;
+            assert_eq!(rig.started(Cue::Cancelled), [1100]);
+            rig.at(6099).await;
+            assert!(!task.is_finished(), "the cue is still playing");
+            rig.at(9099).await;
+            assert!(!task.is_finished(), "3 s after the cue ended is not yet");
+            rig.at(9100).await;
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: CaptureError::MicStopped,
+                    recoverable_text: Some("Hello submit and more".to_owned())
+                }
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capture_without_words_for_a_minute_ends_and_keeps_its_text() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello world").await;
+            rig.feed_until(40_000, Kind::Quiet).await;
+            rig.partial("more").await;
+            rig.feed_until(70_000, Kind::Quiet).await;
+            rig.partial("[noise]").await;
+            rig.feed_until(90_000, Kind::Quiet).await;
+            rig.partial("uh").await;
+            rig.feed_until(99_960, Kind::Quiet).await;
+            assert!(
+                !task.is_finished(),
+                "words at 40 s restart the minute; noise does not"
+            );
+            rig.feed_until(100_080, Kind::Quiet).await;
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: CaptureError::NoEnding,
+                    recoverable_text: Some("Hello world".to_owned())
                 }
             );
         })
@@ -1281,16 +1470,26 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
             let wav = std::fs::read_dir(&day)
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
-                .find(|path| path.extension().is_some_and(|ext| ext == "wav"))
+                .find(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with("capture-"))
+                })
                 .unwrap();
             assert_eq!(
                 std::fs::metadata(wav).unwrap().len(),
                 44 + 2560 * u64::try_from(rig.sent().len()).unwrap(),
                 "only audio sent after the cue is recorded"
             );
+        })
+        .await;
+}
 
+#[tokio::test(start_paused = true)]
+async fn a_failed_capture_records_which_kind_of_failure_and_its_calls() {
+    LocalSet::new()
+        .run_until(async {
             let dir = record_dir("failed");
-            let recorder = Recorder::in_dir(all, &dir).unwrap();
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
             let (mut rig, engine, frames) = Rig::recording("{}", recorder);
             let task = capture_task(engine, frames);
             rig.wake_word().await;
@@ -1300,7 +1499,13 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
                 finished(task).await,
                 CaptureOutcome::Failed { .. }
             ));
-            let seen = events(&read_lines(&dir.join("metrics.jsonl")));
+            let lines = read_lines(&dir.join("metrics.jsonl"));
+            let flow = lines
+                .iter()
+                .find(|line| line["event"] == "desktop_capture_flow")
+                .unwrap();
+            assert_eq!(flow["reason"], "recognizer", "a failure says which kind");
+            let seen = events(&lines);
             for expected in [
                 ("desktop_transcription_ready", "error"),
                 ("desktop_end_cue", "ok"),
@@ -1311,6 +1516,270 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
                     "{expected:?} missing from {seen:?}"
                 );
             }
+        })
+        .await;
+}
+
+const METRICS_ONLY: RecordKinds = RecordKinds {
+    metrics: true,
+    text: false,
+    audio: false,
+};
+
+const AUDIO_AND_METRICS: RecordKinds = RecordKinds {
+    metrics: true,
+    text: false,
+    audio: true,
+};
+
+/// Listens until a capture or conversation wake, then writes the recordings out.
+fn listen_task(
+    mut engine: TestEngine,
+    mut frames: FakeFrames,
+    listens: usize,
+) -> JoinHandle<Vec<WakeTrigger>> {
+    tokio::task::spawn_local(async move {
+        let mut triggers = Vec::new();
+        for _ in 0..listens {
+            triggers.push(engine.listen(&mut frames).await.unwrap());
+        }
+        engine.finish().await;
+        triggers
+    })
+}
+
+/// The one recordings day directory under `root`, when anything was recorded.
+fn day_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    Some(
+        std::fs::read_dir(root.join("recordings"))
+            .ok()?
+            .next()?
+            .unwrap()
+            .path(),
+    )
+}
+
+/// The `wake-` files of a day, as (kind, file name, samples).
+fn wake_clips(day: &std::path::Path) -> Vec<(String, String, Vec<i16>)> {
+    let mut clips: Vec<_> = std::fs::read_dir(day)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("wake-")
+        })
+        .map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let kind = name
+                .strip_suffix(".wav")
+                .unwrap()
+                .rsplit('-')
+                .next()
+                .unwrap()
+                .to_owned();
+            let bytes = std::fs::read(&path).unwrap();
+            let samples = bytes[44..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| i16::from_le_bytes(*pair))
+                .collect();
+            (kind, name, samples)
+        })
+        .collect();
+    clips.sort();
+    clips
+}
+
+/// Sends frames tagged `from..=to`, none of them a wake.
+async fn hear(rig: &Rig, from: usize, to: usize) {
+    for id in from..=to {
+        rig.feed.send(quiet(id));
+        settle().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_wake_inference_line_carries_both_heads_scores_rounded() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("scores");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (rig, engine, frames) = Rig::recording("{}", recorder);
+            let task = listen_task(engine, frames, 1);
+            for (capture, conversation) in [(0.1234, 0.5), (0.9996, 0.0004)] {
+                rig.wake.score(capture, conversation);
+                hear(&rig, 1, 1).await;
+            }
+            rig.wake.score(0.7, 0.4996);
+            rig.wake.fire(WakeEvent::Conversation);
+            hear(&rig, 1, 1).await;
+            assert_eq!(finished(task).await, [WakeTrigger::Conversation]);
+
+            let lines = read_lines(&dir.join("metrics.jsonl"));
+            let scored: Vec<_> = lines
+                .iter()
+                .filter(|line| line["event"] == "desktop_wake_inference")
+                .map(|line| {
+                    (
+                        line["outcome"].clone(),
+                        line["capture"].clone(),
+                        line["conversation"].clone(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                scored,
+                [
+                    (json!("none"), json!(0.123), json!(0.5)),
+                    (json!("none"), json!(1.0), json!(0.0)),
+                    (json!("conversation"), json!(0.7), json!(0.5)),
+                ]
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wake_clips_the_last_two_seconds_of_audio_and_links_it_to_its_scores() {
+    LocalSet::new()
+        .run_until(async {
+            // (events from frame 31 on, clips as (kind, id of the last frame))
+            type Case = (
+                &'static str,
+                &'static [WakeEvent],
+                &'static [(&'static str, usize)],
+            );
+            let cases: [Case; 3] = [
+                ("capture", &[WakeEvent::Capture], &[("capture", 31)]),
+                (
+                    "conversation",
+                    &[WakeEvent::Conversation],
+                    &[("conversation", 31)],
+                ),
+                (
+                    "ambiguous",
+                    &[
+                        WakeEvent::Ambiguous,
+                        WakeEvent::Ambiguous,
+                        WakeEvent::Ambiguous,
+                        WakeEvent::Capture,
+                    ],
+                    &[("ambiguous", 31), ("capture", 34)],
+                ),
+            ];
+            for (name, events, expected) in cases {
+                let dir = record_dir(name);
+                let recorder = Recorder::in_dir(AUDIO_AND_METRICS, &dir).unwrap();
+                let (rig, engine, frames) = Rig::recording("{}", recorder);
+                let task = listen_task(engine, frames, 1);
+                hear(&rig, 1, 30).await;
+                rig.wake.score(0.8, 0.1234);
+                for (offset, event) in events.iter().enumerate() {
+                    rig.wake.fire(*event);
+                    hear(&rig, 31 + offset, 31 + offset).await;
+                }
+                finished(task).await;
+
+                let clips = wake_clips(&day_dir(&dir).unwrap());
+                let kinds: Vec<_> = clips.iter().map(|(kind, _, _)| kind.as_str()).collect();
+                let mut want: Vec<_> = expected.iter().map(|(kind, _)| *kind).collect();
+                want.sort_unstable();
+                assert_eq!(kinds, want, "{name}");
+                let metrics = read_lines(&dir.join("metrics.jsonl"));
+                for (kind, name, samples) in &clips {
+                    let last = expected.iter().find(|(k, _)| k == kind).unwrap().1;
+                    let tags: Vec<i16> = samples
+                        .as_chunks::<FRAME_SAMPLES>()
+                        .0
+                        .iter()
+                        .map(|frame| frame[0])
+                        .collect();
+                    let first = i16::try_from(last - 24).unwrap();
+                    let want: Vec<i16> = (first..=first + 24).collect();
+                    assert_eq!(tags, want, "{name}: the last 25 frames, wake frame last");
+                    assert_eq!(samples.len(), 25 * FRAME_SAMPLES);
+                    assert!(name.starts_with("wake-") && name.ends_with(&format!("-{kind}.wav")));
+
+                    let linked: Vec<_> = metrics
+                        .iter()
+                        .filter(|line| line["event"] == "desktop_wake_clip")
+                        .filter(|line| line["file"] == name.as_str())
+                        .collect();
+                    assert_eq!(linked.len(), 1, "{name}");
+                    assert_eq!(linked[0]["outcome"], kind.as_str());
+                    assert_eq!(linked[0]["capture"], json!(0.8));
+                    assert_eq!(linked[0]["conversation"], json!(0.123));
+                    assert!(linked[0].get("text").is_none());
+                }
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_clip_holds_only_what_was_heard_since_listening_began() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("fresh-clip");
+            let recorder = Recorder::in_dir(AUDIO_AND_METRICS, &dir).unwrap();
+            let (rig, engine, frames) = Rig::recording("{}", recorder);
+            let task = listen_task(engine, frames, 2);
+            hear(&rig, 1, 10).await;
+            rig.wake.fire(WakeEvent::Conversation);
+            hear(&rig, 11, 11).await;
+            // Audio between two listens is never scored, so it must not join the next clip.
+            hear(&rig, 20, 21).await;
+            // Another kind, so the two clips never share a file name within a millisecond.
+            rig.wake.fire(WakeEvent::Capture);
+            hear(&rig, 22, 22).await;
+            finished(task).await;
+
+            let clips = wake_clips(&day_dir(&dir).unwrap());
+            let mut lengths: Vec<_> = clips.iter().map(|(_, _, samples)| samples.len()).collect();
+            lengths.sort_unstable();
+            assert_eq!(lengths, [3 * FRAME_SAMPLES, 11 * FRAME_SAMPLES]);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_audio_recording_a_wake_buffers_and_writes_no_clip() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("no-clip");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (rig, engine, frames) = Rig::recording("{}", recorder);
+            let task = listen_task(engine, frames, 1);
+            hear(&rig, 1, 30).await;
+            rig.wake.fire(WakeEvent::Capture);
+            hear(&rig, 31, 31).await;
+            finished(task).await;
+
+            assert!(day_dir(&dir).is_none(), "no recordings directory appears");
+            let lines = read_lines(&dir.join("metrics.jsonl"));
+            assert!(
+                lines
+                    .iter()
+                    .all(|line| line["event"] != "desktop_wake_clip"),
+                "no clip line without a clip"
+            );
+
+            let dir = record_dir("clip-only");
+            let audio = RecordKinds {
+                audio: true,
+                ..RecordKinds::default()
+            };
+            let (rig, engine, frames) =
+                Rig::recording("{}", Recorder::in_dir(audio, &dir).unwrap());
+            let task = listen_task(engine, frames, 1);
+            rig.wake.fire(WakeEvent::Capture);
+            hear(&rig, 1, 1).await;
+            finished(task).await;
+            assert_eq!(wake_clips(&day_dir(&dir).unwrap()).len(), 1);
+            assert!(!dir.join("metrics.jsonl").exists(), "no metrics asked for");
         })
         .await;
 }

@@ -38,9 +38,9 @@ areas your change touches. Editing rules are in
   audio takes ~50 ms where Kokoro synthesizes a whole sentence first. Rejected:
   Chatterbox (AGPL), Kyutai (no cloning), Orpheus and qwen3-tts-server (slower).
 - **Opt-in recordings.** `THALVI_RECORD` turns on metrics, turn, dictation and reply
-  text, and mic audio, each separately, written locally off the reply path. Why: to
-  judge product, model and endpoint changes, and misrecognitions, on real use. Off by
-  default: they are personal data.
+  text, and mic audio (with ~2 s before each wake), each separately, written locally
+  off the reply path. Why: to judge product, model and endpoint changes, misrecognitions
+  and false wakes on real use. Off by default: they are personal data.
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
   interrupts a reply by speaking. Why: hands and eyes are busy. Rejected:
   push-to-talk.
@@ -64,9 +64,14 @@ areas your change touches. Editing rules are in
   then the cue. Why: wake audio leaked the phrase into 1 in 5 live transcripts even with
   stripping. Rejected: pre-wake audio, cutting it at the wake, and stripping the phrase.
 - **Silence commits capture.** Paste, submit and tasks wait 2.5 seconds of
-  speech silence; continued speech cancels the pending ending. Submit asks
-  for target confirmation during that pause. Why: hands-free control with
-  time to interrupt. Rejected: immediate dispatch and a second spoken yes.
+  speech silence; recognized speech cancels the pending ending, and local
+  speech pauses the countdown until quiet returns. Submit asks for target
+  confirmation during that pause. Why: hands-free control with time to
+  interrupt. Rejected: immediate dispatch and a second spoken yes.
+- **Check, then type.** Delivery re-verifies the bound window just before injecting
+  input, which goes to whatever window is focused; a switch in those milliseconds
+  can misdirect it. Why: neither Hyprland nor Windows can address input to one window.
+  Rejected: per-desktop accessibility or input protocols (much code for a rare race).
 - **Musical earcons.** Five two- or three-note cues (wake, provisional ending, cancelled, accepted, error), each switchable under `cues` in the desktop config; the mic drops frames while a cue plays.
   Why: distinct contours tell capture state apart without looking, and the mic never hears them. Rejected: one beep for every state, and a post-delivery cue.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to

@@ -1,11 +1,13 @@
 //! Desktop configuration, validated once at load.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer};
 
 use crate::capture::{Endings, PauseDuration};
 use crate::cues::Cues;
+use crate::host::{App, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
 use crate::recognizer::ServerUrl;
 use crate::secondary::SecondaryStt;
@@ -31,23 +33,238 @@ pub enum ConfigError {
 /// What the desktop app is configured to do. Every setting is optional in the file and has
 /// the default shown in `Default` of its type; unknown settings are rejected.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawDesktopConfig")]
 pub struct DesktopConfig {
-    #[serde(default)]
     pub server: ServerUrl,
-    #[serde(default)]
     pub wake: WakeConfig,
-    #[serde(default, deserialize_with = "cues")]
     pub cues: Cues,
-    #[serde(default)]
     pub ending_pause: PauseDuration,
-    #[serde(default)]
     pub endings: Endings,
-    #[serde(default)]
     pub stt: SttConfig,
+    /// Phrases the task ending runs, in file order.
+    pub scripts: Vec<Script>,
     /// From `THALVI_RECORD`, never from the file.
-    #[serde(skip)]
     pub record: RecordKinds,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDesktopConfig {
+    #[serde(default)]
+    server: ServerUrl,
+    #[serde(default)]
+    wake: WakeConfig,
+    #[serde(default, deserialize_with = "cues")]
+    cues: Cues,
+    #[serde(default)]
+    ending_pause: PauseDuration,
+    #[serde(default)]
+    endings: Endings,
+    #[serde(default)]
+    stt: SttConfig,
+    #[serde(default)]
+    apps: BTreeMap<String, RawApp>,
+    #[serde(default)]
+    scripts: Vec<RawScript>,
+}
+
+impl TryFrom<RawDesktopConfig> for DesktopConfig {
+    type Error = String;
+
+    fn try_from(raw: RawDesktopConfig) -> Result<Self, String> {
+        let apps = raw
+            .apps
+            .into_iter()
+            .map(|(name, app)| app.validate(&name).map(|app| (name, app)))
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut scripts: Vec<Script> = Vec::new();
+        for script in raw.scripts {
+            let script = script.validate(&apps)?;
+            if scripts.iter().any(|known| known.phrase == script.phrase) {
+                return Err("Script phrases must be distinct.".to_owned());
+            }
+            scripts.push(script);
+        }
+        Ok(Self {
+            server: raw.server,
+            wake: raw.wake,
+            cues: raw.cues,
+            ending_pause: raw.ending_pause,
+            endings: raw.endings,
+            stt: raw.stt,
+            scripts,
+            record: RecordKinds::default(),
+        })
+    }
+}
+
+/// A spoken phrase and the action it runs, as configured under `scripts`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Script {
+    /// Lowercase with single spaces; a spoken task matches it after the same normalizing.
+    pub phrase: String,
+    pub action: ScriptAction,
+    /// What notices call the action.
+    pub label: String,
+}
+
+/// What a script does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScriptAction {
+    OpenUrl(WebUrl),
+    FocusApp(App),
+    /// The phrase is a prefix: the words after it are the message. Normalized channel URL.
+    DiscordMessage {
+        destination: String,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawApp {
+    #[serde(default)]
+    classes: Vec<String>,
+    #[serde(default)]
+    executables: Vec<String>,
+    #[serde(default)]
+    input_keys: Vec<String>,
+}
+
+impl RawApp {
+    fn validate(self, name: &str) -> Result<App, String> {
+        if self.classes.is_empty() && self.executables.is_empty() {
+            return Err(format!("apps.{name} needs window classes or executables."));
+        }
+        let names = |values: Vec<String>, what: &str| {
+            values
+                .iter()
+                .map(|value| nonempty(value, &format!("apps.{name} {what}")))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        Ok(App {
+            classes: names(self.classes, "window class")?,
+            executables: names(self.executables, "executable")?,
+            shortcut: shortcut(&self.input_keys, name)?,
+        })
+    }
+}
+
+fn shortcut(keys: &[String], app: &str) -> Result<Option<Shortcut>, String> {
+    let keys = keys
+        .iter()
+        .map(|key| nonempty(key, &format!("apps.{app} key")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some((key, modifiers)) = keys.split_last() else {
+        return Ok(None);
+    };
+    let modifiers = modifiers
+        .iter()
+        .map(|modifier| match modifier.to_lowercase().as_str() {
+            "ctrl" => Some(Modifier::Ctrl),
+            "shift" => Some(Modifier::Shift),
+            "alt" => Some(Modifier::Alt),
+            "logo" => Some(Modifier::Logo),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>();
+    match modifiers {
+        Some(modifiers) if key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
+            Ok(Some(Shortcut {
+                modifiers,
+                key: key.clone(),
+            }))
+        }
+        _ => Err("Input keys must be modifiers followed by one named key.".to_owned()),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawScript {
+    phrase: String,
+    action: RawAction,
+    destination: String,
+    label: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RawAction {
+    OpenUrl,
+    FocusApp,
+    DiscordMessage,
+}
+
+impl RawScript {
+    fn validate(self, apps: &BTreeMap<String, App>) -> Result<Script, String> {
+        let phrase = nonempty(&self.phrase, "script phrase")?
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let destination = nonempty(&self.destination, "script destination")?;
+        let action = match self.action {
+            RawAction::OpenUrl => {
+                let invalid = || {
+                    "A script URL must be an http or https address with a host and no credentials."
+                        .to_owned()
+                };
+                let parsed = reqwest::Url::parse(&destination).map_err(|_| invalid())?;
+                if !parsed.username().is_empty() || parsed.password().is_some() {
+                    return Err(invalid());
+                }
+                ScriptAction::OpenUrl(WebUrl::parse(&destination).map_err(|_| invalid())?)
+            }
+            RawAction::FocusApp => ScriptAction::FocusApp(
+                apps.get(&destination)
+                    .cloned()
+                    .ok_or_else(|| format!("No app named {destination:?} is configured."))?,
+            ),
+            RawAction::DiscordMessage => ScriptAction::DiscordMessage {
+                destination: discord_channel(&destination)?,
+            },
+        };
+        let label = match self.label {
+            Some(label) => nonempty(&label, "script label")?,
+            None => phrase.clone(),
+        };
+        Ok(Script {
+            phrase,
+            action,
+            label,
+        })
+    }
+}
+
+fn discord_channel(destination: &str) -> Result<String, String> {
+    let invalid = || "Discord destination must be a Discord channel or DM URL.".to_owned();
+    let url = reqwest::Url::parse(destination).map_err(|_| invalid())?;
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let segments: Vec<&str> = url.path_segments().ok_or_else(invalid)?.collect();
+    let ["channels", server, channel] = segments[..] else {
+        return Err(invalid());
+    };
+    if !matches!(url.scheme(), "https" | "discord")
+        || url.host_str() != Some("discord.com")
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !(server == "@me" || digits(server))
+        || !digits(channel)
+    {
+        return Err(invalid());
+    }
+    Ok(format!("https://discord.com/channels/{server}/{channel}"))
+}
+
+fn nonempty(value: &str, label: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{label} must be nonempty text."));
+    }
+    Ok(value.to_owned())
 }
 
 /// Speech-to-text settings beyond the live server stream.
@@ -259,12 +476,143 @@ mod tests {
         }
     }
 
+    fn script(fields: &str) -> String {
+        format!(r#"{{"apps": {{"t3": {{"classes": ["a"]}}}}, "scripts": [{{{fields}}}]}}"#)
+    }
+
+    #[test]
+    fn apps_and_scripts_are_read_into_typed_actions() {
+        let config = parse(
+            r#"{
+                "apps": {
+                    "t3": {"classes": [" T3 Code "], "executables": ["T3 Code.exe"],
+                           "input_keys": ["Ctrl", "SHIFT", "k"]},
+                    "term": {"executables": ["wt.exe"]}
+                },
+                "scripts": [
+                    {"phrase": "  Switch   To T3 ", "action": "focus_app", "destination": " t3 ",
+                     "label": " T3 Code "},
+                    {"phrase": "project", "action": "open_url",
+                     "destination": " https://github.com/NotPellew/Thalvi "},
+                    {"phrase": "message the demo saying", "action": "discord_message",
+                     "destination": "discord://discord.com/channels/@me/42"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let t3 = App {
+            classes: vec!["T3 Code".to_owned()],
+            executables: vec!["T3 Code.exe".to_owned()],
+            shortcut: Some(Shortcut {
+                modifiers: vec![Modifier::Ctrl, Modifier::Shift],
+                key: "k".to_owned(),
+            }),
+        };
+        assert_eq!(
+            config.scripts,
+            [
+                Script {
+                    phrase: "switch to t3".to_owned(),
+                    action: ScriptAction::FocusApp(t3),
+                    label: "T3 Code".to_owned(),
+                },
+                Script {
+                    phrase: "project".to_owned(),
+                    action: ScriptAction::OpenUrl(
+                        WebUrl::parse("https://github.com/NotPellew/Thalvi").unwrap()
+                    ),
+                    label: "project".to_owned(),
+                },
+                Script {
+                    phrase: "message the demo saying".to_owned(),
+                    action: ScriptAction::DiscordMessage {
+                        destination: "https://discord.com/channels/@me/42".to_owned()
+                    },
+                    label: "message the demo saying".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(parse("{}").unwrap().scripts, []);
+    }
+
+    #[test]
+    fn an_app_without_input_keys_has_no_shortcut_and_one_key_needs_no_modifier() {
+        for (keys, expected) in [
+            ("[]", None),
+            (
+                r#"["Return"]"#,
+                Some(Shortcut {
+                    modifiers: Vec::new(),
+                    key: "Return".to_owned(),
+                }),
+            ),
+        ] {
+            let config = parse(&format!(
+                r#"{{"apps": {{"a": {{"classes": ["a"], "input_keys": {keys}}}}},
+                    "scripts": [{{"phrase": "x", "action": "focus_app", "destination": "a"}}]}}"#
+            ))
+            .unwrap();
+            assert_eq!(
+                config.scripts[0].action,
+                ScriptAction::FocusApp(App {
+                    classes: vec!["a".to_owned()],
+                    executables: Vec::new(),
+                    shortcut: expected,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn discord_destinations_must_be_channel_or_dm_urls() {
+        for (destination, normalized) in [
+            (
+                "https://discord.com/channels/123/456",
+                Some("https://discord.com/channels/123/456"),
+            ),
+            (
+                "discord://discord.com/channels/@me/456",
+                Some("https://discord.com/channels/@me/456"),
+            ),
+            ("https://discord.com/channels/123/456?x=1", None),
+            ("https://discord.com/channels/123/456#top", None),
+            ("https://discord.com/channels/123/456/789", None),
+            ("https://discord.com/channels/abc/456", None),
+            ("https://discord.com/channels/@me/", None),
+            ("https://example.com/channels/123/456", None),
+            ("https://discord.com:8443/channels/123/456", None),
+            ("https://u@discord.com/channels/123/456", None),
+            ("http://discord.com/channels/123/456", None),
+            ("not a url", None),
+        ] {
+            let result = parse(&script(&format!(
+                r#""phrase": "x", "action": "discord_message", "destination": "{destination}""#
+            )));
+            match normalized {
+                Some(normalized) => assert_eq!(
+                    result.unwrap().scripts[0].action,
+                    ScriptAction::DiscordMessage {
+                        destination: normalized.to_owned()
+                    },
+                    "{destination}"
+                ),
+                None => assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Discord destination must be a Discord channel or DM URL."),
+                    "{destination}"
+                ),
+            }
+        }
+    }
+
     #[test]
     fn invalid_settings_are_rejected_in_plain_words() {
         let valid_endings = r#""paste": "paste", "send": "submit", "do it": "task",
             "scratch": "scratch", "cancel": "cancel""#;
         for (json, expected) in [
-            (r#"{"apps": {}}"#.to_owned(), "unknown field `apps`"),
+            (r#"{"discord": {}}"#.to_owned(), "unknown field `discord`"),
             (
                 r#"{"server": "http://127.0.0.1:8080"}"#.to_owned(),
                 "server must be a ws or wss URL",
@@ -335,6 +683,94 @@ mod tests {
             (
                 format!(r#"{{"endings": {{{valid_endings}, "x": "enter"}}}}"#),
                 "unknown variant `enter`",
+            ),
+        ] {
+            let error = parse(&json).unwrap_err();
+            assert!(matches!(error, ConfigError::Invalid(_)), "{json}");
+            assert!(error.to_string().contains(expected), "{json}: {error}");
+        }
+    }
+
+    #[test]
+    fn invalid_apps_and_scripts_are_rejected_in_plain_words() {
+        for (json, expected) in [
+            (
+                r#"{"apps": {"t3": {"classes": ["a"], "keys": []}}}"#.to_owned(),
+                "unknown field `keys`",
+            ),
+            (
+                r#"{"apps": {"t3": {}}}"#.to_owned(),
+                "apps.t3 needs window classes or executables.",
+            ),
+            (
+                r#"{"apps": {"t3": {"classes": [" "]}}}"#.to_owned(),
+                "apps.t3 window class must be nonempty text.",
+            ),
+            (
+                r#"{"apps": {"t3": {"executables": [""]}}}"#.to_owned(),
+                "apps.t3 executable must be nonempty text.",
+            ),
+            (
+                r#"{"apps": {"t3": {"classes": ["a"], "input_keys": ["ctrl", " "]}}}"#.to_owned(),
+                "apps.t3 key must be nonempty text.",
+            ),
+            (
+                r#"{"apps": {"t3": {"classes": ["a"], "input_keys": ["meta", "l"]}}}"#.to_owned(),
+                "Input keys must be modifiers followed by one named key.",
+            ),
+            (
+                r#"{"apps": {"t3": {"classes": ["a"], "input_keys": ["ctrl", "k l"]}}}"#.to_owned(),
+                "Input keys must be modifiers followed by one named key.",
+            ),
+            (
+                r#"{"apps": {"t3": {"classes": ["a"], "input_keys": ["ctrl", "-"]}}}"#.to_owned(),
+                "Input keys must be modifiers followed by one named key.",
+            ),
+            (
+                script(r#""phrase": "x", "action": "open_url", "destination": "ftp://x.com""#),
+                "A script URL must be an http or https address",
+            ),
+            (
+                script(
+                    r#""phrase": "x", "action": "open_url", "destination": "https://u:p@x.com""#,
+                ),
+                "A script URL must be an http or https address",
+            ),
+            (
+                script(r#""phrase": "x", "action": "focus_app", "destination": "nope""#),
+                "No app named \"nope\" is configured.",
+            ),
+            (
+                script(r#""phrase": "x", "action": "run", "destination": "x""#),
+                "unknown variant `run`",
+            ),
+            (
+                script(r#""phrase": " ", "action": "open_url", "destination": "https://x.com""#),
+                "script phrase must be nonempty text.",
+            ),
+            (
+                script(
+                    r#""phrase": "x", "action": "open_url", "destination": "https://x.com", "label": " ""#,
+                ),
+                "script label must be nonempty text.",
+            ),
+            (
+                script(
+                    r#""phrase": "x", "action": "open_url", "destination": "https://x.com", "color": 1"#,
+                ),
+                "unknown field `color`",
+            ),
+            (
+                script(r#""phrase": "x", "action": "open_url""#),
+                "missing field `destination`",
+            ),
+            (
+                r#"{"scripts": [
+                    {"phrase": "Open  Site", "action": "open_url", "destination": "https://x.com"},
+                    {"phrase": "open site", "action": "open_url", "destination": "https://y.com"}
+                ]}"#
+                .to_owned(),
+                "Script phrases must be distinct.",
             ),
         ] {
             let error = parse(&json).unwrap_err();

@@ -21,11 +21,11 @@ use tokio::time::Instant;
 use crate::audio::{AudioError, Frames, InputGate};
 use crate::capture::{
     CaptureFullError, CaptureRequest, CaptureRoute, CaptureSession, Endings, FinalStep,
-    PauseDuration, QuietWindow,
+    PauseDuration, QuietWindow, has_words,
 };
 use crate::config::DesktopConfig;
 use crate::cues::{Cue, CueEngine, CueError, Cues};
-use crate::frame::Frame;
+use crate::frame::{FRAME_SAMPLES, Frame};
 use crate::metrics::{Event, Recorder};
 use crate::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
 use crate::secondary::{self, SecondaryApi, SecondaryError, SecondaryStt};
@@ -38,12 +38,20 @@ const READY_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a pending ending may go without microphone audio before the capture fails.
 const MIC_WATCHDOG: Duration = Duration::from_millis(250);
 
+/// How long any capture may go without microphone audio before it fails.
+const MIC_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long a capture may go without recognized words before it ends, keeping the text.
+const IDLE_LIMIT: Duration = Duration::from_secs(60);
 /// Consecutive speech frames, 240 ms, that make audio held back during a pending ending count as
 /// the user continuing.
 const CONTINUATION_FRAMES: u8 = 3;
 
 /// Frames in one wake level report window, 2 s.
 const LEVEL_WINDOW: u64 = 25;
+
+/// Frames of microphone audio kept for the wake clip, 2 s.
+const WAKE_CLIP_FRAMES: usize = 25;
 
 /// The sample peak from which a wake level window counts as activity.
 const ACTIVITY_PEAK: u16 = 1_000;
@@ -121,6 +129,12 @@ impl CuePlayer for CpalCuePlayer {
     }
 }
 
+/// Both heads' scores for one frame, to three decimals.
+fn scores(wake: &WakeFrame) -> Value {
+    let round = |score: f32| (f64::from(score) * 1000.0).round() / 1000.0;
+    json!({"capture": round(wake.capture), "conversation": round(wake.conversation)})
+}
+
 /// What the engine does with a wake word, for the caller to act on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WakeTrigger {
@@ -163,8 +177,25 @@ pub enum CaptureError {
     Audio(#[from] AudioError),
     #[error("Microphone audio stopped. Nothing was delivered.")]
     MicStopped,
+    #[error("No ending heard for a minute.")]
+    NoEnding,
     #[error(transparent)]
     Full(#[from] CaptureFullError),
+}
+
+impl CaptureError {
+    /// A short name for the metrics, without any text.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Recognizer(_) => "recognizer",
+            Self::NotReady => "not_ready",
+            Self::Audio(_) => "audio",
+            Self::MicStopped => "mic_stopped",
+            Self::NoEnding => "no_ending",
+            Self::Full(_) => "full",
+        }
+    }
 }
 
 /// How a capture ended.
@@ -243,6 +274,8 @@ pub struct Engine<R, W, C> {
     level_frames: u64,
     level_activity: bool,
     ambiguous: bool,
+    /// The latest frames scored while listening; filled only while audio is recorded.
+    wake_clip: VecDeque<Frame>,
 }
 
 /// How a cue ended.
@@ -268,6 +301,8 @@ struct Live<S> {
     /// Whether the latest frame was speech.
     speech: bool,
     last_audio: Instant,
+    /// When the recognizer last returned words.
+    last_words: Instant,
     cues: FuturesUnordered<LocalBoxFuture<'static, CueEnd>>,
 }
 
@@ -307,6 +342,7 @@ enum Step {
     Cue(CueEnd),
     Quiet,
     Silent,
+    Idle,
 }
 
 async fn until(at: Option<Instant>) {
@@ -372,8 +408,15 @@ where
             level_frames: 0,
             level_activity: false,
             ambiguous: false,
+            wake_clip: VecDeque::new(),
         };
         (engine, handle)
+    }
+
+    /// The recorder the engine writes to, for the caller's own events.
+    #[must_use]
+    pub fn recorder(&self) -> &Recorder {
+        &self.recorder
     }
 
     /// Writes the recordings still queued; call once at shutdown.
@@ -395,46 +438,76 @@ where
         self.set_state(EngineState::Listening);
         let reset = std::time::Instant::now();
         self.wake.reset();
+        self.wake_clip.clear();
         self.recorder
             .metric(Event::WakeReset, "ok", Some(reset.elapsed()), Value::Null);
+        let metrics = self.recorder.kinds().metrics;
         loop {
             let frame = frames.next().await?;
             self.note_level(&frame);
+            self.remember(&frame);
             let scored = self.wake.process(&frame);
-            let (outcome, took) = match &scored {
-                Ok(WakeFrame {
-                    event, inference, ..
-                }) => (
-                    match event {
+            let (outcome, took, fields) = match &scored {
+                Ok(wake) => (
+                    match wake.event {
                         None => "none",
                         Some(WakeEvent::Capture) => "capture",
                         Some(WakeEvent::Conversation) => "conversation",
                         Some(WakeEvent::Ambiguous) => "ambiguous",
                     },
-                    Some(*inference),
+                    Some(wake.inference),
+                    if metrics { scores(wake) } else { Value::Null },
                 ),
-                Err(_) => ("error", None),
+                Err(_) => ("error", None, Value::Null),
             };
             self.recorder
-                .metric(Event::WakeInference, outcome, took, Value::Null);
-            let event = scored?.event;
-            if event == Some(WakeEvent::Ambiguous) {
+                .metric(Event::WakeInference, outcome, took, fields);
+            let wake = scored?;
+            if wake.event == Some(WakeEvent::Ambiguous) {
                 if !self.ambiguous {
                     (self.notice)("Wake was ambiguous; still listening.");
+                    self.clip_wake("ambiguous", &wake);
                 }
                 self.ambiguous = true;
                 continue;
             }
             self.ambiguous = false;
-            match event {
+            match wake.event {
                 Some(WakeEvent::Capture) => {
+                    self.clip_wake("capture", &wake);
                     self.gate.set_enabled(false);
                     return Ok(WakeTrigger::Capture);
                 }
-                Some(WakeEvent::Conversation) => return Ok(WakeTrigger::Conversation),
+                Some(WakeEvent::Conversation) => {
+                    self.clip_wake("conversation", &wake);
+                    return Ok(WakeTrigger::Conversation);
+                }
                 Some(WakeEvent::Ambiguous) | None => {}
             }
         }
+    }
+
+    /// Keeps `frame` for the wake clip when audio is recorded.
+    fn remember(&mut self, frame: &Frame) {
+        if !self.recorder.kinds().audio {
+            return;
+        }
+        if self.wake_clip.len() == WAKE_CLIP_FRAMES {
+            self.wake_clip.pop_front();
+        }
+        self.wake_clip.push_back(*frame);
+    }
+
+    /// Records the frames up to and including the wake frame, oldest first.
+    fn clip_wake(&self, kind: &str, wake: &WakeFrame) {
+        if !self.recorder.kinds().audio {
+            return;
+        }
+        let mut pcm = Vec::with_capacity(self.wake_clip.len() * FRAME_SAMPLES);
+        for frame in &self.wake_clip {
+            pcm.extend_from_slice(frame);
+        }
+        self.recorder.wake_clip(kind, pcm, scores(wake));
     }
 
     fn note_level(&mut self, frame: &Frame) {
@@ -473,17 +546,13 @@ where
         };
         self.gate.set_enabled(true);
         self.set_state(EngineState::Listening);
-        let flow = match &outcome {
-            CaptureOutcome::Accepted(_) => "ok",
-            CaptureOutcome::Cancelled => "cancelled",
-            CaptureOutcome::Failed { .. } => "failed",
+        let (flow, fields) = match &outcome {
+            CaptureOutcome::Accepted(_) => ("ok", Value::Null),
+            CaptureOutcome::Cancelled => ("cancelled", Value::Null),
+            CaptureOutcome::Failed { error, .. } => ("failed", json!({"reason": error.kind()})),
         };
-        self.recorder.metric(
-            Event::CaptureFlow,
-            flow,
-            Some(started.elapsed()),
-            Value::Null,
-        );
+        self.recorder
+            .metric(Event::CaptureFlow, flow, Some(started.elapsed()), fields);
         outcome
     }
 
@@ -646,6 +715,7 @@ where
             relayed: false,
             speech: false,
             last_audio: Instant::now(),
+            last_words: Instant::now(),
             cues: FuturesUnordered::new(),
         };
         self.publish(&live);
@@ -665,8 +735,12 @@ where
             }
         }
         loop {
-            let watchdog = (live.text.pending().is_some() && live.cues.is_empty())
-                .then(|| live.last_audio + MIC_WATCHDOG);
+            let limit = if live.text.pending().is_some() {
+                MIC_WATCHDOG
+            } else {
+                MIC_TIMEOUT
+            };
+            let watchdog = live.cues.is_empty().then(|| live.last_audio + limit);
             let step = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => Step::Cancel,
@@ -675,15 +749,24 @@ where
                 Some(end) = live.cues.next() => Step::Cue(end),
                 () = until(live.text.ready_at()) => Step::Quiet,
                 () = until(watchdog) => Step::Silent,
+                () = tokio::time::sleep_until(live.last_words + IDLE_LIMIT) => Step::Idle,
             };
             let done = match step {
                 Step::Cancel => Some(Done::Stopped),
                 Step::Event(Err(error)) => Some(Done::Failed(error.into())),
                 Step::Event(Ok(RecognizerEvent::Partial(text))) => {
+                    if has_words(&text) {
+                        live.last_words = Instant::now();
+                    }
                     self.on_partial(live, text);
                     None
                 }
-                Step::Event(Ok(RecognizerEvent::Final(text))) => self.on_final(live, &text),
+                Step::Event(Ok(RecognizerEvent::Final(text))) => {
+                    if has_words(&text) {
+                        live.last_words = Instant::now();
+                    }
+                    self.on_final(live, &text)
+                }
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),
                 Step::Frame(Ok(frame)) => self.on_frame(live, &frame).await.err().map(Done::from),
                 Step::Cue(end) => {
@@ -694,6 +777,7 @@ where
                 }
                 Step::Quiet => self.on_quiet(live),
                 Step::Silent => Some(Done::Failed(CaptureError::MicStopped)),
+                Step::Idle => Some(Done::Failed(CaptureError::NoEnding)),
             };
             if let Some(done) = done {
                 return done;
@@ -796,15 +880,25 @@ where
         }
         if live.relayed {
             live.held.clear();
+            self.pause_for_speech(live);
             return self.send(live, std::slice::from_ref(frame)).await;
         }
         if live.speech_run >= CONTINUATION_FRAMES {
             live.relayed = true;
             self.ending_state("local_speech_relayed");
+            self.pause_for_speech(live);
             let out: Vec<Frame> = live.held.drain(..).collect();
             return self.send(live, &out).await;
         }
         Ok(())
+    }
+
+    /// Stops a running countdown while the user is heard speaking, before any words come back.
+    fn pause_for_speech(&self, live: &mut Live<R::Session>) {
+        if live.speech && live.text.on_local_speech() {
+            self.ending_state("local_speech_paused");
+            self.publish(live);
+        }
     }
 
     /// Sends `frames`, giving up when the user cancels while the recognizer is not taking audio.

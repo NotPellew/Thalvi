@@ -352,11 +352,7 @@ impl CaptureSession {
     /// Applies a partial transcript; returns whether it cancelled the armed ending.
     /// Empty and artifact-only partials (`[noise]`, `uh`) never do.
     pub fn on_partial(&mut self, transcript: &str) -> bool {
-        let text = transcript.trim();
-        if self.pending.is_none()
-            || text.is_empty()
-            || artifacts_to_end(&text.chars().collect::<Vec<_>>(), 1, 2)
-        {
+        if self.pending.is_none() || !has_words(transcript) {
             return false;
         }
         self.pending = None;
@@ -371,6 +367,21 @@ impl CaptureSession {
                 ..
             }) => {
                 *window = QuietWindow::CountingDown { since: now };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Reports local speech while an ending is pending; returns whether it stopped a running
+    /// countdown, which restarts at the next quiet frame. A recognized partial still cancels.
+    pub fn on_local_speech(&mut self) -> bool {
+        match self.pending.as_mut() {
+            Some(PendingEnding {
+                window: window @ QuietWindow::CountingDown { .. },
+                ..
+            }) => {
+                *window = QuietWindow::WaitingForQuiet;
                 true
             }
             _ => false,
@@ -445,6 +456,13 @@ fn is_separator(c: char) -> bool {
 }
 
 /// Whether `chars` is only separators and `min..=max` artifacts, each followed by separators.
+/// Whether `transcript` holds words, not only one or two artifacts such as `[noise]` or `uh`.
+#[must_use]
+pub fn has_words(transcript: &str) -> bool {
+    let text = transcript.trim();
+    !text.is_empty() && !artifacts_to_end(&text.chars().collect::<Vec<_>>(), 1, 2)
+}
+
 fn artifacts_to_end(chars: &[char], min: usize, max: usize) -> bool {
     let skipped = chars.iter().take_while(|c| is_separator(**c)).count();
     let rest = &chars[skipped..];
@@ -620,6 +638,24 @@ mod tests {
                 .map(|request| request.text),
             Some("hello".to_owned())
         );
+    }
+
+    #[test]
+    fn local_speech_stops_a_running_countdown_until_quiet_returns() {
+        let base = Instant::now();
+        let mut session = session();
+        assert!(!session.on_local_speech(), "no ending pending");
+        session
+            .on_final("hello paste that", ms(base, 0), false)
+            .unwrap();
+        assert!(session.on_local_speech());
+        assert!(!session.on_local_speech(), "already waiting for quiet");
+        assert_eq!(session.ready_at(), None);
+        assert_eq!(session.poll_ready(ms(base, 100_000)), None);
+
+        assert!(session.on_quiet_frame(ms(base, 3_000)));
+        assert_eq!(session.poll_ready(ms(base, 5_499)), None);
+        assert!(session.poll_ready(ms(base, 5_500)).is_some());
     }
 
     #[test]
