@@ -34,6 +34,8 @@ const FRAME_MS: u64 = 80;
 enum Kind {
     Quiet,
     Voice,
+    /// Low noise the detector calls speech normally but not while an ending is pending.
+    Hiss,
 }
 
 /// Silence, numbered by its `id` so a test can tell which frame reached the recognizer.
@@ -60,11 +62,20 @@ fn voiced(id: usize) -> Frame {
     })
 }
 
+fn hiss(id: usize) -> Frame {
+    let mut state = u32::try_from(id).unwrap() + 1;
+    std::array::from_fn(|_| {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        i16::try_from(i32::try_from((state >> 16) % 101).unwrap() - 50).unwrap()
+    })
+}
+
 impl Kind {
     fn frame(self, id: usize) -> Frame {
         match self {
             Self::Quiet => quiet(id),
             Self::Voice => voiced(id),
+            Self::Hiss => hiss(id),
         }
     }
 }
@@ -1289,6 +1300,51 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
                     "{expected:?} missing from {seen:?}"
                 );
             }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_ending_withholds_audio_again_after_speech_was_relayed() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello submit").await;
+            rig.feed_until(1760, Kind::Quiet).await;
+            rig.feed_until(2000, Kind::Voice).await;
+            rig.finals("submit").await;
+            let sent = rig.sent().len();
+            rig.feed_until(2640, Kind::Quiet).await;
+            assert_eq!(rig.sent().len(), sent, "quiet audio is held again");
+            rig.handle.cancel();
+            assert_eq!(task.await.unwrap(), CaptureOutcome::Cancelled);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn quiet_hiss_does_not_count_as_speech_to_a_pending_ending() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(880, Kind::Quiet).await;
+            rig.feed_until(1000, Kind::Voice).await;
+            rig.finals("Hello paste that").await;
+            let waiting = |waiting_for_quiet| EngineState::PendingEnding {
+                route: CaptureRoute::Paste,
+                text: "Hello".to_owned(),
+                waiting_for_quiet,
+            };
+            assert_eq!(rig.state(), waiting(true));
+            rig.feed_until(1360, Kind::Hiss).await;
+            assert_eq!(rig.state(), waiting(false));
+            rig.handle.cancel();
+            assert_eq!(task.await.unwrap(), CaptureOutcome::Cancelled);
         })
         .await;
 }
