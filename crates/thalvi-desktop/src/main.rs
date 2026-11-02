@@ -198,11 +198,11 @@ async fn listen_and_deliver(config: DesktopConfig, host: Desktop) -> Result<(), 
                     if interrupted {
                         return Ok(());
                     }
-                    if let Some(notice) = delivery
+                    if let Some(finished) = delivery
                         .finish(&outcome, &bound, &config, engine.recorder())
                         .await
                     {
-                        println!("{notice}");
+                        println!("{}", finished.notice);
                     }
                 }
             }
