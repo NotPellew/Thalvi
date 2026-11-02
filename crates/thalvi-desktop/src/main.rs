@@ -107,15 +107,8 @@ fn report(outcome: &CaptureOutcome) {
             request.text
         ),
         CaptureOutcome::Cancelled => println!("Capture cancelled."),
-        CaptureOutcome::Failed {
-            error,
-            recoverable_text,
-        } => {
-            println!("Capture failed: {error}");
-            if let Some(text) = recoverable_text {
-                println!("Dictated so far: {text}");
-            }
-        }
+        // Delivery's notice says what failed and where the dictated text went.
+        CaptureOutcome::Failed { .. } => {}
     }
 }
 
