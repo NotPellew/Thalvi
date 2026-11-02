@@ -73,12 +73,14 @@ impl FrameSource for FakeFrames {
 /// A wake detector that reports the event a test sets for the next frame.
 pub struct FakeWake {
     next: Rc<Cell<Option<Result<WakeEvent, ()>>>>,
+    scores: Rc<Cell<(f32, f32)>>,
     resets: Rc<Cell<u32>>,
 }
 
 /// Test-side handle of [`FakeWake`].
 pub struct WakeControl {
     next: Rc<Cell<Option<Result<WakeEvent, ()>>>>,
+    scores: Rc<Cell<(f32, f32)>>,
     resets: Rc<Cell<u32>>,
 }
 
@@ -86,13 +88,19 @@ impl FakeWake {
     #[must_use]
     pub fn new() -> (Self, WakeControl) {
         let next = Rc::new(Cell::new(None));
+        let scores = Rc::new(Cell::new((0.0, 0.0)));
         let resets = Rc::new(Cell::new(0));
         (
             Self {
                 next: Rc::clone(&next),
+                scores: Rc::clone(&scores),
                 resets: Rc::clone(&resets),
             },
-            WakeControl { next, resets },
+            WakeControl {
+                next,
+                scores,
+                resets,
+            },
         )
     }
 }
@@ -101,6 +109,11 @@ impl WakeControl {
     /// The next frame scored reports `event`.
     pub fn fire(&self, event: WakeEvent) {
         self.next.set(Some(Ok(event)));
+    }
+
+    /// The frames scored from now on get these head scores.
+    pub fn score(&self, capture: f32, conversation: f32) {
+        self.scores.set((capture, conversation));
     }
 
     /// The next frame scored fails.
@@ -122,9 +135,10 @@ impl WakeDetector for FakeWake {
             Some(Ok(event)) => Some(event),
             None => None,
         };
+        let (capture, conversation) = self.scores.get();
         Ok(WakeFrame {
-            capture: 0.0,
-            conversation: 0.0,
+            capture,
+            conversation,
             inference: Duration::ZERO,
             event,
         })

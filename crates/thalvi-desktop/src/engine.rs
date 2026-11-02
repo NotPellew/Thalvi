@@ -25,7 +25,7 @@ use crate::capture::{
 };
 use crate::config::DesktopConfig;
 use crate::cues::{Cue, CueEngine, CueError, Cues};
-use crate::frame::Frame;
+use crate::frame::{FRAME_SAMPLES, Frame};
 use crate::metrics::{Event, Recorder};
 use crate::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
 use crate::secondary::{self, SecondaryApi, SecondaryError, SecondaryStt};
@@ -44,6 +44,9 @@ const CONTINUATION_FRAMES: u8 = 3;
 
 /// Frames in one wake level report window, 2 s.
 const LEVEL_WINDOW: u64 = 25;
+
+/// Frames of microphone audio kept for the wake clip, 2 s.
+const WAKE_CLIP_FRAMES: usize = 25;
 
 /// The sample peak from which a wake level window counts as activity.
 const ACTIVITY_PEAK: u16 = 1_000;
@@ -119,6 +122,12 @@ impl CuePlayer for CpalCuePlayer {
         // A panic in the playback thread leaves the output in an unknown state.
         played.unwrap_or(Err(CueError::Stalled))
     }
+}
+
+/// Both heads' scores for one frame, to three decimals.
+fn scores(wake: &WakeFrame) -> Value {
+    let round = |score: f32| (f64::from(score) * 1000.0).round() / 1000.0;
+    json!({"capture": round(wake.capture), "conversation": round(wake.conversation)})
 }
 
 /// What the engine does with a wake word, for the caller to act on.
@@ -243,6 +252,8 @@ pub struct Engine<R, W, C> {
     level_frames: u64,
     level_activity: bool,
     ambiguous: bool,
+    /// The latest frames scored while listening; filled only while audio is recorded.
+    wake_clip: VecDeque<Frame>,
 }
 
 /// How a cue ended.
@@ -372,6 +383,7 @@ where
             level_frames: 0,
             level_activity: false,
             ambiguous: false,
+            wake_clip: VecDeque::new(),
         };
         (engine, handle)
     }
@@ -401,46 +413,76 @@ where
         self.set_state(EngineState::Listening);
         let reset = std::time::Instant::now();
         self.wake.reset();
+        self.wake_clip.clear();
         self.recorder
             .metric(Event::WakeReset, "ok", Some(reset.elapsed()), Value::Null);
+        let metrics = self.recorder.kinds().metrics;
         loop {
             let frame = frames.next().await?;
             self.note_level(&frame);
+            self.remember(&frame);
             let scored = self.wake.process(&frame);
-            let (outcome, took) = match &scored {
-                Ok(WakeFrame {
-                    event, inference, ..
-                }) => (
-                    match event {
+            let (outcome, took, fields) = match &scored {
+                Ok(wake) => (
+                    match wake.event {
                         None => "none",
                         Some(WakeEvent::Capture) => "capture",
                         Some(WakeEvent::Conversation) => "conversation",
                         Some(WakeEvent::Ambiguous) => "ambiguous",
                     },
-                    Some(*inference),
+                    Some(wake.inference),
+                    if metrics { scores(wake) } else { Value::Null },
                 ),
-                Err(_) => ("error", None),
+                Err(_) => ("error", None, Value::Null),
             };
             self.recorder
-                .metric(Event::WakeInference, outcome, took, Value::Null);
-            let event = scored?.event;
-            if event == Some(WakeEvent::Ambiguous) {
+                .metric(Event::WakeInference, outcome, took, fields);
+            let wake = scored?;
+            if wake.event == Some(WakeEvent::Ambiguous) {
                 if !self.ambiguous {
                     (self.notice)("Wake was ambiguous; still listening.");
+                    self.clip_wake("ambiguous", &wake);
                 }
                 self.ambiguous = true;
                 continue;
             }
             self.ambiguous = false;
-            match event {
+            match wake.event {
                 Some(WakeEvent::Capture) => {
+                    self.clip_wake("capture", &wake);
                     self.gate.set_enabled(false);
                     return Ok(WakeTrigger::Capture);
                 }
-                Some(WakeEvent::Conversation) => return Ok(WakeTrigger::Conversation),
+                Some(WakeEvent::Conversation) => {
+                    self.clip_wake("conversation", &wake);
+                    return Ok(WakeTrigger::Conversation);
+                }
                 Some(WakeEvent::Ambiguous) | None => {}
             }
         }
+    }
+
+    /// Keeps `frame` for the wake clip when audio is recorded.
+    fn remember(&mut self, frame: &Frame) {
+        if !self.recorder.kinds().audio {
+            return;
+        }
+        if self.wake_clip.len() == WAKE_CLIP_FRAMES {
+            self.wake_clip.pop_front();
+        }
+        self.wake_clip.push_back(*frame);
+    }
+
+    /// Records the frames up to and including the wake frame, oldest first.
+    fn clip_wake(&self, kind: &str, wake: &WakeFrame) {
+        if !self.recorder.kinds().audio {
+            return;
+        }
+        let mut pcm = Vec::with_capacity(self.wake_clip.len() * FRAME_SAMPLES);
+        for frame in &self.wake_clip {
+            pcm.extend_from_slice(frame);
+        }
+        self.recorder.wake_clip(kind, pcm, scores(wake));
     }
 
     fn note_level(&mut self, frame: &Frame) {

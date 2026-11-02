@@ -25,7 +25,7 @@ pub struct RecordKinds {
     pub metrics: bool,
     /// Dictation text and its outcome.
     pub text: bool,
-    /// Microphone audio of the capture, after the wake cue.
+    /// Microphone audio of the capture, after the wake cue, and about 2 s before each wake.
     pub audio: bool,
 }
 
@@ -42,6 +42,7 @@ impl RecordKinds {
 pub enum Event {
     WakeLoad,
     WakeInference,
+    WakeClip,
     WakeReset,
     TranscriptionReady,
     SecondaryStt,
@@ -61,6 +62,7 @@ impl Event {
         match self {
             Self::WakeLoad => "desktop_wake_load",
             Self::WakeInference => "desktop_wake_inference",
+            Self::WakeClip => "desktop_wake_clip",
             Self::WakeReset => "desktop_wake_reset",
             Self::TranscriptionReady => "desktop_transcription_ready",
             Self::SecondaryStt => "desktop_secondary_stt",
@@ -87,8 +89,15 @@ pub enum RecorderError {
 
 enum Message {
     Metric(String),
-    Text { ts_ms: u64, line: String },
-    Audio { ts_ms: u64, pcm: Vec<i16> },
+    Text {
+        ts_ms: u64,
+        line: String,
+    },
+    Audio {
+        ts_ms: u64,
+        name: String,
+        pcm: Vec<i16>,
+    },
     Shutdown,
 }
 
@@ -194,11 +203,33 @@ impl Recorder {
     /// Queues one capture's 16 kHz mono audio as a WAV file.
     pub fn audio(&self, pcm: Vec<i16>) {
         if self.kinds.audio {
+            let ts_ms = now_ms();
             self.send(Message::Audio {
-                ts_ms: now_ms(),
+                ts_ms,
+                name: format!("capture-{ts_ms}.wav"),
                 pcm,
             });
         }
+    }
+
+    /// Queues the 16 kHz mono audio heard up to a wake of `kind` as a WAV file, and a metrics line
+    /// carrying the file name and the keys of `fields`.
+    pub fn wake_clip(&self, kind: &str, pcm: Vec<i16>, fields: Value) {
+        if !self.kinds.audio {
+            return;
+        }
+        let ts_ms = now_ms();
+        let name = format!("wake-{ts_ms}-{kind}.wav");
+        self.send(Message::Audio {
+            ts_ms,
+            name: name.clone(),
+            pcm,
+        });
+        let mut linked = json!({"file": name});
+        if let (Some(target), Value::Object(extra)) = (linked.as_object_mut(), fields) {
+            target.extend(extra);
+        }
+        self.metric(Event::WakeClip, kind, None, linked);
     }
 
     fn send(&self, message: Message) {
@@ -254,7 +285,7 @@ impl Writer {
                 Message::Shutdown => break,
                 Message::Metric(line) => self.metric(&line),
                 Message::Text { ts_ms, line } => self.text(ts_ms, &line),
-                Message::Audio { ts_ms, pcm } => self.audio(ts_ms, &pcm),
+                Message::Audio { ts_ms, name, pcm } => self.audio(ts_ms, &name, &pcm),
             };
             if let Err(error) = result
                 && !self.failed
@@ -296,9 +327,9 @@ impl Writer {
         writeln!(open_private(&dir.join("desktop.jsonl"))?, "{line}")
     }
 
-    fn audio(&self, ts_ms: u64, pcm: &[i16]) -> io::Result<()> {
+    fn audio(&self, ts_ms: u64, name: &str, pcm: &[i16]) -> io::Result<()> {
         let dir = self.day_dir(ts_ms)?;
-        open_private(&dir.join(format!("capture-{ts_ms}.wav")))?.write_all(&wav(pcm))
+        open_private(&dir.join(name))?.write_all(&wav(pcm))
     }
 
     fn day_dir(&self, ts_ms: u64) -> io::Result<PathBuf> {
@@ -472,6 +503,7 @@ mod tests {
         for (event, name) in [
             (Event::WakeLoad, "desktop_wake_load"),
             (Event::WakeInference, "desktop_wake_inference"),
+            (Event::WakeClip, "desktop_wake_clip"),
             (Event::WakeReset, "desktop_wake_reset"),
             (Event::TranscriptionReady, "desktop_transcription_ready"),
             (Event::SecondaryStt, "desktop_secondary_stt"),
@@ -577,6 +609,75 @@ mod tests {
             emit_everything(&recorder);
             recorder.finish().await;
             assert_eq!(tree(&dir.root()), expected, "{tag}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wake_clip_is_a_wav_named_for_its_kind_and_linked_by_a_metric_line() {
+        let dir = TempDir::new("wake-clip");
+        let recorder = Recorder::in_dir(ALL, dir.root()).unwrap();
+        recorder.wake_clip("capture", vec![1, -2], json!({"capture": 0.5}));
+        recorder.finish().await;
+
+        let day = std::fs::read_dir(dir.root().join("recordings"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let files: Vec<_> = std::fs::read_dir(&day)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 1);
+        let name = files[0].file_name().unwrap().to_string_lossy().into_owned();
+        let stamp = name
+            .strip_prefix("wake-")
+            .and_then(|rest| rest.strip_suffix("-capture.wav"))
+            .unwrap();
+        assert!(stamp.parse::<u64>().unwrap() > 1_700_000_000_000);
+        assert_eq!(std::fs::read(&files[0]).unwrap(), wav(&[1, -2]));
+
+        let written = lines(&dir.root().join("metrics.jsonl"));
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0]["event"], "desktop_wake_clip");
+        assert_eq!(written[0]["outcome"], "capture");
+        assert_eq!(written[0]["file"], name.as_str());
+        assert_eq!(written[0]["capture"], 0.5);
+    }
+
+    #[tokio::test]
+    async fn a_wake_clip_needs_audio_and_its_metric_line_needs_metrics() {
+        for (tag, kinds, files) in [
+            ("clip-metrics-only", METRICS, set(&[])),
+            (
+                "clip-audio-only",
+                RecordKinds {
+                    audio: true,
+                    ..RecordKinds::default()
+                },
+                set(&[
+                    "recordings",
+                    "recordings/<date>",
+                    "recordings/<date>/wake.wav",
+                ]),
+            ),
+        ] {
+            let dir = TempDir::new(tag);
+            let recorder = Recorder::in_dir(kinds, dir.root()).unwrap();
+            recorder.wake_clip("conversation", vec![0], Value::Null);
+            recorder.finish().await;
+            let seen: BTreeSet<_> = tree(&dir.root())
+                .into_iter()
+                .map(|path| {
+                    if path.contains("/wake-") {
+                        "recordings/<date>/wake.wav".to_owned()
+                    } else {
+                        path
+                    }
+                })
+                .collect();
+            assert_eq!(seen, files, "{tag}");
         }
     }
 
