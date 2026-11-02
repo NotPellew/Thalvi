@@ -63,6 +63,7 @@ const BROWSERS: [(&str, &str); 6] = [
 
 const NO_FOCUSED_WINDOW: &str = "The desktop did not identify the focused window.";
 const INVALID_WINDOW_LIST: &str = "The desktop returned an invalid window list.";
+const INVALID_MONITOR_LIST: &str = "The desktop returned an invalid monitor list.";
 const NOTHING_TYPED: &str = " Nothing was typed.";
 
 /// One window as `hyprctl -j` prints it; any field may be absent, as for no focused window.
@@ -95,6 +96,15 @@ impl Row {
             },
         ))
     }
+}
+
+/// One monitor as `hyprctl -j monitors` prints it.
+#[derive(Deserialize)]
+struct Monitor {
+    #[serde(default)]
+    focused: bool,
+    /// Space panels reserve, in logical pixels, in the order left, top, right, bottom.
+    reserved: [i64; 4],
 }
 
 /// A tool failure before any input was sent: a missing tool means this desktop lacks it.
@@ -281,15 +291,26 @@ impl<R: CommandRunner> Host for Hyprland<R> {
             .map_err(|error| tool(&error))
     }
 
-    fn prepare_overlay(&self) -> Result<(), HostError> {
+    fn prepare_overlay(&self, width: f64, height: f64) -> Result<f64, HostError> {
+        let monitors: Vec<Monitor> = serde_json::from_str(&self.json("monitors")?)
+            .map_err(|_| HostError::NothingTyped(INVALID_MONITOR_LIST.to_owned()))?;
+        // The window opens on the focused monitor. A rule added later wins over earlier ones, and
+        // Hyprland applies `size` and `move` each time the window maps, so a hidden overlay appears
+        // at its new size and place; a client cannot resize its own floating window afterwards.
+        let top = monitors
+            .iter()
+            .find(|monitor| monitor.focused)
+            .or(monitors.first())
+            .map_or(0, |monitor| monitor.reserved[1].max(0));
         let rule = format!(
             "match:title ^({OVERLAY_TITLE})$, float on, pin on, no_initial_focus on, no_focus on, \
-             move ((monitor_w*0.5)-(window_w*0.5)) 56, border_size 0, no_shadow on, no_anim on"
+             size {width} {height}, move ((monitor_w*0.5)-({width}*0.5)) {top}, border_size 0, \
+             no_shadow on, no_anim on"
         );
         self.run
             .run("hyprctl", &["keyword", "windowrule", &rule], None)
-            .map(|_| ())
-            .map_err(|error| tool(&error))
+            .map_err(|error| tool(&error))?;
+        Ok(f64::from(i32::try_from(top).unwrap_or(0)))
     }
 }
 
@@ -736,21 +757,57 @@ mod tests {
     }
 
     #[test]
-    fn the_overlay_window_is_pinned_at_the_top_without_taking_focus() {
-        let ready = host(|_, _| Ok("ok".to_owned()));
-        assert_eq!(ready.prepare_overlay(), Ok(()));
-        assert_eq!(
-            commands(&ready),
-            [
-                "hyprctl keyword windowrule match:title ^(Thalvi overlay)$, float on, pin on, \
-              no_initial_focus on, no_focus on, move ((monitor_w*0.5)-(window_w*0.5)) 56, \
-              border_size 0, no_shadow on, no_anim on"
-            ]
-        );
+    fn the_overlay_window_is_pinned_below_the_panel_without_taking_focus() {
+        let monitor = |focused: bool, top: i64| {
+            format!(r#"{{"name": "M", "focused": {focused}, "reserved": [0, {top}, 0, 0]}}"#)
+        };
+        let cases = [
+            ("no panel", format!("[{}]", monitor(true, 0)), 0),
+            ("a 40 px bar", format!("[{}]", monitor(true, 40)), 40),
+            (
+                "the focused monitor's bar, not another's",
+                format!("[{}, {}]", monitor(false, 0), monitor(true, 40)),
+                40,
+            ),
+        ];
+        for (name, monitors, top) in cases {
+            let ready = host(move |argv, _| {
+                Ok(if argv.iter().any(|arg| arg == "monitors") {
+                    monitors.clone()
+                } else {
+                    "ok".to_owned()
+                })
+            });
+            assert_eq!(
+                ready.prepare_overlay(460.0, 200.0),
+                Ok(f64::from(top)),
+                "{name}"
+            );
+            assert_eq!(
+                commands(&ready),
+                [
+                    "hyprctl -j monitors".to_owned(),
+                    format!(
+                        "hyprctl keyword windowrule match:title ^(Thalvi overlay)$, float on, \
+                         pin on, no_initial_focus on, no_focus on, \
+                         size 460 200, move ((monitor_w*0.5)-(460*0.5)) {top}, border_size 0, \
+                         no_shadow on, no_anim on"
+                    )
+                ],
+                "{name}"
+            );
+        }
 
+        let garbled = host(|_, _| Ok("not json".to_owned()));
+        assert_eq!(
+            garbled.prepare_overlay(460.0, 200.0),
+            Err(HostError::NothingTyped(
+                "The desktop returned an invalid monitor list.".to_owned()
+            ))
+        );
         let missing = host(|_, _| Err(CommandError::NotInstalled("hyprctl".to_owned())));
         assert_eq!(
-            missing.prepare_overlay(),
+            missing.prepare_overlay(460.0, 200.0),
             Err(HostError::Unsupported(
                 "Desktop tool hyprctl is not installed.".to_owned()
             ))

@@ -50,6 +50,7 @@ pub struct DesktopConfig {
     pub overlay: OverlayConfig,
     /// The input device to open; `None` is the system default.
     pub microphone: Option<String>,
+    pub look: Look,
     /// From `THALVI_RECORD`, never from the file.
     pub record: RecordKinds,
 }
@@ -79,6 +80,31 @@ struct RawDesktopConfig {
     overlay: OverlayConfig,
     #[serde(default)]
     microphone: Option<String>,
+    #[serde(default)]
+    look: Look,
+}
+
+/// How the overlay and the settings window look; `Gunmetal` unless the user picks another.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", rename_all = "lowercase")]
+pub enum Look {
+    Neon,
+    Holo,
+    #[default]
+    Gunmetal,
+}
+
+impl TryFrom<String> for Look {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, String> {
+        match name.as_str() {
+            "neon" => Ok(Self::Neon),
+            "holo" => Ok(Self::Holo),
+            "gunmetal" => Ok(Self::Gunmetal),
+            _ => Err("look must be gunmetal, holo or neon.".to_owned()),
+        }
+    }
 }
 
 /// What the status overlay shows; both are on by default.
@@ -135,6 +161,7 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
             scripts,
             overlay: raw.overlay,
             microphone,
+            look: raw.look,
             record: RecordKinds::default(),
         })
     }
@@ -418,6 +445,7 @@ struct FileForm<'a> {
     scripts: Vec<FileScript<'a>>,
     overlay: &'a OverlayConfig,
     microphone: Option<&'a str>,
+    look: Look,
 }
 
 #[derive(Serialize)]
@@ -506,6 +534,7 @@ impl Serialize for DesktopConfig {
             scripts,
             overlay: &self.overlay,
             microphone: self.microphone.as_deref(),
+            look: self.look,
         }
         .serialize(serializer)
     }
@@ -1146,7 +1175,8 @@ mod tests {
                  "destination": "https://discord.com/channels/1/2"}
             ],
             "overlay": {"show": false, "draft": true},
-            "microphone": " USB Mic "
+            "microphone": " USB Mic ",
+            "look": "gunmetal"
         }"#;
         for json in ["{}", full] {
             let config = DesktopConfig::from_json_str(json, Some("metrics,audio")).unwrap();
@@ -1196,6 +1226,26 @@ mod tests {
         ] {
             let error = parse(json).unwrap_err();
             assert!(error.to_string().contains(expected), "{json}: {error}");
+        }
+    }
+
+    #[test]
+    fn look_defaults_to_gunmetal_and_rejects_unknown_names() {
+        assert_eq!(parse("{}").unwrap().look, Look::Gunmetal);
+        for (name, look) in [
+            ("neon", Look::Neon),
+            ("holo", Look::Holo),
+            ("gunmetal", Look::Gunmetal),
+        ] {
+            let config = parse(&format!(r#"{{"look": "{name}"}}"#)).unwrap();
+            assert_eq!(config.look, look);
+        }
+        for json in [r#"{"look": "classic"}"#, r#"{"look": "Holo"}"#] {
+            let error = parse(json).unwrap_err().to_string();
+            assert!(
+                error.contains("look must be gunmetal, holo or neon."),
+                "{json}: {error}"
+            );
         }
     }
 

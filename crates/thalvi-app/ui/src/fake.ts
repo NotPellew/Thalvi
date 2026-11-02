@@ -1,6 +1,7 @@
-// Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the overlay to the n-th status of the script.
+// Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the overlay to the n-th status of the script and `?look=holo` or `?look=gunmetal` picks the look.
 
 import type { Backend, Settings, Status } from "./contract.ts";
+import { LOOKS } from "./look.ts";
 
 const SETTINGS: Settings = {
   server: "ws://127.0.0.1:8080",
@@ -24,6 +25,7 @@ const SETTINGS: Settings = {
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com/docs", label: "docs" }],
   overlay: { show: true, draft: true },
   microphone: null,
+  look: "gunmetal",
   recordings: { metrics: true, text: false, audio: false },
 };
 
@@ -50,6 +52,12 @@ function script(): Status[] {
     { state: "done", target: slack, route: "paste", notice: "Pasted" },
     { state: "starting", target: null },
     { state: "failed", notice: "The speech server is not reachable. Check the server address in settings." },
+    { state: "loading", notice: "Loading the speech model." },
+    { state: "starting", target: "Firefox" },
+    { state: "capturing", target: "Firefox", committed: "", partial: null },
+    { state: "pending", target: "Firefox", route: "task", text: "open the calendar", waitingForQuiet: false, pauseMs: 2500 },
+    { state: "working", target: "Firefox", route: "task", cancellable: true },
+    { state: "done", target: "Firefox", route: "task", notice: "Opened the calendar" },
   ];
 }
 
@@ -59,6 +67,9 @@ export function fakeBackend(params: URLSearchParams): Backend {
   let index = 0;
   let status: Status = { state: "listening" };
   let level = 0;
+  const requested = params.get("look");
+  const look = LOOKS.find(([name]) => name === requested)?.[0] ?? "gunmetal";
+  const savedListeners: (() => void)[] = [];
   const statusListeners: ((status: Status) => void)[] = [];
   const levelListeners: ((level: number) => void)[] = [];
   const emit = (next: Status): void => {
@@ -82,17 +93,19 @@ export function fakeBackend(params: URLSearchParams): Backend {
     for (const listener of levelListeners) listener(level);
   }, 80);
 
-  let saved = structuredClone(SETTINGS);
+  let saved = { ...structuredClone(SETTINGS), look };
   return {
     getStatus: () => Promise.resolve(status),
     onStatus: (listener) => statusListeners.push(listener),
     onLevel: (listener) => levelListeners.push(listener),
+    onSettingsSaved: (listener) => savedListeners.push(listener),
     getSettings: () => Promise.resolve(structuredClone(saved)),
     saveSettings: (next) => {
       if (!/^wss?:\/\//.test(next.server)) {
         return Promise.reject(new Error("The desktop config is not valid: the server address must start with ws:// or wss://."));
       }
       saved = structuredClone(next);
+      for (const listener of savedListeners) listener();
       return Promise.resolve();
     },
     setListening: (on) => {

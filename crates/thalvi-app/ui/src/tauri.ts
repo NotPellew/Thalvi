@@ -18,6 +18,11 @@ export function tauriBackend(): Backend {
         listener(event.payload.level);
       });
     },
+    onSettingsSaved: (listener) => {
+      void listen("thalvi://settings", () => {
+        listener();
+      });
+    },
     getSettings: () => invoke<Settings>("get_settings"),
     saveSettings: (settings) => invoke<undefined>("save_settings", { settings }),
     setListening: (on) => invoke<undefined>("set_listening", { on }),

@@ -1,7 +1,9 @@
 // The dictation overlay: a pill and a draft box driven by status and level events.
 
-import type { Backend, Route, Status } from "./contract.ts";
+import type { Backend, Look, Route, Status } from "./contract.ts";
 import { el } from "./dom.ts";
+import { applyLook } from "./look.ts";
+import { createModule } from "./module.ts";
 
 /** Frame scheduling and time, injectable so tests drive the animation. */
 export interface Clock {
@@ -49,8 +51,10 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
   const countdownBar = el("b");
   const countdown = el("div", { class: "cd" }, countdownBar);
   const draft = el("div", { class: "draft" }, el("div", { class: "tail" }, text), countdown);
-  root.append(pill, draft);
+  const skin = createModule(requestCancel);
+  root.append(pill, draft, skin.node);
   root.hidden = true;
+  applyLook(root, "gunmetal");
 
   let status: Status = { state: "paused" };
   let showDraft = true;
@@ -61,12 +65,14 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
   let route: Route = "paste";
   let looping = false;
   let flat = true;
+  let look: Look = "gunmetal";
 
-  cancel.addEventListener("click", () => {
+  function requestCancel(): void {
     backend.cancelCapture().catch((error: unknown) => {
       console.error("cancel_capture failed", error);
     });
-  });
+  }
+  cancel.addEventListener("click", requestCancel);
 
   function setBars(height: (index: number) => number): void {
     bars.forEach((bar, index) => {
@@ -78,19 +84,25 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
     looping = false;
     if (!live()) return;
     const now = clock.now();
-    if (!flat) {
+    if (look !== "neon") {
+      skin.draw(now, level);
+    } else if (!flat) {
       shown += (level - shown) * (level > shown ? 0.6 : 0.2);
       setBars((index) => {
         const wobble = 0.75 + 0.25 * Math.sin(now / 110 + index * 1.3);
         return FLAT + (1 - FLAT) * Math.min(1, shown * (ENVELOPE[index] ?? 1) * wobble * 1.2);
       });
     }
-    if (countdownStart !== null) {
-      const left = Math.max(0, pauseMs - (now - countdownStart));
-      countdownBar.style.transform = `scaleX(${(left / pauseMs).toFixed(3)})`;
-      label.textContent = `${ROUTE_WORD[route]} IN ${secondsLeft(left)} s`;
-    }
+    updateCountdown(now);
     schedule();
+  }
+
+  function updateCountdown(now: number): void {
+    if (countdownStart === null) return;
+    const left = Math.max(0, pauseMs - (now - countdownStart));
+    countdownBar.style.transform = `scaleX(${(left / pauseMs).toFixed(3)})`;
+    label.textContent = `${ROUTE_WORD[route]} IN ${secondsLeft(left)} s`;
+    skin.countdown(left, pauseMs);
   }
 
   function live(): boolean {
@@ -129,6 +141,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
     caret.hidden = true;
     countdown.dataset["running"] = "false";
     cancel.hidden = !cancellable();
+    skin.render(next, { showDraft, cancellable: cancellable() });
     switch (next.state) {
       case "paused":
       case "listening":
@@ -176,6 +189,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
         break;
     }
     if (next.state !== "pending") countdownStart = null;
+    updateCountdown(clock.now());
     if (live()) {
       schedule();
     } else {
@@ -187,7 +201,10 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
   backend.onStatus((next) => {
     seen = true;
     render(next);
-    if (next.state === "paused" || next.state === "listening") refreshDraftSetting();
+    if (idle(next)) refreshSettings();
+  });
+  backend.onSettingsSaved(() => {
+    if (idle(status)) refreshSettings();
   });
   backend.onLevel((next) => {
     level = Math.min(1, Math.max(0, next));
@@ -201,15 +218,22 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
       console.error("get_status failed", error);
     });
 
-  function refreshDraftSetting(): void {
+  function idle(of: Status): boolean {
+    return of.state === "paused" || of.state === "listening";
+  }
+
+  function refreshSettings(): void {
     backend
       .getSettings()
       .then((settings) => {
         showDraft = settings.overlay.draft;
+        look = settings.look;
+        applyLook(root, look);
+        skin.fit();
       })
       .catch((error: unknown) => {
         console.error("get_settings failed", error);
       });
   }
-  refreshDraftSetting();
+  refreshSettings();
 }

@@ -6,12 +6,13 @@
 )]
 
 use serde_json::Value;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use thalvi_desktop::audio;
 use thalvi_desktop::host::Host;
 use thalvi_desktop::metrics::Recorder;
 
 use crate::app::AppState;
+use crate::overlay;
 use crate::runner::Control;
 use crate::settings::settings_json;
 use crate::status::Status;
@@ -27,9 +28,22 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn save_settings(settings: Value, state: State<'_, AppState>) -> Result<(), String> {
+pub fn save_settings(
+    settings: Value,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let config = state.store.save(settings)?;
+    let look = state.config().look;
     state.apply(&config);
+    if config.look != look {
+        // The settings are saved either way; the overlay keeps its old place.
+        if let Err(error) = overlay::replace(&app, &state.host()) {
+            eprintln!("The overlay could not be placed again for the new look: {error}");
+        }
+    }
+    // The overlay window is hidden and idle, so it re-reads the settings when told.
+    let _ = app.emit("thalvi://settings", ());
     Ok(())
 }
 

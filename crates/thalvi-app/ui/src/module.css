@@ -1,0 +1,90 @@
+/* The holo and gunmetal overlay: a 370 x 84 module hanging from the top edge. */
+
+#overlay[data-look="neon"] .module,
+#overlay:not([data-look="neon"]) :is(.pill, .draft) { display: none; }
+
+#overlay:is([data-look="holo"], [data-look="gunmetal"]) { display: block; padding: 0; }
+
+.module {
+  --cy: 107, 248, 255; --am: 255, 194, 75; --ok: 43, 255, 136; --bad: 255, 107, 94; --qt: 143, 179, 196;
+  --S: 16px; --sx: 14px; --sn: 13px;
+  --hex: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='27.7'%3E%3Cpath d='M8 0L16 4.62V13.86L8 18.47L0 13.86V4.62ZM8 18.47V27.7' fill='none' stroke='white' stroke-opacity='.06'/%3E%3C/svg%3E");
+  --lc: var(--cy);
+  --trapezoid: polygon(0 0, 100% 0, calc(100% - var(--S)) 100%, var(--S) 100%);
+  position: absolute; left: 50%; top: 0; margin-left: -185px; color: #eafff3; user-select: none;
+}
+.module > *, .slot > * { position: absolute; }
+.module[data-tone="quiet"] { --lc: var(--qt); }
+.module[data-tone="pending"] { --lc: var(--am); }
+.module[data-tone="done"] { --lc: var(--ok); }
+.module[data-tone="failed"] { --lc: var(--bad); }
+
+.shadow { inset: 0; filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.6)); }
+.outer { position: absolute; inset: 0; clip-path: var(--trapezoid); }
+.panel { inset: 0 1px 1px; overflow: hidden; clip-path: var(--trapezoid); }
+.panel i { position: absolute; inset: 0; }
+.slot { left: var(--sx); right: var(--sx); top: 2px; bottom: 4px; overflow: hidden; }
+
+.wv { left: 5px; top: 2px; width: 332px; height: 44px; }
+.wv canvas { position: absolute; left: 0; top: 0; }
+.glow { position: absolute; inset: 0; opacity: 0; background: radial-gradient(45% 70% at 50% 50%, rgba(var(--lc), 0.2), transparent 70%); }
+.module[data-text="false"] .wv { top: 17px; }
+.module[data-text="false"] :is(.sep, .tick) { display: none; }
+
+.tag { position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%); text-align: center; font: 700 11px/14px ui-monospace, Menlo, Consolas, monospace; letter-spacing: 0.14em; color: rgb(var(--lc)); }
+.tag > span { display: inline-flex; align-items: center; }
+.tag > span::before, .tag > span::after { content: ""; margin: 0 12px; width: 34px; height: 1.5px; border-radius: 1px; box-shadow: 0 0 6px rgba(var(--lc), 0.7); }
+.tag > span::before { background: linear-gradient(90deg, transparent, rgb(var(--lc))); }
+.tag > span::after { background: linear-gradient(90deg, rgb(var(--lc)), transparent); }
+.label { white-space: nowrap; }
+
+.sep { left: 24px; right: 24px; top: 48px; height: 1px; background: linear-gradient(90deg, transparent, rgba(143, 179, 196, 0.25), transparent); }
+.tick { position: absolute; left: 24px; right: 24px; top: 52px; height: 22px; overflow: hidden; white-space: nowrap; font: 14px/22px system-ui; color: #eafff3; }
+.tick.over { mask-image: linear-gradient(90deg, transparent, #000 36px); }
+.tick.fail { mask-image: linear-gradient(90deg, transparent, #000 16px, #000 calc(100% - 16px), transparent); }
+.run { display: inline-block; will-change: transform; transition: transform 0.28s ease-out; }
+.run.scroll { transition: none; animation: pass 2.6s linear 0.5s both; }
+@keyframes pass { from { transform: translateX(16px); } to { transform: translateX(calc(16px - var(--over))); } }
+.tick.fail .run { transform: translateX(16px); }
+.p2 { color: #8fb3c4; }
+.module .caret { margin-left: 0; background: rgb(var(--cy)); }
+
+.msg { inset: 0; display: flex; align-items: center; justify-content: center; font: 700 13px ui-monospace, Menlo, Consolas, monospace; letter-spacing: 0.16em; color: rgb(var(--lc)); text-shadow: 0 0 8px rgba(var(--lc), 0.7); }
+.msg:empty { display: none; }
+.module[data-tone="done"] :is(.wv, .sep, .tick) { display: none; }
+
+.mx { right: 6px; top: 6px; width: 18px; height: 18px; padding: 0; border-radius: 2px; border: 1px solid rgba(var(--qt), 0.4); background: rgba(0, 0, 0, 0.4); color: #8fb3c4; font: 14px/1 system-ui; cursor: pointer; z-index: 1; }
+.mx:hover { color: #fff; border-color: rgb(var(--cy)); }
+
+.line { left: calc(var(--S) + 4px); right: calc(var(--S) + 4px); bottom: 0; height: 2px; transform-origin: center; will-change: transform; background: linear-gradient(90deg, transparent, rgb(var(--lc)) 20%, rgb(var(--lc)) 80%, transparent); box-shadow: 0 0 6px rgba(var(--lc), 0.9), 0 0 16px rgba(var(--lc), 0.5); }
+.module[data-motion="sweep"] .line { overflow: hidden; background: rgba(var(--lc), 0.2); box-shadow: none; }
+.module[data-motion="sweep"] .line::after { content: ""; position: absolute; top: 0; bottom: 0; width: 30%; background: linear-gradient(90deg, transparent, rgb(var(--lc)), transparent); animation: sweep 1.3s ease-in-out infinite alternate; }
+@keyframes sweep { from { transform: translateX(0); } to { transform: translateX(233%); } }
+
+.acc { inset: 0; overflow: visible; pointer-events: none; }
+.acc path { fill: none; stroke: rgb(var(--cy)); stroke-width: 2; filter: drop-shadow(0 0 3px rgba(var(--cy), 0.9)); }
+
+/* Holo: steel-blue frame line, teal scanline field over a hex mesh, glowing corner pieces. */
+[data-look="holo"] .outer { background: #5d92b4; }
+[data-look="holo"] .panel { background: linear-gradient(180deg, #0f2530, #081419 55%, #0b1a21); }
+[data-look="holo"] .hex { background: var(--hex); opacity: 0.7; }
+[data-look="holo"] .scan { background: repeating-linear-gradient(0deg, rgba(var(--cy), 0.045) 0 1px, transparent 1px 3px); }
+[data-look="holo"] .vignette { box-shadow: inset 0 0 18px rgba(93, 146, 180, 0.3); }
+[data-look="holo"] .shine { left: -80px; right: auto; width: 70px; background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.07), transparent); animation: shine 7s linear infinite; }
+@keyframes shine { 0%, 70% { transform: translateX(0); } 100% { transform: translateX(720px); } }
+[data-look="holo"] .bezel { display: none; }
+[data-look="holo"] .line { left: calc(var(--S) + 22px); right: calc(var(--S) + 22px); }
+
+/* Gunmetal: a thin hex-mesh metal bezel around a dark glass slot. */
+[data-look="gunmetal"] .outer { background: linear-gradient(180deg, #3a3a3a, #5a5a5a 80%, #9a9a9a); }
+[data-look="gunmetal"] .panel { background: var(--hex), linear-gradient(180deg, #1c1c1c, #2c2c2c 60%, #3c3c3c); }
+[data-look="gunmetal"] .panel i, [data-look="gunmetal"] .acc { display: none; }
+[data-look="gunmetal"] :is(.bezel, .slot) { clip-path: polygon(0 0, 100% 0, calc(100% - var(--sn)) 100%, var(--sn) 100%); }
+[data-look="gunmetal"] .bezel { left: calc(var(--sx) - 1px); right: calc(var(--sx) - 1px); top: 2px; bottom: 3px; background: linear-gradient(180deg, #555, #888); }
+[data-look="gunmetal"] .slot { background: linear-gradient(180deg, #03080d, #0a1820); box-shadow: inset 0 4px 10px #000; }
+[data-look="gunmetal"] .mx { background: linear-gradient(180deg, #5c5c60, #3a3a3d); border-color: #6e6e72; color: #e1e4e7; }
+
+@media (prefers-reduced-motion: reduce) {
+  .shine, .module .line::after, .module .caret { animation: none; }
+  .run { transition: none; }
+}

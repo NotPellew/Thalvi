@@ -6,7 +6,7 @@ body { font-size: 14px; }
   --glass: light-dark(rgba(247, 251, 255, 0.94), rgba(2, 6, 23, 0.92));
   --glass-draft: light-dark(rgba(255, 255, 255, 0.96), rgba(4, 18, 46, 0.95));
   display: flex; flex-direction: column; align-items: center; gap: 6px;
-  padding: 10px 12px;
+  padding: 26px 12px 10px; /* the window starts below any panel; the pill keeps a 16 px gap under it */
 }
 
 .pill {

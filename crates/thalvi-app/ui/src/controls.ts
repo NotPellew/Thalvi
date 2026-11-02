@@ -72,8 +72,14 @@ export function createControls(changed: () => void) {
       step: String(range.step),
     });
     input.value = String(value);
+    const fill = (): void => {
+      const share = (input.valueAsNumber - range.min) / (range.max - range.min);
+      input.style.setProperty("--p", share.toFixed(3));
+    };
+    fill();
     const shown = el("output", { class: "val", for: input.id }, value.toFixed(2));
     input.addEventListener("input", () => {
+      fill();
       set(input.valueAsNumber);
       shown.textContent = input.valueAsNumber.toFixed(2);
       changed();
