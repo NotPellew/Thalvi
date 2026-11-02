@@ -24,6 +24,7 @@ tauri.workspace = true
 tauri-plugin-single-instance.workspace = true
 thalvi-desktop = { path = "../thalvi-desktop" }
 tokio.workspace = true
+tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]

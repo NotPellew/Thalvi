@@ -60,6 +60,9 @@ pub enum Event {
     CaptureFlow,
     /// One call to the desktop host; fields hold only the call's name.
     HostCall,
+    /// Microphone audio was lost: `xrun` for a discontinuity the system reported, `queue_full`
+    /// when the engine stopped reading for ten seconds.
+    AudioGap,
 }
 
 impl Event {
@@ -81,6 +84,7 @@ impl Event {
             Self::EndCue => "desktop_end_cue",
             Self::CaptureFlow => "desktop_capture_flow",
             Self::HostCall => "desktop_host_call",
+            Self::AudioGap => "desktop_audio_gap",
         }
     }
 }

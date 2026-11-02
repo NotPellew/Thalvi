@@ -21,7 +21,7 @@ pub enum AudioError {
     DeviceLost,
     /// The default microphone changed while capturing.
     DeviceChanged,
-    /// Samples were lost, so the capture in progress is not whole.
+    /// The engine stopped reading for ten seconds and the queued audio overflowed.
     Dropped,
     /// The stream failed for another reason.
     StreamFailed(cpal::Error),
@@ -52,7 +52,9 @@ impl fmt::Display for AudioError {
             Self::DeviceChanged => {
                 "The default microphone changed. Capture stopped without delivery."
             }
-            Self::Dropped => "Microphone audio was lost. Capture stopped without delivery.",
+            Self::Dropped => {
+                "Thalvi could not keep up with the microphone audio. Capture stopped without delivery."
+            }
             Self::StreamFailed(_) => "The microphone stopped working. Capture stopped without delivery.",
             Self::Closed => "The microphone is off.",
         })
@@ -84,8 +86,8 @@ impl AudioError {
         match error.kind() {
             ErrorKind::DeviceNotAvailable => Some(Self::DeviceLost),
             ErrorKind::DeviceChanged | ErrorKind::StreamInvalidated => Some(Self::DeviceChanged),
-            ErrorKind::Xrun => Some(Self::Dropped),
-            ErrorKind::RealtimeDenied => None,
+            // A discontinuity is a gap in the audio, not the end of the stream.
+            ErrorKind::Xrun | ErrorKind::RealtimeDenied => None,
             _ => Some(Self::StreamFailed(error)),
         }
     }
@@ -121,7 +123,7 @@ mod tests {
                 ErrorKind::StreamInvalidated,
                 Some(AudioError::DeviceChanged),
             ),
-            (ErrorKind::Xrun, Some(AudioError::Dropped)),
+            (ErrorKind::Xrun, None),
             (ErrorKind::RealtimeDenied, None),
         ];
         for (kind, expected) in cases {

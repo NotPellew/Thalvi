@@ -19,7 +19,7 @@ use thalvi_desktop::engine::{
 };
 use thalvi_desktop::host::Desktop;
 use thalvi_desktop::local::LocalRecognizer;
-use thalvi_desktop::metrics::{Event, Recorder};
+use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::ModelStore;
 use thalvi_desktop::transducer::TransducerSource;
 use thalvi_desktop::wake::WakeEngine;
@@ -162,6 +162,10 @@ impl Publisher {
         });
     }
 
+    fn failed(&self) -> bool {
+        matches!(self.view.borrow().mode, Mode::Failed(_))
+    }
+
     fn mode(&self, mode: Mode) {
         self.update(|view| view.mode = mode);
     }
@@ -179,6 +183,7 @@ struct Session {
     handle: EngineHandle,
     gate: InputGate,
     device: Option<String>,
+    metrics: Metrics,
     microphone: Option<Microphone>,
     frames: Option<Frames>,
 }
@@ -192,10 +197,9 @@ impl Session {
     }
 
     async fn open_microphone(&mut self) -> Result<(), String> {
-        let mut microphone = self
-            .microphone
-            .take()
-            .unwrap_or_else(|| Microphone::new(self.gate.clone(), self.device.clone()));
+        let mut microphone = self.microphone.take().unwrap_or_else(|| {
+            Microphone::new(self.gate.clone(), self.device.clone(), self.metrics.clone())
+        });
         let (microphone, frames) = tokio::task::spawn_blocking(move || {
             let frames = microphone.open();
             (microphone, frames)
@@ -228,6 +232,8 @@ struct Runner {
     config: DesktopConfig,
     session: Option<Session>,
     paused: bool,
+    /// Set while listening wants a microphone it does not have: how many reopen attempts failed.
+    reopen_failures: Option<u32>,
     /// Settings that arrived during a capture.
     pending: Option<DesktopConfig>,
     control: mpsc::UnboundedReceiver<Control>,
@@ -251,6 +257,7 @@ impl Runner {
             config,
             session: None,
             paused: false,
+            reopen_failures: None,
             pending: None,
             control,
             publisher,
@@ -341,12 +348,8 @@ impl Runner {
         );
         let wake = wake.map_err(|error| error.to_string())?;
         let gate = InputGate::default();
-        let recognizer = Chosen::new(
-            &config.stt.engine,
-            &config.server,
-            store,
-            recorder.metrics(),
-        );
+        let metrics = recorder.metrics();
+        let recognizer = Chosen::new(&config.stt.engine, &config.server, store, metrics.clone());
         let local = recognizer.local();
         let (engine, handle) = Engine::new(
             Parts {
@@ -376,6 +379,7 @@ impl Runner {
             handle,
             gate,
             device: config.microphone.clone(),
+            metrics,
             microphone: None,
             frames: None,
         })
@@ -391,9 +395,22 @@ impl Runner {
             return;
         };
         match session.open_microphone().await {
-            Ok(()) => self.publisher.mode(Mode::Idle),
-            Err(message) => self.fail(&message),
+            Ok(()) => {
+                self.reopen_failures = None;
+                self.publisher.mode(Mode::Idle);
+            }
+            Err(message) => self.microphone_failed(&message),
         }
+    }
+
+    /// Shows why listening has no microphone and schedules the next attempt to reopen it.
+    fn microphone_failed(&mut self, message: &str) {
+        if self.reopen_failures.is_none() {
+            self.fail(message);
+        } else {
+            tracing::warn!(message, "microphone still unavailable");
+        }
+        self.reopen_failures = Some(self.reopen_failures.map_or(0, |failures| failures + 1));
     }
 
     async fn step(&mut self) -> Flow {
@@ -406,9 +423,17 @@ impl Runner {
                 .as_ref()
                 .is_some_and(|session| session.frames.is_some());
         if !listening {
-            return match self.control.recv().await {
-                Some(control) => self.handle(control).await,
-                None => Flow::Quit,
+            let retry = (!self.paused && self.session.is_some())
+                .then_some(self.reopen_failures)
+                .flatten()
+                .map(backoff);
+            return match next(&mut self.control, retry).await {
+                Next::Control(Some(control)) => self.handle(control).await,
+                Next::Control(None) => Flow::Quit,
+                Next::Reopen => {
+                    self.open_microphone().await;
+                    Flow::Continue
+                }
             };
         }
         let woke = {
@@ -437,10 +462,15 @@ impl Runner {
                 Flow::Continue
             }
             Woke::Trigger(Err(error)) => {
+                tracing::warn!(?error, "listening stopped");
                 if let Some(session) = self.session.as_mut() {
                     session.close_microphone();
                 }
-                self.fail(&error.to_string());
+                // A capture that failed with the microphone has said where its text went.
+                if !self.publisher.failed() {
+                    self.fail(&error.to_string());
+                }
+                self.reopen_failures = Some(0);
                 Flow::Continue
             }
         }
@@ -474,6 +504,7 @@ impl Runner {
 
     fn pause(&mut self) {
         self.paused = true;
+        self.reopen_failures = None;
         if let Some(session) = self.session.as_mut() {
             session.close_microphone();
         }
@@ -592,6 +623,28 @@ impl Runner {
             self.pause();
         }
         Flow::Continue
+    }
+}
+
+/// How long to wait before reopening a microphone that `failures` attempts could not open.
+fn backoff(failures: u32) -> Duration {
+    const STEPS: [u64; 3] = [1, 2, 5];
+    Duration::from_secs(STEPS.get(failures as usize).copied().unwrap_or(5))
+}
+
+enum Next {
+    Control(Option<Control>),
+    Reopen,
+}
+
+/// Waits for the next control, or until `retry` has passed.
+async fn next(control: &mut mpsc::UnboundedReceiver<Control>, retry: Option<Duration>) -> Next {
+    match retry {
+        Some(delay) => tokio::select! {
+            received = control.recv() => Next::Control(received),
+            () = tokio::time::sleep(delay) => Next::Reopen,
+        },
+        None => Next::Control(control.recv().await),
     }
 }
 
@@ -773,6 +826,42 @@ mod tests {
             assert_eq!(requests.quit, quit, "{label}");
             assert_eq!(requests.listening_off, listening_off, "{label}");
         }
+    }
+
+    #[test]
+    fn a_missing_microphone_is_retried_after_one_two_then_every_five_seconds() {
+        let waits: Vec<u64> = (0..6).map(|failures| backoff(failures).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 5, 5, 5, 5]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_microphone_is_reopened_when_its_time_comes_unless_a_control_comes_first() {
+        let (sender, mut control) = mpsc::unbounded_channel();
+        let started = tokio::time::Instant::now();
+
+        let reopen = tokio::time::timeout(
+            Duration::from_secs(10),
+            next(&mut control, Some(Duration::from_secs(2))),
+        )
+        .await
+        .expect("the microphone was never reopened");
+        assert!(matches!(reopen, Next::Reopen));
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+
+        sender.send(Control::Quit).unwrap();
+        let quit = next(&mut control, Some(Duration::from_secs(2))).await;
+        assert!(matches!(quit, Next::Control(Some(Control::Quit))));
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(2),
+            "a control does not wait"
+        );
+
+        let waiting = tokio::time::timeout(Duration::from_secs(60), next(&mut control, None)).await;
+        assert!(
+            waiting.is_err(),
+            "without a retry only a control ends the wait"
+        );
     }
 
     #[tokio::test(start_paused = true)]

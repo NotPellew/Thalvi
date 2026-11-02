@@ -17,12 +17,14 @@ use cpal::{
 };
 use futures_util::task::AtomicWaker;
 use rtrb::{Consumer, Producer, RingBuffer};
+use serde_json::Value;
 
 pub use error::AudioError;
 pub use framer::Framer;
 pub use gate::InputGate;
 
 use crate::frame::Frame;
+use crate::metrics::{Event, Metrics};
 
 /// Frames queued between the capture thread and the consumer: 10 s.
 const QUEUE_FRAMES: usize = 125;
@@ -42,7 +44,6 @@ const FORMATS: [SampleFormat; 5] = [
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// State the capture and error callbacks share with the consumer.
-#[derive(Default)]
 struct Shared {
     waker: AtomicWaker,
     overrun: AtomicBool,
@@ -50,9 +51,21 @@ struct Shared {
     /// Set once the first frame is queued; until then no audio can have been lost.
     delivering: AtomicBool,
     error: Mutex<Option<AudioError>>,
+    metrics: Metrics,
 }
 
 impl Shared {
+    fn new(metrics: Metrics) -> Self {
+        Self {
+            waker: AtomicWaker::new(),
+            overrun: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            delivering: AtomicBool::new(false),
+            error: Mutex::new(None),
+            metrics,
+        }
+    }
+
     /// Marks the stream as gone and wakes a consumer that is waiting for a frame.
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
@@ -60,10 +73,16 @@ impl Shared {
     }
 
     fn report(&self, error: cpal::Error) {
-        // WASAPI flags discontinuities while a stream starts, before any audio is captured.
-        if error.kind() == ErrorKind::Xrun && !self.delivering.load(Ordering::Acquire) {
+        if error.kind() == ErrorKind::Xrun {
+            // WASAPI flags discontinuities while a stream starts, before any audio is captured.
+            if self.delivering.load(Ordering::Acquire) {
+                tracing::warn!("microphone audio gap: the system reported a discontinuity");
+                self.metrics
+                    .metric(Event::AudioGap, "xrun", None, Value::Null);
+            }
             return;
         }
+        tracing::warn!(kind = ?error.kind(), "microphone stream error");
         if let Some(error) = AudioError::from_stream(error) {
             self.error
                 .lock()
@@ -140,8 +159,11 @@ impl Sink {
             {
                 shared.delivering.store(true, Ordering::Release);
                 shared.waker.wake();
-            } else {
-                shared.overrun.store(true, Ordering::Release);
+            } else if !shared.overrun.swap(true, Ordering::AcqRel) {
+                tracing::warn!("microphone audio lost: the engine stopped reading for 10 s");
+                shared
+                    .metrics
+                    .metric(Event::AudioGap, "queue_full", None, Value::Null);
             }
         };
         for samples in data.chunks_exact(usize::from(*channels)) {
@@ -257,17 +279,20 @@ pub struct Microphone {
     gate: InputGate,
     /// The device to open; `None` follows the system default.
     device: Option<String>,
+    metrics: Metrics,
     open: Option<(Stream, Arc<Shared>)>,
 }
 
 impl Microphone {
     /// A closed microphone whose captured audio is dropped while `gate` is off; it opens the
-    /// input device named `device`, or the system default when `None`.
+    /// input device named `device`, or the system default when `None`. Gaps in the audio are
+    /// recorded through `metrics`.
     #[must_use]
-    pub fn new(gate: InputGate, device: Option<String>) -> Self {
+    pub fn new(gate: InputGate, device: Option<String>, metrics: Metrics) -> Self {
         Self {
             gate,
             device,
+            metrics,
             open: None,
         }
     }
@@ -310,7 +335,7 @@ impl Microphone {
         let chosen = pick_config(ranges, default);
 
         let (producer, consumer) = RingBuffer::new(QUEUE_FRAMES);
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared::new(self.metrics.clone()));
         let (_, epoch) = self.gate.state();
         let sink = Sink {
             framer: Framer::new(chosen.sample_rate()),
@@ -415,13 +440,23 @@ mod tests {
 
     use super::*;
     use crate::frame::FRAME_SAMPLES;
+    use crate::metrics::{RecordKinds, Recorder};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// A capture pipeline without a device: feed the sink as a callback would.
     fn pipeline(rate: u32, channels: u16, gate: &InputGate) -> (Sink, Frames) {
+        recording_pipeline(rate, channels, gate, Recorder::disabled().metrics())
+    }
+
+    fn recording_pipeline(
+        rate: u32,
+        channels: u16,
+        gate: &InputGate,
+        metrics: Metrics,
+    ) -> (Sink, Frames) {
         let (producer, consumer) = RingBuffer::new(QUEUE_FRAMES);
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared::new(metrics));
         let (_, epoch) = gate.state();
         let sink = Sink {
             framer: Framer::new(rate),
@@ -549,11 +584,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_errors_end_capture_unless_harmless_or_before_any_audio() {
+    async fn stream_errors_end_capture_unless_they_are_only_a_gap_or_harmless() {
         for (kind, after_a_frame, ends) in [
             (ErrorKind::RealtimeDenied, true, false),
             (ErrorKind::Xrun, false, false),
-            (ErrorKind::Xrun, true, true),
+            (ErrorKind::Xrun, true, false),
+            (ErrorKind::DeviceNotAvailable, true, true),
         ] {
             let gate = InputGate::default();
             let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
@@ -580,6 +616,63 @@ mod tests {
             live(&mut sink, &block(1));
         }
         assert_eq!(next(&mut frames).await, Err(AudioError::Dropped));
+    }
+
+    #[tokio::test]
+    async fn a_gap_and_a_stalled_consumer_are_recorded_apart_without_audio() {
+        let dir = std::env::temp_dir().join(format!("thalvi-audio-gap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let recorder = Recorder::in_dir(
+            RecordKinds {
+                metrics: true,
+                text: false,
+                audio: false,
+            },
+            &dir,
+        )
+        .unwrap();
+        let gate = InputGate::default();
+        let (mut sink, mut frames) = recording_pipeline(16_000, 1, &gate, recorder.metrics());
+        live(&mut sink, &block(1));
+        sink.shared.report(ErrorKind::Xrun.into());
+        live(&mut sink, &block(2));
+        assert_eq!(next(&mut frames).await.map(|frame| frame[0]), Ok(1));
+        assert_eq!(next(&mut frames).await.map(|frame| frame[0]), Ok(2));
+        for _ in 0..=QUEUE_FRAMES {
+            live(&mut sink, &block(3));
+        }
+        live(&mut sink, &block(3));
+        recorder.finish().await;
+
+        let written = std::fs::read_to_string(dir.join("metrics.jsonl")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let gaps: Vec<(String, String)> = written
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|line| line["event"] == "desktop_audio_gap")
+            .map(|line| {
+                (
+                    line["outcome"].as_str().unwrap().to_owned(),
+                    line.as_object()
+                        .unwrap()
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+            })
+            .collect();
+        assert_eq!(
+            gaps.iter()
+                .map(|(outcome, _)| outcome.as_str())
+                .collect::<Vec<_>>(),
+            ["xrun", "queue_full"],
+            "one line per gap, and the overflow is recorded once"
+        );
+        assert_eq!(
+            gaps[0].1, "event,outcome,ts_ms",
+            "no audio or text in a gap line"
+        );
     }
 
     #[tokio::test]
@@ -656,7 +749,7 @@ mod tests {
     #[ignore = "needs a microphone"]
     async fn default_microphone_delivers_16khz_frames_in_real_time() {
         let gate = InputGate::default();
-        let mut microphone = Microphone::new(gate.clone(), None);
+        let mut microphone = Microphone::new(gate.clone(), None, Recorder::disabled().metrics());
         let mut frames = microphone.open().expect("a default microphone");
         let started = Instant::now();
         let mut count = 0_u32;

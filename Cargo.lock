@@ -4378,6 +4378,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "thalvi-desktop",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 
