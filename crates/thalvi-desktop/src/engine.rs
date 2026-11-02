@@ -920,13 +920,21 @@ where
         }
     }
 
-    /// Sends `frames`, giving up when the user cancels while the recognizer is not taking audio.
+    /// Sends `frames`, giving up when the user cancels or a capture limit passes while the
+    /// recognizer is not taking audio.
     async fn send(&mut self, live: &mut Live<R::Session>, frames: &[Frame]) -> Result<(), Stop> {
+        let limits = self.limits;
         for frame in frames {
             tokio::select! {
                 biased;
                 _ = self.cancel.changed() => return Err(Stop::Cancelled),
                 sent = live.session.send_frame(frame) => sent.map_err(|e| Stop::Failed(e.into()))?,
+                () = tokio::time::sleep_until(live.last_words + limits.idle()) => {
+                    return Err(Stop::Failed(CaptureError::NoEnding(limits.idle())));
+                }
+                () = tokio::time::sleep_until(live.started + limits.max()) => {
+                    return Err(Stop::Failed(CaptureError::TooLong(limits.max())));
+                }
             }
             if live.keep_sent {
                 live.sent.push(*frame);

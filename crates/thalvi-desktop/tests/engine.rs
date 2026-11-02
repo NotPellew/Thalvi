@@ -2071,3 +2071,54 @@ async fn cancelling_works_while_the_recognizer_has_stopped_taking_audio() {
         })
         .await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_capture_limits_still_end_a_capture_whose_recognizer_stopped_taking_audio() {
+    LocalSet::new()
+        .run_until(async {
+            // Words at 5 s, then the server stops reading: idle 10 s ends it at 15 s, long
+            // before the 60 s maximum. Without words the maximum is the only limit that can fire.
+            for (name, limit, words, at, error) in [
+                (
+                    "idle",
+                    r#"{"idle": 10, "max": 600}"#,
+                    true,
+                    15_000,
+                    CaptureError::NoEnding(Duration::from_secs(10)),
+                ),
+                (
+                    "max",
+                    r#"{"idle": 600, "max": 60}"#,
+                    false,
+                    CAPTURE_OPENS + 60_000,
+                    CaptureError::TooLong(Duration::from_secs(60)),
+                ),
+            ] {
+                let (mut rig, engine, frames) =
+                    Rig::new(&format!(r#"{{"capture_limits": {limit}}}"#));
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(5_000, Kind::Quiet).await;
+                if words {
+                    rig.finals("Hello").await;
+                }
+                rig.server.stall_sends();
+                rig.feed_until(5_160, Kind::Quiet).await;
+                rig.at(at - 1).await;
+                assert!(!task.is_finished(), "{name}: not before the limit");
+                rig.at(at).await;
+                assert_eq!(
+                    finished(task).await,
+                    CaptureOutcome::Failed {
+                        error,
+                        recoverable_text: words.then(|| "Hello".to_owned())
+                    },
+                    "{name}"
+                );
+                assert_eq!(rig.started(Cue::Error), [at], "{name}");
+                assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel), "{name}");
+                assert!(rig.gate.is_enabled(), "{name}");
+            }
+        })
+        .await;
+}
