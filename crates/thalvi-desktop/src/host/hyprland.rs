@@ -3,6 +3,7 @@
 mod command;
 
 use std::fmt;
+use std::path::Path;
 
 use serde::Deserialize;
 
@@ -269,6 +270,13 @@ impl<R: CommandRunner> Host for Hyprland<R> {
             })?;
         self.run
             .run(browser, &["--new-tab", url.as_str()], None)
+            .map(|_| ())
+            .map_err(|error| tool(&error))
+    }
+
+    fn open_folder(&self, path: &Path) -> Result<(), HostError> {
+        self.run
+            .run("xdg-open", &[&path.to_string_lossy()], None)
             .map(|_| ())
             .map_err(|error| tool(&error))
     }
@@ -706,6 +714,24 @@ mod tests {
             commands(&host)
                 .iter()
                 .all(|command| !command.starts_with("wtype"))
+        );
+    }
+
+    #[test]
+    fn a_folder_opens_in_the_file_manager() {
+        let ready = host(|_, _| Ok(String::new()));
+        assert_eq!(
+            ready.open_folder(Path::new("/home/me/.local/share/thalvi")),
+            Ok(())
+        );
+        assert_eq!(commands(&ready), ["xdg-open /home/me/.local/share/thalvi"]);
+
+        let missing = host(|_, _| Err(CommandError::NotInstalled("xdg-open".to_owned())));
+        assert_eq!(
+            missing.open_folder(Path::new("/x")),
+            Err(HostError::Unsupported(
+                "Desktop tool xdg-open is not installed.".to_owned()
+            ))
         );
     }
 

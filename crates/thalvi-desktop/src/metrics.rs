@@ -127,8 +127,17 @@ impl Recorder {
     /// # Errors
     /// Fails when the platform has no per-user data directory or the writer cannot start.
     pub fn per_user(kinds: RecordKinds) -> Result<Self, RecorderError> {
-        let dir = dirs::data_local_dir().ok_or(RecorderError::NoDataDir)?;
-        Self::in_dir(kinds, dir.join("thalvi"))
+        Self::in_dir(kinds, Self::user_dir()?)
+    }
+
+    /// The folder [`per_user`](Self::per_user) records into.
+    ///
+    /// # Errors
+    /// Fails when the platform has no per-user data directory.
+    pub fn user_dir() -> Result<PathBuf, RecorderError> {
+        Ok(dirs::data_local_dir()
+            .ok_or(RecorderError::NoDataDir)?
+            .join("thalvi"))
     }
 
     /// Records under `root`; files and directories appear on the first event written.
