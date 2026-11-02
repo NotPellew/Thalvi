@@ -105,6 +105,7 @@ fn start() -> Result<(), String> {
         }))
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
+            commands::get_audio,
             commands::get_settings,
             commands::save_settings,
             commands::set_listening,
@@ -164,14 +165,25 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
     let state = app.state::<AppState>();
     let mut status = state.link.status_updates();
     let mut level = state.link.level_updates();
-    let tray = Tray::new(app, &status.borrow())?;
+    let mut audio = state.link.audio_updates();
+    let tray = Tray::new(app, &status.borrow(), state.link.audio().paused)?;
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {
             let current = status.borrow_and_update().clone();
             show(&handle, &tray, &current);
-            if status.changed().await.is_err() {
-                // The engine thread ended without a quit.
+            let changed = tokio::select! {
+                changed = status.changed() => changed,
+                changed = audio.changed() => {
+                    if changed.is_ok() {
+                        let current = audio.borrow_and_update().clone();
+                        tray.listening(current.paused);
+                        let _ = handle.emit("thalvi://audio", current);
+                    }
+                    changed
+                }
+            };
+            if changed.is_err() {
                 let failed = Status::Failed {
                     notice: "Thalvi stopped unexpectedly. Restart it.".to_owned(),
                 };
@@ -214,10 +226,7 @@ fn act(app: &AppHandle, command: Command) {
     };
     match command {
         Command::Show => show_settings(app),
-        Command::Toggle => {
-            let on = matches!(state.link.status(), Status::Paused | Status::Failed { .. });
-            state.link.send(Control::SetListening(on));
-        }
+        Command::Toggle => state.link.send(Control::ToggleListening),
         Command::Cancel => state.link.send(Control::Cancel),
     }
 }

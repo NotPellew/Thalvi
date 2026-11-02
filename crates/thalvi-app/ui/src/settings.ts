@@ -1,13 +1,13 @@
 // The settings window: sidebar, search, pages, and save or revert of the whole draft.
 
-import type { Backend, Settings } from "./contract.ts";
+import type { AudioStatus, Backend, Settings, Status } from "./contract.ts";
 import { errorText } from "./contract.ts";
 import { createControls } from "./controls.ts";
 import { el } from "./dom.ts";
 import { applyLook } from "./look.ts";
 import { buildPages, type Page, type PageContext } from "./settings-pages.ts";
 
-export const SAVED_TEXT = "Saved — applies after the current capture";
+export const SAVED_TEXT = "Saved — applies after the current capture; the saved microphone is not active until it opens";
 
 export function mountSettings(root: HTMLElement, backend: Backend): void {
   const search = el("input", { type: "search", "aria-label": "Search settings", placeholder: "Search settings", class: "search" });
@@ -27,8 +27,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   let current = "general";
   let draft: Settings | null = null;
   let baseline = "";
-  let listening = true;
-  const live: PageContext["live"] = { level: () => undefined, listening: () => undefined };
+  let runtimeFailure = "";
+  let saveFailure = "";
+  let saving = false;
+  let saved = false;
+  let audio: AudioStatus = { selected: null, active: null, paused: false };
+  const live: PageContext["live"] = { level: () => undefined, listening: () => undefined, audio: () => undefined };
 
   function applyView(): void {
     const query = search.value.trim().toLowerCase();
@@ -52,27 +56,53 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     }
   }
 
+  function feedback(): void {
+    failure.textContent = saveFailure || runtimeFailure;
+    const dirty = draft !== null && JSON.stringify(draft) !== baseline;
+    message.textContent = saving ? "Saving…" : dirty ? "Unsaved changes"
+      : saved && failure.textContent === "" ? SAVED_TEXT : "";
+  }
+
   function changed(): void {
-    if (draft === null) return;
-    failure.textContent = "";
-    message.textContent = JSON.stringify(draft) === baseline ? "" : "Unsaved changes";
+    saveFailure = "";
+    feedback();
+  }
+
+  function showStatus(status: Status): void {
+    if (status.state === "failed") runtimeFailure = status.notice;
+    else if (["listening", "capturing", "done"].includes(status.state)) runtimeFailure = "";
+    feedback();
+  }
+
+  function showAudio(next: AudioStatus): void {
+    audio = next;
+    live.audio(next);
+    live.listening(!next.paused);
+    if (next.paused || next.active === null) live.level(0);
   }
 
   async function load(): Promise<void> {
-    failure.textContent = "";
-    message.textContent = "";
+    saveFailure = "";
+    saved = false;
+    feedback();
     let loaded: Settings;
     try {
       loaded = await backend.getSettings();
     } catch (error) {
-      failure.textContent = errorText(error);
+      saveFailure = errorText(error);
+      feedback();
       return;
     }
     const microphones = await backend.listMicrophones().catch((error: unknown) => ({ error: errorText(error) }));
+    audio = await backend.getAudio().catch(() => ({
+      selected: loaded.microphone,
+      active: null,
+      paused: false,
+    }));
     draft = structuredClone(loaded);
     baseline = JSON.stringify(draft);
     applyLook(root, draft.look);
-    pages = buildPages({ draft, backend, root, controls: createControls(changed), microphones, live });
+    pages = buildPages({ draft, backend, root, controls: createControls(changed), microphones, audio, live });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {
       const button = el("button", { type: "button", "data-page": page.id }, page.title);
@@ -84,7 +114,8 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       return button;
     });
     items.replaceChildren(...navButtons);
-    live.listening(listening);
+    showAudio(audio);
+    feedback();
     applyView();
   }
 
@@ -96,41 +127,37 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   save.addEventListener("click", () => {
     if (draft === null) return;
     const sending = structuredClone(draft);
-    failure.textContent = "";
-    message.textContent = "Saving…";
+    saveFailure = "";
+    saving = true;
+    feedback();
     save.disabled = true;
     revert.disabled = true;
     backend
       .saveSettings(sending)
       .then(() => {
         baseline = JSON.stringify(sending);
-        message.textContent = JSON.stringify(draft) === baseline ? SAVED_TEXT : "Unsaved changes";
+        saved = true;
       })
       .catch((error: unknown) => {
-        message.textContent = "";
-        failure.textContent = errorText(error);
+        saved = false;
+        saveFailure = errorText(error);
       })
       .finally(() => {
+        saving = false;
         save.disabled = false;
         revert.disabled = false;
+        feedback();
       });
   });
 
   backend.onLevel((level) => {
-    live.level(level);
+    live.level(audio.paused || audio.active === null ? 0 : level);
   });
-  backend.onStatus((status) => {
-    listening = status.state !== "paused";
-    live.listening(listening);
+  backend.onAudio(showAudio);
+  backend.onStatus(showStatus);
+  backend.getStatus().then(showStatus).catch((error: unknown) => {
+    runtimeFailure = errorText(error);
+    feedback();
   });
-  backend
-    .getStatus()
-    .then((status) => {
-      listening = status.state !== "paused";
-      live.listening(listening);
-    })
-    .catch((error: unknown) => {
-      console.error("get_status failed", error);
-    });
   void load();
 }

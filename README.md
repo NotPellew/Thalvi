@@ -212,6 +212,13 @@ off keeps the endpoint and key, and accepted captures make no second request.
 Turn it on to use the saved endpoint; Save validates it before applying it to
 subsequent captures.
 
+To change the microphone, pause listening in Settings → General first, then
+choose and save a device in Microphone. Saving keeps listening paused; enable
+it explicitly when ready. **Active microphone** names the opened device,
+separately from the saved choice. If that device is unavailable, Thalvi reports
+the error instead of using another microphone. The level meter uses the same
+stream while listening or capturing.
+
 To dictate without the server or a network, set `"stt": {"engine": "local"}` in
 the config or choose "On this computer" under Speech recognition in Settings.
 The first use downloads about 650 MB (the pill says so); after that it works

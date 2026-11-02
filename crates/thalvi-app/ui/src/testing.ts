@@ -1,7 +1,7 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
-import type { Backend, Settings, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Settings, Status } from "./contract.ts";
 import type { Clock } from "./overlay.ts";
 
 export const SETTINGS: Settings = {
@@ -33,11 +33,23 @@ export const SETTINGS: Settings = {
 export function stubBackend(settings: Settings = SETTINGS, initial: Status = { state: "listening" }) {
   const statusListeners: ((status: Status) => void)[] = [];
   const levelListeners: ((level: number) => void)[] = [];
+  const audioListeners: ((audio: AudioStatus) => void)[] = [];
   const savedListeners: (() => void)[] = [];
+  let audioState: AudioStatus = {
+    selected: settings.microphone,
+    active: initial.state === "paused" ? null : (settings.microphone ?? "Built-in"),
+    paused: initial.state === "paused",
+  };
+  const emitAudio = (next: AudioStatus): void => {
+    audioState = next;
+    for (const listener of audioListeners) listener(next);
+  };
   const backend = {
     getStatus: vi.fn(() => Promise.resolve(initial)),
     onStatus: vi.fn((listener: (status: Status) => void) => statusListeners.push(listener)),
     onLevel: vi.fn((listener: (level: number) => void) => levelListeners.push(listener)),
+    getAudio: vi.fn(() => Promise.resolve(structuredClone(audioState))),
+    onAudio: vi.fn((listener: (audio: AudioStatus) => void) => audioListeners.push(listener)),
     onSettingsSaved: vi.fn((listener: () => void) => savedListeners.push(listener)),
     getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
     saveSettings: vi.fn<(settings: Settings) => Promise<void>>(() => Promise.resolve()),
@@ -51,7 +63,17 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     backend,
     emit: (status: Status) => {
       for (const listener of statusListeners) listener(status);
+      const paused = status.state === "paused";
+      if ((status.state === "paused" || status.state === "listening") && paused !== audioState.paused) {
+        emitAudio({
+          selected: audioState.selected,
+          active: paused ? null : (audioState.selected ?? "Built-in"),
+          paused,
+        });
+      }
     },
+    audio: emitAudio,
+    audioState: () => structuredClone(audioState),
     level: (level: number) => {
       for (const listener of levelListeners) listener(level);
     },

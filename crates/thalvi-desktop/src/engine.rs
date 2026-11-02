@@ -253,7 +253,7 @@ impl EngineHandle {
         self.state.clone()
     }
 
-    /// The loudness of the latest frame of the capture, 0 to 1; 0 outside a capture.
+    /// The loudness of the latest frame while listening or capturing, 0 to 1; 0 otherwise.
     #[must_use]
     pub fn level(&self) -> watch::Receiver<f32> {
         self.level.clone()
@@ -482,7 +482,14 @@ where
             .metric(Event::WakeReset, "ok", Some(reset.elapsed()), Value::Null);
         let metrics = self.recorder.kinds().metrics;
         loop {
-            let frame = frames.next().await?;
+            let frame = match frames.next().await {
+                Ok(frame) => frame,
+                Err(error) => {
+                    self.level.send_replace(0.0);
+                    return Err(error.into());
+                }
+            };
+            self.level.send_replace(loudness(&frame));
             self.note_level(&frame);
             self.remember(&frame);
             let scored = self.wake.process(&frame);
@@ -501,7 +508,13 @@ where
             };
             self.recorder
                 .metric(Event::WakeInference, outcome, took, fields);
-            let wake = scored?;
+            let wake = match scored {
+                Ok(wake) => wake,
+                Err(error) => {
+                    self.level.send_replace(0.0);
+                    return Err(error.into());
+                }
+            };
             if wake.event == Some(WakeEvent::Ambiguous) {
                 if !self.ambiguous {
                     (self.notice)("Wake was ambiguous; still listening.");
@@ -515,10 +528,12 @@ where
                 Some(WakeEvent::Capture) => {
                     self.clip_wake("capture", &wake);
                     self.gate.set_enabled(false);
+                    self.level.send_replace(0.0);
                     return Ok(WakeTrigger::Capture);
                 }
                 Some(WakeEvent::Conversation) => {
                     self.clip_wake("conversation", &wake);
+                    self.level.send_replace(0.0);
                     return Ok(WakeTrigger::Conversation);
                 }
                 Some(WakeEvent::Ambiguous) | None => {}

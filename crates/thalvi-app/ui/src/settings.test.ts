@@ -83,7 +83,8 @@ describe("save", () => {
     goTo("limits");
     type(control("Stop after", "input"), "120");
     goTo("microphone");
-    choose(control("Input device", "select"), "USB Microphone");
+    stub.emit({ state: "paused" });
+    choose(control("Saved device", "select"), "USB Microphone");
     button("Save").click();
     const expected = structuredClone(SETTINGS);
     expected.server = "wss://thalvi.example";
@@ -117,19 +118,24 @@ describe("save", () => {
     expect(root.querySelector(".msg")?.textContent).toBe("");
   });
 
-  it("keeps later task edits unsaved when an in-flight save completes", async () => {
+  it.each(["edit", "apply failure"] as const)("keeps a later %s visible when an in-flight save completes", async (event) => {
     const stub = await open();
     let complete = (): void => { throw new Error("Save has not started"); };
     stub.backend.saveSettings.mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }));
     goTo("tasks");
     button("Save").click();
     expect(button("Revert").disabled).toBe(true);
-    type(root.querySelector<HTMLInputElement>('input[aria-label="Label of script 1"]') as HTMLInputElement, "new label");
+    if (event === "edit") {
+      type(root.querySelector<HTMLInputElement>('input[aria-label="Label of script 1"]') as HTMLInputElement, "new label");
+    } else {
+      stub.emit({ state: "failed", notice: "The new settings could not be applied." });
+    }
     complete();
     await settle();
-    expect(sent(stub).scripts[0]?.label).toBe("docs");
-    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
     expect(button("Revert").disabled).toBe(false);
+    expect(sent(stub).scripts[0]?.label).toBe("docs");
+    expect(root.querySelector(".msg")?.textContent).toBe(event === "edit" ? "Unsaved changes" : "");
+    if (event === "apply failure") expect(root.querySelector(".err")?.textContent).toBe("The new settings could not be applied.");
   });
 });
 
@@ -301,8 +307,77 @@ describe("live controls", () => {
 
   it("lists the microphones and keeps a saved device that is gone", async () => {
     await open({ ...SETTINGS, microphone: "Old Mic" });
-    const options = Array.from(control("Input device", "select").options).map((option) => option.textContent);
+    const options = Array.from(control("Saved device", "select").options).map((option) => option.textContent);
     expect(options).toEqual(["System default", "USB Microphone", "Built-in", "Old Mic (not found)"]);
+  });
+
+  it("disables the saved-device picker until listening is paused", async () => {
+    const stub = await open();
+    goTo("microphone");
+    expect(control("Saved device", "select").disabled).toBe(true);
+    stub.emit({ state: "paused" });
+    expect(control("Saved device", "select").disabled).toBe(false);
+    stub.audio({ selected: null, active: "Built-in", paused: false });
+    expect(control("Saved device", "select").disabled).toBe(true);
+  });
+
+  it("shows the active microphone separately from the saved choice and stays paused after saving while paused", async () => {
+    const stub = await open();
+    goTo("microphone");
+    expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe("Built-in");
+    stub.emit({ state: "paused" });
+    expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe("None — no microphone is open");
+    choose(control("Saved device", "select"), "USB Microphone");
+    button("Save").click();
+    await settle();
+    expect(sent(stub).microphone).toBe("USB Microphone");
+    expect(control("Saved device", "select").value).toBe("USB Microphone");
+    expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe("None — no microphone is open");
+    expect(control("Listening", "input").checked).toBe(false);
+    expect(root.querySelector(".msg")?.textContent).toBe(SAVED_TEXT);
+  });
+
+  it("shows a failed apply plainly and clears the saved message", async () => {
+    const stub = await open();
+    button("Save").click();
+    await settle();
+    expect(root.querySelector(".msg")?.textContent).toBe(SAVED_TEXT);
+    stub.emit({ state: "failed", notice: "The saved microphone could not be opened." });
+    expect(root.querySelector(".msg")?.textContent).toBe("");
+    expect(root.querySelector(".err")?.textContent).toBe("The saved microphone could not be opened.");
+  });
+
+  it("resets the microphone meter when listening pauses", async () => {
+    const stub = await open();
+    goTo("microphone");
+    stub.level(0.5);
+    expect((root.querySelector(".meter b") as HTMLElement).style.transform).toBe("scaleX(0.500)");
+    stub.emit({ state: "paused" });
+    expect((root.querySelector(".meter b") as HTMLElement).style.transform).toBe("scaleX(0.000)");
+    stub.level(0.6);
+    expect((root.querySelector(".meter b") as HTMLElement).style.transform).toBe("scaleX(0.000)");
+  });
+
+  it.each([false, true])("uses audio state for listening controls when a failure occurs (paused=%s)", async (paused) => {
+    const stub = await open();
+    stub.audio({ selected: null, active: paused ? null : "Built-in", paused });
+    stub.emit({ state: "failed", notice: "The last operation failed." });
+    expect(control("Listening", "input").checked).toBe(!paused);
+    expect(control("Saved device", "select").disabled).toBe(!paused);
+  });
+
+  it.each(["save", "revert", "edit"])("retains a runtime problem through %s and clears it on recovery", async (action) => {
+    const stub = await open();
+    stub.emit({ state: "failed", notice: "The chosen microphone is unavailable." });
+    if (action === "save") button("Save").click();
+    else if (action === "revert") button("Revert").click();
+    else type(control("Server address", "input"), "ws://other");
+    await settle();
+    expect(root.querySelector(".err")?.textContent).toBe("The chosen microphone is unavailable.");
+    expect(root.querySelector(".msg")?.textContent).toBe(action === "edit" ? "Unsaved changes" : "");
+    stub.emit({ state: "listening" });
+    expect(root.querySelector(".err")?.textContent).toBe("");
+    if (action === "edit") expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
   });
 
   it("shows the recordings kinds and opens the folder", async () => {

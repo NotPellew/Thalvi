@@ -8,6 +8,7 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use serde_json::Value;
 use thalvi_desktop::audio::{Frames, InputGate, Microphone};
 use thalvi_desktop::capture::EndingPauses;
@@ -26,7 +27,7 @@ use thalvi_desktop::wake::WakeEngine;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
-use crate::status::{Mode, Status, View};
+use crate::status::{Mode, STARTING_NOTICE, Status, View};
 
 /// What the user sees while the speech model downloads or loads.
 const LOADING_NOTICE: &str = "Loading the speech model. The first time it downloads about 650 MB.";
@@ -39,6 +40,8 @@ const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum Control {
     /// Off closes the microphone; on opens it again.
     SetListening(bool),
+    /// Toggle the runner-owned listening intent, including while starting.
+    ToggleListening,
     /// Cancels the capture in progress.
     Cancel,
     /// Takes new settings in between captures.
@@ -47,11 +50,23 @@ pub enum Control {
     Quit,
 }
 
+/// The saved microphone choice, the device actually open, and whether listening is paused.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioStatus {
+    /// The device named in the saved config; `None` follows the system default.
+    pub selected: Option<String>,
+    /// The name of the device the opened stream uses; `None` when no stream is open.
+    pub active: Option<String>,
+    pub paused: bool,
+}
+
 /// The app's side of the engine thread.
 pub struct EngineLink {
     control: mpsc::UnboundedSender<Control>,
     status: watch::Receiver<Status>,
     level: watch::Receiver<f32>,
+    audio: watch::Receiver<AudioStatus>,
     stopped: Mutex<std_mpsc::Receiver<()>>,
 }
 
@@ -62,8 +77,15 @@ impl EngineLink {
     /// Fails when the thread or its runtime cannot start.
     pub fn start(config: DesktopConfig, host: Desktop) -> Result<Self, String> {
         let (control, control_rx) = mpsc::unbounded_channel();
-        let (status_tx, status) = watch::channel(Status::Paused);
+        let (status_tx, status) = watch::channel(Status::Loading {
+            notice: STARTING_NOTICE.to_owned(),
+        });
         let (level_tx, level) = watch::channel(0.0);
+        let (audio_tx, audio) = watch::channel(AudioStatus {
+            selected: config.microphone.clone(),
+            active: None,
+            paused: false,
+        });
         let (ready_tx, ready) = std_mpsc::channel();
         let (stopped_tx, stopped) = std_mpsc::channel();
         std::thread::Builder::new()
@@ -82,7 +104,14 @@ impl EngineLink {
                 };
                 let _ = ready_tx.send(Ok(()));
                 let publisher = Publisher::new(status_tx, config.ending_pause);
-                let runner = Runner::new(config, host, control_rx, publisher, Arc::new(level_tx));
+                let runner = Runner::new(
+                    config,
+                    host,
+                    control_rx,
+                    publisher,
+                    Arc::new(level_tx),
+                    audio_tx,
+                );
                 LocalSet::new().block_on(&runtime, runner.run());
                 let _ = stopped_tx.send(());
             })
@@ -94,6 +123,7 @@ impl EngineLink {
             control,
             status,
             level,
+            audio,
             stopped: Mutex::new(stopped),
         })
     }
@@ -118,6 +148,16 @@ impl EngineLink {
         self.level.clone()
     }
 
+    #[must_use]
+    pub fn audio(&self) -> AudioStatus {
+        self.audio.borrow().clone()
+    }
+
+    #[must_use]
+    pub fn audio_updates(&self) -> watch::Receiver<AudioStatus> {
+        self.audio.clone()
+    }
+
     /// Stops the engine and waits until the microphone and the recognizer are closed.
     ///
     /// Blocks for at most a few seconds.
@@ -139,7 +179,7 @@ impl Publisher {
         Rc::new(Self {
             view: RefCell::new(View {
                 // The models load before the first capture can start.
-                mode: Mode::Paused,
+                mode: Mode::Starting,
                 engine: EngineState::Listening,
                 target: None,
                 pauses,
@@ -189,6 +229,13 @@ struct Session {
 }
 
 impl Session {
+    fn active_device(&self) -> Option<String> {
+        self.frames.as_ref()?;
+        self.microphone
+            .as_ref()
+            .and_then(|microphone| microphone.active_name().map(str::to_owned))
+    }
+
     fn close_microphone(&mut self) {
         self.frames = None;
         if let Some(microphone) = &mut self.microphone {
@@ -232,6 +279,7 @@ struct Runner {
     config: DesktopConfig,
     session: Option<Session>,
     paused: bool,
+    stopping: bool,
     /// Set while listening wants a microphone it does not have: how many reopen attempts failed.
     reopen_failures: Option<u32>,
     /// Settings that arrived during a capture.
@@ -239,6 +287,7 @@ struct Runner {
     control: mpsc::UnboundedReceiver<Control>,
     publisher: Rc<Publisher>,
     level: Arc<watch::Sender<f32>>,
+    audio: watch::Sender<AudioStatus>,
     delivery: Delivery<Desktop>,
     http: reqwest::Client,
     /// Loads the current engine's speech model.
@@ -252,16 +301,19 @@ impl Runner {
         control: mpsc::UnboundedReceiver<Control>,
         publisher: Rc<Publisher>,
         level: Arc<watch::Sender<f32>>,
+        audio: watch::Sender<AudioStatus>,
     ) -> Self {
         Self {
             config,
             session: None,
             paused: false,
+            stopping: false,
             reopen_failures: None,
             pending: None,
             control,
             publisher,
             level,
+            audio,
             delivery: Delivery::new(host),
             http: reqwest::Client::new(),
             loading: None,
@@ -286,11 +338,13 @@ impl Runner {
         match self.build(&config).await {
             Ok(session) => {
                 self.session = Some(session);
-                self.publisher.mode(Mode::Idle);
                 self.load_speech_model();
                 self.open_microphone().await;
             }
-            Err(message) => self.fail(&message),
+            Err(message) => {
+                self.fail(&message);
+                self.publish_audio();
+            }
         }
     }
 
@@ -364,9 +418,11 @@ impl Runner {
             recorder,
         );
         tokio::task::spawn_local(follow(
-            handle.clone(),
+            handle.state(),
+            handle.level(),
             Rc::clone(&self.publisher),
             Arc::clone(&self.level),
+            self.audio.subscribe(),
         ));
         if local.is_some() {
             println!("Transcribing on this machine.");
@@ -385,12 +441,56 @@ impl Runner {
         })
     }
 
+    fn publish_audio(&self) {
+        let next = AudioStatus {
+            selected: self.config.microphone.clone(),
+            active: self.session.as_ref().and_then(Session::active_device),
+            paused: self.paused,
+        };
+        self.audio.send_if_modified(|current| {
+            if *current == next {
+                return false;
+            }
+            *current = next;
+            true
+        });
+    }
+
+    fn close_microphone(&mut self) {
+        if let Some(session) = self.session.as_mut() {
+            session.close_microphone();
+        }
+        self.level.send_replace(0.0);
+        self.publish_audio();
+    }
+
     /// Opens the microphone unless listening is paused; a failure becomes the status.
     async fn open_microphone(&mut self) {
-        if self.paused {
-            self.publisher.mode(Mode::Paused);
+        let mut requests = Requests {
+            listening_off: self.paused,
+            ..Requests::default()
+        };
+        requests.read_queued(&mut self.control);
+        self.paused = requests.listening_off;
+        self.stopping |= requests.quit;
+        if let Some(config) = requests.pending
+            && config != self.config
+        {
+            self.pending = Some(config);
+        }
+        if self.stopping || self.pending.is_some() {
+            self.publish_audio();
             return;
         }
+        if self.paused {
+            self.publisher.mode(Mode::Paused);
+            self.publish_audio();
+            return;
+        }
+        if self.reopen_failures.is_none() {
+            self.publisher.mode(Mode::Starting);
+        }
+        self.publish_audio();
         let Some(session) = self.session.as_mut() else {
             return;
         };
@@ -401,6 +501,7 @@ impl Runner {
             }
             Err(message) => self.microphone_failed(&message),
         }
+        self.publish_audio();
     }
 
     /// Shows why listening has no microphone and schedules the next attempt to reopen it.
@@ -414,8 +515,12 @@ impl Runner {
     }
 
     async fn step(&mut self) -> Flow {
+        if self.stopping {
+            return Flow::Quit;
+        }
         if let Some(config) = self.pending.take() {
             self.apply(config).await;
+            return Flow::Continue;
         }
         let listening = !self.paused
             && self
@@ -463,9 +568,7 @@ impl Runner {
             }
             Woke::Trigger(Err(error)) => {
                 tracing::warn!(?error, "listening stopped");
-                if let Some(session) = self.session.as_mut() {
-                    session.close_microphone();
-                }
+                self.close_microphone();
                 // A capture that failed with the microphone has said where its text went.
                 if !self.publisher.failed() {
                     self.fail(&error.to_string());
@@ -479,22 +582,8 @@ impl Runner {
     /// Acts on a control message while nothing is being captured.
     async fn handle(&mut self, control: Control) -> Flow {
         match control {
-            Control::SetListening(true) => {
-                self.paused = false;
-                let open = self
-                    .session
-                    .as_ref()
-                    .is_some_and(|session| session.frames.is_some());
-                if open {
-                    self.publisher.mode(Mode::Idle);
-                } else if self.session.is_some() {
-                    self.open_microphone().await;
-                } else {
-                    let config = self.config.clone();
-                    self.start(config).await;
-                }
-            }
-            Control::SetListening(false) => self.pause(),
+            Control::SetListening(on) => self.set_listening(on).await,
+            Control::ToggleListening => self.set_listening(self.paused).await,
             Control::Cancel => {}
             Control::Apply(config) => self.apply(*config).await,
             Control::Quit => return Flow::Quit,
@@ -502,12 +591,30 @@ impl Runner {
         Flow::Continue
     }
 
+    async fn set_listening(&mut self, on: bool) {
+        if !on {
+            self.pause();
+            return;
+        }
+        self.paused = false;
+        self.publish_audio();
+        let open = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.frames.is_some());
+        if open {
+            self.publisher.mode(Mode::Idle);
+        } else if self.session.is_some() {
+            self.open_microphone().await;
+        } else {
+            self.start(self.config.clone()).await;
+        }
+    }
+
     fn pause(&mut self) {
         self.paused = true;
         self.reopen_failures = None;
-        if let Some(session) = self.session.as_mut() {
-            session.close_microphone();
-        }
+        self.close_microphone();
         self.publisher.mode(Mode::Paused);
     }
 
@@ -516,10 +623,7 @@ impl Runner {
         if config == self.config {
             return;
         }
-        if let Some(session) = self.session.as_mut() {
-            // The queue would overflow while the models load.
-            session.close_microphone();
-        }
+        self.close_microphone();
         match self.build(&config).await {
             Ok(session) => {
                 if let Some(old) = self.session.replace(session) {
@@ -672,6 +776,10 @@ impl Requests {
     fn take(&mut self, control: Option<Control>) -> bool {
         match control {
             Some(Control::Cancel) => true,
+            Some(Control::ToggleListening) => {
+                self.listening_off = !self.listening_off;
+                self.listening_off
+            }
             Some(Control::SetListening(on)) => {
                 self.listening_off = !on;
                 !on
@@ -720,12 +828,12 @@ async fn drive<O>(
 
 /// Carries one engine's state and level changes to the publisher until the engine is dropped.
 async fn follow(
-    handle: EngineHandle,
+    mut state: watch::Receiver<EngineState>,
+    mut level: watch::Receiver<f32>,
     publisher: Rc<Publisher>,
     level_out: Arc<watch::Sender<f32>>,
+    audio: watch::Receiver<AudioStatus>,
 ) {
-    let mut state = handle.state();
-    let mut level = handle.level();
     loop {
         tokio::select! {
             changed = state.changed() => {
@@ -739,7 +847,9 @@ async fn follow(
                 if changed.is_err() {
                     break;
                 }
-                level_out.send_replace(*level.borrow_and_update());
+                let next = *level.borrow_and_update();
+                let current = audio.borrow();
+                level_out.send_replace(if current.paused || current.active.is_none() { 0.0 } else { next });
             }
         }
     }
@@ -802,6 +912,7 @@ mod tests {
             (Control::Quit, true, false),
             (Control::Cancel, false, false),
             (Control::SetListening(false), false, true),
+            (Control::ToggleListening, false, true),
         ] {
             let label = format!("{control:?}");
             let (outcome, requests, started) = run(vec![control], vec![]).await;
@@ -818,6 +929,7 @@ mod tests {
             (Control::Quit, true, false),
             (Control::Cancel, false, false),
             (Control::SetListening(false), false, true),
+            (Control::ToggleListening, false, true),
         ] {
             let label = format!("{control:?}");
             let (outcome, requests, started) = run(vec![], vec![control]).await;
@@ -872,6 +984,7 @@ mod tests {
             (Some(Control::Apply(Box::new(config))), true),
             (Some(Control::Cancel), false),
             (Some(Control::SetListening(false)), false),
+            (Some(Control::ToggleListening), false),
             (Some(Control::Quit), false),
         ] {
             let label = format!("{control:?}");
@@ -915,5 +1028,180 @@ mod tests {
         )
         .await;
         assert!(requests.listening_off);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_second_toggle_changes_the_intent_without_reviving_a_cancelled_capture() {
+        // Both toggles land before the capture starts: nothing starts, and the intent is on again.
+        let (outcome, requests, started) = run(
+            vec![Control::ToggleListening, Control::ToggleListening],
+            vec![],
+        )
+        .await;
+        assert_eq!(outcome, None, "a cancelled capture delivers nothing");
+        assert!(!started);
+        assert!(
+            !requests.listening_off,
+            "the second toggle is the latest intent"
+        );
+
+        // Both toggles land during the capture: the first cancels it, the second only
+        // changes the intent, so the cancelled outcome still is not a delivery to resume.
+        let (outcome, requests, started) = run(
+            vec![],
+            vec![Control::ToggleListening, Control::ToggleListening],
+        )
+        .await;
+        assert_eq!(outcome, Some("cancelled"));
+        assert!(started);
+        assert!(!requests.listening_off);
+
+        let (outcome, requests, _) = run(vec![], vec![Control::ToggleListening]).await;
+        assert_eq!(outcome, Some("cancelled"));
+        assert!(requests.listening_off, "one toggle during a capture pauses");
+    }
+
+    #[test]
+    fn listening_requests_queued_before_the_microphone_opens_settle_on_the_latest_one() {
+        let config = DesktopConfig::from_json_str("{}", None).unwrap();
+        for (listening_off, queued, expected) in [
+            (false, vec![Control::ToggleListening], true),
+            (
+                false,
+                vec![Control::ToggleListening, Control::ToggleListening],
+                false,
+            ),
+            (true, vec![Control::ToggleListening], false),
+            (
+                false,
+                vec![Control::SetListening(false), Control::ToggleListening],
+                false,
+            ),
+            (
+                false,
+                vec![Control::ToggleListening, Control::SetListening(true)],
+                false,
+            ),
+            (true, vec![Control::SetListening(true)], false),
+            (
+                false,
+                vec![Control::SetListening(false), Control::SetListening(false)],
+                true,
+            ),
+            (
+                true,
+                vec![Control::SetListening(true), Control::SetListening(true)],
+                false,
+            ),
+        ] {
+            let label = format!("off={listening_off} {queued:?}");
+            let (sender, mut control) = mpsc::unbounded_channel();
+            for message in queued {
+                sender.send(message).unwrap();
+            }
+            let mut requests = Requests {
+                listening_off,
+                ..Requests::default()
+            };
+            requests.read_queued(&mut control);
+            assert_eq!(requests.listening_off, expected, "{label}");
+            assert!(!requests.quit, "{label}");
+        }
+
+        let (sender, mut control) = mpsc::unbounded_channel();
+        sender
+            .send(Control::Apply(Box::new(config.clone())))
+            .unwrap();
+        sender.send(Control::Quit).unwrap();
+        let mut requests = Requests::default();
+        assert!(requests.read_queued(&mut control), "a queued quit ends it");
+        assert!(requests.quit);
+        assert_eq!(requests.pending, Some(config));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_level_that_arrives_after_the_microphone_closed_or_paused_stays_zero() {
+        LocalSet::new()
+            .run_until(a_level_forwarding_follows_the_open_microphone())
+            .await;
+    }
+
+    async fn a_level_forwarding_follows_the_open_microphone() {
+        let (state_tx, state) = watch::channel(EngineState::Listening);
+        let (engine_level_tx, engine_level) = watch::channel(0.0_f32);
+        let (level_tx, mut level) = watch::channel(0.0_f32);
+        let (status_tx, _status) = watch::channel(Status::Paused);
+        let (audio_tx, audio) = watch::channel(AudioStatus {
+            selected: None,
+            active: Some("USB Mic".to_owned()),
+            paused: false,
+        });
+        let following = tokio::task::spawn_local(follow(
+            state,
+            engine_level,
+            Publisher::new(status_tx, EndingPauses::default()),
+            Arc::new(level_tx),
+            audio,
+        ));
+
+        engine_level_tx.send_replace(0.8);
+        tokio::time::timeout(Duration::from_secs(5), level.changed())
+            .await
+            .expect("the level was not forwarded")
+            .unwrap();
+        assert_eq!(
+            *level.borrow(),
+            0.8,
+            "an open microphone forwards its level"
+        );
+
+        // What closing and pausing publish, before any pending engine level arrives.
+        audio_tx.send_replace(AudioStatus {
+            selected: None,
+            active: None,
+            paused: true,
+        });
+        engine_level_tx.send_replace(0.9);
+        tokio::time::timeout(Duration::from_secs(5), level.changed())
+            .await
+            .expect("the level was not forwarded")
+            .unwrap();
+        assert_eq!(
+            *level.borrow(),
+            0.0,
+            "a pending level must not restore a paused meter"
+        );
+
+        audio_tx.send_replace(AudioStatus {
+            selected: None,
+            active: None,
+            paused: false,
+        });
+        engine_level_tx.send_replace(0.7);
+        tokio::time::timeout(Duration::from_secs(5), level.changed())
+            .await
+            .expect("the level was not forwarded")
+            .unwrap();
+        assert_eq!(
+            *level.borrow(),
+            0.0,
+            "a pending level must not restore a closed meter"
+        );
+
+        audio_tx.send_replace(AudioStatus {
+            selected: None,
+            active: Some("USB Mic".to_owned()),
+            paused: false,
+        });
+        engine_level_tx.send_replace(0.6);
+        tokio::time::timeout(Duration::from_secs(5), level.changed())
+            .await
+            .expect("the level was not forwarded")
+            .unwrap();
+        assert_eq!(*level.borrow(), 0.6, "a reopened microphone forwards again");
+
+        drop(state_tx);
+        drop(engine_level_tx);
+        following.await.unwrap();
     }
 }

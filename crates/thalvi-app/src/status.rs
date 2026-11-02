@@ -4,6 +4,8 @@ use serde::Serialize;
 use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 use thalvi_desktop::engine::EngineState;
 
+pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not ready yet.";
+
 /// The status event's payload; its JSON form is the contract with the TypeScript UI.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(
@@ -57,6 +59,8 @@ pub enum Status {
 pub enum Mode {
     /// Follow the engine.
     Idle,
+    /// Models or the microphone are starting.
+    Starting,
     /// The microphone is closed.
     Paused,
     /// An accepted capture is being delivered.
@@ -91,6 +95,9 @@ impl View {
             };
         }
         match (&self.mode, &self.engine) {
+            (Mode::Starting, _) => Status::Loading {
+                notice: STARTING_NOTICE.to_owned(),
+            },
             (Mode::Paused, _) => Status::Paused,
             (Mode::Delivering(route), _) => Status::Working {
                 target,
@@ -226,6 +233,13 @@ mod tests {
         };
         let failed = Mode::Failed("The microphone is off.".to_owned());
         let cases = [
+            (
+                Mode::Starting,
+                EngineState::Listening,
+                Status::Loading {
+                    notice: STARTING_NOTICE.to_owned(),
+                },
+            ),
             (Mode::Paused, capturing(), Status::Paused),
             (
                 Mode::Delivering(CaptureRoute::Submit),

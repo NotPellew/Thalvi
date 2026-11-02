@@ -3,7 +3,7 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Backend, Level, Settings, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Level, Settings, Status } from "./contract.ts";
 
 export function tauriBackend(): Backend {
   return {
@@ -16,6 +16,12 @@ export function tauriBackend(): Backend {
     onLevel: (listener) => {
       void listen<Level>("thalvi://level", (event) => {
         listener(event.payload.level);
+      });
+    },
+    getAudio: () => invoke<AudioStatus>("get_audio"),
+    onAudio: (listener) => {
+      void listen<AudioStatus>("thalvi://audio", (event) => {
+        listener(event.payload);
       });
     },
     onSettingsSaved: (listener) => {
