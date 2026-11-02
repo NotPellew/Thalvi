@@ -335,14 +335,15 @@ impl CaptureSession {
             return Err(CaptureFullError);
         }
         self.pieces.push(text.to_owned());
+        let window = match &self.pending {
+            Some(pending) if pending.route == route && pending.text == before => pending.window,
+            _ if speech => QuietWindow::WaitingForQuiet,
+            _ => QuietWindow::CountingDown { since: now },
+        };
         let pending = PendingEnding {
             route,
             text: before.to_owned(),
-            window: if speech {
-                QuietWindow::WaitingForQuiet
-            } else {
-                QuietWindow::CountingDown { since: now }
-            },
+            window,
         };
         self.pending = Some(pending.clone());
         Ok(FinalStep::Armed(pending))
@@ -672,6 +673,22 @@ mod tests {
             Some(CaptureRequest {
                 route: CaptureRoute::Task,
                 text: "hello submit more words".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn a_final_that_leaves_the_ending_unchanged_keeps_its_pause() {
+        let base = Instant::now();
+        let mut session = session();
+        session.on_final("Keep this submit", base, false).unwrap();
+        let step = session.on_final("...", ms(base, 1_000), true).unwrap();
+        assert_eq!(armed_parts(&step), armed(CaptureRoute::Submit, "Keep this"));
+        assert_eq!(
+            session.poll_ready(ms(base, 2_500)),
+            Some(CaptureRequest {
+                route: CaptureRoute::Submit,
+                text: "Keep this".to_owned()
             })
         );
     }
