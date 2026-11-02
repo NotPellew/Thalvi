@@ -1386,3 +1386,39 @@ async fn a_final_that_continues_after_an_ending_cancels_it_with_a_cue() {
         })
         .await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_works_while_the_recognizer_has_stopped_taking_audio() {
+    LocalSet::new()
+        .run_until(async {
+            for (name, in_backlog) in [("a live frame", false), ("the startup backlog", true)] {
+                let (mut rig, engine, frames) = Rig::new("{}");
+                let task = capture_task(engine, frames);
+                if in_backlog {
+                    rig.server.stall_sends();
+                    rig.wake_word().await;
+                    rig.at(230).await;
+                    rig.feed.send(quiet(5));
+                    settle().await;
+                    rig.server.ready();
+                    settle().await;
+                } else {
+                    rig.open().await;
+                    rig.feed_until(400, Kind::Quiet).await;
+                    rig.server.stall_sends();
+                    rig.feed_until(480, Kind::Quiet).await;
+                }
+                assert!(!task.is_finished(), "{name}: the send is stuck");
+                rig.handle.cancel();
+                settle().await;
+                assert!(
+                    task.is_finished(),
+                    "{name}: cancel is not waiting for the send"
+                );
+                assert_eq!(finished(task).await, CaptureOutcome::Cancelled, "{name}");
+                assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel), "{name}");
+                assert!(rig.gate.is_enabled(), "{name}");
+            }
+        })
+        .await;
+}

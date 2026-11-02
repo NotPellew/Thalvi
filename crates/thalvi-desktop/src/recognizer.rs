@@ -2,7 +2,10 @@
 
 use std::{
     future::Future,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -306,6 +309,7 @@ pub struct FakeRecognizer {
     ready: Mutex<Option<oneshot::Receiver<Result<(), RecognizerError>>>>,
     events: Mutex<Option<mpsc::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>>>,
     calls: Arc<Mutex<Vec<FakeCall>>>,
+    stalled: Arc<AtomicBool>,
 }
 
 /// Test-side handle of a [`FakeRecognizer`].
@@ -313,12 +317,14 @@ pub struct FakeControl {
     ready: Option<oneshot::Sender<Result<(), RecognizerError>>>,
     events: mpsc::UnboundedSender<Result<RecognizerEvent, RecognizerError>>,
     calls: Arc<Mutex<Vec<FakeCall>>>,
+    stalled: Arc<AtomicBool>,
 }
 
 /// The stream a [`FakeRecognizer`] hands out once ready.
 pub struct FakeSession {
     events: mpsc::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>,
     calls: Arc<Mutex<Vec<FakeCall>>>,
+    stalled: Arc<AtomicBool>,
 }
 
 impl FakeRecognizer {
@@ -328,16 +334,19 @@ impl FakeRecognizer {
         let (ready_tx, ready_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let calls = Arc::new(Mutex::new(Vec::new()));
+        let stalled = Arc::new(AtomicBool::new(false));
         (
             Self {
                 ready: Mutex::new(Some(ready_rx)),
                 events: Mutex::new(Some(events_rx)),
                 calls: Arc::clone(&calls),
+                stalled: Arc::clone(&stalled),
             },
             FakeControl {
                 ready: Some(ready_tx),
                 events: events_tx,
                 calls,
+                stalled,
             },
         )
     }
@@ -358,6 +367,7 @@ impl Recognizer for FakeRecognizer {
         Ok(FakeSession {
             events,
             calls: Arc::clone(&self.calls),
+            stalled: Arc::clone(&self.stalled),
         })
     }
 }
@@ -377,6 +387,11 @@ impl FakeControl {
 
     pub fn emit(&self, event: Result<RecognizerEvent, RecognizerError>) {
         let _ = self.events.send(event);
+    }
+
+    /// From now on frames are accepted but never finish sending, as when the server stops reading.
+    pub fn stall_sends(&self) {
+        self.stalled.store(true, Ordering::Relaxed);
     }
 
     /// Everything the session was asked to do so far.
@@ -403,7 +418,13 @@ impl RecognizerSession for FakeSession {
         frame: &Frame,
     ) -> impl Future<Output = Result<(), RecognizerError>> + Send {
         self.record(FakeCall::Frame(Box::new(*frame)));
-        std::future::ready(Ok(()))
+        let stalled = self.stalled.load(Ordering::Relaxed);
+        async move {
+            if stalled {
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        }
     }
 
     async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {

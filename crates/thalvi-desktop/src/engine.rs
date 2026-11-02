@@ -271,6 +271,21 @@ struct Live<S> {
     cues: FuturesUnordered<LocalBoxFuture<'static, CueEnd>>,
 }
 
+/// Why sending audio stopped the capture.
+enum Stop {
+    Cancelled,
+    Failed(CaptureError),
+}
+
+impl From<Stop> for Done {
+    fn from(stop: Stop) -> Self {
+        match stop {
+            Stop::Cancelled => Self::Stopped,
+            Stop::Failed(error) => Self::Failed(error),
+        }
+    }
+}
+
 /// Why the capture loop stopped.
 enum Done {
     /// [`EngineHandle::cancel`].
@@ -645,8 +660,8 @@ where
         backlog: Vec<Frame>,
     ) -> Done {
         for frame in backlog {
-            if let Err(error) = self.on_frame(live, &frame).await {
-                return Done::Failed(error);
+            if let Err(stop) = self.on_frame(live, &frame).await {
+                return stop.into();
             }
         }
         loop {
@@ -670,7 +685,7 @@ where
                 }
                 Step::Event(Ok(RecognizerEvent::Final(text))) => self.on_final(live, &text),
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),
-                Step::Frame(Ok(frame)) => self.on_frame(live, &frame).await.err().map(Done::Failed),
+                Step::Frame(Ok(frame)) => self.on_frame(live, &frame).await.err().map(Done::from),
                 Step::Cue(end) => {
                     live.last_audio = Instant::now();
                     self.cue_metric(Event::Cue, &end);
@@ -754,11 +769,7 @@ where
 
     /// Judges one frame and sends it, or holds it while an ending is pending and the user has
     /// not been heard continuing.
-    async fn on_frame(
-        &mut self,
-        live: &mut Live<R::Session>,
-        frame: &Frame,
-    ) -> Result<(), CaptureError> {
+    async fn on_frame(&mut self, live: &mut Live<R::Session>, frame: &Frame) -> Result<(), Stop> {
         let now = Instant::now();
         live.last_audio = now;
         let pending = live.text.pending().is_some();
@@ -768,7 +779,7 @@ where
             live.relayed = false;
             let mut out: Vec<Frame> = live.held.drain(..).collect();
             out.push(*frame);
-            return Self::send(live, &out).await;
+            return self.send(live, &out).await;
         }
         if live.held.len() == usize::from(CONTINUATION_FRAMES) {
             live.held.pop_front();
@@ -785,20 +796,25 @@ where
         }
         if live.relayed {
             live.held.clear();
-            return Self::send(live, std::slice::from_ref(frame)).await;
+            return self.send(live, std::slice::from_ref(frame)).await;
         }
         if live.speech_run >= CONTINUATION_FRAMES {
             live.relayed = true;
             self.ending_state("local_speech_relayed");
             let out: Vec<Frame> = live.held.drain(..).collect();
-            return Self::send(live, &out).await;
+            return self.send(live, &out).await;
         }
         Ok(())
     }
 
-    async fn send(live: &mut Live<R::Session>, frames: &[Frame]) -> Result<(), CaptureError> {
+    /// Sends `frames`, giving up when the user cancels while the recognizer is not taking audio.
+    async fn send(&mut self, live: &mut Live<R::Session>, frames: &[Frame]) -> Result<(), Stop> {
         for frame in frames {
-            live.session.send_frame(frame).await?;
+            tokio::select! {
+                biased;
+                _ = self.cancel.changed() => return Err(Stop::Cancelled),
+                sent = live.session.send_frame(frame) => sent.map_err(|e| Stop::Failed(e.into()))?,
+            }
             if live.keep_sent {
                 live.sent.push(*frame);
             }
