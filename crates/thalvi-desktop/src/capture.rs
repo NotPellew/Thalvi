@@ -158,12 +158,11 @@ pub struct EndingPauses {
     task: Duration,
 }
 
-/// A pause was outside what the user can interrupt comfortably. Shown as written.
+/// A pause was outside the range the user may choose. Shown as written.
 #[derive(Clone, Copy, Debug, PartialEq, thiserror::Error)]
-#[error("The {ending} pause must be a number of seconds from {min} to 3.")]
+#[error("The {ending} pause must be a number of seconds from 0 to 5.")]
 pub struct PauseError {
     ending: &'static str,
-    min: f64,
 }
 
 #[derive(Deserialize)]
@@ -179,19 +178,15 @@ impl TryFrom<RawEndingPauses> for EndingPauses {
 
     fn try_from(raw: RawEndingPauses) -> Result<Self, PauseError> {
         let defaults = Self::default();
-        let pause =
-            |ending: &'static str, min: f64, seconds: Option<f64>, default: Duration| match seconds
-            {
-                None => Ok(default),
-                Some(seconds) if (min..=3.0).contains(&seconds) => {
-                    Ok(Duration::from_secs_f64(seconds))
-                }
-                Some(_) => Err(PauseError { ending, min }),
-            };
+        let pause = |ending: &'static str, seconds: Option<f64>, default: Duration| match seconds {
+            None => Ok(default),
+            Some(seconds) if (0.0..=5.0).contains(&seconds) => Ok(Duration::from_secs_f64(seconds)),
+            Some(_) => Err(PauseError { ending }),
+        };
         Ok(Self {
-            paste: pause("paste", 0.5, raw.paste, defaults.paste)?,
-            submit: pause("submit", 2.0, raw.submit, defaults.submit)?,
-            task: pause("task", 2.0, raw.task, defaults.task)?,
+            paste: pause("paste", raw.paste, defaults.paste)?,
+            submit: pause("submit", raw.submit, defaults.submit)?,
+            task: pause("task", raw.task, defaults.task)?,
         })
     }
 }
@@ -1170,28 +1165,21 @@ mod tests {
     }
 
     #[test]
-    fn each_ending_has_its_own_pause_with_its_own_range() {
+    fn each_ending_has_its_own_pause_from_zero_to_five_seconds() {
         let ms = |paste, submit, task| Ok([paste, submit, task].map(Duration::from_millis));
         for (json, expected) in [
             ("{}", ms(700, 2500, 2500)),
             (
-                r#"{"paste": 0.5, "submit": 3, "task": 2}"#,
-                ms(500, 3000, 2000),
+                r#"{"paste": 0, "submit": 5, "task": 1.5}"#,
+                ms(0, 5000, 1500),
             ),
-            (r#"{"submit": 2.25}"#, ms(700, 2250, 2500)),
-            (r#"{"paste": 3}"#, ms(3000, 2500, 2500)),
+            (r#"{"submit": 0.7}"#, ms(700, 700, 2500)),
             (
-                r#"{"paste": 0.499}"#,
-                Err("The paste pause must be a number of seconds from 0.5 to 3."),
+                r#"{"paste": -0.001}"#,
+                Err("The paste pause must be a number of seconds from 0 to 5."),
             ),
-            (r#"{"paste": 3.001}"#, Err("paste pause must be")),
-            (
-                r#"{"submit": 1.999}"#,
-                Err("The submit pause must be a number of seconds from 2 to 3."),
-            ),
-            (r#"{"submit": 0.7}"#, Err("submit pause must be")),
-            (r#"{"task": 3.001}"#, Err("task pause must be")),
-            (r#"{"task": 1}"#, Err("from 2 to 3")),
+            (r#"{"submit": 5.001}"#, Err("submit pause must be")),
+            (r#"{"task": 6}"#, Err("task pause must be")),
             (r#"{"paste": "0.7"}"#, Err("invalid type")),
             (r#"{"task": null, "paste": true}"#, Err("invalid type")),
             ("2.5", Err("invalid type")),
