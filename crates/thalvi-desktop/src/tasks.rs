@@ -55,13 +55,13 @@ pub fn decide(text: &str, config: &DesktopConfig) -> Result<Task, NotConfigured>
                     label: script.label.clone(),
                 });
             }
-            ScriptAction::FocusApp(app) if spoken == script.phrase => {
+            ScriptAction::FocusApp { app, .. } if spoken == script.phrase => {
                 return Ok(Task::FocusApp {
                     app: app.clone(),
                     label: script.label.clone(),
                 });
             }
-            ScriptAction::OpenUrl(_) | ScriptAction::FocusApp(_) => {}
+            ScriptAction::OpenUrl(_) | ScriptAction::FocusApp { .. } => {}
         }
     }
     spoken_url(text).ok_or(NotConfigured)

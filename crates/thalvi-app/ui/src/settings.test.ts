@@ -116,6 +116,21 @@ describe("save", () => {
     expect(control("Server address", "input").value).toBe(SETTINGS.server);
     expect(root.querySelector(".msg")?.textContent).toBe("");
   });
+
+  it("keeps later task edits unsaved when an in-flight save completes", async () => {
+    const stub = await open();
+    let complete = (): void => { throw new Error("Save has not started"); };
+    stub.backend.saveSettings.mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }));
+    goTo("tasks");
+    button("Save").click();
+    expect(button("Revert").disabled).toBe(true);
+    type(root.querySelector<HTMLInputElement>('input[aria-label="Label of script 1"]') as HTMLInputElement, "new label");
+    complete();
+    await settle();
+    expect(sent(stub).scripts[0]?.label).toBe("docs");
+    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
+    expect(button("Revert").disabled).toBe(false);
+  });
 });
 
 describe("tables", () => {

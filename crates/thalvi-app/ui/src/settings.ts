@@ -95,15 +95,16 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   });
   save.addEventListener("click", () => {
     if (draft === null) return;
-    const sending = draft;
+    const sending = structuredClone(draft);
     failure.textContent = "";
     message.textContent = "Saving…";
     save.disabled = true;
+    revert.disabled = true;
     backend
       .saveSettings(sending)
       .then(() => {
         baseline = JSON.stringify(sending);
-        message.textContent = SAVED_TEXT;
+        message.textContent = JSON.stringify(draft) === baseline ? SAVED_TEXT : "Unsaved changes";
       })
       .catch((error: unknown) => {
         message.textContent = "";
@@ -111,6 +112,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       })
       .finally(() => {
         save.disabled = false;
+        revert.disabled = false;
       });
   });
 
