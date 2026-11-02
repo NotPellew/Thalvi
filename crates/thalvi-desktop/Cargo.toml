@@ -9,3 +9,12 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+dirs.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
