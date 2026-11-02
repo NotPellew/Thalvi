@@ -63,11 +63,10 @@ areas your change touches. Editing rules are in
   only later speech, buffered while the recognizer connects; confirmations wait for ready,
   then the cue. Why: wake audio leaked the phrase into 1 in 5 live transcripts even with
   stripping. Rejected: pre-wake audio, cutting it at the wake, and stripping the phrase.
-- **Silence commits capture.** Paste, submit and tasks wait 2.5 seconds of
-  speech silence; recognized speech cancels the pending ending, and local
-  speech pauses the countdown until quiet returns. Submit asks for target
-  confirmation during that pause. Why: hands-free control with time to
-  interrupt. Rejected: immediate dispatch and a second spoken yes.
+- **Silence commits capture.** Paste waits 0.7 s of speech silence, submit and tasks 2.5 s;
+  recognized speech cancels the pending ending, local speech pauses the countdown, and submit
+  confirms its target meanwhile. Why: paste is undoable and should feel fast; submit and tasks
+  reach others. Rejected: one pause for all, immediate dispatch, a second spoken yes.
 - **Check, then type.** Delivery re-verifies the bound window just before injecting
   input, which goes to whatever window is focused; a switch in those milliseconds
   can misdirect it. Why: neither Hyprland nor Windows can address input to one window.

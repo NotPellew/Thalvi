@@ -20,8 +20,8 @@ use tokio::time::Instant;
 
 use crate::audio::{AudioError, Frames, InputGate};
 use crate::capture::{
-    CaptureFullError, CaptureRequest, CaptureRoute, CaptureSession, Endings, FinalStep,
-    PauseDuration, QuietWindow, has_words,
+    CaptureFullError, CaptureRequest, CaptureRoute, CaptureSession, EndingPauses, Endings,
+    FinalStep, QuietWindow, has_words,
 };
 use crate::config::DesktopConfig;
 use crate::cues::{Cue, CueEngine, CueError, Cues};
@@ -269,7 +269,7 @@ pub struct Engine<R, W, C> {
     gate: InputGate,
     vad: VadDetector,
     endings: Endings,
-    pause: PauseDuration,
+    pauses: EndingPauses,
     secondary: Option<SecondaryStt>,
     http: reqwest::Client,
     recorder: Recorder,
@@ -406,7 +406,7 @@ where
             gate: parts.gate,
             vad: VadDetector::new(),
             endings: config.endings.clone(),
-            pause: config.ending_pause,
+            pauses: config.ending_pause,
             secondary: config.stt.secondary.clone(),
             http: parts.http,
             recorder,
@@ -715,7 +715,7 @@ where
         };
         let live = Live {
             session,
-            text: CaptureSession::new(self.endings.clone(), self.pause),
+            text: CaptureSession::new(self.endings.clone(), self.pauses),
             partial: None,
             sent: Vec::new(),
             keep_sent: self.secondary.is_some() || self.recorder.kinds().audio,
@@ -844,7 +844,7 @@ where
 
     fn on_quiet(&self, live: &mut Live<R::Session>) -> Option<Done> {
         let now = Instant::now();
-        let since = live.text.ready_at().map(|at| at - self.pause.get());
+        let since = live.text.quiet_since();
         let request = live.text.poll_ready(now)?;
         self.ending_state("accepted");
         if let Some(since) = since {
@@ -1059,7 +1059,7 @@ where
 
     /// The secondary transcript without its ending phrase, when it ends the way the user did.
     fn agreed(&self, raw: &str, route: CaptureRoute) -> Option<String> {
-        let mut parser = CaptureSession::new(self.endings.clone(), self.pause);
+        let mut parser = CaptureSession::new(self.endings.clone(), self.pauses);
         let text = match parser.on_final(raw, Instant::now(), false).ok()? {
             FinalStep::Armed(pending) if pending.route == route => pending.text,
             FinalStep::Continue { .. } if !parser.scratched() => parser.text(),

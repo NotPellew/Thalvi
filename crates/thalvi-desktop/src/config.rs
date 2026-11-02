@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer};
 
-use crate::capture::{Endings, PauseDuration};
+use crate::capture::{EndingPauses, Endings};
 use crate::cues::Cues;
 use crate::host::{App, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
@@ -38,7 +38,7 @@ pub struct DesktopConfig {
     pub server: ServerUrl,
     pub wake: WakeConfig,
     pub cues: Cues,
-    pub ending_pause: PauseDuration,
+    pub ending_pause: EndingPauses,
     pub endings: Endings,
     pub stt: SttConfig,
     /// Phrases the task ending runs, in file order.
@@ -57,7 +57,7 @@ struct RawDesktopConfig {
     #[serde(default, deserialize_with = "cues")]
     cues: Cues,
     #[serde(default)]
-    ending_pause: PauseDuration,
+    ending_pause: EndingPauses,
     #[serde(default)]
     endings: Endings,
     #[serde(default)]
@@ -359,7 +359,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::capture::Ending;
+    use crate::capture::{CaptureRoute, Ending};
     use crate::cues::Cue;
     use crate::models::CatalogHead;
     use crate::secondary::SecondaryApi;
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(config.stt.secondary, None);
         assert_eq!(config.wake, WakeConfig::default());
         assert_eq!(config.cues, Cues::default());
-        assert_eq!(config.ending_pause.get(), Duration::from_millis(2500));
+        assert_eq!(config.ending_pause, EndingPauses::default());
         assert_eq!(config.endings, Endings::default());
         assert_eq!(config.record, RecordKinds::default());
     }
@@ -393,7 +393,7 @@ mod tests {
                 "stt": {"secondary": {"url": "http://127.0.0.1:9/v1/", "model": " m ", "api": "meta"}},
                 "wake": {"capture": {"model": "hey_jarvis", "threshold": 0.7}},
                 "cues": {"wake": false, "error": false},
-                "ending_pause": 3,
+                "ending_pause": {"paste": 1, "submit": 3},
                 "endings": {
                     "Send It": "submit", "paste": "paste", "do it": "task",
                     "scratch": "scratch", "cancel": "cancel"
@@ -431,7 +431,19 @@ mod tests {
                 ..Cues::default()
             }
         );
-        assert_eq!(config.ending_pause.get(), Duration::from_secs(3));
+        assert_eq!(
+            [
+                CaptureRoute::Paste,
+                CaptureRoute::Submit,
+                CaptureRoute::Task
+            ]
+            .map(|route| config.ending_pause.get(route)),
+            [
+                Duration::from_secs(1),
+                Duration::from_secs(3),
+                Duration::from_millis(2500)
+            ]
+        );
         assert_eq!(
             config.endings,
             Endings::try_from(BTreeMap::from([
@@ -664,9 +676,15 @@ mod tests {
                 r#"{"cues": {"chime": true}}"#.to_owned(),
                 "unknown field `chime`",
             ),
-            (r#"{"ending_pause": 1.9}"#.to_owned(), "from 2 to 3"),
-            (r#"{"ending_pause": 3.1}"#.to_owned(), "from 2 to 3"),
-            (r#"{"ending_pause": "2.5"}"#.to_owned(), "invalid type"),
+            (
+                r#"{"ending_pause": {"submit": 1.9}}"#.to_owned(),
+                "submit pause must be a number of seconds from 2 to 3",
+            ),
+            (
+                r#"{"ending_pause": {"paste": 0.4}}"#.to_owned(),
+                "paste pause must be a number of seconds from 0.5 to 3",
+            ),
+            (r#"{"ending_pause": 2.5}"#.to_owned(), "invalid type"),
             (r#"{"ending_pause": true}"#.to_owned(), "invalid type"),
             (
                 r#"{"endings": {"enter": "submit"}}"#.to_owned(),
@@ -813,13 +831,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.json");
-        std::fs::write(&path, r#"{"ending_pause": 2}"#).unwrap();
+        std::fs::write(&path, r#"{"ending_pause": {"task": 2}}"#).unwrap();
 
         let loaded = DesktopConfig::load(&path, None).unwrap();
         let missing = DesktopConfig::load(&dir.join("missing.json"), None).unwrap_err();
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert_eq!(loaded.ending_pause.get(), Duration::from_secs(2));
+        assert_eq!(
+            loaded.ending_pause.get(CaptureRoute::Task),
+            Duration::from_secs(2)
+        );
         assert!(matches!(missing, ConfigError::Read { .. }));
         assert!(missing.to_string().contains("missing.json"));
     }

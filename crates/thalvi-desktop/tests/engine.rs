@@ -32,6 +32,9 @@ type TestEngine = Engine<FakeRecognizer, FakeWake, FakeCuePlayer>;
 
 const FRAME_MS: u64 = 80;
 
+/// The paste pause the countdown tests below were written around, longer than the default.
+const SLOW_PASTE: &str = r#"{"ending_pause": {"paste": 2.5}}"#;
+
 #[derive(Clone, Copy)]
 enum Kind {
     Quiet,
@@ -426,7 +429,7 @@ async fn an_ending_is_delivered_once_the_quiet_pause_has_passed() {
             route: CaptureRoute::Paste,
             text: "First sentence. Second",
             provisional_at: &[2000],
-            commit: 4500,
+            commit: 2000 + 700,
         },
         Case {
             name: "an ending split across finals",
@@ -439,7 +442,7 @@ async fn an_ending_is_delivered_once_the_quiet_pause_has_passed() {
             route: CaptureRoute::Paste,
             text: "Keep this",
             provisional_at: &[1400],
-            commit: 3900,
+            commit: 1400 + 700,
         },
         Case {
             name: "breaths and artifacts neither cancel nor restart the pause",
@@ -467,7 +470,7 @@ async fn an_ending_is_delivered_once_the_quiet_pause_has_passed() {
             route: CaptureRoute::Paste,
             text: "Hello",
             provisional_at: &[1000],
-            commit: 1840 + 2500,
+            commit: 1840 + 700,
         },
         Case {
             name: "sustained noise and an artifact partial do not cancel the ending",
@@ -482,7 +485,7 @@ async fn an_ending_is_delivered_once_the_quiet_pause_has_passed() {
             text: "Hello",
             provisional_at: &[1000],
             // Noise without words delays the commit: the pause restarts at the first quiet frame.
-            commit: 1840 + 2500,
+            commit: 1840 + 700,
         },
     ];
     LocalSet::new()
@@ -605,7 +608,7 @@ async fn local_speech_stops_the_countdown_until_quiet_returns_unless_words_cance
     LocalSet::new()
         .run_until(async {
             for (name, script) in cases {
-                let (mut rig, engine, frames) = Rig::new("{}");
+                let (mut rig, engine, frames) = Rig::new(SLOW_PASTE);
                 let task = capture_task(engine, frames);
                 rig.open().await;
                 rig.feed_until(1000, Kind::Quiet).await;
@@ -639,7 +642,7 @@ async fn local_speech_stops_the_countdown_until_quiet_returns_unless_words_cance
 async fn words_recognized_while_the_countdown_waits_for_quiet_still_cancel_the_ending() {
     LocalSet::new()
         .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
+            let (mut rig, engine, frames) = Rig::new(SLOW_PASTE);
             let task = capture_task(engine, frames);
             rig.open().await;
             rig.feed_until(1000, Kind::Quiet).await;
@@ -657,6 +660,44 @@ async fn words_recognized_while_the_countdown_waits_for_quiet_still_cancel_the_e
             );
             rig.feed_until(6000, Kind::Quiet).await;
             assert!(!task.is_finished(), "the cancelled ending is not delivered");
+            rig.handle.cancel();
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_paste_still_yields_to_speech_inside_its_short_window() {
+    LocalSet::new()
+        .run_until(async {
+            // Local speech pauses the countdown; the paste waits for quiet and the full 0.7 s again.
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello paste that").await;
+            rig.feed_until(1200, Kind::Quiet).await;
+            rig.feed_until(1600, Kind::Voice).await;
+            rig.feed_until(2400, Kind::Quiet).await;
+            assert!(
+                !task.is_finished(),
+                "speech at 1.2 s moved the paste past 1.7 s"
+            );
+            rig.feed_until(3000, Kind::Quiet).await;
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "Hello"));
+            assert!(rig.started(Cue::Accepted)[0] > 2400);
+
+            // Recognized words cancel the pending paste.
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello paste that").await;
+            rig.feed_until(1300, Kind::Quiet).await;
+            rig.partial("and also").await;
+            assert_eq!(rig.started(Cue::Cancelled), [1300]);
+            rig.feed_until(3000, Kind::Quiet).await;
+            assert!(!task.is_finished(), "the cancelled paste is not delivered");
             rig.handle.cancel();
             assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
         })
@@ -748,7 +789,7 @@ async fn cancelling_from_outside_stops_whatever_the_capture_is_doing() {
     LocalSet::new()
         .run_until(async {
             for moment in [Moment::Starting, Moment::Countdown, Moment::AcceptedCue] {
-                let (mut rig, engine, frames) = Rig::new("{}");
+                let (mut rig, engine, frames) = Rig::new(SLOW_PASTE);
                 let task = capture_task(engine, frames);
                 match moment {
                     Moment::Starting => {
@@ -960,7 +1001,7 @@ async fn a_failed_capture_says_what_happened_keeps_the_text_and_returns_to_liste
 async fn the_microphone_watchdog_waits_while_a_cue_is_playing() {
     LocalSet::new()
         .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
+            let (mut rig, engine, frames) = Rig::new(SLOW_PASTE);
             rig.cues.set_length(Cue::Provisional, ms(1000));
             let task = capture_task(engine, frames);
             rig.open().await;
@@ -1093,7 +1134,7 @@ async fn a_capture_that_keeps_hearing_words_is_stopped_after_five_minutes_and_ke
             }
             rig.feed_until(CAPTURE_OPENS + 299_920, Kind::Quiet).await;
             assert!(!task.is_finished(), "words keep the idle limit away");
-            assert!(rig.started(Cue::Error).is_empty());
+            assert_eq!(rig.started(Cue::Error).len(), 0);
 
             rig.at(CAPTURE_OPENS + 300_000).await;
             assert_eq!(rig.started(Cue::Error), [CAPTURE_OPENS + 300_000]);
@@ -1136,7 +1177,7 @@ async fn an_ending_still_pending_when_the_five_minutes_pass_is_not_delivered() {
                     recoverable_text: Some("more more more more more Almost done".to_owned())
                 }
             );
-            assert!(rig.started(Cue::Accepted).is_empty());
+            assert_eq!(rig.started(Cue::Accepted).len(), 0);
         })
         .await;
 }
@@ -1254,7 +1295,9 @@ async fn serve(reply: Reply) -> (String, tokio::sync::mpsc::UnboundedReceiver<us
 }
 
 fn with_secondary(url: &str, api: &str) -> String {
-    format!(r#"{{"stt": {{"secondary": {{"url": "{url}", "model": "m", "api": "{api}"}}}}}}"#)
+    format!(
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"secondary": {{"url": "{url}", "model": "m", "api": "{api}"}}}}}}"#
+    )
 }
 
 /// A capture that says "live words paste that" at 1000 and is delivered at 3500.
