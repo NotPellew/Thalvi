@@ -159,3 +159,27 @@ async fn a_damaged_file_on_disk_is_downloaded_again() {
         .expect("repairs");
     assert_eq!(fs::read(path).expect("saved"), GOOD);
 }
+
+#[tokio::test]
+async fn a_speech_model_is_named_as_one_when_it_cannot_be_trusted() {
+    let (address, _server) = serve().await;
+    let dir = dir("speech");
+    let url = format!("http://{address}/other.onnx");
+    let sha = sha256(GOOD);
+    let asset = Asset {
+        kind: ModelKind::Speech,
+        file_name: "speech.onnx",
+        url: &url,
+        size: GOOD.len() as u64,
+        sha256: &sha,
+    };
+
+    let error = ModelStore::in_dir(&dir)
+        .fetch(&asset)
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        error.to_string(),
+        "The downloaded speech model speech.onnx did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
+    );
+}

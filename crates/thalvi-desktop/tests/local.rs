@@ -230,15 +230,15 @@ fn fails_on_the_third_frame(n: usize) -> Reply {
 async fn a_model_error_reaches_the_caller_after_the_text_before_it_and_stops_the_work() {
     let rig = rig("error", fails_on_the_third_frame, None, 0);
     let mut session = rig.recognizer.connect().await.expect("connects");
-    for _ in 0..3 {
+    for _ in 0..6 {
         session.send_frame(&FRAME).await.expect("sends");
     }
     assert_eq!(session.next_event().await, Ok(partial("hel")));
     let error = session.next_event().await.expect_err("fails");
     assert_eq!(error.message, "The speech model stopped working.");
-    assert_eq!(rig.seen.load(Ordering::SeqCst), 3);
-    session.cancel().await;
+    let seen = Arc::clone(&rig.seen);
     assert_eq!(rig.metric().await["outcome"], "error");
+    assert_eq!(seen.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]
