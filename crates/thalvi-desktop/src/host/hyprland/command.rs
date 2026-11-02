@@ -103,8 +103,8 @@ mod tests {
 
     #[test]
     fn a_tool_gets_its_input_on_stdin_and_returns_its_output() {
-        // Larger than a pipe buffer, so the write cannot finish before the tool reads.
-        let text = "café 👋\n".repeat(30_000);
+        // Far larger than two pipe buffers, so the write cannot finish before the tool is read from.
+        let text = "café 👋\n".repeat(400_000);
         assert_eq!(run_within(LONG, "cat", &[], Some(&text)), Ok(text));
         assert_eq!(
             run_within(LONG, "echo", &["-n", "$(not run)"], None),

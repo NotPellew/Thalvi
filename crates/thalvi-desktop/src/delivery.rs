@@ -357,6 +357,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_empty_submit_that_fails_has_no_text_to_keep() {
+        let (notice, seen) = run(
+            FakeHost::default().failing("deliver", HostError::NothingTyped("Gone.".to_owned())),
+            accepted(CaptureRoute::Submit, ""),
+        )
+        .await;
+        assert_eq!(notice.as_deref(), Some("Gone."));
+        assert_eq!(
+            seen,
+            calls(&["capture_target", "deliver:the editor:\"\":enter=true"])
+        );
+    }
+
+    #[tokio::test]
     async fn a_host_that_panics_is_reported_as_possibly_partial_and_the_text_is_kept() {
         let (notice, seen) = run(
             FakeHost::default().panicking("deliver"),
