@@ -83,11 +83,8 @@ impl View {
     #[must_use]
     pub fn status(&self) -> Status {
         let target = self.target.clone();
-        if let (
-            Some(notice),
-            EngineState::Listening,
-            Mode::Idle | Mode::Done { .. } | Mode::Failed(_),
-        ) = (&self.loading, &self.engine, &self.mode)
+        if let (Some(notice), EngineState::Listening, Mode::Idle | Mode::Done { .. }) =
+            (&self.loading, &self.engine, &self.mode)
         {
             return Status::Loading {
                 notice: notice.clone(),
@@ -279,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn loading_the_speech_model_shows_until_a_capture_starts_or_listening_is_paused() {
+    fn loading_the_speech_model_shows_until_a_capture_starts_a_failure_or_a_pause() {
         let loading = |mode, engine| {
             let mut view = view(mode, engine);
             view.loading = Some("Loading the speech model.".to_owned());
@@ -292,13 +289,21 @@ mod tests {
                 route: CaptureRoute::Paste,
                 notice: String::new(),
             },
-            Mode::Failed(String::new()),
         ] {
             assert_eq!(
                 loading(mode, EngineState::Listening),
                 Status::Loading { notice: notice() }
             );
         }
+        assert_eq!(
+            loading(
+                Mode::Failed("The microphone is off.".to_owned()),
+                EngineState::Listening
+            ),
+            Status::Failed {
+                notice: "The microphone is off.".to_owned()
+            }
+        );
         assert_eq!(
             loading(Mode::Paused, EngineState::Listening),
             Status::Paused
