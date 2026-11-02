@@ -128,6 +128,8 @@ fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use thalvi_desktop::config::Look;
+
     use super::*;
 
     fn store(name: &str, record: Option<&str>) -> (Store, PathBuf) {
@@ -160,6 +162,7 @@ mod tests {
                 "cues",
                 "ending_pause",
                 "endings",
+                "look",
                 "microphone",
                 "overlay",
                 "recordings",
@@ -174,6 +177,7 @@ mod tests {
             json!({"metrics": true, "text": false, "audio": true})
         );
         assert_eq!(settings["microphone"], Value::Null);
+        assert_eq!(settings["look"], json!("classic"));
         assert_eq!(settings["overlay"], json!({"show": true, "draft": true}));
     }
 
@@ -183,6 +187,7 @@ mod tests {
         let mut settings = settings_json(&store_defaults()).unwrap();
         settings["overlay"]["draft"] = json!(false);
         settings["microphone"] = json!("USB Mic");
+        settings["look"] = json!("holo");
         settings["recordings"] = json!({"metrics": true, "text": true, "audio": true});
 
         let saved = store.save(settings).unwrap();
@@ -196,6 +201,7 @@ mod tests {
 
         assert!(!saved.overlay.draft);
         assert_eq!(saved.microphone.as_deref(), Some("USB Mic"));
+        assert_eq!(saved.look, Look::Holo);
         assert_eq!(reloaded, saved);
         assert!(
             reloaded.record.text && !reloaded.record.audio,
