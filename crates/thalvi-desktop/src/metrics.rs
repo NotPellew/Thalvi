@@ -3,6 +3,7 @@
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::JoinHandle;
@@ -46,6 +47,8 @@ pub enum Event {
     WakeReset,
     TranscriptionReady,
     SecondaryStt,
+    /// One local recognition: its engine, device, model latency and outcome.
+    LocalStt,
     WakeLevel,
     ReadyCue,
     Cue,
@@ -66,6 +69,7 @@ impl Event {
             Self::WakeReset => "desktop_wake_reset",
             Self::TranscriptionReady => "desktop_transcription_ready",
             Self::SecondaryStt => "desktop_secondary_stt",
+            Self::LocalStt => "desktop_local_stt",
             Self::WakeLevel => "desktop_wake_level",
             Self::ReadyCue => "desktop_ready_cue",
             Self::Cue => "desktop_cue",
@@ -107,7 +111,7 @@ pub struct Recorder {
     kinds: RecordKinds,
     sender: Option<SyncSender<Message>>,
     writer: Option<JoinHandle<()>>,
-    dropped: AtomicU64,
+    dropped: Arc<AtomicU64>,
 }
 
 impl Recorder {
@@ -118,7 +122,7 @@ impl Recorder {
             kinds: RecordKinds::default(),
             sender: None,
             writer: None,
-            dropped: AtomicU64::new(0),
+            dropped: Arc::default(),
         }
     }
 
@@ -170,7 +174,7 @@ impl Recorder {
             kinds,
             sender: Some(sender),
             writer: Some(writer),
-            dropped: AtomicU64::new(0),
+            dropped: Arc::default(),
         })
     }
 
@@ -189,14 +193,17 @@ impl Recorder {
     /// Queues one metrics line: time, event, `outcome`, the optional `duration` in milliseconds,
     /// and the keys of `fields` when it is a JSON object (`Value::Null` for none).
     pub fn metric(&self, event: Event, outcome: &str, duration: Option<Duration>, fields: Value) {
-        if !self.kinds.metrics {
-            return;
+        self.metrics().metric(event, outcome, duration, fields);
+    }
+
+    /// A handle that records metrics from other threads, for as long as the writer runs.
+    #[must_use]
+    pub fn metrics(&self) -> Metrics {
+        Metrics {
+            enabled: self.kinds.metrics,
+            sender: self.sender.clone(),
+            dropped: Arc::clone(&self.dropped),
         }
-        let mut line = json!({"ts_ms": now_ms(), "event": event.name(), "outcome": outcome});
-        if let Some(duration) = duration {
-            line["duration_ms"] = json!(duration.as_secs_f64() * 1000.0);
-        }
-        self.send(Message::Metric(finish_line(line, fields)));
     }
 
     /// Queues one line of dictation text for today's `desktop.jsonl`, with the keys of `fields`.
@@ -242,12 +249,7 @@ impl Recorder {
     }
 
     fn send(&self, message: Message) {
-        let Some(sender) = &self.sender else {
-            return;
-        };
-        if sender.try_send(message).is_err() && self.dropped.fetch_add(1, Ordering::Relaxed) == 0 {
-            tracing::warn!("recording events are being dropped because the writer is behind");
-        }
+        send(self.sender.as_ref(), &self.dropped, message);
     }
 
     /// Writes everything queued so far and stops the writer; call once at shutdown.
@@ -263,6 +265,42 @@ impl Recorder {
             })
             .await;
         }
+    }
+}
+
+fn send(sender: Option<&SyncSender<Message>>, dropped: &AtomicU64, message: Message) {
+    let Some(sender) = sender else {
+        return;
+    };
+    if sender.try_send(message).is_err() && dropped.fetch_add(1, Ordering::Relaxed) == 0 {
+        tracing::warn!("recording events are being dropped because the writer is behind");
+    }
+}
+
+/// Records metrics like [`Recorder::metric`] from a thread that does not own the recorder.
+#[derive(Clone)]
+pub struct Metrics {
+    enabled: bool,
+    sender: Option<SyncSender<Message>>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl Metrics {
+    /// Queues one metrics line: time, event, `outcome`, the optional `duration` in milliseconds,
+    /// and the keys of `fields` when it is a JSON object (`Value::Null` for none).
+    pub fn metric(&self, event: Event, outcome: &str, duration: Option<Duration>, fields: Value) {
+        if !self.enabled {
+            return;
+        }
+        let mut line = json!({"ts_ms": now_ms(), "event": event.name(), "outcome": outcome});
+        if let Some(duration) = duration {
+            line["duration_ms"] = json!(duration.as_secs_f64() * 1000.0);
+        }
+        send(
+            self.sender.as_ref(),
+            &self.dropped,
+            Message::Metric(finish_line(line, fields)),
+        );
     }
 }
 
@@ -516,6 +554,7 @@ mod tests {
             (Event::WakeReset, "desktop_wake_reset"),
             (Event::TranscriptionReady, "desktop_transcription_ready"),
             (Event::SecondaryStt, "desktop_secondary_stt"),
+            (Event::LocalStt, "desktop_local_stt"),
             (Event::WakeLevel, "desktop_wake_level"),
             (Event::ReadyCue, "desktop_ready_cue"),
             (Event::Cue, "desktop_cue"),

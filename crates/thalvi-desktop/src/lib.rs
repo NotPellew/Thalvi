@@ -6,6 +6,7 @@ pub mod config;
 pub mod cues;
 pub mod delivery;
 pub mod engine;
+pub mod fbank;
 pub mod frame;
 pub mod host;
 pub mod metrics;
