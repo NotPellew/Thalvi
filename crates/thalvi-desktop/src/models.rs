@@ -299,15 +299,12 @@ impl ModelStore {
 
 /// Whether the file on disk is the pinned one; streamed, because speech models are large.
 async fn is_verified(path: &Path, asset: &Asset<'_>) -> bool {
-    let (path, size, sha256) = (path.to_owned(), asset.size, asset.sha256.to_owned());
+    let (path, sha256) = (path.to_owned(), asset.sha256.to_owned());
     tokio::task::spawn_blocking(move || {
         use std::io::Read;
         let Ok(mut file) = std::fs::File::open(path) else {
             return false;
         };
-        if file.metadata().map_or(true, |meta| meta.len() != size) {
-            return false;
-        }
         let mut hasher = Sha256::new();
         let mut buffer = vec![0; 1 << 20];
         loop {
