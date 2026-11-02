@@ -1019,10 +1019,7 @@ async fn the_secondary_transcription_replaces_the_text_of_the_frames_that_were_s
     LocalSet::new()
         .run_until(async {
             for (api, reply) in [
-                (
-                    "open_ai",
-                    r#"{"text": "Polished words paste that [noise]"}"#,
-                ),
+                ("openai", r#"{"text": "Polished words paste that [noise]"}"#),
                 (
                     "meta",
                     r#"{"transcript": "Polished words paste that [noise]"}"#,
@@ -1068,7 +1065,7 @@ async fn the_live_transcript_is_kept_with_a_notice_when_the_secondary_cannot_sta
                 ),
             ] {
                 let (url, _uploads) = serve(reply).await;
-                let (mut rig, engine, frames) = Rig::new(&with_secondary(&url, "open_ai"));
+                let (mut rig, engine, frames) = Rig::new(&with_secondary(&url, "openai"));
                 let task = capture_task(engine, frames);
                 live_words(&mut rig).await;
                 assert_eq!(
@@ -1087,7 +1084,7 @@ async fn cancelling_during_the_secondary_transcription_abandons_it() {
     LocalSet::new()
         .run_until(async {
             let (url, mut uploads) = serve(Reply::Stall).await;
-            let (mut rig, engine, frames) = Rig::new(&with_secondary(&url, "open_ai"));
+            let (mut rig, engine, frames) = Rig::new(&with_secondary(&url, "openai"));
             let task = capture_task(engine, frames);
             live_words(&mut rig).await;
             rig.at(3600).await;
@@ -1113,7 +1110,7 @@ async fn scratching_skips_the_secondary_and_only_the_final_ending_plays_a_provis
     LocalSet::new()
         .run_until(async {
             let (url, mut uploads) = serve(Reply::Json(r#"{"text": "Other words"}"#)).await;
-            let (mut rig, engine, frames) = Rig::new(&with_secondary(&url, "open_ai"));
+            let (mut rig, engine, frames) = Rig::new(&with_secondary(&url, "openai"));
             let task = capture_task(engine, frames);
             rig.open().await;
             rig.feed_until(1000, Kind::Quiet).await;
@@ -1228,7 +1225,7 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
                 serve(Reply::Json(r#"{"text": "Polished words paste that"}"#)).await;
             let recorder = Recorder::in_dir(all, &dir).unwrap();
             let (mut rig, engine, frames) =
-                Rig::recording(&with_secondary(&url, "open_ai"), recorder);
+                Rig::recording(&with_secondary(&url, "openai"), recorder);
             let task = capture_task(engine, frames);
             live_words(&mut rig).await;
             assert_eq!(

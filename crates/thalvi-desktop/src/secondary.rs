@@ -13,7 +13,7 @@ const BOUNDARY: &str = "thalvi-capture-boundary-7d1f0c2a9b3e";
 
 /// Which transcription API the secondary endpoint speaks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "lowercase")]
 pub enum SecondaryApi {
     #[default]
     OpenAi,

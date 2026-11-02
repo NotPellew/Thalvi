@@ -290,6 +290,13 @@ fn settings_are_validated_once_where_they_are_read() {
         )
         .unwrap()
     );
+    assert_eq!(
+        parse(
+            serde_json::json!({"url": "https://api.example.com/v1", "model": "m", "api": "openai"})
+        )
+        .expect("the openai api by name"),
+        minimal
+    );
     let meta = parse(serde_json::json!({
         "url": "http://localhost:9000", "model": "m", "api_key": "hunter2", "api": "meta"
     }))
