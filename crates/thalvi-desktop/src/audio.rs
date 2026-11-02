@@ -47,6 +47,8 @@ struct Shared {
     waker: AtomicWaker,
     overrun: AtomicBool,
     closed: AtomicBool,
+    /// Set once the first frame is queued; until then no audio can have been lost.
+    delivering: AtomicBool,
     error: Mutex<Option<AudioError>>,
 }
 
@@ -58,6 +60,10 @@ impl Shared {
     }
 
     fn report(&self, error: cpal::Error) {
+        // WASAPI flags discontinuities while a stream starts, before any audio is captured.
+        if error.kind() == ErrorKind::Xrun && !self.delivering.load(Ordering::Acquire) {
+            return;
+        }
         if let Some(error) = AudioError::from_stream(error) {
             self.error
                 .lock()
@@ -132,6 +138,7 @@ impl Sink {
                 })
                 .is_ok()
             {
+                shared.delivering.store(true, Ordering::Release);
                 shared.waker.wake();
             } else {
                 shared.overrun.store(true, Ordering::Release);
@@ -501,12 +508,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_harmless_stream_error_leaves_capture_running() {
-        let gate = InputGate::default();
-        let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
-        sink.shared.report(ErrorKind::RealtimeDenied.into());
-        live(&mut sink, &block(1));
-        assert_eq!(next(&mut frames).await.expect("frame")[0], 1);
+    async fn stream_errors_end_capture_unless_harmless_or_before_any_audio() {
+        for (kind, after_a_frame, ends) in [
+            (ErrorKind::RealtimeDenied, true, false),
+            (ErrorKind::Xrun, false, false),
+            (ErrorKind::Xrun, true, true),
+        ] {
+            let gate = InputGate::default();
+            let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
+            if after_a_frame {
+                live(&mut sink, &block(1));
+                next(&mut frames).await.expect("first frame");
+            }
+            sink.shared.report(kind.into());
+            live(&mut sink, &block(2));
+            let result = next(&mut frames).await;
+            assert_eq!(
+                result.is_err(),
+                ends,
+                "{kind:?} after a frame: {after_a_frame}"
+            );
+        }
     }
 
     #[tokio::test]
