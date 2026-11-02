@@ -67,7 +67,7 @@ impl RecordingConfig {
 
 enum RecordMessage {
     Line(Value),
-    Wav { turn: u64, pcm: Vec<u8> },
+    Wav { name: String, pcm: Vec<u8> },
 }
 
 /// A handle for emitting recording events without ever blocking.
@@ -160,15 +160,15 @@ impl Recorder {
         }
     }
 
-    /// Queues one turn's microphone audio as a WAV file; never blocks.
-    pub fn emit_wav(&self, turn: u64, pcm: Vec<u8>) {
+    /// Queues microphone audio as `<name>.wav` in the session directory; never blocks.
+    pub fn emit_wav(&self, name: String, pcm: Vec<u8>) {
         if !self.kinds.audio {
             return;
         }
         let Some(sender) = &self.sender else {
             return;
         };
-        if sender.try_send(RecordMessage::Wav { turn, pcm }).is_err() {
+        if sender.try_send(RecordMessage::Wav { name, pcm }).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -263,7 +263,7 @@ async fn write_loop(
     while let Some(message) = receiver.recv().await {
         let result = match &message {
             RecordMessage::Line(line) => write_line(&mut jsonl, &jsonl_path, line).await,
-            RecordMessage::Wav { turn, pcm } => write_wav(&session_dir, *turn, pcm).await,
+            RecordMessage::Wav { name, pcm } => write_wav(&session_dir, name, pcm).await,
         };
         if let Err(error) = result
             && !error_logged
@@ -302,9 +302,9 @@ async fn write_line(
     file.write_all(format!("{line}\n").as_bytes()).await
 }
 
-async fn write_wav(session_dir: &PathBuf, turn: u64, pcm: &[u8]) -> std::io::Result<()> {
+async fn write_wav(session_dir: &PathBuf, name: &str, pcm: &[u8]) -> std::io::Result<()> {
     tokio::fs::create_dir_all(session_dir).await?;
-    let path = session_dir.join(format!("{turn}.wav"));
+    let path = session_dir.join(format!("{name}.wav"));
     tokio::fs::write(path, wav_bytes(pcm)).await
 }
 

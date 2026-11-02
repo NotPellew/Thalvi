@@ -156,7 +156,10 @@ key press. Desktop metrics contain neither captured text, destinations, tokens
 nor debugger messages. Each record includes its UTC creation time. New logs rotate
 at 5 MiB and retain two numbered backups; new log files are private to the user.
 Existing oversized logs are preserved until they age out of those backups.
-Status and confirmation text appear in the foreground terminal.
+Status and confirmation text appear in the foreground terminal. To diagnose
+misrecognized dictation, the server's `THALVI_RECORD` also covers captures:
+`text` keeps each live final and `audio` keeps the capture as `capture.wav`,
+locally, under the server's recordings directory.
 
 Wake-model loading, the target-window lookup and each detector call record
 their host elapsed time and outcome when metrics are enabled. Detector outcomes

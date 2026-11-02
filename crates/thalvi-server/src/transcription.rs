@@ -10,7 +10,7 @@ use serde_json::json;
 use tokio::time::Instant;
 
 use crate::recognizer::{Recognizer, RecognizerEvent, RecognizerFactory};
-use crate::recorder::{RecordingConfig, start_recording};
+use crate::recorder::{Recorder, RecordingConfig, start_recording};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_AUDIO_BYTES: usize = 48_000;
@@ -46,9 +46,16 @@ pub async fn handle_transcription<F: RecognizerFactory>(
             "outcome": if connection.is_ok() { "ok" } else { "failed" },
         }),
     );
+    let mut captured = Vec::new();
     let (recognizer, result) = match connection {
         Ok(mut recognizer) => {
-            let result = relay(&mut socket, &mut recognizer).await;
+            let result = relay(
+                &mut socket,
+                &mut recognizer,
+                &recording.recorder,
+                &mut captured,
+            )
+            .await;
             (Some(recognizer), result)
         }
         Err(error) => (None, Err(error)),
@@ -59,14 +66,16 @@ pub async fn handle_transcription<F: RecognizerFactory>(
     if let Err(message) = &result {
         let _ = send(&mut socket, json!({"type":"error", "message":message})).await;
     }
-    recording.recorder.emit(
-        "transcription",
-        json!({
-            "model": recording.recorder.stt_model(), "total_ms": elapsed_ms(started),
-            "outcome": if result.is_ok() { "ok" } else { "failed" },
-            "error": result.err(),
-        }),
-    );
+    let mut fields = json!({
+        "model": recording.recorder.stt_model(), "total_ms": elapsed_ms(started),
+        "outcome": if result.is_ok() { "ok" } else { "failed" },
+        "error": result.err(),
+    });
+    if !captured.is_empty() {
+        recording.recorder.emit_wav("capture".to_string(), captured);
+        fields["audio"] = json!("capture.wav");
+    }
+    recording.recorder.emit("transcription", fields);
     let _ = tokio::time::timeout(IO_TIMEOUT, socket.close()).await;
     recording.finish(elapsed_ms(started)).await;
 }
@@ -88,10 +97,17 @@ fn validate_audio(audio: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-async fn relay<R: Recognizer>(socket: &mut WebSocket, recognizer: &mut R) -> Result<(), String> {
+/// Relays one capture; with audio recording on, `captured` collects what reached the recognizer.
+async fn relay<R: Recognizer>(
+    socket: &mut WebSocket,
+    recognizer: &mut R,
+    recorder: &Recorder,
+    captured: &mut Vec<u8>,
+) -> Result<(), String> {
     send(socket, json!({"type":"ready"})).await?;
     let mut buffered: VecDeque<Bytes> = VecDeque::new();
     let mut buffered_bytes = 0;
+    let mut finals: u64 = 0;
     loop {
         let message = async {
             if let Some(audio) = buffered.pop_front() {
@@ -116,6 +132,9 @@ async fn relay<R: Recognizer>(socket: &mut WebSocket, recognizer: &mut R) -> Res
                             result = &mut write => {
                                 result.map_err(|_| "Speech recognition stopped accepting audio.".to_string())?
                                     .map_err(|error| error.to_string())?;
+                                if recorder.audio_enabled() {
+                                    captured.extend_from_slice(&audio);
+                                }
                                 break;
                             }
                             next = socket.recv() => match next {
@@ -150,7 +169,15 @@ async fn relay<R: Recognizer>(socket: &mut WebSocket, recognizer: &mut R) -> Res
             },
             event = recognizer.next_event() => match event {
                 Some(Ok(RecognizerEvent::Partial {text})) => send(socket,json!({"type":"partial","text":text})).await?,
-                Some(Ok(RecognizerEvent::SpeechComplete {turn_id,text})) => send(socket,json!({"type":"final","turn_id":turn_id,"text":text})).await?,
+                Some(Ok(RecognizerEvent::SpeechComplete {turn_id,text})) => {
+                    finals += 1;
+                    let mut fields = json!({"turn": finals, "source": "dictation"});
+                    if recorder.text_enabled() {
+                        fields["text"] = json!(text);
+                    }
+                    recorder.emit("turn", fields);
+                    send(socket,json!({"type":"final","turn_id":turn_id,"text":text})).await?;
+                }
                 Some(Ok(RecognizerEvent::SpeechStart {turn_id, audio_processed_ms})) => send(socket,json!({"type":"speech_start","turn_id":turn_id,"audio_processed_ms":audio_processed_ms})).await?,
                 Some(Ok(RecognizerEvent::SpeechEnd {turn_id, audio_processed_ms})) => send(socket,json!({"type":"speech_end","turn_id":turn_id,"audio_processed_ms":audio_processed_ms})).await?,
                 Some(Ok(RecognizerEvent::Error {message})) => return Err(message),
@@ -328,6 +355,155 @@ mod tests {
                 }
             }
             server.abort();
+        }
+    }
+
+    struct Echo {
+        heard: tokio::sync::mpsc::Sender<()>,
+        finals: tokio::sync::mpsc::Receiver<()>,
+    }
+
+    impl Recognizer for Echo {
+        async fn send_audio(&mut self, _: &[u8]) -> Result<(), RecognizerError> {
+            let _ = self.heard.send(()).await;
+            Ok(())
+        }
+
+        async fn next_event(&mut self) -> Option<Result<RecognizerEvent, RecognizerError>> {
+            self.finals.recv().await?;
+            Some(Ok(RecognizerEvent::SpeechComplete {
+                turn_id: "t".to_string(),
+                text: "pissed that".to_string(),
+            }))
+        }
+
+        async fn close(&mut self) {}
+    }
+
+    #[derive(Clone)]
+    struct EchoFactory;
+
+    impl RecognizerFactory for EchoFactory {
+        type Rec = Echo;
+
+        fn connect(
+            &self,
+        ) -> impl std::future::Future<Output = Result<Echo, RecognizerError>> + Send {
+            let (heard, finals) = tokio::sync::mpsc::channel(4);
+            std::future::ready(Ok(Echo { heard, finals }))
+        }
+    }
+
+    fn recorded(dir: &std::path::Path) -> (std::path::PathBuf, Vec<serde_json::Value>) {
+        let day = std::fs::read_dir(dir.join("recordings"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let lines = std::fs::read_to_string(day.join("dictation.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        (day, lines)
+    }
+
+    #[tokio::test]
+    async fn opted_in_dictation_records_finals_and_capture_audio() {
+        for (text, audio) in [(false, false), (true, false), (true, true)] {
+            let dir = std::env::temp_dir().join(format!(
+                "thalvi-dictation-record-{}-{text}-{audio}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            let mut config = RecordingConfig::disabled();
+            config.kinds.metrics = true;
+            config.kinds.text = text;
+            config.kinds.audio = audio;
+            config.data_dir = dir.clone();
+            let finished = Arc::new(Notify::new());
+            let handler_finished = Arc::clone(&finished);
+            let app = Router::new().route(
+                "/transcription",
+                get(move |upgrade: WebSocketUpgrade| {
+                    let config = config.clone();
+                    let finished = Arc::clone(&handler_finished);
+                    async move {
+                        upgrade.on_upgrade(move |socket| async move {
+                            handle_transcription(socket, EchoFactory, config, "dictation".into())
+                                .await;
+                            finished.notify_one();
+                        })
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (mut client, _) =
+                tokio_tungstenite::connect_async(format!("ws://{address}/transcription"))
+                    .await
+                    .unwrap();
+            client.next().await.unwrap().unwrap();
+            let frames: Vec<Vec<u8>> = (1..=2_u8).map(|marker| [marker, 0].repeat(1920)).collect();
+            for frame in &frames {
+                client
+                    .send(Message::Binary(frame.clone().into()))
+                    .await
+                    .unwrap();
+                let Message::Text(event) = client.next().await.unwrap().unwrap() else {
+                    panic!("each frame yields a final");
+                };
+                assert!(event.contains("pissed that"));
+            }
+            client.close(None).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), finished.notified())
+                .await
+                .unwrap();
+            server.abort();
+
+            let (day, lines) = recorded(&dir);
+            let turns: Vec<_> = lines
+                .iter()
+                .filter(|line| line["event"] == "turn")
+                .map(|line| {
+                    (
+                        line["turn"].clone(),
+                        line["source"].clone(),
+                        line["text"].clone(),
+                    )
+                })
+                .collect();
+            let spoken = if text {
+                serde_json::json!("pissed that")
+            } else {
+                serde_json::Value::Null
+            };
+            assert_eq!(
+                turns,
+                [1, 2].map(|turn| (
+                    serde_json::json!(turn),
+                    serde_json::json!("dictation"),
+                    spoken.clone()
+                ))
+            );
+            let summary = lines
+                .iter()
+                .find(|line| line["event"] == "transcription")
+                .unwrap();
+            let wav = day.join("dictation").join("capture.wav");
+            if audio {
+                assert_eq!(summary["audio"], "capture.wav");
+                assert_eq!(
+                    std::fs::read(wav).unwrap(),
+                    crate::recorder::wav_bytes(&frames.concat())
+                );
+            } else {
+                assert!(summary.get("audio").is_none());
+                assert!(!wav.exists());
+            }
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
