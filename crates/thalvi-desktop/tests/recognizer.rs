@@ -381,7 +381,7 @@ fn server_urls_are_validated_once_and_normalised() {
     ];
     for (input, expected) in valid {
         let url: ServerUrl = serde_json::from_value(serde_json::json!(input)).expect(input);
-        assert_eq!(url, ServerUrl::parse(expected).expect(expected), "{input}");
+        assert_eq!(url.to_string(), expected, "{input}");
     }
     let invalid = [
         ("", ServerUrlError::Invalid),

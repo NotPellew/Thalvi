@@ -153,6 +153,7 @@ async fn listen_and_print(config: DesktopConfig) -> Result<(), String> {
             }
         }
     });
+    println!("Transcribing through {}.", config.server);
     println!("This build prints what it hears and delivers nothing. Ctrl+C stops it.");
 
     let mut interrupt = pin!(tokio::signal::ctrl_c());

@@ -114,6 +114,12 @@ impl ServerUrl {
     }
 }
 
+impl std::fmt::Display for ServerUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl TryFrom<String> for ServerUrl {
     type Error = ServerUrlError;
 
