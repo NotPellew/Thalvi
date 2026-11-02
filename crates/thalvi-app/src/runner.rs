@@ -11,20 +11,25 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use thalvi_desktop::audio::{Frames, InputGate, Microphone};
 use thalvi_desktop::capture::EndingPauses;
+use thalvi_desktop::chosen::Chosen;
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::Delivery;
 use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
 };
 use thalvi_desktop::host::Desktop;
+use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::ModelStore;
-use thalvi_desktop::recognizer::ServerRecognizer;
+use thalvi_desktop::transducer::TransducerSource;
 use thalvi_desktop::wake::WakeEngine;
 use tokio::sync::{mpsc, watch};
-use tokio::task::LocalSet;
+use tokio::task::{JoinHandle, LocalSet};
 
 use crate::status::{Mode, Status, View};
+
+/// What the user sees while the speech model downloads or loads.
+const LOADING_NOTICE: &str = "Loading the speech model. The first time it downloads about 650 MB.";
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -138,6 +143,7 @@ impl Publisher {
                 engine: EngineState::Listening,
                 target: None,
                 pauses,
+                loading: None,
             }),
             out,
         })
@@ -159,11 +165,17 @@ impl Publisher {
     fn mode(&self, mode: Mode) {
         self.update(|view| view.mode = mode);
     }
+
+    fn loading(&self, notice: Option<&str>) {
+        self.update(|view| view.loading = notice.map(str::to_owned));
+    }
 }
 
 /// Everything one engine needs; replaced when settings change.
 struct Session {
-    engine: Engine<ServerRecognizer, WakeEngine, CpalCuePlayer>,
+    engine: Engine<Chosen, WakeEngine, CpalCuePlayer>,
+    /// The local recognizer, whose model loads ahead of the first dictation.
+    local: Option<Arc<LocalRecognizer<TransducerSource>>>,
     handle: EngineHandle,
     gate: InputGate,
     device: Option<String>,
@@ -223,6 +235,8 @@ struct Runner {
     level: Arc<watch::Sender<f32>>,
     delivery: Delivery<Desktop>,
     http: reqwest::Client,
+    /// Loads the current engine's speech model.
+    loading: Option<JoinHandle<()>>,
 }
 
 impl Runner {
@@ -243,6 +257,7 @@ impl Runner {
             level,
             delivery: Delivery::new(host),
             http: reqwest::Client::new(),
+            loading: None,
         }
     }
 
@@ -250,6 +265,9 @@ impl Runner {
         let config = self.config.clone();
         self.start(config).await;
         while let Flow::Continue = Box::pin(self.step()).await {}
+        if let Some(loading) = self.loading.take() {
+            loading.abort();
+        }
         if let Some(session) = self.session.take() {
             session.close().await;
         }
@@ -262,10 +280,46 @@ impl Runner {
             Ok(session) => {
                 self.session = Some(session);
                 self.publisher.mode(Mode::Idle);
+                self.load_speech_model();
                 self.open_microphone().await;
             }
             Err(message) => self.fail(&message),
         }
+    }
+
+    /// Fetches and loads the speech model in the background, and shows that until it is ready.
+    /// A failure is a notice; the app keeps listening and dictation tries again.
+    fn load_speech_model(&mut self) {
+        if let Some(loading) = self.loading.take() {
+            loading.abort();
+        }
+        let local = self
+            .session
+            .as_ref()
+            .and_then(|session| session.local.clone());
+        let Some(local) = local else {
+            self.publisher.loading(None);
+            return;
+        };
+        println!("{LOADING_NOTICE}");
+        self.publisher.loading(Some(LOADING_NOTICE));
+        let publisher = Rc::clone(&self.publisher);
+        self.loading = Some(tokio::task::spawn_local(async move {
+            let loaded = local.load().await;
+            if let Err(error) = &loaded {
+                println!("{error}");
+            }
+            publisher.update(|view| {
+                view.loading = None;
+                if let Err(error) = loaded
+                    && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
+                {
+                    view.mode = Mode::Failed(format!(
+                        "{error} Dictation will try again when you start it."
+                    ));
+                }
+            });
+        }));
     }
 
     fn fail(&mut self, message: &str) {
@@ -287,9 +341,16 @@ impl Runner {
         );
         let wake = wake.map_err(|error| error.to_string())?;
         let gate = InputGate::default();
+        let recognizer = Chosen::new(
+            &config.stt.engine,
+            &config.server,
+            store,
+            recorder.metrics(),
+        );
+        let local = recognizer.local();
         let (engine, handle) = Engine::new(
             Parts {
-                recognizer: ServerRecognizer::new(config.server.clone()),
+                recognizer,
                 wake,
                 cues: CpalCuePlayer::new(config.cues, gate.clone()),
                 gate: gate.clone(),
@@ -304,9 +365,14 @@ impl Runner {
             Rc::clone(&self.publisher),
             Arc::clone(&self.level),
         ));
-        println!("Transcribing through {}.", config.server);
+        if local.is_some() {
+            println!("Transcribing on this machine.");
+        } else {
+            println!("Transcribing through {}.", config.server);
+        }
         Ok(Session {
             engine,
+            local,
             handle,
             gate,
             device: config.microphone.clone(),
@@ -431,6 +497,7 @@ impl Runner {
                 self.publisher
                     .update(|view| view.pauses = config.ending_pause);
                 self.config = config;
+                self.load_speech_model();
                 self.open_microphone().await;
             }
             Err(message) => {

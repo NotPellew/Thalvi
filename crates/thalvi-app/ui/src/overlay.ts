@@ -171,6 +171,9 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
       case "failed":
         pillView("failed", next.notice, null);
         break;
+      case "loading":
+        pillView("working", next.notice, null);
+        break;
     }
     if (next.state !== "pending") countdownStart = null;
     if (live()) {

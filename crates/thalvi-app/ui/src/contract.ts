@@ -17,7 +17,8 @@ export type Status =
     }
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
   | { state: "done"; target: string | null; route: Route; notice: string }
-  | { state: "failed"; notice: string };
+  | { state: "failed"; notice: string }
+  | { state: "loading"; notice: string }; // the speech model is being fetched or loaded
 
 export interface Level {
   level: number;
@@ -26,6 +27,7 @@ export interface Level {
 export type Ending = "paste" | "submit" | "task" | "scratch" | "cancel";
 export type ScriptActionKind = "open_url" | "focus_app" | "discord_message";
 export type SecondaryApi = "openai" | "meta";
+export type SttEngine = "server" | "local";
 
 export interface HeadSettings {
   model: string;
@@ -60,7 +62,12 @@ export interface Settings {
   ending_pause: { paste: number; submit: number; task: number };
   capture_limits: { idle: number; max: number };
   endings: Record<string, Ending>;
-  stt: { secondary?: SecondarySettings | null };
+  stt: {
+    engine: SttEngine;
+    /** A catalog name or a model folder; only with the local engine, and its default when absent. */
+    model?: string;
+    secondary?: SecondarySettings | null;
+  };
   apps: Record<string, AppSettings>;
   scripts: ScriptSettings[];
   overlay: { show: boolean; draft: boolean };

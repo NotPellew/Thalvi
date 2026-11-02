@@ -20,7 +20,7 @@ export const SETTINGS: Settings = {
     "scratch that": "scratch",
     "never mind": "cancel",
   },
-  stt: { secondary: null },
+  stt: { engine: "server", secondary: null },
   apps: { slack: { classes: ["Slack"], executables: [], input_keys: ["ctrl", "k"] } },
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com", label: "docs" }],
   overlay: { show: true, draft: true },
