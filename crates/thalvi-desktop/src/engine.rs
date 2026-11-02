@@ -749,7 +749,8 @@ where
             text: CaptureSession::new(self.endings.clone(), self.pauses),
             partial: None,
             sent: Vec::new(),
-            keep_sent: self.secondary.is_some() || self.recorder.kinds().audio,
+            keep_sent: self.secondary.as_ref().is_some_and(SecondaryStt::enabled)
+                || self.recorder.kinds().audio,
             held: VecDeque::new(),
             speech_run: 0,
             relayed: false,
@@ -1047,7 +1048,11 @@ where
         sent: &[Frame],
         scratched: bool,
     ) -> CaptureOutcome {
-        let Some(settings) = self.secondary.as_ref().filter(|_| !scratched) else {
+        let Some(settings) = self
+            .secondary
+            .as_ref()
+            .filter(|settings| settings.enabled() && !scratched)
+        else {
             return CaptureOutcome::Accepted(request);
         };
         self.set_state(EngineState::TranscribingSecondary {

@@ -260,25 +260,39 @@ function recognition({ draft, controls }: PageContext): HTMLElement[] {
   }
 
   const secondary = draft.stt.secondary ?? null;
+  let secondaryOn = secondary?.enabled ?? false;
   const url = controls.text(secondary?.url ?? "", sync, { placeholder: "http://127.0.0.1:9000/v1" });
   const model = controls.text(secondary?.model ?? "", sync);
   const key = controls.text(secondary?.api_key ?? "", sync, { type: "password" });
   const api = controls.select(APIS, secondary?.api ?? "openai", sync);
   const inputs = [url, model, key].map((field) => field.field as HTMLInputElement);
   const picker = api.field as HTMLSelectElement;
+  const toggle = controls.toggle(secondaryOn, (value) => {
+    secondaryOn = value;
+    syncEnabled();
+    sync();
+  });
+
+  function syncEnabled(): void {
+    for (const input of inputs) input.disabled = !secondaryOn;
+    picker.disabled = !secondaryOn;
+  }
 
   function sync(): void {
     const [urlInput, modelInput, keyInput] = inputs;
     const blank = inputs.every((input) => input.value.trim() === "");
-    draft.stt.secondary = blank
-      ? null
-      : {
-          url: urlInput?.value ?? "",
-          model: modelInput?.value ?? "",
-          api: APIS.find(([value]) => value === picker.value)?.[0] ?? "openai",
-          api_key: keyInput?.value ?? "",
-        };
+    draft.stt.secondary =
+      !secondaryOn && blank
+        ? null
+        : {
+            enabled: secondaryOn,
+            url: urlInput?.value ?? "",
+            model: modelInput?.value ?? "",
+            api: APIS.find(([value]) => value === picker.value)?.[0] ?? "openai",
+            api_key: keyInput?.value ?? "",
+          };
   }
+  syncEnabled();
   return [
     group("Dictation"),
     row("Recognize speech", "Where your dictation is turned into text. Conversation mode always uses the server.", engine),
@@ -288,7 +302,8 @@ function recognition({ draft, controls }: PageContext): HTMLElement[] {
       speechModel,
     ),
     group("Second transcription"),
-    row("Endpoint address", "Transcribes each accepted capture again here. Leave all four fields empty to turn it off.", url),
+    row("Second-pass transcription", "Transcribes each accepted capture again on the endpoint below. Off keeps the endpoint and key.", toggle),
+    row("Endpoint address", "Where the second transcription is sent.", url),
     row("Model", null, model),
     row("API", "Which transcription API the endpoint speaks.", api),
     row("API key", "Stored in the desktop config file.", key),

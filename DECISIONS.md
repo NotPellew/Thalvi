@@ -78,6 +78,10 @@ areas your change touches. Editing rules are in
   Rejected: per-desktop accessibility or input protocols (much code for a rare race).
 - **Musical earcons.** Five two- or three-note cues (wake, provisional ending, cancelled, accepted, error), each switchable under `cues` in the desktop config; the mic drops frames while a cue plays.
   Why: distinct contours tell capture state apart without looking, and the mic never hears them. Rejected: one beep for every state, and a post-delivery cue.
+- **Second-pass transcription is explicitly opt-in.** `stt.secondary.enabled`
+  defaults off and disabling preserves endpoint settings. Why: avoid uploading
+  every dictation and adding latency without an explicit choice. Rejected:
+  treating an endpoint's presence as enablement.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
   browser and app actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative

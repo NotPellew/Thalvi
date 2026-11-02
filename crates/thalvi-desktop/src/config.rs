@@ -404,7 +404,7 @@ impl TryFrom<RawStt> for SttConfig {
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(try_from = "RawStt")]
 pub struct SttConfig {
-    /// Re-transcribes each accepted capture on this endpoint when set.
+    /// Re-transcribes each accepted capture on this endpoint only when its `enabled` switch is on.
     pub secondary: Option<SecondaryStt>,
     pub engine: SttEngine,
 }
@@ -651,6 +651,71 @@ mod tests {
     }
 
     #[test]
+    fn secondary_is_off_by_default_and_round_trips_off_on_and_default() {
+        let endpoint =
+            r#""url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k", "api": "meta""#;
+        for (json, expected) in [
+            ("{}".to_owned(), None),
+            (
+                format!(r#"{{"stt": {{"secondary": {{{endpoint}}}}}}}"#),
+                Some(false),
+            ),
+            (
+                format!(r#"{{"stt": {{"secondary": {{"enabled": false, {endpoint}}}}}}}"#),
+                Some(false),
+            ),
+            (
+                format!(r#"{{"stt": {{"secondary": {{"enabled": true, {endpoint}}}}}}}"#),
+                Some(true),
+            ),
+        ] {
+            let config = parse(&json).unwrap();
+            assert_eq!(
+                config.stt.secondary.as_ref().map(SecondaryStt::enabled),
+                expected,
+                "{json}"
+            );
+            let written = serde_json::to_string(&config).unwrap();
+            let again = parse(&written).unwrap();
+            assert_eq!(again.stt.secondary, config.stt.secondary, "{written}");
+            if expected == Some(false) {
+                assert!(written.contains(r#""enabled":false"#), "{written}");
+                assert!(written.contains("http://127.0.0.1:9/v1"), "{written}");
+                assert!(written.contains(r#""api_key":"k""#), "{written}");
+            }
+            if expected == Some(true) {
+                assert!(written.contains(r#""enabled":true"#), "{written}");
+            }
+        }
+        let off_blank = parse(
+            r#"{"stt": {"secondary": {"enabled": false, "url": "", "model": "", "api_key": "k"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            off_blank.stt.secondary.as_ref().map(SecondaryStt::enabled),
+            Some(false)
+        );
+        let on_blank =
+            parse(r#"{"stt": {"secondary": {"enabled": true, "url": "", "model": ""}}}"#)
+                .unwrap_err()
+                .to_string();
+        assert!(on_blank.contains("stt.secondary.url"), "{on_blank}");
+        for (json, expected) in [
+            (
+                r#"{"stt": {"secondary": {"enabled": true, "url": "ftp://x", "model": "m"}}}"#,
+                "stt.secondary.url must be an http or https URL",
+            ),
+            (
+                r#"{"stt": {"secondary": {"enabled": true, "url": "http://x", "model": " "}}}"#,
+                "stt.secondary.model must be nonempty",
+            ),
+        ] {
+            let error = parse(json).unwrap_err().to_string();
+            assert!(error.contains(expected), "{json}: {error}");
+        }
+    }
+
+    #[test]
     fn dictation_is_recognized_on_the_server_unless_a_local_model_is_chosen() {
         for (json, engine) in [
             (r#"{"stt": {"engine": "server"}}"#, SttEngine::Server),
@@ -704,7 +769,8 @@ mod tests {
                     "http://127.0.0.1:9/v1",
                     "m",
                     String::new(),
-                    SecondaryApi::Meta
+                    SecondaryApi::Meta,
+                    false
                 )
                 .unwrap()
             )
@@ -951,14 +1017,6 @@ mod tests {
                 "unknown field `primary`",
             ),
             (
-                r#"{"stt": {"secondary": {"url": "ftp://x", "model": "m"}}}"#.to_owned(),
-                "stt.secondary.url must be an http or https URL",
-            ),
-            (
-                r#"{"stt": {"secondary": {"url": "http://x", "model": " "}}}"#.to_owned(),
-                "stt.secondary.model must be nonempty",
-            ),
-            (
                 r#"{"stt": {"secondary": {"url": "http://x", "model": "m", "api": "azure"}}}"#
                     .to_owned(),
                 "unknown variant `azure`",
@@ -1156,7 +1214,7 @@ mod tests {
         let full = r#"{
             "server": "wss://thalvi.example:9000/",
             "stt": {"engine": "local", "model": "/models/speech",
-                    "secondary": {"url": "http://127.0.0.1:9/v1/", "model": "m", "api_key": "k", "api": "meta"}},
+                    "secondary": {"enabled": true, "url": "http://127.0.0.1:9/v1/", "model": "m", "api_key": "k", "api": "meta"}},
             "wake": {"capture": {"model": "/models/me.onnx", "threshold": 0.7},
                      "conversation": {"model": "hey_jarvis"}},
             "cues": {"wake": false, "error": false},
