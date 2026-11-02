@@ -85,6 +85,13 @@ pub enum ServerUrlError {
 #[serde(try_from = "String")]
 pub struct ServerUrl(String);
 
+impl Default for ServerUrl {
+    /// The local server, `ws://127.0.0.1:8080`.
+    fn default() -> Self {
+        Self("ws://127.0.0.1:8080".to_string())
+    }
+}
+
 impl ServerUrl {
     /// # Errors
     /// Fails when `value` is not a `ws` or `wss` server root without credentials.
