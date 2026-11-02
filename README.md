@@ -206,6 +206,12 @@ config is `desktop.json` in `thalvi/` under the user config directory
 `THALVI_RECORD=metrics,text,audio` records timings, dictated text and
 microphone audio locally, each opt-in.
 
+To dictate without the server or a network, set `"stt": {"engine": "local"}` in
+the config or choose "On this computer" under Speech recognition in Settings.
+The first use downloads about 650 MB (the pill says so); after that it works
+offline. The text comes mostly unpunctuated. The model is NVIDIA Nemotron Speech
+Streaming under the [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/).
+
 ## Measure a setup
 
 `cargo run --release --bin measure -- --setup data/measure/a.env --setup data/measure/b.env`
