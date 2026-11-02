@@ -1,6 +1,7 @@
 //! Runs the capture engine on its own thread and follows the app's control messages.
 
 use std::cell::RefCell;
+use std::future::Future;
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::mpsc as std_mpsc;
@@ -448,43 +449,47 @@ impl Runner {
             self.delivery.bind(session.engine.recorder()).await
         };
         self.publisher.update(|view| view.target = bound.window());
-        let mut pause = false;
-        let mut quit = false;
+        let mut requests = Requests::default();
         let outcome = {
             let Self {
-                session,
-                control,
-                pending,
-                ..
+                session, control, ..
             } = &mut *self;
             let Some(Session {
                 engine,
                 handle,
+                gate,
                 frames: Some(frames),
                 ..
             }) = session.as_mut()
             else {
                 return Flow::Continue;
             };
-            let mut capture = pin!(engine.capture(frames));
-            loop {
-                tokio::select! {
-                    outcome = &mut capture => break outcome,
-                    received = control.recv(), if !quit => match received {
-                        Some(Control::Cancel) => handle.cancel(),
-                        Some(Control::SetListening(false)) => {
-                            pause = true;
-                            handle.cancel();
-                        }
-                        Some(Control::SetListening(true)) => {}
-                        Some(Control::Apply(config)) => *pending = Some(*config),
-                        Some(Control::Quit) | None => {
-                            quit = true;
-                            handle.cancel();
-                        }
-                    },
-                }
+            let outcome = Box::pin(drive(
+                engine.capture(frames),
+                control,
+                || handle.cancel(),
+                &mut requests,
+            ))
+            .await;
+            if outcome.is_none() {
+                // The wake word closed the gate and only a capture opens it again.
+                gate.set_enabled(true);
             }
+            outcome
+        };
+        if let Some(config) = requests.pending.take() {
+            self.pending = Some(config);
+        }
+        if requests.quit {
+            // Nothing is delivered after a quit.
+            return Flow::Quit;
+        }
+        let Some(outcome) = outcome else {
+            self.publisher.mode(Mode::Idle);
+            if requests.listening_off {
+                self.pause();
+            }
+            return Flow::Continue;
         };
         let route = match &outcome {
             CaptureOutcome::Accepted(request) => {
@@ -516,13 +521,80 @@ impl Runner {
             (None, _) => Mode::Idle,
         };
         self.publisher.mode(mode);
-        if quit {
-            return Flow::Quit;
-        }
-        if pause {
+        if requests.listening_off {
             self.pause();
         }
         Flow::Continue
+    }
+}
+
+/// What the user asked for while a capture ran.
+#[derive(Default)]
+struct Requests {
+    /// The latest listening request was off.
+    listening_off: bool,
+    quit: bool,
+    /// Settings to apply once the capture is over.
+    pending: Option<DesktopConfig>,
+}
+
+impl Requests {
+    /// Notes every message already waiting; true when one of them ends the capture.
+    fn read_queued(&mut self, control: &mut mpsc::UnboundedReceiver<Control>) -> bool {
+        let mut ends = false;
+        while let Ok(received) = control.try_recv() {
+            ends |= self.take(Some(received));
+        }
+        ends
+    }
+
+    /// Notes one control message; true when it ends the capture.
+    fn take(&mut self, control: Option<Control>) -> bool {
+        match control {
+            Some(Control::Cancel) => true,
+            Some(Control::SetListening(on)) => {
+                self.listening_off = !on;
+                !on
+            }
+            Some(Control::Apply(config)) => {
+                self.pending = Some(*config);
+                false
+            }
+            Some(Control::Quit) | None => {
+                self.quit = true;
+                true
+            }
+        }
+    }
+}
+
+/// Runs `capture` while following the controls; `None` when a control ended the capture before
+/// it started. The engine ignores a cancel that arrives before it starts, so those are read
+/// first, and the capture is polled before any later control.
+async fn drive<O>(
+    capture: impl Future<Output = O>,
+    control: &mut mpsc::UnboundedReceiver<Control>,
+    cancel: impl Fn(),
+    requests: &mut Requests,
+) -> Option<O> {
+    if requests.read_queued(control) {
+        return None;
+    }
+    let mut capture = pin!(capture);
+    loop {
+        tokio::select! {
+            biased;
+            outcome = &mut capture => {
+                // What was asked while the capture wound down counts too.
+                requests.read_queued(control);
+                return Some(outcome);
+            }
+            received = control.recv(), if !requests.quit => {
+                if requests.take(received) {
+                    cancel();
+                }
+            }
+        }
     }
 }
 
@@ -550,5 +622,113 @@ async fn follow(
                 level_out.send_replace(*level.borrow_and_update());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    use super::*;
+
+    /// A capture that, like the engine's, forgets cancels sent before it starts and ends on the
+    /// next one.
+    async fn capture(cancels: &watch::Sender<u64>, started: &Cell<bool>) -> &'static str {
+        let mut cancelled = cancels.subscribe();
+        cancelled.borrow_and_update();
+        started.set(true);
+        let _ = cancelled.changed().await;
+        "cancelled"
+    }
+
+    /// Runs `drive` after sending `before` and, once the capture runs, `during`.
+    async fn run(
+        before: Vec<Control>,
+        during: Vec<Control>,
+    ) -> (Option<&'static str>, Requests, bool) {
+        let (sender, mut control) = mpsc::unbounded_channel();
+        let (cancels, _) = watch::channel(0_u64);
+        let started = Cell::new(false);
+        let mut requests = Requests::default();
+        for message in before {
+            sender.send(message).unwrap();
+        }
+        let driven = drive(
+            capture(&cancels, &started),
+            &mut control,
+            || {
+                cancels.send_modify(|count| *count += 1);
+            },
+            &mut requests,
+        );
+        let sending = async {
+            tokio::task::yield_now().await;
+            for message in during {
+                sender.send(message).unwrap();
+            }
+        };
+        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(driven, sending)
+        })
+        .await
+        .expect("the capture was never cancelled");
+        (outcome, requests, started.get())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_control_that_ends_the_capture_before_it_starts_keeps_it_from_starting() {
+        for (control, quit, listening_off) in [
+            (Control::Quit, true, false),
+            (Control::Cancel, false, false),
+            (Control::SetListening(false), false, true),
+        ] {
+            let label = format!("{control:?}");
+            let (outcome, requests, started) = run(vec![control], vec![]).await;
+            assert_eq!(outcome, None, "{label}");
+            assert!(!started, "{label}");
+            assert_eq!(requests.quit, quit, "{label}");
+            assert_eq!(requests.listening_off, listening_off, "{label}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_control_during_the_capture_cancels_it() {
+        for (control, quit, listening_off) in [
+            (Control::Quit, true, false),
+            (Control::Cancel, false, false),
+            (Control::SetListening(false), false, true),
+        ] {
+            let label = format!("{control:?}");
+            let (outcome, requests, started) = run(vec![], vec![control]).await;
+            assert_eq!(outcome, Some("cancelled"), "{label}");
+            assert!(started, "{label}");
+            assert_eq!(requests.quit, quit, "{label}");
+            assert_eq!(requests.listening_off, listening_off, "{label}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_latest_listening_request_wins_and_settings_wait_for_the_end() {
+        let config = DesktopConfig::from_json_str("{}", None).unwrap();
+        let (outcome, requests, _) = run(
+            vec![],
+            vec![
+                Control::SetListening(false),
+                Control::Apply(Box::new(config.clone())),
+                Control::SetListening(true),
+            ],
+        )
+        .await;
+        assert_eq!(outcome, Some("cancelled"));
+        assert!(!requests.listening_off, "the later resume is the request");
+        assert_eq!(requests.pending, Some(config));
+
+        let (_, requests, _) = run(
+            vec![],
+            vec![Control::SetListening(true), Control::SetListening(false)],
+        )
+        .await;
+        assert!(requests.listening_off);
     }
 }
