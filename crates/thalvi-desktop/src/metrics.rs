@@ -52,6 +52,8 @@ pub enum Event {
     EndingPause,
     EndCue,
     CaptureFlow,
+    /// One call to the desktop host; fields hold only the call's name.
+    HostCall,
 }
 
 impl Event {
@@ -69,6 +71,7 @@ impl Event {
             Self::EndingPause => "desktop_ending_pause",
             Self::EndCue => "desktop_end_cue",
             Self::CaptureFlow => "desktop_capture_flow",
+            Self::HostCall => "desktop_host_call",
         }
     }
 }
@@ -479,6 +482,7 @@ mod tests {
             (Event::EndingPause, "desktop_ending_pause"),
             (Event::EndCue, "desktop_end_cue"),
             (Event::CaptureFlow, "desktop_capture_flow"),
+            (Event::HostCall, "desktop_host_call"),
         ] {
             assert_eq!(event.name(), name);
         }

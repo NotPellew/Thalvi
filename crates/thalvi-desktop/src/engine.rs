@@ -376,6 +376,12 @@ where
         (engine, handle)
     }
 
+    /// The recorder the engine writes to, for the caller's own events.
+    #[must_use]
+    pub fn recorder(&self) -> &Recorder {
+        &self.recorder
+    }
+
     /// Writes the recordings still queued; call once at shutdown.
     pub async fn finish(self) {
         self.recorder.finish().await;
