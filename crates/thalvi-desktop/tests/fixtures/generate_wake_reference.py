@@ -1,7 +1,7 @@
 """Writes wake_reference.json: per-frame scores from Python openwakeword 0.6.0.
 
-Run from the desktop venv, with a directory holding the five model files and the test clip:
-    desktop/.venv/bin/python -I generate_wake_reference.py MODEL_DIR hey_mycroft_test.wav
+Needs a directory holding the five model files and the test clip. From this directory:
+    uv sync --locked && .venv/bin/python -I generate_wake_reference.py MODEL_DIR hey_mycroft_test.wav
 The seed noise is replaced by the same formula wake.rs uses, so both start from identical history.
 """
 

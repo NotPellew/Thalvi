@@ -1,0 +1,5 @@
+[project]
+name = "wake-reference"
+version = "0.0.0"
+requires-python = ">=3.11,<3.12"
+dependencies = ["numpy==1.26.4", "onnxruntime==1.31.1", "openwakeword==0.6.0"]
