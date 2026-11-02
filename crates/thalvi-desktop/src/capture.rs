@@ -1,1 +1,992 @@
 //! Transcript accumulation, ending phrases, scratch and cancel, and the pending silence window.
+
+use std::cmp::Reverse;
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
+
+/// The most characters one capture holds.
+pub const MAX_CAPTURE_CHARS: usize = 20_000;
+
+/// The most characters between the delimiters of an artifact such as `[noise]`.
+const ARTIFACT_BODY_MAX: usize = 32;
+
+/// The most artifacts that may follow an ending phrase.
+const ENDING_ARTIFACTS_MAX: usize = 2;
+
+const DEFAULT_ENDINGS: [(&str, Ending); 6] = [
+    ("paste that", Ending::Paste),
+    ("finish dictation", Ending::Paste),
+    ("submit", Ending::Submit),
+    ("do that", Ending::Task),
+    ("scratch that", Ending::Scratch),
+    ("never mind", Ending::Cancel),
+];
+
+/// What a spoken ending phrase does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ending {
+    Paste,
+    Submit,
+    Task,
+    Scratch,
+    Cancel,
+}
+
+impl Ending {
+    const ALL: [Self; 5] = [
+        Self::Paste,
+        Self::Submit,
+        Self::Task,
+        Self::Scratch,
+        Self::Cancel,
+    ];
+}
+
+/// The endings that deliver the capture; scratch and cancel never do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureRoute {
+    Paste,
+    Submit,
+    Task,
+}
+
+/// Why a set of ending phrases was rejected. Messages are shown to the user as written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum EndingsError {
+    #[error("An ending phrase must not be empty.")]
+    Empty,
+    #[error("Ending phrases must be distinct.")]
+    Duplicate,
+    #[error("Configure paste, submit, task, scratch, and cancel endings.")]
+    Incomplete,
+}
+
+/// The phrases that end or edit a capture, validated once: lowercase single-spaced, distinct,
+/// and covering every [`Ending`].
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "BTreeMap<String, Ending>")]
+pub struct Endings(Vec<(String, Ending)>);
+
+impl TryFrom<BTreeMap<String, Ending>> for Endings {
+    type Error = EndingsError;
+
+    fn try_from(phrases: BTreeMap<String, Ending>) -> Result<Self, EndingsError> {
+        let mut entries: Vec<(String, Ending)> = Vec::new();
+        for (phrase, ending) in phrases {
+            let phrase = phrase
+                .to_lowercase()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if phrase.is_empty() {
+                return Err(EndingsError::Empty);
+            }
+            if entries.iter().any(|(known, _)| *known == phrase) {
+                return Err(EndingsError::Duplicate);
+            }
+            entries.push((phrase, ending));
+        }
+        if Ending::ALL
+            .iter()
+            .any(|ending| entries.iter().all(|(_, known)| known != ending))
+        {
+            return Err(EndingsError::Incomplete);
+        }
+        Ok(Self::longest_first(entries))
+    }
+}
+
+impl Default for Endings {
+    fn default() -> Self {
+        Self::longest_first(
+            DEFAULT_ENDINGS
+                .iter()
+                .map(|(phrase, ending)| ((*phrase).to_owned(), *ending))
+                .collect(),
+        )
+    }
+}
+
+impl Endings {
+    /// Longest first, so "please submit" wins over "submit".
+    fn longest_first(mut entries: Vec<(String, Ending)>) -> Self {
+        entries.sort_by_key(|(phrase, _)| (Reverse(phrase.chars().count()), phrase.clone()));
+        Self(entries)
+    }
+
+    /// The first ending, longest phrase first, that `text` ends with (allowing trailing
+    /// artifacts), and the text before its phrase.
+    fn find<'a>(&self, text: &'a str) -> Option<(Ending, &'a str)> {
+        let chars: Vec<char> = text.chars().collect();
+        for (phrase, ending) in &self.0 {
+            let starts = (0..chars.len()).filter(|&at| at == 0 || chars[at - 1].is_whitespace());
+            for start in starts {
+                if let Some(end) = phrase_end(&chars, start, phrase)
+                    && artifacts_to_end(&chars[end..], 0, ENDING_ARTIFACTS_MAX)
+                {
+                    let byte = text.char_indices().nth(start).map_or(0, |(byte, _)| byte);
+                    return Some((*ending, text[..byte].trim()));
+                }
+            }
+        }
+        None
+    }
+}
+
+/// The silence the user must keep after an ending before it is delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(try_from = "f64")]
+pub struct PauseDuration(Duration);
+
+/// The pause was outside what the user can interrupt comfortably.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("The ending pause must be a number of seconds from 2 to 3.")]
+pub struct PauseError;
+
+impl TryFrom<f64> for PauseDuration {
+    type Error = PauseError;
+
+    fn try_from(seconds: f64) -> Result<Self, PauseError> {
+        if (2.0..=3.0).contains(&seconds) {
+            Ok(Self(Duration::from_secs_f64(seconds)))
+        } else {
+            Err(PauseError)
+        }
+    }
+}
+
+impl Default for PauseDuration {
+    fn default() -> Self {
+        Self(Duration::from_millis(2500))
+    }
+}
+
+impl PauseDuration {
+    #[must_use]
+    pub fn get(self) -> Duration {
+        self.0
+    }
+}
+
+/// Where an armed ending is in its silence window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuietWindow {
+    /// The ending arrived while the user was still audibly speaking; counting starts at the
+    /// first quiet frame.
+    WaitingForQuiet,
+    /// Continuous quiet since `since`; the ending is delivered once the pause has passed.
+    CountingDown { since: Instant },
+}
+
+/// An ending heard but not yet delivered: continued speech cancels it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingEnding {
+    pub route: CaptureRoute,
+    /// What will be delivered: the capture without the ending phrase.
+    pub text: String,
+    pub window: QuietWindow,
+}
+
+/// What a delivered capture asks the caller to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureRequest {
+    pub route: CaptureRoute,
+    pub text: String,
+}
+
+/// What one final transcript did to the capture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FinalStep {
+    /// The capture grew, was scratched, or the final was ignored; capture continues.
+    /// `cancelled_pending` is true when it also cancelled an armed ending.
+    Continue { cancelled_pending: bool },
+    /// An ending is armed (replacing any earlier one) and its quiet window starts.
+    Armed(PendingEnding),
+    /// The user said "never mind": the capture is discarded.
+    Cancelled,
+}
+
+/// The capture cannot take more text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("This capture is full. Finish or cancel it before continuing.")]
+pub struct CaptureFullError;
+
+/// One dictation: final transcripts in, an ending delivered after a quiet pause out.
+/// Pure and synchronous; the caller supplies every instant.
+#[derive(Clone, Debug)]
+pub struct CaptureSession {
+    endings: Endings,
+    pause: PauseDuration,
+    pieces: Vec<String>,
+    scratched: bool,
+    pending: Option<PendingEnding>,
+}
+
+impl CaptureSession {
+    #[must_use]
+    pub fn new(endings: Endings, pause: PauseDuration) -> Self {
+        Self {
+            endings,
+            pause,
+            pieces: Vec::new(),
+            scratched: false,
+            pending: None,
+        }
+    }
+
+    /// Everything captured so far; an armed ending's phrase is still in it until delivery.
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.pieces.join(" ")
+    }
+
+    /// Whether the user said "scratch that" at any point.
+    #[must_use]
+    pub fn scratched(&self) -> bool {
+        self.scratched
+    }
+
+    #[must_use]
+    pub fn pending(&self) -> Option<&PendingEnding> {
+        self.pending.as_ref()
+    }
+
+    /// When the armed ending is delivered if the quiet continues; `None` until quiet starts.
+    #[must_use]
+    pub fn ready_at(&self) -> Option<Instant> {
+        match self.pending.as_ref()?.window {
+            QuietWindow::CountingDown { since } => Some(since + self.pause.get()),
+            QuietWindow::WaitingForQuiet => None,
+        }
+    }
+
+    /// Applies one final transcript. `speech` is whether the user is audibly speaking right now.
+    ///
+    /// # Errors
+    /// Fails, leaving the capture unchanged, when the text would pass [`MAX_CAPTURE_CHARS`].
+    pub fn on_final(
+        &mut self,
+        transcript: &str,
+        now: Instant,
+        speech: bool,
+    ) -> Result<FinalStep, CaptureFullError> {
+        let text = transcript.trim();
+        if text.is_empty() || artifacts_to_end(&text.chars().collect::<Vec<_>>(), 1, 2) {
+            return Ok(FinalStep::Continue {
+                cancelled_pending: false,
+            });
+        }
+        let combined = self
+            .pieces
+            .iter()
+            .map(String::as_str)
+            .chain([text])
+            .collect::<Vec<_>>()
+            .join(" ");
+        let cancelled_pending = self.pending.is_some();
+        match self.endings.find(&combined) {
+            Some((Ending::Cancel, _)) => {
+                self.pieces.clear();
+                self.pending = None;
+                Ok(FinalStep::Cancelled)
+            }
+            Some((Ending::Scratch, before)) => {
+                self.scratched = true;
+                let kept = kept_pieces(
+                    self.pieces.iter().map(String::as_str).chain([text]),
+                    before.chars().count(),
+                );
+                self.pieces.truncate(kept);
+                self.pending = None;
+                Ok(FinalStep::Continue { cancelled_pending })
+            }
+            Some((Ending::Paste, before)) => {
+                self.arm(CaptureRoute::Paste, before, text, now, speech)
+            }
+            Some((Ending::Submit, before)) => {
+                self.arm(CaptureRoute::Submit, before, text, now, speech)
+            }
+            Some((Ending::Task, before)) => self.arm(CaptureRoute::Task, before, text, now, speech),
+            None => {
+                if combined.chars().count() > MAX_CAPTURE_CHARS {
+                    return Err(CaptureFullError);
+                }
+                self.pieces.push(text.to_owned());
+                self.pending = None;
+                Ok(FinalStep::Continue { cancelled_pending })
+            }
+        }
+    }
+
+    fn arm(
+        &mut self,
+        route: CaptureRoute,
+        before: &str,
+        text: &str,
+        now: Instant,
+        speech: bool,
+    ) -> Result<FinalStep, CaptureFullError> {
+        if before.chars().count() > MAX_CAPTURE_CHARS {
+            return Err(CaptureFullError);
+        }
+        self.pieces.push(text.to_owned());
+        let pending = PendingEnding {
+            route,
+            text: before.to_owned(),
+            window: if speech {
+                QuietWindow::WaitingForQuiet
+            } else {
+                QuietWindow::CountingDown { since: now }
+            },
+        };
+        self.pending = Some(pending.clone());
+        Ok(FinalStep::Armed(pending))
+    }
+
+    /// Applies a partial transcript; returns whether it cancelled the armed ending.
+    /// Empty and artifact-only partials (`[noise]`, `uh`) never do.
+    pub fn on_partial(&mut self, transcript: &str) -> bool {
+        let text = transcript.trim();
+        if self.pending.is_none()
+            || text.is_empty()
+            || artifacts_to_end(&text.chars().collect::<Vec<_>>(), 1, 2)
+        {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
+
+    /// Reports one quiet audio frame; returns whether it started the armed ending's countdown.
+    pub fn on_quiet_frame(&mut self, now: Instant) -> bool {
+        match self.pending.as_mut() {
+            Some(PendingEnding {
+                window: window @ QuietWindow::WaitingForQuiet,
+                ..
+            }) => {
+                *window = QuietWindow::CountingDown { since: now };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Delivers the armed ending once its quiet window has lasted the whole pause.
+    pub fn poll_ready(&mut self, now: Instant) -> Option<CaptureRequest> {
+        let ready_at = self.ready_at()?;
+        if now < ready_at {
+            return None;
+        }
+        let pending = self.pending.take()?;
+        self.pieces = if pending.text.is_empty() {
+            Vec::new()
+        } else {
+            vec![pending.text.clone()]
+        };
+        Some(CaptureRequest {
+            route: pending.route,
+            text: pending.text,
+        })
+    }
+}
+
+/// How many leading `pieces` survive "scratch that" when `before_len` characters precede the
+/// phrase: the pieces wholly inside it, minus the last one if the phrase directly followed it.
+fn kept_pieces<'a>(pieces: impl Iterator<Item = &'a str>, before_len: usize) -> usize {
+    let mut used = 0;
+    let mut kept = 0;
+    for piece in pieces {
+        let end = used + piece.chars().count();
+        if end > before_len {
+            break;
+        }
+        kept += 1;
+        used = end + 1;
+    }
+    if kept > 0 && used >= before_len {
+        kept -= 1;
+    }
+    kept
+}
+
+/// Where `phrase`'s words end if they start at `start`, separated by any punctuation or space.
+fn phrase_end(chars: &[char], start: usize, phrase: &str) -> Option<usize> {
+    let mut at = start;
+    for (index, word) in phrase.split(' ').enumerate() {
+        if index > 0 {
+            let gap = chars[at..].iter().take_while(|c| is_separator(**c)).count();
+            if gap == 0 {
+                return None;
+            }
+            at += gap;
+        }
+        for expected in word.chars() {
+            if !chars.get(at).is_some_and(|c| same_letter(*c, expected)) {
+                return None;
+            }
+            at += 1;
+        }
+    }
+    Some(at)
+}
+
+fn same_letter(heard: char, expected: char) -> bool {
+    heard == expected || heard.to_lowercase().eq(expected.to_lowercase())
+}
+
+fn is_separator(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '.' | '!' | '?' | ',' | ';' | ':')
+}
+
+/// Whether `chars` is only separators and `min..=max` artifacts, each followed by separators.
+fn artifacts_to_end(chars: &[char], min: usize, max: usize) -> bool {
+    let skipped = chars.iter().take_while(|c| is_separator(**c)).count();
+    let rest = &chars[skipped..];
+    if rest.is_empty() {
+        return min == 0;
+    }
+    max > 0
+        && artifact_lengths(rest)
+            .into_iter()
+            .any(|len| artifacts_to_end(&rest[len..], min.saturating_sub(1), max - 1))
+}
+
+/// Every length of an artifact that `rest` starts with: `[noise]`, `(breathing)`, `<|nospeech|>`,
+/// and the filler sounds uh, um, hm, mh, ah and erm.
+fn artifact_lengths(rest: &[char]) -> Vec<usize> {
+    let mut lengths = Vec::new();
+    delimited(rest, "[", "]", ['[', ']'], &mut lengths);
+    delimited(rest, "(", ")", ['(', ')'], &mut lengths);
+    delimited(rest, "<|", "|>", ['<', '>'], &mut lengths);
+    for filler in ["uh", "um", "hm", "mh", "ah", "erm"] {
+        filler_runs(rest, filler, 0, &mut lengths);
+    }
+    lengths
+}
+
+fn starts_with(chars: &[char], pattern: &str) -> bool {
+    chars.len() >= pattern.len() && chars.iter().zip(pattern.chars()).all(|(a, b)| *a == b)
+}
+
+fn delimited(rest: &[char], open: &str, close: &str, banned: [char; 2], out: &mut Vec<usize>) {
+    if !starts_with(rest, open) {
+        return;
+    }
+    let body = &rest[open.len()..];
+    for count in 1..=ARTIFACT_BODY_MAX {
+        match body.get(count - 1) {
+            Some(c) if !banned.contains(c) && !matches!(c, '\r' | '\n') => {}
+            _ => return,
+        }
+        if starts_with(&body[count..], close) {
+            out.push(open.len() + count + close.len());
+        }
+    }
+}
+
+/// Lengths of `rest`'s prefixes made of one or more repeats of each letter of `letters` in turn.
+fn filler_runs(rest: &[char], letters: &str, used: usize, out: &mut Vec<usize>) {
+    let Some(letter) = letters.chars().next() else {
+        out.push(used);
+        return;
+    };
+    let run = rest[used..]
+        .iter()
+        .take_while(|c| c.eq_ignore_ascii_case(&letter))
+        .count();
+    for take in 1..=run {
+        filler_runs(rest, &letters[1..], used + take, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session() -> CaptureSession {
+        CaptureSession::new(Endings::default(), PauseDuration::default())
+    }
+
+    fn ms(base: Instant, millis: u64) -> Instant {
+        base + Duration::from_millis(millis)
+    }
+
+    fn endings(entries: &[(&str, Ending)]) -> Result<Endings, EndingsError> {
+        Endings::try_from(
+            entries
+                .iter()
+                .map(|(phrase, ending)| ((*phrase).to_owned(), *ending))
+                .collect::<BTreeMap<_, _>>(),
+        )
+    }
+
+    /// Feeds finals with no speech and returns the last step.
+    fn feed(session: &mut CaptureSession, finals: &[&str]) -> FinalStep {
+        let now = Instant::now();
+        let mut step = FinalStep::Continue {
+            cancelled_pending: false,
+        };
+        for text in finals {
+            step = session.on_final(text, now, false).unwrap();
+        }
+        step
+    }
+
+    fn armed(route: CaptureRoute, text: &str) -> (CaptureRoute, String) {
+        (route, text.to_owned())
+    }
+
+    fn armed_parts(step: &FinalStep) -> (CaptureRoute, String) {
+        match step {
+            FinalStep::Armed(pending) => (pending.route, pending.text.clone()),
+            other => panic!("expected an armed ending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_ending_delivers_the_capture_only_after_the_whole_pause() {
+        for (ending, route) in [
+            ("paste that", CaptureRoute::Paste),
+            ("SUBMIT!", CaptureRoute::Submit),
+            ("do that.", CaptureRoute::Task),
+        ] {
+            let mut session = session();
+            let base = Instant::now();
+            let expected = "Explain how to submit a change. Then show the next test.";
+            for text in [
+                "Explain how to submit a change.",
+                "Then show the next test.",
+            ] {
+                assert_eq!(
+                    session.on_final(text, base, false),
+                    Ok(FinalStep::Continue {
+                        cancelled_pending: false
+                    })
+                );
+            }
+            let step = session.on_final(ending, base, false).unwrap();
+            assert_eq!(armed_parts(&step), armed(route, expected), "{ending}");
+            assert_eq!(session.poll_ready(ms(base, 2499)), None, "{ending}");
+            assert_eq!(
+                session.poll_ready(ms(base, 2500)),
+                Some(CaptureRequest {
+                    route,
+                    text: expected.to_owned()
+                }),
+                "{ending}"
+            );
+            assert_eq!(session.pending(), None);
+            assert_eq!(session.text(), expected);
+        }
+    }
+
+    #[test]
+    fn an_ending_armed_during_speech_counts_down_from_the_first_quiet_frame() {
+        let base = Instant::now();
+        let mut session = session();
+        let step = session
+            .on_final("hello paste that", ms(base, 100), true)
+            .unwrap();
+        assert_eq!(
+            step,
+            FinalStep::Armed(PendingEnding {
+                route: CaptureRoute::Paste,
+                text: "hello".to_owned(),
+                window: QuietWindow::WaitingForQuiet,
+            })
+        );
+        assert_eq!(session.ready_at(), None);
+        assert_eq!(session.poll_ready(ms(base, 100_000)), None);
+
+        assert!(session.on_quiet_frame(ms(base, 10_000)));
+        assert!(!session.on_quiet_frame(ms(base, 10_080)));
+        assert_eq!(
+            session.pending().map(|pending| pending.window),
+            Some(QuietWindow::CountingDown {
+                since: ms(base, 10_000)
+            })
+        );
+        assert_eq!(session.ready_at(), Some(ms(base, 12_500)));
+        assert_eq!(session.poll_ready(ms(base, 12_499)), None);
+        assert_eq!(
+            session
+                .poll_ready(ms(base, 12_500))
+                .map(|request| request.text),
+            Some("hello".to_owned())
+        );
+    }
+
+    #[test]
+    fn continued_speech_cancels_an_ending_and_a_new_one_restarts_the_pause() {
+        let base = Instant::now();
+        let mut session = session();
+        session
+            .on_final("hello submit", ms(base, 10_000), false)
+            .unwrap();
+        assert!(!session.on_partial(""));
+        assert!(!session.on_partial("[noise]"));
+        assert!(session.pending().is_some());
+        assert!(session.on_partial("more"));
+        assert_eq!(session.pending(), None);
+        assert_eq!(session.poll_ready(ms(base, 12_500)), None);
+        assert!(!session.on_partial("more again"));
+
+        assert_eq!(
+            session.on_final("  ", ms(base, 11_000), false),
+            Ok(FinalStep::Continue {
+                cancelled_pending: false
+            })
+        );
+        assert_eq!(session.poll_ready(ms(base, 13_500)), None);
+        session
+            .on_final("more words submit", ms(base, 13_000), false)
+            .unwrap();
+        assert_eq!(session.poll_ready(ms(base, 15_499)), None);
+        assert_eq!(
+            session.poll_ready(ms(base, 15_500)),
+            Some(CaptureRequest {
+                route: CaptureRoute::Submit,
+                text: "hello submit more words".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn a_later_ending_replaces_the_earlier_one_and_restarts_the_pause() {
+        let base = Instant::now();
+        let mut session = session();
+        session
+            .on_final("hello submit", ms(base, 10_000), false)
+            .unwrap();
+        session
+            .on_final("more words do that", ms(base, 11_000), false)
+            .unwrap();
+        assert_eq!(session.poll_ready(ms(base, 13_499)), None);
+        assert_eq!(
+            session.poll_ready(ms(base, 13_500)),
+            Some(CaptureRequest {
+                route: CaptureRoute::Task,
+                text: "hello submit more words".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn dictation_after_an_ending_cancels_it_and_stays_in_the_capture() {
+        let base = Instant::now();
+        let mut session = session();
+        session.on_final("hello submit", base, false).unwrap();
+        assert_eq!(
+            session.on_final("more words", base, false),
+            Ok(FinalStep::Continue {
+                cancelled_pending: true
+            })
+        );
+        assert_eq!(session.pending(), None);
+        assert_eq!(session.text(), "hello submit more words");
+    }
+
+    #[test]
+    fn artifact_finals_neither_cancel_nor_restart_an_armed_ending() {
+        let base = Instant::now();
+        for artifact in ["[noise] uh", "(breathing)", "<|nospeech|>", "um...", "   "] {
+            let mut session = session();
+            session
+                .on_final("hello submit", ms(base, 10_000), false)
+                .unwrap();
+            assert_eq!(
+                session.on_final(artifact, ms(base, 11_000), false),
+                Ok(FinalStep::Continue {
+                    cancelled_pending: false
+                }),
+                "{artifact}"
+            );
+            assert_eq!(session.poll_ready(ms(base, 12_499)), None, "{artifact}");
+            assert_eq!(
+                session
+                    .poll_ready(ms(base, 12_500))
+                    .map(|request| request.text),
+                Some("hello".to_owned()),
+                "{artifact}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_artifact_final_does_not_revive_a_cancelled_ending() {
+        let base = Instant::now();
+        let mut session = session();
+        session
+            .on_final("hello submit", ms(base, 10_000), false)
+            .unwrap();
+        assert!(session.on_partial("more"));
+        session
+            .on_final("[noise]", ms(base, 11_000), false)
+            .unwrap();
+        assert_eq!(session.pending(), None);
+        assert_eq!(session.poll_ready(ms(base, 20_000)), None);
+        assert_eq!(session.text(), "hello submit");
+    }
+
+    #[test]
+    fn endings_span_final_boundaries_and_inserted_punctuation() {
+        for (finals, expected) in [
+            (
+                ["Keep this paste.", "that!"],
+                Some(armed(CaptureRoute::Paste, "Keep this")),
+            ),
+            (
+                ["Keep this finish", "dictation."],
+                Some(armed(CaptureRoute::Paste, "Keep this")),
+            ),
+            (
+                ["Keep this do", "that."],
+                Some(armed(CaptureRoute::Task, "Keep this")),
+            ),
+            (
+                ["Keep this", "submit."],
+                Some(armed(CaptureRoute::Submit, "Keep this")),
+            ),
+            (["Keep this never.", "mind"], None),
+        ] {
+            let mut session = session();
+            let step = feed(&mut session, &finals);
+            match expected {
+                Some(expected) => assert_eq!(armed_parts(&step), expected, "{finals:?}"),
+                None => assert_eq!(step, FinalStep::Cancelled, "{finals:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn endings_tolerate_up_to_two_trailing_artifacts() {
+        for (ending, route) in [
+            ("paste that", CaptureRoute::Paste),
+            ("submit", CaptureRoute::Submit),
+            ("do that", CaptureRoute::Task),
+        ] {
+            for tail in [
+                "...",
+                " [noise]",
+                " (breathing)",
+                " <|nospeech|>",
+                " uh",
+                ", um... [MUSIC]",
+            ] {
+                let mut session = session();
+                let step = feed(&mut session, &[&format!("Keep this {ending}{tail}")]);
+                assert_eq!(
+                    armed_parts(&step),
+                    armed(route, "Keep this"),
+                    "{ending}{tail}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn near_matches_stay_literal_dictation() {
+        for text in [
+            "taste that.",
+            "finish dictation later",
+            "submitter",
+            "submit um okay",
+            "submit um uh hmm",
+        ] {
+            let mut session = session();
+            assert_eq!(
+                feed(&mut session, &[text]),
+                FinalStep::Continue {
+                    cancelled_pending: false
+                },
+                "{text}"
+            );
+            assert_eq!(session.text(), text);
+        }
+    }
+
+    #[test]
+    fn configured_endings_match_whole_phrases_longest_first() {
+        let custom = endings(&[
+            ("  Send   THIS ", Ending::Submit),
+            ("please send this", Ending::Paste),
+            ("paste", Ending::Paste),
+            ("do it", Ending::Task),
+            ("scratch", Ending::Scratch),
+            ("cancel", Ending::Cancel),
+        ])
+        .unwrap();
+        let mut session = CaptureSession::new(custom, PauseDuration::default());
+        let now = Instant::now();
+        for literal in ["Resend this", "A literal send this inside the sentence"] {
+            assert_eq!(
+                session.on_final(literal, now, false),
+                Ok(FinalStep::Continue {
+                    cancelled_pending: false
+                })
+            );
+        }
+        let step = session
+            .on_final("Final words SEND THIS.", now, false)
+            .unwrap();
+        assert_eq!(
+            armed_parts(&step),
+            armed(
+                CaptureRoute::Submit,
+                "Resend this A literal send this inside the sentence Final words"
+            )
+        );
+        let step = session.on_final("ok please send this", now, false).unwrap();
+        assert_eq!(armed_parts(&step).0, CaptureRoute::Paste);
+    }
+
+    #[test]
+    fn scratch_discards_only_the_latest_piece_and_cancel_discards_everything() {
+        let mut session = session();
+        feed(&mut session, &["Keep the first thought."]);
+        feed(&mut session, &["Throw this away scratch that."]);
+        assert_eq!(session.text(), "Keep the first thought.");
+        assert!(session.scratched());
+        feed(&mut session, &["Second thought."]);
+        feed(&mut session, &["scratch that"]);
+        assert_eq!(session.text(), "Keep the first thought.");
+        assert_eq!(feed(&mut session, &["never mind"]), FinalStep::Cancelled);
+        assert_eq!(session.text(), "");
+    }
+
+    #[test]
+    fn scratch_across_finals_keeps_earlier_piece_boundaries() {
+        for (finals, expected) in [
+            (vec!["scratch that"], "First"),
+            (vec!["scratch.", "that"], "First"),
+            (vec!["Discard this scratch", "that"], "First Second"),
+            (vec!["Discard this scratch that"], "First Second"),
+        ] {
+            let mut session = session();
+            feed(&mut session, &["First", "Second"]);
+            assert_eq!(
+                feed(&mut session, &finals),
+                FinalStep::Continue {
+                    cancelled_pending: false
+                },
+                "{finals:?}"
+            );
+            assert_eq!(session.text(), expected, "{finals:?}");
+        }
+    }
+
+    #[test]
+    fn scratch_after_an_armed_ending_removes_its_piece_and_cancels_it() {
+        let mut session = session();
+        feed(&mut session, &["first piece"]);
+        feed(&mut session, &["second submit"]);
+        assert!(session.on_partial("more"));
+        feed(&mut session, &["scratch that"]);
+        assert_eq!(session.text(), "first piece");
+
+        feed(&mut session, &["third submit"]);
+        assert_eq!(
+            feed(&mut session, &["scratch that"]),
+            FinalStep::Continue {
+                cancelled_pending: true
+            }
+        );
+        assert_eq!(session.pending(), None);
+        assert_eq!(session.text(), "first piece");
+    }
+
+    #[test]
+    fn never_mind_discards_the_capture_and_any_armed_ending() {
+        let mut session = session();
+        feed(&mut session, &["Draft words", "hello submit"]);
+        assert_eq!(feed(&mut session, &["never mind"]), FinalStep::Cancelled);
+        assert_eq!(session.pending(), None);
+        assert_eq!(session.text(), "");
+    }
+
+    #[test]
+    fn a_capture_accepts_exactly_the_limit_and_refuses_one_character_more() {
+        let x = |count: usize| "x".repeat(count);
+        let cases: Vec<(usize, String, bool)> = vec![
+            (19_990, x(9), false),
+            (19_990, x(10), true),
+            (0, "é".repeat(20_000), false),
+            (0, "é".repeat(20_001), true),
+            // The ending phrase does not count toward the limit.
+            (19_990, "paste that".to_owned(), false),
+            (19_990, "y".repeat(9) + " paste that", false),
+            (19_990, "y".repeat(10) + " paste that", true),
+        ];
+        for (existing, next, refused) in cases {
+            let mut session = session();
+            if existing > 0 {
+                feed(&mut session, &[&x(existing)]);
+            }
+            let result = session.on_final(&next, Instant::now(), false);
+            if refused {
+                assert_eq!(result, Err(CaptureFullError), "{existing} + {}", next.len());
+                assert_eq!(session.text().chars().count(), existing);
+                assert_eq!(session.pending(), None);
+            } else {
+                assert!(result.is_ok(), "{existing} + {}", next.len());
+            }
+        }
+    }
+
+    #[test]
+    fn a_full_capture_can_still_deliver_what_it_holds() {
+        let mut session = session();
+        feed(&mut session, &[&"x".repeat(19_990)]);
+        assert_eq!(
+            session.on_final(&"y".repeat(20), Instant::now(), false),
+            Err(CaptureFullError)
+        );
+        let step = feed(&mut session, &["paste that"]);
+        assert_eq!(
+            armed_parts(&step),
+            armed(CaptureRoute::Paste, &"x".repeat(19_990))
+        );
+    }
+
+    #[test]
+    fn endings_reject_empty_duplicate_and_incomplete_sets() {
+        let complete = [
+            ("paste", Ending::Paste),
+            ("send", Ending::Submit),
+            ("do it", Ending::Task),
+            ("scratch", Ending::Scratch),
+            ("cancel", Ending::Cancel),
+        ];
+        let with = |extra: (&'static str, Ending)| {
+            let mut entries = complete.to_vec();
+            entries.push(extra);
+            endings(&entries)
+        };
+        assert!(endings(&complete).is_ok());
+        assert_eq!(with(("   ", Ending::Paste)), Err(EndingsError::Empty));
+        assert_eq!(with(("Do  IT", Ending::Task)), Err(EndingsError::Duplicate));
+        assert_eq!(endings(&complete[..4]), Err(EndingsError::Incomplete));
+        assert_eq!(Endings::default(), endings(&DEFAULT_ENDINGS).unwrap());
+    }
+
+    #[test]
+    fn the_pause_must_be_between_two_and_three_seconds() {
+        for (seconds, valid) in [
+            (2.0, true),
+            (2.5, true),
+            (3.0, true),
+            (1.999, false),
+            (3.001, false),
+            (f64::NAN, false),
+            (f64::INFINITY, false),
+        ] {
+            assert_eq!(PauseDuration::try_from(seconds).is_ok(), valid, "{seconds}");
+        }
+        assert_eq!(PauseDuration::default().get(), Duration::from_millis(2500));
+    }
+}
