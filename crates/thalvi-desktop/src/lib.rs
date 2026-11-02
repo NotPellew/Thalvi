@@ -3,3 +3,4 @@
 pub mod frame;
 pub mod models;
 pub mod vad;
+pub mod wake;

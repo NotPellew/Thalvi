@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 dirs.workspace = true
+ort.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 sha2.workspace = true
@@ -19,3 +20,4 @@ webrtc-vad.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+serde_json.workspace = true
