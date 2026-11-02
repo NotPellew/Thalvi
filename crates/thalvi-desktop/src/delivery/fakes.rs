@@ -89,4 +89,8 @@ impl Host for FakeHost {
     fn open_url(&self, url: &WebUrl) -> Result<(), HostError> {
         self.record("open_url", format!("open_url:{}", url.as_str()))
     }
+
+    fn prepare_overlay(&self) -> Result<(), HostError> {
+        self.record("prepare_overlay", "prepare_overlay".to_owned())
+    }
 }

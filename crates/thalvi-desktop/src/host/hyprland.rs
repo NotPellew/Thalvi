@@ -7,7 +7,7 @@ use std::fmt;
 use serde::Deserialize;
 
 use self::command::{CommandError, CommandRunner, SystemRunner};
-use super::{App, Host, HostError, Modifier, Shortcut, TypedText, WebUrl};
+use super::{App, Host, HostError, Modifier, OVERLAY_TITLE, Shortcut, TypedText, WebUrl};
 
 /// The window as Hyprland identifies it; the pid tells a reused address from the original window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,6 +269,17 @@ impl<R: CommandRunner> Host for Hyprland<R> {
             })?;
         self.run
             .run(browser, &["--new-tab", url.as_str()], None)
+            .map(|_| ())
+            .map_err(|error| tool(&error))
+    }
+
+    fn prepare_overlay(&self) -> Result<(), HostError> {
+        let rule = format!(
+            "match:title ^({OVERLAY_TITLE})$, float on, pin on, no_initial_focus on, no_focus on, \
+             move ((monitor_w*0.5)-(window_w*0.5)) 56, border_size 0, no_shadow on, no_anim on"
+        );
+        self.run
+            .run("hyprctl", &["keyword", "windowrule", &rule], None)
             .map(|_| ())
             .map_err(|error| tool(&error))
     }
@@ -695,6 +706,28 @@ mod tests {
             commands(&host)
                 .iter()
                 .all(|command| !command.starts_with("wtype"))
+        );
+    }
+
+    #[test]
+    fn the_overlay_window_is_pinned_at_the_top_without_taking_focus() {
+        let ready = host(|_, _| Ok("ok".to_owned()));
+        assert_eq!(ready.prepare_overlay(), Ok(()));
+        assert_eq!(
+            commands(&ready),
+            [
+                "hyprctl keyword windowrule match:title ^(Thalvi overlay)$, float on, pin on, \
+              no_initial_focus on, no_focus on, move ((monitor_w*0.5)-(window_w*0.5)) 56, \
+              border_size 0, no_shadow on, no_anim on"
+            ]
+        );
+
+        let missing = host(|_, _| Err(CommandError::NotInstalled("hyprctl".to_owned())));
+        assert_eq!(
+            missing.prepare_overlay(),
+            Err(HostError::Unsupported(
+                "Desktop tool hyprctl is not installed.".to_owned()
+            ))
         );
     }
 

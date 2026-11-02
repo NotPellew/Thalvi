@@ -230,6 +230,11 @@ impl<A: Win32> Host for Windows<A> {
             Err(nothing_typed("Windows could not open the web address."))
         }
     }
+
+    fn prepare_overlay(&self) -> Result<(), HostError> {
+        // Tauri's non-focusable window (WS_EX_NOACTIVATE) already never takes focus.
+        Ok(())
+    }
 }
 
 fn nothing_typed(notice: &str) -> HostError {
