@@ -254,11 +254,11 @@ impl ModelStore {
             source,
         };
         tokio::fs::create_dir_all(&self.dir).await.map_err(io)?;
-        let part = path.with_extension(format!(
+        let part = Partial(path.with_extension(format!(
             "{}-{}.part",
             std::process::id(),
             DOWNLOADS.fetch_add(1, Ordering::Relaxed)
-        ));
+        )));
         let mut response = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(DOWNLOAD_BASE + Duration::from_secs(asset.size / SLOWEST_BYTES_PER_SECOND))
@@ -269,7 +269,7 @@ impl ModelStore {
             .await
             .and_then(reqwest::Response::error_for_status)
             .map_err(net)?;
-        let mut file = tokio::fs::File::create(&part).await.map_err(io)?;
+        let mut file = tokio::fs::File::create(&part.0).await.map_err(io)?;
         let mut hasher = Sha256::new();
         let received = async {
             while let Some(chunk) = response.chunk().await.map_err(net)? {
@@ -282,18 +282,23 @@ impl ModelStore {
         }
         .await;
         drop(file);
-        if let Err(error) = received {
-            let _ = tokio::fs::remove_file(&part).await;
-            return Err(error);
-        }
+        received?;
         if hex(&hasher.finalize()) != asset.sha256 {
-            let _ = tokio::fs::remove_file(&part).await;
             return Err(ModelError::Checksum {
                 kind: asset.kind,
                 file: asset.file_name.to_owned(),
             });
         }
-        tokio::fs::rename(&part, path).await.map_err(io)
+        tokio::fs::rename(&part.0, path).await.map_err(io)
+    }
+}
+
+/// A download in progress, deleted when it is dropped: finished, failed or cancelled.
+struct Partial(PathBuf);
+
+impl Drop for Partial {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 

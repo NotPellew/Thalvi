@@ -6,8 +6,10 @@ use std::fmt::Write;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use axum::Router;
+use axum::body::{Body, Bytes};
 use axum::http::StatusCode;
 use axum::routing::get;
 use sha2::{Digest, Sha256};
@@ -28,7 +30,22 @@ async fn serve() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let app = Router::new()
         .route("/good.onnx", get(|| async { GOOD }))
         .route("/other.onnx", get(|| async { "something else entirely" }))
-        .route("/gone.onnx", get(|| async { StatusCode::NOT_FOUND }));
+        .route("/gone.onnx", get(|| async { StatusCode::NOT_FOUND }))
+        .route(
+            "/stalls.onnx",
+            get(|| async {
+                Body::from_stream(futures_util::stream::unfold(0, |sent| async move {
+                    if sent == 0 {
+                        Some((
+                            Ok::<_, std::io::Error>(Bytes::from_static(b"some bytes")),
+                            1,
+                        ))
+                    } else {
+                        std::future::pending().await
+                    }
+                }))
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -182,4 +199,40 @@ async fn a_speech_model_is_named_as_one_when_it_cannot_be_trusted() {
         error.to_string(),
         "The downloaded speech model speech.onnx did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
     );
+}
+
+#[tokio::test]
+async fn a_download_that_is_cancelled_leaves_no_partial_file() {
+    let (address, _server) = serve().await;
+    let dir = dir("cancelled");
+    let url = format!("http://{address}/stalls.onnx");
+    let sha = sha256(GOOD);
+    let task = {
+        let dir = dir.clone();
+        tokio::spawn(async move {
+            let asset = Asset {
+                kind: ModelKind::Speech,
+                file_name: "good.onnx",
+                url: &url,
+                size: GOOD.len() as u64,
+                sha256: &sha,
+            };
+            ModelStore::in_dir(dir).fetch(&asset).await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .any(|entry| entry.expect("entry").metadata().expect("meta").len() > 0)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the download starts");
+
+    task.abort();
+    assert!(task.await.expect_err("cancelled").is_cancelled());
+    assert_eq!(leftovers(&dir), Vec::<String>::new());
 }
