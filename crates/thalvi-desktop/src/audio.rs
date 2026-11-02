@@ -46,10 +46,17 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 struct Shared {
     waker: AtomicWaker,
     overrun: AtomicBool,
+    closed: AtomicBool,
     error: Mutex<Option<AudioError>>,
 }
 
 impl Shared {
+    /// Marks the stream as gone and wakes a consumer that is waiting for a frame.
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.waker.wake();
+    }
+
     fn report(&self, error: cpal::Error) {
         if let Some(error) = AudioError::from_stream(error) {
             self.error
@@ -68,6 +75,8 @@ struct Tagged {
 }
 
 /// The capture callback's state; feeding it never allocates or locks.
+///
+/// Dropping it, which is what closing the stream does, ends the consumer's frames.
 struct Sink {
     framer: Framer,
     producer: Producer<Tagged>,
@@ -77,6 +86,12 @@ struct Sink {
     boundary: StreamInstant,
     channels: u16,
     shared: Arc<Shared>,
+}
+
+impl Drop for Sink {
+    fn drop(&mut self) {
+        self.shared.close();
+    }
 }
 
 impl Sink {
@@ -181,7 +196,12 @@ impl Frames {
                     .load(Ordering::Acquire)
                     .then_some(AudioError::Dropped)
             })
-            .or_else(|| self.consumer.is_abandoned().then_some(AudioError::Closed));
+            .or_else(|| {
+                self.shared
+                    .closed
+                    .load(Ordering::Acquire)
+                    .then_some(AudioError::Closed)
+            });
         if let Some(error) = failure {
             self.failure = Some(error.clone());
             return Some(Err(error));
@@ -270,8 +290,14 @@ impl Microphone {
     pub fn pause(&mut self) {
         if let Some((stream, shared)) = self.open.take() {
             drop(stream);
-            shared.waker.wake();
+            shared.close();
         }
+    }
+}
+
+impl Drop for Microphone {
+    fn drop(&mut self) {
+        self.pause();
     }
 }
 
@@ -499,9 +525,7 @@ mod tests {
         let (sink, mut frames) = pipeline(16_000, 1, &gate);
         let waiting = tokio::spawn(async move { next(&mut frames).await });
         tokio::task::yield_now().await;
-        let shared = Arc::clone(&sink.shared);
         drop(sink);
-        shared.waker.wake();
         assert_eq!(waiting.await.expect("task"), Err(AudioError::Closed));
     }
 
@@ -553,7 +577,8 @@ mod tests {
         }
     }
 
-    /// Opens the default microphone for 4 s and checks 16 kHz frames arrive at the real rate.
+    /// Opens the default microphone for 4 s and checks 16 kHz frames arrive at the real rate,
+    /// then that dropping the microphone ends a reader that is waiting for frames.
     #[tokio::test]
     #[ignore = "needs a microphone"]
     async fn default_microphone_delivers_16khz_frames_in_real_time() {
@@ -575,5 +600,17 @@ mod tests {
         microphone.pause();
         assert!(!microphone.is_open());
         assert_eq!(next(&mut frames).await, Err(AudioError::Closed));
+
+        let mut frames = microphone.open().expect("the microphone reopens");
+        let reader = tokio::spawn(async move {
+            loop {
+                if let Err(error) = next(&mut frames).await {
+                    return error;
+                }
+            }
+        });
+        tokio::task::yield_now().await;
+        drop(microphone);
+        assert_eq!(reader.await.expect("task"), AudioError::Closed);
     }
 }
