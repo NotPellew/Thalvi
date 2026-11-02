@@ -118,7 +118,12 @@ fn spoken_url(text: &str) -> Option<Task> {
         .get(4..)
         .filter(|_| text[..4].eq_ignore_ascii_case("open"))?;
     let value = rest.trim_start();
-    if value.len() == rest.len() || value.is_empty() {
+    if value.len() == rest.len() {
+        return None;
+    }
+    // Recognizers end the sentence before "do that" with punctuation no host ends with.
+    let value = value.trim_end_matches(['.', ',', '!', '?']);
+    if value.is_empty() {
         return None;
     }
     let candidate = if value.contains("://") {
@@ -270,7 +275,15 @@ mod tests {
             ("open https://exämple.com", None),
             ("open ftp://example.com", None),
             ("open localhost", None),
-            ("open example.com.", None),
+            (
+                "Open google.com.",
+                Some(("https://google.com/", "google.com")),
+            ),
+            (
+                "open example.com/a?",
+                Some(("https://example.com/a", "example.com/a")),
+            ),
+            ("open .", None),
             ("open -example.com", None),
             ("open exa..mple.com", None),
             ("open [::1]", None),
