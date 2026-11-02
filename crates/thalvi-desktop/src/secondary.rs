@@ -91,6 +91,18 @@ impl SecondaryStt {
             api,
         })
     }
+
+    /// The model named in each request.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Which request format the endpoint speaks.
+    #[must_use]
+    pub fn api(&self) -> SecondaryApi {
+        self.api
+    }
 }
 
 impl TryFrom<RawSecondaryStt> for SecondaryStt {
