@@ -1,0 +1,77 @@
+// Test doubles shared by the page tests.
+
+import { vi } from "vitest";
+import type { Backend, Settings, Status } from "./contract.ts";
+import type { Clock } from "./overlay.ts";
+
+export const SETTINGS: Settings = {
+  server: "ws://127.0.0.1:8080",
+  wake: {
+    capture: { model: "hey_thalvi", threshold: 0.5 },
+    conversation: { model: "hey_mycroft", threshold: 0.5 },
+  },
+  cues: { wake: true, provisional: true, cancelled: true, accepted: true, error: true },
+  ending_pause: { paste: 0.7, submit: 2.5, task: 2.5 },
+  capture_limits: { idle: 60, max: 300 },
+  endings: {
+    "paste that": "paste",
+    submit: "submit",
+    "do that": "task",
+    "scratch that": "scratch",
+    "never mind": "cancel",
+  },
+  stt: { secondary: null },
+  apps: { slack: { classes: ["Slack"], executables: [], input_keys: ["ctrl", "k"] } },
+  scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com", label: "docs" }],
+  overlay: { show: true, draft: true },
+  microphone: null,
+  recordings: { metrics: true, text: false, audio: false },
+};
+
+/** A backend whose calls are spies and whose events the test emits. */
+export function stubBackend(settings: Settings = SETTINGS, initial: Status = { state: "listening" }) {
+  const statusListeners: ((status: Status) => void)[] = [];
+  const levelListeners: ((level: number) => void)[] = [];
+  const backend = {
+    getStatus: vi.fn(() => Promise.resolve(initial)),
+    onStatus: vi.fn((listener: (status: Status) => void) => statusListeners.push(listener)),
+    onLevel: vi.fn((listener: (level: number) => void) => levelListeners.push(listener)),
+    getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
+    saveSettings: vi.fn<(settings: Settings) => Promise<void>>(() => Promise.resolve()),
+    setListening: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
+    cancelCapture: vi.fn(() => Promise.resolve()),
+    listMicrophones: vi.fn(() => Promise.resolve(["USB Microphone", "Built-in"])),
+    openRecordings: vi.fn(() => Promise.resolve()),
+    appVersion: vi.fn(() => Promise.resolve("1.2.3")),
+  } satisfies Backend;
+  return {
+    backend,
+    emit: (status: Status) => {
+      for (const listener of statusListeners) listener(status);
+    },
+    level: (level: number) => {
+      for (const listener of levelListeners) listener(level);
+    },
+  };
+}
+
+/** Lets pending promise callbacks run. */
+export async function settle(): Promise<void> {
+  for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+}
+
+/** A clock the test advances by hand; each advance runs the frames queued so far once. */
+export function manualClock(): Clock & { advance(ms: number): void } {
+  let time = 1000;
+  let queued: (() => void)[] = [];
+  return {
+    now: () => time,
+    frame: (callback) => queued.push(callback),
+    advance: (ms) => {
+      time += ms;
+      const run = queued;
+      queued = [];
+      for (const callback of run) callback();
+    },
+  };
+}
