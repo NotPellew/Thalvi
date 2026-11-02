@@ -1,0 +1,153 @@
+//! Model downloads are verified, cached, and never leave a bad file behind.
+
+#![expect(clippy::expect_used, reason = "a test fails by panicking")]
+
+use std::fmt::Write;
+use std::fs;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use axum::Router;
+use axum::http::StatusCode;
+use axum::routing::get;
+use sha2::{Digest, Sha256};
+use thalvi_desktop::models::{Asset, ModelError, ModelStore};
+
+const GOOD: &[u8] = b"pretend this is a model";
+
+fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
+async fn serve() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let app = Router::new()
+        .route("/good.onnx", get(|| async { GOOD }))
+        .route("/other.onnx", get(|| async { "something else entirely" }))
+        .route("/gone.onnx", get(|| async { StatusCode::NOT_FOUND }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("address");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (address, server)
+}
+
+fn dir(test: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("models-{test}"));
+    let _ = fs::remove_dir_all(&dir);
+    dir
+}
+
+fn leftovers(dir: &PathBuf) -> Vec<String> {
+    fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .map(|entry| {
+                    entry
+                        .expect("entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_missing_file_is_downloaded_once_and_then_served_from_disk() {
+    let (address, server) = serve().await;
+    let dir = dir("download");
+    let store = ModelStore::in_dir(&dir);
+    let url = format!("http://{address}/good.onnx");
+    let sha = sha256(GOOD);
+    let asset = Asset {
+        file_name: "good.onnx",
+        url: &url,
+        sha256: &sha,
+    };
+
+    let path = store.fetch(&asset).await.expect("downloads");
+    assert_eq!(fs::read(&path).expect("saved"), GOOD);
+    assert_eq!(leftovers(&dir), ["good.onnx"]);
+
+    server.abort();
+    let _ = server.await;
+    assert_eq!(store.fetch(&asset).await.expect("cached"), path);
+}
+
+#[tokio::test]
+async fn a_download_with_the_wrong_checksum_is_deleted_and_refused() {
+    let (address, _server) = serve().await;
+    let dir = dir("mismatch");
+    let url = format!("http://{address}/other.onnx");
+    let sha = sha256(GOOD);
+    let asset = Asset {
+        file_name: "good.onnx",
+        url: &url,
+        sha256: &sha,
+    };
+
+    let error = ModelStore::in_dir(&dir)
+        .fetch(&asset)
+        .await
+        .expect_err("refused");
+    assert!(matches!(error, ModelError::Checksum { .. }));
+    assert_eq!(
+        error.to_string(),
+        "The downloaded wake model good.onnx did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
+    );
+    assert_eq!(leftovers(&dir), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_failed_download_says_so_and_leaves_nothing_behind() {
+    let (address, _server) = serve().await;
+    let dir = dir("missing");
+    let url = format!("http://{address}/gone.onnx");
+    let sha = sha256(GOOD);
+    let asset = Asset {
+        file_name: "good.onnx",
+        url: &url,
+        sha256: &sha,
+    };
+
+    let error = ModelStore::in_dir(&dir)
+        .fetch(&asset)
+        .await
+        .expect_err("fails");
+    assert!(matches!(error, ModelError::Download { .. }));
+    assert_eq!(
+        error.to_string(),
+        "Could not download the wake model good.onnx. Check the internet connection and try again."
+    );
+    assert_eq!(leftovers(&dir), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_damaged_file_on_disk_is_downloaded_again() {
+    let (address, _server) = serve().await;
+    let dir = dir("damaged");
+    fs::create_dir_all(&dir).expect("dir");
+    fs::write(dir.join("good.onnx"), b"half a mod").expect("damaged file");
+    let url = format!("http://{address}/good.onnx");
+    let sha = sha256(GOOD);
+    let asset = Asset {
+        file_name: "good.onnx",
+        url: &url,
+        sha256: &sha,
+    };
+
+    let path = ModelStore::in_dir(&dir)
+        .fetch(&asset)
+        .await
+        .expect("repairs");
+    assert_eq!(fs::read(path).expect("saved"), GOOD);
+}
