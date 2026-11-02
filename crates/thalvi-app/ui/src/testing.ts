@@ -25,6 +25,7 @@ export const SETTINGS: Settings = {
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com", label: "docs" }],
   overlay: { show: true, draft: true },
   microphone: null,
+  look: "classic",
   recordings: { metrics: true, text: false, audio: false },
 };
 
@@ -32,10 +33,12 @@ export const SETTINGS: Settings = {
 export function stubBackend(settings: Settings = SETTINGS, initial: Status = { state: "listening" }) {
   const statusListeners: ((status: Status) => void)[] = [];
   const levelListeners: ((level: number) => void)[] = [];
+  const savedListeners: (() => void)[] = [];
   const backend = {
     getStatus: vi.fn(() => Promise.resolve(initial)),
     onStatus: vi.fn((listener: (status: Status) => void) => statusListeners.push(listener)),
     onLevel: vi.fn((listener: (level: number) => void) => levelListeners.push(listener)),
+    onSettingsSaved: vi.fn((listener: () => void) => savedListeners.push(listener)),
     getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
     saveSettings: vi.fn<(settings: Settings) => Promise<void>>(() => Promise.resolve()),
     setListening: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
@@ -51,6 +54,9 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     },
     level: (level: number) => {
       for (const listener of levelListeners) listener(level);
+    },
+    saved: () => {
+      for (const listener of savedListeners) listener();
     },
   };
 }
