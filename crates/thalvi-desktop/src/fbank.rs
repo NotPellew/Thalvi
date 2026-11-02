@@ -1,6 +1,6 @@
-//! Owns the NeMo-style log-mel features of the local speech model, computed incrementally from 16 kHz samples.
+//! Owns the `NeMo`-style log-mel features of the local speech model, computed incrementally from 16 kHz samples.
 //!
-//! Matches kaldi-native-fbank as sherpa-onnx configures it for NeMo transducers: 25 ms Hann
+//! Matches kaldi-native-fbank as sherpa-onnx configures it for `NeMo` transducers: 25 ms Hann
 //! windows every 10 ms centred on their frame (reflected at the start), 0.97 pre-emphasis, a
 //! 512-point power spectrum and 128 Slaney mel bins up to 8 kHz.
 

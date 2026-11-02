@@ -111,6 +111,71 @@ impl CatalogHead {
     }
 }
 
+/// A speech model that ships in the catalog and is chosen by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogSpeech {
+    Nemotron160ms,
+}
+
+/// A catalog model's files, which a model folder must also contain under these names.
+#[derive(Debug, Clone, Copy)]
+pub struct SpeechAssets<'a> {
+    pub encoder: Asset<'a>,
+    pub decoder: Asset<'a>,
+    pub joiner: Asset<'a>,
+    pub tokens: Asset<'a>,
+}
+
+impl CatalogSpeech {
+    pub const ALL: [Self; 1] = [Self::Nemotron160ms];
+
+    /// The name used in config.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Nemotron160ms => "nemotron_160ms",
+        }
+    }
+
+    /// The downloads that provide this model: NVIDIA's Nemotron Speech Streaming 0.6B (NVIDIA
+    /// Open Model License) as exported to int8 ONNX for sherpa-onnx, pinned by repository commit.
+    #[must_use]
+    pub fn assets(self) -> SpeechAssets<'static> {
+        match self {
+            Self::Nemotron160ms => SpeechAssets {
+                encoder: Asset {
+                    kind: ModelKind::Speech,
+                    file_name: "nemotron_160ms.encoder.int8.onnx",
+                    url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25/resolve/237e551abd7a411ef92d3595454d9f6ab5fe7d6c/encoder.int8.onnx",
+                    size: 652_916_849,
+                    sha256: "71111f61b18e1e65e01e369434a5c0434868d2f44892742ae54240600c681209",
+                },
+                decoder: Asset {
+                    kind: ModelKind::Speech,
+                    file_name: "nemotron_160ms.decoder.int8.onnx",
+                    url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25/resolve/237e551abd7a411ef92d3595454d9f6ab5fe7d6c/decoder.int8.onnx",
+                    size: 7_257_753,
+                    sha256: "0be9702c2f427a2b6bb241d298e0d3836a558de1f5b9fd3018f1cce6e2b3fa98",
+                },
+                joiner: Asset {
+                    kind: ModelKind::Speech,
+                    file_name: "nemotron_160ms.joiner.int8.onnx",
+                    url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25/resolve/237e551abd7a411ef92d3595454d9f6ab5fe7d6c/joiner.int8.onnx",
+                    size: 1_735_862,
+                    sha256: "a35eac38a22ebceb04d230ed7afe0d68f446ba6914a036b97f14fece95967e23",
+                },
+                tokens: Asset {
+                    kind: ModelKind::Speech,
+                    file_name: "nemotron_160ms.tokens.txt",
+                    url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25/resolve/237e551abd7a411ef92d3595454d9f6ab5fe7d6c/tokens.txt",
+                    size: 8_952,
+                    sha256: "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff",
+                },
+            },
+        }
+    }
+}
+
 /// Why a model could not be provided. Messages are shown to the user as written.
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {

@@ -1,11 +1,13 @@
 //! Owns the on-device recognizer: runs a streaming speech model on a worker thread behind the recognizer seam.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
+use tokio::sync::OnceCell;
 use tokio::sync::mpsc as events;
 
 use crate::frame::Frame;
@@ -30,34 +32,60 @@ pub trait SpeechStream: Send + 'static {
     fn accept(&mut self, frame: &Frame) -> Result<Vec<RecognizerEvent>, RecognizerError>;
 }
 
+/// Where a speech model comes from; loading may download it, and is retried until it works.
+pub trait ModelSource: Send + Sync + 'static {
+    type Model: SpeechModel;
+
+    /// # Errors
+    /// Fails in plain words when the model cannot be fetched or loaded.
+    fn load(&self) -> impl Future<Output = Result<Self::Model, RecognizerError>> + Send;
+}
+
 /// Recognizes speech on this machine, one recognition at a time.
-pub struct LocalRecognizer<M> {
-    model: Arc<M>,
+pub struct LocalRecognizer<S: ModelSource> {
+    source: S,
+    model: OnceCell<Arc<S::Model>>,
     name: String,
     metrics: Metrics,
 }
 
-impl<M: SpeechModel> LocalRecognizer<M> {
+impl<S: ModelSource> LocalRecognizer<S> {
     /// `name` labels the model in metrics.
     #[must_use]
-    pub fn new(model: M, name: impl Into<String>, metrics: Metrics) -> Self {
+    pub fn new(source: S, name: impl Into<String>, metrics: Metrics) -> Self {
         Self {
-            model: Arc::new(model),
+            source,
+            model: OnceCell::new(),
             name: name.into(),
             metrics,
         }
     }
+
+    /// Fetches and loads the model now instead of at the first dictation; later calls are free.
+    ///
+    /// # Errors
+    /// Fails in plain words when the model cannot be fetched or loaded; the next call tries again.
+    pub async fn load(&self) -> Result<(), RecognizerError> {
+        self.model().await.map(|_| ())
+    }
+
+    async fn model(&self) -> Result<&Arc<S::Model>, RecognizerError> {
+        self.model
+            .get_or_try_init(|| async { self.source.load().await.map(Arc::new) })
+            .await
+    }
 }
 
-impl<M: SpeechModel> Recognizer for LocalRecognizer<M> {
+impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
     type Session = LocalSession;
 
     async fn connect(&self) -> Result<LocalSession, RecognizerError> {
+        let model = self.model().await?;
         let (frames_tx, frames_rx) = mpsc::channel();
         let (events_tx, events_rx) = events::unbounded_channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let work = Work {
-            stream: self.model.stream(),
+            stream: model.stream(),
             frames: frames_rx,
             events: events_tx,
             cancelled: Arc::clone(&cancelled),
@@ -88,21 +116,29 @@ fn stopped() -> RecognizerError {
 }
 
 impl RecognizerSession for LocalSession {
-    async fn send_frame(&mut self, frame: &Frame) -> Result<(), RecognizerError> {
-        self.frames
-            .send((Instant::now(), *frame))
-            .map_err(|_| stopped())
+    fn send_frame(
+        &mut self,
+        frame: &Frame,
+    ) -> impl Future<Output = Result<(), RecognizerError>> + Send {
+        std::future::ready(
+            self.frames
+                .send((Instant::now(), *frame))
+                .map_err(|_| stopped()),
+        )
     }
 
     async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
         self.events.recv().await.unwrap_or_else(|| Err(stopped()))
     }
 
-    async fn cancel(self) {
+    fn cancel(self) -> impl Future<Output = ()> + Send {
         self.cancelled.store(true, Ordering::Relaxed);
+        std::future::ready(())
     }
 
-    async fn close(self) {}
+    fn close(self) -> impl Future<Output = ()> + Send {
+        std::future::ready(())
+    }
 }
 
 struct Work<S> {

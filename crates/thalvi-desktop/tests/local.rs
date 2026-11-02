@@ -2,6 +2,7 @@
 
 #![expect(clippy::expect_used, reason = "a test fails by panicking")]
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
@@ -9,7 +10,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
-use thalvi_desktop::local::{LocalRecognizer, SpeechModel, SpeechStream};
+use thalvi_desktop::local::{LocalRecognizer, ModelSource, SpeechModel, SpeechStream};
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
 use thalvi_desktop::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
 
@@ -24,6 +25,38 @@ struct Fake {
     gate: Mutex<Option<mpsc::Receiver<()>>>,
     seen: Arc<AtomicUsize>,
     done: mpsc::Sender<()>,
+}
+
+/// Fails to load this many times, then provides the [`Fake`] it was given.
+struct Source {
+    failures: AtomicUsize,
+    fake: Mutex<Option<Fake>>,
+}
+
+impl ModelSource for Source {
+    type Model = Fake;
+
+    fn load(&self) -> impl Future<Output = Result<Fake, RecognizerError>> + Send {
+        let failing = self
+            .failures
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok();
+        std::future::ready(if failing {
+            Err(RecognizerError {
+                message: "Could not download the speech model.".to_owned(),
+            })
+        } else {
+            self.fake
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .ok_or_else(|| RecognizerError {
+                    message: "The fake model loads once.".to_owned(),
+                })
+        })
+    }
 }
 
 struct FakeStream {
@@ -70,14 +103,19 @@ impl Drop for FakeStream {
 }
 
 struct Rig {
-    recognizer: LocalRecognizer<Fake>,
+    recognizer: LocalRecognizer<Source>,
     recorder: Recorder,
     dir: PathBuf,
     seen: Arc<AtomicUsize>,
     done: mpsc::Receiver<()>,
 }
 
-fn rig(name: &str, script: fn(usize) -> Reply, gate: Option<mpsc::Receiver<()>>) -> Rig {
+fn rig(
+    name: &str,
+    script: fn(usize) -> Reply,
+    gate: Option<mpsc::Receiver<()>>,
+    failures: usize,
+) -> Rig {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("local-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     let kinds = RecordKinds {
@@ -94,7 +132,14 @@ fn rig(name: &str, script: fn(usize) -> Reply, gate: Option<mpsc::Receiver<()>>)
         done: done_tx,
     };
     Rig {
-        recognizer: LocalRecognizer::new(fake, "fake-model", recorder.metrics()),
+        recognizer: LocalRecognizer::new(
+            Source {
+                failures: AtomicUsize::new(failures),
+                fake: Mutex::new(Some(fake)),
+            },
+            "fake-model",
+            recorder.metrics(),
+        ),
         recorder,
         dir,
         seen,
@@ -120,6 +165,7 @@ fn partial(text: &str) -> RecognizerEvent {
     RecognizerEvent::Partial(text.to_owned())
 }
 
+#[expect(clippy::unnecessary_wraps, reason = "scripts all return a Reply")]
 fn dictation(n: usize) -> Reply {
     match n {
         1 => Ok(vec![partial("hello")]),
@@ -134,7 +180,7 @@ fn dictation(n: usize) -> Reply {
 
 #[tokio::test]
 async fn partials_and_finals_arrive_in_order_and_the_recognition_is_reported() {
-    let rig = rig("dictation", dictation, None);
+    let rig = rig("dictation", dictation, None, 0);
     let mut session = rig.recognizer.connect().await.expect("connects");
     for _ in 0..4 {
         session.send_frame(&FRAME).await.expect("sends");
@@ -182,7 +228,7 @@ fn fails_on_the_third_frame(n: usize) -> Reply {
 
 #[tokio::test]
 async fn a_model_error_reaches_the_caller_after_the_text_before_it_and_stops_the_work() {
-    let rig = rig("error", fails_on_the_third_frame, None);
+    let rig = rig("error", fails_on_the_third_frame, None, 0);
     let mut session = rig.recognizer.connect().await.expect("connects");
     for _ in 0..3 {
         session.send_frame(&FRAME).await.expect("sends");
@@ -198,7 +244,7 @@ async fn a_model_error_reaches_the_caller_after_the_text_before_it_and_stops_the
 #[tokio::test]
 async fn cancelling_drops_the_frames_still_waiting_for_the_model() {
     let (release, gate) = mpsc::channel();
-    let rig = rig("cancel", |_| Ok(vec![]), Some(gate));
+    let rig = rig("cancel", |_| Ok(vec![]), Some(gate), 0);
     let mut session = rig.recognizer.connect().await.expect("connects");
     for _ in 0..5 {
         session.send_frame(&FRAME).await.expect("sends");
@@ -217,4 +263,21 @@ async fn cancelling_drops_the_frames_still_waiting_for_the_model() {
     let metric = rig.metric().await;
     assert_eq!(metric["outcome"], "cancelled");
     assert_eq!(metric["frames"], 1);
+}
+
+#[tokio::test]
+async fn a_model_that_cannot_be_fetched_is_reported_and_fetched_again_on_the_next_try() {
+    let rig = rig("load", dictation, None, 1);
+    let error = rig
+        .recognizer
+        .connect()
+        .await
+        .err()
+        .expect("first try fails");
+    assert_eq!(error.message, "Could not download the speech model.");
+    let mut session = rig.recognizer.connect().await.expect("second try loads");
+    session.send_frame(&FRAME).await.expect("sends");
+    session.send_frame(&FRAME).await.expect("sends");
+    assert_eq!(session.next_event().await, Ok(partial("hello")));
+    session.cancel().await;
 }

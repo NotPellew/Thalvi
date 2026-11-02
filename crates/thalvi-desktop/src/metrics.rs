@@ -47,6 +47,8 @@ pub enum Event {
     WakeReset,
     TranscriptionReady,
     SecondaryStt,
+    /// Fetching and loading the local speech model.
+    SpeechLoad,
     /// One local recognition: its engine, device, model latency and outcome.
     LocalStt,
     WakeLevel,
@@ -69,6 +71,7 @@ impl Event {
             Self::WakeReset => "desktop_wake_reset",
             Self::TranscriptionReady => "desktop_transcription_ready",
             Self::SecondaryStt => "desktop_secondary_stt",
+            Self::SpeechLoad => "desktop_speech_load",
             Self::LocalStt => "desktop_local_stt",
             Self::WakeLevel => "desktop_wake_level",
             Self::ReadyCue => "desktop_ready_cue",
@@ -554,6 +557,7 @@ mod tests {
             (Event::WakeReset, "desktop_wake_reset"),
             (Event::TranscriptionReady, "desktop_transcription_ready"),
             (Event::SecondaryStt, "desktop_secondary_stt"),
+            (Event::SpeechLoad, "desktop_speech_load"),
             (Event::LocalStt, "desktop_local_stt"),
             (Event::WakeLevel, "desktop_wake_level"),
             (Event::ReadyCue, "desktop_ready_cue"),
