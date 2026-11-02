@@ -28,6 +28,7 @@ export type Ending = "paste" | "submit" | "task" | "scratch" | "cancel";
 export type ScriptActionKind = "open_url" | "focus_app" | "discord_message";
 export type SecondaryApi = "openai" | "meta";
 export type SttEngine = "server" | "local";
+export type Look = "classic" | "holo" | "gunmetal";
 
 export interface HeadSettings {
   model: string;
@@ -72,6 +73,7 @@ export interface Settings {
   scripts: ScriptSettings[];
   overlay: { show: boolean; draft: boolean };
   microphone: string | null;
+  look: Look;
   recordings: { metrics: boolean; text: boolean; audio: boolean };
 }
 
@@ -80,6 +82,8 @@ export interface Backend {
   getStatus(): Promise<Status>;
   onStatus(listener: (status: Status) => void): void;
   onLevel(listener: (level: number) => void): void;
+  /** Settings were saved, from any window. */
+  onSettingsSaved(listener: () => void): void;
   getSettings(): Promise<Settings>;
   saveSettings(settings: Settings): Promise<void>;
   setListening(on: boolean): Promise<void>;
