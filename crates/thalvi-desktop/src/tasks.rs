@@ -118,7 +118,7 @@ fn spoken_url(text: &str) -> Option<Task> {
         .get(4..)
         .filter(|_| text[..4].eq_ignore_ascii_case("open"))?;
     let value = rest.trim_start();
-    if value.len() == rest.len() || value.is_empty() || value.contains(char::is_whitespace) {
+    if value.len() == rest.len() || value.is_empty() {
         return None;
     }
     let candidate = if value.contains("://") {
@@ -275,6 +275,7 @@ mod tests {
             ("open exa..mple.com", None),
             ("open [::1]", None),
             ("open", None),
+            ("opengoogle.com", None),
             ("opens example.com", None),
             ("open\u{7f}example.com", None),
         ] {
