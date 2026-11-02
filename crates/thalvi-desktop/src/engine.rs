@@ -1100,11 +1100,21 @@ where
     /// The secondary transcript without its ending phrase, when it ends the way the user did.
     fn agreed(&self, raw: &str, route: CaptureRoute) -> Option<String> {
         let mut parser = CaptureSession::new(self.endings.clone(), self.pauses);
-        let text = match parser.on_final(raw, Instant::now(), false).ok()? {
+        let mut text = match parser.on_final(raw, Instant::now(), false).ok()? {
             FinalStep::Armed(pending) if pending.route == route => pending.text,
-            FinalStep::Continue { .. } if !parser.scratched() => parser.text(),
+            FinalStep::Continue { .. } if !parser.scratched() => {
+                return Some(parser.text()).filter(|text| !text.is_empty());
+            }
             _ => return None,
         };
+        // A second pass can hear the spoken ending twice ("Yes. Submit. Submit."); every trailing copy is the ending.
+        loop {
+            let mut parser = CaptureSession::new(self.endings.clone(), self.pauses);
+            match parser.on_final(&text, Instant::now(), false) {
+                Ok(FinalStep::Armed(pending)) if pending.route == route => text = pending.text,
+                _ => break,
+            }
+        }
         (!text.is_empty()).then_some(text)
     }
 }
