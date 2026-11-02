@@ -1045,6 +1045,31 @@ async fn a_capture_fails_when_the_microphone_gives_no_audio_for_three_seconds() 
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_capture_without_words_for_a_minute_ends_and_keeps_its_text() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello world").await;
+            rig.feed_until(40_000, Kind::Quiet).await;
+            rig.partial("more").await;
+            rig.feed_until(99_960, Kind::Quiet).await;
+            assert!(!task.is_finished(), "words at 40 s restart the minute");
+            rig.feed_until(100_080, Kind::Quiet).await;
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: CaptureError::NoEnding,
+                    recoverable_text: Some("Hello world".to_owned())
+                }
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn wake_words_are_reported_and_an_ambiguous_one_only_once() {
     LocalSet::new()
         .run_until(async {

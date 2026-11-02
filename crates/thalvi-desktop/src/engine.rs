@@ -40,6 +40,9 @@ const MIC_WATCHDOG: Duration = Duration::from_millis(250);
 
 /// How long any capture may go without microphone audio before it fails.
 const MIC_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long a capture may go without recognized words before it ends, keeping the text.
+const IDLE_LIMIT: Duration = Duration::from_secs(60);
 /// Consecutive speech frames, 240 ms, that make audio held back during a pending ending count as
 /// the user continuing.
 const CONTINUATION_FRAMES: u8 = 3;
@@ -174,6 +177,8 @@ pub enum CaptureError {
     Audio(#[from] AudioError),
     #[error("Microphone audio stopped. Nothing was delivered.")]
     MicStopped,
+    #[error("No ending heard for a minute.")]
+    NoEnding,
     #[error(transparent)]
     Full(#[from] CaptureFullError),
 }
@@ -281,6 +286,8 @@ struct Live<S> {
     /// Whether the latest frame was speech.
     speech: bool,
     last_audio: Instant,
+    /// When the recognizer last returned words.
+    last_words: Instant,
     cues: FuturesUnordered<LocalBoxFuture<'static, CueEnd>>,
 }
 
@@ -320,6 +327,7 @@ enum Step {
     Cue(CueEnd),
     Quiet,
     Silent,
+    Idle,
 }
 
 async fn until(at: Option<Instant>) {
@@ -696,6 +704,7 @@ where
             relayed: false,
             speech: false,
             last_audio: Instant::now(),
+            last_words: Instant::now(),
             cues: FuturesUnordered::new(),
         };
         self.publish(&live);
@@ -729,15 +738,22 @@ where
                 Some(end) = live.cues.next() => Step::Cue(end),
                 () = until(live.text.ready_at()) => Step::Quiet,
                 () = until(watchdog) => Step::Silent,
+                () = tokio::time::sleep_until(live.last_words + IDLE_LIMIT) => Step::Idle,
             };
             let done = match step {
                 Step::Cancel => Some(Done::Stopped),
                 Step::Event(Err(error)) => Some(Done::Failed(error.into())),
                 Step::Event(Ok(RecognizerEvent::Partial(text))) => {
+                    if !text.trim().is_empty() {
+                        live.last_words = Instant::now();
+                    }
                     self.on_partial(live, text);
                     None
                 }
-                Step::Event(Ok(RecognizerEvent::Final(text))) => self.on_final(live, &text),
+                Step::Event(Ok(RecognizerEvent::Final(text))) => {
+                    live.last_words = Instant::now();
+                    self.on_final(live, &text)
+                }
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),
                 Step::Frame(Ok(frame)) => self.on_frame(live, &frame).await.err().map(Done::from),
                 Step::Cue(end) => {
@@ -748,6 +764,7 @@ where
                 }
                 Step::Quiet => self.on_quiet(live),
                 Step::Silent => Some(Done::Failed(CaptureError::MicStopped)),
+                Step::Idle => Some(Done::Failed(CaptureError::NoEnding)),
             };
             if let Some(done) = done {
                 return done;
