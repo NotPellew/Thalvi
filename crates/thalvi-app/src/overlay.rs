@@ -154,6 +154,7 @@ mod tests {
                 Status::Working {
                     target: target.clone(),
                     route: CaptureRoute::Submit,
+                    cancellable: false,
                 },
                 Visibility::Show,
             ),

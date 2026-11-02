@@ -97,6 +97,10 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
     return status.state === "starting" || status.state === "capturing" || status.state === "pending";
   }
 
+  function cancellable(): boolean {
+    return live() || (status.state === "working" && status.cancellable);
+  }
+
   function schedule(): void {
     if (looping) return;
     looping = true;
@@ -124,7 +128,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
     ending.hidden = true;
     caret.hidden = true;
     countdown.dataset["running"] = "false";
-    cancel.hidden = !live();
+    cancel.hidden = !cancellable();
     switch (next.state) {
       case "paused":
       case "listening":

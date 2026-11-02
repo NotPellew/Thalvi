@@ -49,7 +49,7 @@ describe("each status", () => {
     { name: "pending, waiting for quiet", status: pending(true), hidden: false, label: "QUIET", target: "→ Slack", draft: true },
     { name: "pending, counting", status: pending(false), hidden: false, label: "SUBMIT IN 2 s", target: "→ Slack", draft: true },
     { name: "pending, short pause", status: pending(false, 700), hidden: false, label: "SUBMIT IN 1 s", target: "→ Slack", draft: true },
-    { name: "working", status: { state: "working", target: "Slack", route: "task" }, hidden: false, label: "WORKING", target: "→ Slack", draft: false },
+    { name: "working", status: { state: "working", target: "Slack", route: "task", cancellable: false }, hidden: false, label: "WORKING", target: "→ Slack", draft: false },
     { name: "failed", status: { state: "failed", notice: "Server unreachable." }, hidden: false, label: "Server unreachable.", target: "", draft: false },
   ];
   it.each(cases)("$name", async ({ status, hidden, label, target, draft }) => {
@@ -173,6 +173,21 @@ describe("level bars", () => {
     emit(pending(false));
     clock.advance(16);
     expect(middle()).toBeCloseTo(4 / 22, 2);
+  });
+});
+
+describe("the cancel button", () => {
+  it("shows while a capture can still be cancelled and hides once delivery starts", async () => {
+    const { emit } = mount();
+    await settle();
+    const shown = (status: Status): boolean => {
+      emit(status);
+      return !pick(".x").hidden;
+    };
+    expect(shown({ state: "capturing", target: null, committed: "", partial: null })).toBe(true);
+    expect(shown({ state: "working", target: "Slack", route: "task", cancellable: true })).toBe(true);
+    expect(shown({ state: "working", target: "Slack", route: "task", cancellable: false })).toBe(false);
+    expect(shown({ state: "done", target: "Slack", route: "task", notice: "Done" })).toBe(false);
   });
 });
 

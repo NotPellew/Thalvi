@@ -15,7 +15,7 @@ export type Status =
       waitingForQuiet: boolean;
       pauseMs: number;
     }
-  | { state: "working"; target: string | null; route: Route }
+  | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
   | { state: "done"; target: string | null; route: Route; notice: string }
   | { state: "failed"; notice: string };
 

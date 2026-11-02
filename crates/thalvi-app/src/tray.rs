@@ -156,12 +156,18 @@ pub fn toggle_text(status: &Status) -> &'static str {
     }
 }
 
-/// Whether there is a capture to cancel.
+/// Whether there is a capture to cancel: until the delivery starts.
 #[must_use]
 pub fn can_cancel(status: &Status) -> bool {
     matches!(
         status,
-        Status::Starting { .. } | Status::Capturing { .. } | Status::Pending { .. }
+        Status::Starting { .. }
+            | Status::Capturing { .. }
+            | Status::Pending { .. }
+            | Status::Working {
+                cancellable: true,
+                ..
+            }
     )
 }
 
@@ -274,6 +280,16 @@ mod tests {
                 Status::Working {
                     target: Some(kitty()),
                     route: CaptureRoute::Task,
+                    cancellable: false,
+                },
+                Icon::Working,
+                "Thalvi: working",
+            ),
+            (
+                Status::Working {
+                    target: Some(kitty()),
+                    route: CaptureRoute::Task,
+                    cancellable: true,
                 },
                 Icon::Working,
                 "Thalvi: working",
@@ -354,11 +370,36 @@ mod tests {
                 },
                 "{status:?}"
             );
-            let capture = matches!(
-                status,
-                Status::Starting { .. } | Status::Capturing { .. } | Status::Pending { .. }
-            );
-            assert_eq!(can_cancel(&status), capture, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_capture_can_be_cancelled_until_the_delivery_starts() {
+        let working = |cancellable| Status::Working {
+            target: Some(kitty()),
+            route: CaptureRoute::Task,
+            cancellable,
+        };
+        for (status, cancellable) in [
+            (Status::Paused, false),
+            (Status::Listening, false),
+            (
+                Status::Starting {
+                    target: Some(kitty()),
+                },
+                true,
+            ),
+            (pending_status(CaptureRoute::Paste, 700), true),
+            (working(true), true),
+            (working(false), false),
+            (
+                Status::Failed {
+                    notice: String::new(),
+                },
+                false,
+            ),
+        ] {
+            assert_eq!(can_cancel(&status), cancellable, "{status:?}");
         }
     }
 }

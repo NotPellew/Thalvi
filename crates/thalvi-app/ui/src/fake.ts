@@ -40,7 +40,7 @@ function script(): Status[] {
     { state: "capturing", target: slack, committed: SENTENCE.repeat(3), partial: "and bring the" },
     { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: true, pauseMs: 2500 },
     { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: false, pauseMs: 2500 },
-    { state: "working", target: slack, route: "submit" },
+    { state: "working", target: slack, route: "submit", cancellable: false },
     { state: "done", target: slack, route: "submit", notice: "Sent" },
     { state: "paused" },
     { state: "listening" },

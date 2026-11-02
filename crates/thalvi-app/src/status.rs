@@ -35,6 +35,8 @@ pub enum Status {
     Working {
         target: Option<String>,
         route: CaptureRoute,
+        /// The capture can still be cancelled; delivery cannot be.
+        cancellable: bool,
     },
     Done {
         target: Option<String>,
@@ -80,6 +82,7 @@ impl View {
             (Mode::Delivering(route), _) => Status::Working {
                 target,
                 route: *route,
+                cancellable: false,
             },
             (Mode::Done { route, notice }, EngineState::Listening) => Status::Done {
                 target,
@@ -112,6 +115,7 @@ impl View {
                 EngineState::TranscribingSecondary { route } => Status::Working {
                     target,
                     route: *route,
+                    cancellable: true,
                 },
             },
         }
@@ -190,6 +194,7 @@ mod tests {
                 Status::Working {
                     target: Some(kitty()),
                     route: CaptureRoute::Task,
+                    cancellable: true,
                 },
             ),
         ];
@@ -214,6 +219,7 @@ mod tests {
                 Status::Working {
                     target: Some(kitty()),
                     route: CaptureRoute::Submit,
+                    cancellable: false,
                 },
             ),
             (
@@ -288,6 +294,14 @@ mod tests {
                 },
                 json!({"state": "pending", "target": "kitty", "route": "submit", "text": "hi",
                        "waitingForQuiet": false, "pauseMs": 2500}),
+            ),
+            (
+                Status::Working {
+                    target: Some(kitty()),
+                    route: CaptureRoute::Task,
+                    cancellable: true,
+                },
+                json!({"state": "working", "target": "kitty", "route": "task", "cancellable": true}),
             ),
             (
                 Status::Done {
