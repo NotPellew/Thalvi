@@ -3,3 +3,6 @@
 pub mod audio;
 pub mod cues;
 pub mod frame;
+pub mod models;
+pub mod vad;
+pub mod wake;

@@ -51,6 +51,14 @@ areas your change touches. Editing rules are in
 - **Wake context.** Both trained heads use 16 embedding frames. Why: this
   supports first-frame inference with upstream startup and reset history.
   Rejected: accepting longer contexts that need additional warm-up history.
+- **ONNX Runtime from ort's prebuilt static binaries.** The build downloads a pinned
+  ONNX Runtime and links it in, the same on Linux and Windows. Why: one way to
+  provide it, nothing to ship or find at run time. Rejected: loading a system
+  or bundled dynamic library (a version and a file per OS).
+- **Wake heads chosen by name or path, downloaded pinned.** Each head is a catalog
+  name or a local `.onnx` path with its own threshold; catalog files download on first
+  use into the user data directory and must match their SHA-256. Why: users change a
+  phrase without a rebuild, and we never re-host CC BY-NC-SA heads. Rejected: bundled models.
 - **Capture starts after the wake cue.** Dictation plays the wake cue at once and sends
   only later speech, buffered while the recognizer connects; confirmations wait for ready,
   then the cue. Why: wake audio leaked the phrase into 1 in 5 live transcripts even with
