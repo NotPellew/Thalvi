@@ -529,6 +529,7 @@ export function createView(root: HTMLElement) {
 
       empty.hidden = s.turns.length > 0 || s.partial !== "";
       tasks.hidden = s.tasks.length === 0;
+      if (tasks.hidden) tasks.open = false;
       taskCount.textContent = `${String(s.tasks.length)} ${s.tasks.length === 1 ? "step" : "steps"}`;
       syncTasks(taskList, s.tasks);
       syncTurns(list, s.turns, s.replyOpen);
