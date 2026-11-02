@@ -100,7 +100,7 @@ impl Row {
 fn tool(error: &CommandError) -> HostError {
     match error {
         CommandError::NotInstalled(_) => HostError::Unsupported(error.to_string()),
-        CommandError::TimedOut(_) | CommandError::Failed(_) => {
+        CommandError::TimedOut(_) | CommandError::Failed { .. } => {
             HostError::NothingTyped(error.to_string())
         }
     }
@@ -204,7 +204,7 @@ impl<R: CommandRunner> Host for Hyprland<R> {
             .map(|_| ())
             .map_err(|error| match error {
                 CommandError::NotInstalled(_) => nothing_typed(tool(&error)),
-                CommandError::TimedOut(_) | CommandError::Failed(_) => HostError::MaybePartial(
+                CommandError::TimedOut(_) | CommandError::Failed { .. } => HostError::MaybePartial(
                     "Typing failed or stopped partway. Check the target before retrying."
                         .to_owned(),
                 ),
@@ -243,10 +243,12 @@ impl<R: CommandRunner> Host for Hyprland<R> {
                 .run("wtype", &key_arguments(shortcut), None)
                 .map_err(|error| match error {
                     CommandError::NotInstalled(_) => tool(&error),
-                    CommandError::TimedOut(_) | CommandError::Failed(_) => HostError::MaybePartial(
-                        "The app's shortcut may have been pressed only partly. Check the app."
-                            .to_owned(),
-                    ),
+                    CommandError::TimedOut(_) | CommandError::Failed { .. } => {
+                        HostError::MaybePartial(
+                            "The app's shortcut may have been pressed only partly. Check the app."
+                                .to_owned(),
+                        )
+                    }
                 })?;
         }
         Ok(selected)
@@ -472,7 +474,10 @@ mod tests {
                 HostError::NothingTyped("Desktop tool hyprctl took too long.".to_owned()),
             ),
             (
-                CommandError::Failed("hyprctl".to_owned()),
+                CommandError::Failed {
+                    program: "hyprctl".to_owned(),
+                    reason: None,
+                },
                 HostError::NothingTyped("Desktop tool hyprctl failed.".to_owned()),
             ),
         ] {
@@ -550,7 +555,10 @@ mod tests {
     fn a_typing_tool_that_fails_after_focus_may_have_typed_part_of_the_text() {
         for (error, expected) in [
             (
-                CommandError::Failed("wtype".to_owned()),
+                CommandError::Failed {
+                    program: "wtype".to_owned(),
+                    reason: None,
+                },
                 HostError::MaybePartial(
                     "Typing failed or stopped partway. Check the target before retrying."
                         .to_owned(),
