@@ -239,12 +239,11 @@ describe("the overlay in the holo and gunmetal looks", () => {
       return canvasDraws - before;
     };
 
-    it("is drawn at most 30 times a second, and rarely once the voice has settled", async () => {
+    it("is drawn on every frame while the voice is live, and rarely once it has settled", async () => {
       const { emit, level, clock } = await mount();
       emit({ state: "capturing", target: null, committed: "", partial: null });
       level(0.8);
-      expect(run(clock, 1000)).toBeGreaterThan(25);
-      expect(canvasDraws).toBeLessThanOrEqual(31);
+      expect(run(clock, 1000)).toBeGreaterThan(55);
 
       level(0);
       run(clock, 4000);

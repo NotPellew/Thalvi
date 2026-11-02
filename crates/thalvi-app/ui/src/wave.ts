@@ -7,7 +7,6 @@ export type Rgb = readonly [number, number, number];
 
 const HISTORY = 40;
 const SAMPLE_MS = 80;
-const BUSY_FRAME_MS = 33;
 const SETTLED_FRAME_MS = 100;
 const SETTLED_BELOW = 0.015;
 
@@ -96,7 +95,7 @@ export function createWave(canvas: HTMLCanvasElement, glow: HTMLElement): Wave {
     context ??= canvas.getContext("2d");
     if (context === null) return;
     const settled = smoothed < SETTLED_BELOW && level < SETTLED_BELOW && history.every((sample) => sample < SETTLED_BELOW);
-    if (now - lastFrame < (settled ? SETTLED_FRAME_MS : BUSY_FRAME_MS)) return;
+    if (settled && now - lastFrame < SETTLED_FRAME_MS) return;
     const seconds = Math.min(0.05, Math.max(0, (now - lastFrame) / 1000) || 0);
     lastFrame = now;
     const due = Math.floor((now - lastSample) / SAMPLE_MS);
