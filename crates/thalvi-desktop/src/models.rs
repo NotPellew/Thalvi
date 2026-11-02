@@ -1,4 +1,4 @@
-//! Wake model catalog and its checksum-verified download into the per-user data directory.
+//! Model catalogs (wake heads, speech recognition) and their checksum-verified download into the per-user data directory.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,28 +7,56 @@ use std::time::Duration;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+/// The most a download may take besides moving its bytes.
+const DOWNLOAD_BASE: Duration = Duration::from_secs(120);
+
+/// The slowest connection a download is given time for, so a large model is not cut off.
+const SLOWEST_BYTES_PER_SECOND: u64 = 500_000;
+
 /// Makes each download's temporary file name unique, so concurrent fetches do not share one.
 static DOWNLOADS: AtomicU64 = AtomicU64::new(0);
 
-/// A downloadable model file pinned by checksum.
+/// What a model file is for; error messages name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelKind {
+    Wake,
+    Speech,
+}
+
+impl ModelKind {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Wake => "wake model",
+            Self::Speech => "speech model",
+        }
+    }
+}
+
+/// A downloadable model file pinned by size and checksum.
 #[derive(Debug, Clone, Copy)]
 pub struct Asset<'a> {
+    pub kind: ModelKind,
     pub file_name: &'a str,
     pub url: &'a str,
+    pub size: u64,
     pub sha256: &'a str,
 }
 
 /// Feature stage 1: audio to log-mel spectrogram (openWakeWord v0.5.1).
 pub const MELSPECTROGRAM: Asset<'static> = Asset {
+    kind: ModelKind::Wake,
     file_name: "melspectrogram.onnx",
     url: "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.onnx",
+    size: 1_087_958,
     sha256: "ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f",
 };
 
 /// Feature stage 2: spectrogram windows to 96-value embeddings (openWakeWord v0.5.1).
 pub const EMBEDDING: Asset<'static> = Asset {
+    kind: ModelKind::Wake,
     file_name: "embedding_model.onnx",
     url: "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx",
+    size: 1_326_578,
     sha256: "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f",
 };
 
@@ -59,18 +87,24 @@ impl CatalogHead {
     pub fn asset(self) -> Asset<'static> {
         match self {
             Self::HeyThalvi => Asset {
+                kind: ModelKind::Wake,
                 file_name: "hey_thalvi_v0.0.13.onnx",
                 url: "https://github.com/NotPellew/Thalvi/releases/download/wake-models-v1/hey_thalvi_v0.0.13.onnx",
+                size: 395_095,
                 sha256: "f0491728ee36bb0b7f8860ad35a290b3b5b518cf8d2a378179b31ef9494b37e3",
             },
             Self::HeyMycroft => Asset {
+                kind: ModelKind::Wake,
                 file_name: "hey_mycroft_v0.1.onnx",
                 url: "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/hey_mycroft_v0.1.onnx",
+                size: 857_691,
                 sha256: "c2a311e8fa1338de89c31b3b46dc4dffd4af2f9a8d6ddead48893c2d301b1f18",
             },
             Self::HeyJarvis => Asset {
+                kind: ModelKind::Wake,
                 file_name: "hey_jarvis_v0.1.onnx",
                 url: "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/hey_jarvis_v0.1.onnx",
+                size: 1_271_370,
                 sha256: "94a13cfe60075b132f6a472e7e462e8123ee70861bc3fb58434a73712ee0d2cb",
             },
         }
@@ -80,22 +114,26 @@ impl CatalogHead {
 /// Why a model could not be provided. Messages are shown to the user as written.
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
-    #[error("Thalvi could not find a folder to keep its wake models in.")]
+    #[error("Thalvi could not find a folder to keep its models in.")]
     NoDataDir,
     #[error(
-        "Could not download the wake model {file}. Check the internet connection and try again."
+        "Could not download the {} {file}. Check the internet connection and try again.",
+        kind.noun()
     )]
     Download {
+        kind: ModelKind,
         file: String,
         #[source]
         source: reqwest::Error,
     },
     #[error(
-        "The downloaded wake model {file} did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
+        "The downloaded {} {file} did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening.",
+        kind.noun()
     )]
-    Checksum { file: String },
-    #[error("Could not save the wake model {file} in {}: {source}", dir.display())]
+    Checksum { kind: ModelKind, file: String },
+    #[error("Could not save the {} {file} in {}: {source}", kind.noun(), dir.display())]
     Io {
+        kind: ModelKind,
         file: String,
         dir: PathBuf,
         #[source]
@@ -131,9 +169,7 @@ impl ModelStore {
     /// directory cannot be written.
     pub async fn fetch(&self, asset: &Asset<'_>) -> Result<PathBuf, ModelError> {
         let path = self.dir.join(asset.file_name);
-        if let Ok(bytes) = tokio::fs::read(&path).await
-            && hex(&Sha256::digest(&bytes)) == asset.sha256
-        {
+        if is_verified(&path, asset).await {
             return Ok(path);
         }
         self.download(asset, &path).await?;
@@ -142,11 +178,13 @@ impl ModelStore {
 
     async fn download(&self, asset: &Asset<'_>, path: &Path) -> Result<(), ModelError> {
         let io = |source| ModelError::Io {
+            kind: asset.kind,
             file: asset.file_name.to_owned(),
             dir: self.dir.clone(),
             source,
         };
         let net = |source| ModelError::Download {
+            kind: asset.kind,
             file: asset.file_name.to_owned(),
             source,
         };
@@ -158,7 +196,7 @@ impl ModelStore {
         ));
         let mut response = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(120))
+            .timeout(DOWNLOAD_BASE + Duration::from_secs(asset.size / SLOWEST_BYTES_PER_SECOND))
             .build()
             .map_err(net)?
             .get(asset.url)
@@ -186,11 +224,37 @@ impl ModelStore {
         if hex(&hasher.finalize()) != asset.sha256 {
             let _ = tokio::fs::remove_file(&part).await;
             return Err(ModelError::Checksum {
+                kind: asset.kind,
                 file: asset.file_name.to_owned(),
             });
         }
         tokio::fs::rename(&part, path).await.map_err(io)
     }
+}
+
+/// Whether the file on disk is the pinned one; streamed, because speech models are large.
+async fn is_verified(path: &Path, asset: &Asset<'_>) -> bool {
+    let (path, size, sha256) = (path.to_owned(), asset.size, asset.sha256.to_owned());
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return false;
+        };
+        if file.metadata().map_or(true, |meta| meta.len() != size) {
+            return false;
+        }
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0; 1 << 20];
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => return hex(&hasher.finalize()) == sha256,
+                Ok(read) => hasher.update(&buffer[..read]),
+                Err(_) => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 fn hex(digest: &[u8]) -> String {

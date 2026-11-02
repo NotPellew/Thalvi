@@ -11,7 +11,7 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::get;
 use sha2::{Digest, Sha256};
-use thalvi_desktop::models::{Asset, ModelError, ModelStore};
+use thalvi_desktop::models::{Asset, ModelError, ModelKind, ModelStore};
 
 const GOOD: &[u8] = b"pretend this is a model";
 
@@ -69,8 +69,10 @@ async fn a_missing_file_is_downloaded_once_and_then_served_from_disk() {
     let url = format!("http://{address}/good.onnx");
     let sha = sha256(GOOD);
     let asset = Asset {
+        kind: ModelKind::Wake,
         file_name: "good.onnx",
         url: &url,
+        size: GOOD.len() as u64,
         sha256: &sha,
     };
 
@@ -90,8 +92,10 @@ async fn a_download_with_the_wrong_checksum_is_deleted_and_refused() {
     let url = format!("http://{address}/other.onnx");
     let sha = sha256(GOOD);
     let asset = Asset {
+        kind: ModelKind::Wake,
         file_name: "good.onnx",
         url: &url,
+        size: GOOD.len() as u64,
         sha256: &sha,
     };
 
@@ -114,8 +118,10 @@ async fn a_failed_download_says_so_and_leaves_nothing_behind() {
     let url = format!("http://{address}/gone.onnx");
     let sha = sha256(GOOD);
     let asset = Asset {
+        kind: ModelKind::Wake,
         file_name: "good.onnx",
         url: &url,
+        size: GOOD.len() as u64,
         sha256: &sha,
     };
 
@@ -140,8 +146,10 @@ async fn a_damaged_file_on_disk_is_downloaded_again() {
     let url = format!("http://{address}/good.onnx");
     let sha = sha256(GOOD);
     let asset = Asset {
+        kind: ModelKind::Wake,
         file_name: "good.onnx",
         url: &url,
+        size: GOOD.len() as u64,
         sha256: &sha,
     };
 
