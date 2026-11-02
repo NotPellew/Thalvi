@@ -9,9 +9,12 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+cpal.workspace = true
 dirs.workspace = true
+futures-util.workspace = true
 ort.workspace = true
 reqwest.workspace = true
+rtrb.workspace = true
 serde.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
