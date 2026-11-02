@@ -25,7 +25,8 @@ const FAILED_FOR: Duration = Duration::from_secs(4);
 pub enum Visibility {
     Show,
     Hide,
-    HideAfter(Duration),
+    /// Show now, then hide.
+    ShowFor(Duration),
 }
 
 impl Visibility {
@@ -41,8 +42,8 @@ impl Visibility {
             | Status::Capturing { .. }
             | Status::Pending { .. }
             | Status::Working { .. } => Self::Show,
-            Status::Done { .. } => Self::HideAfter(DONE_FOR),
-            Status::Failed { .. } => Self::HideAfter(FAILED_FOR),
+            Status::Done { .. } => Self::ShowFor(DONE_FOR),
+            Status::Failed { .. } => Self::ShowFor(FAILED_FOR),
         }
     }
 }
@@ -88,7 +89,8 @@ impl Overlay {
         match visibility {
             Visibility::Show => set_visible(app, true),
             Visibility::Hide => set_visible(app, false),
-            Visibility::HideAfter(delay) => {
+            Visibility::ShowFor(delay) => {
+                set_visible(app, true);
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(delay).await;
@@ -161,13 +163,13 @@ mod tests {
                     route: CaptureRoute::Paste,
                     notice: String::new(),
                 },
-                Visibility::HideAfter(Duration::from_secs(1)),
+                Visibility::ShowFor(Duration::from_secs(1)),
             ),
             (
                 Status::Failed {
                     notice: String::new(),
                 },
-                Visibility::HideAfter(Duration::from_secs(4)),
+                Visibility::ShowFor(Duration::from_secs(4)),
             ),
         ];
         for (status, expected) in statuses {

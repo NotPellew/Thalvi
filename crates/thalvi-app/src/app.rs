@@ -30,6 +30,24 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Reads the config and starts the engine.
+    fn start(config: Option<std::path::PathBuf>) -> Result<Self, String> {
+        let store = Store::new(config, std::env::var("THALVI_RECORD").ok())?;
+        let config = store.load()?;
+        let link = EngineLink::start(
+            config.clone(),
+            Desktop::detect().map_err(|error| error.to_string())?,
+        )?;
+        Ok(Self {
+            link,
+            store,
+            overlay: Overlay::default(),
+            host: Arc::new(Desktop::detect().map_err(|error| error.to_string())?),
+            overlay_shown: AtomicBool::new(config.overlay.show),
+            config: Mutex::new(config),
+        })
+    }
+
     #[must_use]
     pub fn config(&self) -> DesktopConfig {
         self.config
@@ -78,20 +96,6 @@ pub fn run() -> ExitCode {
 fn start() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let launch = Launch::parse(&args)?;
-    let store = Store::new(launch.config, std::env::var("THALVI_RECORD").ok())?;
-    let config = store.load()?;
-    let link = EngineLink::start(
-        config.clone(),
-        Desktop::detect().map_err(|e| e.to_string())?,
-    )?;
-    let state = AppState {
-        link,
-        store,
-        overlay: Overlay::default(),
-        host: Arc::new(Desktop::detect().map_err(|e| e.to_string())?),
-        overlay_shown: AtomicBool::new(config.overlay.show),
-        config: Mutex::new(config),
-    };
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             // A relaunch that cannot be read still opens the settings.
@@ -99,7 +103,6 @@ fn start() -> Result<(), String> {
                 .map_or(Command::Show, |launch| launch.command);
             act(app, command);
         }))
-        .manage(state)
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_settings,
@@ -109,13 +112,15 @@ fn start() -> Result<(), String> {
             commands::list_microphones,
             commands::open_recordings,
         ])
-        .setup(|app| {
+        .setup(move |app| {
+            // Only the first instance gets here, so a relaunch never reads the config.
+            app.manage(AppState::start(launch.config)?);
             create_windows(app.handle())?;
             follow_engine(app.handle())?;
             Ok(())
         })
         .build(tauri::generate_context!())
-        .map_err(|error| format!("Thalvi could not start: {error}"))?;
+        .map_err(|error| error.to_string())?;
     app.run(|_, event| {
         // The tray keeps the app alive when no window is open.
         if let RunEvent::ExitRequested {
@@ -205,7 +210,10 @@ fn show_settings(app: &AppHandle) {
 }
 
 fn act(app: &AppHandle, command: Command) {
-    let state = app.state::<AppState>();
+    // A relaunch can arrive while the first instance is still starting.
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
     match command {
         Command::Show => show_settings(app),
         Command::Toggle => {
