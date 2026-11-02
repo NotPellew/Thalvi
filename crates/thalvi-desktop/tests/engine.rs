@@ -1055,8 +1055,15 @@ async fn a_capture_without_words_for_a_minute_ends_and_keeps_its_text() {
             rig.finals("Hello world").await;
             rig.feed_until(40_000, Kind::Quiet).await;
             rig.partial("more").await;
+            rig.feed_until(70_000, Kind::Quiet).await;
+            rig.partial("[noise]").await;
+            rig.feed_until(90_000, Kind::Quiet).await;
+            rig.partial("uh").await;
             rig.feed_until(99_960, Kind::Quiet).await;
-            assert!(!task.is_finished(), "words at 40 s restart the minute");
+            assert!(
+                !task.is_finished(),
+                "words at 40 s restart the minute; noise does not"
+            );
             rig.feed_until(100_080, Kind::Quiet).await;
             assert_eq!(
                 finished(task).await,

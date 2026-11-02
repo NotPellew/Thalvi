@@ -21,7 +21,7 @@ use tokio::time::Instant;
 use crate::audio::{AudioError, Frames, InputGate};
 use crate::capture::{
     CaptureFullError, CaptureRequest, CaptureRoute, CaptureSession, Endings, FinalStep,
-    PauseDuration, QuietWindow,
+    PauseDuration, QuietWindow, has_words,
 };
 use crate::config::DesktopConfig;
 use crate::cues::{Cue, CueEngine, CueError, Cues};
@@ -755,14 +755,16 @@ where
                 Step::Cancel => Some(Done::Stopped),
                 Step::Event(Err(error)) => Some(Done::Failed(error.into())),
                 Step::Event(Ok(RecognizerEvent::Partial(text))) => {
-                    if !text.trim().is_empty() {
+                    if has_words(&text) {
                         live.last_words = Instant::now();
                     }
                     self.on_partial(live, text);
                     None
                 }
                 Step::Event(Ok(RecognizerEvent::Final(text))) => {
-                    live.last_words = Instant::now();
+                    if has_words(&text) {
+                        live.last_words = Instant::now();
+                    }
                     self.on_final(live, &text)
                 }
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),

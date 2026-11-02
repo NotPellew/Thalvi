@@ -352,11 +352,7 @@ impl CaptureSession {
     /// Applies a partial transcript; returns whether it cancelled the armed ending.
     /// Empty and artifact-only partials (`[noise]`, `uh`) never do.
     pub fn on_partial(&mut self, transcript: &str) -> bool {
-        let text = transcript.trim();
-        if self.pending.is_none()
-            || text.is_empty()
-            || artifacts_to_end(&text.chars().collect::<Vec<_>>(), 1, 2)
-        {
+        if self.pending.is_none() || !has_words(transcript) {
             return false;
         }
         self.pending = None;
@@ -460,6 +456,13 @@ fn is_separator(c: char) -> bool {
 }
 
 /// Whether `chars` is only separators and `min..=max` artifacts, each followed by separators.
+/// Whether `transcript` holds words, not only one or two artifacts such as `[noise]` or `uh`.
+#[must_use]
+pub fn has_words(transcript: &str) -> bool {
+    let text = transcript.trim();
+    !text.is_empty() && !artifacts_to_end(&text.chars().collect::<Vec<_>>(), 1, 2)
+}
+
 fn artifacts_to_end(chars: &[char], min: usize, max: usize) -> bool {
     let skipped = chars.iter().take_while(|c| is_separator(**c)).count();
     let rest = &chars[skipped..];
