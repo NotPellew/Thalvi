@@ -72,7 +72,7 @@ directing you.
 - Before calling work done, run the gates and use the change end to end the
   way the user would. Report what you ran and what you could not verify.
   The `verify-thalvi` skill (`.agents/skills/verify-thalvi/`) runs the web
-  client on local fake endpoints for this.
+  client on fake or self-hosted endpoints for this.
 
 ## Keep it lean (YAGNI)
 

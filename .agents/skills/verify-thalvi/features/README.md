@@ -5,8 +5,11 @@ index before driving the app, then use the matching feature file as the recipe.
 
 ## Baseline preconditions
 
-- A run started with `.agents/skills/verify-thalvi/scripts/thalvi-verify up`
-  from the repository root. `R` is the `RUN_DIR` it printed, and
+- A fake-mode run started with
+  `.agents/skills/verify-thalvi/scripts/thalvi-verify up` from the repository
+  root. The scripted replies these recipes assert exist only in fake mode. With
+  `up --local`, follow the same steps but assert the shape of each result, as
+  `SKILL.md` describes. `R` is the `RUN_DIR` it printed, and
   `V=.agents/skills/verify-thalvi/scripts/thalvi-verify`.
 - `$V doctor $R` prints only `ok` lines.
 - The page is open: `$V ab $R open "$(. $R/run.env; echo $URL)"`, then
@@ -38,7 +41,8 @@ index before driving the app, then use the matching feature file as the recipe.
 
 - UI proof: a screenshot and an ARIA snapshot in `R/evidence/`, named
   `<feature>-<step>`. Record a `.webm` for flows that unfold over time (speaking,
-  stopping, barge-in).
+  stopping, barge-in). Start the recording with the URL before the first turn
+  (see `SKILL.md`, Evidence).
 - Side-effect proof: the matching lines of `R/fakes.jsonl` and the stored file
   under `R/data/`.
 - Report a path you could not reach with the command you tried and the

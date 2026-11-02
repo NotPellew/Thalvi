@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Launches, checks, drives and stops one isolated Thalvi verification run on local fake endpoints.
+# Launches, checks, drives and stops one isolated Thalvi verification run: fake endpoints by
+# default, self-hosted model and speech with --local; the recognizer is always the scripted fake.
 # Upper-case run variables (RUN_DIR, URL, ports, PGIDs) come from the sourced RUN_DIR/run.env.
 # shellcheck disable=SC2153
 set -euo pipefail
@@ -10,13 +11,17 @@ WEBSOCKETS="websockets==17.4"
 
 usage() {
   cat <<'EOF'
-thalvi-verify up                      build, launch, print RUN_DIR
+thalvi-verify up [--local]            build, launch, print RUN_DIR; --local uses self-hosted
+                                      model and speech (see local_endpoints.py)
 thalvi-verify doctor RUN_DIR          read-only health and identity check
 thalvi-verify say RUN_DIR "words"     queue the transcript of the next mic speech burst
 thalvi-verify ab RUN_DIR <args...>    agent-browser in this run's session, fake mic attached
 thalvi-verify state RUN_DIR STATE     wait (25 s) until the page's data-state is STATE
-thalvi-verify reply RUN_DIR "text"    wait (25 s) until the last Thalvi turn contains text and the
-                                      state is idle or listening; print that turn
+thalvi-verify reply RUN_DIR "text"    wait until the last Thalvi turn contains text and the state is
+                                      idle or listening (25 s; 120 s with --local); print that turn
+thalvi-verify reply RUN_DIR --after "user text"
+                                      the same, for a reply whose text is unknown: the last turn is
+                                      Thalvi's, right after a user turn containing the text
 thalvi-verify down RUN_DIR            stop what this run started; keep RUN_DIR/evidence
 EOF
   exit 2
@@ -51,11 +56,20 @@ wait_for() {
 }
 
 up() {
-  local run_id run_dir app_port http_port asr_port
+  local mode=fake run_id run_dir app_port http_port asr_port
+  case "${1:-}" in
+    "") ;;
+    --local) mode=local ;;
+    *) usage ;;
+  esac
   run_id="$(date +%Y%m%d-%H%M%S)-$$"
   run_dir="/tmp/thalvi-verify-$run_id"
   mkdir -p "$run_dir/data" "$run_dir/evidence"
   echo "RUN_DIR=$run_dir"
+  if [[ "$mode" == local ]]; then
+    python3 -I "$SCRIPTS/local_endpoints.py" resolve "$REPO" >"$run_dir/local.env"
+    python3 -I "$SCRIPTS/local_endpoints.py" check "$run_dir/local.env"
+  fi
 
   [[ -d "$REPO/web/node_modules" ]] || npm ci --prefix "$REPO/web" >"$run_dir/build.log" 2>&1
   npm run build --prefix "$REPO/web" -- --outDir "$run_dir/web" --emptyOutDir >>"$run_dir/build.log" 2>&1
@@ -68,6 +82,17 @@ up() {
     "$(date +%s000)" >"$run_dir/data/learnings.json"
   : >"$run_dir/asr-queue.txt"
 
+  local llm_base="http://127.0.0.1:$http_port/v1" llm_model=fake-chat tts_api=openai
+  local tts_base="http://127.0.0.1:$http_port/v1" tts_model=fake-tts tts_voice=fake_heart
+  local tts_voices=fake_heart,fake_bella
+  if [[ "$mode" == local ]]; then
+    # shellcheck disable=SC1091
+    source "$run_dir/local.env"
+    llm_base="$VERIFY_LLM_BASE_URL" llm_model="$VERIFY_LLM_MODEL" tts_api="$VERIFY_TTS_API"
+    tts_base="$VERIFY_TTS_BASE_URL" tts_model="$VERIFY_TTS_MODEL" tts_voice="$VERIFY_TTS_VOICE"
+    tts_voices="$VERIFY_TTS_VOICES"
+  fi
+
   setsid uv run --quiet --no-project --with "$WEBSOCKETS" python -I "$SCRIPTS/fake_endpoints.py" \
     serve "$run_dir" "$http_port" "$asr_port" >"$run_dir/fakes.log" 2>&1 </dev/null &
   local fakes_pgid=$!
@@ -75,15 +100,21 @@ up() {
   (cd "$run_dir" && exec setsid env -i HOME="$HOME" PATH="$PATH" RUST_LOG=info \
     THALVI_ADDR="127.0.0.1:$app_port" THALVI_WEB_DIR="$run_dir/web" THALVI_DATA_DIR="$run_dir/data" \
     THALVI_RECORD=metrics,text THALVI_ACK=off THALVI_RETIRE_DAYS=off LLM_AUDIO_INPUT=off \
-    LLM_BASE_URL="http://127.0.0.1:$http_port/v1" LLM_MODEL=fake-chat LLM_API_KEY= LLM_REASONING_EFFORT= \
+    LLM_BASE_URL="$llm_base" LLM_MODEL="$llm_model" LLM_API_KEY= LLM_REASONING_EFFORT= \
     STT_URL="ws://127.0.0.1:$asr_port" STT_MODEL=fake-asr STT_API_KEY=fake \
-    TTS_API=openai TTS_BASE_URL="http://127.0.0.1:$http_port/v1" TTS_MODEL=fake-tts TTS_API_KEY= \
-    TTS_VOICE=fake_heart TTS_VOICES=fake_heart,fake_bella \
+    TTS_API="$tts_api" TTS_BASE_URL="$tts_base" TTS_MODEL="$tts_model" TTS_API_KEY= \
+    TTS_VOICE="$tts_voice" TTS_VOICES="$tts_voices" \
     ./thalvi >"$run_dir/server.log" 2>&1 </dev/null) &
   local server_pgid=$!
 
   cat >"$run_dir/run.env" <<EOF
 RUN_DIR=$run_dir
+MODE=$mode
+LLM_BASE_URL=$llm_base
+LLM_MODEL=$llm_model
+TTS_BASE_URL=$tts_base
+TTS_VOICE=$tts_voice
+TTS_VOICES=$tts_voices
 URL=http://127.0.0.1:$app_port/
 APP_PORT=$app_port
 FAKE_HTTP_PORT=$http_port
@@ -96,7 +127,7 @@ BINARY_SHA=$(sha256sum "$run_dir/thalvi" | cut -c1-16)
 EOF
   load "$run_dir"
   wait_for "fake endpoints" "curl -sf http://127.0.0.1:$http_port/health"
-  wait_for "Thalvi voices" "curl -sf ${URL}voices | grep -q '\"default\":\"fake_heart\"'"
+  wait_for "Thalvi voices" "curl -sf ${URL}voices | grep -q '\"default\":\"$tts_voice\"'"
   doctor "$run_dir"
   echo "URL=$URL"
 }
@@ -117,9 +148,14 @@ doctor() {
   check "fake ports $FAKE_HTTP_PORT/$FAKE_ASR_PORT owned by this run" \
     "owned_port $FAKE_HTTP_PORT $FAKES_PGID && owned_port $FAKE_ASR_PORT $FAKES_PGID"
   check "page serves the Thalvi web client" "curl -sf $URL | grep -q '<title>Thalvi</title>'"
-  check "server uses the fake voices" "curl -sf ${URL}voices | grep -q '\"voices\":\\[\"fake_heart\",\"fake_bella\"\\]'"
-  check "model, recognizer and speech all point at this run's fakes" \
-    "[[ \$(tr '\\0' '\\n' </proc/$SERVER_PGID/environ | grep -cE '^(LLM_BASE_URL|TTS_BASE_URL)=http://127.0.0.1:$FAKE_HTTP_PORT/v1\$|^STT_URL=ws://127.0.0.1:$FAKE_ASR_PORT\$') == 3 ]]"
+  check "server offers the run's voices ($TTS_VOICES)" \
+    "curl -sf ${URL}voices | grep -qF '\"voices\":[\"${TTS_VOICES//,/\",\"}\"]'"
+  check "$MODE model ($LLM_MODEL) and speech configured, recognizer is this run's fake" \
+    "[[ \$(tr '\\0' '\\n' </proc/$SERVER_PGID/environ | grep -cxF -e LLM_BASE_URL=$LLM_BASE_URL -e LLM_MODEL=$LLM_MODEL -e TTS_BASE_URL=$TTS_BASE_URL -e STT_URL=ws://127.0.0.1:$FAKE_ASR_PORT) == 4 ]]"
+  if [[ "$MODE" == local ]]; then
+    check "self-hosted model and every voice answer" \
+      "python3 -I $SCRIPTS/local_endpoints.py check $RUN_DIR/local.env"
+  fi
   check "running binary matches the checkout (source $SOURCE_HASH)" "[[ \$(source_hash) == $SOURCE_HASH ]]"
   echo "run $RUN_DIR binary $BINARY_SHA url $URL"
   return "$failed"
@@ -145,13 +181,30 @@ state() {
 }
 
 reply() {
-  local text
-  text="$(python3 -I -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$2")"
-  ab "$1" wait --fn "(() => {
-    const state = document.querySelector('.orb-app')?.dataset.state;
-    const last = [...document.querySelectorAll('.o-turns .o-assistant')].at(-1)?.textContent ?? '';
-    return (state === 'idle' || state === 'listening') && last.includes($text);
-  })()" >/dev/null || { echo "no settled reply containing $text" >&2; exit 1; }
+  load "$1"
+  local after=false text settled match
+  if [[ "$2" == --after ]]; then
+    after=true
+    text="$3"
+  else
+    text="$2"
+  fi
+  text="$(python3 -I -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$text")"
+  settled="['idle', 'listening'].includes(document.querySelector('.orb-app')?.dataset.state)"
+  if [[ "$after" == true ]]; then
+    match="turns.at(-1)?.classList.contains('o-assistant') && turns.at(-2)?.classList.contains('o-user') && turns.at(-2).textContent.includes($text)"
+  else
+    match="(turns.filter((t) => t.classList.contains('o-assistant')).at(-1)?.textContent ?? '').includes($text)"
+  fi
+  # Each wait lasts 25 s; a self-hosted model gets five. Changing agent-browser's timeout setting
+  # instead would restart its browser and lose the page.
+  local tries=1 condition
+  [[ "$MODE" == local ]] && tries=5
+  condition="(() => { const turns = [...document.querySelectorAll('.o-turns > *')]; return $settled && $match; })()"
+  until ab "$1" wait --fn "$condition" >/dev/null 2>&1; do
+    tries=$((tries - 1))
+    ((tries > 0)) || { echo "no settled reply matching $text" >&2; exit 1; }
+  done
   ab "$1" eval "[...document.querySelectorAll('.o-turns .o-assistant')].at(-1).innerText"
 }
 
@@ -167,12 +220,12 @@ down() {
 }
 
 case "${1:-}" in
-  up) up ;;
+  up) up "${2:-}" ;;
   doctor) doctor "${2:-}" ;;
   say) [[ $# -eq 3 ]] || usage; say "$2" "$3" ;;
   ab) [[ $# -ge 3 ]] || usage; ab "${@:2}" ;;
   state) [[ $# -eq 3 ]] || usage; state "$2" "$3" ;;
-  reply) [[ $# -eq 3 ]] || usage; reply "$2" "$3" ;;
+  reply) [[ $# -eq 3 || ($# -eq 4 && "$3" == --after) ]] || usage; reply "${@:2}" ;;
   down) down "${2:-}" ;;
   *) usage ;;
 esac

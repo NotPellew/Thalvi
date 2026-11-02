@@ -59,8 +59,9 @@ Steps:
 - **Voice off.** Tap the header toggle.
   - Run `$V ab $R click 'button.o-voice'` and `$V state $R idle`.
   - `aria-pressed="false"`, and `fakes.jsonl` gains `asr_close`.
-- **Proof.** Record the stop and barge-in steps with
-  `$V ab $R record start $R/evidence/voice.webm` and `record stop`. Keep a
+- **Proof.** Record the whole recipe. Start it in place of `open`, before
+  voice is on: `$V ab $R record start $R/evidence/voice.webm "$(. $R/run.env; echo $URL)"`
+  and `$V state $R idle`. Finish with `$V ab $R record stop`. Keep a
   screenshot taken during `speaking` and the `fakes.jsonl` lines.
 
 ## Gotchas
