@@ -128,6 +128,7 @@ describe("countdown", () => {
     expect(pick(".lbl").textContent).toBe("SUBMIT IN 1 s");
 
     emit(pending(true));
+    clock.advance(1000);
     expect(bar()).toBe("scaleX(1)");
     expect(pick(".lbl").textContent).toBe("QUIET");
 
