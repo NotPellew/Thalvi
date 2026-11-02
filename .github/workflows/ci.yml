@@ -27,7 +27,14 @@ jobs:
         with:
           path: target/tmp/models
           key: wake-models-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/thalvi-app/ui/package-lock.json
+      - run: npm ci --prefix crates/thalvi-app/ui
+      - run: npm run build --prefix crates/thalvi-app/ui
       - run: cargo fmt --all -- --check
       - run: cargo lint
       - run: cargo test --workspace --locked
@@ -49,9 +56,16 @@ jobs:
         with:
           path: target/tmp/models
           key: wake-models-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/thalvi-app/ui/package-lock.json
+      - run: npm ci --prefix crates/thalvi-app/ui
+      - run: npm run build --prefix crates/thalvi-app/ui
       - run: cargo fmt --all -- --check
       - run: cargo lint
-      - run: cargo test -p thalvi-desktop --locked
+      - run: cargo test -p thalvi-desktop -p thalvi-app --locked
 
   web:
     name: web
@@ -67,6 +81,26 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  desktop-ui:
+    name: desktop-ui
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: crates/thalvi-app/ui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/thalvi-app/ui/package-lock.json
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
