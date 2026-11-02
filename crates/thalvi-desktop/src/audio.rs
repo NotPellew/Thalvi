@@ -1,9 +1,8 @@
-//! Owns the microphone: cpal capture, 16 kHz framing, the pre-wake buffer and the input gate.
+//! Owns the microphone: cpal capture, 16 kHz framing and the input gate.
 
 mod error;
 mod framer;
 mod gate;
-mod ring;
 
 use std::future::poll_fn;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +21,6 @@ use rtrb::{Consumer, Producer, RingBuffer};
 pub use error::AudioError;
 pub use framer::Framer;
 pub use gate::InputGate;
-pub use ring::{PRE_WAKE_FRAMES, PRE_WAKE_MS, RollingAudioBuffer};
 
 use crate::frame::Frame;
 
@@ -133,9 +131,7 @@ pub struct Frames {
     consumer: Consumer<Tagged>,
     shared: Arc<Shared>,
     gate: InputGate,
-    seen_epoch: u64,
     failure: Option<AudioError>,
-    pre_wake: RollingAudioBuffer,
 }
 
 impl Frames {
@@ -147,8 +143,8 @@ impl Frames {
     /// # Errors
     ///
     /// The [`AudioError`] that ended capture.
-    pub async fn next(&mut self) -> Result<&Frame, AudioError> {
-        let frame = poll_fn(|cx| {
+    pub async fn next(&mut self) -> Result<Frame, AudioError> {
+        poll_fn(|cx| {
             if let Some(result) = self.try_frame() {
                 return Poll::Ready(result);
             }
@@ -156,18 +152,7 @@ impl Frames {
             // A frame or failure may have landed before the waker was registered.
             self.try_frame().map_or(Poll::Pending, Poll::Ready)
         })
-        .await?;
-        Ok(self.pre_wake.push(frame))
-    }
-
-    /// The last 560 ms delivered by [`next`](Self::next), oldest first, including the latest frame.
-    ///
-    /// Empty once the input gate has changed, since audio on either side is not contiguous.
-    pub fn pre_wake(&self) -> impl Iterator<Item = &Frame> {
-        let current = self.gate.state().1 == self.seen_epoch;
-        self.pre_wake
-            .iter()
-            .take(if current { PRE_WAKE_FRAMES } else { 0 })
+        .await
     }
 
     fn try_frame(&mut self) -> Option<Result<Frame, AudioError>> {
@@ -195,10 +180,6 @@ impl Frames {
         while let Ok(Tagged { epoch, frame }) = self.consumer.pop() {
             if epoch != current {
                 continue;
-            }
-            if epoch != self.seen_epoch {
-                self.seen_epoch = epoch;
-                self.pre_wake.clear();
             }
             return Some(Ok(frame));
         }
@@ -268,9 +249,7 @@ impl Microphone {
             consumer,
             shared,
             gate: self.gate.clone(),
-            seen_epoch: epoch,
             failure: None,
-            pre_wake: RollingAudioBuffer::default(),
         })
     }
 
@@ -368,9 +347,7 @@ mod tests {
             consumer,
             shared,
             gate: gate.clone(),
-            seen_epoch: epoch,
             failure: None,
-            pre_wake: RollingAudioBuffer::default(),
         };
         (sink, frames)
     }
@@ -384,7 +361,6 @@ mod tests {
         tokio::time::timeout(TEST_TIMEOUT, frames.next())
             .await
             .expect("a frame or an error should arrive")
-            .copied()
     }
 
     #[tokio::test]
@@ -415,18 +391,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_wake_holds_the_last_seven_frames_oldest_first() {
-        let gate = InputGate::default();
-        let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
-        for value in 1..=9 {
-            sink.feed(&block(value));
-            next(&mut frames).await.expect("frame");
-        }
-        let kept: Vec<i16> = frames.pre_wake().map(|f| f[0]).collect();
-        assert_eq!(kept, [3, 4, 5, 6, 7, 8, 9]);
-    }
-
-    #[tokio::test]
     async fn frames_are_dropped_while_the_gate_is_off_and_the_first_chunk_after_it() {
         let gate = InputGate::default();
         let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
@@ -443,11 +407,6 @@ mod tests {
 
         assert_eq!(next(&mut frames).await.expect("frame")[0], 5);
         assert_eq!(next(&mut frames).await.expect("frame")[0], 6);
-        assert_eq!(
-            frames.pre_wake().map(|f| f[0]).collect::<Vec<_>>(),
-            [5, 6],
-            "audio from before the cue is not contiguous with it"
-        );
     }
 
     #[tokio::test]
