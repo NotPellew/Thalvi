@@ -569,8 +569,9 @@ impl Requests {
 }
 
 /// Runs `capture` while following the controls; `None` when a control ended the capture before
-/// it started. The engine ignores a cancel that arrives before it starts, so those are read
-/// first, and the capture is polled before any later control.
+/// it started or asked for a cancel as it finished, so its outcome is not to be delivered. The
+/// engine ignores a cancel that arrives before it starts, so those are read first, and the
+/// capture is polled before any later control.
 async fn drive<O>(
     capture: impl Future<Output = O>,
     control: &mut mpsc::UnboundedReceiver<Control>,
@@ -586,8 +587,7 @@ async fn drive<O>(
             biased;
             outcome = &mut capture => {
                 // What was asked while the capture wound down counts too.
-                requests.read_queued(control);
-                return Some(outcome);
+                return (!requests.read_queued(control)).then_some(outcome);
             }
             received = control.recv(), if !requests.quit => {
                 if requests.take(received) {
@@ -705,6 +705,35 @@ mod tests {
             assert!(started, "{label}");
             assert_eq!(requests.quit, quit, "{label}");
             assert_eq!(requests.listening_off, listening_off, "{label}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancel_that_arrives_as_the_capture_finishes_keeps_its_outcome_from_delivery() {
+        let config = DesktopConfig::from_json_str("{}", None).unwrap();
+        for (control, delivered) in [
+            (None, true),
+            (Some(Control::Apply(Box::new(config))), true),
+            (Some(Control::Cancel), false),
+            (Some(Control::SetListening(false)), false),
+            (Some(Control::Quit), false),
+        ] {
+            let label = format!("{control:?}");
+            let (sender, mut control_rx) = mpsc::unbounded_channel();
+            let mut requests = Requests::default();
+            // The capture finishes on its second poll, after the control was sent.
+            let finishing = async {
+                tokio::task::yield_now().await;
+                "accepted"
+            };
+            let driven = drive(finishing, &mut control_rx, || {}, &mut requests);
+            let sending = async {
+                if let Some(control) = control {
+                    sender.send(control).unwrap();
+                }
+            };
+            let (outcome, ()) = tokio::join!(driven, sending);
+            assert_eq!(outcome.is_some(), delivered, "{label}");
         }
     }
 
