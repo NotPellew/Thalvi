@@ -129,10 +129,15 @@ impl<A: Win32> Windows<A> {
     }
 
     fn send(&self, events: &[KeyEvent], partial: &str) -> Result<(), HostError> {
-        if events.is_empty() || self.api.send_input(events) == events.len() {
-            Ok(())
-        } else {
-            Err(HostError::MaybePartial(partial.to_owned()))
+        if events.is_empty() {
+            return Ok(());
+        }
+        match self.api.send_input(events) {
+            0 => Err(HostError::NothingTyped(
+                "Windows refused the input. Nothing was typed.".to_owned(),
+            )),
+            accepted if accepted == events.len() => Ok(()),
+            _ => Err(HostError::MaybePartial(partial.to_owned())),
         }
     }
 }
@@ -651,6 +656,10 @@ mod tests {
             matches!(&error, HostError::MaybePartial(notice) if notice.starts_with("Typing stopped partway"))
         );
         assert_eq!(desktop.api.read(|state| state.sent.len()), 1);
+
+        desktop.api.with(|state| state.accepts = Some(0));
+        let error = desktop.deliver(&target, &text("hello"), true).unwrap_err();
+        assert!(matches!(error, HostError::NothingTyped(_)), "{error:?}");
     }
 
     #[test]
