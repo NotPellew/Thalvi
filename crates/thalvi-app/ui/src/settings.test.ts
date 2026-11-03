@@ -207,6 +207,19 @@ describe("a custom speech model folder", () => {
     expect(result()).toBeNull();
   });
 
+  it("drops the answer of a check whose path was edited while it ran", async () => {
+    const stub = await openLocal();
+    const input = control("Speech model", "input");
+    let answer: () => void = () => undefined;
+    stub.backend.validateSpeechModelFolder.mockReturnValueOnce(new Promise<void>((resolve) => (answer = resolve)));
+    type(input, "/models/mine");
+    button("Check folder").click();
+    type(input, "/models/unchecked");
+    answer();
+    await settle();
+    expect(result()).toBeNull();
+  });
+
   it("asks for a path instead of checking nothing or the built-in model", async () => {
     const stub = await openLocal();
     button("Check folder").click();

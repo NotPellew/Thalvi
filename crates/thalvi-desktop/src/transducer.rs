@@ -52,6 +52,8 @@ pub enum FolderError {
     NotAFolder(PathBuf),
     #[error("The folder {} cannot be read: {}.", .0.display(), .1)]
     Unreadable(PathBuf, std::io::ErrorKind),
+    #[error("The model file {} cannot be read: {}.", .0.display(), .1)]
+    UnreadableFile(PathBuf, std::io::ErrorKind),
     #[error("Missing required {}: {}", if .0.len() == 1 { "file" } else { "files" }, .0.join(", "))]
     Missing(Vec<String>),
 }
@@ -72,17 +74,20 @@ pub fn check_folder(dir: &Path) -> Result<(), FolderError> {
     }
     std::fs::read_dir(dir).map_err(|error| unreadable(&error))?;
     let files = TransducerFiles::in_folder(dir);
-    let missing: Vec<String> = [files.encoder, files.decoder, files.joiner, files.tokens]
+    let missing: Vec<String> = [&files.encoder, &files.decoder, &files.joiner, &files.tokens]
         .iter()
         .filter(|file| !file.is_file())
         .filter_map(|file| file.file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .collect();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(FolderError::Missing(missing))
+    if !missing.is_empty() {
+        return Err(FolderError::Missing(missing));
     }
+    for file in [files.encoder, files.decoder, files.joiner, files.tokens] {
+        std::fs::File::open(&file)
+            .map_err(|error| FolderError::UnreadableFile(file, error.kind()))?;
+    }
+    Ok(())
 }
 
 /// Why a model could not be loaded. Messages are shown to the user as written.
@@ -633,6 +638,24 @@ mod tests {
         assert_eq!(
             FolderError::NotAFolder(file.clone()).to_string(),
             format!("{} is not a folder.", file.display())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_model_file_without_read_permission_is_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = folder_with("locked-file", &FILES);
+        let encoder = dir.join("encoder.int8.onnx");
+        std::fs::set_permissions(&encoder, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = check_folder(&dir);
+        std::fs::set_permissions(&encoder, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            result,
+            Err(FolderError::UnreadableFile(
+                encoder,
+                std::io::ErrorKind::PermissionDenied
+            ))
         );
     }
 
