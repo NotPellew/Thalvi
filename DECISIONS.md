@@ -94,6 +94,10 @@ areas your change touches. Editing rules are in
   enabling opens the selected device and status names the open stream separately.
   Why: choosing a microphone must not start recording or redirect a capture.
   Rejected: applying a device change automatically after an active capture.
+- **Errors stay until dismissed or fixed.** No error clears on a timer, and each can be copied. The
+  overlay never takes focus, so its failure stays until the next capture or a dismissal in settings,
+  which shows the same text with Copy. Why: a notice that vanishes in 4 s is gone before it is read.
+  Rejected: timeouts, a focusable overlay, copying from logs.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
   browser and app actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative
