@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::startup::LOGIN_ARG;
 
 const USAGE: &str =
-    "Usage: thalvi-desktop [toggle | pause | resume | cancel | status | config-file]";
+    "Usage: thalvi-desktop [toggle | pause | resume | cancel | copy-error | status | config-file]";
 
 /// What a relaunch makes the running app do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +22,8 @@ pub enum Command {
     Resume,
     /// Cancel the capture in progress.
     Cancel,
+    /// Copy the report of the last error shown, without opening a window.
+    CopyError,
 }
 
 impl Command {
@@ -75,6 +77,7 @@ impl Launch {
                 "pause" => run(Command::Pause, None),
                 "resume" => run(Command::Resume, None),
                 "cancel" => run(Command::Cancel, None),
+                "copy-error" => run(Command::CopyError, None),
                 path => run(Command::Show, Some(PathBuf::from(path))),
             },
             _ => Err(USAGE.to_owned()),
@@ -104,6 +107,7 @@ mod tests {
             (&["pause"][..], run(Command::Pause, None)),
             (&["resume"][..], run(Command::Resume, None)),
             (&["cancel"][..], run(Command::Cancel, None)),
+            (&["copy-error"][..], run(Command::CopyError, None)),
             (&["status"][..], Ok(Launch::Status)),
             (&["--login"][..], run(Command::Login, None)),
             (
@@ -142,6 +146,7 @@ mod tests {
             (Command::Pause, false),
             (Command::Resume, false),
             (Command::Cancel, false),
+            (Command::CopyError, false),
         ] {
             assert_eq!(command.first_start().is_ok(), starts, "{command:?}");
         }

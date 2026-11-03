@@ -188,6 +188,9 @@ view.onSpeak(() => {
   if (controller.state.speak) controller.setSpeak(false);
   else void startSpeak();
 });
+view.onDismissNotice(() => {
+  controller.dismissNotice();
+});
 view.onStop(() => {
   controller.stop();
 });

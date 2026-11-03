@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, expect, it, vi } from "vitest";
-import { INITIAL, reduce, type SessionState } from "./session.ts";
+import { INITIAL, reduce, type SessionState, UNREACHABLE_NOTICE } from "./session.ts";
 import { createView } from "./view.ts";
 
 afterEach(() => {
@@ -56,4 +56,80 @@ it("shows Speak replies as a switch that follows the server's confirmation and w
   expect(speak.getAttribute("aria-checked")).toBe("true");
   expect(speak.textContent).toBe("Speak replies");
   expect(clicks).toEqual(["click"]);
+});
+
+type SessionMessage = Parameters<typeof reduce>[1];
+
+function noticeView() {
+  vi.stubGlobal("ResizeObserver", class { observe() { return undefined; } });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const view = createView(root);
+  let state: SessionState = { ...INITIAL, link: "online" };
+  const render = (message: SessionMessage): void => {
+    state = reduce(state, message);
+    view.render(state);
+  };
+  view.onDismissNotice(() => {
+    render({ type: "notice", notice: null });
+  });
+  const part = (selector: string): HTMLElement => {
+    const found = root.querySelector<HTMLElement>(selector);
+    if (!found) throw new Error(`${selector} is missing`);
+    return found;
+  };
+  return { render, part };
+}
+
+it.each<[string, SessionMessage, string, SessionMessage]>([
+  [
+    "a server error",
+    { type: "server", message: { type: "error", message: "The voice service failed." } },
+    "The voice service failed.",
+    { type: "server", message: { type: "user", text: "try again" } },
+  ],
+  ["a lost connection", { type: "lost" }, UNREACHABLE_NOTICE, { type: "opened" }],
+  [
+    "a microphone failure",
+    { type: "voice", on: false, speak: false, notice: "The microphone stopped working." },
+    "The microphone stopped working.",
+    { type: "voice", on: true, speak: true, notice: null },
+  ],
+])("keeps %s on screen until dismissed or fixed, and copies its text", async (_name, raise, text, fix) => {
+  vi.useFakeTimers();
+  const writeText = vi.fn(() => Promise.resolve());
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  const { render, part } = noticeView();
+  const notice = part(".o-notice");
+
+  render(raise);
+  vi.advanceTimersByTime(60_000);
+  expect(notice.hidden).toBe(false);
+  expect(part(".o-notice-text").textContent).toBe(text);
+
+  part(".o-notice-copy").click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(writeText).toHaveBeenCalledWith(text);
+  expect(part(".o-notice-copy").textContent).toBe("Copied");
+
+  part(".o-notice-close").click();
+  expect(notice.hidden).toBe(true);
+
+  render(raise);
+  expect(part(".o-notice-copy").textContent).toBe("Copy");
+  render(fix);
+  expect(notice.hidden).toBe(true);
+  vi.useRealTimers();
+});
+
+it("selects the notice text for copying by hand when the clipboard refuses", async () => {
+  vi.stubGlobal("navigator", { clipboard: { writeText: () => Promise.reject(new Error("denied")) } });
+  const { render, part } = noticeView();
+  render({ type: "notice", notice: "The voice service failed." });
+
+  part(".o-notice-copy").click();
+  await vi.waitFor(() => {
+    expect(window.getSelection()?.toString()).toBe("The voice service failed.");
+  });
+  expect(part(".o-notice-copy").textContent).toBe("Copy");
 });

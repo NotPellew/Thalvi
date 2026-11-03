@@ -49,12 +49,12 @@ impl Hyprland {
     /// # Errors
     /// [`HostError::Unsupported`] when no private folder is available or another app answers.
     pub fn serve_state(
-        state: impl Fn() -> &'static str + Send + 'static,
+        state: impl Fn() -> String + Send + 'static,
     ) -> Result<StateServer, HostError> {
         state::serve(state)
     }
 
-    /// The running app's state word; `None` when no app answers.
+    /// The running app's state line; `None` when no app answers.
     ///
     /// # Errors
     /// [`HostError::Unsupported`] when the answer could not be asked or read.

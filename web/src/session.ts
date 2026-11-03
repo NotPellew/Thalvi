@@ -24,7 +24,7 @@ export type SessionEvent =
   | { type: "lost" }
   | { type: "voice"; on: boolean; speak: boolean; notice: string | null }
   | { type: "speak"; on: boolean }
-  | { type: "notice"; notice: string }
+  | { type: "notice"; notice: string | null }
   | { type: "stopped" }
   | { type: "switched" }
   | { type: "playing"; playing: boolean }

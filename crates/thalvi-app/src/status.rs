@@ -1,8 +1,11 @@
 //! What the UI is told: the engine's state, the pause switch and the delivery outcome as one typed status.
 
+use std::sync::{Arc, Mutex, PoisonError};
+
 use serde::Serialize;
 use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 use thalvi_desktop::engine::EngineState;
+use thalvi_desktop::report::{UserError, causes};
 
 pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not ready yet.";
 
@@ -47,11 +50,66 @@ pub enum Status {
     },
     Failed {
         notice: String,
+        /// `notice` as one short line that fits the overlay.
+        headline: &'static str,
+        /// The technical causes behind `notice`, outermost first, for the error report.
+        causes: Vec<String>,
     },
     /// The speech model is being fetched or loaded; the wake word already works.
     Loading {
         notice: String,
     },
+}
+
+/// What went wrong: the notice for the user and the technical causes for the error report.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failure {
+    pub notice: String,
+    pub headline: &'static str,
+    pub causes: Vec<String>,
+}
+
+impl Failure {
+    /// `error`'s `Display` as the notice, its headline and its source chain as the causes.
+    #[must_use]
+    pub fn of(error: &(impl UserError + 'static)) -> Self {
+        Self {
+            notice: error.to_string(),
+            headline: error.headline(),
+            causes: causes(error),
+        }
+    }
+}
+
+/// The latest failure the status showed. Only a newer failure replaces it, so it outlives the
+/// overlay hiding it and the status recovering.
+#[derive(Clone, Debug, Default)]
+pub struct LastError(Arc<Mutex<Option<Failure>>>);
+
+impl LastError {
+    /// Keeps `status` if it is a failure.
+    pub fn record(&self, status: &Status) {
+        if let Status::Failed {
+            notice,
+            headline,
+            causes,
+        } = status
+        {
+            *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(Failure {
+                notice: notice.clone(),
+                headline,
+                causes: causes.clone(),
+            });
+        }
+    }
+
+    #[must_use]
+    pub fn get(&self) -> Option<Failure> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 /// What the runner reports besides the engine's own state.
@@ -68,7 +126,7 @@ pub enum Mode {
     /// The last capture was delivered, until the next one starts.
     Done { route: CaptureRoute, notice: String },
     /// The last capture or the microphone failed, until the next one starts or listening resumes.
-    Failed(String),
+    Failed(Failure),
 }
 
 /// Everything the status is derived from.
@@ -109,8 +167,10 @@ impl View {
                 route: *route,
                 notice: notice.clone(),
             },
-            (Mode::Failed(notice), EngineState::Listening) => Status::Failed {
-                notice: notice.clone(),
+            (Mode::Failed(failure), EngineState::Listening) => Status::Failed {
+                notice: failure.notice.clone(),
+                headline: failure.headline,
+                causes: failure.causes.clone(),
             },
             (Mode::Idle | Mode::Done { .. } | Mode::Failed(_), engine) => match engine {
                 EngineState::Listening => Status::Listening,
@@ -145,6 +205,7 @@ impl View {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use thalvi_desktop::recognizer::{ConnectFailure, Detail, RecognizerError, ServerUrl};
 
     use super::*;
 
@@ -231,7 +292,11 @@ mod tests {
             route: CaptureRoute::Paste,
             notice: "Delivered.".to_owned(),
         };
-        let failed = Mode::Failed("The microphone is off.".to_owned());
+        let failed = Mode::Failed(Failure {
+            notice: "The microphone is off.".to_owned(),
+            headline: "Failed",
+            causes: Vec::new(),
+        });
         let cases = [
             (
                 Mode::Starting,
@@ -271,6 +336,8 @@ mod tests {
                 EngineState::Listening,
                 Status::Failed {
                     notice: "The microphone is off.".to_owned(),
+                    headline: "Failed",
+                    causes: Vec::new(),
                 },
             ),
             (
@@ -311,11 +378,17 @@ mod tests {
         }
         assert_eq!(
             loading(
-                Mode::Failed("The microphone is off.".to_owned()),
+                Mode::Failed(Failure {
+                    notice: "The microphone is off.".to_owned(),
+                    headline: "Failed",
+                    causes: vec!["open failed".to_owned()],
+                }),
                 EngineState::Listening
             ),
             Status::Failed {
-                notice: "The microphone is off.".to_owned()
+                notice: "The microphone is off.".to_owned(),
+                headline: "Failed",
+                causes: vec!["open failed".to_owned()],
             }
         );
         assert_eq!(
@@ -383,8 +456,10 @@ mod tests {
             (
                 Status::Failed {
                     notice: "No.".to_owned(),
+                    headline: "No",
+                    causes: vec!["connection refused (os error 111)".to_owned()],
                 },
-                json!({"state": "failed", "notice": "No."}),
+                json!({"state": "failed", "notice": "No.", "headline": "No", "causes": ["connection refused (os error 111)"]}),
             ),
             (
                 Status::Loading {
@@ -396,5 +471,51 @@ mod tests {
         for (status, expected) in cases {
             assert_eq!(serde_json::to_value(&status).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn the_last_error_outlives_the_failure_until_a_newer_one_replaces_it() {
+        let failed = |notice: &str| Status::Failed {
+            notice: notice.to_owned(),
+            headline: "Failed",
+            causes: vec![format!("cause of {notice}")],
+        };
+        let last = LastError::default();
+        assert_eq!(last.get(), None);
+        for (status, expected) in [
+            (Status::Listening, None),
+            (failed("First."), Some("First.")),
+            (Status::Listening, Some("First.")),
+            (Status::Paused, Some("First.")),
+            (failed("Second."), Some("Second.")),
+        ] {
+            last.record(&status);
+            assert_eq!(
+                last.get().map(|failure| failure.notice),
+                expected.map(str::to_owned),
+                "{status:?}"
+            );
+        }
+        assert_eq!(
+            last.get().map(|failure| failure.causes),
+            Some(vec!["cause of Second.".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_failure_carries_the_errors_text_headline_and_causes() {
+        let error = RecognizerError::Unreachable {
+            server: ServerUrl::default(),
+            reason: ConnectFailure::Refused,
+            detail: Detail("connection refused (os error 111)".to_owned()),
+        };
+        assert_eq!(
+            Failure::of(&error),
+            Failure {
+                notice: error.to_string(),
+                headline: "Can't reach speech server — Settings",
+                causes: vec!["connection refused (os error 111)".to_owned()],
+            }
+        );
     }
 }

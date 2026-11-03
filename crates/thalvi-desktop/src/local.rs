@@ -105,7 +105,7 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
         std::thread::Builder::new()
             .name("thalvi-local-stt".to_owned())
             .spawn(move || work.run())
-            .map_err(|_| RecognizerError::new("Speech recognition could not start."))?;
+            .map_err(|_| RecognizerError::said("Speech recognition could not start."))?;
         Ok(LocalSession {
             frames: frames_tx,
             events: events_rx,
@@ -122,7 +122,7 @@ pub struct LocalSession {
 }
 
 fn stopped() -> RecognizerError {
-    RecognizerError::new("Speech recognition stopped unexpectedly. Nothing was delivered.")
+    RecognizerError::said("Speech recognition stopped unexpectedly. Nothing was delivered.")
 }
 
 impl RecognizerSession for LocalSession {

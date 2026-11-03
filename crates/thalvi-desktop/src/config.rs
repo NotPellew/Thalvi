@@ -10,7 +10,7 @@ use crate::cues::Cues;
 use crate::host::{App, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
 use crate::models::CatalogSpeech;
-use crate::recognizer::ServerUrl;
+use crate::recognizer::{ServerUrl, SpeechSource};
 use crate::secondary::SecondaryStt;
 use crate::transducer::SpeechChoice;
 use crate::wake::WakeConfig;
@@ -98,6 +98,19 @@ struct RawDesktopConfig {
     start_at_login: bool,
     #[serde(default)]
     show_in_menu: bool,
+}
+
+impl DesktopConfig {
+    /// Where dictation is recognized, as the settings name it.
+    #[must_use]
+    pub fn speech_source(&self) -> SpeechSource {
+        match &self.stt.engine {
+            SttEngine::Server => SpeechSource::Server(self.server.clone()),
+            SttEngine::Local(choice) => SpeechSource::Local {
+                model: choice.label(),
+            },
+        }
+    }
 }
 
 /// How the overlay and the settings window look; `Gunmetal` unless the user picks another.

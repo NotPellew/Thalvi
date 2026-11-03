@@ -33,6 +33,8 @@ export function tauriBackend(): Backend {
     saveSettings: (settings) => invoke<undefined>("save_settings", { settings }),
     setListening: (on) => invoke<undefined>("set_listening", { on }),
     cancelCapture: () => invoke<undefined>("cancel_capture"),
+    dismissError: () => invoke<undefined>("dismiss_error"),
+    copyReport: (message, causes) => invoke<undefined>("copy_report", { message, causes }),
     listMicrophones: () => invoke<string[]>("list_microphones"),
     openRecordings: () => invoke<undefined>("open_recordings"),
     getStartAtLogin: () => invoke<SwitchState>("get_start_at_login"),

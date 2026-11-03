@@ -90,7 +90,7 @@ impl Windows {
     /// # Errors
     /// Always [`HostError::Unsupported`]: Windows has no private channel for it yet.
     pub fn serve_state(
-        _state: impl Fn() -> &'static str + Send + 'static,
+        _state: impl Fn() -> String + Send + 'static,
     ) -> Result<StateServer, HostError> {
         Err(no_state())
     }
