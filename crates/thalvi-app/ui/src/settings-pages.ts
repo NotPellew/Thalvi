@@ -405,13 +405,17 @@ function recognition({ draft, controls, backend, checks, live }: PageContext): H
     say(folderResult, message);
   }
 
+  // Bumped by every check and edit, so a slow answer never describes a path that is no longer typed.
+  let latestCheck = 0;
+
   function checkFolder(path: string): Promise<void> {
+    const check = ++latestCheck;
     return backend.validateSpeechModelFolder(path).then(
       () => {
-        showFolder("This folder holds a speech model.", true);
+        if (check === latestCheck) showFolder("This folder holds a speech model.", true);
       },
       (error: unknown) => {
-        showFolder(errorText(error), false);
+        if (check === latestCheck) showFolder(errorText(error), false);
         throw error;
       },
     );
@@ -434,6 +438,7 @@ function recognition({ draft, controls, backend, checks, live }: PageContext): H
   };
 
   function syncModel(): void {
+    latestCheck += 1;
     say(folderResult, "");
     if (draft.stt.engine === "local" && chosen !== "") {
       draft.stt.model = chosen;
