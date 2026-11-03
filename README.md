@@ -211,6 +211,7 @@ that starts Thalvi in the tray without opening Settings, and the switch shows
 what the system holds. Thalvi remembers the choice and puts the entry back each
 time it starts, so an upgrade or a moved AppImage is fixed by starting Thalvi
 once more (from its new place); turn the switch off before deleting the file.
+Keep the AppImage on a path without spaces: the login entry breaks on one.
 If you turned Thalvi off in the system's startup list, Thalvi leaves it off and
 says so there. Hyprland does not run
 XDG autostart by itself, so unless a session manager such as `uwsm` does, the row shows
