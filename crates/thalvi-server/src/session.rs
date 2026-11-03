@@ -53,7 +53,8 @@ struct ReplyContext {
     ack: AckSettings,
     /// The voice every speech call of this reply uses, fixed when the reply starts.
     voice_name: String,
-    store: Arc<SessionStore>,
+    /// Saved conversations the history tool may search; none for a private conversation.
+    past: Option<Arc<SessionStore>>,
     session_id: String,
 }
 
@@ -76,7 +77,7 @@ impl ReplySettings {
     fn new(
         ack_enabled: bool,
         voices: VoiceChoices,
-        store: Arc<SessionStore>,
+        past: Option<Arc<SessionStore>>,
         session_id: String,
     ) -> Self {
         Self {
@@ -86,7 +87,7 @@ impl ReplySettings {
                     cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 },
                 voice_name: voices.default,
-                store,
+                past,
                 session_id,
             },
             offered: voices.offered,
@@ -333,43 +334,173 @@ impl Mode {
     }
 }
 
-/// Keeps the store in step with the history and asks for a title after the first reply.
-struct Persistence<M> {
+/// What a connection may keep, chosen when it connects and never changed.
+pub enum Retention<M> {
+    /// A saved conversation: `resume` when the store has it, else a new one.
+    Saved {
+        /// Where conversations are kept.
+        store: Arc<SessionStore>,
+        /// The conversation to rejoin, if any.
+        resume: Option<String>,
+        /// Writes a title after the first reply, when configured.
+        titler: Option<Arc<Titler<M>>>,
+    },
+    /// Context held in memory only, under an id no store knows.
+    Private {
+        /// The id this connection reports; it is never written anywhere but metrics.
+        id: String,
+    },
+}
+
+/// Every private conversation's id starts with this, so a resume of one is recognised and refused.
+pub const PRIVATE_ID_PREFIX: &str = "private-";
+
+fn is_private_id(id: &str) -> bool {
+    id.starts_with(PRIVATE_ID_PREFIX)
+}
+
+const PRIVATE_RESUME_REFUSAL: &str =
+    "A private conversation ends when it closes and can't be resumed. Start a new conversation.";
+
+/// Tells a client that asked to resume a private conversation why not, then closes its socket,
+/// so it never lands in a saved conversation by accident.
+pub async fn refuse_private_resume(socket: WebSocket) {
+    let (mut sink, _) = socket.split();
+    send_json(
+        &mut sink,
+        &json!({"type": "ended", "reason": "private", "message": PRIVATE_RESUME_REFUSAL}),
+    )
+    .await;
+    let _ = sink.send(Message::Close(None)).await;
+}
+
+impl<M> Retention<M> {
+    /// Reads a connection's request. `None` when it asks to resume a private conversation,
+    /// which no one can, so the caller refuses it rather than start a saved one instead.
+    pub fn from_request(
+        private: bool,
+        resume: Option<String>,
+        store: Arc<SessionStore>,
+        titler: Option<Arc<Titler<M>>>,
+        new_private_id: impl FnOnce() -> String,
+    ) -> Option<Self> {
+        match (private, resume) {
+            (true, None) => Some(Self::Private {
+                id: new_private_id(),
+            }),
+            (false, resume) if !resume.as_deref().is_some_and(is_private_id) => Some(Self::Saved {
+                store,
+                resume,
+                titler,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// A conversation as it opens: what it already holds and how it will be kept.
+struct Opened<M> {
+    persistence: Persistence<M>,
+    id: String,
+    history: Vec<ChatMessage>,
+    next_turn: u64,
+    past: Option<Arc<SessionStore>>,
+}
+
+impl<M: ChatModel + 'static> Retention<M> {
+    async fn open(self) -> Opened<M> {
+        match self {
+            Self::Saved {
+                store,
+                resume,
+                titler,
+            } => {
+                let mut attachment = store.attach(resume.as_deref()).await;
+                let history = std::mem::take(&mut attachment.history);
+                let (id, next_turn) = (attachment.id.clone(), attachment.next_turn);
+                let past = Some(Arc::clone(&store));
+                let saved = Saved {
+                    store,
+                    attachment,
+                    titler,
+                    synced_len: history.len(),
+                    title_tried: false,
+                };
+                Opened {
+                    persistence: Persistence::Saved(saved),
+                    id,
+                    history,
+                    next_turn,
+                    past,
+                }
+            }
+            Self::Private { id } => Opened {
+                persistence: Persistence::Private,
+                id,
+                history: Vec::new(),
+                next_turn: 0,
+                past: None,
+            },
+        }
+    }
+}
+
+/// Keeps the store in step with the history; a private conversation holds no store at all.
+enum Persistence<M> {
+    Saved(Saved<M>),
+    Private,
+}
+
+/// A saved conversation's claim on the store, with its title bookkeeping.
+struct Saved<M> {
     store: Arc<SessionStore>,
     attachment: Attachment,
     titler: Option<Arc<Titler<M>>>,
-    saved_len: usize,
+    synced_len: usize,
     title_tried: bool,
 }
 
 impl<M: ChatModel + 'static> Persistence<M> {
-    async fn attach(
-        store: Arc<SessionStore>,
-        resume: Option<&str>,
-        titler: Option<Arc<Titler<M>>>,
-    ) -> (Self, Vec<ChatMessage>) {
-        let mut attachment = store.attach(resume).await;
-        let history = std::mem::take(&mut attachment.history);
-        let persistence = Self {
-            store,
-            attachment,
-            titler,
-            saved_len: history.len(),
-            title_tried: false,
-        };
-        (persistence, history)
+    fn is_private(&self) -> bool {
+        matches!(self, Self::Private)
     }
 
-    fn finish(mut self, history: &[ChatMessage], next_turn: u64, recorder: &Recorder) {
-        self.sync(history, next_turn, recorder);
-        self.store.release(self.attachment);
+    /// Resolves when a saved conversation must be let go; never for a private one.
+    async fn detached(&mut self) -> Detach {
+        match self {
+            Self::Saved(saved) => saved.attachment.detached().await,
+            Self::Private => std::future::pending().await,
+        }
+    }
+
+    /// A private conversation never saves, so its receiver never signals.
+    fn save_error_receiver(&self) -> watch::Receiver<bool> {
+        match self {
+            Self::Saved(saved) => saved.attachment.save_error_receiver(),
+            Self::Private => watch::channel(false).1,
+        }
+    }
+
+    fn finish(self, history: &[ChatMessage], next_turn: u64, recorder: &Recorder) {
+        if let Self::Saved(mut saved) = self {
+            saved.sync(history, next_turn, recorder);
+            saved.store.release(saved.attachment);
+        }
     }
 
     fn sync(&mut self, history: &[ChatMessage], next_turn: u64, recorder: &Recorder) {
-        if history.len() == self.saved_len {
+        if let Self::Saved(saved) = self {
+            saved.sync(history, next_turn, recorder);
+        }
+    }
+}
+
+impl<M: ChatModel + 'static> Saved<M> {
+    fn sync(&mut self, history: &[ChatMessage], next_turn: u64, recorder: &Recorder) {
+        if history.len() == self.synced_len {
             return;
         }
-        self.saved_len = history.len();
+        self.synced_len = history.len();
         self.store.save(&self.attachment, history, next_turn);
         let (Some(titler), false) = (&self.titler, self.title_tried) else {
             return;
@@ -427,9 +558,7 @@ pub async fn handle_session<F, M, T>(
     factory: F,
     model: Arc<M>,
     tts: Arc<T>,
-    store: Arc<SessionStore>,
-    resume: Option<String>,
-    titler: Option<Arc<Titler<M>>>,
+    retention: Retention<M>,
     recording_config: RecordingConfig,
     ack_enabled: bool,
     audio_input: bool,
@@ -443,29 +572,30 @@ pub async fn handle_session<F, M, T>(
     let (mut sink, mut stream) = socket.split();
     let factory = Arc::new(factory);
     let session_started = Instant::now();
-    let (mut persistence, mut history) =
-        Persistence::attach(store, resume.as_deref(), titler).await;
-    let session_id = persistence.attachment.id.clone();
+    let Opened {
+        mut persistence,
+        id: session_id,
+        mut history,
+        next_turn,
+        past,
+    } = retention.open().await;
+    let private = persistence.is_private();
     let resumed = !history.is_empty();
+    let recording_config = if private {
+        recording_config.metrics_only()
+    } else {
+        recording_config
+    };
     let recording = start_recording(recording_config, session_id.clone());
-    let mut turn_log = TurnLog::new(
-        recording.recorder.clone(),
-        persistence.attachment.next_turn,
-        audio_input,
-    );
+    let mut turn_log = TurnLog::new(recording.recorder.clone(), next_turn, audio_input);
     turn_log
         .recorder
         .emit("session_open", json!({"resumed": resumed}));
-    send_session_opening(&mut sink, &session_id, &history).await;
+    send_session_opening(&mut sink, &session_id, &history, private).await;
     send_state(&mut sink, "idle").await;
     tracing::info!("session opened");
 
-    let mut settings = ReplySettings::new(
-        ack_enabled,
-        voices,
-        Arc::clone(&persistence.store),
-        session_id.clone(),
-    );
+    let mut settings = ReplySettings::new(ack_enabled, voices, past, session_id.clone());
     let mut choices = Choices::new();
     let mut recognizer: Option<RecognizerHandle> = None;
     let mut rec_rx: Option<mpsc::Receiver<RecognizerMessage>> = None;
@@ -473,8 +603,7 @@ pub async fn handle_session<F, M, T>(
     let mut reply_rx: Option<mpsc::Receiver<ReplyEvent>> = None;
     let mut client_audio = ClientAudio::default();
     let mut detached = None;
-    let (mut save_error, mut save_notice_sent) =
-        (persistence.attachment.save_error_receiver(), false);
+    let (mut save_error, mut save_notice_sent) = (persistence.save_error_receiver(), false);
 
     loop {
         persistence.sync(&history, turn_log.next_turn, &turn_log.recorder);
@@ -491,7 +620,7 @@ pub async fn handle_session<F, M, T>(
             }
         };
         tokio::select! {
-            reason = persistence.attachment.detached() => {
+            reason = persistence.detached() => {
                 detached = Some(reason);
                 break;
             }
@@ -664,9 +793,6 @@ async fn handle_recognizer_message<M, T>(
     M: ChatModel + 'static,
     T: Tts + 'static,
 {
-    if let Some(RecognizerMessage::Event(event)) = &recognizer_message {
-        tracing::debug!(?event, "recognizer event");
-    }
     match recognizer_message {
         Some(RecognizerMessage::Event(RecognizerEvent::SpeechStart {
             turn_id,
@@ -868,16 +994,17 @@ async fn send_session_opening(
     sink: &mut (impl SinkExt<Message> + Unpin),
     session_id: &str,
     history: &[ChatMessage],
+    private: bool,
 ) {
     let turns: Vec<serde_json::Value> = history
         .iter()
         .map(|message| json!({"role": message.role, "text": message.content}))
         .collect();
-    send_json(
-        sink,
-        &json!({"type": "session", "id": session_id, "turns": turns}),
-    )
-    .await;
+    let mut opening = json!({"type": "session", "id": session_id, "turns": turns});
+    if private {
+        opening["private"] = json!(true);
+    }
+    send_json(sink, &opening).await;
 }
 
 fn spawn_recognizer<F>(
@@ -1467,7 +1594,7 @@ async fn run_reply<M, T>(
             sentence_tx,
             Arc::clone(&failure_sent),
             ToolRun {
-                store: Arc::clone(&context.store),
+                past: context.past.clone(),
                 session_id: context.session_id.clone(),
                 recorder: recorder.clone(),
                 turn,
@@ -1530,7 +1657,7 @@ async fn send_failed(
 
 /// What running a tool call needs besides the call.
 struct ToolRun {
-    store: Arc<SessionStore>,
+    past: Option<Arc<SessionStore>>,
     session_id: String,
     recorder: Recorder,
     turn: u64,
@@ -1725,7 +1852,7 @@ async fn send_sentence(
     sentences.send(sentence).is_ok()
 }
 
-/// Runs one model tool call against the live history and the saved conversations, showing it
+/// Runs one model tool call against the live history and any saved conversations, showing it
 /// as a task step. A call that cannot run becomes a failed step and an error result for the
 /// model. None when the reply is gone.
 async fn run_tool_call(
@@ -1751,8 +1878,10 @@ async fn run_tool_call(
     events.send(step(TaskStatus::Running, None)).await.ok()?;
     let started = Instant::now();
     let outcome: Result<Vec<HistoryMatch>, String> = if known {
-        history::parse_arguments(&call.arguments)
-            .map(|query| run.store.search_history(&run.session_id, history, &query))
+        history::parse_arguments(&call.arguments).map(|query| match &run.past {
+            Some(store) => store.search_history(&run.session_id, history, &query),
+            None => history::search_live(&run.session_id, history, &query.text),
+        })
     } else {
         Err("That tool doesn't exist.".to_string())
     };
@@ -2553,7 +2682,7 @@ mod tests {
         ReplyContext {
             ack,
             voice_name: "af_heart".to_string(),
-            store: Arc::new(store),
+            past: Some(Arc::new(store)),
             session_id: "unit".to_string(),
         }
     }
@@ -3206,7 +3335,7 @@ mod tests {
                 enabled: false,
                 cache: new_ack_cache(),
             })
-            .store;
+            .past;
             let (events, mut received) = mpsc::channel(1);
             let reservation = events.clone();
             let permit = reservation.reserve().await.expect("reserve event capacity");
@@ -3220,7 +3349,7 @@ mod tests {
                 sentences,
                 Arc::new(AtomicBool::new(false)),
                 super::ToolRun {
-                    store,
+                    past: store,
                     session_id: "unit".to_string(),
                     recorder: recording.recorder.clone(),
                     turn: 1,
@@ -3309,8 +3438,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("thalvi-close-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = Arc::new(crate::store::SessionStore::open(&dir).unwrap());
-        let (persistence, _) =
-            super::Persistence::<FakeModel>::attach(Arc::clone(&store), None, None).await;
+        let super::Opened { persistence, .. } = super::Retention::<FakeModel>::Saved {
+            store: Arc::clone(&store),
+            resume: None,
+            titler: None,
+        }
+        .open()
+        .await;
         let history = vec![
             ChatMessage::user("question".to_string()),
             ChatMessage::assistant("Partial words.".to_string()),

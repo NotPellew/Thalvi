@@ -44,6 +44,7 @@ function setup(current: string | null = "s1") {
     currentId: () => current,
     open: (id) => log.push(`open ${id}`),
     startNew: () => log.push("startNew"),
+    startPrivate: () => log.push("startPrivate"),
   });
   return {
     library,
@@ -176,6 +177,14 @@ describe("Library", () => {
     await library.read("s2");
     expect(library.state).toMatchObject({ preview: null, loading: false, error: "That conversation doesn't exist." });
     expect(log).not.toContain("open s2");
+  });
+
+  it("starts a private conversation and closes, joining nothing saved", async () => {
+    const { library, log } = setup();
+    await library.show();
+    library.startPrivate();
+    expect(log.slice(1)).toEqual(["startPrivate"]);
+    expect(library.state.open).toBe(false);
   });
 
   it("starts a new conversation and closes", async () => {

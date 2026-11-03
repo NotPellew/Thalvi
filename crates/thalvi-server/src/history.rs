@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::model::{Role, ToolDefinition};
+use crate::model::{ChatMessage, Role, ToolDefinition};
+use crate::recorder::now_ms;
 
 const MAX_QUERY_CHARS: usize = 200;
 const EXCERPT_CHARS: usize = 240;
@@ -135,6 +136,33 @@ pub fn find_match(
         excerpt,
         updated_ms,
     })
+}
+
+/// Matches in a conversation that is not saved, found only in its live `history`.
+#[must_use]
+pub fn live_matches(current_id: &str, history: &[ChatMessage], query: &str) -> Vec<HistoryMatch> {
+    let now = now_ms();
+    history
+        .iter()
+        .filter_map(|message| {
+            find_match(
+                current_id,
+                "Current conversation",
+                message.role,
+                &message.content,
+                now,
+                query,
+            )
+        })
+        .collect()
+}
+
+/// Searches only a conversation's live `history`, never anything saved.
+#[must_use]
+pub fn search_live(current_id: &str, history: &[ChatMessage], query: &str) -> Vec<HistoryMatch> {
+    let mut matches = live_matches(current_id, history, query);
+    matches.truncate(MAX_RESULTS);
+    matches
 }
 
 /// Serializes matches as data for the model, with an explicit instruction boundary.
