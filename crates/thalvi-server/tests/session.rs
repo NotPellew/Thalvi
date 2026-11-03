@@ -24,7 +24,9 @@ use thalvi_server::model::{
 };
 use thalvi_server::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerFactory};
 use thalvi_server::recorder::{RecordKinds, RecordingConfig};
-use thalvi_server::session::{VoiceChoices, handle_session};
+use thalvi_server::session::{
+    PRIVATE_ID_PREFIX, Retention, VoiceChoices, handle_session, refuse_private_resume,
+};
 use thalvi_server::store::SessionStore;
 use thalvi_server::title::Titler;
 use thalvi_server::tts::{AudioStream, Tts, TtsError};
@@ -363,19 +365,25 @@ impl Harness {
 }
 
 async fn read_session_opening(client: &mut ClientSocket) -> (String, Value) {
+    let session = read_opening_message(client).await;
+    let id = session["id"].as_str().unwrap().to_string();
+    let turns = session["turns"].clone();
+    (id, turns)
+}
+
+/// The `session` message that opens a connection; the idle state that follows is consumed.
+async fn read_opening_message(client: &mut ClientSocket) -> Value {
     let first = recv(client).await;
     let Received::Json(session) = &first else {
         panic!("first message was not the session message: {first:?}");
     };
     assert_eq!(session["type"], "session");
-    let id = session["id"].as_str().unwrap().to_string();
-    let turns = session["turns"].clone();
     let second = recv(client).await;
     assert!(
         matches!(&second, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
         "second message was not idle state: {second:?}"
     );
-    (id, turns)
+    session.clone()
 }
 
 async fn start() -> Harness {
@@ -446,16 +454,28 @@ async fn start_full(
                     );
                     let recording = recording2.clone();
                     async move {
+                        let private = query.get("private").is_some_and(|value| value == "1");
                         let resume = query.get("resume").cloned();
+                        let retention =
+                            Retention::from_request(private, resume, store, titler, || {
+                                static NEXT_PRIVATE: AtomicUsize = AtomicUsize::new(1);
+                                format!(
+                                    "{PRIVATE_ID_PREFIX}{}",
+                                    NEXT_PRIVATE.fetch_add(1, Ordering::SeqCst)
+                                )
+                            });
                         upgrade.on_upgrade(move |socket: WebSocket| async move {
+                            let Some(retention) = retention else {
+                                refuse_private_resume(socket).await;
+                                closed.fetch_add(1, Ordering::SeqCst);
+                                return;
+                            };
                             handle_session(
                                 socket,
                                 factory,
                                 Arc::new(model),
                                 Arc::new(tts),
-                                store,
-                                resume,
-                                titler,
+                                retention,
                                 recording,
                                 ack_enabled,
                                 audio_input,
@@ -1535,6 +1555,7 @@ async fn operator_log_carries_turn_source_and_length_but_never_the_text() {
     tracing::subscriber::set_global_default(
         tracing_subscriber::fmt()
             .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
             .with_writer(move || writer.clone())
             .finish(),
     )
@@ -3382,4 +3403,348 @@ fn notices(received: &[Received]) -> usize {
         .iter()
         .filter(|item| matches!(item, Received::Json(v) if v["type"] == "error" && v["message"] == "This conversation couldn't be saved"))
         .count()
+}
+
+// ---------- private conversations ----------
+
+async fn connect_to(addr: std::net::SocketAddr, query: &str) -> ClientSocket {
+    let (client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/session{query}"))
+        .await
+        .unwrap();
+    client
+}
+
+/// Leaves the harness's first connection and joins a new private conversation.
+async fn open_private(harness: &mut Harness) -> Value {
+    let mut client = connect_to(harness.addr, "?private=1").await;
+    let opening = read_opening_message(&mut client).await;
+    harness.client = client;
+    harness.session_id = opening["id"].as_str().unwrap().to_string();
+    opening
+}
+
+fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+/// Asserts no file under `dirs` contains any of `secrets`.
+fn assert_no_file_holds(dirs: &[&std::path::Path], secrets: &[&str]) {
+    for path in dirs.iter().flat_map(|dir| files_under(dir)) {
+        let content = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+        for secret in secrets {
+            assert!(
+                !content.contains(secret),
+                "{} holds {secret:?}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_private_conversation_leaves_no_content_on_disk_with_every_recording_on() {
+    let data_dir = ScratchDir::new("private-disk");
+    let everything = RecordKinds {
+        metrics: true,
+        text: true,
+        audio: true,
+    };
+    let (title_fake, titler) = title_model();
+    title_fake.add_script(vec![ModelChunk::Delta("Secret title".to_string())]);
+    let mut harness = start_with(recording_config(everything, &data_dir), Some(titler)).await;
+    let opening = open_private(&mut harness).await;
+    assert_eq!(opening["private"], true);
+    assert_eq!(opening["turns"], json!([]));
+    ask(&mut harness, "typed secret question", "typed secret answer").await;
+    run_voice_turn(&mut harness).await;
+    let private_id = harness.session_id.clone();
+    harness.client.close(None).await.unwrap();
+    wait_closed(&harness, 2).await;
+
+    assert_no_file_holds(
+        &[&harness.dir.0, &data_dir.0],
+        &[
+            "typed secret",
+            "hello thalvi",
+            "Hello there.",
+            "Secret title",
+        ],
+    );
+    assert!(
+        files_under(&harness.dir.0.join("sessions")).is_empty(),
+        "no conversation file"
+    );
+    assert_eq!(saved_titles(&harness), Vec::<String>::new());
+    assert!(title_fake.calls().is_empty(), "no title was asked for");
+    assert!(
+        files_under(&data_dir.0)
+            .iter()
+            .all(|path| path.extension().is_none_or(|ext| ext != "wav")),
+        "no microphone clip"
+    );
+
+    let lines = read_recorded_lines_blocking(&data_dir.0, &private_id);
+    let events: Vec<&str> = lines
+        .iter()
+        .filter_map(|line| line["event"].as_str())
+        .collect();
+    assert_eq!(events.iter().filter(|event| **event == "turn").count(), 2);
+    assert_eq!(events.iter().filter(|event| **event == "reply").count(), 2);
+    assert_events(&lines, &["session_open", "model_call", "session_close"]);
+    for line in &lines {
+        assert!(
+            ["text", "tts_text", "audio"]
+                .iter()
+                .all(|field| line.get(*field).is_none()),
+            "content in a private metrics line: {line}"
+        );
+    }
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn a_private_conversation_is_not_listed_opened_or_found_by_another_conversation() {
+    let mut harness = start().await;
+    open_private(&mut harness).await;
+    let private_id = harness.session_id.clone();
+    ask(&mut harness, "the cabin code is 4711", "Noted.").await;
+
+    assert_eq!(listed(&harness).await, Vec::<Value>::new());
+    let detail = reqwest::get(url(&harness, &format!("/sessions/{private_id}")))
+        .await
+        .unwrap();
+    assert_eq!(detail.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let (mut saved, saved_id, _) = open_client(harness.addr, None).await;
+    harness
+        .model
+        .add_script(vec![search_call("call-1", r#"{"query":"cabin"}"#)]);
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Nothing found.".to_string())]);
+    send_json_to(
+        &mut saved,
+        &json!({"type": "text", "text": "what was the cabin code?"}),
+    )
+    .await;
+    let received = collect_until(
+        &mut saved,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_end"),
+    )
+    .await;
+    let found = tasks(&received)[1]["detail"].clone();
+    let rounds = harness.model.tool_rounds();
+    let result: Value = serde_json::from_str(&rounds.last().unwrap().results[0].content).unwrap();
+    let sessions: Vec<&str> = result["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|found| found["session_id"].as_str())
+        .collect();
+    assert_eq!(
+        (found, sessions),
+        (json!("1 match"), vec![saved_id.as_str()]),
+        "only the saved conversation's own question matches"
+    );
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn a_private_search_covers_only_its_own_turns_whatever_the_scope() {
+    let mut harness = start().await;
+    save_past_conversation(&harness, "The cabin code is in a saved chat").await;
+    open_private(&mut harness).await;
+    ask(&mut harness, "cabin plans", "Sounds good.").await;
+    for (turn, arguments) in [
+        (1, r#"{"query":"cabin","scope":"all"}"#),
+        (2, r#"{"query":"cabin","scope":"current"}"#),
+    ] {
+        harness
+            .model
+            .add_script(vec![search_call("call-1", arguments)]);
+        harness
+            .model
+            .add_script(vec![ModelChunk::Delta("Done.".to_string())]);
+        send_json(&mut harness, &json!({"type": "text", "text": "cabin?"})).await;
+        let _ = finish_reply(&mut harness).await;
+        let ids: Vec<String> = {
+            let rounds = harness.model.tool_rounds();
+            let result: Value =
+                serde_json::from_str(&rounds.last().unwrap().results[0].content).unwrap();
+            result["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|found| found["session_id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert!(
+            !ids.is_empty() && ids.iter().all(|id| *id == harness.session_id),
+            "turn {turn}: {ids:?}"
+        );
+    }
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn failure_cancel_and_disconnect_in_a_private_conversation_save_nothing_and_keep_its_context()
+{
+    for case in ["model failure", "cancel", "disconnect"] {
+        let mut harness = start().await;
+        open_private(&mut harness).await;
+        let gate = Arc::new(Notify::new());
+        match case {
+            "model failure" => harness.model.add_script(vec![ModelChunk::Fail]),
+            _ => harness.model.add_script(vec![
+                ModelChunk::Delta("Part one. ".to_string()),
+                ModelChunk::Wait(Arc::clone(&gate)),
+            ]),
+        }
+        send_json(
+            &mut harness,
+            &json!({"type": "text", "text": "first private question"}),
+        )
+        .await;
+        match case {
+            "model failure" => {
+                let received = collect_until(
+                    &mut harness.client,
+                    |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
+                )
+                .await;
+                assert!(has_type(&received, "error"), "{case}");
+            }
+            "cancel" => {
+                let _ = collect_until(
+                    &mut harness.client,
+                    |item| matches!(item, Received::Json(v) if v["type"] == "reply"),
+                )
+                .await;
+                send_json(&mut harness, &json!({"type": "cancel"})).await;
+                let _ = collect_until(
+                    &mut harness.client,
+                    |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
+                )
+                .await;
+            }
+            _ => {
+                let _ = collect_until(
+                    &mut harness.client,
+                    |item| matches!(item, Received::Json(v) if v["type"] == "reply"),
+                )
+                .await;
+                harness.client.close(None).await.unwrap();
+                wait_closed(&harness, 2).await;
+            }
+        }
+        if case != "disconnect" {
+            ask(&mut harness, "second private question", "Fine.").await;
+            let calls = harness.model.calls();
+            let texts: Vec<&str> = calls
+                .last()
+                .unwrap()
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect();
+            assert!(
+                texts.contains(&"first private question"),
+                "{case}: the live context is kept: {texts:?}"
+            );
+            harness.client.close(None).await.unwrap();
+            wait_closed(&harness, 2).await;
+        }
+        assert!(
+            files_under(&harness.dir.0.join("sessions")).is_empty(),
+            "{case}: a conversation file was written"
+        );
+        assert_eq!(saved_titles(&harness), Vec::<String>::new(), "{case}");
+        harness.server.abort();
+    }
+}
+
+#[tokio::test]
+async fn a_private_conversation_cannot_be_resumed_and_the_refusal_starts_nothing() {
+    let mut harness = start().await;
+    open_private(&mut harness).await;
+    let private_id = harness.session_id.clone();
+    ask(&mut harness, "private question", "Private answer.").await;
+    harness.client.close(None).await.unwrap();
+    wait_closed(&harness, 2).await;
+    let calls_before = harness.model.calls().len();
+
+    for query in [
+        format!("?resume={private_id}"),
+        format!("?private=1&resume={private_id}"),
+        "?private=1&resume=s1-1".to_string(),
+    ] {
+        let mut client = connect_to(harness.addr, &query).await;
+        let Received::Json(refusal) = recv(&mut client).await else {
+            panic!("{query}: expected a message");
+        };
+        assert_eq!(refusal["type"], "ended", "{query}");
+        assert_eq!(refusal["reason"], "private", "{query}");
+        assert!(
+            refusal["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("can't be resumed")),
+            "{query}: {refusal}"
+        );
+        expect_closed(&mut client).await;
+    }
+    assert_eq!(harness.model.calls().len(), calls_before);
+    assert_eq!(saved_titles(&harness), Vec::<String>::new());
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn switching_between_saved_and_private_never_carries_context_across() {
+    let mut harness = start().await;
+    let saved_id = harness.session_id.clone();
+    ask(&mut harness, "saved question", "Saved answer.").await;
+
+    let opening = open_private(&mut harness).await;
+    assert_eq!(opening["private"], true);
+    ask(&mut harness, "private question", "Private answer.").await;
+    let history_of_last_call = |harness: &Harness| -> Vec<String> {
+        harness
+            .model
+            .calls()
+            .last()
+            .unwrap()
+            .iter()
+            .map(|message| message.content.clone())
+            .collect()
+    };
+    assert_eq!(history_of_last_call(&harness), ["private question"]);
+
+    let turns = harness.reconnect(Some(&saved_id)).await;
+    assert_eq!(
+        turns,
+        json!([
+            {"role": "user", "text": "saved question"},
+            {"role": "assistant", "text": "Saved answer."},
+        ]),
+        "the saved conversation holds none of the private turns"
+    );
+    harness.client.close(None).await.unwrap();
+    wait_closed(&harness, 3).await;
+
+    let mut fresh = connect_to(harness.addr, "").await;
+    let opening = read_opening_message(&mut fresh).await;
+    assert_eq!(
+        (opening.get("private"), &opening["turns"]),
+        (None, &json!([])),
+        "a saved conversation does not say private"
+    );
+    assert_eq!(saved_titles(&harness), ["saved question"]);
+    harness.server.abort();
 }

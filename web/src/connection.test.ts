@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Connection, reconnectDelay, sessionUrl, type Socket } from "./connection.ts";
+import { Connection, privateSessionUrl, reconnectDelay, sessionUrl, type Socket } from "./connection.ts";
 import { Controller } from "./controller.ts";
 
 class FakeSocket implements Socket {
@@ -100,6 +100,26 @@ describe("Connection", () => {
     expect(events).toEqual(["open", "lost"]);
   });
 
+  it("stays closed after a loss when it is told not to reconnect", () => {
+    const conn = new Connection(
+      () => "ws://x/session",
+      { onOpen: () => events.push("open"), onLost: () => events.push("lost"), onMessage: () => undefined },
+      (url) => {
+        urls.push(url);
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      () => false,
+    );
+    conn.connect();
+    sockets[0]?.open();
+    sockets[0]?.drop();
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(1);
+    expect(events).toEqual(["open", "lost"]);
+  });
+
   it("rejoins with the latest session id on every connect", () => {
     const conn = connection();
     conn.connect();
@@ -167,6 +187,7 @@ describe("a conversation the server ended", () => {
         connection.close();
         connection.connect();
       },
+      connectPrivate: () => undefined,
       releaseUnused: () => undefined,
       onChange: () => undefined,
     });
@@ -194,6 +215,81 @@ describe("a conversation the server ended", () => {
     expect(controller.state.link).toBe("connecting");
     expect(remembered).toEqual(["s2"]);
     vi.useRealTimers();
+  });
+});
+
+describe("a private conversation", () => {
+  it("is asked for privately, ends for good when the socket drops, and is never rejoined as a saved one", () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const urls: string[] = [];
+    const where = { protocol: "http:", host: "x" };
+    let wantPrivate = false;
+    const connection: Connection = new Connection(
+      () => (wantPrivate ? privateSessionUrl(where) : sessionUrl(where, null)),
+      {
+        onOpen: () => {
+          controller.opened();
+        },
+        onLost: () => {
+          controller.lost();
+        },
+        onMessage: (data) => {
+          controller.message(data);
+        },
+      },
+      (url) => {
+        urls.push(url);
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      () => !controller.state.private,
+    );
+    const controller = new Controller({
+      send: () => undefined,
+      playback: { enqueue: () => undefined, flush: () => undefined },
+      remember: () => undefined,
+      forget: () => undefined,
+      stopConnection: () => {
+        connection.close();
+      },
+      connect: () => {
+        wantPrivate = false;
+        connection.close();
+        connection.connect();
+      },
+      connectPrivate: () => {
+        wantPrivate = true;
+        connection.close();
+        connection.connect();
+      },
+      releaseUnused: () => undefined,
+      onChange: () => undefined,
+    });
+
+    connection.connect();
+    sockets[0]?.open();
+    controller.startPrivate();
+    sockets[1]?.open();
+    sockets[1]?.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ type: "session", id: "private-1", turns: [], private: true }) }));
+    sockets[1]?.drop();
+    vi.advanceTimersByTime(60_000);
+    expect(urls).toEqual(["ws://x/session", "ws://x/session?private=1"]);
+    expect(controller.state.link).toBe("ended");
+
+    controller.switchTo(null);
+    expect(urls.at(-1)).toBe("ws://x/session");
+    vi.useRealTimers();
+  });
+});
+
+describe("privateSessionUrl", () => {
+  it.each([
+    ["https:", "wss://phone.ts.net/session?private=1"],
+    ["http:", "ws://phone.ts.net/session?private=1"],
+  ])("for %s", (protocol, url) => {
+    expect(privateSessionUrl({ protocol, host: "phone.ts.net" })).toBe(url);
   });
 });
 

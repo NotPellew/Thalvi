@@ -183,12 +183,14 @@ const MARKUP = `
   <div class="orb-app o-collapsed">
     <header class="o-top">
       <span class="o-brand">Thalvi</span>
+      <span class="o-private" hidden>Private</span>
       <div class="o-head-actions">
         <button class="o-speed-chip" type="button" aria-expanded="false" aria-label="Playback speed 1×">1×</button>
         <button class="o-speak" type="button" role="switch" aria-checked="false">Speak replies</button>
         <button class="o-voice" type="button" aria-pressed="false">${icon("mic")}<span class="o-voice-text">Voice off</span></button>
       </div>
     </header>
+    <p class="o-private-note" hidden>Not saved, and gone when you leave or reload. Providers still process your requests.</p>
     <div class="o-speed-row" role="group" aria-label="Playback speed" hidden></div>
     <div class="o-layout">
       <section class="o-stage">
@@ -328,6 +330,8 @@ export function createView(root: HTMLElement) {
   const coreIc = find(page, ".o-core-ic", HTMLSpanElement);
   const stateName = find(page, ".o-state", HTMLHeadingElement);
   const hint = find(page, ".o-hint", HTMLParagraphElement);
+  const privateBadge = find(page, ".o-private", HTMLSpanElement);
+  const privateNote = find(page, ".o-private-note", HTMLParagraphElement);
   const notice = find(page, ".o-notice", HTMLDivElement);
   const noticeText = find(page, ".o-notice-text", HTMLSpanElement);
   const noticeCopy = find(page, ".o-notice-copy", HTMLButtonElement);
@@ -506,6 +510,8 @@ export function createView(root: HTMLElement) {
   const api = {
     render(s: SessionState) {
       lastState = s;
+      privateBadge.hidden = !s.private;
+      privateNote.hidden = !s.private;
       const display = displayState(s, busyWith === "mic");
       const text = stateText(display, s.voice);
       if (hint.textContent !== text.hint) hint.textContent = text.hint;

@@ -1,4 +1,4 @@
-import { Connection, sessionUrl } from "./connection.ts";
+import { Connection, privateSessionUrl, sessionUrl } from "./connection.ts";
 import { Controller } from "./controller.ts";
 import { conversationsApi } from "./conversations.ts";
 import { Learnings, learningsApi } from "./learnings.ts";
@@ -15,6 +15,8 @@ import { audioElementPlayer, createVoiceView } from "./voice-view.ts";
 import { holdWakeLock } from "./wake-lock.ts";
 
 const SESSION_KEY = "thalvi.session";
+/** The next connection starts a private conversation; a reload never does. */
+let wantPrivate = false;
 
 interface ReplyAudio {
   readonly ctx: AudioContext;
@@ -56,8 +58,14 @@ const controller = new Controller({
     connection.close();
   },
   connect: (id) => {
+    wantPrivate = false;
     if (id === null) sessionStorage.removeItem(SESSION_KEY);
     else sessionStorage.setItem(SESSION_KEY, id);
+    connection.close();
+    connection.connect();
+  },
+  connectPrivate: () => {
+    wantPrivate = true;
     connection.close();
     connection.connect();
   },
@@ -68,7 +76,7 @@ const controller = new Controller({
 });
 
 const connection = new Connection(
-  () => sessionUrl(location, sessionStorage.getItem(SESSION_KEY)),
+  () => (wantPrivate ? privateSessionUrl(location) : sessionUrl(location, sessionStorage.getItem(SESSION_KEY))),
   {
     onOpen: () => {
       controller.opened();
@@ -82,6 +90,8 @@ const connection = new Connection(
       controller.message(data);
     },
   },
+  undefined,
+  () => !controller.state.private,
 );
 
 const voicePicker = new VoicePicker({
@@ -103,6 +113,9 @@ const library = new Library({
   },
   startNew: () => {
     controller.switchTo(null);
+  },
+  startPrivate: () => {
+    controller.startPrivate();
   },
 });
 createLibraryView(appRoot, library, () => sessionStorage.getItem(SESSION_KEY));
