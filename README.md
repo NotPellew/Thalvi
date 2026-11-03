@@ -195,8 +195,9 @@ Download the latest `desktop-v*` release from
 is needed.
 
 - **Windows:** run `Thalvi_<version>_x64-setup.exe`. It installs for your user
-  only, adds a Start-menu entry, and downloads WebView2 if missing. Uninstall
-  from Settings → Apps; your config and models stay.
+  only, into `%LOCALAPPDATA%\Programs\Thalvi` (apart from your data in
+  `%LOCALAPPDATA%\thalvi`), adds a Start-menu entry, and downloads WebView2 if
+  missing. Uninstall from Settings → Apps; your config and models stay.
 - **Linux:** `chmod +x Thalvi_<version>_amd64.AppImage`, then run it.
   Install `hyprctl`, `wtype` and `wl-copy` (listed under Build from source). Update by replacing the
   file; settings and models stay.
