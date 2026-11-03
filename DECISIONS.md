@@ -122,6 +122,10 @@ areas your change touches. Editing rules are in
   sessions and returns short excerpts as data; task steps stay collapsed. Why:
   recover earlier details without whole-history context. Rejected: embeddings
   and code mode before a keyword tool proves useful.
+- **Reading a conversation never takes it over.** `GET /sessions/{id}` previews;
+  only an explicit Continue here resumes, moving a live one from its device.
+  Why: browsing must not cut off the device in use. Rejected: resume on open,
+  shared ownership. Desktop conversation clients follow the same split.
 - **Opt-in retirement with editable learnings.** `THALVI_RETIRE_DAYS` replaces
   old transcripts with summaries and keeps durable facts in a separate editable
   store. Why: bound retention without losing useful context. Rejected:
