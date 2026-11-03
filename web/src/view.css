@@ -63,10 +63,10 @@ body { margin: 0; }
 .o-voice[aria-pressed="true"] { background: var(--neon); color: light-dark(#fff, #02120a); }
 .o-speak {
   min-height: 50px; padding: 0 14px; border: 2px solid var(--line); border-radius: 6px;
-  font-size: 14px; font-weight: 700; background: var(--surf);
+  font-size: 14px; font-weight: 700; white-space: nowrap; background: var(--surf);
 }
 .o-speak[aria-checked="true"] { border-color: var(--neon); color: var(--neon); }
-.o-head-actions { display: inline-flex; align-items: center; gap: 8px; }
+.o-head-actions { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .o-speed-chip {
   min-height: 50px; min-width: 52px; padding: 0 10px;
   border: 2px solid var(--line); border-radius: 6px;
