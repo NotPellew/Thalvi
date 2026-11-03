@@ -302,7 +302,10 @@ async fn the_microphone_level_follows_the_capture_frames_and_is_zero_outside_it(
             rig.feed.send([i16::MAX; FRAME_SAMPLES]);
             settle().await;
             rig.finals("never mind").await;
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled { dictated: None }
+            );
             assert_eq!(*level.borrow(), 0.0, "the level ends with the capture");
         })
         .await;
@@ -379,7 +382,10 @@ async fn the_wake_cue_and_the_connection_overlap_and_only_audio_after_both_is_se
 
             rig.at(800).await;
             rig.finals("never mind").await;
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled { dictated: None }
+            );
             assert_eq!(
                 rig.cue_log(),
                 [
@@ -432,7 +438,10 @@ async fn a_wake_cue_that_is_off_or_fails_still_reopens_the_gate_and_the_capture_
                 };
                 assert_eq!(rig.notices(), expected, "{config}");
                 rig.handle.cancel();
-                assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+                assert_eq!(
+                    finished(task).await,
+                    CaptureOutcome::Cancelled { dictated: None }
+                );
             }
         })
         .await;
@@ -720,7 +729,12 @@ async fn words_recognized_while_the_countdown_waits_for_quiet_still_cancel_the_e
             rig.feed_until(6000, Kind::Quiet).await;
             assert!(!task.is_finished(), "the cancelled ending is not delivered");
             rig.handle.cancel();
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("Hello paste that".to_owned())
+                }
+            );
         })
         .await;
 }
@@ -758,7 +772,12 @@ async fn a_paste_still_yields_to_speech_inside_its_short_window() {
             rig.feed_until(3000, Kind::Quiet).await;
             assert!(!task.is_finished(), "the cancelled paste is not delivered");
             rig.handle.cancel();
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("Hello paste that".to_owned())
+                }
+            );
         })
         .await;
 }
@@ -791,7 +810,12 @@ async fn audio_held_back_by_a_cancelled_ending_is_sent_with_the_next_frame() {
             );
 
             rig.handle.cancel();
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("Hello submit".to_owned())
+                }
+            );
         })
         .await;
 }
@@ -810,7 +834,10 @@ async fn an_ending_heard_only_in_a_partial_never_arms() {
             assert_eq!(rig.started(Cue::Provisional).len(), 0);
             assert!(matches!(rig.state(), EngineState::Capturing { .. }));
             rig.finals("never mind").await;
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled { dictated: None }
+            );
         })
         .await;
 }
@@ -829,7 +856,10 @@ async fn never_mind_cancels_at_once_without_waiting_or_a_provisional_cue() {
             assert_eq!(rig.started(Cue::Cancelled), [1500]);
             rig.at(1600).await;
             assert!(task.is_finished(), "no pause is waited out");
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled { dictated: None }
+            );
             assert_eq!(rig.started(Cue::Provisional).len(), 0);
             assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
             assert!(rig.gate.is_enabled());
@@ -868,7 +898,12 @@ async fn cancelling_from_outside_stops_whatever_the_capture_is_doing() {
                     }
                 }
                 rig.handle.cancel();
-                assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+                assert_eq!(
+                    finished(task).await,
+                    CaptureOutcome::Cancelled {
+                        dictated: (!matches!(moment, Moment::Starting)).then(|| "Hello".to_owned())
+                    }
+                );
                 let log = rig.cue_log();
                 match moment {
                     Moment::Starting => {
@@ -1108,7 +1143,10 @@ async fn a_capture_fails_when_the_microphone_gives_no_audio_for_three_seconds() 
             rig.feed_until(8000, Kind::Quiet).await;
             assert!(!task.is_finished());
             rig.handle.cancel();
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled { dictated: None }
+            );
 
             // Cues mute the microphone, so the limit starts when the cue ends.
             let (mut rig, engine, frames) = Rig::new("{}");
@@ -1561,7 +1599,12 @@ async fn cancelling_during_the_secondary_transcription_abandons_it() {
             );
             assert!(!rig.gate.is_enabled(), "no audio is wanted meanwhile");
             rig.handle.cancel();
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("live words".to_owned())
+                }
+            );
             assert_eq!(rig.server.calls().last(), Some(&FakeCall::Close));
             assert!(rig.gate.is_enabled());
             assert_eq!(rig.notices().len(), 0);
@@ -1635,7 +1678,12 @@ async fn the_state_follows_the_capture() {
             rig.partial("and more").await;
             assert_eq!(rig.state(), capturing("Hello paste that", Some("and more")));
             rig.handle.cancel();
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("Hello paste that".to_owned())
+                }
+            );
             assert_eq!(rig.state(), EngineState::Listening);
         })
         .await;
@@ -2363,7 +2411,12 @@ async fn a_new_ending_withholds_audio_again_after_speech_was_relayed() {
             rig.feed_until(2640, Kind::Quiet).await;
             assert_eq!(rig.sent().len(), sent, "quiet audio is held again");
             rig.handle.cancel();
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("Hello submit".to_owned())
+                }
+            );
         })
         .await;
 }
@@ -2387,7 +2440,12 @@ async fn quiet_hiss_does_not_count_as_speech_to_a_pending_ending() {
             rig.feed_until(1360, Kind::Hiss).await;
             assert_eq!(rig.state(), waiting(false));
             rig.handle.cancel();
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("Hello".to_owned())
+                }
+            );
         })
         .await;
 }
@@ -2414,7 +2472,12 @@ async fn a_final_that_continues_after_an_ending_cancels_it_with_a_cue() {
             rig.feed_until(6000, Kind::Quiet).await;
             assert!(!task.is_finished(), "the cancelled ending is not delivered");
             rig.handle.cancel();
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("Hello submit and then some more".to_owned())
+                }
+            );
         })
         .await;
 }
@@ -2447,7 +2510,11 @@ async fn cancelling_works_while_the_recognizer_has_stopped_taking_audio() {
                     task.is_finished(),
                     "{name}: cancel is not waiting for the send"
                 );
-                assert_eq!(finished(task).await, CaptureOutcome::Cancelled, "{name}");
+                assert_eq!(
+                    finished(task).await,
+                    CaptureOutcome::Cancelled { dictated: None },
+                    "{name}"
+                );
                 assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel), "{name}");
                 assert!(rig.gate.is_enabled(), "{name}");
             }
@@ -2617,7 +2684,10 @@ async fn the_wake_cue_wait_is_counted_from_the_wake_word_not_from_the_cue_starti
             rig.at(70).await;
             rig.at(70 + 230).await;
             rig.handle.cancel();
-            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled { dictated: None }
+            );
             let lines = read_lines(&dir.join("metrics.jsonl"));
             let wake = lines
                 .iter()
