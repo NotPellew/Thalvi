@@ -18,7 +18,7 @@ input[type="search"] { width: 100%; color: var(--mut); }
 input[type="number"] { width: 6.5em; font-family: var(--mono); }
 button { background: var(--surf); border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px; cursor: pointer; }
 button:hover { border-color: var(--neon); }
-button:disabled { opacity: 0.55; cursor: default; }
+button:disabled, input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 button.primary { background: var(--neon); border-color: var(--neon); color: light-dark(#fff, #02120a); font-weight: 700; }
 button.quiet { color: var(--mut); }
 
@@ -64,6 +64,7 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .note.ok { color: var(--mut); }
 .stack.wide > button { align-self: flex-start; }
 code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surf); font-family: ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; user-select: all; }
+.note.why { margin: 4px 0 0; color: var(--amber); }
 .empty { color: var(--mut); }
 
 .bar { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 10px 22px; border-top: 1px solid var(--line); background: var(--surf); }

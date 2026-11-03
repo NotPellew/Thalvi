@@ -1707,7 +1707,6 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
             let seen = events(&metrics);
             for expected in [
                 ("desktop_wake_reset", "ok"),
-                ("desktop_wake_inference", "capture"),
                 ("desktop_wake_level", "quiet"),
                 ("desktop_ready_cue", "ok"),
                 ("desktop_transcription_ready", "ok"),
@@ -1735,33 +1734,19 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
             assert_eq!(secondary["model"], "m");
             assert_eq!(secondary["api"], "openai");
 
-            let day = std::fs::read_dir(dir.join("recordings"))
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap()
-                .path();
-            let text = read_lines(&day.join("desktop.jsonl"));
-            let kinds: Vec<&str> = text
-                .iter()
-                .map(|line| line["event"].as_str().unwrap())
-                .collect();
-            assert_eq!(kinds, ["final", "secondary", "accepted"]);
-            assert_eq!(text[0]["text"], "live words paste that");
-            assert_eq!(text[2]["text"], "Polished words");
-            let wav = std::fs::read_dir(&day)
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .find(|path| {
-                    path.file_name()
-                        .is_some_and(|name| name.to_string_lossy().starts_with("capture-"))
-                })
-                .unwrap();
+            let folder = dictation_dirs(&dir).pop().unwrap();
             assert_eq!(
-                std::fs::metadata(wav).unwrap().len(),
+                std::fs::read_to_string(folder.join("text.txt")).unwrap(),
+                "heard: live words paste that\n\
+                 second transcription: Polished words paste that\n\
+                 accepted (paste): Polished words\n"
+            );
+            assert_eq!(
+                std::fs::metadata(folder.join("speech.wav")).unwrap().len(),
                 44 + 2560 * u64::try_from(rig.sent().len()).unwrap(),
                 "only audio sent after the cue is recorded"
             );
+            assert!(folder.join("wake.wav").exists());
         })
         .await;
 }
@@ -1830,49 +1815,67 @@ fn listen_task(
     })
 }
 
-/// The one recordings day directory under `root`, when anything was recorded.
-fn day_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
-    Some(
-        std::fs::read_dir(root.join("recordings"))
-            .ok()?
-            .next()?
-            .unwrap()
-            .path(),
-    )
+/// The dictation folders (`<date>/<time>`) under `root`, in name order.
+fn dictation_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let subdirs = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut paths: Vec<_> = entries
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_dir())
+            .collect();
+        paths.sort();
+        paths
+    };
+    subdirs(root).iter().flat_map(|day| subdirs(day)).collect()
 }
 
-/// The `wake-` files of a day, as (kind, file name, samples).
-fn wake_clips(day: &std::path::Path) -> Vec<(String, String, Vec<i16>)> {
-    let mut clips: Vec<_> = std::fs::read_dir(day)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("wake-")
+/// Every file under `root` as a path with the date and time elided.
+fn files_under(root: &std::path::Path) -> Vec<String> {
+    let mut files: Vec<String> = dictation_dirs(root)
+        .iter()
+        .flat_map(|folder| {
+            std::fs::read_dir(folder).unwrap().map(|entry| {
+                format!(
+                    "<dictation>/{}",
+                    entry.unwrap().file_name().to_string_lossy()
+                )
+            })
         })
-        .map(|path| {
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            let kind = name
-                .strip_suffix(".wav")
-                .unwrap()
-                .rsplit('-')
-                .next()
-                .unwrap()
-                .to_owned();
-            let bytes = std::fs::read(&path).unwrap();
+        .collect();
+    if root.join("metrics.jsonl").exists() {
+        files.push("metrics.jsonl".to_owned());
+    }
+    files.sort();
+    files
+}
+
+/// The `wake.wav` of each dictation folder as (folder name, samples).
+fn wake_clips(root: &std::path::Path) -> Vec<(String, Vec<i16>)> {
+    dictation_dirs(root)
+        .iter()
+        .filter_map(|folder| {
+            let bytes = std::fs::read(folder.join("wake.wav")).ok()?;
             let samples = bytes[44..]
                 .as_chunks::<2>()
                 .0
                 .iter()
                 .map(|pair| i16::from_le_bytes(*pair))
                 .collect();
-            (kind, name, samples)
+            let name = format!(
+                "{}/{}",
+                folder
+                    .parent()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy(),
+                folder.file_name().unwrap().to_string_lossy()
+            );
+            Some((name, samples))
         })
-        .collect();
-    clips.sort();
-    clips
+        .collect()
 }
 
 /// Sends frames tagged `from..=to`, none of them a wake.
@@ -1883,64 +1886,131 @@ async fn hear(rig: &Rig, from: usize, to: usize) {
     }
 }
 
+fn wake_lines(dir: &std::path::Path, event: &str) -> Vec<serde_json::Value> {
+    read_lines(&dir.join("metrics.jsonl"))
+        .into_iter()
+        .filter(|line| line["event"] == event)
+        .collect()
+}
+
 #[tokio::test(start_paused = true)]
-async fn every_wake_inference_line_carries_both_heads_scores_rounded() {
+async fn a_near_miss_is_one_line_per_episode_with_its_peak_and_a_crossing_is_none() {
     LocalSet::new()
         .run_until(async {
-            let dir = record_dir("scores");
+            // Per frame (capture, conversation); both thresholds are 0.5.
+            let frames = [
+                (0.0, 0.0),
+                (0.1, 0.0),
+                (0.2, 0.0),
+                (0.3004, 0.0),
+                (0.2, 0.0),
+                (0.0, 0.0),
+                (0.15, 0.0),
+                (0.1, 0.4),
+                (0.0, 0.1234),
+                (0.0, 0.0),
+                (0.3, 0.0),
+            ];
+            let dir = record_dir("near-miss");
             let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
-            let (rig, engine, frames) = Rig::recording("{}", recorder);
-            let task = listen_task(engine, frames, 1);
-            for (capture, conversation) in [(0.1234, 0.5), (0.9996, 0.0004)] {
+            let (rig, engine, frames_in) = Rig::recording("{}", recorder);
+            let task = listen_task(engine, frames_in, 1);
+            for (id, (capture, conversation)) in frames.into_iter().enumerate() {
                 rig.wake.score(capture, conversation);
-                hear(&rig, 1, 1).await;
+                hear(&rig, id, id).await;
             }
-            rig.wake.score(0.7, 0.4996);
-            rig.wake.fire(WakeEvent::Conversation);
-            hear(&rig, 1, 1).await;
-            assert_eq!(finished(task).await, [WakeTrigger::Conversation]);
+            rig.wake.score(0.6, 0.0);
+            rig.wake.fire(WakeEvent::Capture);
+            hear(&rig, 99, 99).await;
+            finished(task).await;
 
-            let lines = read_lines(&dir.join("metrics.jsonl"));
-            let scored: Vec<_> = lines
+            let misses: Vec<_> = wake_lines(&dir, "desktop_wake_near_miss")
                 .iter()
-                .filter(|line| line["event"] == "desktop_wake_inference")
                 .map(|line| {
                     (
-                        line["outcome"].clone(),
-                        line["capture"].clone(),
-                        line["conversation"].clone(),
+                        line["outcome"].as_str().unwrap().to_owned(),
+                        line["peak"].clone(),
+                        line["threshold"].clone(),
                     )
                 })
                 .collect();
             assert_eq!(
-                scored,
+                misses,
                 [
-                    (json!("none"), json!(0.123), json!(0.5)),
-                    (json!("none"), json!(1.0), json!(0.0)),
-                    (json!("conversation"), json!(0.7), json!(0.5)),
-                ]
+                    ("capture".to_owned(), json!(0.3), json!(0.5)),
+                    ("capture".to_owned(), json!(0.15), json!(0.5)),
+                    ("conversation".to_owned(), json!(0.4), json!(0.5)),
+                ],
+                "a rise that ends in a wake is not a near miss"
+            );
+            assert!(
+                wake_lines(&dir, "desktop_wake_inference")
+                    .iter()
+                    .all(|line| line["outcome"] == "summary"),
+                "no line per frame"
             );
         })
         .await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_wake_clips_the_last_two_seconds_of_audio_and_links_it_to_its_scores() {
+async fn wake_latency_is_summarized_once_a_minute_and_when_listening_ends() {
     LocalSet::new()
         .run_until(async {
-            // (events from frame 31 on, clips as (kind, id of the last frame))
-            type Case = (
-                &'static str,
-                &'static [WakeEvent],
-                &'static [(&'static str, usize)],
+            let dir = record_dir("latency");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (rig, engine, frames) = Rig::recording("{}", recorder);
+            let task = listen_task(engine, frames, 1);
+            for (id, took) in [10, 20, 30, 40].into_iter().enumerate() {
+                rig.wake.inference(ms(took));
+                hear(&rig, id, id).await;
+            }
+            tokio::time::advance(Duration::from_secs(59)).await;
+            rig.wake.inference(ms(99));
+            hear(&rig, 4, 4).await;
+            rig.wake.inference(ms(50));
+            tokio::time::advance(Duration::from_secs(1)).await;
+            hear(&rig, 5, 5).await;
+            rig.wake.inference(ms(7));
+            rig.wake.fire(WakeEvent::Capture);
+            hear(&rig, 6, 6).await;
+            finished(task).await;
+
+            let summaries: Vec<_> = wake_lines(&dir, "desktop_wake_inference")
+                .iter()
+                .map(|line| {
+                    (
+                        line["count"].as_u64().unwrap(),
+                        line["p50_ms"].as_f64().unwrap(),
+                        line["p95_ms"].as_f64().unwrap(),
+                        line["max_ms"].as_f64().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                summaries,
+                [(6, 30.0, 99.0, 99.0), (1, 7.0, 7.0, 7.0)],
+                "the first minute's frames, then what the wake cut short"
             );
+        })
+        .await;
+}
+
+const ALL_KINDS: RecordKinds = RecordKinds {
+    metrics: true,
+    text: true,
+    audio: true,
+};
+
+#[tokio::test(start_paused = true)]
+async fn each_wake_gets_a_folder_with_the_last_two_seconds_and_a_wake_nothing_ends_a_line() {
+    LocalSet::new()
+        .run_until(async {
+            // (events from frame 31 on, id of the last frame of each folder's clip)
+            type Case = (&'static str, &'static [WakeEvent], &'static [usize]);
             let cases: [Case; 3] = [
-                ("capture", &[WakeEvent::Capture], &[("capture", 31)]),
-                (
-                    "conversation",
-                    &[WakeEvent::Conversation],
-                    &[("conversation", 31)],
-                ),
+                ("capture", &[WakeEvent::Capture], &[31]),
+                ("conversation", &[WakeEvent::Conversation], &[31]),
                 (
                     "ambiguous",
                     &[
@@ -1949,7 +2019,7 @@ async fn a_wake_clips_the_last_two_seconds_of_audio_and_links_it_to_its_scores()
                         WakeEvent::Ambiguous,
                         WakeEvent::Capture,
                     ],
-                    &[("ambiguous", 31), ("capture", 34)],
+                    &[31, 34],
                 ),
             ];
             for (name, events, expected) in cases {
@@ -1965,36 +2035,41 @@ async fn a_wake_clips_the_last_two_seconds_of_audio_and_links_it_to_its_scores()
                 }
                 finished(task).await;
 
-                let clips = wake_clips(&day_dir(&dir).unwrap());
-                let kinds: Vec<_> = clips.iter().map(|(kind, _, _)| kind.as_str()).collect();
-                let mut want: Vec<_> = expected.iter().map(|(kind, _)| *kind).collect();
-                want.sort_unstable();
-                assert_eq!(kinds, want, "{name}");
-                let metrics = read_lines(&dir.join("metrics.jsonl"));
-                for (kind, name, samples) in &clips {
-                    let last = expected.iter().find(|(k, _)| k == kind).unwrap().1;
-                    let tags: Vec<i16> = samples
-                        .as_chunks::<FRAME_SAMPLES>()
-                        .0
-                        .iter()
-                        .map(|frame| frame[0])
-                        .collect();
-                    let first = i16::try_from(last - 24).unwrap();
-                    let want: Vec<i16> = (first..=first + 24).collect();
-                    assert_eq!(tags, want, "{name}: the last 25 frames, wake frame last");
-                    assert_eq!(samples.len(), 25 * FRAME_SAMPLES);
-                    assert!(name.starts_with("wake-") && name.ends_with(&format!("-{kind}.wav")));
+                let clips = wake_clips(&dir);
+                let mut lasts: Vec<_> = clips
+                    .iter()
+                    .map(|(_, samples)| {
+                        let tags: Vec<i16> = samples
+                            .as_chunks::<FRAME_SAMPLES>()
+                            .0
+                            .iter()
+                            .map(|frame| frame[0])
+                            .collect();
+                        assert_eq!(tags.len(), 25, "{name}");
+                        assert_eq!(tags[24] - tags[0], 24, "{name}: the last 25 frames");
+                        usize::try_from(tags[24]).unwrap()
+                    })
+                    .collect();
+                lasts.sort_unstable();
+                assert_eq!(lasts, expected, "{name}");
 
-                    let linked: Vec<_> = metrics
-                        .iter()
-                        .filter(|line| line["event"] == "desktop_wake_clip")
-                        .filter(|line| line["file"] == name.as_str())
-                        .collect();
-                    assert_eq!(linked.len(), 1, "{name}");
-                    assert_eq!(linked[0]["outcome"], kind.as_str());
-                    assert_eq!(linked[0]["capture"], json!(0.8));
-                    assert_eq!(linked[0]["conversation"], json!(0.123));
-                    assert!(linked[0].get("text").is_none());
+                let nothing = wake_lines(&dir, "desktop_wake_nothing");
+                if name == "ambiguous" {
+                    assert_eq!(nothing.len(), 1, "{name}: once per run of ambiguous frames");
+                    assert_eq!(nothing[0]["outcome"], "ambiguous");
+                    assert_eq!(nothing[0]["capture"], json!(0.8));
+                    assert_eq!(nothing[0]["conversation"], json!(0.123));
+                    assert!(
+                        clips
+                            .iter()
+                            .any(|(folder, _)| nothing[0]["dictation"] == folder.as_str()),
+                        "{name}: the line names the folder of its clip"
+                    );
+                } else {
+                    assert!(
+                        nothing.is_empty(),
+                        "{name}: the wake fired, so it is no line"
+                    );
                 }
             }
         })
@@ -2014,13 +2089,14 @@ async fn a_clip_holds_only_what_was_heard_since_listening_began() {
             hear(&rig, 11, 11).await;
             // Audio between two listens is never scored, so it must not join the next clip.
             hear(&rig, 20, 21).await;
-            // Another kind, so the two clips never share a file name within a millisecond.
             rig.wake.fire(WakeEvent::Capture);
             hear(&rig, 22, 22).await;
             finished(task).await;
 
-            let clips = wake_clips(&day_dir(&dir).unwrap());
-            let mut lengths: Vec<_> = clips.iter().map(|(_, _, samples)| samples.len()).collect();
+            let mut lengths: Vec<_> = wake_clips(&dir)
+                .iter()
+                .map(|(_, samples)| samples.len())
+                .collect();
             lengths.sort_unstable();
             assert_eq!(lengths, [3 * FRAME_SAMPLES, 11 * FRAME_SAMPLES]);
         })
@@ -2048,13 +2124,145 @@ async fn recordings_changed_between_listens_apply_to_the_next_one() {
             hear(&rig, 22, 22).await;
             finished(task).await;
 
-            let clips = wake_clips(&day_dir(&dir).unwrap());
-            let kinds: Vec<_> = clips.iter().map(|(kind, _, _)| kind.as_str()).collect();
             assert_eq!(
-                kinds,
-                ["capture"],
+                wake_clips(&dir).len(),
+                1,
                 "only the listen after the change has a clip"
             );
+        })
+        .await;
+}
+
+/// A capture that is delivered, as `Run::Dictation` with every kind on: the files it leaves.
+async fn files_of(name: &str, kinds: RecordKinds) -> Vec<String> {
+    let dir = record_dir(name);
+    let (mut rig, engine, frames) = Rig::recording("{}", Recorder::in_dir(kinds, &dir).unwrap());
+    let task = capture_task(engine, frames);
+    live_words(&mut rig).await;
+    finished(task).await;
+    files_under(&dir)
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_kind_writes_only_its_own_files_into_the_dictations_folder() {
+    LocalSet::new()
+        .run_until(async {
+            let only = |text, audio| RecordKinds {
+                metrics: false,
+                text,
+                audio,
+            };
+            for (name, kinds, expected) in [
+                ("none", RecordKinds::default(), &[][..]),
+                ("text", only(true, false), &["<dictation>/text.txt"][..]),
+                (
+                    "audio",
+                    only(false, true),
+                    &["<dictation>/speech.wav", "<dictation>/wake.wav"][..],
+                ),
+                (
+                    "all",
+                    ALL_KINDS,
+                    &[
+                        "<dictation>/speech.wav",
+                        "<dictation>/text.txt",
+                        "<dictation>/wake.wav",
+                        "metrics.jsonl",
+                    ][..],
+                ),
+            ] {
+                assert_eq!(
+                    files_of(&format!("kinds-{name}"), kinds).await,
+                    expected,
+                    "{name}"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wake_that_delivers_nothing_is_one_line_naming_the_reason_and_the_folder() {
+    LocalSet::new()
+        .run_until(async {
+            const IDLE: &str = r#"{"capture_limits": {"idle": 20, "max": 90}}"#;
+            // (name, config, what the user does, reason, last line of text.txt)
+            type Script = for<'a> fn(&'a mut Rig) -> futures_util::future::LocalBoxFuture<'a, ()>;
+            let cases: [(&str, &str, Script, &str, &str); 4] = [
+                (
+                    "cancelled",
+                    "{}",
+                    |rig| {
+                        Box::pin(async {
+                            rig.open().await;
+                            rig.finals("never mind").await;
+                        })
+                    },
+                    "cancelled",
+                    "cancelled",
+                ),
+                (
+                    "empty",
+                    SLOW_PASTE,
+                    |rig| {
+                        Box::pin(async {
+                            rig.open().await;
+                            rig.feed_until(1000, Kind::Quiet).await;
+                            rig.finals("paste that").await;
+                            rig.feed_until(3499, Kind::Quiet).await;
+                            rig.at(3500).await;
+                        })
+                    },
+                    "empty",
+                    "accepted (paste): ",
+                ),
+                (
+                    "timed-out",
+                    IDLE,
+                    |rig| {
+                        Box::pin(async {
+                            rig.open().await;
+                            rig.feed_until(20_300, Kind::Quiet).await;
+                        })
+                    },
+                    "no_ending",
+                    "failed: No words heard for 20 seconds.",
+                ),
+                (
+                    "delivered",
+                    SLOW_PASTE,
+                    |rig| Box::pin(live_words(rig)),
+                    "",
+                    "accepted (paste): live words",
+                ),
+            ];
+            for (name, config, act, reason, last_line) in cases {
+                let dir = record_dir(&format!("nothing-{name}"));
+                let recorder = Recorder::in_dir(ALL_KINDS, &dir).unwrap();
+                let (mut rig, engine, frames) = Rig::recording(config, recorder);
+                let task = capture_task(engine, frames);
+                act(&mut rig).await;
+                finished(task).await;
+
+                let folder = dictation_dirs(&dir).pop().unwrap();
+                let text = std::fs::read_to_string(folder.join("text.txt")).unwrap();
+                assert_eq!(text.lines().last(), Some(last_line), "{name}");
+                let nothing = wake_lines(&dir, "desktop_wake_nothing");
+                if reason.is_empty() {
+                    assert!(nothing.is_empty(), "{name}: something was delivered");
+                    continue;
+                }
+                assert_eq!(nothing.len(), 1, "{name}");
+                assert_eq!(nothing[0]["outcome"], reason, "{name}");
+                let day = folder
+                    .parent()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy();
+                let time = folder.file_name().unwrap().to_string_lossy();
+                assert_eq!(nothing[0]["dictation"], format!("{day}/{time}").as_str());
+            }
         })
         .await;
 }
@@ -2071,14 +2279,9 @@ async fn without_audio_recording_a_wake_buffers_and_writes_no_clip() {
             rig.wake.fire(WakeEvent::Capture);
             hear(&rig, 31, 31).await;
             finished(task).await;
-
-            assert!(day_dir(&dir).is_none(), "no recordings directory appears");
-            let lines = read_lines(&dir.join("metrics.jsonl"));
             assert!(
-                lines
-                    .iter()
-                    .all(|line| line["event"] != "desktop_wake_clip"),
-                "no clip line without a clip"
+                dictation_dirs(&dir).is_empty(),
+                "no dictation folder appears"
             );
 
             let dir = record_dir("clip-only");
@@ -2092,7 +2295,7 @@ async fn without_audio_recording_a_wake_buffers_and_writes_no_clip() {
             rig.wake.fire(WakeEvent::Capture);
             hear(&rig, 1, 1).await;
             finished(task).await;
-            assert_eq!(wake_clips(&day_dir(&dir).unwrap()).len(), 1);
+            assert_eq!(wake_clips(&dir).len(), 1);
             assert!(!dir.join("metrics.jsonl").exists(), "no metrics asked for");
         })
         .await;
@@ -2488,7 +2691,7 @@ async fn cue_timings_are_not_written_when_metrics_are_off() {
             let task = capture_task(engine, frames);
             live_words(&mut rig).await;
             finished(task).await;
-            assert!(dir.join("recordings").exists(), "text was recorded");
+            assert!(!dictation_dirs(&dir).is_empty(), "text was recorded");
             assert!(!dir.join("metrics.jsonl").exists());
         })
         .await;

@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+chrono.workspace = true
 cpal.workspace = true
 dirs.workspace = true
 futures-util.workspace = true

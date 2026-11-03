@@ -244,7 +244,15 @@ config is `desktop.json` in `thalvi/` under the user config directory
 (`~/.config` on Linux, `%APPDATA%` on Windows); without one the defaults apply.
 Settings → App has a switch each for recording timings, dictated text and
 microphone audio on this computer; all are off until turned on, and Save applies
-a change between captures.
+a change between captures. Open folder shows `recordings/` in the app's data
+folder (`~/.local/share/thalvi` on Linux, `%LOCALAPPDATA%\thalvi` on Windows).
+Each wake has a folder named `<date>/<time>` in local time, holding `wake.wav`
+(about 2 s before the wake), `speech.wav` and `text.txt` (what was heard and
+what was handed to delivery), each when its switch is on. `metrics.jsonl` sits
+beside the folders. For wake scoring it holds a line for each near miss (a
+score that rose to 0.15 or more and fell back below its threshold), a line for
+each wake that delivered nothing, with the reason and the wake's folder, and
+one line a minute with the count, p50, p95 and maximum scoring time.
 
 On Hyprland, `thalvi-desktop toggle`, `pause`, `resume` and `cancel` control
 the running app; they report an error when it is not running. `status` prints

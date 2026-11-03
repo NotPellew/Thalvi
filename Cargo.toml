@@ -23,6 +23,7 @@ expect_used = "warn"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.23"
 bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cpal = "0.18"
 dirs = "7"
 dotenvy = "0.15"
