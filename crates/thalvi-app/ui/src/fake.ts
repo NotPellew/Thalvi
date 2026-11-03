@@ -136,6 +136,8 @@ export function fakeBackend(params: URLSearchParams): Backend {
     },
     listMicrophones: () => Promise.resolve([...microphones]),
     openRecordings: () => Promise.resolve(),
+    validateSpeechModelFolder: (path) =>
+      path.includes("missing") ? Promise.reject(new Error("Missing required file: tokens.txt")) : Promise.resolve(),
     appVersion: () => Promise.resolve("0.1.0 (fake)"),
   };
 }

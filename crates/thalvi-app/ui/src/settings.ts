@@ -23,6 +23,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   root.append(el("div", { class: "app" }, nav, main));
 
   let pages: Page[] = [];
+  let checks: PageContext["checks"] = [];
   let navButtons: HTMLButtonElement[] = [];
   let current = "general";
   let draft: Settings | null = null;
@@ -102,7 +103,8 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     draft = structuredClone(loaded);
     baseline = JSON.stringify(draft);
     applyLook(root, draft.look);
-    pages = buildPages({ draft, backend, root, controls: createControls(changed), microphones, audio, live });
+    checks = [];
+    pages = buildPages({ draft, backend, root, controls: createControls(changed), microphones, audio, live, checks });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {
       const button = el("button", { type: "button", "data-page": page.id }, page.title);
@@ -132,8 +134,9 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     feedback();
     save.disabled = true;
     revert.disabled = true;
-    backend
-      .saveSettings(sending)
+    const pending = checks.map((check) => check()).filter((check) => check !== null);
+    const sent = pending.length === 0 ? backend.saveSettings(sending) : Promise.all(pending).then(() => backend.saveSettings(sending));
+    sent
       .then(() => {
         baseline = JSON.stringify(sending);
         saved = true;

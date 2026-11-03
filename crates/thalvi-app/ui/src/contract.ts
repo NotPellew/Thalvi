@@ -100,6 +100,8 @@ export interface Backend {
   cancelCapture(): Promise<void>;
   listMicrophones(): Promise<string[]>;
   openRecordings(): Promise<void>;
+  /** Resolves when the folder holds a speech model; rejects with the plain reason it does not. */
+  validateSpeechModelFolder(path: string): Promise<void>;
   appVersion(): Promise<string>;
 }
 

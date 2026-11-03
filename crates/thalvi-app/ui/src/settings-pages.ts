@@ -19,6 +19,8 @@ export interface PageContext {
   root: HTMLElement;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
   live: { level: (level: number) => void; listening: (on: boolean) => void; audio: (audio: AudioStatus) => void };
+  /** Checks a page adds that must pass before Save sends; each returns null when it has nothing to check. */
+  checks: (() => Promise<void> | null)[];
 }
 
 export interface Page {
@@ -226,15 +228,54 @@ function wake(context: PageContext): HTMLElement[] {
   ];
 }
 
-function recognition({ draft, controls }: PageContext): HTMLElement[] {
+function recognition({ draft, controls, backend, checks }: PageContext): HTMLElement[] {
   const engine = controls.select(ENGINES, draft.stt.engine, (value) => {
     draft.stt.engine = value;
     syncModel();
   });
   const speechModel = controls.text(draft.stt.model ?? "", syncModel, { placeholder: SPEECH_MODEL });
   const modelInput = speechModel.field as HTMLInputElement;
+  const folderResult = el("p", { class: "note", role: "status", hidden: true });
+
+  function showFolder(message: string, valid: boolean): void {
+    folderResult.classList.toggle("ok", valid);
+    say(folderResult, message);
+  }
+
+  // Bumped by every check and edit, so a slow answer never describes a path that is no longer typed.
+  let latestCheck = 0;
+
+  function checkFolder(path: string): Promise<void> {
+    const check = ++latestCheck;
+    return backend.validateSpeechModelFolder(path).then(
+      () => {
+        if (check === latestCheck) showFolder("This folder holds a speech model.", true);
+      },
+      (error: unknown) => {
+        if (check === latestCheck) showFolder(errorText(error), false);
+        throw error;
+      },
+    );
+  }
+
+  const checkButton = button("Check folder", () => {
+    const path = modelInput.value.trim();
+    if (path === "") showFolder("Type the folder path first.", false);
+    else if (path === SPEECH_MODEL) showFolder(`${SPEECH_MODEL} is downloaded on first use; there is no folder to check.`, false);
+    else checkFolder(path).catch(() => undefined);
+  });
+  checks.push(() => {
+    const path = draft.stt.model;
+    return draft.stt.engine === "local" && path !== undefined && path !== SPEECH_MODEL ? checkFolder(path) : null;
+  });
+  const speechModelField: Field = {
+    node: el("div", { class: "stack wide" }, el("div", { class: "trow check" }, speechModel.node, checkButton), folderResult),
+    field: modelInput,
+  };
 
   function syncModel(): void {
+    latestCheck += 1;
+    say(folderResult, "");
     const model = modelInput.value.trim();
     if (draft.stt.engine === "local" && model !== "") {
       draft.stt.model = model;
@@ -282,8 +323,8 @@ function recognition({ draft, controls }: PageContext): HTMLElement[] {
     row("Recognize speech", "Where your dictation is turned into text. Conversation mode always uses the server.", engine),
     row(
       "Speech model",
-      `For recognition on this computer: ${SPEECH_MODEL} or the folder of a model. Empty uses ${SPEECH_MODEL}. The first use downloads about 650 MB.`,
-      speechModel,
+      `For recognition on this computer: ${SPEECH_MODEL} or the path of your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt. Empty uses ${SPEECH_MODEL}, downloaded on first use (about 650 MB).`,
+      speechModelField,
     ),
     group("Second transcription"),
     row("Second-pass transcription", "Transcribes each accepted capture again on the endpoint below. Off keeps the endpoint and key.", toggle),
