@@ -19,6 +19,8 @@ export interface ControllerPorts {
   stopConnection(): void;
   /** Drops the current connection and joins conversation `id`, or starts a new one for null. */
   connect(id: string | null): void;
+  /** Drops the current connection and starts a private conversation, which nothing remembers. */
+  connectPrivate(): void;
   /** Stops the mic and the audio context that neither Voice nor Speak replies needs any more. */
   releaseUnused(): void;
   onChange(state: SessionState): void;
@@ -43,6 +45,7 @@ export class Controller {
   lost(): void {
     this.ports.playback.flush();
     this.apply({ type: "lost" });
+    if (this.state.link === "ended") this.ports.releaseUnused();
   }
 
   /** The one-click Voice control: microphone input and spoken replies together. */
@@ -100,7 +103,15 @@ export class Controller {
   switchTo(id: string | null): void {
     this.ports.playback.flush();
     this.ports.connect(id);
-    this.apply({ type: "switched" });
+    this.apply({ type: "switched", private: false });
+  }
+
+  /** Leaves the current conversation for a private one; the remembered id goes, so a reload starts fresh. */
+  startPrivate(): void {
+    this.ports.playback.flush();
+    this.ports.forget();
+    this.ports.connectPrivate();
+    this.apply({ type: "switched", private: true });
   }
 
   playing(playing: boolean): void {
@@ -118,7 +129,7 @@ export class Controller {
     const message = parseServerMessage(data);
     if (!message) return;
     if (message.type === "interrupted") this.ports.playback.flush();
-    if (message.type === "session") this.ports.remember(message.id);
+    if (message.type === "session" && message.private !== true) this.ports.remember(message.id);
     if (message.type === "ended") {
       this.ports.playback.flush();
       this.apply({ type: "server", message });

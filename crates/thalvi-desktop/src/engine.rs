@@ -275,12 +275,24 @@ pub enum CaptureOutcome {
     /// The user ended the capture; nothing has been delivered yet.
     Accepted(CaptureRequest),
     /// The user cancelled it, by voice or through [`EngineHandle::cancel`].
-    Cancelled,
+    Cancelled {
+        /// What the user had dictated before cancelling; nothing was delivered.
+        dictated: Option<String>,
+    },
     Failed {
         error: CaptureError,
         /// What the user had dictated so far, for the caller to keep.
         recoverable_text: Option<String>,
     },
+}
+
+impl CaptureOutcome {
+    /// A cancelled capture that had dictated `text`.
+    fn cancelled_with(text: String) -> Self {
+        Self::Cancelled {
+            dictated: (!text.is_empty()).then_some(text),
+        }
+    }
 }
 
 /// Why listening stopped; `Display` is the plain notice for the user.
@@ -480,7 +492,7 @@ enum Done {
     /// [`EngineHandle::cancel`].
     Stopped,
     /// The user said "never mind".
-    NeverMind,
+    NeverMind(Option<String>),
     Accepted(CaptureRequest),
     Failed(CaptureError),
 }
@@ -539,7 +551,7 @@ fn nothing_delivered(outcome: &CaptureOutcome) -> Option<&'static str> {
         CaptureOutcome::Accepted(request) => {
             (request.text.is_empty() && request.route != CaptureRoute::Submit).then_some("empty")
         }
-        CaptureOutcome::Cancelled => Some("cancelled"),
+        CaptureOutcome::Cancelled { .. } => Some("cancelled"),
         CaptureOutcome::Failed { error, .. } => Some(error.kind()),
     }
 }
@@ -857,7 +869,7 @@ where
         self.set_state(EngineState::Listening);
         let (flow, fields) = match &outcome {
             CaptureOutcome::Accepted(_) => ("ok", Value::Null),
-            CaptureOutcome::Cancelled => ("cancelled", Value::Null),
+            CaptureOutcome::Cancelled { .. } => ("cancelled", Value::Null),
             CaptureOutcome::Failed { error, .. } => ("failed", json!({"reason": error.kind()})),
         };
         self.recorder
@@ -1240,7 +1252,7 @@ where
         let now = Instant::now();
         match live.text.on_final(text, now, live.speech) {
             Err(full) => return Some(Done::Failed(full.into())),
-            Ok(FinalStep::Cancelled) => return Some(Done::NeverMind),
+            Ok(FinalStep::Cancelled { dictated }) => return Some(Done::NeverMind(dictated)),
             Ok(FinalStep::Continue { cancelled_pending }) => {
                 if cancelled_pending {
                     self.ending_state("final_cancelled");
@@ -1388,12 +1400,14 @@ where
                 if let Some(session) = session {
                     session.cancel().await;
                 }
-                CaptureOutcome::Cancelled
+                CaptureOutcome::Cancelled {
+                    dictated: recoverable_text,
+                }
             }
-            Done::NeverMind => {
+            Done::NeverMind(dictated) => {
                 self.gate.set_enabled(false);
                 self.end_with(Cue::Cancelled, decided, session, false).await;
-                CaptureOutcome::Cancelled
+                CaptureOutcome::Cancelled { dictated }
             }
             Done::Failed(error) => {
                 self.gate.set_enabled(false);
@@ -1408,7 +1422,7 @@ where
                 if self.end_with(Cue::Accepted, decided, session, true).await {
                     self.reconcile(request, &sent, scratched, dictation).await
                 } else {
-                    CaptureOutcome::Cancelled
+                    CaptureOutcome::cancelled_with(request.text)
                 }
             }
         };
@@ -1418,7 +1432,7 @@ where
                 CaptureOutcome::Accepted(request) => {
                     format!("accepted ({}): {}", request.route.name(), request.text)
                 }
-                CaptureOutcome::Cancelled => "cancelled".to_owned(),
+                CaptureOutcome::Cancelled { .. } => "cancelled".to_owned(),
                 CaptureOutcome::Failed { error, .. } => format!("failed: {error}"),
             },
         );
@@ -1497,7 +1511,7 @@ where
             fields,
         );
         match (outcome, replaced) {
-            ("cancelled", _) => CaptureOutcome::Cancelled,
+            ("cancelled", _) => CaptureOutcome::cancelled_with(request.text),
             (_, Some(text)) => CaptureOutcome::Accepted(CaptureRequest {
                 route: request.route,
                 text,

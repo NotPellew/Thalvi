@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Controller } from "./controller.ts";
-import { displayState, UNREACHABLE_NOTICE } from "./session.ts";
+import { displayState, PRIVATE_LOST_NOTICE, UNREACHABLE_NOTICE } from "./session.ts";
 
 const INPUT_MIC = 'send {"type":"input","source":"mic"}';
 const INPUT_TEXT = 'send {"type":"input","source":"text"}';
@@ -19,6 +19,7 @@ function setup() {
     forget: () => calls.push("forget"),
     stopConnection: () => calls.push("stopConnection"),
     connect: (id) => calls.push(`connect ${String(id)}`),
+    connectPrivate: () => calls.push("connectPrivate"),
     releaseUnused: () => calls.push("release"),
     onChange: () => undefined,
   });
@@ -321,6 +322,47 @@ describe("Controller", () => {
     controller.switchTo(null);
     expect(calls.at(-1)).toBe("connect null");
     expect(controller.state.turns).toEqual([]);
+  });
+
+  it("starts a private conversation by forgetting the saved id, and remembers no id the server gives it", () => {
+    const { controller, calls, server, shown } = online();
+    server({ type: "session", id: "s1", turns: [] });
+    calls.length = 0;
+
+    controller.startPrivate();
+    expect(calls).toEqual(["flush", "forget", "connectPrivate"]);
+    expect(shown()).toBe("connecting");
+    expect(controller.state.private).toBe(true);
+
+    controller.opened();
+    server({ type: "session", id: "private-1", turns: [], private: true });
+    expect(calls).not.toContain("remember private-1");
+    expect(controller.state.private).toBe(true);
+
+    controller.switchTo(null);
+    expect(controller.state.private).toBe(false);
+  });
+
+  it("shows Private only when the server says the conversation is private", () => {
+    const { controller, server } = online();
+    controller.startPrivate();
+    controller.opened();
+    server({ type: "session", id: "s2", turns: [] });
+    expect(controller.state.private).toBe(false);
+  });
+
+  it("ends a private conversation when the connection drops, and says it can't be resumed", () => {
+    const { controller, calls, server, shown } = online();
+    controller.startPrivate();
+    controller.opened();
+    server({ type: "session", id: "private-1", turns: [], private: true });
+    server({ type: "user", text: "a private question" });
+    calls.length = 0;
+
+    controller.lost();
+    expect(shown()).toBe("ended");
+    expect(controller.state).toMatchObject({ private: true, notice: PRIVATE_LOST_NOTICE });
+    expect(calls).toEqual(["flush", "release"]);
   });
 
   it("ignores input readiness updates and a text fallback it already acted on", () => {

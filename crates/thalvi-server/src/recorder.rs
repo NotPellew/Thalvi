@@ -51,6 +51,17 @@ pub struct RecordingConfig {
 }
 
 impl RecordingConfig {
+    /// The same settings with turn text and mic audio off, for a private conversation.
+    #[must_use]
+    pub fn metrics_only(mut self) -> Self {
+        self.kinds = RecordKinds {
+            metrics: self.kinds.metrics,
+            text: false,
+            audio: false,
+        };
+        self
+    }
+
     /// A configuration that records nothing.
     #[must_use]
     pub fn disabled() -> Self {

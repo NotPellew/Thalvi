@@ -35,6 +35,29 @@ it("collapses task steps on the next user turn while retaining expansion during 
   expect(details.hidden).toBe(false);
 });
 
+it("shows a Private indicator with its explanation for as long as the conversation is private", () => {
+  vi.stubGlobal("ResizeObserver", class { observe() { return undefined; } });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const view = createView(root);
+  const badge = root.querySelector<HTMLElement>(".o-private");
+  const note = root.querySelector<HTMLElement>(".o-private-note");
+  if (!badge || !note) throw new Error("the Private indicator is missing");
+
+  view.render({ ...INITIAL, link: "online" });
+  expect([badge.hidden, note.hidden]).toEqual([true, true]);
+
+  view.render({ ...INITIAL, link: "online", private: true, turns: [{ role: "user", text: "hi" }] });
+  expect([badge.hidden, badge.textContent, note.hidden]).toEqual([false, "Private", false]);
+  expect(note.textContent).toMatch(/Providers still process your requests/);
+
+  view.render({ ...INITIAL, link: "ended", private: true });
+  expect(badge.hidden).toBe(false);
+
+  view.render({ ...INITIAL, link: "online" });
+  expect([badge.hidden, note.hidden]).toEqual([true, true]);
+});
+
 it("shows Speak replies as a switch that follows the server's confirmation and waits while offline", () => {
   vi.stubGlobal("ResizeObserver", class { observe() { return undefined; } });
   const root = document.createElement("div");

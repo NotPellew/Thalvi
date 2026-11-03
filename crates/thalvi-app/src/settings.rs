@@ -173,6 +173,7 @@ mod tests {
                 "cues",
                 "ending_pause",
                 "endings",
+                "history",
                 "hold_key",
                 "look",
                 "microphone",
@@ -188,6 +189,7 @@ mod tests {
             settings["recordings"],
             json!({"metrics": true, "text": false, "audio": true})
         );
+        assert_eq!(settings["history"], json!({"enabled": true, "limit": 200}));
         assert_eq!(settings["microphone"], Value::Null);
         assert_eq!(settings["look"], json!("gunmetal"));
         assert_eq!(settings["overlay"], json!({"show": true, "draft": true}));

@@ -114,7 +114,7 @@ where
         recorder: &Recorder,
     ) -> Option<Finished> {
         match outcome {
-            CaptureOutcome::Cancelled => None,
+            CaptureOutcome::Cancelled { .. } => None,
             CaptureOutcome::Failed {
                 error,
                 recoverable_text,
@@ -344,7 +344,11 @@ mod tests {
                 Some(false),
             ),
             (FakeHost::default(), failed, Some(false)),
-            (FakeHost::default(), CaptureOutcome::Cancelled, None),
+            (
+                FakeHost::default(),
+                CaptureOutcome::Cancelled { dictated: None },
+                None,
+            ),
         ] {
             let (finished, _) = finish(host, outcome.clone()).await;
             assert_eq!(
@@ -627,7 +631,11 @@ mod tests {
         );
         assert_eq!(seen, calls(&["capture_target"]));
 
-        let (notice, seen) = run(FakeHost::default(), CaptureOutcome::Cancelled).await;
+        let (notice, seen) = run(
+            FakeHost::default(),
+            CaptureOutcome::Cancelled { dictated: None },
+        )
+        .await;
         assert_eq!(notice, None);
         assert_eq!(seen, calls(&["capture_target"]));
     }

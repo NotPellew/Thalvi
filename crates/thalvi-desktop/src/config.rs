@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::capture::{CaptureLimits, EndingPauses, Endings};
 use crate::cues::Cues;
+use crate::history::HistoryConfig;
 use crate::hold::HoldKey;
 use crate::host::{App, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
@@ -58,6 +59,8 @@ pub struct DesktopConfig {
     pub look: Look,
     /// What is recorded on this computer; nothing unless the user turns it on.
     pub recordings: RecordKinds,
+    /// The dictation history kept on this computer; on unless the user turns it off.
+    pub history: HistoryConfig,
     /// Whether the user wants Thalvi to start at login. The app restores the OS entry from this
     /// on start, because a Windows upgrade removes it.
     pub start_at_login: bool,
@@ -97,6 +100,8 @@ struct RawDesktopConfig {
     look: Look,
     #[serde(default)]
     recordings: RecordKinds,
+    #[serde(default)]
+    history: HistoryConfig,
     #[serde(default)]
     start_at_login: bool,
     #[serde(default)]
@@ -197,6 +202,7 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
             microphone,
             look: raw.look,
             recordings: raw.recordings,
+            history: raw.history,
             start_at_login: raw.start_at_login,
             show_in_menu: raw.show_in_menu,
             hold_key: raw.hold_key,
@@ -489,6 +495,7 @@ struct FileForm<'a> {
     microphone: Option<&'a str>,
     look: Look,
     recordings: RecordKinds,
+    history: HistoryConfig,
     start_at_login: bool,
     show_in_menu: bool,
     hold_key: &'a HoldKey,
@@ -578,6 +585,7 @@ impl Serialize for DesktopConfig {
             microphone: self.microphone.as_deref(),
             look: self.look,
             recordings: self.recordings,
+            history: self.history,
             start_at_login: self.start_at_login,
             show_in_menu: self.show_in_menu,
             hold_key: &self.hold_key,
@@ -676,6 +684,10 @@ mod tests {
         assert_eq!(config.capture_limits, CaptureLimits::default());
         assert_eq!(config.endings, Endings::default());
         assert_eq!(config.recordings, RecordKinds::default());
+        assert_eq!(
+            (config.history.enabled(), config.history.limit()),
+            (true, 200)
+        );
         assert!(!config.start_at_login);
         assert!(!config.show_in_menu);
         assert_eq!(config.hold_key, HoldKey::default());
@@ -1276,6 +1288,51 @@ mod tests {
     }
 
     #[test]
+    fn history_is_on_with_200_entries_unless_the_file_says_otherwise() {
+        for (json, expected) in [
+            ("{}", (true, 200)),
+            (r#"{"history": {}}"#, (true, 200)),
+            (r#"{"history": {"enabled": false}}"#, (false, 200)),
+            (r#"{"history": {"limit": 1}}"#, (true, 1)),
+            (
+                r#"{"history": {"enabled": false, "limit": 1000}}"#,
+                (false, 1000),
+            ),
+        ] {
+            let config = parse(json).unwrap();
+            assert_eq!(
+                (config.history.enabled(), config.history.limit()),
+                expected,
+                "{json}"
+            );
+            let written = serde_json::to_string(&config).unwrap();
+            assert!(
+                written.contains(&format!(
+                    r#""history":{{"enabled":{},"limit":{}}}"#,
+                    expected.0, expected.1
+                )),
+                "{written}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_settings_that_cannot_work_are_rejected_in_plain_words() {
+        let limit = "history limit must be a whole number of entries from 1 to 1000";
+        for (json, expected) in [
+            (r#"{"history": {"limit": 0}}"#, limit),
+            (r#"{"history": {"limit": 1001}}"#, limit),
+            (r#"{"history": {"limit": -1}}"#, "invalid value"),
+            (r#"{"history": {"enabled": "yes"}}"#, "boolean"),
+            (r#"{"history": {"audio": true}}"#, "unknown field `audio`"),
+        ] {
+            let error = parse(json).unwrap_err();
+            assert!(matches!(error, ConfigError::Invalid(_)), "{json}");
+            assert!(error.to_string().contains(expected), "{json}: {error}");
+        }
+    }
+
+    #[test]
     fn the_config_serializes_to_the_file_form_it_was_read_from() {
         let full = r#"{
             "server": "wss://thalvi.example:9000/",
@@ -1302,6 +1359,7 @@ mod tests {
             "microphone": " USB Mic ",
             "look": "gunmetal",
             "recordings": {"metrics": true, "text": false, "audio": true},
+            "history": {"enabled": false, "limit": 50},
             "start_at_login": true,
             "show_in_menu": true,
             "hold_key": "Ctrl+Shift+F9"

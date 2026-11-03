@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use thalvi_desktop::config::DesktopConfig;
+use thalvi_desktop::history;
 use thalvi_desktop::hold::HoldKey;
 use thalvi_desktop::host::{Desktop, HoldWatch, StateServer};
 use thalvi_desktop::models::SpeechDownloads;
@@ -31,6 +32,8 @@ pub struct AppState {
     pub store: Store,
     pub overlay: Overlay,
     pub speech_downloads: SpeechDownloads,
+    /// The dictation history, shared with the engine thread that writes it.
+    pub history: Arc<history::Store>,
     /// The latest failure shown, for "Copy last error" in the tray and `copy-error`.
     last_error: LastError,
     /// Set once the engine's first status is in; the tray menu and the commands update it.
@@ -53,9 +56,11 @@ impl AppState {
     fn start(config: Option<std::path::PathBuf>) -> Result<Self, String> {
         let store = Store::new(config)?;
         let config = store.load()?;
+        let history = Arc::new(history::Store::per_user());
         let link = EngineLink::start(
             config.clone(),
             Desktop::detect().map_err(|error| error.to_string())?,
+            Arc::clone(&history),
         )?;
         let last_error = LastError::default();
         let state_server = match Desktop::serve_state(control::answer(
@@ -75,6 +80,7 @@ impl AppState {
             store,
             overlay: Overlay::default(),
             speech_downloads: SpeechDownloads::default(),
+            history,
             last_error,
             tray: OnceLock::new(),
             host: Arc::new(Desktop::detect().map_err(|error| error.to_string())?),
@@ -286,6 +292,9 @@ fn start() -> Result<(), String> {
             commands::list_speech_models,
             commands::download_speech_model,
             commands::open_speech_model_source,
+            commands::get_history,
+            commands::delete_history_entry,
+            commands::clear_history,
         ])
         .setup(move |app| {
             // Tauri turns an error from this hook into a panic, so it is reported here instead.

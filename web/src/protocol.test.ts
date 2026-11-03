@@ -22,6 +22,12 @@ describe("parseServerMessage", () => {
       { type: "task", step: { id: "call-1", label: "Searching conversations", status: "done", detail: "2 matches" } },
     ],
     ['{"type":"session","id":"abc","turns":[]}', { type: "session", id: "abc", turns: [] }],
+    ['{"type":"session","id":"p-1","turns":[],"private":true}', { type: "session", id: "p-1", turns: [], private: true }],
+    ['{"type":"session","id":"abc","turns":[],"private":"yes"}', { type: "session", id: "abc", turns: [] }],
+    [
+      '{"type":"ended","reason":"private","message":"A private conversation ends when it closes and can\'t be resumed."}',
+      { type: "ended", reason: "private", message: "A private conversation ends when it closes and can't be resumed." },
+    ],
     [
       '{"type":"session","id":"abc","turns":[{"role":"user","text":"hi"},{"role":"assistant","text":"Hello."}]}',
       {

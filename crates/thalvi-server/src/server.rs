@@ -24,7 +24,9 @@ use crate::model::OpenAiChatModel;
 use crate::recognizer::MetaRecognizerFactory;
 use crate::recorder::{RecordingConfig, start_recording, wav_bytes};
 use crate::retirement::{RETIREMENT_SYSTEM_PROMPT, spawn_retirement};
-use crate::session::{VoiceChoices, handle_session};
+use crate::session::{
+    PRIVATE_ID_PREFIX, Retention, VoiceChoices, handle_session, refuse_private_resume,
+};
 use crate::store::SessionStore;
 use crate::title::{TITLE_SYSTEM_PROMPT, Titler};
 use crate::transcription::handle_transcription;
@@ -176,16 +178,22 @@ async fn session_upgrade<T: Tts + Clone + 'static>(
     upgrade: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+    let private = query.get("private").is_some_and(|value| value == "1");
     let resume = query.get("resume").cloned();
-    upgrade.on_upgrade(move |socket| {
+    let retention = Retention::from_request(private, resume, state.store, state.titler, || {
+        format!("{PRIVATE_ID_PREFIX}{id:x}-{:x}", crate::recorder::now_ms())
+    });
+    upgrade.on_upgrade(move |socket| async move {
+        let Some(retention) = retention else {
+            refuse_private_resume(socket).await;
+            return;
+        };
         handle_session(
             socket,
             state.factory,
             state.model,
             state.tts,
-            state.store,
-            resume,
-            state.titler,
+            retention,
             state.recording,
             state.ack_enabled,
             state.audio_input,
@@ -195,6 +203,7 @@ async fn session_upgrade<T: Tts + Clone + 'static>(
             },
         )
         .instrument(tracing::info_span!("session", id))
+        .await;
     })
 }
 

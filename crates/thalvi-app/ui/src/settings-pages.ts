@@ -4,6 +4,8 @@ import type {
   AudioStatus,
   Backend,
   Ending,
+  HistoryEntry,
+  HistoryOutcome,
   ScriptActionKind,
   SecondaryApi,
   Settings,
@@ -38,6 +40,8 @@ export interface PageContext {
     listening: (on: boolean) => void;
     audio: (audio: AudioStatus) => void;
     speechModel: (progress: SpeechModelProgress) => void;
+    /** The page with this id was opened. */
+    opened: (id: string) => void;
   };
   /** Checks a page adds that must pass before Save sends; each returns null when it has nothing to check. */
   checks: (() => Promise<void> | null)[];
@@ -81,6 +85,8 @@ const CUES: readonly (readonly [keyof Settings["cues"], string, string])[] = [
   ["error", "Error", "Something failed."],
 ];
 const WAKE_MODELS = ["hey_thalvi", "hey_mycroft", "hey_jarvis"];
+const OUTCOMES: Record<HistoryOutcome, string> = { accepted: "Delivered", cancelled: "Cancelled", failed: "Failed" };
+const WHEN = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 export function row(label: string, hint: string | null, control: Field | HTMLElement): HTMLElement {
   const labelId = uid("l");
@@ -804,6 +810,84 @@ function recordings({ draft, backend, controls }: PageContext): HTMLElement[] {
   ];
 }
 
+function entryCard(entry: HistoryEntry, remove: () => void): HTMLElement {
+  const when = new Date(entry.timestamp_ms);
+  const time = el("time", { datetime: when.toISOString() }, WHEN.format(when));
+  const header = el("header", {}, time);
+  if (entry.target !== null) header.append(el("span", { class: "target" }, entry.target));
+  header.append(el("span", { class: "outcome" }, OUTCOMES[entry.outcome]));
+  const del = button("Delete", remove, "quiet");
+  del.setAttribute("aria-label", `Delete the entry from ${time.textContent}`);
+  return el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, entry.text), del);
+}
+
+/** A button that asks before it acts: it is replaced by the question and a yes and a no. */
+function confirmed(label: string, question: string, yes: string, no: string, act: () => void): HTMLElement {
+  const ask = button(label, () => {
+    ask.hidden = true;
+    sure.hidden = false;
+    keep.focus();
+  });
+  const close = (): void => {
+    sure.hidden = true;
+    ask.hidden = false;
+    ask.focus();
+  };
+  const keep = button(no, close);
+  const sure = el("span", { class: "trow", role: "group", "aria-label": question, hidden: true }, question, button(yes, () => {
+    close();
+    act();
+  }), keep);
+  return el("span", { class: "stack" }, ask, sure);
+}
+
+function history({ draft, backend, controls, live }: PageContext): HTMLElement[] {
+  const list = el("div", { class: "entries" });
+  const problem = note();
+  const nothing = el("p", { class: "note ok" }, "Nothing has been kept yet.");
+
+  function refresh(): void {
+    backend.getHistory().then(
+      (entries) => {
+        say(problem, "");
+        list.replaceChildren(...(entries.length === 0 ? [nothing] : entries.map((entry) => entryCard(entry, () => { change(backend.deleteHistoryEntry(entry.id)); }))));
+      },
+      (error: unknown) => {
+        say(problem, errorText(error));
+        list.replaceChildren();
+      },
+    );
+  }
+  function change(done: Promise<void>): void {
+    say(problem, "");
+    done.then(refresh, (error: unknown) => {
+      say(problem, errorText(error));
+    });
+  }
+  live.opened = (id) => {
+    if (id === "history") refresh();
+  };
+  refresh();
+
+  return [
+    group("Keeping"),
+    row("Keep a history", "What you dictate, when, where it went and how it ended; never audio. Kept on this computer only, never uploaded. Turning this off stops new entries and deletes none: delete them below.",
+      controls.toggle(draft.history.enabled, (value) => {
+        draft.history.enabled = value;
+      })),
+    row("Entries to keep", "The oldest entries go first past this number, 1 to 1000.",
+      controls.number(draft.history.limit, { min: 1, max: 1000, step: 1 }, (value) => {
+        draft.history.limit = value;
+      })),
+    group("Kept so far"),
+    row("Recent dictations", "Newest first. Deleting takes effect at once; it is not part of Save.", el("div", { class: "stack wide" }, problem, list)),
+    row("Clear history", "Deletes every entry for good, and a damaged history file with them.",
+      confirmed("Clear history", "Delete every entry? This cannot be undone.", "Yes, clear history", "Keep history", () => {
+        change(backend.clearHistory());
+      })),
+  ];
+}
+
 function about({ backend }: PageContext): HTMLElement[] {
   const version = el("output", { class: "badge" }, "…");
   backend
@@ -830,6 +914,7 @@ const PAGES: readonly (readonly [string, string, (context: PageContext) => HTMLE
   ["capture", "Capture", capture],
   ["feedback", "Feedback and appearance", feedback],
   ["tasks", "Apps & tasks", tasks],
+  ["history", "History", history],
   ["app", "App", app],
 ];
 

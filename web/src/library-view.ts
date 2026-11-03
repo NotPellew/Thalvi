@@ -11,7 +11,11 @@ const MARKUP = `
         <h2 id="o-lib-title">Conversations</h2>
         <button class="o-lib-close" type="button">Close</button>
       </header>
-      <button class="o-lib-new" type="button">New conversation</button>
+      <div class="o-lib-new-row">
+        <button class="o-lib-new" type="button">New conversation</button>
+        <button class="o-lib-new-private" type="button">New private conversation</button>
+      </div>
+      <p class="o-lib-private-note">Private conversations aren't saved. Providers still process your requests; diagnostic recordings are a separate setting.</p>
       <p class="o-lib-note" role="status"></p>
       <ul class="o-lib-list"></ul>
       <section class="o-lib-preview" hidden aria-labelledby="o-lib-preview-title">
@@ -194,6 +198,9 @@ export function createLibraryView(root: ParentNode, library: Library, currentId:
   });
   newButton.addEventListener("click", () => {
     library.startNew();
+  });
+  find(page, ".o-lib-new-private", HTMLButtonElement).addEventListener("click", () => {
+    library.startPrivate();
   });
   find(preview, ".o-lib-back", HTMLButtonElement).addEventListener("click", () => {
     library.closePreview();
