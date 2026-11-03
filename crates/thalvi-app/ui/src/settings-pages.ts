@@ -1,6 +1,6 @@
 // The settings pages: each builds its rows against the draft and edits it in place.
 
-import type { Backend, Ending, ScriptActionKind, SecondaryApi, Settings, SttEngine } from "./contract.ts";
+import type { AudioStatus, Backend, Ending, ScriptActionKind, SecondaryApi, Settings, SttEngine } from "./contract.ts";
 import { errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
@@ -13,10 +13,12 @@ export interface PageContext {
   controls: Controls;
   /** Microphone names, or why they could not be listed. */
   microphones: string[] | { error: string };
+  /** The microphone actually open when the pages were built. */
+  audio: AudioStatus;
   /** The settings window, so a look picked here shows at once. */
   root: HTMLElement;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
-  live: { level: (level: number) => void; listening: (on: boolean) => void };
+  live: { level: (level: number) => void; listening: (on: boolean) => void; audio: (audio: AudioStatus) => void };
 }
 
 export interface Page {
@@ -310,7 +312,7 @@ function recognition({ draft, controls }: PageContext): HTMLElement[] {
   ];
 }
 
-function microphone({ draft, controls, microphones, live }: PageContext): HTMLElement[] {
+function microphone({ draft, controls, microphones, live, audio }: PageContext): HTMLElement[] {
   const names = Array.isArray(microphones) ? microphones : [];
   const saved = draft.microphone;
   const options: (readonly [string, string])[] = [
@@ -321,13 +323,26 @@ function microphone({ draft, controls, microphones, live }: PageContext): HTMLEl
   const picker = controls.select(options, saved ?? "", (value) => {
     draft.microphone = value === "" ? null : value;
   });
+  const pickerInput = picker.field as HTMLSelectElement;
+  const active = el("output", { class: "badge" }, "");
+  const showAudio = (next: AudioStatus): void => {
+    pickerInput.disabled = !next.paused;
+    active.textContent = next.active ?? "None — no microphone is open";
+    active.dataset["on"] = String(next.active !== null);
+  };
+  showAudio(audio);
+  live.audio = showAudio;
   const meter = el("b");
   live.level = (level) => {
     meter.style.transform = `scaleX(${Math.min(1, Math.max(0, level)).toFixed(3)})`;
   };
   const rows = [
-    row("Input device", Array.isArray(microphones) ? "Takes effect after the current capture." : null, picker),
-    row("Level", "Moves while Thalvi is capturing: say the wake phrase to test.", {
+    row("Saved device", Array.isArray(microphones) ? "Pause listening to change it. Saving writes this choice; it does not prove a microphone opened." : null, picker),
+    row("Active microphone", "The device actually open now. This is different from the saved choice above.", {
+      node: active,
+      field: el("span", { id: uid("f") }),
+    }),
+    row("Level", "Moves while Thalvi is listening or capturing.", {
       node: el("span", { class: "meter", role: "meter", "aria-valuemin": "0", "aria-valuemax": "1" }, meter),
       field: el("span", { id: uid("f") }),
     }),

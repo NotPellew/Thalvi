@@ -308,6 +308,34 @@ async fn the_microphone_level_follows_the_capture_frames_and_is_zero_outside_it(
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_microphone_level_follows_wake_listening_and_resets_when_it_stops() {
+    LocalSet::new()
+        .run_until(async {
+            let (rig, mut engine, mut frames) = Rig::new("{}");
+            let level = rig.handle.level();
+            let task = tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
+            rig.feed.send([i16::MAX; FRAME_SAMPLES]);
+            settle().await;
+            assert_eq!(*level.borrow(), 1.0, "listening frames move the level");
+            rig.feed.send(quiet(1));
+            settle().await;
+            assert_eq!(*level.borrow(), 0.0);
+            rig.feed.send([1036; FRAME_SAMPLES]);
+            settle().await;
+            assert!((*level.borrow() - 0.6).abs() < 0.01, "{}", *level.borrow());
+            rig.feed.fail(AudioError::DeviceLost);
+            let error = finished(task).await.unwrap_err();
+            assert!(matches!(error, ListenError::Audio(AudioError::DeviceLost)));
+            assert_eq!(
+                *level.borrow(),
+                0.0,
+                "the level resets when the microphone stops"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_wake_cue_and_the_connection_overlap_and_only_audio_after_both_is_sent() {
     LocalSet::new()
         .run_until(async {

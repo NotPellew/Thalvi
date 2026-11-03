@@ -142,18 +142,19 @@ pub fn title(status: &Status) -> String {
             seconds(*pause_ms)
         ),
         Status::Working { .. } => "working".to_owned(),
-        Status::Loading { .. } => "loading the speech model".to_owned(),
+        Status::Loading { .. } => "starting".to_owned(),
         Status::Failed { .. } => "something went wrong".to_owned(),
     };
     format!("Thalvi: {state}")
 }
 
-/// The menu text for the pause switch: paused and failed states offer to resume.
+/// The next action follows listening intent, independently of a failure notice.
 #[must_use]
-pub fn toggle_text(status: &Status) -> &'static str {
-    match status {
-        Status::Paused | Status::Failed { .. } => "Resume listening",
-        _ => "Pause listening",
+pub fn toggle_text(paused: bool) -> &'static str {
+    if paused {
+        "Resume listening"
+    } else {
+        "Pause listening"
     }
 }
 
@@ -184,9 +185,9 @@ pub struct Tray {
 impl Tray {
     /// # Errors
     /// Fails when the tray icon or its menu cannot be created.
-    pub fn new(app: &AppHandle, status: &Status) -> tauri::Result<Self> {
+    pub fn new(app: &AppHandle, status: &Status, paused: bool) -> tauri::Result<Self> {
         let header = MenuItem::with_id(app, "state", title(status), false, None::<&str>)?;
-        let toggle = MenuItem::with_id(app, TOGGLE, toggle_text(status), true, None::<&str>)?;
+        let toggle = MenuItem::with_id(app, TOGGLE, toggle_text(paused), true, None::<&str>)?;
         let cancel = MenuItem::with_id(
             app,
             CANCEL,
@@ -215,11 +216,14 @@ impl Tray {
         })
     }
 
+    pub fn listening(&self, paused: bool) {
+        let _ = self.toggle.set_text(toggle_text(paused));
+    }
+
     pub fn show(&self, status: &Status) {
         let _ = self.icon.set_icon(Some(Icon::of(status).image()));
         let _ = self.icon.set_tooltip(Some(title(status)));
         let _ = self.header.set_text(title(status));
-        let _ = self.toggle.set_text(toggle_text(status));
         let _ = self.cancel.set_enabled(can_cancel(status));
     }
 }
@@ -316,7 +320,7 @@ mod tests {
                     notice: "Loading the speech model.".to_owned(),
                 },
                 Icon::Working,
-                "Thalvi: loading the speech model",
+                "Thalvi: starting",
             ),
         ]
     }
@@ -366,18 +370,9 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_offers_resume_when_paused_or_failed_and_cancel_only_during_a_capture() {
-        for (status, _, _) in all() {
-            let resume = matches!(status, Status::Paused | Status::Failed { .. });
-            assert_eq!(
-                toggle_text(&status),
-                if resume {
-                    "Resume listening"
-                } else {
-                    "Pause listening"
-                },
-                "{status:?}"
-            );
+    fn the_menu_offers_the_opposite_of_the_current_listening_intent() {
+        for (paused, expected) in [(true, "Resume listening"), (false, "Pause listening")] {
+            assert_eq!(toggle_text(paused), expected);
         }
     }
 

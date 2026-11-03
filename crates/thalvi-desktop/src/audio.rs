@@ -281,6 +281,7 @@ pub struct Microphone {
     device: Option<String>,
     metrics: Metrics,
     open: Option<(Stream, Arc<Shared>)>,
+    active: Option<String>,
 }
 
 impl Microphone {
@@ -294,6 +295,7 @@ impl Microphone {
             device,
             metrics,
             open: None,
+            active: None,
         }
     }
 
@@ -301,6 +303,12 @@ impl Microphone {
     #[must_use]
     pub fn is_open(&self) -> bool {
         self.open.is_some()
+    }
+
+    /// The name of the device actually open, as the system lists it; `None` when closed.
+    #[must_use]
+    pub fn active_name(&self) -> Option<&str> {
+        self.open.as_ref().and(self.active.as_deref())
     }
 
     /// Opens the chosen microphone, or the current default one, closing any stream already open.
@@ -325,6 +333,7 @@ impl Microphone {
             )?,
             None => host.default_input_device().ok_or(AudioError::NoDevice)?,
         };
+        let active = device.to_string();
         let default = device
             .default_input_config()
             .map_err(AudioError::from_open)?;
@@ -348,6 +357,7 @@ impl Microphone {
         };
         let stream = build_stream(&device, &chosen, sink).map_err(AudioError::from_open)?;
         stream.play().map_err(AudioError::from_open)?;
+        self.active = Some(active);
         self.open = Some((stream, Arc::clone(&shared)));
         Ok(Frames {
             consumer,
@@ -361,6 +371,7 @@ impl Microphone {
     ///
     /// The [`Frames`] from the stream then report [`AudioError::Closed`].
     pub fn pause(&mut self) {
+        self.active = None;
         if let Some((stream, shared)) = self.open.take() {
             drop(stream);
             shared.close();
@@ -693,6 +704,17 @@ mod tests {
             named(devices(), "Headset"),
             Err(AudioError::DeviceMissing("Headset".to_owned()))
         );
+    }
+
+    #[test]
+    fn a_closed_microphone_reports_no_active_device() {
+        let microphone = Microphone::new(
+            InputGate::default(),
+            Some("USB Mic".to_owned()),
+            Recorder::disabled().metrics(),
+        );
+        assert!(!microphone.is_open());
+        assert_eq!(microphone.active_name(), None);
     }
 
     #[test]

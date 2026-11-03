@@ -82,6 +82,10 @@ areas your change touches. Editing rules are in
   defaults off and disabling preserves endpoint settings. Why: avoid uploading
   every dictation and adding latency without an explicit choice. Rejected:
   treating an endpoint's presence as enablement.
+- **Pause before changing microphones.** Save device changes only while paused;
+  enabling opens the selected device and status names the open stream separately.
+  Why: choosing a microphone must not start recording or redirect a capture.
+  Rejected: applying a device change automatically after an active capture.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
   browser and app actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative

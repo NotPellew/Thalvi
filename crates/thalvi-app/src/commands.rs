@@ -13,13 +13,40 @@ use thalvi_desktop::metrics::Recorder;
 
 use crate::app::AppState;
 use crate::overlay;
-use crate::runner::Control;
+use crate::runner::{AudioStatus, Control};
 use crate::settings::settings_json;
 use crate::status::Status;
 
 #[tauri::command]
 pub fn get_status(state: State<'_, AppState>) -> Status {
     state.link.status()
+}
+
+#[tauri::command]
+pub fn get_audio(state: State<'_, AppState>) -> AudioStatus {
+    state.link.audio()
+}
+
+/// Refuses a microphone change while listening is not paused, before anything is written.
+///
+/// # Errors
+/// The plain refusal when the saved device would change while the microphone may be open.
+fn ensure_microphone_change_allowed(
+    settings: &Value,
+    current: Option<&str>,
+    paused: bool,
+) -> Result<(), String> {
+    let incoming = match settings.get("microphone") {
+        Some(Value::String(name)) => Some(name.trim().to_owned()),
+        _ => None,
+    };
+    if incoming.as_deref() != current && !paused {
+        return Err(
+            "Pause listening before changing the microphone. Turn listening off, then save again."
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -33,6 +60,11 @@ pub fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    ensure_microphone_change_allowed(
+        &settings,
+        state.config().microphone.as_deref(),
+        state.link.audio().paused,
+    )?;
     let config = state.store.save(settings)?;
     let look = state.config().look;
     state.apply(&config);
@@ -81,4 +113,47 @@ pub async fn open_recordings(state: State<'_, AppState>) -> Result<(), String> {
     })
     .await
     .map_err(|error| format!("The folder could not be opened: {error}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_microphone_change_needs_a_pause_but_other_saves_do_not() {
+        let refusal =
+            "Pause listening before changing the microphone. Turn listening off, then save again.";
+        for (settings, current, paused, expected) in [
+            (json!({"microphone": "USB Mic"}), None, false, Err(refusal)),
+            (
+                json!({"microphone": null}),
+                Some("USB Mic"),
+                false,
+                Err(refusal),
+            ),
+            (json!({"microphone": "USB Mic"}), None, true, Ok(())),
+            (json!({"microphone": null}), Some("USB Mic"), true, Ok(())),
+            (
+                json!({"microphone": "USB Mic"}),
+                Some("USB Mic"),
+                false,
+                Ok(()),
+            ),
+            (json!({"microphone": null}), None, false, Ok(())),
+            (
+                json!({"microphone": " USB Mic "}),
+                Some("USB Mic"),
+                false,
+                Ok(()),
+            ),
+        ] {
+            assert_eq!(
+                ensure_microphone_change_allowed(&settings, current, paused),
+                expected.map_err(str::to_owned),
+                "{settings} current={current:?} paused={paused}"
+            );
+        }
+    }
 }

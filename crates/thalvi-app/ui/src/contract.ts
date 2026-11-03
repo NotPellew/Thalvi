@@ -24,6 +24,13 @@ export interface Level {
   level: number;
 }
 
+/** The saved microphone choice, the device actually open, and whether listening is paused. */
+export interface AudioStatus {
+  selected: string | null;
+  active: string | null;
+  paused: boolean;
+}
+
 export type Ending = "paste" | "submit" | "task" | "scratch" | "cancel";
 export type ScriptActionKind = "open_url" | "focus_app" | "discord_message";
 export type SecondaryApi = "openai" | "meta";
@@ -83,6 +90,8 @@ export interface Backend {
   getStatus(): Promise<Status>;
   onStatus(listener: (status: Status) => void): void;
   onLevel(listener: (level: number) => void): void;
+  getAudio(): Promise<AudioStatus>;
+  onAudio(listener: (audio: AudioStatus) => void): void;
   /** Settings were saved, from any window. */
   onSettingsSaved(listener: () => void): void;
   getSettings(): Promise<Settings>;

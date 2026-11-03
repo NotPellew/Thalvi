@@ -1,6 +1,6 @@
 // Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the overlay to the n-th status of the script and `?look=holo` or `?look=gunmetal` picks the look.
 
-import type { Backend, Settings, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Settings, Status } from "./contract.ts";
 import { LOOKS } from "./look.ts";
 
 const SETTINGS: Settings = {
@@ -72,6 +72,17 @@ export function fakeBackend(params: URLSearchParams): Backend {
   const savedListeners: (() => void)[] = [];
   const statusListeners: ((status: Status) => void)[] = [];
   const levelListeners: ((level: number) => void)[] = [];
+  const audioListeners: ((audio: AudioStatus) => void)[] = [];
+  const microphones = ["Built-in Audio Analog Stereo", "USB Microphone"];
+  let audioState: AudioStatus = { selected: null, active: "Built-in Audio Analog Stereo", paused: false };
+  const emitAudio = (next: AudioStatus): void => {
+    audioState = next;
+    for (const listener of audioListeners) listener(next);
+  };
+  const activeFor = (selected: string | null): string | null => {
+    if (selected === null) return "Built-in Audio Analog Stereo";
+    return microphones.includes(selected) ? selected : null;
+  };
   const emit = (next: Status): void => {
     status = next;
     for (const listener of statusListeners) listener(next);
@@ -87,7 +98,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
     }, 2200);
   }
   setInterval(() => {
-    level = status.state === "starting" || status.state === "capturing" || status.state === "pending"
+    level = status.state === "listening" || status.state === "starting" || status.state === "capturing" || status.state === "pending"
       ? Math.max(0, Math.min(1, level * 0.5 + Math.random() * 0.7))
       : 0;
     for (const listener of levelListeners) listener(level);
@@ -98,17 +109,24 @@ export function fakeBackend(params: URLSearchParams): Backend {
     getStatus: () => Promise.resolve(status),
     onStatus: (listener) => statusListeners.push(listener),
     onLevel: (listener) => levelListeners.push(listener),
+    getAudio: () => Promise.resolve(structuredClone(audioState)),
+    onAudio: (listener) => audioListeners.push(listener),
     onSettingsSaved: (listener) => savedListeners.push(listener),
     getSettings: () => Promise.resolve(structuredClone(saved)),
     saveSettings: (next) => {
       if (!/^wss?:\/\//.test(next.server)) {
         return Promise.reject(new Error("The desktop config is not valid: the server address must start with ws:// or wss://."));
       }
+      if (next.microphone !== saved.microphone && !audioState.paused) {
+        return Promise.reject(new Error("Pause listening before changing the microphone. Turn listening off, then save again."));
+      }
       saved = structuredClone(next);
+      emitAudio({ selected: next.microphone, active: audioState.paused ? null : activeFor(next.microphone), paused: audioState.paused });
       for (const listener of savedListeners) listener();
       return Promise.resolve();
     },
     setListening: (on) => {
+      emitAudio({ selected: audioState.selected, active: on ? activeFor(audioState.selected) : null, paused: !on });
       emit(on ? { state: "listening" } : { state: "paused" });
       return Promise.resolve();
     },
@@ -116,7 +134,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
       emit({ state: "listening" });
       return Promise.resolve();
     },
-    listMicrophones: () => Promise.resolve(["Built-in Audio Analog Stereo", "USB Microphone"]),
+    listMicrophones: () => Promise.resolve([...microphones]),
     openRecordings: () => Promise.resolve(),
     appVersion: () => Promise.resolve("0.1.0 (fake)"),
   };
