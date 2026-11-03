@@ -10,8 +10,10 @@ use serde::Deserialize;
 
 use self::command::{CommandError, CommandRunner, SystemRunner};
 use super::{
-    App, Host, HostError, Modifier, OVERLAY_TITLE, Shortcut, StateServer, TypedText, WebUrl,
+    App, HoldWatch, Host, HostError, Modifier, OVERLAY_TITLE, Shortcut, StateServer, TypedText,
+    WebUrl,
 };
+use crate::hold::HoldKey;
 
 /// The window as Hyprland identifies it; the pid tells a reused address from the original window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +54,19 @@ impl Hyprland {
         state: impl Fn() -> String + Send + 'static,
     ) -> Result<StateServer, HostError> {
         state::serve(state)
+    }
+
+    /// # Errors
+    /// Always [`HostError::Unsupported`]: the compositor reports the key, through the binds in
+    /// `hyprland.conf` that run the `hold-start` and `hold-end` commands.
+    pub fn watch_hold_key(
+        _key: &HoldKey,
+        _on_change: impl Fn(bool) + Send + 'static,
+    ) -> Result<HoldWatch, HostError> {
+        Err(HostError::Unsupported(
+            "On Hyprland the hold key is a bind in hyprland.conf: see integrations/hyprland/hyprland-binds.conf."
+                .to_owned(),
+        ))
     }
 
     /// The running app's state line; `None` when no app answers.

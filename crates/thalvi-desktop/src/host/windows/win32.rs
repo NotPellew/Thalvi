@@ -5,12 +5,14 @@
     reason = "raw Win32 calls; each block says why it is sound"
 )]
 
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use ::windows::Win32::Foundation::{
-    CloseHandle, FILETIME, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, RECT,
+    CloseHandle, FILETIME, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, RECT, WPARAM,
 };
 use ::windows::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
@@ -22,24 +24,29 @@ use ::windows::Win32::System::DataExchange::{
 use ::windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use ::windows::Win32::System::Ole::CF_UNICODETEXT;
 use ::windows::Win32::System::Threading::{
-    GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    GetCurrentProcess, GetCurrentThreadId, GetProcessTimes, OpenProcess, OpenProcessToken,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use ::windows::Win32::UI::HiDpi::GetDpiForSystem;
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY,
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY,
 };
 use ::windows::Win32::UI::Shell::ShellExecuteW;
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongW,
-    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, MB_ICONERROR, MB_OK,
-    MessageBoxW, SPI_GETWORKAREA, SW_RESTORE, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    SetForegroundWindow, ShowWindow, SystemParametersInfoW, WS_EX_TOOLWINDOW,
+    CallNextHookEx, EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetMessageW,
+    GetWindow, GetWindowLongW, GetWindowThreadProcessId, HC_ACTION, IsIconic, IsWindow,
+    IsWindowVisible, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, MB_ICONERROR, MB_OK, MSG,
+    MessageBoxW, PostThreadMessageW, SPI_GETWORKAREA, SW_RESTORE, SW_SHOWNORMAL,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SetWindowsHookExW, ShowWindow,
+    SystemParametersInfoW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WS_EX_TOOLWINDOW,
 };
 use ::windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
 use super::{Hwnd, Identity, Key, KeyEvent, Process, Win32};
+use crate::hold::{self, HoldHook, HoldKey, Verdict};
+use crate::host::{HoldWatch, HostError};
 
 /// The live Windows desktop.
 pub struct Real;
@@ -186,6 +193,170 @@ fn input(event: KeyEvent) -> INPUT {
             },
         },
     }
+}
+
+/// A virtual key that no key sends, tapped between a swallowed hold key and the release of its Alt
+/// or Win so the focused app does not take that release for a lone press that opens its menu.
+const MASK_KEY: u16 = 0xE8;
+
+type OnChange = Box<dyn Fn(bool) + Send>;
+
+/// What the keyboard hook procedure works with; it runs on the thread that installed the hook.
+struct Rules {
+    hook: HoldHook,
+    on_change: OnChange,
+}
+
+thread_local! {
+    static RULES: RefCell<Option<Rules>> = const { RefCell::new(None) };
+}
+
+fn virtual_input(code: u16, release: bool, extended: bool) -> INPUT {
+    let mut flags = KEYBD_EVENT_FLAGS(0);
+    if release {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    if extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(code),
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// Taps the unused key, then lets the release of `modifier` through behind it.
+fn mask_release(modifier: u16, extended: bool) {
+    let inputs = [
+        virtual_input(MASK_KEY, false, false),
+        virtual_input(MASK_KEY, true, false),
+        virtual_input(modifier, true, extended),
+    ];
+    let Ok(size) = i32::try_from(size_of::<INPUT>()) else {
+        return;
+    };
+    // SAFETY: `inputs` is a valid slice of INPUT structures and `size` is the size of one. The hook
+    // skips these events, which are marked as injected.
+    unsafe { SendInput(&inputs, size) };
+}
+
+/// The low-level keyboard hook: keeps the hold key from the focused app, passes every other key.
+unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION.cast_signed() {
+        // SAFETY: for HC_ACTION, `lparam` points to a KBDLLHOOKSTRUCT that lives until this
+        // procedure returns.
+        let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+        let message = u32::try_from(wparam.0).unwrap_or(0);
+        let down = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
+        if down || matches!(message, WM_KEYUP | WM_SYSKEYUP) {
+            let extended = info.flags.0 & LLKHF_EXTENDED.0 != 0;
+            let event = hold::KeyEvent {
+                vk: u16::try_from(info.vkCode).unwrap_or(0),
+                scan_code: u16::try_from(info.scanCode).unwrap_or(0),
+                extended,
+                down,
+                injected: info.flags.0 & LLKHF_INJECTED.0 != 0,
+            };
+            let decision = RULES.with(|rules| {
+                let mut rules = rules.try_borrow_mut().ok()?;
+                let rules = rules.as_mut()?;
+                let decision = rules.hook.on_event(event);
+                if let Some(down) = decision.change {
+                    (rules.on_change)(down);
+                }
+                Some(decision)
+            });
+            match decision.map(|decision| decision.verdict) {
+                Some(Verdict::Swallow) => return LRESULT(1),
+                Some(Verdict::Mask) => {
+                    mask_release(event.vk, extended);
+                    return LRESULT(1);
+                }
+                Some(Verdict::Pass) | None => {}
+            }
+        }
+    }
+    // SAFETY: the arguments are the ones this procedure was called with.
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+/// Ends the hook thread's message loop when dropped, and waits for the hook to be removed.
+struct HookThread {
+    id: u32,
+    join: Option<JoinHandle<()>>,
+}
+
+impl Drop for HookThread {
+    fn drop(&mut self) {
+        // SAFETY: plain values; the thread runs a message loop that ends on WM_QUIT.
+        let _ = unsafe { PostThreadMessageW(self.id, WM_QUIT, WPARAM(0), LPARAM(0)) };
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+/// Starts the keyboard hook for `key` on a thread of its own, reporting each change to `on_change`.
+pub(super) fn watch_hold_key(key: HoldKey, on_change: OnChange) -> Result<HoldWatch, HostError> {
+    let (ready_tx, ready) = std::sync::mpsc::channel();
+    let join = std::thread::Builder::new()
+        .name("thalvi-hold-key".to_owned())
+        .spawn(move || {
+            RULES.with(|rules| {
+                *rules.borrow_mut() = Some(Rules {
+                    hook: HoldHook::new(key),
+                    on_change,
+                });
+            });
+            // SAFETY: `keyboard_hook` has the signature the hook requires and, as a low-level
+            // hook, needs no module handle.
+            let installed =
+                unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0) };
+            let hook = match installed {
+                Ok(hook) => hook,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error.to_string()));
+                    return;
+                }
+            };
+            // SAFETY: no arguments.
+            let _ = ready_tx.send(Ok(unsafe { GetCurrentThreadId() }));
+            let mut message = MSG::default();
+            // Windows calls the hook from inside this wait. GetMessageW returns 0 on WM_QUIT.
+            // SAFETY: `message` is a valid MSG.
+            while unsafe { GetMessageW(&raw mut message, None, 0, 0) }.0 > 0 {}
+            // SAFETY: `hook` came from the successful call above and is removed once.
+            let _ = unsafe { UnhookWindowsHookEx(hook) };
+            RULES.with(|rules| {
+                if let Some(rules) = rules.borrow_mut().take() {
+                    // A key still held when watching ends must not stay down.
+                    (rules.on_change)(false);
+                }
+            });
+        })
+        .map_err(|error| refused(&error.to_string()))?;
+    match ready.recv() {
+        Ok(Ok(id)) => Ok(HoldWatch::new(HookThread {
+            id,
+            join: Some(join),
+        })),
+        Ok(Err(reason)) => Err(refused(&reason)),
+        Err(_) => Err(refused("the keyboard hook thread stopped")),
+    }
+}
+
+fn refused(reason: &str) -> HostError {
+    HostError::Unsupported(format!(
+        "Windows refused the keyboard hook for the dictation key: {reason}"
+    ))
 }
 
 /// Holds the clipboard open; closes it when dropped.
