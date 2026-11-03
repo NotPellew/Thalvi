@@ -299,7 +299,9 @@ mind" cancels it; any other spoken ending works as after the wake word.
   The app watches the keyboard itself and keeps the key from the focused app; the
   hold ends when the key and Alt are both up. Set another as `hold_key` in the
   config, such as `Ctrl+Shift+F9`, named by its place on the keyboard (`Alt+KeyZ`,
-  `Digit1`, `Space`, `F9`).
+  `Digit1`, `Space`, `F9`). While an administrator window is focused, Windows
+  shows Thalvi no keys and lets it type nothing, so the key reaches that window
+  as usual and no dictation starts.
 
 ### Config
 
