@@ -43,6 +43,12 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - run: npm exec --prefix ui -- tauri build --bundles appimage -- --locked
         working-directory: crates/thalvi-app
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-linux
+          path: target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+          retention-days: 7
 
   desktop-windows:
     name: desktop-windows
@@ -70,6 +76,12 @@ jobs:
       - run: cargo test -p thalvi-desktop -p thalvi-app --locked
       - run: npm exec --prefix ui -- tauri build --bundles nsis -- --locked
         working-directory: crates/thalvi-app
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-windows
+          path: target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 7
 
   web:
     name: web
