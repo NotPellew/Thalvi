@@ -218,7 +218,7 @@ pub async fn open_speech_model_source(
 
 #[tauri::command]
 pub async fn open_recordings(state: State<'_, AppState>) -> Result<(), String> {
-    let folder = Recorder::user_dir().map_err(|error| error.to_string())?;
+    let folder = Recorder::dir().map_err(|error| error.to_string())?;
     if !folder.is_dir() {
         return Err(
             "Nothing has been recorded yet. Turn a recording on in the settings.".to_owned(),

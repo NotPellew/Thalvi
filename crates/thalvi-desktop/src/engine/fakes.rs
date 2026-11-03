@@ -74,6 +74,7 @@ impl FrameSource for FakeFrames {
 pub struct FakeWake {
     next: Rc<Cell<Option<Result<WakeEvent, ()>>>>,
     scores: Rc<Cell<(f32, f32)>>,
+    inference: Rc<Cell<Duration>>,
     resets: Rc<Cell<u32>>,
 }
 
@@ -81,6 +82,7 @@ pub struct FakeWake {
 pub struct WakeControl {
     next: Rc<Cell<Option<Result<WakeEvent, ()>>>>,
     scores: Rc<Cell<(f32, f32)>>,
+    inference: Rc<Cell<Duration>>,
     resets: Rc<Cell<u32>>,
 }
 
@@ -89,16 +91,19 @@ impl FakeWake {
     pub fn new() -> (Self, WakeControl) {
         let next = Rc::new(Cell::new(None));
         let scores = Rc::new(Cell::new((0.0, 0.0)));
+        let inference = Rc::new(Cell::new(Duration::ZERO));
         let resets = Rc::new(Cell::new(0));
         (
             Self {
                 next: Rc::clone(&next),
                 scores: Rc::clone(&scores),
+                inference: Rc::clone(&inference),
                 resets: Rc::clone(&resets),
             },
             WakeControl {
                 next,
                 scores,
+                inference,
                 resets,
             },
         )
@@ -114,6 +119,11 @@ impl WakeControl {
     /// The frames scored from now on get these head scores.
     pub fn score(&self, capture: f32, conversation: f32) {
         self.scores.set((capture, conversation));
+    }
+
+    /// The frames scored from now on report taking `took`.
+    pub fn inference(&self, took: Duration) {
+        self.inference.set(took);
     }
 
     /// The next frame scored fails.
@@ -139,7 +149,7 @@ impl WakeDetector for FakeWake {
         Ok(WakeFrame {
             capture,
             conversation,
-            inference: Duration::ZERO,
+            inference: self.inference.get(),
             event,
         })
     }
