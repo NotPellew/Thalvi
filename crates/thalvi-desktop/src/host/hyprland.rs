@@ -305,7 +305,7 @@ impl<R: CommandRunner> Host for Hyprland<R> {
         let rule = format!(
             "match:title ^({OVERLAY_TITLE})$, float on, pin on, no_initial_focus on, no_focus on, \
              size {width} {height}, move ((monitor_w*0.5)-({width}*0.5)) {top}, border_size 0, \
-             no_shadow on, no_anim on"
+             no_shadow on, no_anim on, no_blur on"
         );
         self.run
             .run("hyprctl", &["keyword", "windowrule", &rule], None)
@@ -791,7 +791,7 @@ mod tests {
                         "hyprctl keyword windowrule match:title ^(Thalvi overlay)$, float on, \
                          pin on, no_initial_focus on, no_focus on, \
                          size 460 200, move ((monitor_w*0.5)-(460*0.5)) {top}, border_size 0, \
-                         no_shadow on, no_anim on"
+                         no_shadow on, no_anim on, no_blur on"
                     )
                 ],
                 "{name}"
