@@ -1091,7 +1091,6 @@ describe("last dictation", () => {
     target: "foot",
     outcome: "failed",
     newerWaiting: false,
-    pasting: false,
   };
 
   async function openDraft(draft: Draft | null = DRAFT) {
@@ -1123,23 +1122,23 @@ describe("last dictation", () => {
     expect(section().querySelector<HTMLElement>(".stack > .stack")?.hidden).toBe(true);
   });
 
-  it("shows the draft with how it ended and names the window Paste would use", async () => {
+  it("shows the draft with how it ended and the window it was meant for", async () => {
     for (const [outcome, sentence] of [
       ["delivered", "Delivered. Meant for foot."],
       ["cancelled", "You cancelled this one, so nothing was typed. Meant for foot."],
       ["failed", "This was not delivered. Meant for foot."],
-      ["maybePartial", "Typing stopped partway: some of this text may already be in the window. Check it there, and use Copy text rather than pasting again. Meant for foot."],
+      ["maybePartial", "Typing stopped partway: some of this text may already be in the window. Check it there, or use Copy text. Meant for foot."],
     ] as const) {
       document.body.innerHTML = '<div id="settings"></div>';
       root = document.getElementById("settings") as HTMLElement;
       await openDraft({ ...DRAFT, outcome });
       expect(area().value, outcome).toBe(DRAFT.text);
       expect(notes()[0], outcome).toBe(sentence);
-      expect(buttons(), outcome).toEqual(["Copy text", "Paste into foot", "Reset to original", "Discard"]);
+      expect(buttons(), outcome).toEqual(["Copy text", "Reset to original", "Discard"]);
     }
   });
 
-  it("keeps an edit without recognizing, copying or typing anything, and can reset it", async () => {
+  it("keeps an edit without recognizing, copying or sending anything, and can reset it", async () => {
     const stub = await openDraft();
     expect(within(section(), "Reset to original").disabled).toBe(true);
     edit("Remind me to call the dentist tomorrow.");
@@ -1149,21 +1148,17 @@ describe("last dictation", () => {
     expect(area().value).toBe(DRAFT.original);
     expect(stub.backend.editDraft).toHaveBeenLastCalledWith(DRAFT.original);
     expect(stub.backend.copyDraft).not.toHaveBeenCalled();
-    expect(stub.backend.pasteDraft).not.toHaveBeenCalled();
     expect(stub.backend.saveSettings).not.toHaveBeenCalled();
   });
 
-  it("offers neither Copy nor Paste for an empty edit", async () => {
-    const stub = await openDraft();
+  it("offers no Copy for an empty edit", async () => {
+    await openDraft();
     for (const blank of ["", "   "]) {
       edit(blank);
       expect(within(section(), "Copy text").disabled, blank).toBe(true);
-      expect(within(section(), "Paste into foot").disabled, blank).toBe(true);
     }
     edit("back");
     expect(within(section(), "Copy text").disabled).toBe(false);
-    expect(within(section(), "Paste into foot").disabled).toBe(false);
-    expect(stub.backend.pasteDraft).not.toHaveBeenCalled();
   });
 
   it("copies the edited text, and says why when it could not", async () => {
@@ -1182,70 +1177,18 @@ describe("last dictation", () => {
     expect(area().value).toBe("fixed text");
   });
 
-  it("pastes the edited text once however often Paste is clicked, and says Enter was not pressed", async () => {
-    const stub = await openDraft();
-    let finish: () => void = () => undefined;
-    stub.backend.pasteDraft.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
-    edit("fixed text");
-    const paste = within(section(), "Paste into foot");
-    paste.click();
-    paste.click();
-    paste.click();
-    expect(paste.disabled).toBe(true);
-    expect(stub.backend.pasteDraft).toHaveBeenCalledExactlyOnceWith("fixed text");
-    finish();
-    await settle();
-    expect(notes()).toContain("Pasted into foot. Enter was not pressed.");
-    expect(within(section(), "Paste into foot").disabled).toBe(false);
-  });
-
-  it("keeps the text and Copy when the window is gone, and shows what the paste left behind", async () => {
-    const stub = await openDraft();
-    const closed = "The original window closed. Nothing was typed.";
-    stub.backend.pasteDraft.mockRejectedValueOnce(closed);
-    edit("fixed text");
-    within(section(), "Paste into foot").click();
-    await settle();
-    expect(notes()).toContain(closed);
-    expect(area().value).toBe("fixed text");
-    expect(within(section(), "Copy text").disabled).toBe(false);
-
-    stub.backend.pasteDraft.mockRejectedValueOnce("Typing stopped partway.");
-    stub.backend.getDraft.mockResolvedValueOnce({ ...DRAFT, text: "fixed text", outcome: "maybePartial" });
-    within(section(), "Paste into foot").click();
-    await settle();
-    expect(notes()[0]).toContain("some of this text may already be in the window");
-    expect(notes()).toContain("Typing stopped partway.");
-    expect(area().value).toBe("fixed text");
-  });
-
-  it("only offers Copy when no window was bound", async () => {
-    const stub = await openDraft({ ...DRAFT, target: null });
-    expect(buttons()).toEqual(["Copy text", "Paste", "Reset to original", "Discard"]);
-    expect(within(section(), "Paste").disabled).toBe(true);
-    expect(within(section(), "Copy text").disabled).toBe(false);
-    expect(notes()).toContain("No window was bound when you dictated this, so only Copy is possible.");
-    within(section(), "Paste").click();
-    expect(stub.backend.pasteDraft).not.toHaveBeenCalled();
-  });
-
-  it("disables Paste while a capture or delivery runs and checks the draft again when it ends", async () => {
+  it("checks the draft again when a capture ends, not while it runs", async () => {
     const stub = await openDraft();
     const calls = stub.backend.getDraft.mock.calls.length;
-    stub.emit({ state: "capturing", target: "foot", committed: "", partial: null });
-    expect(within(section(), "Paste into foot").disabled).toBe(true);
-    expect(notes()).toContain("Thalvi is capturing or delivering. Paste is available again when it has finished.");
-    within(section(), "Paste into foot").click();
-    expect(stub.backend.pasteDraft).not.toHaveBeenCalled();
-    expect(stub.backend.getDraft.mock.calls.length).toBe(calls);
-
-    stub.emit({ state: "working", target: "foot", route: "paste", cancellable: false });
-    expect(within(section(), "Paste into foot").disabled).toBe(true);
-    stub.emit({ state: "listening" });
-    expect(within(section(), "Paste into foot").disabled, "until the draft that capture left is loaded").toBe(true);
+    for (const state of [
+      { state: "capturing", target: "foot", committed: "", partial: null },
+      { state: "working", target: "foot", route: "paste", cancellable: false },
+    ] as const) stub.emit(state);
     await settle();
-    expect(within(section(), "Paste into foot").disabled).toBe(false);
-    expect(stub.backend.getDraft.mock.calls.length).toBeGreaterThan(calls);
+    expect(stub.backend.getDraft.mock.calls.length).toBe(calls);
+    stub.emit({ state: "listening" });
+    await settle();
+    expect(stub.backend.getDraft.mock.calls.length).toBe(calls + 1);
   });
 
   it("shows a new dictation, but keeps the edits and says a newer one waits when there are unsent edits", async () => {

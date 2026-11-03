@@ -44,7 +44,6 @@ export function tauriBackend(): Backend {
     getDraft: () => invoke<Draft | null>("get_draft"),
     editDraft: (text) => invoke<undefined>("edit_draft", { text }),
     copyDraft: (text) => invoke<undefined>("copy_draft", { text }),
-    pasteDraft: (text) => invoke<undefined>("paste_draft", { text }),
     discardDraft: () => invoke<undefined>("discard_draft"),
     onOpenPage: (listener) => {
       void listen<string>("thalvi://open-page", (event) => {

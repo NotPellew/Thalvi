@@ -9,6 +9,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::Delivery;
+use thalvi_desktop::draft::Drafts;
 use thalvi_desktop::history;
 use thalvi_desktop::host::{Desktop, StateServer};
 use thalvi_desktop::models::SpeechDownloads;
@@ -18,7 +19,7 @@ use crate::control;
 use crate::launch::{Command, Launch, relaunch_command};
 use crate::menu_entry::{self, MenuEntry};
 use crate::overlay::{self, Overlay, Visibility};
-use crate::runner::{Control, Drafts, EngineLink, Records};
+use crate::runner::{Control, EngineLink, Records};
 use crate::settings::Store;
 use crate::startup::{self, APP_NAME, LOGIN_ARG, Registration};
 use crate::status::{LastError, Status};
@@ -284,7 +285,6 @@ fn start() -> Result<(), String> {
             commands::get_draft,
             commands::edit_draft,
             commands::copy_draft,
-            commands::paste_draft,
             commands::discard_draft,
         ])
         .setup(move |app| {

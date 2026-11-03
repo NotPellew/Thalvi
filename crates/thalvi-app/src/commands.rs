@@ -340,19 +340,6 @@ pub async fn copy_draft(text: String, state: State<'_, AppState>) -> Result<(), 
         .map_err(|error| error.to_string())
 }
 
-/// Types the edited text into the window the dictation was bound to, without pressing Enter.
-#[tauri::command]
-pub async fn paste_draft(text: String, state: State<'_, AppState>) -> Result<(), String> {
-    let recorder =
-        Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
-    let capture_active = state.link.status().is_busy();
-    state
-        .drafts
-        .paste(&state.delivery, &recorder, text, capture_active)
-        .await
-        .map_err(|error| error.to_string())
-}
-
 #[tauri::command]
 pub fn discard_draft(state: State<'_, AppState>) {
     state.drafts.discard();

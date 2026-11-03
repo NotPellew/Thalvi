@@ -61,20 +61,6 @@ pub enum Status {
     },
 }
 
-impl Status {
-    /// Whether a capture or a delivery is running, so nothing else may type into a window.
-    #[must_use]
-    pub fn is_busy(&self) -> bool {
-        matches!(
-            self,
-            Self::Starting { .. }
-                | Self::Capturing { .. }
-                | Self::Pending { .. }
-                | Self::Working { .. }
-        )
-    }
-}
-
 /// What went wrong: the notice for the user and the technical causes for the error report.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Failure {
@@ -531,28 +517,5 @@ mod tests {
                 causes: vec!["connection refused (os error 111)".to_owned()],
             }
         );
-    }
-
-    #[test]
-    fn a_capture_or_delivery_in_progress_is_busy() {
-        let done = Mode::Done {
-            route: CaptureRoute::Paste,
-            notice: "Delivered.".to_owned(),
-        };
-        for (mode, engine, busy) in [
-            (Mode::Idle, EngineState::Listening, false),
-            (Mode::Paused, EngineState::Listening, false),
-            (done, EngineState::Listening, false),
-            (Mode::Idle, EngineState::StartingCapture, true),
-            (Mode::Idle, capturing(), true),
-            (Mode::Idle, pending(CaptureRoute::Paste, false), true),
-            (
-                Mode::Delivering(CaptureRoute::Paste),
-                EngineState::Listening,
-                true,
-            ),
-        ] {
-            assert_eq!(view(mode, engine).status().is_busy(), busy);
-        }
     }
 }

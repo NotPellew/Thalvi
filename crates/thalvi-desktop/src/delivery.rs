@@ -26,12 +26,6 @@ impl<T: Display> Bound<T> {
     pub fn window(&self) -> Option<String> {
         self.0.as_ref().ok().map(ToString::to_string)
     }
-
-    /// The bound window itself; `None` when nothing was bound.
-    #[must_use]
-    pub fn target(&self) -> Option<&T> {
-        self.0.as_ref().ok()
-    }
 }
 
 /// The confirmation shown while a submit ending is pending, naming the window that receives it.
@@ -188,25 +182,6 @@ where
                 ..self.keep(recorder, text, &error).await
             },
         }
-    }
-
-    /// Types `text` into `target`, never pressing Enter and never touching the clipboard. Like a
-    /// capture's delivery, the host checks `target` is still the window that gets the input.
-    ///
-    /// # Errors
-    /// [`HostError::NothingTyped`] when the text holds control characters or the target is gone;
-    /// [`HostError::MaybePartial`] when typing stopped partway.
-    pub async fn type_text(
-        &self,
-        recorder: &Recorder,
-        target: H::Target,
-        text: &str,
-    ) -> Result<(), HostError> {
-        let typed = TypedText::new(text)?;
-        self.call(recorder, "deliver", move |host| {
-            host.deliver(&target, &typed, false)
-        })
-        .await
     }
 
     /// Puts `text` on the clipboard.

@@ -106,12 +106,11 @@ export interface Draft {
   id: number;
   original: string;
   text: string;
-  /** The window Paste would type into; null when none was bound, so only Copy works. */
+  /** The window the dictation was meant for, when one was bound. */
   target: string | null;
   outcome: DraftOutcome;
   /** A newer dictation ended while this one had unsent edits; discarding this one shows it. */
   newerWaiting: boolean;
-  pasting: boolean;
 }
 
 /** A speech model Thalvi can download, as the Rust catalog describes it. */
@@ -167,8 +166,6 @@ export interface Backend {
   editDraft(text: string): Promise<void>;
   /** Puts the text on the clipboard; rejects with the plain reason it could not. */
   copyDraft(text: string): Promise<void>;
-  /** Types the text into the dictation's window, never pressing Enter; rejects with the plain reason it was refused or failed. */
-  pasteDraft(text: string): Promise<void>;
   discardDraft(): Promise<void>;
   /** The tray asked for the settings page with this id. */
   onOpenPage(listener: (page: string) => void): void;

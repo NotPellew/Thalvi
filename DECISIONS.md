@@ -51,9 +51,9 @@ areas your change touches. Editing rules are in
   Why: the user can recover what they dictated, and text alone never leaves the computer. Rejected: opt-in like the
   recordings (audio and metrics stay off), deleting entries when it is switched off.
 - **The last dictation is an in-memory draft.** Settings → History holds the latest capture, also when it failed or was cancelled, to
-  edit, Copy, or Paste into its bound window (checked again at delivery, never Enter); a newer capture waits while edits are unsent.
-  Why: fix a dictation without dictating it again, with nothing stored beyond the history. Rejected: persisting drafts, replacing
-  unsent edits, and retrying a partial delivery by itself.
+  edit and Copy; a newer capture waits while the draft is edited. Why: fix a dictation without dictating it again, with nothing
+  stored beyond the history; Windows refuses to bring the bound window to the front from Settings, so Paste could not work there.
+  Rejected: persisting drafts, replacing edits, Paste into the bound window, retrying a partial delivery by itself.
 - **Desktop recordings by wake.** `recordings/` holds only recordings: `metrics.jsonl` and a
   `<date>/<time>/` folder per wake (`wake.wav`, `speech.wav`, `text.txt`). Wake metrics: near misses
   (score from 0.15), wakes that deliver nothing, one summary a minute (scoring latency, seconds

@@ -132,7 +132,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
     target: "Slack",
     outcome: "failed",
     newerWaiting: false,
-    pasting: false,
   };
   let startAtLogin = false;
   let menuEntry = false;
@@ -188,13 +187,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
       return Promise.resolve();
     },
     copyDraft: () => Promise.resolve(),
-    pasteDraft: (text) => {
-      if (draft) {
-        draft.text = text;
-        draft.outcome = "delivered";
-      }
-      return Promise.resolve();
-    },
     discardDraft: () => {
       draft = null;
       return Promise.resolve();

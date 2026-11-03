@@ -94,8 +94,9 @@ const DRAFT_OUTCOMES: Record<DraftOutcome, string> = {
   delivered: "Delivered.",
   cancelled: "You cancelled this one, so nothing was typed.",
   failed: "This was not delivered.",
-  maybePartial: "Typing stopped partway: some of this text may already be in the window. Check it there, and use Copy text rather than pasting again.",
+  maybePartial: "Typing stopped partway: some of this text may already be in the window. Check it there, or use Copy text.",
 };
+/** While one of these runs the status changes with every word; the draft is read again once it ends. */
 const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "working"];
 const WHEN = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
@@ -852,17 +853,12 @@ function confirmed(label: string, question: string, yes: string, no: string, act
   return el("span", { class: "stack" }, ask, sure);
 }
 
-/** The last dictation: editable, with Copy, Paste into its window, and Discard. Nothing is sent until a button is pressed. */
+/** The last dictation: editable, with Copy, Reset and Discard. Editing sends and copies nothing. */
 function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; refresh: () => void } {
   let current: Draft | null = null;
-  let busy = false;
-  // After a capture the shown draft may be stale until the new one loads; Paste waits for it.
-  let loading = false;
-  let pasting = false;
   const empty = el("p", { class: "note ok" }, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it.");
   const outcome = el("p", { class: "note ok" });
   const newer = el("p", { class: "note why", hidden: true }, "A newer dictation is waiting. Discard this one to see it.");
-  const why = el("p", { class: "note why", hidden: true });
   const text = el("textarea", { rows: "4", spellcheck: "false", "aria-label": "Last dictation text" });
   const done = el("p", { class: "note ok", role: "status", hidden: true });
   const problem = note();
@@ -878,25 +874,6 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
       },
     );
   });
-  const paste = button("Paste", () => {
-    if (paste.disabled || current === null) return;
-    const target = current.target ?? "the window";
-    pasting = true;
-    sync();
-    say(problem, "");
-    say(done, "");
-    backend.pasteDraft(text.value).then(
-      () => {
-        say(done, `Pasted into ${target}. Enter was not pressed.`);
-      },
-      (error: unknown) => {
-        say(problem, errorText(error));
-      },
-    ).finally(() => {
-      pasting = false;
-      refresh();
-    });
-  });
   const reset = button("Reset to original", () => {
     if (current === null) return;
     text.value = current.original;
@@ -910,7 +887,7 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
       say(problem, errorText(error));
     });
   }, "quiet");
-  const editor = el("div", { class: "stack wide", hidden: true }, outcome, newer, text, el("span", { class: "trow" }, copy, paste, reset, discard), why, done);
+  const editor = el("div", { class: "stack wide", hidden: true }, outcome, newer, text, el("span", { class: "trow" }, copy, reset, discard), done);
 
   function saveEdit(): void {
     backend.editDraft(text.value).catch((error: unknown) => {
@@ -919,17 +896,10 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
   }
   function sync(): void {
     if (current === null) return;
-    const blank = text.value.trim() === "";
-    paste.textContent = current.target === null ? "Paste" : `Paste into ${current.target}`;
-    paste.disabled = blank || busy || loading || pasting || current.pasting || current.target === null;
-    copy.disabled = blank;
+    copy.disabled = text.value.trim() === "";
     reset.disabled = text.value === current.original;
-    say(why, current.target === null ? "No window was bound when you dictated this, so only Copy is possible."
-      : busy ? "Thalvi is capturing or delivering. Paste is available again when it has finished."
-      : "");
   }
   function show(next: Draft | null): void {
-    loading = false;
     if (next?.id !== current?.id) {
       say(done, "");
       say(problem, "");
@@ -945,8 +915,6 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
   }
   function refresh(): void {
     backend.getDraft().then(show, (error: unknown) => {
-      loading = false;
-      sync();
       say(problem, errorText(error));
     });
   }
@@ -955,17 +923,14 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
     saveEdit();
   });
   live.status = (status) => {
-    busy = CAPTURE_STATES.includes(status.state);
-    loading = !busy;
-    sync();
-    if (!busy) refresh();
+    if (!CAPTURE_STATES.includes(status.state)) refresh();
   };
   refresh();
 
   return {
     nodes: [
       group("Last dictation"),
-      row("Last dictation", "Fix it, then Copy it or Paste it into the window it was meant for. Editing sends nothing, and Paste never presses Enter. Kept in memory only, until you discard it or quit.",
+      row("Last dictation", "Fix it, then copy it. Editing sends and copies nothing. Kept in memory only, until you discard it or quit.",
         { node: el("div", { class: "stack wide" }, empty, editor, problem), field: text }),
     ],
     refresh,

@@ -15,12 +15,12 @@ use thalvi_desktop::capture::EndingPauses;
 use thalvi_desktop::chosen::Chosen;
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::Delivery;
-use thalvi_desktop::draft::{self, Draft};
+use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
 };
 use thalvi_desktop::history::{Capture, Store as History};
-use thalvi_desktop::host::{Desktop, Host};
+use thalvi_desktop::host::Desktop;
 use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::ModelStore;
@@ -37,9 +37,6 @@ const LOADING_NOTICE: &str = "Loading the speech model. The first time it downlo
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// The last dictation, for the window the capture was bound to on this desktop.
-pub type Drafts = draft::Drafts<<Desktop as Host>::Target>;
 
 /// Where the engine keeps each finished capture.
 pub struct Records {
