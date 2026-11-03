@@ -10,7 +10,9 @@ facts the user can read and correct.
 - `conv-rejoin` brings back the same conversation after a reload.
 - `conv-list` lists saved conversations, newest first, with age.
 - `conv-new` starts an empty conversation and closes the sheet.
-- `conv-reopen` opens a saved conversation with its turns.
+- `conv-preview` shows a saved conversation's turns without joining it, and
+  warns when another device has it open.
+- `conv-reopen` joins the previewed conversation through `Continue here`.
 - `conv-rename` renames a conversation; the title persists.
 - `conv-delete` asks `Delete “<title>”? This can't be undone.`, offers
   `Keep it`, and deletes only on `Delete`. Deleting the open conversation
@@ -63,11 +65,20 @@ Steps:
   - `button[aria-label="Rename Rice ideas"]` appears, and `curl <URL>sessions`
     shows the title `Rice ideas`.
   - `document.activeElement.getAttribute("aria-label")` reads `Rename Rice ideas`.
-- **Reopen.** Choose the `Rice ideas` row.
+- **Preview.** Choose the `Rice ideas` row.
   - Run `$V ab $R find role button click --name "Rice ideas"` and
-    `$V state $R idle`.
+    `$V ab $R wait --fn 'document.querySelector(".o-library")?.innerText.includes("Continue here")'`.
+  - The sheet shows the title and the turns labelled `You` and `Thalvi`; the
+    page's own `.o-turns` is unchanged.
+- **Reopen.** Choose `Continue here`.
+  - Run `$V ab $R find role button click --name "Continue here"` and
+    `$V ab $R wait --fn 'document.querySelector(".o-turns").innerText.includes("What should I cook")'`.
+    `$V state $R idle` alone can pass before the page switches over.
   - The sheet closes and `.o-turns` starts with `What should I cook with
     leftover rice`.
+  - A second browser that has the conversation open shows `This conversation
+    continued on another device.` and stays stopped. Drive it with
+    `agent-browser --session <name>`; previewing from it never stops the first.
 - **Delete, keep.** Open the sheet, wait for
   `button[aria-label="Delete Rice ideas"]`, and choose it.
   - `.o-lib-ask` reads `Delete “Rice ideas”? This can't be undone.`
