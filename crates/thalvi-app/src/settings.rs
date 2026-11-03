@@ -70,7 +70,9 @@ impl Store {
                     let position = format!(" at line {} column {}", error.line(), error.column());
                     text.strip_suffix(&position).unwrap_or(&text).to_owned()
                 }
-                error @ ConfigError::Read { .. } => error.to_string(),
+                error @ (ConfigError::Read { .. } | ConfigError::InvalidFile { .. }) => {
+                    error.to_string()
+                }
             })?;
         let json = serde_json::to_string_pretty(&config)
             .map_err(|error| format!("The settings could not be written: {error}"))?;

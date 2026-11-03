@@ -26,6 +26,14 @@ pub enum ConfigError {
     },
     #[error("The desktop config is not valid: {0}")]
     Invalid(#[from] serde_json::Error),
+    #[error(
+        "The desktop config at {path} is not valid: {source}. Fix or remove the file, then start Thalvi again."
+    )]
+    InvalidFile {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 /// What the desktop app is configured to do. Every setting is optional in the file and has
@@ -567,7 +575,10 @@ impl DesktopConfig {
             path: path.to_owned(),
             source,
         })?;
-        Self::from_json_str(&json)
+        serde_json::from_str(&json).map_err(|source| ConfigError::InvalidFile {
+            path: path.to_owned(),
+            source,
+        })
     }
 
     /// Validates config `json`.
@@ -1325,7 +1336,7 @@ mod tests {
     }
 
     #[test]
-    fn load_reads_a_file_and_names_one_it_cannot_read() {
+    fn load_reads_a_file_and_names_one_it_cannot_read_or_understand() {
         let dir = std::env::temp_dir().join(format!("thalvi-config-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1334,6 +1345,9 @@ mod tests {
 
         let loaded = DesktopConfig::load(&path).unwrap();
         let missing = DesktopConfig::load(&dir.join("missing.json")).unwrap_err();
+        let broken_path = dir.join("broken.json");
+        std::fs::write(&broken_path, "{1: 2}").unwrap();
+        let broken = DesktopConfig::load(&broken_path).unwrap_err();
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(
@@ -1342,5 +1356,13 @@ mod tests {
         );
         assert!(matches!(missing, ConfigError::Read { .. }));
         assert!(missing.to_string().contains("missing.json"));
+        assert_eq!(
+            broken.to_string(),
+            format!(
+                "The desktop config at {} is not valid: key must be a string at line 1 column 2. \
+                 Fix or remove the file, then start Thalvi again.",
+                broken_path.display()
+            )
+        );
     }
 }
