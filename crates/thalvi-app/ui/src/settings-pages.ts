@@ -484,9 +484,12 @@ function microphone({ draft, backend, controls, microphones, live, audio }: Page
     draft.microphone = value === "" ? null : value;
   });
   const pickerInput = picker.field as HTMLSelectElement;
+  const whyLocked = el("p", { class: "note why", id: uid("n") }, "Pause listening above to change the microphone.");
+  pickerInput.setAttribute("aria-describedby", whyLocked.id);
   const active = el("output", { class: "badge" }, "");
   const showAudio = (next: AudioStatus): void => {
     pickerInput.disabled = !next.paused;
+    whyLocked.hidden = next.paused;
     active.textContent = next.active ?? "None — no microphone is open";
     active.dataset["on"] = String(next.active !== null);
   };
@@ -525,7 +528,10 @@ function microphone({ draft, backend, controls, microphones, live, audio }: Page
       field: el("span", { id: uid("f") }),
     }),
     group("Saved with Save"),
-    row("Saved device", Array.isArray(microphones) ? "Pause listening to change it. Saving writes this choice; it does not prove a microphone opened." : null, picker),
+    row("Saved device", Array.isArray(microphones) ? "Pause listening to change it. Saving writes this choice; it does not prove a microphone opened." : null, {
+      node: el("span", { class: "stack" }, picker.node, whyLocked),
+      field: pickerInput,
+    }),
   ];
   if (!Array.isArray(microphones)) {
     rows.unshift(el("p", { class: "note", role: "alert" }, `Microphones could not be listed: ${microphones.error}`));
