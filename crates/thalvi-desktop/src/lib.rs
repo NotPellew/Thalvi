@@ -6,6 +6,7 @@ pub mod chosen;
 pub mod config;
 pub mod cues;
 pub mod delivery;
+pub mod draft;
 pub mod engine;
 pub mod fbank;
 pub mod frame;

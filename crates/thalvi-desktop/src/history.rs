@@ -422,6 +422,7 @@ mod tests {
     fn finished(delivered: bool) -> Finished {
         Finished {
             delivered,
+            maybe_partial: false,
             notice: String::new(),
             headline: "",
             causes: Vec::new(),

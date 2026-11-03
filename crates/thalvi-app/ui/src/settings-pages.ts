@@ -3,6 +3,8 @@
 import type {
   AudioStatus,
   Backend,
+  Draft,
+  DraftOutcome,
   Ending,
   HistoryEntry,
   HistoryOutcome,
@@ -11,6 +13,7 @@ import type {
   Settings,
   SpeechModelInfo,
   SpeechModelProgress,
+  Status,
   SttEngine,
   SwitchState,
 } from "./contract.ts";
@@ -40,6 +43,7 @@ export interface PageContext {
     listening: (on: boolean) => void;
     audio: (audio: AudioStatus) => void;
     speechModel: (progress: SpeechModelProgress) => void;
+    status: (status: Status) => void;
     /** The page with this id was opened. */
     opened: (id: string) => void;
   };
@@ -86,6 +90,14 @@ const CUES: readonly (readonly [keyof Settings["cues"], string, string])[] = [
 ];
 const WAKE_MODELS = ["hey_thalvi", "hey_mycroft", "hey_jarvis"];
 const OUTCOMES: Record<HistoryOutcome, string> = { accepted: "Delivered", cancelled: "Cancelled", failed: "Failed" };
+const DRAFT_OUTCOMES: Record<DraftOutcome, string> = {
+  delivered: "Delivered.",
+  cancelled: "You cancelled this one, so nothing was typed.",
+  failed: "This was not delivered.",
+  maybePartial: "Typing stopped partway: some of this text may already be in the window. Check it there, or use Copy text.",
+};
+/** While one of these runs the status changes with every word; the draft is read again once it ends. */
+const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "working"];
 const WHEN = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 export function row(label: string, hint: string | null, control: Field | HTMLElement): HTMLElement {
@@ -810,15 +822,29 @@ function recordings({ draft, backend, controls }: PageContext): HTMLElement[] {
   ];
 }
 
-function entryCard(entry: HistoryEntry, remove: () => void): HTMLElement {
+function entryCard(entry: HistoryEntry, remove: () => void, copyText: (text: string) => Promise<void>): HTMLElement {
   const when = new Date(entry.timestamp_ms);
   const time = el("time", { datetime: when.toISOString() }, WHEN.format(when));
   const header = el("header", {}, time);
   if (entry.target !== null) header.append(el("span", { class: "target" }, entry.target));
   header.append(el("span", { class: "outcome" }, OUTCOMES[entry.outcome]));
+  const result = el("p", { class: "note", role: "status", hidden: true });
+  const copy = button("Copy", () => {
+    copyText(entry.text).then(
+      () => {
+        result.className = "note ok";
+        say(result, "Copied to the clipboard.");
+      },
+      (error: unknown) => {
+        result.className = "note";
+        say(result, errorText(error));
+      },
+    );
+  }, "quiet");
+  copy.setAttribute("aria-label", `Copy the entry from ${time.textContent}`);
   const del = button("Delete", remove, "quiet");
   del.setAttribute("aria-label", `Delete the entry from ${time.textContent}`);
-  return el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, entry.text), del);
+  return el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, entry.text), result, el("span", { class: "trow" }, copy, del));
 }
 
 /** A button that asks before it acts: it is replaced by the question and a yes and a no. */
@@ -841,7 +867,93 @@ function confirmed(label: string, question: string, yes: string, no: string, act
   return el("span", { class: "stack" }, ask, sure);
 }
 
-function history({ draft, backend, controls, live }: PageContext): HTMLElement[] {
+/** The last dictation: editable, with Copy, Reset and Discard. Editing sends and copies nothing. */
+function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; refresh: () => void } {
+  let current: Draft | null = null;
+  const empty = el("p", { class: "note ok" }, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it.");
+  const outcome = el("p", { class: "note ok" });
+  const newer = el("p", { class: "note why", hidden: true }, "A newer dictation is waiting. Discard this one to see it.");
+  const text = el("textarea", { rows: "4", spellcheck: "false", "aria-label": "Last dictation text" });
+  const done = el("p", { class: "note ok", role: "status", hidden: true });
+  const problem = note();
+  const copy = button("Copy text", () => {
+    say(problem, "");
+    backend.copyText(text.value).then(
+      () => {
+        say(done, "Copied to the clipboard.");
+      },
+      (error: unknown) => {
+        say(done, "");
+        say(problem, errorText(error));
+      },
+    );
+  });
+  const reset = button("Reset to original", () => {
+    if (current === null) return;
+    text.value = current.original;
+    sync();
+    saveEdit();
+  }, "quiet");
+  const discard = button("Discard", () => {
+    say(problem, "");
+    say(done, "");
+    backend.discardDraft().then(refresh, (error: unknown) => {
+      say(problem, errorText(error));
+    });
+  }, "quiet");
+  const editor = el("div", { class: "stack wide", hidden: true }, outcome, newer, text, el("span", { class: "trow" }, copy, reset, discard), done);
+
+  function saveEdit(): void {
+    backend.editDraft(text.value).catch((error: unknown) => {
+      say(problem, errorText(error));
+    });
+  }
+  function sync(): void {
+    if (current === null) return;
+    copy.disabled = text.value.trim() === "";
+    reset.disabled = text.value === current.original;
+  }
+  function show(next: Draft | null): void {
+    if (next?.id !== current?.id) {
+      say(done, "");
+      say(problem, "");
+    }
+    if (next !== null && next.id !== current?.id) text.value = next.text;
+    current = next;
+    empty.hidden = next !== null;
+    editor.hidden = next === null;
+    if (next === null) return;
+    outcome.textContent = next.target === null ? DRAFT_OUTCOMES[next.outcome] : `${DRAFT_OUTCOMES[next.outcome]} Meant for ${next.target}.`;
+    newer.hidden = !next.newerWaiting;
+    sync();
+  }
+  function refresh(): void {
+    backend.getDraft().then(show, (error: unknown) => {
+      say(problem, errorText(error));
+    });
+  }
+  text.addEventListener("input", () => {
+    sync();
+    saveEdit();
+  });
+  live.status = (status) => {
+    if (!CAPTURE_STATES.includes(status.state)) refresh();
+  };
+  refresh();
+
+  return {
+    nodes: [
+      group("Last dictation"),
+      row("Last dictation", "Fix it, then copy it. Editing sends and copies nothing. Kept in memory only, until you discard it or quit.",
+        { node: el("div", { class: "stack wide" }, empty, editor, problem), field: text }),
+    ],
+    refresh,
+  };
+}
+
+function history(context: PageContext): HTMLElement[] {
+  const { draft, backend, controls, live } = context;
+  const last = lastDictation(context);
   const list = el("div", { class: "entries" });
   const problem = note();
   const nothing = el("p", { class: "note ok" }, "Nothing has been kept yet.");
@@ -850,7 +962,7 @@ function history({ draft, backend, controls, live }: PageContext): HTMLElement[]
     backend.getHistory().then(
       (entries) => {
         say(problem, "");
-        list.replaceChildren(...(entries.length === 0 ? [nothing] : entries.map((entry) => entryCard(entry, () => { change(backend.deleteHistoryEntry(entry.id)); }))));
+        list.replaceChildren(...(entries.length === 0 ? [nothing] : entries.map((entry) => entryCard(entry, () => { change(backend.deleteHistoryEntry(entry.id)); }, (text) => backend.copyText(text)))));
       },
       (error: unknown) => {
         say(problem, errorText(error));
@@ -865,11 +977,15 @@ function history({ draft, backend, controls, live }: PageContext): HTMLElement[]
     });
   }
   live.opened = (id) => {
-    if (id === "history") refresh();
+    if (id === "history") {
+      refresh();
+      last.refresh();
+    }
   };
   refresh();
 
   return [
+    ...last.nodes,
     group("Keeping"),
     row("Keep a history", "What you dictate, when, where it went and how it ended; never audio. Kept on this computer only, never uploaded. Turning this off stops new entries and deletes none: delete them below.",
       controls.toggle(draft.history.enabled, (value) => {

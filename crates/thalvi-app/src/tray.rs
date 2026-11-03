@@ -16,6 +16,7 @@ const SAMPLES: u8 = 4;
 pub const TOGGLE: &str = "toggle";
 pub const CANCEL: &str = "cancel";
 pub const COPY_ERROR: &str = "copy-error";
+pub const LAST_DICTATION: &str = "last-dictation";
 pub const SETTINGS: &str = "settings";
 pub const QUIT: &str = "quit";
 
@@ -228,11 +229,20 @@ impl Tray {
             CopyItem::NoError.enabled(),
             None::<&str>,
         )?;
+        let last = MenuItem::with_id(app, LAST_DICTATION, "Last dictation…", true, None::<&str>)?;
         let settings = MenuItem::with_id(app, SETTINGS, "Settings…", true, None::<&str>)?;
         let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
         let menu = Menu::with_items(
             app,
-            &[&header, &toggle, &cancel, &copy_error, &settings, &quit],
+            &[
+                &header,
+                &toggle,
+                &cancel,
+                &copy_error,
+                &last,
+                &settings,
+                &quit,
+            ],
         )?;
         let icon = TrayIconBuilder::with_id("thalvi")
             .icon(Image::new_owned(

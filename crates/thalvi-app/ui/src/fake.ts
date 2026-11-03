@@ -1,6 +1,6 @@
 // Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the overlay to the n-th status of the script and `?look=holo` or `?look=gunmetal` picks the look.
 
-import type { AudioStatus, Backend, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
 import { LOOKS } from "./look.ts";
 
 const SETTINGS: Settings = {
@@ -126,6 +126,14 @@ export function fakeBackend(params: URLSearchParams): Backend {
     { id: 2, timestamp_ms: now - 3_600_000, text: "Thalvi could not reach the window that was open when you started.", target: null, outcome: "failed" },
     { id: 1, timestamp_ms: now - 86_400_000, text: "Hey, I'm running a few minutes late", target: "Firefox", outcome: "cancelled" },
   ];
+  let draft: Draft | null = {
+    id: 1,
+    original: "Remind me to call the dentist tomorow morning.",
+    text: "Remind me to call the dentist tomorow morning.",
+    target: "Slack",
+    outcome: "failed",
+    newerWaiting: false,
+  };
   let startAtLogin = false;
   let menuEntry = false;
   const hyprland = params.has("hyprland");
@@ -174,6 +182,17 @@ export function fakeBackend(params: URLSearchParams): Backend {
       history = [];
       return Promise.resolve();
     },
+    getDraft: () => Promise.resolve(structuredClone(draft)),
+    editDraft: (text) => {
+      if (draft) draft.text = text;
+      return Promise.resolve();
+    },
+    copyText: () => Promise.resolve(),
+    discardDraft: () => {
+      draft = null;
+      return Promise.resolve();
+    },
+    onOpenPage: () => undefined,
     getStartAtLogin: () =>
       Promise.resolve(
         hyprland

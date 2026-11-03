@@ -100,6 +100,21 @@ export interface HistoryEntry {
   outcome: HistoryOutcome;
 }
 
+export type DraftOutcome = "delivered" | "cancelled" | "failed" | "maybePartial";
+
+/** The last dictation, held in memory; `text` is the user's edit and `original` what was heard. */
+export interface Draft {
+  /** Changes when a different dictation becomes the draft, so the text is reloaded only then. */
+  id: number;
+  original: string;
+  text: string;
+  /** The window the dictation was meant for, when one was bound. */
+  target: string | null;
+  outcome: DraftOutcome;
+  /** A newer dictation ended while this one had unsent edits; discarding this one shows it. */
+  newerWaiting: boolean;
+}
+
 /** A speech model Thalvi can download, as the Rust catalog describes it. */
 export interface SpeechModelInfo {
   name: string;
@@ -147,6 +162,15 @@ export interface Backend {
   deleteHistoryEntry(id: number): Promise<void>;
   /** Removes every entry, and a damaged history file with them. */
   clearHistory(): Promise<void>;
+  /** The last dictation, or null when there is none. */
+  getDraft(): Promise<Draft | null>;
+  /** Keeps the edited text; nothing is recognized, copied or typed. */
+  editDraft(text: string): Promise<void>;
+  /** Puts the text on the clipboard through the desktop; rejects with the plain reason it could not. */
+  copyText(text: string): Promise<void>;
+  discardDraft(): Promise<void>;
+  /** The tray asked for the settings page with this id. */
+  onOpenPage(listener: (page: string) => void): void;
   /** Whether the OS starts Thalvi at login, read from the OS, and why Thalvi could not put its entry back on start. */
   getStartAtLogin(): Promise<SwitchState>;
   /** Adds or removes the startup entry; rejects unless the OS then holds it as asked. */

@@ -1,6 +1,7 @@
 //! Runs the capture engine on its own thread and follows the app's control messages.
 
 use std::cell::RefCell;
+use std::fmt::Display;
 use std::future::Future;
 use std::pin::pin;
 use std::rc::Rc;
@@ -14,7 +15,8 @@ use thalvi_desktop::audio::{Frames, InputGate, Microphone};
 use thalvi_desktop::capture::EndingPauses;
 use thalvi_desktop::chosen::Chosen;
 use thalvi_desktop::config::DesktopConfig;
-use thalvi_desktop::delivery::Delivery;
+use thalvi_desktop::delivery::{Bound, Delivery, Finished};
+use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
 };
@@ -83,8 +85,9 @@ impl EngineLink {
     /// Fails when the thread or its runtime cannot start.
     pub fn start(
         config: DesktopConfig,
-        host: Desktop,
+        delivery: Arc<Delivery<Desktop>>,
         history: Arc<History>,
+        drafts: Arc<Drafts>,
     ) -> Result<Self, String> {
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
@@ -117,7 +120,7 @@ impl EngineLink {
                 let publisher = Publisher::new(status_tx, config.ending_pause);
                 let runner = Runner::new(
                     config,
-                    host,
+                    delivery,
                     control_rx,
                     publisher,
                     Arc::new(level_tx),
@@ -125,6 +128,7 @@ impl EngineLink {
                     Shared {
                         key: key_state,
                         history,
+                        drafts,
                     },
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
@@ -306,6 +310,7 @@ struct Shared {
     /// Whether the hold key is down.
     key: watch::Receiver<KeyState>,
     history: Arc<History>,
+    drafts: Arc<Drafts>,
 }
 
 struct Runner {
@@ -323,8 +328,9 @@ struct Runner {
     publisher: Rc<Publisher>,
     level: Arc<watch::Sender<f32>>,
     audio: watch::Sender<AudioStatus>,
-    delivery: Delivery<Desktop>,
+    delivery: Arc<Delivery<Desktop>>,
     history: Arc<History>,
+    drafts: Arc<Drafts>,
     http: reqwest::Client,
     /// Loads the current engine's speech model.
     loading: Option<JoinHandle<()>>,
@@ -336,7 +342,7 @@ struct Runner {
 impl Runner {
     fn new(
         config: DesktopConfig,
-        host: Desktop,
+        delivery: Arc<Delivery<Desktop>>,
         control: mpsc::UnboundedReceiver<Control>,
         publisher: Rc<Publisher>,
         level: Arc<watch::Sender<f32>>,
@@ -355,8 +361,9 @@ impl Runner {
             publisher,
             level,
             audio,
-            delivery: Delivery::new(host),
+            delivery,
             history: shared.history,
+            drafts: shared.drafts,
             http: reqwest::Client::new(),
             loading: None,
             key: Presses::new(shared.key.clone()),
@@ -750,6 +757,22 @@ impl Runner {
         }
     }
 
+    /// Records a finished capture in the history and offers it as the last draft.
+    fn keep<T: Display>(
+        &self,
+        outcome: &CaptureOutcome,
+        finished: Option<&Finished>,
+        bound: &Bound<T>,
+    ) {
+        if let Some(capture) = Capture::of(outcome, finished, bound.window()) {
+            self.history
+                .record_in_background(self.config.history, capture);
+        }
+        if let Some(draft) = Draft::of(outcome, finished, bound) {
+            self.drafts.offer(draft);
+        }
+    }
+
     /// Takes one capture from the wake word to its delivery.
     async fn capture(&mut self) -> Flow {
         let bound = {
@@ -824,10 +847,7 @@ impl Runner {
             }
             None => None,
         };
-        if let Some(capture) = Capture::of(&outcome, finished.as_ref(), bound.window()) {
-            self.history
-                .record_in_background(self.config.history, capture);
-        }
+        self.keep(&outcome, finished.as_ref(), &bound);
         let mode = match (finished, route) {
             (Some(finished), Some(route)) if finished.delivered => {
                 println!("{}", finished.notice);

@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use thalvi_desktop::config::DesktopConfig;
+use thalvi_desktop::delivery::Delivery;
+use thalvi_desktop::draft::Drafts;
 use thalvi_desktop::history;
 use thalvi_desktop::hold::HoldKey;
 use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, StateServer};
@@ -26,6 +28,10 @@ use crate::tray::{self, CopyItem, Tray};
 
 const SETTINGS: &str = "settings";
 
+/// The settings page that holds the last dictation, and the event that opens a page.
+const HISTORY_PAGE: &str = "history";
+const OPEN_PAGE_EVENT: &str = "thalvi://open-page";
+
 /// What the commands and the tray menu reach.
 pub struct AppState {
     pub link: EngineLink,
@@ -34,6 +40,10 @@ pub struct AppState {
     pub speech_downloads: SpeechDownloads,
     /// The dictation history, shared with the engine thread that writes it.
     pub history: Arc<history::Store>,
+    /// The last dictation, shared with the engine thread that offers each new one.
+    pub drafts: Arc<Drafts>,
+    /// Delivers for the engine thread and copies for the commands, so both record the same metrics.
+    pub delivery: Arc<Delivery<Desktop>>,
     /// The latest failure shown, for "Copy last error" in the tray and `copy-error`.
     last_error: LastError,
     /// Set once the engine's first status is in; the tray menu and the commands update it.
@@ -57,10 +67,15 @@ impl AppState {
         let store = Store::new(config)?;
         let config = store.load()?;
         let history = Arc::new(history::Store::per_user());
+        let drafts = Arc::new(Drafts::default());
+        let delivery = Arc::new(Delivery::new(
+            Desktop::detect().map_err(|error| error.to_string())?,
+        ));
         let link = EngineLink::start(
             config.clone(),
-            Desktop::detect().map_err(|error| error.to_string())?,
+            Arc::clone(&delivery),
             Arc::clone(&history),
+            Arc::clone(&drafts),
         )?;
         let last_error = LastError::default();
         let state_server = match Desktop::serve_state(control::answer(
@@ -81,6 +96,8 @@ impl AppState {
             overlay: Overlay::default(),
             speech_downloads: SpeechDownloads::default(),
             history,
+            drafts,
+            delivery,
             last_error,
             tray: OnceLock::new(),
             host: Arc::new(Desktop::detect().map_err(|error| error.to_string())?),
@@ -302,6 +319,10 @@ fn start() -> Result<(), String> {
             commands::get_history,
             commands::delete_history_entry,
             commands::clear_history,
+            commands::get_draft,
+            commands::edit_draft,
+            commands::copy_text,
+            commands::discard_draft,
         ])
         .setup(move |app| {
             // Tauri turns an error from this hook into a panic, so it is reported here instead.
@@ -478,6 +499,10 @@ pub fn on_menu(app: &AppHandle, id: &str) {
         tray::CANCEL => act(app, Command::Cancel),
         tray::COPY_ERROR => act(app, Command::CopyError),
         tray::SETTINGS => act(app, Command::Show),
+        tray::LAST_DICTATION => {
+            act(app, Command::Show);
+            let _ = app.emit(OPEN_PAGE_EVENT, HISTORY_PAGE);
+        }
         tray::QUIT => {
             let app = app.clone();
             tauri::async_runtime::spawn_blocking(move || {

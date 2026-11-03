@@ -48,6 +48,8 @@ pub fn submit_notice(state: &EngineState, window: &str) -> Option<String> {
 pub struct Finished {
     /// The text reached its destination; otherwise it is kept on the clipboard when possible.
     pub delivered: bool,
+    /// Typing stopped partway, so some of the text may be in the window; never with `delivered`.
+    pub maybe_partial: bool,
     /// Says what happened and where the dictated text went.
     pub notice: String,
     /// `notice` as one short line for the overlay.
@@ -60,6 +62,7 @@ impl Finished {
     fn delivered(notice: String) -> Self {
         Self {
             delivered: true,
+            maybe_partial: false,
             notice,
             headline: "Delivered",
             causes: Vec::new(),
@@ -69,6 +72,7 @@ impl Finished {
     fn kept(notice: String, headline: &'static str) -> Self {
         Self {
             delivered: false,
+            maybe_partial: false,
             notice,
             headline,
             causes: Vec::new(),
@@ -90,6 +94,11 @@ where
         Self {
             host: Arc::new(host),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn host(&self) -> &H {
+        &self.host
     }
 
     /// Binds the window that has focus now; call at the wake, before the capture starts.
@@ -168,8 +177,21 @@ where
                 }
                 Finished::delivered("Delivered.".to_owned())
             }
-            Err(error) => self.keep(recorder, text, &error).await,
+            Err(error) => Finished {
+                maybe_partial: matches!(error, HostError::MaybePartial(_)),
+                ..self.keep(recorder, text, &error).await
+            },
         }
+    }
+
+    /// Puts `text` on the clipboard.
+    ///
+    /// # Errors
+    /// Why the clipboard could not be set.
+    pub async fn copy_text(&self, recorder: &Recorder, text: &str) -> Result<(), HostError> {
+        let owned = text.to_owned();
+        self.call(recorder, "copy", move |host| host.copy(&owned))
+            .await
     }
 
     async fn run_task(&self, recorder: &Recorder, config: &DesktopConfig, text: &str) -> Finished {
@@ -302,6 +324,23 @@ mod tests {
     async fn run(host: FakeHost, outcome: CaptureOutcome) -> (Option<String>, Vec<String>) {
         let (finished, calls) = finish(host, outcome).await;
         (finished.map(|finished| finished.notice), calls)
+    }
+
+    #[tokio::test]
+    async fn copying_text_puts_it_on_the_clipboard_and_says_why_it_could_not() {
+        let locked = HostError::Unsupported("The clipboard is locked.".to_owned());
+        for (host, expected) in [
+            (FakeHost::default(), Ok(())),
+            (
+                FakeHost::default().failing("copy", locked.clone()),
+                Err(locked),
+            ),
+        ] {
+            let delivery = Delivery::new(host);
+            let result = delivery.copy_text(&Recorder::disabled(), "fixed").await;
+            assert_eq!(result, expected);
+            assert_eq!(delivery.host.calls(), ["copy:\"fixed\""]);
+        }
     }
 
     #[tokio::test]

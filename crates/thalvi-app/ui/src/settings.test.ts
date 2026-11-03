@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryEntry, Settings } from "./contract.ts";
+import type { Draft, HistoryEntry, Settings } from "./contract.ts";
 import { mountSettings, SAVED_TEXT } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend } from "./testing.ts";
 
@@ -139,6 +139,7 @@ describe("pages", () => {
         id: "history",
         title: "History",
         groups: {
+          "Last dictation": ["last dictation"],
           Keeping: ["keep a history", "entries to keep"],
           "Kept so far": ["recent dictations", "clear history"],
         },
@@ -1050,6 +1051,21 @@ describe("history", () => {
     expect(group().querySelector(".trow")?.hasAttribute("hidden")).toBe(true);
   });
 
+  it("copies exactly one entry's text and says so on that row, or says why it could not", async () => {
+    const stub = await openHistory(ENTRIES);
+    const rows = cards();
+    within(rows[1] as HTMLElement, "Copy").click();
+    await settle();
+    expect(stub.backend.copyText).toHaveBeenCalledExactlyOnceWith("The window was gone.");
+    expect(rows.map((card) => card.querySelector(".note")?.textContent ?? "")).toEqual(["", "Copied to the clipboard.", ""]);
+    expect(within(rows[1] as HTMLElement, "Copy").getAttribute("aria-label")).toMatch(/^Copy the entry from /);
+
+    stub.backend.copyText.mockRejectedValueOnce("The clipboard is locked.");
+    within(rows[0] as HTMLElement, "Copy").click();
+    await settle();
+    expect(rows.map((card) => card.querySelector(".note")?.textContent ?? "")).toEqual(["The clipboard is locked.", "Copied to the clipboard.", ""]);
+  });
+
   it("shows why the history cannot be read and lets the user start a new one", async () => {
     const damaged = "The history file /home/me/history.json is damaged (EOF). Clear the history to start a new one.";
     const stub = await openHistory(new Error(damaged), [ENTRIES[0] as HistoryEntry]);
@@ -1079,5 +1095,153 @@ describe("history", () => {
     expected.history = { enabled: false, limit: 50 };
     expect(sent(stub)).toEqual(expected);
     expect(stub.backend.clearHistory).not.toHaveBeenCalled();
+  });
+});
+
+describe("last dictation", () => {
+  const DRAFT: Draft = {
+    id: 7,
+    original: "Remind me to call the dentist tomorow.",
+    text: "Remind me to call the dentist tomorow.",
+    target: "foot",
+    outcome: "failed",
+    newerWaiting: false,
+  };
+
+  async function openDraft(draft: Draft | null = DRAFT) {
+    const stub = stubBackend();
+    stub.backend.getDraft.mockImplementation(() => Promise.resolve(draft === null ? null : structuredClone(draft)));
+    mountSettings(root, stub.backend);
+    await settle();
+    return stub;
+  }
+
+  const area = (): HTMLTextAreaElement => rowOf("Last dictation").querySelector("textarea") as HTMLTextAreaElement;
+  const section = (): HTMLElement => rowOf("Last dictation");
+  const buttons = (): string[] => Array.from(section().querySelectorAll("button")).map((candidate) => candidate.textContent);
+  const notes = (): string[] => Array.from(section().querySelectorAll<HTMLElement>(".note")).filter(shownInSection).map((node) => node.textContent);
+
+  function shownInSection(node: HTMLElement): boolean {
+    for (let at: HTMLElement | null = node; at !== null && at !== section().parentElement; at = at.parentElement) if (at.hidden) return false;
+    return true;
+  }
+
+  function edit(value: string): void {
+    area().value = value;
+    area().dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  it("says there is nothing to recover when there is no draft", async () => {
+    await openDraft(null);
+    expect(notes()).toEqual(["Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it."]);
+    expect(section().querySelector<HTMLElement>(".stack > .stack")?.hidden).toBe(true);
+  });
+
+  it("shows the draft with how it ended and the window it was meant for", async () => {
+    for (const [outcome, sentence] of [
+      ["delivered", "Delivered. Meant for foot."],
+      ["cancelled", "You cancelled this one, so nothing was typed. Meant for foot."],
+      ["failed", "This was not delivered. Meant for foot."],
+      ["maybePartial", "Typing stopped partway: some of this text may already be in the window. Check it there, or use Copy text. Meant for foot."],
+    ] as const) {
+      document.body.innerHTML = '<div id="settings"></div>';
+      root = document.getElementById("settings") as HTMLElement;
+      await openDraft({ ...DRAFT, outcome });
+      expect(area().value, outcome).toBe(DRAFT.text);
+      expect(notes()[0], outcome).toBe(sentence);
+      expect(buttons(), outcome).toEqual(["Copy text", "Reset to original", "Discard"]);
+    }
+  });
+
+  it("keeps an edit without recognizing, copying or sending anything, and can reset it", async () => {
+    const stub = await openDraft();
+    expect(within(section(), "Reset to original").disabled).toBe(true);
+    edit("Remind me to call the dentist tomorrow.");
+    expect(stub.backend.editDraft).toHaveBeenLastCalledWith("Remind me to call the dentist tomorrow.");
+    expect(within(section(), "Reset to original").disabled).toBe(false);
+    within(section(), "Reset to original").click();
+    expect(area().value).toBe(DRAFT.original);
+    expect(stub.backend.editDraft).toHaveBeenLastCalledWith(DRAFT.original);
+    expect(stub.backend.copyText).not.toHaveBeenCalled();
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("offers no Copy for an empty edit", async () => {
+    await openDraft();
+    for (const blank of ["", "   "]) {
+      edit(blank);
+      expect(within(section(), "Copy text").disabled, blank).toBe(true);
+    }
+    edit("back");
+    expect(within(section(), "Copy text").disabled).toBe(false);
+  });
+
+  it("copies the edited text, and says why when it could not", async () => {
+    const stub = await openDraft();
+    edit("fixed text");
+    within(section(), "Copy text").click();
+    await settle();
+    expect(stub.backend.copyText).toHaveBeenCalledExactlyOnceWith("fixed text");
+    expect(notes()).toContain("Copied to the clipboard.");
+
+    stub.backend.copyText.mockRejectedValueOnce("The clipboard is locked.");
+    within(section(), "Copy text").click();
+    await settle();
+    expect(notes()).toContain("The clipboard is locked.");
+    expect(notes()).not.toContain("Copied to the clipboard.");
+    expect(area().value).toBe("fixed text");
+  });
+
+  it("checks the draft again when a capture ends, not while it runs", async () => {
+    const stub = await openDraft();
+    const calls = stub.backend.getDraft.mock.calls.length;
+    for (const state of [
+      { state: "capturing", target: "foot", committed: "", partial: null },
+      { state: "working", target: "foot", route: "paste", cancellable: false },
+    ] as const) stub.emit(state);
+    await settle();
+    expect(stub.backend.getDraft.mock.calls.length).toBe(calls);
+    stub.emit({ state: "listening" });
+    await settle();
+    expect(stub.backend.getDraft.mock.calls.length).toBe(calls + 1);
+  });
+
+  it("shows a new dictation, but keeps the edits and says a newer one waits when there are unsent edits", async () => {
+    const stub = await openDraft();
+    stub.backend.getDraft.mockImplementation(() => Promise.resolve({ ...DRAFT, id: 8, original: "A newer one.", text: "A newer one." }));
+    stub.emit({ state: "listening" });
+    await settle();
+    expect(area().value).toBe("A newer one.");
+
+    edit("A newer one, fixed.");
+    stub.backend.getDraft.mockImplementation(() => Promise.resolve({ ...DRAFT, id: 8, original: "A newer one.", text: "A newer one, fixed.", newerWaiting: true }));
+    stub.emit({ state: "listening" });
+    await settle();
+    expect(area().value).toBe("A newer one, fixed.");
+    expect(notes()).toContain("A newer dictation is waiting. Discard this one to see it.");
+  });
+
+  it("discards the draft and shows the one that waited", async () => {
+    const stub = await openDraft({ ...DRAFT, newerWaiting: true });
+    stub.backend.getDraft.mockResolvedValueOnce({ ...DRAFT, id: 9, original: "Waiting.", text: "Waiting." });
+    within(section(), "Discard").click();
+    await settle();
+    expect(stub.backend.discardDraft).toHaveBeenCalledOnce();
+    expect(area().value).toBe("Waiting.");
+    expect(notes()).not.toContain("A newer dictation is waiting. Discard this one to see it.");
+
+    stub.backend.getDraft.mockResolvedValueOnce(null);
+    within(section(), "Discard").click();
+    await settle();
+    expect(notes()[0]).toContain("Nothing to recover yet.");
+  });
+
+  it("opens on the History page when the tray asks for it", async () => {
+    const stub = await openDraft();
+    expect(root.querySelector<HTMLElement>('section[data-page="history"]')?.hidden).toBe(true);
+    stub.openPage("history");
+    expect(root.querySelector<HTMLElement>('section[data-page="history"]')?.hidden).toBe(false);
+    stub.openPage("nowhere");
+    expect(root.querySelector<HTMLElement>('section[data-page="history"]')?.hidden).toBe(false);
   });
 });

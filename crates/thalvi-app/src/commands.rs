@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 use thalvi_desktop::audio;
+use thalvi_desktop::draft::DraftView;
 use thalvi_desktop::history::{Entry, HistoryError, Store as History};
 use thalvi_desktop::host::{Desktop, Host, WebUrl};
 use thalvi_desktop::metrics::{Event, Recorder};
@@ -313,6 +314,35 @@ pub async fn delete_history_entry(id: u64, state: State<'_, AppState>) -> Result
 #[tauri::command]
 pub async fn clear_history(state: State<'_, AppState>) -> Result<(), String> {
     with_history(&state, History::clear).await
+}
+
+/// The last dictation, if there is one.
+#[tauri::command]
+pub fn get_draft(state: State<'_, AppState>) -> Option<DraftView> {
+    state.drafts.view()
+}
+
+/// Keeps the edited text. Nothing is recognized, copied or typed.
+#[tauri::command]
+pub fn edit_draft(text: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.drafts.edit(text).map_err(|error| error.to_string())
+}
+
+/// Puts `text` on the clipboard through the desktop.
+#[tauri::command]
+pub async fn copy_text(text: String, state: State<'_, AppState>) -> Result<(), String> {
+    let recorder =
+        Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
+    state
+        .delivery
+        .copy_text(&recorder, &text)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn discard_draft(state: State<'_, AppState>) {
+    state.drafts.discard();
 }
 
 #[tauri::command]
