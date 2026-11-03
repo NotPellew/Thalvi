@@ -171,6 +171,8 @@ impl<A: Win32> Windows<A> {
 impl<A: Win32> Host for Windows<A> {
     type Target = Target;
 
+    const OVERLAY_TAKES_CLICKS: bool = true;
+
     fn capture_target(&self) -> Result<Target, HostError> {
         let window = self.api.foreground().ok_or_else(|| {
             nothing_typed("No window is in front, so Thalvi has nowhere to type.")

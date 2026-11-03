@@ -242,6 +242,7 @@ fn start() -> Result<(), String> {
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_audio,
+            commands::overlay_takes_clicks,
             commands::get_settings,
             commands::save_settings,
             commands::set_listening,

@@ -159,6 +159,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
       emit({ state: "listening" });
       return Promise.resolve();
     },
+    overlayTakesClicks: () => Promise.resolve(true),
     dismissError: () => Promise.resolve(),
     copyReport: () => Promise.resolve(),
     listMicrophones: () => Promise.resolve([...microphones]),
