@@ -1,6 +1,7 @@
 //! Runs the capture engine on its own thread and follows the app's control messages.
 
 use std::cell::RefCell;
+use std::fmt::Display;
 use std::future::Future;
 use std::pin::pin;
 use std::rc::Rc;
@@ -9,17 +10,18 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use thalvi_desktop::audio::{Frames, InputGate, Microphone};
 use thalvi_desktop::capture::EndingPauses;
 use thalvi_desktop::chosen::Chosen;
 use thalvi_desktop::config::DesktopConfig;
-use thalvi_desktop::delivery::Delivery;
+use thalvi_desktop::delivery::{Bound, Delivery, Finished};
 use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
 };
 use thalvi_desktop::history::{Capture, Store as History};
+use thalvi_desktop::hold::{HoldInput, KeyState, Presses};
 use thalvi_desktop::host::Desktop;
 use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
@@ -38,12 +40,6 @@ const LOADING_NOTICE: &str = "Loading the speech model. The first time it downlo
 /// How long a quit waits for the engine to close the microphone and the recognizer.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Where the engine keeps each finished capture.
-pub struct Records {
-    pub history: Arc<History>,
-    pub drafts: Arc<Drafts>,
-}
-
 /// What the app asks of the engine.
 #[derive(Debug)]
 pub enum Control {
@@ -55,6 +51,8 @@ pub enum Control {
     Cancel,
     /// Takes new settings in between captures.
     Apply(Box<DesktopConfig>),
+    /// The desktop refused to report the hold key; the notice says so in plain words.
+    HoldKeyFailed(String),
     /// Cancels any capture, closes the microphone and the recognizer, and stops.
     Quit,
 }
@@ -77,6 +75,7 @@ pub struct EngineLink {
     level: watch::Receiver<f32>,
     audio: watch::Receiver<AudioStatus>,
     stopped: Mutex<std_mpsc::Receiver<()>>,
+    key: HoldInput,
 }
 
 impl EngineLink {
@@ -87,7 +86,8 @@ impl EngineLink {
     pub fn start(
         config: DesktopConfig,
         delivery: Arc<Delivery<Desktop>>,
-        records: Records,
+        history: Arc<History>,
+        drafts: Arc<Drafts>,
     ) -> Result<Self, String> {
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
@@ -99,6 +99,7 @@ impl EngineLink {
             active: None,
             paused: false,
         });
+        let (key, key_state) = HoldInput::new();
         let (ready_tx, ready) = std_mpsc::channel();
         let (stopped_tx, stopped) = std_mpsc::channel();
         std::thread::Builder::new()
@@ -124,7 +125,11 @@ impl EngineLink {
                     publisher,
                     Arc::new(level_tx),
                     audio_tx,
-                    records,
+                    Shared {
+                        key: key_state,
+                        history,
+                        drafts,
+                    },
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
                 let _ = stopped_tx.send(());
@@ -139,7 +144,14 @@ impl EngineLink {
             level,
             audio,
             stopped: Mutex::new(stopped),
+            key,
         })
+    }
+
+    /// Where the hold key's presses and releases come in.
+    #[must_use]
+    pub fn hold_input(&self) -> HoldInput {
+        self.key.clone()
     }
 
     pub fn send(&self, control: Control) {
@@ -293,6 +305,14 @@ enum Woke {
     Control(Option<Control>),
 }
 
+/// What the app shares with the runner besides its controls.
+struct Shared {
+    /// Whether the hold key is down.
+    key: watch::Receiver<KeyState>,
+    history: Arc<History>,
+    drafts: Arc<Drafts>,
+}
+
 struct Runner {
     config: DesktopConfig,
     session: Option<Session>,
@@ -302,6 +322,8 @@ struct Runner {
     reopen_failures: Option<u32>,
     /// Settings that arrived during a capture.
     pending: Option<DesktopConfig>,
+    /// A refused hold key not yet shown.
+    hold_problem: Option<String>,
     control: mpsc::UnboundedReceiver<Control>,
     publisher: Rc<Publisher>,
     level: Arc<watch::Sender<f32>>,
@@ -312,6 +334,9 @@ struct Runner {
     http: reqwest::Client,
     /// Loads the current engine's speech model.
     loading: Option<JoinHandle<()>>,
+    /// The hold key, for presses the engine is not listening for.
+    key: Presses,
+    key_state: watch::Receiver<KeyState>,
 }
 
 impl Runner {
@@ -322,7 +347,7 @@ impl Runner {
         publisher: Rc<Publisher>,
         level: Arc<watch::Sender<f32>>,
         audio: watch::Sender<AudioStatus>,
-        Records { history, drafts }: Records,
+        shared: Shared,
     ) -> Self {
         Self {
             config,
@@ -331,15 +356,18 @@ impl Runner {
             stopping: false,
             reopen_failures: None,
             pending: None,
+            hold_problem: None,
             control,
             publisher,
             level,
             audio,
             delivery,
-            history,
-            drafts,
+            history: shared.history,
+            drafts: shared.drafts,
             http: reqwest::Client::new(),
             loading: None,
+            key: Presses::new(shared.key.clone()),
+            key_state: shared.key,
         }
     }
 
@@ -438,6 +466,7 @@ impl Runner {
                 cues: CpalCuePlayer::new(config.cues, gate.clone()),
                 gate: gate.clone(),
                 http: self.http.clone(),
+                hold: self.key_state.clone(),
                 notice: Box::new(|notice| println!("{notice}")),
             },
             config,
@@ -499,6 +528,7 @@ impl Runner {
         requests.read_queued(&mut self.control);
         self.paused = requests.listening_off;
         self.stopping |= requests.quit;
+        self.hold_problem = requests.hold_problem.or(self.hold_problem.take());
         if let Some(config) = requests.pending
             && config != self.config
         {
@@ -544,6 +574,7 @@ impl Runner {
         if self.stopping {
             return Flow::Quit;
         }
+        self.show_hold_problem();
         if let Some(config) = self.pending.take() {
             self.apply(config).await;
             return Flow::Continue;
@@ -558,11 +589,22 @@ impl Runner {
                 .then_some(self.reopen_failures)
                 .flatten()
                 .map(backoff);
-            return match next(&mut self.control, retry).await {
+            self.key.skip();
+            return match next(&mut self.control, &mut self.key, retry).await {
                 Next::Control(Some(control)) => self.handle(control).await,
                 Next::Control(None) => Flow::Quit,
                 Next::Reopen => {
                     self.open_microphone().await;
+                    Flow::Continue
+                }
+                Next::Key => {
+                    if self.key.take().is_some() {
+                        self.refuse_press(if self.paused {
+                            Refusal::Paused
+                        } else {
+                            Refusal::MicrophoneClosed
+                        });
+                    }
                     Flow::Continue
                 }
             };
@@ -587,7 +629,9 @@ impl Runner {
         match woke {
             Woke::Control(Some(control)) => self.handle(control).await,
             Woke::Control(None) => Flow::Quit,
-            Woke::Trigger(Ok(WakeTrigger::Capture)) => Box::pin(self.capture()).await,
+            Woke::Trigger(Ok(WakeTrigger::Capture | WakeTrigger::Hold)) => {
+                Box::pin(self.capture()).await
+            }
             Woke::Trigger(Ok(WakeTrigger::Conversation)) => {
                 println!("Conversation wake heard. This build has no conversation.");
                 Flow::Continue
@@ -605,6 +649,22 @@ impl Runner {
         }
     }
 
+    /// Says that a press of the hold key started nothing, and why.
+    fn refuse_press(&self, refusal: Refusal) {
+        if let Some(session) = &self.session {
+            report_refusal(session.engine.recorder(), refusal);
+        } else {
+            println!("{}", refusal.notice());
+        }
+        if refusal == Refusal::Paused {
+            self.publisher.mode(Mode::Failed(Failure {
+                notice: refusal.notice().to_owned(),
+                headline: "Paused — key ignored",
+                causes: Vec::new(),
+            }));
+        }
+    }
+
     /// Acts on a control message while nothing is being captured.
     async fn handle(&mut self, control: Control) -> Flow {
         match control {
@@ -612,9 +672,21 @@ impl Runner {
             Control::ToggleListening => self.set_listening(self.paused).await,
             Control::Cancel => {}
             Control::Apply(config) => self.apply(*config).await,
+            Control::HoldKeyFailed(notice) => self.hold_problem = Some(notice),
             Control::Quit => return Flow::Quit,
         }
         Flow::Continue
+    }
+
+    /// Shows a refused hold key once nothing else is on the status: the failure stays until the
+    /// next capture or resumed listening, like any other.
+    fn show_hold_problem(&mut self) {
+        if self.paused || self.publisher.failed() {
+            return;
+        }
+        if let Some(notice) = self.hold_problem.take() {
+            self.fail(hold_failure(notice));
+        }
     }
 
     async fn set_listening(&mut self, on: bool) {
@@ -685,6 +757,22 @@ impl Runner {
         }
     }
 
+    /// Records a finished capture in the history and offers it as the last draft.
+    fn keep<T: Display>(
+        &self,
+        outcome: &CaptureOutcome,
+        finished: Option<&Finished>,
+        bound: &Bound<T>,
+    ) {
+        if let Some(capture) = Capture::of(outcome, finished, bound.window()) {
+            self.history
+                .record_in_background(self.config.history, capture);
+        }
+        if let Some(draft) = Draft::of(outcome, finished, bound) {
+            self.drafts.offer(draft);
+        }
+    }
+
     /// Takes one capture from the wake word to its delivery.
     async fn capture(&mut self) -> Flow {
         let bound = {
@@ -725,6 +813,7 @@ impl Runner {
         if let Some(config) = requests.pending.take() {
             self.pending = Some(config);
         }
+        self.hold_problem = requests.hold_problem.take().or(self.hold_problem.take());
         if requests.quit {
             // Nothing is delivered after a quit.
             return Flow::Quit;
@@ -745,19 +834,20 @@ impl Runner {
         };
         let finished = match self.session.as_ref() {
             Some(session) => {
-                self.delivery
-                    .finish(&outcome, &bound, &self.config, session.engine.recorder())
-                    .await
+                let recorder = session.engine.recorder();
+                // The presses so far were the capture's; a later one finds the user waiting.
+                self.key.skip();
+                while_delivering(
+                    self.delivery
+                        .finish(&outcome, &bound, &self.config, recorder),
+                    &mut self.key,
+                    || report_refusal(recorder, Refusal::Delivering),
+                )
+                .await
             }
             None => None,
         };
-        if let Some(capture) = Capture::of(&outcome, finished.as_ref(), bound.window()) {
-            self.history
-                .record_in_background(self.config.history, capture);
-        }
-        if let Some(draft) = Draft::of(&outcome, finished.as_ref(), &bound) {
-            self.drafts.offer(draft);
-        }
+        self.keep(&outcome, finished.as_ref(), &bound);
         let mode = match (finished, route) {
             (Some(finished), Some(route)) if finished.delivered => {
                 println!("{}", finished.notice);
@@ -784,6 +874,77 @@ impl Runner {
     }
 }
 
+/// Why a press of the hold key starts nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    Paused,
+    MicrophoneClosed,
+    Delivering,
+}
+
+impl Refusal {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Paused => "paused",
+            Self::MicrophoneClosed => "microphone_closed",
+            Self::Delivering => "delivering",
+        }
+    }
+
+    fn notice(self) -> &'static str {
+        match self {
+            Self::Paused => {
+                "Thalvi is paused, so pressing the key started nothing. Resume listening first."
+            }
+            Self::MicrophoneClosed => {
+                "The microphone is not open, so pressing the key started nothing."
+            }
+            Self::Delivering => {
+                "Thalvi is still delivering the last dictation, so pressing the key started nothing."
+            }
+        }
+    }
+}
+
+/// Runs `delivery`, calling `refuse` for each press of the hold key meanwhile.
+async fn while_delivering<T>(
+    delivery: impl Future<Output = T>,
+    key: &mut Presses,
+    refuse: impl Fn(),
+) -> T {
+    let mut delivery = pin!(delivery);
+    loop {
+        tokio::select! {
+            biased;
+            Ok(()) = key.changed() => {
+                if key.take().is_some() {
+                    refuse();
+                }
+            }
+            finished = &mut delivery => return finished,
+        }
+    }
+}
+
+fn report_refusal(recorder: &Recorder, refusal: Refusal) {
+    recorder.metric(
+        Event::HoldStart,
+        "refused",
+        None,
+        json!({"reason": refusal.reason()}),
+    );
+    println!("{}", refusal.notice());
+}
+
+/// The failure that tells the user the hold key is not working.
+fn hold_failure(notice: String) -> Failure {
+    Failure {
+        causes: vec![notice.clone()],
+        notice,
+        headline: "Hold key unavailable",
+    }
+}
+
 /// Whether `new` differs from `old` only in settings a running engine takes without a rebuild.
 fn retunes_only(old: &DesktopConfig, new: &DesktopConfig) -> bool {
     *old == DesktopConfig {
@@ -802,16 +963,27 @@ fn backoff(failures: u32) -> Duration {
 enum Next {
     Control(Option<Control>),
     Reopen,
+    /// The hold key changed.
+    Key,
 }
 
-/// Waits for the next control, or until `retry` has passed.
-async fn next(control: &mut mpsc::UnboundedReceiver<Control>, retry: Option<Duration>) -> Next {
-    match retry {
-        Some(delay) => tokio::select! {
-            received = control.recv() => Next::Control(received),
-            () = tokio::time::sleep(delay) => Next::Reopen,
-        },
-        None => Next::Control(control.recv().await),
+/// Waits for the next control or hold key change, or until `retry` has passed.
+async fn next(
+    control: &mut mpsc::UnboundedReceiver<Control>,
+    key: &mut Presses,
+    retry: Option<Duration>,
+) -> Next {
+    let reopen = async {
+        match retry {
+            Some(delay) => tokio::time::sleep(delay).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        received = control.recv() => Next::Control(received),
+        () = reopen => Next::Reopen,
+        // A key that cannot change any more is no reason to wake.
+        Ok(()) = key.changed() => Next::Key,
     }
 }
 
@@ -823,6 +995,8 @@ struct Requests {
     quit: bool,
     /// Settings to apply once the capture is over.
     pending: Option<DesktopConfig>,
+    /// A refused hold key, to show once the capture is over.
+    hold_problem: Option<String>,
 }
 
 impl Requests {
@@ -849,6 +1023,10 @@ impl Requests {
             }
             Some(Control::Apply(config)) => {
                 self.pending = Some(*config);
+                false
+            }
+            Some(Control::HoldKeyFailed(notice)) => {
+                self.hold_problem = Some(notice);
                 false
             }
             Some(Control::Quit) | None => {
@@ -1032,9 +1210,11 @@ mod tests {
         let (sender, mut control) = mpsc::unbounded_channel();
         let started = tokio::time::Instant::now();
 
+        let (_input, state) = HoldInput::new();
+        let mut key = Presses::new(state);
         let reopen = tokio::time::timeout(
             Duration::from_secs(10),
-            next(&mut control, Some(Duration::from_secs(2))),
+            next(&mut control, &mut key, Some(Duration::from_secs(2))),
         )
         .await
         .expect("the microphone was never reopened");
@@ -1042,7 +1222,7 @@ mod tests {
         assert_eq!(started.elapsed(), Duration::from_secs(2));
 
         sender.send(Control::Quit).unwrap();
-        let quit = next(&mut control, Some(Duration::from_secs(2))).await;
+        let quit = next(&mut control, &mut key, Some(Duration::from_secs(2))).await;
         assert!(matches!(quit, Next::Control(Some(Control::Quit))));
         assert_eq!(
             started.elapsed(),
@@ -1050,11 +1230,59 @@ mod tests {
             "a control does not wait"
         );
 
-        let waiting = tokio::time::timeout(Duration::from_secs(60), next(&mut control, None)).await;
+        let waiting =
+            tokio::time::timeout(Duration::from_secs(60), next(&mut control, &mut key, None)).await;
         assert!(
             waiting.is_err(),
             "without a retry only a control ends the wait"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_press_of_the_hold_key_wakes_the_wait_that_refuses_it_but_a_release_does_not() {
+        let (_sender, mut control) = mpsc::unbounded_channel();
+        let (input, state) = HoldInput::new();
+        let mut key = Presses::new(state);
+        input.set(true);
+        let pressed =
+            tokio::time::timeout(Duration::from_secs(60), next(&mut control, &mut key, None)).await;
+        assert!(matches!(pressed, Ok(Next::Key)), "a press wakes the wait");
+        assert_eq!(key.take(), Some(1));
+        input.set(true);
+        input.set(false);
+        let released =
+            tokio::time::timeout(Duration::from_secs(60), next(&mut control, &mut key, None)).await;
+        assert!(
+            matches!(released, Ok(Next::Key)),
+            "a release wakes the wait too"
+        );
+        assert_eq!(key.take(), None, "but it is no press to refuse");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn each_press_while_a_delivery_runs_is_refused_once_and_a_repeat_or_earlier_press_is_not()
+    {
+        let (input, state) = HoldInput::new();
+        let mut key = Presses::new(state);
+        // Pressed during the capture: the engine's, not a refusal.
+        input.set(true);
+        key.skip();
+        let refused = Cell::new(0);
+        let delivery = async {
+            input.set(true);
+            tokio::task::yield_now().await;
+            input.set(false);
+            tokio::task::yield_now().await;
+            input.set(true);
+            input.set(true);
+            tokio::task::yield_now().await;
+            "delivered"
+        };
+        // The held key is released first, so the next press is new.
+        input.set(false);
+        let outcome = while_delivering(delivery, &mut key, || refused.set(refused.get() + 1)).await;
+        assert_eq!(outcome, "delivered");
+        assert_eq!(refused.get(), 2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1140,6 +1368,30 @@ mod tests {
         let (outcome, requests, _) = run(vec![], vec![Control::ToggleListening]).await;
         assert_eq!(outcome, Some("cancelled"));
         assert!(requests.listening_off, "one toggle during a capture pauses");
+    }
+
+    #[test]
+    fn a_refused_hold_key_is_kept_through_a_capture_and_told_in_plain_words() {
+        let (sender, mut control) = mpsc::unbounded_channel();
+        sender
+            .send(Control::HoldKeyFailed(
+                "Windows refused the hook.".to_owned(),
+            ))
+            .unwrap();
+        let mut requests = Requests::default();
+        assert!(
+            !requests.read_queued(&mut control),
+            "it does not end a capture"
+        );
+        assert_eq!(
+            requests.hold_problem.as_deref(),
+            Some("Windows refused the hook.")
+        );
+        let failure = hold_failure("Windows refused the hook.".to_owned());
+        assert_eq!(
+            (failure.notice.as_str(), failure.headline),
+            ("Windows refused the hook.", "Hold key unavailable")
+        );
     }
 
     #[test]

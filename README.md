@@ -284,6 +284,25 @@ click opens Settings) and key bindings in `hyprland-binds.conf`, such as
 `bind = SUPER, E, exec, thalvi-desktop copy-error`. Pausing cancels the
 current capture and closes the microphone.
 
+### Hold a key to dictate
+
+Hold a key, speak, and let go: the text is pasted into the window focused when
+you pressed, without the pause countdown and without Enter. A hold shorter than
+a third of a second, or with no words, pastes nothing and says so. Saying "never
+mind" cancels it; any other spoken ending works as after the wake word.
+
+- **Hyprland:** F9, with no modifier. Add the `hold-start` and `hold-end` binds
+  from `hyprland-binds.conf`. Hyprland types any modifier you still hold into the
+  pasted text and skips the release when a modifier comes up first, so the key
+  must be a single key.
+- **Windows:** Alt and the key left of X (Z on a QWERTY keyboard, Y on QWERTZ).
+  The app watches the keyboard itself and keeps the key from the focused app; the
+  hold ends when the key and Alt are both up. Set another as `hold_key` in the
+  config, such as `Ctrl+Shift+F9`, named by its place on the keyboard (`Alt+KeyZ`,
+  `Digit1`, `Space`, `F9`). While an administrator window is focused, Windows
+  shows Thalvi no keys and lets it type nothing, so the key reaches that window
+  as usual and no dictation starts.
+
 ### Config
 
 Settings edit `desktop.json` in `thalvi/` under the user config folder

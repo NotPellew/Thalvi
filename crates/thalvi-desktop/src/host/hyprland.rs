@@ -10,8 +10,10 @@ use serde::Deserialize;
 
 use self::command::{CommandError, CommandRunner, SystemRunner};
 use super::{
-    App, Host, HostError, Modifier, OVERLAY_TITLE, Shortcut, StateServer, TypedText, WebUrl,
+    App, HoldSource, Host, HostError, Modifier, OVERLAY_TITLE, Shortcut, StateServer, TypedText,
+    WebUrl,
 };
+use crate::hold::HoldKey;
 
 /// The window as Hyprland identifies it; the pid tells a reused address from the original window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +54,24 @@ impl Hyprland {
         state: impl Fn() -> String + Send + 'static,
     ) -> Result<StateServer, HostError> {
         state::serve(state)
+    }
+
+    /// The compositor reports the key, through the binds in `hyprland.conf` that run the
+    /// `hold-start` and `hold-end` commands, so there is nothing to watch.
+    ///
+    /// # Errors
+    /// Never fails.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as the Windows host, whose hook can fail"
+    )]
+    pub fn watch_hold_key(
+        _key: &HoldKey,
+        _on_change: impl Fn(bool) + Send + 'static,
+    ) -> Result<HoldSource, HostError> {
+        Ok(HoldSource::Binds(
+            "On Hyprland the hold key is a bind in hyprland.conf: see integrations/hyprland/hyprland-binds.conf.",
+        ))
     }
 
     /// The running app's state line; `None` when no app answers.
@@ -370,6 +390,14 @@ impl<R: CommandRunner> Host for Hyprland<R> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_hold_key_is_no_failure_on_hyprland_where_binds_report_it() {
+        let source = Hyprland::watch_hold_key(&HoldKey::default(), |_| {});
+        assert!(
+            matches!(source, Ok(HoldSource::Binds(reason)) if reason.contains("hyprland.conf"))
+        );
+    }
+
     use std::sync::Mutex;
 
     use super::*;
