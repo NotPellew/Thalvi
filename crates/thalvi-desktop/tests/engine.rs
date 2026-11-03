@@ -858,11 +858,48 @@ async fn never_mind_cancels_at_once_without_waiting_or_a_provisional_cue() {
             assert!(task.is_finished(), "no pause is waited out");
             assert_eq!(
                 finished(task).await,
-                CaptureOutcome::Cancelled { dictated: None }
+                CaptureOutcome::Cancelled {
+                    dictated: Some("Draft words".to_owned())
+                }
             );
             assert_eq!(rig.started(Cue::Provisional).len(), 0);
             assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
             assert!(rig.gate.is_enabled());
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_spoken_never_mind_keeps_what_was_dictated_before_it_without_the_phrase() {
+    LocalSet::new()
+        .run_until(async {
+            for (finals, dictated) in [
+                (
+                    &["Second check that I drop. Never mind."][..],
+                    Some("Second check that I drop."),
+                ),
+                (&["Draft words", "never mind"], Some("Draft words")),
+                (
+                    &["First part.", "Second part. Never mind."],
+                    Some("First part. Second part."),
+                ),
+                (&["never mind"], None),
+            ] {
+                let (mut rig, engine, frames) = Rig::new("{}");
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                for words in finals {
+                    rig.finals(words).await;
+                }
+                assert_eq!(
+                    finished(task).await,
+                    CaptureOutcome::Cancelled {
+                        dictated: dictated.map(str::to_owned)
+                    },
+                    "{finals:?}"
+                );
+            }
         })
         .await;
 }

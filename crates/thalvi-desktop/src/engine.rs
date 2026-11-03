@@ -436,7 +436,7 @@ enum Done {
     /// [`EngineHandle::cancel`].
     Stopped,
     /// The user said "never mind".
-    NeverMind,
+    NeverMind(Option<String>),
     Accepted(CaptureRequest),
     Failed(CaptureError),
 }
@@ -1033,7 +1033,7 @@ where
         let now = Instant::now();
         match live.text.on_final(text, now, live.speech) {
             Err(full) => return Some(Done::Failed(full.into())),
-            Ok(FinalStep::Cancelled) => return Some(Done::NeverMind),
+            Ok(FinalStep::Cancelled { dictated }) => return Some(Done::NeverMind(dictated)),
             Ok(FinalStep::Continue { cancelled_pending }) => {
                 if cancelled_pending {
                     self.ending_state("final_cancelled");
@@ -1185,12 +1185,10 @@ where
                     dictated: recoverable_text,
                 }
             }
-            Done::NeverMind => {
+            Done::NeverMind(dictated) => {
                 self.gate.set_enabled(false);
                 self.end_with(Cue::Cancelled, decided, session, false).await;
-                CaptureOutcome::Cancelled {
-                    dictated: recoverable_text,
-                }
+                CaptureOutcome::Cancelled { dictated }
             }
             Done::Failed(error) => {
                 self.gate.set_enabled(false);
