@@ -3745,6 +3745,7 @@ async fn switching_between_saved_and_private_never_carries_context_across() {
         (None, &json!([])),
         "a saved conversation does not say private"
     );
+    harness.store.flush().await;
     assert_eq!(saved_titles(&harness), ["saved question"]);
     harness.server.abort();
 }
