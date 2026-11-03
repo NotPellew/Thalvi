@@ -188,6 +188,33 @@ pauses, cancels and opens Settings, which edit the config file.
 | Windows | Full |
 | GNOME | Not yet ([#101](https://github.com/NotPellew/Thalvi/issues/101)) |
 
+### Install
+
+Download the latest `desktop-v*` release from
+[Releases](https://github.com/NotPellew/Thalvi/releases). No Git, Rust or Node
+is needed.
+
+- **Windows:** run `Thalvi_<version>_x64-setup.exe`. It installs for your user
+  only, adds a Start-menu entry, and downloads WebView2 if missing. Uninstall
+  from Settings → Apps; your config and models stay.
+- **Linux:** `chmod +x Thalvi_<version>_amd64.AppImage`, then run it. An
+  AppImage adds no menu entry itself; AppImageLauncher or Gear Lever add one.
+  Install `hyprctl`, `wtype` and `wl-copy` (listed under Build from source). Update by replacing the
+  file; settings and models stay.
+
+Start it once; it lives in the tray. Starting it again opens Settings. On Linux
+the control commands below run the AppImage with that word:
+`Thalvi_<version>_amd64.AppImage toggle`.
+
+**Settings → General → Start Thalvi when I log in** is off by default. It
+writes an XDG autostart entry (Linux) or a `Run` entry for your user (Windows)
+that starts Thalvi in the tray without opening Settings, and the switch shows
+what the system holds. Moving the AppImage breaks its entry: turn the switch off
+and on again, and turn it off before deleting the file. Hyprland does not run
+XDG autostart by itself; use `uwsm`, or `dex -a` in `exec-once`.
+
+### Build from source
+
 Needs, besides Rust (`rust-toolchain.toml`) and Node (`.node-version`):
 
 - **Linux:** `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev` to build;
