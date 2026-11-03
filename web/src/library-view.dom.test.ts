@@ -50,7 +50,7 @@ it.each([
   });
 
   expect(query(".o-lib-list").hidden).toBe(true);
-  expect([...document.querySelectorAll(".o-lib-turn")].map((turn) => turn.textContent)).toEqual(["Boil water", "Done."]);
+  expect([...document.querySelectorAll(".o-lib-turn")].map((turn) => turn.textContent)).toEqual(["YouBoil water", "ThalviDone."]);
   const warning = query(".o-lib-warn");
   if (notice) expect(warning.textContent).toMatch(notice);
   else expect(warning.hidden).toBe(true);

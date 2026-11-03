@@ -159,7 +159,10 @@ export function createLibraryView(root: ParentNode, library: Library, currentId:
         ...state.preview.turns.map((turn) => {
           const line = document.createElement("li");
           line.className = `o-lib-turn o-lib-turn-${turn.role}`;
-          line.textContent = turn.text;
+          const who = document.createElement("span");
+          who.className = "o-who";
+          who.textContent = turn.role === "user" ? "You" : "Thalvi";
+          line.append(who, turn.text);
           return line;
         }),
       );
