@@ -41,6 +41,8 @@ jobs:
       - run: cargo docs
         env:
           RUSTDOCFLAGS: -D warnings
+      - run: npm exec --prefix ui -- tauri build --bundles appimage -- --locked
+        working-directory: crates/thalvi-app
 
   desktop-windows:
     name: desktop-windows
@@ -66,6 +68,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo lint
       - run: cargo test -p thalvi-desktop -p thalvi-app --locked
+      - run: npm exec --prefix ui -- tauri build --bundles nsis -- --locked
+        working-directory: crates/thalvi-app
 
   web:
     name: web

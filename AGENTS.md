@@ -108,10 +108,13 @@ are committed.
   libwebkit2gtk-4.1-dev libayatana-appindicator3-dev`, build the desktop UI
   first (`npm ci` and `npm run build` in `crates/thalvi-app/ui`, Node pinned in
   `.node-version`), then `cargo fmt --all -- --check`, `cargo lint`,
-  `cargo test --workspace --locked`, `RUSTDOCFLAGS="-D warnings" cargo docs`.
+  `cargo test --workspace --locked`, `RUSTDOCFLAGS="-D warnings" cargo docs`, then
+  `npm exec --prefix ui -- tauri build --bundles appimage -- --locked` in
+  `crates/thalvi-app`.
 - Rust desktop on Windows (`windows-latest`): build the desktop UI the same
   way, then `cargo fmt --all -- --check`, `cargo lint`,
-  `cargo test -p thalvi-desktop -p thalvi-app --locked`.
+  `cargo test -p thalvi-desktop -p thalvi-app --locked`, then the same
+  `tauri build` with `--bundles nsis`.
 - Desktop UI (`crates/thalvi-app/ui/`): `npm ci`, `npm run typecheck`,
   `npm run lint`, `npm test`, `npm run build`.
 - Web (`web/`): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`,
