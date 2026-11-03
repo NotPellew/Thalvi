@@ -378,15 +378,15 @@ fn speech<'a>(urls: [&'a str; 4], sha: &'a str) -> SpeechAssets<'a> {
 }
 
 #[tokio::test]
-async fn a_speech_model_is_cached_only_when_every_file_is_intact() {
+async fn a_speech_model_is_cached_only_when_every_file_has_its_pinned_size() {
     let sha = sha256(GOOD);
     let assets = speech(["http://unused"; 4], &sha);
     for (case, files, cached) in [
         ("all present", &[GOOD, GOOD, GOOD, GOOD][..], true),
         ("one missing", &[GOOD, GOOD, GOOD][..], false),
         (
-            "wrong checksum",
-            &[GOOD, GOOD, b"same size, not it!!!!!!", GOOD][..],
+            "one cut short",
+            &[GOOD, GOOD, b"pretend this", GOOD][..],
             false,
         ),
         ("none", &[][..], false),

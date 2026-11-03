@@ -411,14 +411,13 @@ impl ModelStore {
         }
     }
 
-    /// Whether every file of `assets` is on disk and matches its checksum.
+    /// Whether every file of `assets` is on disk at its pinned size. Cheap, for showing download
+    /// state; [`fetch`](Self::fetch) still verifies each checksum before a model is used.
     pub async fn is_cached(&self, assets: &SpeechAssets<'_>) -> bool {
         for asset in assets.all() {
-            if !matches!(
-                stored(&self.dir.join(asset.file_name), &asset).await,
-                Stored::Intact
-            ) {
-                return false;
+            match tokio::fs::metadata(self.dir.join(asset.file_name)).await {
+                Ok(meta) if meta.len() == asset.size => {}
+                _ => return false,
             }
         }
         true
