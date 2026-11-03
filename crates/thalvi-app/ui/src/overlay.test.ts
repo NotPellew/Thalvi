@@ -72,8 +72,8 @@ describe("each status", () => {
   });
 
   const done: { name: string; route: "paste" | "submit" | "task"; target: string | null; text: string }[] = [
-    { name: "pasted", route: "paste", target: "Slack", text: "✓ Pasted into Slack" },
-    { name: "sent", route: "submit", target: "Slack", text: "✓ Sent to Slack" },
+    { name: "pasted", route: "paste", target: "Slack", text: "✓ Pasted into Slack. Opened the docs" },
+    { name: "sent", route: "submit", target: "Slack", text: "✓ Sent to Slack. Opened the docs" },
     { name: "task", route: "task", target: "Slack", text: "✓ Opened the docs" },
     { name: "no target", route: "paste", target: null, text: "✓ Opened the docs" },
   ];
@@ -82,6 +82,16 @@ describe("each status", () => {
     emit({ state: "done", target, route, notice: "Opened the docs" });
     expect(root.hidden).toBe(false);
     expect(pick(".lbl").textContent).toBe(text);
+  });
+
+  it.each(["paste", "submit"] as const)("keeps a refused press visible after a successful %s", (route) => {
+    const { emit } = mount();
+    const refusal = "Thalvi is still delivering the last dictation, so pressing the key started nothing.";
+    emit({ state: "done", target: "Editor", route, notice: `Delivered. ${refusal}` });
+    expect(pick(".lbl").textContent).toContain(refusal);
+    expect(pick(".module .msg").textContent).toContain(refusal);
+    expect(pick(".pill").dataset["tone"]).toBe("done");
+    expect(pick(".module").dataset["tone"]).toBe("done");
   });
 });
 

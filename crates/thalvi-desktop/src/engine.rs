@@ -25,8 +25,8 @@ use crate::capture::{
 };
 use crate::config::DesktopConfig;
 use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues};
-use crate::frame::{FRAME_SAMPLES, Frame};
-use crate::hold::{KeyState, Presses};
+use crate::frame::{FRAME_SAMPLES, Frame, Order, Queued};
+use crate::hold::{Cutoff, KeyState, Press, Presses, Refusal};
 use crate::metrics::{Dictation, Event, RecordKinds, Recorder};
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
@@ -72,11 +72,11 @@ const ACTIVITY_PEAK: u16 = 1_000;
 /// Microphone frames in order.
 pub trait FrameSource {
     /// Waits for the next frame; safe to drop and call again.
-    fn next(&mut self) -> impl Future<Output = Result<Frame, AudioError>>;
+    fn next(&mut self) -> impl Future<Output = Result<Queued, AudioError>>;
 }
 
 impl FrameSource for Frames {
-    async fn next(&mut self) -> Result<Frame, AudioError> {
+    async fn next(&mut self) -> Result<Queued, AudioError> {
         Frames::next(self).await
     }
 }
@@ -403,13 +403,16 @@ pub struct Engine<R, W, C> {
     hold_end: Option<&'static str>,
     /// How long the latest hold's key was down, once it came up.
     held_for: Option<Duration>,
+    /// The presses of the dictation key that started nothing, until the caller takes them.
+    ignored: Vec<Refusal>,
 }
 
 /// A press of the dictation key that opened a capture.
-#[derive(Clone, Copy)]
 struct Held {
     press: u64,
     at: Instant,
+    /// Where this press was released among the queued frames, however many presses followed.
+    release: Cutoff,
 }
 
 /// A wake word heard: when, and the folder of its recordings.
@@ -449,6 +452,9 @@ struct Live<S> {
     last_words: Instant,
     cues: FuturesUnordered<LocalBoxFuture<'static, CueEnd>>,
     release: Release,
+    /// The release of the hold that opened this capture; frames queued after it are not speech
+    /// of the hold.
+    cutoff: Option<Cutoff>,
 }
 
 /// What the dictation key's release does to a capture.
@@ -463,6 +469,17 @@ enum Release {
 }
 
 impl<S> Live<S> {
+    /// Whether a frame queued at `order` came after the key went up and is not the hold's to
+    /// send: a spoken ending already pending keeps the capture open for it.
+    fn after_release(&self, order: Order) -> bool {
+        self.text.pending().is_none()
+            && !matches!(self.release, Release::Over)
+            && self
+                .cutoff
+                .as_ref()
+                .is_some_and(|cutoff| cutoff.precedes(order))
+    }
+
     /// When a released hold stops waiting for words; none while a spoken ending is pending.
     fn tail(&self) -> Option<Instant> {
         match self.release {
@@ -504,7 +521,7 @@ enum Done {
 enum Step {
     Cancel,
     Event(Result<RecognizerEvent, RecognizerError>),
-    Frame(Result<Frame, AudioError>),
+    Frame(Result<Queued, AudioError>),
     Cue(CueEnd),
     Quiet,
     Silent,
@@ -513,6 +530,28 @@ enum Step {
     Tail,
     /// The dictation key changed; false when it can no longer change.
     Key(bool),
+}
+
+/// Whether any of the frames heard after the start cue holds speech.
+fn speaks(frames: &[Queued]) -> bool {
+    let mut vad = VadDetector::new();
+    frames.iter().any(|queued| vad.speech(&queued.frame, false))
+}
+
+/// Takes frames published before release, including one that arrived after the last pending poll.
+fn take_queued_before(
+    frames: &mut impl FrameSource,
+    cutoff: &Cutoff,
+    backlog: &mut Vec<Queued>,
+) -> Result<(), AudioError> {
+    while let Some(next) = frames.next().now_or_never() {
+        let queued = next?;
+        if cutoff.precedes(queued.order) {
+            break;
+        }
+        backlog.push(queued);
+    }
+    Ok(())
 }
 
 /// Why a hold ended before the recognizer could take any speech, and how the metrics name it.
@@ -617,6 +656,7 @@ where
             held: None,
             hold_end: None,
             held_for: None,
+            ignored: Vec::new(),
         };
         (engine, handle)
     }
@@ -631,6 +671,12 @@ where
     /// it from running during a capture, which finishes under the kinds it started with.
     pub fn set_recordings(&mut self, kinds: RecordKinds) {
         self.recorder.set_kinds(kinds);
+    }
+
+    /// The presses of the dictation key that started nothing since this was last called: each
+    /// was already told through the notice and the metrics.
+    pub fn take_ignored(&mut self) -> Vec<Refusal> {
+        std::mem::take(&mut self.ignored)
     }
 
     /// Writes the recordings still queued; call once at shutdown.
@@ -652,6 +698,10 @@ where
     ) -> Result<WakeTrigger, ListenError> {
         self.set_state(EngineState::Listening);
         self.key.skip();
+        // A capture the caller abandoned before it began leaves its start behind; the next one is
+        // not that hold or that wake.
+        self.held = None;
+        self.woke = None;
         let reset = std::time::Instant::now();
         self.wake.reset();
         self.wake_clip.clear();
@@ -679,7 +729,9 @@ where
                 biased;
                 changed = self.key.changed(), if key_open => {
                     key_open = changed.is_ok();
-                    if let Some(press) = self.key.take() {
+                    let press = self.key.take();
+                    self.ignore_lost();
+                    if let Some(press) = press {
                         self.begin_hold(press);
                         return Ok(WakeTrigger::Hold);
                     }
@@ -688,7 +740,7 @@ where
                 frame = frames.next() => frame,
             };
             let frame = match frame {
-                Ok(frame) => frame,
+                Ok(queued) => queued.frame,
                 Err(error) => {
                     self.level.send_replace(0.0);
                     return Err(error.into());
@@ -758,9 +810,13 @@ where
 
     /// Starts the capture the way a wake word does: the gate shuts so nothing said before the
     /// cue is sent.
-    fn begin_hold(&mut self, press: u64) {
+    fn begin_hold(&mut self, press: Press) {
         let at = Instant::now();
-        self.held = Some(Held { press, at });
+        self.held = Some(Held {
+            press: press.number,
+            at,
+            release: press.release,
+        });
         self.woke = Some(Woke {
             at,
             dictation: self.recorder.begin(),
@@ -856,14 +912,20 @@ where
                 json!({"dictation": woke.dictation.to_string()}),
             );
         }
-        let outcome = match self.start(frames, &woke, held).await {
-            Ok((mut live, backlog)) => {
-                let (done, decided) = self.drive(frames, &mut live, backlog, held).await;
+        let outcome = match self.start(frames, &woke, held.as_ref()).await {
+            Ok((mut live, backlog, released)) => {
+                let (done, decided) = self
+                    .drive(frames, &mut live, backlog, held.as_ref(), released)
+                    .await;
                 self.conclude(done, decided, Some(live), &woke.dictation)
                     .await
             }
             Err((done, decided)) => self.conclude(done, decided, None, &woke.dictation).await,
         };
+        let pressed = u64::from(self.key.take().is_some()) + self.key.take_lost();
+        if pressed > 0 {
+            self.ignore(Refusal::Capturing, pressed);
+        }
         self.gate.set_enabled(true);
         self.level.send_replace(0.0);
         self.set_state(EngineState::Listening);
@@ -983,14 +1045,15 @@ where
         }
     }
 
-    /// Plays the wake cue while the recognizer connects, then returns the open recognition and
-    /// the frames that arrived after the cue while it was still connecting.
+    /// Plays the wake cue while the recognizer connects, then returns the open recognition, the
+    /// frames that arrived after the cue while it was still connecting, and when the hold's key
+    /// came up in the meantime, if speech was already waiting.
     async fn start(
         &mut self,
         frames: &mut impl FrameSource,
         woke: &Woke,
-        held: Option<Held>,
-    ) -> Result<(Live<R::Session>, Vec<Frame>), (Done, Instant)> {
+        held: Option<&Held>,
+    ) -> Result<(Live<R::Session>, Vec<Queued>, Option<Instant>), (Done, Instant)> {
         let started = Instant::now();
         let deadline = started + READY_TIMEOUT;
         let recognizer = &self.recognizer;
@@ -1002,11 +1065,40 @@ where
         let mut session = None;
         let mut cue_ended = false;
         let mut backlog = Vec::new();
+        let mut released = None;
         let mut connection: (&str, Option<Duration>) = ("cancelled", None);
         let stop = loop {
             tokio::select! {
                 biased;
                 _ = self.cancel.changed() => break Some(Done::Stopped),
+                end = &mut wake_cue, if !cue_ended => {
+                    cue_ended = true;
+                    // The cue engine does not restore a gate that was already off.
+                    self.gate.set_enabled(true);
+                    self.cue_metric(Event::ReadyCue, &end);
+                    self.cue_failed(&end, "The capture continues.");
+                }
+                () = tokio::time::sleep_until(deadline) => break Some(Done::Failed(self.not_ready())),
+                frame = frames.next(), if cue_ended && released.is_none() => match frame {
+                    Ok(queued) if !held.is_some_and(|held| held.release.precedes(queued.order)) => backlog.push(queued),
+                    Ok(_) => {}
+                    Err(error) => break Some(Done::Failed(error.into())),
+                },
+                () = self.key.over(held.map_or(0, |held| held.press)), if held.is_some() && released.is_none() => {
+                    if let Some(held) = held
+                        && let Err(error) = take_queued_before(frames, &held.release, &mut backlog)
+                    {
+                        break Some(Done::Failed(error.into()));
+                    }
+                    if woke.at.elapsed() >= MIN_HOLD && speaks(&backlog) {
+                        released = Some(Instant::now());
+                    } else {
+                        let (error, how) = released_early(woke.at);
+                        self.hold_end = Some(how);
+                        self.held_for = Some(woke.at.elapsed());
+                        break Some(Done::Failed(error));
+                    }
+                }
                 (result, took) = &mut connect, if session.is_none() => match result {
                     Ok(open) => {
                         connection = ("ok", Some(took));
@@ -1017,26 +1109,11 @@ where
                         break Some(Done::Failed(error.into()));
                     }
                 },
-                end = &mut wake_cue, if !cue_ended => {
-                    cue_ended = true;
-                    // The cue engine does not restore a gate that was already off.
-                    self.gate.set_enabled(true);
-                    self.cue_metric(Event::ReadyCue, &end);
-                    self.cue_failed(&end, "The capture continues.");
-                }
-                () = self.key.over(held.map_or(0, |held| held.press)), if held.is_some() => {
-                    let (error, how) = released_early(woke.at);
-                    self.hold_end = Some(how);
-                    self.held_for = Some(woke.at.elapsed());
-                    break Some(Done::Failed(error));
-                }
-                () = tokio::time::sleep_until(deadline) => break Some(Done::Failed(self.not_ready())),
-                frame = frames.next(), if cue_ended => match frame {
-                    Ok(frame) => backlog.push(frame),
-                    Err(error) => break Some(Done::Failed(error.into())),
-                },
             }
-            if cue_ended && session.is_some() {
+            // A release not yet dealt with comes first, whichever branch the select saw first.
+            let release_pending =
+                released.is_none() && held.is_some_and(|held| self.key.is_over(held.press));
+            if cue_ended && session.is_some() && !release_pending {
                 break None;
             }
         };
@@ -1072,14 +1149,11 @@ where
             started: Instant::now(),
             last_words: Instant::now(),
             cues: FuturesUnordered::new(),
-            release: if held.is_some() {
-                Release::Down
-            } else {
-                Release::Over
-            },
+            release: held.map_or(Release::Over, |_| Release::Down),
+            cutoff: held.map(|held| held.release.clone()),
         };
         self.publish(&live);
-        Ok((live, backlog))
+        Ok((live, backlog, released))
     }
 
     /// Runs the capture until it ends.
@@ -1087,13 +1161,20 @@ where
         &mut self,
         frames: &mut impl FrameSource,
         live: &mut Live<R::Session>,
-        backlog: Vec<Frame>,
-        held: Option<Held>,
+        backlog: Vec<Queued>,
+        held: Option<&Held>,
+        released: Option<Instant>,
     ) -> (Done, Instant) {
-        for frame in backlog {
-            if let Err(stop) = self.on_frame(live, &frame).await {
+        for queued in backlog {
+            if let Err(stop) = self.on_frame(live, &queued).await {
                 return (stop.into(), Instant::now());
             }
+        }
+        if let (Some(at), Some(held)) = (released, held) {
+            // The key came up while connecting: the recognizer has what was said, and the last
+            // words get the tail from now.
+            self.held_for = Some(at.duration_since(held.at));
+            live.release = Release::Tail(Instant::now());
         }
         let mut key_open = true;
         loop {
@@ -1136,7 +1217,7 @@ where
                     done
                 }
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),
-                Step::Frame(Ok(frame)) => self.on_frame(live, &frame).await.err().map(Done::from),
+                Step::Frame(Ok(queued)) => self.on_frame(live, &queued).await.err().map(Done::from),
                 Step::Cue(end) => {
                     live.last_audio = Instant::now();
                     self.cue_metric(Event::Cue, &end);
@@ -1161,10 +1242,11 @@ where
 
     /// The dictation key changed during a capture: its release ends a hold, and a press during a
     /// dictation by wake word is refused.
-    fn on_key(&mut self, live: &mut Live<R::Session>, held: Option<Held>) -> Option<Done> {
+    fn on_key(&mut self, live: &mut Live<R::Session>, held: Option<&Held>) -> Option<Done> {
         let Some(held) = held else {
-            if self.key.take().is_some() {
-                self.refuse_press("capturing");
+            let pressed = u64::from(self.key.take().is_some()) + self.key.take_lost();
+            if pressed > 0 {
+                self.ignore(Refusal::Capturing, pressed);
             }
             return None;
         };
@@ -1177,7 +1259,7 @@ where
     /// The key came up: a spoken ending already pending keeps deciding the capture; a slip of the
     /// finger ends it; otherwise the last words get [`RELEASE_TAIL`] to arrive, and no recognizer
     /// signals that nothing more is coming, so the whole tail is waited out.
-    fn on_release(&mut self, live: &mut Live<R::Session>, held: Held) -> Option<Done> {
+    fn on_release(&mut self, live: &mut Live<R::Session>, held: &Held) -> Option<Done> {
         let now = Instant::now();
         self.held_for = Some(now.duration_since(held.at));
         if live.text.pending().is_some() {
@@ -1223,11 +1305,19 @@ where
         }))
     }
 
-    /// Says that a press of the dictation key started nothing, and why.
-    fn refuse_press(&self, reason: &str) {
-        self.recorder
-            .metric(Event::HoldStart, "refused", None, json!({"reason": reason}));
-        (self.notice)("A dictation is already running, so pressing the key started nothing.");
+    /// Says that `count` presses of the dictation key started nothing, and why.
+    fn ignore(&mut self, refusal: Refusal, count: u64) {
+        refusal.record(&self.recorder, count);
+        (self.notice)(refusal.notice());
+        self.ignored.push(refusal);
+    }
+
+    /// Says so for presses that were over before the key was looked at.
+    fn ignore_lost(&mut self) {
+        let lost = self.key.take_lost();
+        if lost > 0 {
+            self.ignore(Refusal::TooQuick, lost);
+        }
     }
 
     fn queue_cue(&self, live: &Live<R::Session>, cue: Cue) {
@@ -1299,13 +1389,15 @@ where
 
     /// Judges one frame and sends it, or holds it while an ending is pending and the user has
     /// not been heard continuing.
-    async fn on_frame(&mut self, live: &mut Live<R::Session>, frame: &Frame) -> Result<(), Stop> {
+    async fn on_frame(&mut self, live: &mut Live<R::Session>, queued: &Queued) -> Result<(), Stop> {
         let now = Instant::now();
         live.last_audio = now;
+        let frame = &queued.frame;
         self.level.send_replace(loudness(frame));
-        // Once the key is up nothing more is said to the recognizer: what is still being
+        // Frames queued before the release are still the hold's, however late they are read. Once
+        // the key is up nothing queued after it is said to the recognizer: what is still being
         // recognized finishes, and an aside spoken after the release stays out of the text.
-        if matches!(live.release, Release::Tail(_)) {
+        if live.after_release(queued.order) {
             return Ok(());
         }
         let pending = live.text.pending().is_some();

@@ -26,6 +26,8 @@ def main():
     runner = (ROOT / 'crates/thalvi-app/src/runner.rs').read_text()
     pieces = [
         runner[runner.index('#[derive(Debug)]\npub enum Control'):runner.index('/// The saved microphone choice')],
+        runner[runner.index('/// What becomes of a finished capture'):runner.index("/// Adds what the hold key's ignored")],
+        runner[runner.index('/// The presses of the hold key since'):runner.index('fn report_refusal')],
         runner[runner.index('#[derive(Default)]\nstruct Requests'):runner.index('/// Runs `capture`')],
         runner[runner.index('async fn drive<O>'):runner.index('/// Carries one engine')],
     ]
@@ -43,10 +45,10 @@ def main():
                               stdout=log, stderr=subprocess.STDOUT, timeout=300, check=False)
     output = (evidence / 'repro.txt').read_text()
     if done.returncode == 0:
-        print('PASS: the real-code replay did not deliver after Cancel')
+        print('PASS: no delivery after Cancel; a shutdown-time press is reported without losing delivery')
         return 0
-    if 'CANCEL_REACHED_DELIVERY' in output:
-        print('FINDING: Cancel was consumed, then the real engine returned Accepted and the fake host delivered.')
+    if 'CANCEL_REACHED_DELIVERY' in output or 'PRESS_DURING_CLOSE_SILENTLY_DROPPED' in output:
+        print('FINDING: the real-code replay violated cancellation or shutdown-time hold feedback.')
         print(f'Read {evidence / "repro.txt"}')
         return 1
     print(f'BLOCKED: replay did not reach its assertion; read {evidence / "repro.txt"}')

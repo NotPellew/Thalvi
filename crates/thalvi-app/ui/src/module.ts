@@ -47,8 +47,8 @@ export function countdownLabel(route: Route, target: string | null, ms: number):
 
 /** What the slot says once a delivery finished. */
 export function doneMessage(route: Route, target: string | null, notice: string): string {
-  if (target === null || route === "task") return `✓ ${notice.toUpperCase()}`;
-  return `✓ ${route === "paste" ? "PASTED INTO" : "SENT TO"} ${target.toUpperCase()}`;
+  if (target === null || route === "task") return `✓ ${notice}`;
+  return `✓ ${route === "paste" ? "Pasted into" : "Sent to"} ${target}. ${notice}`;
 }
 
 export interface Module {

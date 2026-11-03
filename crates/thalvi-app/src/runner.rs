@@ -1,7 +1,6 @@
 //! Runs the capture engine on its own thread and follows the app's control messages.
 
 use std::cell::RefCell;
-use std::fmt::Display;
 use std::future::Future;
 use std::pin::pin;
 use std::rc::Rc;
@@ -10,9 +9,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use thalvi_desktop::audio::{Frames, InputGate, Microphone};
-use thalvi_desktop::capture::EndingPauses;
+use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 use thalvi_desktop::chosen::Chosen;
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::{Bound, Delivery, Finished};
@@ -21,8 +20,8 @@ use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
 };
 use thalvi_desktop::history::{Capture, Store as History};
-use thalvi_desktop::hold::{HoldInput, KeyState, Presses};
-use thalvi_desktop::host::Desktop;
+use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
+use thalvi_desktop::host::{Desktop, Host};
 use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::ModelStore;
@@ -132,7 +131,7 @@ impl EngineLink {
                     },
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
-                let _ = stopped_tx.send(());
+                finish_runtime(runtime, &stopped_tx);
             })
             .map_err(|error| format!("Thalvi could not start: {error}"))?;
         ready
@@ -194,6 +193,12 @@ impl EngineLink {
     }
 }
 
+/// Finishes background writes before letting the app exit.
+fn finish_runtime(runtime: tokio::runtime::Runtime, stopped: &std_mpsc::Sender<()>) {
+    drop(runtime);
+    let _ = stopped.send(());
+}
+
 /// Derives the status from the view and publishes it when it changes.
 struct Publisher {
     view: RefCell<View>,
@@ -238,6 +243,20 @@ impl Publisher {
 
     fn loading(&self, notice: Option<&str>) {
         self.update(|view| view.loading = notice.map(str::to_owned));
+    }
+
+    fn notice_sink(self: &Rc<Self>) -> Box<dyn Fn(&str)> {
+        let publisher = Rc::clone(self);
+        Box::new(move |notice| {
+            println!("{notice}");
+            if !publisher.failed() {
+                publisher.mode(Mode::Failed(Failure {
+                    notice: notice.to_owned(),
+                    headline: "Dictation notice",
+                    causes: Vec::new(),
+                }));
+            }
+        })
     }
 }
 
@@ -467,7 +486,7 @@ impl Runner {
                 gate: gate.clone(),
                 http: self.http.clone(),
                 hold: self.key_state.clone(),
-                notice: Box::new(|notice| println!("{notice}")),
+                notice: self.publisher.notice_sink(),
             },
             config,
             recorder,
@@ -598,12 +617,16 @@ impl Runner {
                     Flow::Continue
                 }
                 Next::Key => {
-                    if self.key.take().is_some() {
-                        self.refuse_press(if self.paused {
-                            Refusal::Paused
-                        } else {
-                            Refusal::MicrophoneClosed
-                        });
+                    let pressed = pressed(&mut self.key);
+                    if pressed > 0 {
+                        self.refuse_press(
+                            if self.paused {
+                                Refusal::Paused
+                            } else {
+                                Refusal::MicrophoneClosed
+                            },
+                            pressed,
+                        );
                     }
                     Flow::Continue
                 }
@@ -649,17 +672,18 @@ impl Runner {
         }
     }
 
-    /// Says that a press of the hold key started nothing, and why.
-    fn refuse_press(&self, refusal: Refusal) {
+    /// Says that `count` presses of the hold key started nothing, and why. A refusal that only
+    /// repeats an earlier failure does not hide it.
+    fn refuse_press(&self, refusal: Refusal, count: u64) {
         if let Some(session) = &self.session {
-            report_refusal(session.engine.recorder(), refusal);
+            report_refusal(session.engine.recorder(), refusal, count);
         } else {
             println!("{}", refusal.notice());
         }
-        if refusal == Refusal::Paused {
+        if refusal == Refusal::Paused || !self.publisher.failed() {
             self.publisher.mode(Mode::Failed(Failure {
                 notice: refusal.notice().to_owned(),
-                headline: "Paused — key ignored",
+                headline: refusal.headline(),
                 causes: Vec::new(),
             }));
         }
@@ -757,22 +781,6 @@ impl Runner {
         }
     }
 
-    /// Records a finished capture in the history and offers it as the last draft.
-    fn keep<T: Display>(
-        &self,
-        outcome: &CaptureOutcome,
-        finished: Option<&Finished>,
-        bound: &Bound<T>,
-    ) {
-        if let Some(capture) = Capture::of(outcome, finished, bound.window()) {
-            self.history
-                .record_in_background(self.config.history, capture);
-        }
-        if let Some(draft) = Draft::of(outcome, finished, bound) {
-            self.drafts.offer(draft);
-        }
-    }
-
     /// Takes one capture from the wake word to its delivery.
     async fn capture(&mut self) -> Flow {
         let bound = {
@@ -783,9 +791,17 @@ impl Runner {
         };
         self.publisher.update(|view| view.target = bound.window());
         let mut requests = Requests::default();
-        let outcome = {
+        let (finished, route, ignored) = {
             let Self {
-                session, control, ..
+                session,
+                control,
+                delivery,
+                history,
+                drafts,
+                config,
+                key,
+                publisher,
+                ..
             } = &mut *self;
             let Some(Session {
                 engine,
@@ -804,69 +820,49 @@ impl Runner {
                 &mut requests,
             ))
             .await;
-            if outcome.is_none() {
-                // The wake word closed the gate and only a capture opens it again.
-                gate.set_enabled(true);
+            let mut ignored = engine.take_ignored();
+            match outcome {
+                None => {
+                    // The wake word closed the gate and only a capture opens it again.
+                    gate.set_enabled(true);
+                    (None, None, ignored)
+                }
+                Some(outcome) => {
+                    let route = match &outcome {
+                        CaptureOutcome::Accepted(request) => Some(request.route),
+                        _ => None,
+                    };
+                    if let (false, Some(route)) = (requests.ended, route) {
+                        publisher.mode(Mode::Delivering(route));
+                    }
+                    let refused = RefCell::new(Vec::new());
+                    let finished = Settling {
+                        delivery,
+                        history,
+                        drafts,
+                        config,
+                        recorder: engine.recorder(),
+                    }
+                    .settle(&outcome, requests.ended, &bound, key, |refusal, count| {
+                        report_refusal(engine.recorder(), refusal, count);
+                        refused.borrow_mut().push(refusal);
+                    })
+                    .await;
+                    ignored.extend(refused.into_inner());
+                    (finished, route, ignored)
+                }
             }
-            outcome
         };
         if let Some(config) = requests.pending.take() {
             self.pending = Some(config);
         }
-        self.hold_problem = requests.hold_problem.take().or(self.hold_problem.take());
+        self.hold_problem = requests.hold_problem.or(self.hold_problem.take());
         if requests.quit {
-            // Nothing is delivered after a quit.
+            // Nothing is delivered after a quit; what was dictated is already kept.
             return Flow::Quit;
         }
-        let Some(outcome) = outcome else {
-            self.publisher.mode(Mode::Idle);
-            if requests.listening_off {
-                self.pause();
-            }
-            return Flow::Continue;
-        };
-        let route = match &outcome {
-            CaptureOutcome::Accepted(request) => {
-                self.publisher.mode(Mode::Delivering(request.route));
-                Some(request.route)
-            }
-            _ => None,
-        };
-        let finished = match self.session.as_ref() {
-            Some(session) => {
-                let recorder = session.engine.recorder();
-                // The presses so far were the capture's; a later one finds the user waiting.
-                self.key.skip();
-                while_delivering(
-                    self.delivery
-                        .finish(&outcome, &bound, &self.config, recorder),
-                    &mut self.key,
-                    || report_refusal(recorder, Refusal::Delivering),
-                )
-                .await
-            }
-            None => None,
-        };
-        self.keep(&outcome, finished.as_ref(), &bound);
-        let mode = match (finished, route) {
-            (Some(finished), Some(route)) if finished.delivered => {
-                println!("{}", finished.notice);
-                Mode::Done {
-                    route,
-                    notice: finished.notice,
-                }
-            }
-            (Some(finished), _) => {
-                println!("{}", finished.notice);
-                Mode::Failed(Failure {
-                    notice: finished.notice,
-                    headline: finished.headline,
-                    causes: finished.causes,
-                })
-            }
-            (None, _) => Mode::Idle,
-        };
-        self.publisher.mode(mode);
+        self.publisher
+            .mode(told(delivered(finished, route), &ignored));
         if requests.listening_off {
             self.pause();
         }
@@ -874,51 +870,153 @@ impl Runner {
     }
 }
 
-/// Why a press of the hold key starts nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Refusal {
-    Paused,
-    MicrophoneClosed,
-    Delivering,
+/// What becomes of a finished capture: its delivery, unless a control ended the capture first,
+/// and its place in the history and as the last draft either way.
+struct Settling<'a, H: Host + 'static> {
+    delivery: &'a Delivery<H>,
+    history: &'a Arc<History>,
+    drafts: &'a Drafts,
+    config: &'a DesktopConfig,
+    recorder: &'a Recorder,
 }
 
-impl Refusal {
-    fn reason(self) -> &'static str {
-        match self {
-            Self::Paused => "paused",
-            Self::MicrophoneClosed => "microphone_closed",
-            Self::Delivering => "delivering",
-        }
+impl<H: Host + 'static> Settling<'_, H> {
+    /// Delivers `outcome` unless `ended`, calling `refuse` for each press of the hold key
+    /// meanwhile, and keeps what was dictated once. An ended capture reaches no host and is kept
+    /// as cancelled.
+    async fn settle(
+        &self,
+        outcome: &CaptureOutcome,
+        ended: bool,
+        bound: &Bound<H::Target>,
+        key: &mut Presses,
+        refuse: impl Fn(Refusal, u64),
+    ) -> Option<Finished> {
+        let finished = if ended {
+            None
+        } else {
+            // The presses so far were the capture's; a later one finds the user waiting.
+            key.skip();
+            while_delivering(
+                self.delivery
+                    .finish(outcome, bound, self.config, self.recorder),
+                key,
+                refuse,
+            )
+            .await
+        };
+        self.keep(outcome, ended, finished.as_ref(), bound);
+        finished
     }
 
-    fn notice(self) -> &'static str {
-        match self {
-            Self::Paused => {
-                "Thalvi is paused, so pressing the key started nothing. Resume listening first."
+    fn keep(
+        &self,
+        outcome: &CaptureOutcome,
+        ended: bool,
+        finished: Option<&Finished>,
+        bound: &Bound<H::Target>,
+    ) {
+        let cancelled;
+        let kept = match outcome {
+            CaptureOutcome::Accepted(request) if ended => {
+                cancelled = CaptureOutcome::Cancelled {
+                    dictated: Some(request.text.clone()),
+                };
+                &cancelled
             }
-            Self::MicrophoneClosed => {
-                "The microphone is not open, so pressing the key started nothing."
-            }
-            Self::Delivering => {
-                "Thalvi is still delivering the last dictation, so pressing the key started nothing."
-            }
+            _ => outcome,
+        };
+        // A task's text is a command: the window it began in and a draft to resend mean nothing.
+        let task = matches!(
+            outcome,
+            CaptureOutcome::Accepted(request) if request.route == CaptureRoute::Task
+        );
+        let window = (!task).then(|| bound.window()).flatten();
+        if let Some(capture) = Capture::of(kept, finished, window) {
+            self.history
+                .record_in_background(self.config.history, capture);
+        }
+        if !task && let Some(draft) = Draft::of(kept, finished, bound) {
+            self.drafts.offer(draft);
         }
     }
+}
+
+/// Adds what the hold key's ignored presses came to to the capture's final `mode`: a result stays
+/// as it is, and the user is told besides.
+fn told(mode: Mode, ignored: &[Refusal]) -> Mode {
+    let Some(first) = ignored.first() else {
+        return mode;
+    };
+    let mut distinct: Vec<Refusal> = Vec::new();
+    for refusal in ignored {
+        if !distinct.contains(refusal) {
+            distinct.push(*refusal);
+        }
+    }
+    let extra = distinct
+        .iter()
+        .map(|refusal| refusal.notice())
+        .collect::<Vec<_>>()
+        .join(" ");
+    match mode {
+        Mode::Done { route, notice } => Mode::Done {
+            route,
+            notice: format!("{notice} {extra}"),
+        },
+        Mode::Failed(failure) => Mode::Failed(Failure {
+            notice: format!("{} {extra}", failure.notice),
+            ..failure
+        }),
+        _ => Mode::Failed(Failure {
+            notice: extra,
+            headline: first.headline(),
+            causes: Vec::new(),
+        }),
+    }
+}
+
+/// What the status shows once a capture's delivery is over; nothing to show when it had none.
+fn delivered(finished: Option<Finished>, route: Option<CaptureRoute>) -> Mode {
+    match (finished, route) {
+        (Some(finished), Some(route)) if finished.delivered => {
+            println!("{}", finished.notice);
+            Mode::Done {
+                route,
+                notice: finished.notice,
+            }
+        }
+        (Some(finished), _) => {
+            println!("{}", finished.notice);
+            Mode::Failed(Failure {
+                notice: finished.notice,
+                headline: finished.headline,
+                causes: finished.causes,
+            })
+        }
+        (None, _) => Mode::Idle,
+    }
+}
+
+/// The presses of the hold key since it was last looked at, however quickly they came and went.
+fn pressed(key: &mut Presses) -> u64 {
+    u64::from(key.take().is_some()) + key.take_lost()
 }
 
 /// Runs `delivery`, calling `refuse` for each press of the hold key meanwhile.
 async fn while_delivering<T>(
     delivery: impl Future<Output = T>,
     key: &mut Presses,
-    refuse: impl Fn(),
+    refuse: impl Fn(Refusal, u64),
 ) -> T {
     let mut delivery = pin!(delivery);
     loop {
         tokio::select! {
             biased;
             Ok(()) = key.changed() => {
-                if key.take().is_some() {
-                    refuse();
+                let pressed = pressed(key);
+                if pressed > 0 {
+                    refuse(Refusal::Delivering, pressed);
                 }
             }
             finished = &mut delivery => return finished,
@@ -926,13 +1024,8 @@ async fn while_delivering<T>(
     }
 }
 
-fn report_refusal(recorder: &Recorder, refusal: Refusal) {
-    recorder.metric(
-        Event::HoldStart,
-        "refused",
-        None,
-        json!({"reason": refusal.reason()}),
-    );
+fn report_refusal(recorder: &Recorder, refusal: Refusal, count: u64) {
+    refusal.record(recorder, count);
     println!("{}", refusal.notice());
 }
 
@@ -993,6 +1086,8 @@ struct Requests {
     /// The latest listening request was off.
     listening_off: bool,
     quit: bool,
+    /// A control ended the capture, and nothing later undoes that: the host is not to be acted on.
+    ended: bool,
     /// Settings to apply once the capture is over.
     pending: Option<DesktopConfig>,
     /// A refused hold key, to show once the capture is over.
@@ -1011,6 +1106,12 @@ impl Requests {
 
     /// Notes one control message; true when it ends the capture.
     fn take(&mut self, control: Option<Control>) -> bool {
+        let ends = self.ends(control);
+        self.ended |= ends;
+        ends
+    }
+
+    fn ends(&mut self, control: Option<Control>) -> bool {
         match control {
             Some(Control::Cancel) => true,
             Some(Control::ToggleListening) => {
@@ -1037,10 +1138,10 @@ impl Requests {
     }
 }
 
-/// Runs `capture` while following the controls; `None` when a control ended the capture before
-/// it started or asked for a cancel as it finished, so its outcome is not to be delivered. The
-/// engine ignores a cancel that arrives before it starts, so those are read first, and the
-/// capture is polled before any later control.
+/// Runs `capture` while following the controls; `None` when a control ended it before it
+/// started, so it never ran. Every ending control it consumed, even as the capture finished, is
+/// kept in `requests.ended`. The engine ignores a cancel that arrives before it starts, so those
+/// are read first, and the capture is polled before any later control.
 async fn drive<O>(
     capture: impl Future<Output = O>,
     control: &mut mpsc::UnboundedReceiver<Control>,
@@ -1056,7 +1157,8 @@ async fn drive<O>(
             biased;
             outcome = &mut capture => {
                 // What was asked while the capture wound down counts too.
-                return (!requests.read_queued(control)).then_some(outcome);
+                requests.read_queued(control);
+                return Some(outcome);
             }
             received = control.recv(), if !requests.quit => {
                 if requests.take(received) {
@@ -1102,6 +1204,72 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn stopped_is_not_reported_until_background_writes_finish() {
+        let (writing, started) = std_mpsc::channel();
+        let (release, pending) = std_mpsc::channel();
+        let (stopped, status) = std_mpsc::channel();
+        let closing = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            drop(runtime.spawn_blocking(move || {
+                writing.send(()).unwrap();
+                pending.recv_timeout(Duration::from_secs(5)).unwrap();
+            }));
+            finish_runtime(runtime, &stopped);
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let premature = status.recv_timeout(Duration::from_millis(100));
+        release.send(()).unwrap();
+        closing.join().unwrap();
+        assert!(
+            matches!(premature, Err(std_mpsc::RecvTimeoutError::Timeout)),
+            "quit acknowledged a pending write"
+        );
+        status.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_press_reaches_the_status_without_another_capture() {
+        use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeFrames, FakeWake};
+        use thalvi_desktop::recognizer::FakeRecognizer;
+
+        LocalSet::new().run_until(async {
+            let (out, mut status) = watch::channel(Status::Listening);
+            let publisher = Publisher::new(out, EndingPauses::default());
+            publisher.mode(Mode::Idle);
+            let gate = InputGate::default();
+            let (mut frames, _feed) = FakeFrames::new(&gate);
+            let (wake, wake_control) = FakeWake::new();
+            let (cues, _cue_control) = FakeCuePlayer::new();
+            let (recognizer, _server) = FakeRecognizer::new();
+            let (input, hold) = HoldInput::new();
+            let (mut engine, _) = Engine::new(Parts {
+                recognizer, wake, cues, gate, hold,
+                http: reqwest::Client::new(),
+                notice: publisher.notice_sink(),
+            }, &DesktopConfig::from_json_str("{}").unwrap(), Recorder::disabled());
+            let listening = tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while wake_control.resets() == 0 { tokio::task::yield_now().await; }
+            }).await.unwrap();
+            input.set(true);
+            input.set(false);
+            tokio::time::timeout(Duration::from_secs(5), status.changed()).await.unwrap().unwrap();
+            assert!(matches!(&*status.borrow(), Status::Failed { notice, .. } if notice == Refusal::TooQuick.notice()));
+            listening.abort();
+            let _ = listening.await;
+
+            publisher.mode(Mode::Idle);
+            publisher.update(|view| view.engine = EngineState::Capturing {
+                committed: "keep speaking".to_owned(), partial: None,
+            });
+            publisher.notice_sink()(Refusal::Capturing.notice());
+            assert!(matches!(&*status.borrow(), Status::Capturing { committed, .. } if committed == "keep speaking"));
+        }).await;
+    }
 
     /// A capture that, like the engine's, forgets cancels sent before it starts and ends on the
     /// next one.
@@ -1247,7 +1415,7 @@ mod tests {
         let pressed =
             tokio::time::timeout(Duration::from_secs(60), next(&mut control, &mut key, None)).await;
         assert!(matches!(pressed, Ok(Next::Key)), "a press wakes the wait");
-        assert_eq!(key.take(), Some(1));
+        assert_eq!(key.take().map(|press| press.number), Some(1));
         input.set(true);
         input.set(false);
         let released =
@@ -1256,7 +1424,7 @@ mod tests {
             matches!(released, Ok(Next::Key)),
             "a release wakes the wait too"
         );
-        assert_eq!(key.take(), None, "but it is no press to refuse");
+        assert!(key.take().is_none(), "but it is no press to refuse");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1280,9 +1448,35 @@ mod tests {
         };
         // The held key is released first, so the next press is new.
         input.set(false);
-        let outcome = while_delivering(delivery, &mut key, || refused.set(refused.get() + 1)).await;
+        let outcome = while_delivering(delivery, &mut key, |refusal, count| {
+            assert_eq!(refusal, Refusal::Delivering);
+            refused.set(refused.get() + count);
+        })
+        .await;
         assert_eq!(outcome, "delivered");
         assert_eq!(refused.get(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_press_and_release_during_a_delivery_is_refused_not_lost() {
+        let (input, state) = HoldInput::new();
+        let mut key = Presses::new(state);
+        key.skip();
+        let refused = Cell::new(0);
+        let delivery = async {
+            // Both land before the delivery wait looks at the key.
+            input.set(true);
+            input.set(false);
+            tokio::task::yield_now().await;
+            "delivered"
+        };
+        while_delivering(delivery, &mut key, |refusal, count| {
+            assert_eq!(refusal, Refusal::Delivering);
+            refused.set(refused.get() + count);
+        })
+        .await;
+        assert_eq!(refused.get(), 1);
+        assert_eq!(key.take_lost(), 0, "it was counted once, not left over");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1311,8 +1505,377 @@ mod tests {
                 }
             };
             let (outcome, ()) = tokio::join!(driven, sending);
-            assert_eq!(outcome.is_some(), delivered, "{label}");
+            assert_eq!(outcome, Some("accepted"), "{label}: the outcome is kept");
+            assert_eq!(requests.ended, !delivered, "{label}");
         }
+    }
+
+    /// Runs `drive` over a capture that, once running, waits for `release` before it finishes
+    /// as accepted: like the engine closing its recognizer after the accepted cue. `during` is
+    /// sent once the capture runs, and `release` follows once the first ending control among
+    /// them was consumed.
+    async fn consumed_while_closing(during: Vec<Control>) -> (Option<&'static str>, Requests) {
+        let (sender, mut control) = mpsc::unbounded_channel();
+        let (entered_tx, entered) = tokio::sync::oneshot::channel();
+        let (consumed_tx, consumed) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let consumed_tx = std::sync::Mutex::new(Some(consumed_tx));
+        let mut requests = Requests::default();
+        let capture = async {
+            entered_tx.send(()).unwrap();
+            released.await.unwrap();
+            "accepted"
+        };
+        let driven = drive(
+            capture,
+            &mut control,
+            || {
+                if let Some(consumed) = consumed_tx.lock().unwrap().take() {
+                    consumed.send(()).unwrap();
+                }
+            },
+            &mut requests,
+        );
+        let ordering = async {
+            entered.await.unwrap();
+            for message in during {
+                sender.send(message).unwrap();
+            }
+            consumed.await.unwrap();
+            release.send(()).unwrap();
+            // Disconnecting is a Quit of its own; keep the channel open until `drive` is done.
+            sender
+        };
+        let (outcome, _sender) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(driven, ordering)
+        })
+        .await
+        .expect("the capture never finished");
+        (outcome, requests)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_ending_control_consumed_before_the_capture_finishes_still_keeps_it_from_the_host() {
+        // (what was sent while the capture ran, quit, the latest listening request is off)
+        for (during, quit, listening_off) in [
+            (vec![Control::Cancel], false, false),
+            (vec![Control::SetListening(false)], false, true),
+            (vec![Control::ToggleListening], false, true),
+            (vec![Control::Quit], true, false),
+            // Resuming changes what listening does next, not what became of this capture.
+            (
+                vec![Control::SetListening(false), Control::SetListening(true)],
+                false,
+                false,
+            ),
+            (
+                vec![Control::ToggleListening, Control::ToggleListening],
+                false,
+                false,
+            ),
+            (
+                vec![Control::Cancel, Control::SetListening(false)],
+                false,
+                true,
+            ),
+        ] {
+            let label = format!("{during:?}");
+            let (outcome, requests) = consumed_while_closing(during).await;
+            assert_eq!(outcome, Some("accepted"), "{label}: its text is kept");
+            assert!(requests.ended, "{label}");
+            assert_eq!(requests.quit, quit, "{label}");
+            assert_eq!(requests.listening_off, listening_off, "{label}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_capture_nothing_ended_is_delivered_even_with_settings_and_a_resume_sent() {
+        let config = DesktopConfig::from_json_str("{}").unwrap();
+        for during in [
+            vec![],
+            vec![Control::Apply(Box::new(config))],
+            vec![Control::SetListening(true)],
+        ] {
+            let label = format!("{during:?}");
+            let (sender, mut control) = mpsc::unbounded_channel();
+            let (release, gate) = tokio::sync::oneshot::channel();
+            let mut requests = Requests::default();
+            let driven = drive(
+                async {
+                    gate.await.unwrap();
+                    "accepted"
+                },
+                &mut control,
+                || panic!("{label}: nothing asked to cancel"),
+                &mut requests,
+            );
+            let sending = async {
+                for message in during {
+                    sender.send(message).unwrap();
+                }
+                tokio::task::yield_now().await;
+                release.send(()).unwrap();
+                sender
+            };
+            let (outcome, _sender) = tokio::join!(driven, sending);
+            assert_eq!(outcome, Some("accepted"), "{label}");
+            assert!(!requests.ended, "{label}");
+        }
+    }
+
+    /// The window and the calls a host saw.
+    #[derive(Clone, Default)]
+    struct TestHost(Arc<Mutex<Vec<&'static str>>>);
+
+    impl TestHost {
+        fn called(&self, call: &'static str) {
+            self.0.lock().unwrap().push(call);
+        }
+    }
+
+    impl Host for TestHost {
+        type Target = String;
+        const OVERLAY_TAKES_CLICKS: bool = false;
+
+        fn capture_target(&self) -> Result<String, thalvi_desktop::host::HostError> {
+            Ok("Editor".to_owned())
+        }
+
+        fn deliver(
+            &self,
+            _: &String,
+            _: &thalvi_desktop::host::TypedText,
+            _: bool,
+        ) -> Result<(), thalvi_desktop::host::HostError> {
+            self.called("deliver");
+            Ok(())
+        }
+
+        fn copy(&self, _: &str) -> Result<(), thalvi_desktop::host::HostError> {
+            self.called("copy");
+            Ok(())
+        }
+
+        fn focus_app(
+            &self,
+            _: &thalvi_desktop::host::App,
+        ) -> Result<String, thalvi_desktop::host::HostError> {
+            self.called("focus_app");
+            Ok("App".to_owned())
+        }
+
+        fn open_url(
+            &self,
+            _: &thalvi_desktop::host::WebUrl,
+        ) -> Result<(), thalvi_desktop::host::HostError> {
+            self.called("open_url");
+            Ok(())
+        }
+
+        fn open_folder(&self, _: &std::path::Path) -> Result<(), thalvi_desktop::host::HostError> {
+            self.called("open_folder");
+            Ok(())
+        }
+
+        fn prepare_overlay(&self, _: f64, _: f64) -> Result<f64, thalvi_desktop::host::HostError> {
+            Ok(0.0)
+        }
+    }
+
+    fn request(route: CaptureRoute, text: &str) -> CaptureOutcome {
+        CaptureOutcome::Accepted(thalvi_desktop::capture::CaptureRequest {
+            route,
+            text: text.to_owned(),
+        })
+    }
+
+    /// Settles `outcome` as `ended` and returns what the host, the history and the draft saw.
+    async fn settled(
+        outcome: &CaptureOutcome,
+        ended: bool,
+        expected_entries: usize,
+    ) -> (
+        Option<Finished>,
+        Vec<&'static str>,
+        Vec<thalvi_desktop::history::Entry>,
+        Option<thalvi_desktop::draft::DraftView>,
+    ) {
+        let dir = std::env::temp_dir().join(format!(
+            "thalvi-runner-test-{}-{}",
+            std::process::id(),
+            ended
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let host = TestHost::default();
+        let delivery = Delivery::new(host.clone());
+        let recorder = Recorder::disabled();
+        let history = Arc::new(History::at(dir.join("history.json")));
+        let drafts = Drafts::default();
+        let config = DesktopConfig::from_json_str("{}").unwrap();
+        let bound = delivery.bind(&recorder).await;
+        let (_input, state) = HoldInput::new();
+        let mut key = Presses::new(state);
+        let finished = Settling {
+            delivery: &delivery,
+            history: &history,
+            drafts: &drafts,
+            config: &config,
+            recorder: &recorder,
+        }
+        .settle(outcome, ended, &bound, &mut key, |_, _| {})
+        .await;
+        // The history is written on a blocking thread: wait for what it will hold.
+        let entries = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let entries = history.list().unwrap();
+                if entries.len() >= expected_entries {
+                    return entries;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the history entry was never written");
+        let _ = std::fs::remove_dir_all(&dir);
+        let calls = host.0.lock().unwrap().clone();
+        (finished, calls, entries, drafts.view())
+    }
+
+    #[tokio::test]
+    async fn a_capture_with_text_is_kept_once_and_reaches_no_host_when_a_control_ended_it() {
+        use thalvi_desktop::draft::DraftOutcome;
+        use thalvi_desktop::history::Outcome;
+
+        // (outcome, ended, host calls, history outcome, window, draft outcome)
+        type Case = (
+            CaptureOutcome,
+            bool,
+            Vec<&'static str>,
+            Outcome,
+            Option<&'static str>,
+            Option<DraftOutcome>,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                request(CaptureRoute::Paste, "hello world"),
+                false,
+                vec!["deliver", "copy"],
+                Outcome::Accepted,
+                Some("Editor"),
+                Some(DraftOutcome::Delivered),
+            ),
+            (
+                request(CaptureRoute::Paste, "hello world"),
+                true,
+                vec![],
+                Outcome::Cancelled,
+                Some("Editor"),
+                Some(DraftOutcome::Cancelled),
+            ),
+            (
+                request(CaptureRoute::Submit, "hello world"),
+                true,
+                vec![],
+                Outcome::Cancelled,
+                Some("Editor"),
+                Some(DraftOutcome::Cancelled),
+            ),
+            // A task's text is a command: kept in the history, never offered as a draft.
+            (
+                request(CaptureRoute::Task, "open the docs"),
+                true,
+                vec![],
+                Outcome::Cancelled,
+                None,
+                None,
+            ),
+            (
+                CaptureOutcome::Cancelled {
+                    dictated: Some("hello world".to_owned()),
+                },
+                true,
+                vec![],
+                Outcome::Cancelled,
+                Some("Editor"),
+                Some(DraftOutcome::Cancelled),
+            ),
+            // The clipboard is a host action too: a failed capture's text is not copied.
+            (
+                CaptureOutcome::Failed {
+                    error: thalvi_desktop::engine::CaptureError::MicStopped,
+                    recoverable_text: Some("hello world".to_owned()),
+                },
+                true,
+                vec![],
+                Outcome::Failed,
+                Some("Editor"),
+                Some(DraftOutcome::Failed),
+            ),
+        ];
+        for (case, (outcome, ended, calls, history, window, draft)) in cases.into_iter().enumerate()
+        {
+            let label = format!("case {case}: {outcome:?}, ended {ended}");
+            let (finished, seen, entries, view) = settled(&outcome, ended, 1).await;
+            assert_eq!(finished.is_some(), !ended, "{label}");
+            assert_eq!(seen, calls, "{label}");
+            assert_eq!(entries.len(), 1, "{label}");
+            assert_eq!(entries[0].outcome, history, "{label}");
+            assert_eq!(entries[0].target.as_deref(), window, "{label}");
+            assert_eq!(view.as_ref().map(|view| view.outcome), draft, "{label}");
+            if let Some(view) = view {
+                assert_eq!(view.id, 1, "{label}: offered once");
+                assert_eq!(view.original, "hello world", "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn presses_that_started_nothing_are_told_without_replacing_the_result() {
+        let failure = |notice: &str| Failure {
+            notice: notice.to_owned(),
+            headline: "Nothing was typed",
+            causes: vec!["cause".to_owned()],
+        };
+        let done = Mode::Done {
+            route: CaptureRoute::Paste,
+            notice: "Delivered.".to_owned(),
+        };
+        assert_eq!(
+            told(done.clone(), &[]),
+            done,
+            "nothing ignored, nothing told"
+        );
+        assert_eq!(
+            told(
+                done,
+                &[Refusal::Delivering, Refusal::Capturing, Refusal::Delivering]
+            ),
+            Mode::Done {
+                route: CaptureRoute::Paste,
+                notice: format!(
+                    "Delivered. {} {}",
+                    Refusal::Delivering.notice(),
+                    Refusal::Capturing.notice()
+                ),
+            },
+            "each reason once, the delivery still reported"
+        );
+        assert_eq!(
+            told(Mode::Failed(failure("It failed.")), &[Refusal::TooQuick]),
+            Mode::Failed(Failure {
+                notice: format!("It failed. {}", Refusal::TooQuick.notice()),
+                ..failure("")
+            }),
+        );
+        assert_eq!(
+            told(Mode::Idle, &[Refusal::Capturing]),
+            Mode::Failed(Failure {
+                notice: Refusal::Capturing.notice().to_owned(),
+                headline: "Dictating — key ignored",
+                causes: Vec::new(),
+            }),
+            "a cancelled capture has no result to add to"
+        );
     }
 
     #[tokio::test(start_paused = true)]

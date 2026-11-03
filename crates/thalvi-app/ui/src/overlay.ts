@@ -3,7 +3,7 @@
 import type { Backend, Look, Route, Status } from "./contract.ts";
 import { el } from "./dom.ts";
 import { applyLook } from "./look.ts";
-import { createModule } from "./module.ts";
+import { createModule, doneMessage } from "./module.ts";
 
 /** Frame scheduling and time, injectable so tests drive the animation. */
 export interface Clock {
@@ -27,12 +27,6 @@ type Tone = "live" | "quiet" | "pending" | "working" | "done" | "failed";
 
 function secondsLeft(ms: number): string {
   return String(Math.max(1, Math.floor(ms / 1000)));
-}
-
-/** What the pill says once a delivery finished. */
-export function doneText(route: Route, target: string | null, notice: string): string {
-  if (target === null || route === "task") return notice;
-  return route === "paste" ? `Pasted into ${target}` : `Sent to ${target}`;
 }
 
 export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock): void {
@@ -180,7 +174,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
         pillView("working", "WORKING", next.target);
         break;
       case "done":
-        pillView("done", `✓ ${doneText(next.route, next.target, next.notice)}`, null);
+        pillView("done", doneMessage(next.route, next.target, next.notice), null);
         break;
       case "failed":
         pillView("failed", next.headline, null);

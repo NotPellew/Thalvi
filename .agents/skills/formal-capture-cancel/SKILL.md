@@ -9,16 +9,22 @@ description: Check that desktop cancellation, pause, and quit prevent a capture 
 
 An ending control queued before the capture's final control drain empties must
 prevent that capture's accepted result from entering delivery, even if a later
-control resumes listening.
+control resumes listening. The result's text is still kept once, as cancelled.
 Breaking this promise can type text, press Enter, or execute a configured task
 after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `9e45370212e60a7fe9b1344efcc347e1c7a2e69d`.
-The faithful check currently **fails**: cancellation can be lost while the
-recognizer closes after the accepted cue finishes. Keep this failure visible;
-setup does not authorize a product fix.
+Sync commit: `9e45370212e60a7fe9b1344efcc347e1c7a2e69d`; the recorded file
+hashes describe the working change that fixes the failure below, until it is
+committed and the commit is moved here. The model was updated for that change
+before it was rerun.
+The faithful check **passes**. It used to fail: cancellation was lost while the
+recognizer closed after the accepted cue finished, because the runner kept only
+the last drain's decision. `Requests::ended` now keeps every ending decision
+through the whole `drive` call, and `Settling::settle` delivers nothing once it
+is set. The full model's counterexample, the shortest trace and the first
+replay failure are kept in "Read a result" as the history of the fix.
 
 All paths below are repository-relative. [source.json](source.json) records
 whole-file hashes so a changed implementation cannot silently reuse this model.
@@ -26,14 +32,14 @@ Matching hashes establish synchronization only, not correctness of the model.
 
 | Code | Model actions and boundary |
 | --- | --- |
-| `crates/thalvi-app/src/runner.rs`: `Control`, `Requests::take`, `Requests::read_queued` | `Send`, `DrainOne`, `NextOff`, `Ends`; one channel send or one receive plus runner-local state update. Every drain accumulates ending decisions with OR. `Apply` has no cancellation effect. |
-| Same file: `drive` | `PreEmpty`, `Receive`, `FinishEmpty`; pre-start drain, cancellation callback while capture is Pending, and completion drain. Biased polling starts the capture before a later control branch can run. |
-| Same file: `Runner::capture` | `FinishEmpty` admits an Accepted result only if not quitting. This is delivery admission at the last empty receive, not an atomic physical host effect. |
+| `crates/thalvi-app/src/runner.rs`: `Control`, `Requests::take`, `Requests::read_queued` | `Send`, `DrainOne`, `NextOff`, `Ends`; one channel send or one receive plus runner-local state update. Every receive and drain accumulates ending decisions with OR into `Requests::ended`. `Apply` has no cancellation effect. |
+| Same file: `drive` | `PreEmpty`, `Receive`, `FinishEmpty`; pre-start drain, cancellation callback while capture is Pending, and completion drain. Biased polling starts the capture before a later control branch can run. `ended` is never reset inside the call, so a control consumed by `Receive` still counts at `FinishEmpty`. |
+| Same file: `Runner::capture`, `Settling::settle` | `FinishEmpty` admits an Accepted result only if `ended` is clear. This is delivery admission at the last empty receive, not an atomic physical host effect. An ended capture skips `Delivery::finish` and is kept as cancelled. |
 | `crates/thalvi-desktop/src/engine.rs`: `EngineHandle::cancel`, `Engine::capture` | `cancelPending` represents the watch version change; capture entry consumes the old version. `Accept` and `ActiveCancelled` abstract capture work before the ending. |
 | Same file: `Engine::conclude`, `Engine::end_cue`, `Engine::end_with` | `CueReturns`, `CloseReturns`; the cue's cancellation-biased select and recognizer release are separate futures joined together. A completed cue retains its bool while close is still Pending. Neither completion is a transaction encompassing the other. |
 | Same file: `Engine::reconcile` | `secondary`, `SecondaryReturns`; disabled/skipped secondary returns Accepted directly, enabled secondary polls cancellation first. |
 | `crates/thalvi-desktop/src/recognizer.rs`: `RecognizerSession`, `ServerSession::close` | `CloseReturns` may occur before or after the cue. Network close is awaited under a timeout, so it can remain Pending. |
-| `crates/thalvi-desktop/src/delivery.rs`: `Delivery::finish`, `type_in`, `call` | `delivered` abstracts admission to a valid configured host action. Actual host execution is outside the proof; once admitted it can run via `spawn_blocking`. |
+| `crates/thalvi-desktop/src/delivery.rs`: `Delivery::finish`, `type_in`, `call` | `delivered` abstracts admission to a valid configured host action. Actual host execution is outside the proof; once admitted it can run via `spawn_blocking`. Other changes to this file are not covered by the model. |
 
 ## Run
 
@@ -56,16 +62,16 @@ Temurin JRE `21.0.9+10` in the same user cache, verifying archive SHA-256
 Other platforms need a user-installed Java on PATH. No system package install
 is performed. Downloads require network access only on the first run.
 
-A warm faithful run takes about 0.3 s here, with 4,824 distinct states before
-its counterexample; a passing focused control explores 6,758 distinct states.
+A warm faithful run takes about 0.3 s here and explores 7,481 distinct states
+(20,969 generated) with no error; the passing focused control explores 6,638.
 Each TLC invocation has a 120 s limit and 512 MB heap limit. State counts are
 receipts for this model, not acceptance criteria for a changed model.
 
 The command prints `EVIDENCE=/var/tmp/thalvi-formal-...`, retaining TLC output,
 trace, copied model/config and generated states there. Exit 0 prints `PASS`;
 exit 1 prints `COUNTEREXAMPLE` and `FAIL`; exit 2 prints `BLOCKED` for source
-drift, a tool error, or timeout. The current faithful result is exit 1.
-Never turn an expected known failure into a success verdict.
+drift, a tool error, or timeout. The current faithful result is exit 0.
+Never turn a failure into a success verdict.
 
 Check the negative controls after changing the verification:
 
@@ -74,10 +80,11 @@ Check the negative controls after changing the verification:
 ```
 
 This runs a focused `Scenario = "fence"` control that disallows consuming a
-control after the ending cue returns (so it excludes the known shutdown bug).
+control after the ending cue returns (the shutdown ordering of the fixed bug).
 It passes, then both mutations must fail the **same** `NoDeliveryAfterStop`
-invariant: removing the completion guard, and replacing drain OR accumulation
-with the last message's decision. `SELF-TEST PASS` verifies detection only; it
+invariant: removing the `ended` guard from admission, and replacing OR
+accumulation with the last message's decision. Both mutations also fail under
+`Scenario = "all"`. `SELF-TEST PASS` verifies detection only; it
 is not a pass of the full model. The production configuration remains
 `Scenario = "all"`, both mutation constants FALSE, `MaxControls = 3`.
 
@@ -93,12 +100,18 @@ This copies tracked Rust sources to a new `/var/tmp/thalvi-cancel-repro-...`
 directory, runs the workspace's pinned Rust toolchain and locked Cargo
 dependencies offline, and builds only the desktop library test in a dedicated
 user-cache target directory. It needs cached Cargo dependencies and native
-build prerequisites from AGENTS.md. It uses immediate fake cues and an event-gated
-fake recognizer close; no audio, native host, model, or service is used.
+build prerequisites from AGENTS.md. It uses immediate fake cues, an event-gated
+fake recognizer close and a recording host; no audio, native host, model, or
+service is used. The runner's `Control`, `Settling`, `while_delivering`,
+`Requests` and `drive` are extracted byte for byte, so the replay settles the
+real engine's outcome through the real admission code.
 A finding prints `FINDING` and exits 1; a resolved replay exits 0; a compile,
 setup, or 300 s timeout failure exits 2. Raw evidence stays outside Git.
-The measured warm replay took about 4 s and failed with
-`CANCEL_REACHED_DELIVERY`, Accepted output and `delivered=true`.
+Before the fix the replay failed with `CANCEL_REACHED_DELIVERY`, Accepted
+output and `delivered=true`. Now it observes Accepted output with `ended=true`,
+no host call, and one cancelled history entry and draft carrying the text.
+The second replay gates the same shutdown without Cancel, presses and releases
+the hold key while close is pending, and checks one refusal and successful delivery.
 
 ## Read a result
 
@@ -107,7 +120,7 @@ the printed `tlc.txt`; replay each named action against the mapped function.
 An impossible step is a modeling error: correct it from the code and explain
 what was wrong. If every step is possible, report the bug and its harm.
 
-Current shortest trace (secondary disabled):
+Shortest trace of the fixed bug (secondary disabled), kept to read the model:
 
 1. `runner.rs::drive` finishes its empty pre-start drain (`PreEmpty`).
 2. `EngineLink::send` queues Cancel (`Send`); capture polling can win before the runner receives it.
@@ -117,10 +130,8 @@ Current shortest trace (secondary disabled):
 6. `recognizer.rs::ServerSession::close` completes or times out; `engine.rs::end_with` returns the cue's earlier true, and disabled `reconcile` returns Accepted (`CloseReturns`).
 7. `runner.rs::drive` finds an empty completion queue because it consumed Cancel already; `Runner::capture` admits Accepted to `Delivery::finish` (`FinishEmpty`).
 
-Cancel enqueued after step 4 also reaches the same bug; the CPU replay uses
-that order. No fix is included. A likely fix is to retain the ending decision
-through `drive`, while preserving dictated-text history and latest listening
-intent; evaluate that in a separate authorized product change.
+Cancel enqueued after step 4 reached the same bug; the CPU replay uses that
+order. Step 7 now finds `ended` set by step 5 and admits nothing.
 
 ## When the covered code changes
 
@@ -173,4 +184,4 @@ three controls, liveness/fair scheduling, config application, history writes,
 real sockets/audio/cue devices, OS focus, clipboard, key injection and native
 platform behavior are not verified. `Apply` stands for any settings payload
 because payload content does not change `Requests::take`'s ending decision.
-The Rust replay covers one concrete shutdown ordering, not these exclusions.
+The Rust replay covers two concrete shutdown orderings, not these exclusions.

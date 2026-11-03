@@ -904,6 +904,7 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
   const editor = el("div", { class: "stack wide", hidden: true }, outcome, newer, text, el("span", { class: "trow" }, copy, reset, discard), done);
 
   function saveEdit(): void {
+    latestRefresh += 1;
     backend.editDraft(text.value).catch((error: unknown) => {
       say(problem, errorText(error));
     });
@@ -927,10 +928,18 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
     newer.hidden = !next.newerWaiting;
     sync();
   }
+  // Bumped by every refresh and edit, so a slow answer never replaces a newer draft or an edit.
+  let latestRefresh = 0;
   function refresh(): void {
-    backend.getDraft().then(show, (error: unknown) => {
-      say(problem, errorText(error));
-    });
+    const asked = ++latestRefresh;
+    backend.getDraft().then(
+      (next) => {
+        if (asked === latestRefresh) show(next);
+      },
+      (error: unknown) => {
+        if (asked === latestRefresh) say(problem, errorText(error));
+      },
+    );
   }
   text.addEventListener("input", () => {
     sync();

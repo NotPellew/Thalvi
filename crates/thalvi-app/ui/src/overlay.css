@@ -32,7 +32,7 @@ body { font-size: 14px; }
 .pill[data-tone="working"] .dot { background: var(--blue); box-shadow: 0 0 8px var(--blue); animation: pulse 1s ease-in-out infinite; }
 .pill[data-tone="working"] .wave i { background: var(--mut); opacity: 0.6; }
 .pill[data-tone="done"] { border-color: var(--neon); }
-.pill[data-tone="done"] .lbl { color: var(--neon); }
+.pill[data-tone="done"] .lbl { color: var(--neon); white-space: normal; font: 600 13px system-ui; letter-spacing: 0; overflow-wrap: anywhere; }
 .pill[data-tone="failed"] { border-color: var(--warn); }
 .pill[data-tone="failed"] .lbl { color: var(--warn); white-space: normal; font: 600 13px system-ui; letter-spacing: 0; }
 .pill:is([data-tone="done"], [data-tone="failed"]) :is(.dot, .wave) { display: none; }
