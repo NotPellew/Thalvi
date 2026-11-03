@@ -3168,3 +3168,30 @@ async fn a_hold_sends_only_the_audio_that_comes_after_its_start_cue() {
         })
         .await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn speech_that_cancels_an_ending_after_the_release_goes_on_as_a_dictation_by_wake_word() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new(SLOW_PASTE);
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("hello paste that").await;
+            rig.release(1100).await;
+            rig.feed_until(1500, Kind::Voice).await;
+            rig.finals("world").await;
+            rig.feed_until(2500, Kind::Quiet).await;
+            assert!(
+                !task.is_finished(),
+                "the key is up but the dictation is not over"
+            );
+            rig.finals("again paste that").await;
+            rig.feed_until(6000, Kind::Quiet).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "hello paste that world again")
+            );
+        })
+        .await;
+}
