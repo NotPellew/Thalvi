@@ -66,6 +66,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
   let looping = false;
   let flat = true;
   let look: Look = "gunmetal";
+  let clickable = false;
 
   function requestCancel(): void {
     backend.cancelCapture().catch((error: unknown) => {
@@ -110,7 +111,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
   }
 
   function cancellable(): boolean {
-    return live() || (status.state === "working" && status.cancellable);
+    return clickable && (live() || (status.state === "working" && status.cancellable));
   }
 
   function schedule(): void {
@@ -216,6 +217,16 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
     })
     .catch((error: unknown) => {
       console.error("get_status failed", error);
+    });
+
+  backend
+    .overlayTakesClicks()
+    .then((takes) => {
+      clickable = takes;
+      render(status);
+    })
+    .catch((error: unknown) => {
+      console.error("overlay_takes_clicks failed", error);
     });
 
   function idle(of: Status): boolean {
