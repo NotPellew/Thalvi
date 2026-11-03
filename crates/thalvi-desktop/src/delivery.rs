@@ -26,6 +26,12 @@ impl<T: Display> Bound<T> {
     pub fn window(&self) -> Option<String> {
         self.0.as_ref().ok().map(ToString::to_string)
     }
+
+    /// The bound window itself; `None` when nothing was bound.
+    #[must_use]
+    pub fn target(&self) -> Option<&T> {
+        self.0.as_ref().ok()
+    }
 }
 
 /// The confirmation shown while a submit ending is pending, naming the window that receives it.
@@ -48,6 +54,8 @@ pub fn submit_notice(state: &EngineState, window: &str) -> Option<String> {
 pub struct Finished {
     /// The text reached its destination; otherwise it is kept on the clipboard when possible.
     pub delivered: bool,
+    /// Typing stopped partway, so some of the text may be in the window; never with `delivered`.
+    pub maybe_partial: bool,
     /// Says what happened and where the dictated text went.
     pub notice: String,
     /// `notice` as one short line for the overlay.
@@ -60,6 +68,7 @@ impl Finished {
     fn delivered(notice: String) -> Self {
         Self {
             delivered: true,
+            maybe_partial: false,
             notice,
             headline: "Delivered",
             causes: Vec::new(),
@@ -69,6 +78,7 @@ impl Finished {
     fn kept(notice: String, headline: &'static str) -> Self {
         Self {
             delivered: false,
+            maybe_partial: false,
             notice,
             headline,
             causes: Vec::new(),
@@ -90,6 +100,11 @@ where
         Self {
             host: Arc::new(host),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn host(&self) -> &H {
+        &self.host
     }
 
     /// Binds the window that has focus now; call at the wake, before the capture starts.
@@ -168,8 +183,41 @@ where
                 }
                 Finished::delivered("Delivered.".to_owned())
             }
-            Err(error) => self.keep(recorder, text, &error).await,
+            Err(error) => Finished {
+                maybe_partial: matches!(error, HostError::MaybePartial(_)),
+                ..self.keep(recorder, text, &error).await
+            },
         }
+    }
+
+    /// Types `text` into `target`, never pressing Enter and never touching the clipboard. Like a
+    /// capture's delivery, the host checks `target` is still the window that gets the input.
+    ///
+    /// # Errors
+    /// [`HostError::NothingTyped`] when the text holds control characters or the target is gone;
+    /// [`HostError::MaybePartial`] when typing stopped partway.
+    pub async fn type_text(
+        &self,
+        recorder: &Recorder,
+        target: &H::Target,
+        text: &str,
+    ) -> Result<(), HostError> {
+        let typed = TypedText::new(text)?;
+        let target = target.clone();
+        self.call(recorder, "deliver", move |host| {
+            host.deliver(&target, &typed, false)
+        })
+        .await
+    }
+
+    /// Puts `text` on the clipboard.
+    ///
+    /// # Errors
+    /// Why the clipboard could not be set.
+    pub async fn copy_text(&self, recorder: &Recorder, text: &str) -> Result<(), HostError> {
+        let owned = text.to_owned();
+        self.call(recorder, "copy", move |host| host.copy(&owned))
+            .await
     }
 
     async fn run_task(&self, recorder: &Recorder, config: &DesktopConfig, text: &str) -> Finished {
