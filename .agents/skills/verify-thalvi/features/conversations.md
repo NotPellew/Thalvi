@@ -74,11 +74,13 @@ Steps:
   - Choose `Keep it` (`find role button click --name "Keep it"`); the row
     stays.
 - **Delete.** Choose `Delete Rice ideas`, then the confirming `Delete`.
-  - Run `$V ab $R click 'button[aria-label="Delete Rice ideas"]'` and
-    `$V ab $R click '.o-lib-danger'`.
+  - Run `$V ab $R click 'button[aria-label="Delete Rice ideas"]'`,
+    `$V ab $R click '.o-lib-danger'` and
+    `$V ab $R wait --fn '!document.querySelector(".o-lib-ask")'`.
   - The row disappears and the sheet stays open.
-  - Focus moves to the next row's main button (or `New conversation` when
-    there are no rows). Capture `document.activeElement.outerHTML`.
+  - Focus moves to the main button of the row that took the deleted row's
+    place, or to `New conversation` when the deleted row was the last.
+    Capture `document.activeElement.outerHTML`.
   - That session's file is gone from `R/data/sessions/`.
   - Because `Rice ideas` was open, `.o-turns` is now empty, a new conversation
     in state `idle`.
@@ -105,6 +107,11 @@ Steps:
   This cross-client path is not exercised by the single-tab recipe.
 - Row labels include the age (`just now`, `1 min ago`). Match the
   `aria-label` of `Rename …` and `Delete …`, which carry only the title.
+  Earlier recipes leave rows with the same rice title; a selector picks the
+  first, newest row, which is this recipe's seed.
+- While the delete question shows, the row's `Delete …` button is gone, so
+  waiting for it to vanish passes before the deletion. Wait for `.o-lib-ask`
+  to go instead.
 - While the sheet is open the rest of the page is `inert`. Close it
   (`find role button click --name "Close"`) before using the composer.
 - Learnings come only from the seed file or from retirement

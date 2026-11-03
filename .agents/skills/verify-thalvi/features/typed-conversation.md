@@ -63,8 +63,8 @@ Steps:
 
 ## Gotchas
 
-- Any message containing `make it fail`, `long story` or `search for` takes
-  the fake's scripted path. `How long …` is an ordinary echo.
+- Any message containing `make it fail`, `long story` or `search for <words>`
+  takes the fake's scripted path. `How long …` is an ordinary echo.
 - Reply text appears while the state is still `thinking`, and `idle` holds
   before the server answers. Use `reply --after` with a unique prompt to wait
   for this answer. Sending again earlier interrupts the open reply.
