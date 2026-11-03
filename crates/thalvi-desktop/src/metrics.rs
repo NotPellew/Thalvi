@@ -40,7 +40,8 @@ pub struct RecordKinds {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     WakeLoad,
-    /// Every minute of wake listening: how long scoring a frame took.
+    /// Every minute of wake listening: how long scoring a frame took, and how long the microphone
+    /// heard sound or quiet.
     WakeInference,
     /// A wake head's score rose near its threshold and fell back without crossing it.
     WakeNearMiss,
@@ -55,7 +56,6 @@ pub enum Event {
     SpeechDownload,
     /// One local recognition: its engine, device, model latency and outcome.
     LocalStt,
-    WakeLevel,
     ReadyCue,
     Cue,
     EndingState,
@@ -82,7 +82,6 @@ impl Event {
             Self::SpeechLoad => "desktop_speech_load",
             Self::SpeechDownload => "desktop_speech_download",
             Self::LocalStt => "desktop_local_stt",
-            Self::WakeLevel => "desktop_wake_level",
             Self::ReadyCue => "desktop_ready_cue",
             Self::Cue => "desktop_cue",
             Self::EndingState => "desktop_ending_state",
@@ -635,7 +634,6 @@ mod tests {
             (Event::SpeechLoad, "desktop_speech_load"),
             (Event::SpeechDownload, "desktop_speech_download"),
             (Event::LocalStt, "desktop_local_stt"),
-            (Event::WakeLevel, "desktop_wake_level"),
             (Event::ReadyCue, "desktop_ready_cue"),
             (Event::Cue, "desktop_cue"),
             (Event::EndingState, "desktop_ending_state"),

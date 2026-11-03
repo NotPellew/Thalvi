@@ -1707,7 +1707,6 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
             let seen = events(&metrics);
             for expected in [
                 ("desktop_wake_reset", "ok"),
-                ("desktop_wake_level", "quiet"),
                 ("desktop_ready_cue", "ok"),
                 ("desktop_transcription_ready", "ok"),
                 ("desktop_cue", "ok"),
@@ -1992,6 +1991,60 @@ async fn wake_latency_is_summarized_once_a_minute_and_when_listening_ends() {
                 [(6, 30.0, 99.0, 99.0), (1, 7.0, 7.0, 7.0)],
                 "the first minute's frames, then what the wake cut short"
             );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_minute_line_counts_seconds_of_sound_and_quiet_and_switches_between_them() {
+    LocalSet::new()
+        .run_until(async {
+            // Per 2 s of microphone audio, whether it held sound.
+            let cases: [(&str, &[bool], f64, f64, u64); 3] = [
+                (
+                    "several switches",
+                    &[true, false, false, true, false],
+                    4.0,
+                    6.0,
+                    3,
+                ),
+                ("one quiet stretch", &[false, false, false], 0.0, 6.0, 0),
+                ("one loud stretch", &[true, true], 4.0, 0.0, 0),
+            ];
+            for (name, windows, sound_s, quiet_s, switches) in cases {
+                let dir = record_dir("level");
+                let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+                let (rig, engine, frames) = Rig::recording("{}", recorder);
+                let task = listen_task(engine, frames, 1);
+                for (index, sound) in windows.iter().enumerate() {
+                    for id in 0..25 {
+                        let id = index * 25 + id;
+                        rig.feed.send(if *sound { voiced(id) } else { quiet(id) });
+                        settle().await;
+                    }
+                }
+                rig.wake.fire(WakeEvent::Capture);
+                hear(&rig, 999, 999).await;
+                finished(task).await;
+
+                let lines = wake_lines(&dir, "desktop_wake_inference");
+                let [summary] = lines.as_slice() else {
+                    panic!("{name}: expected one summary line, got {lines:?}");
+                };
+                assert_eq!(
+                    (
+                        summary["sound_ms"].as_f64().unwrap(),
+                        summary["quiet_ms"].as_f64().unwrap(),
+                        summary["switches"].as_u64().unwrap(),
+                    ),
+                    (sound_s * 1000.0, quiet_s * 1000.0, switches),
+                    "{name}"
+                );
+                assert!(
+                    wake_lines(&dir, "desktop_wake_level").is_empty(),
+                    "{name}: no line per sound or quiet switch"
+                );
+            }
         })
         .await;
 }
