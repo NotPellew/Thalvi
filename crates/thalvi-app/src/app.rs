@@ -12,6 +12,7 @@ use thalvi_desktop::models::SpeechDownloads;
 
 use crate::commands;
 use crate::control;
+use crate::dialog;
 use crate::launch::{Command, Launch, relaunch_command};
 use crate::overlay::{self, Overlay, Visibility};
 use crate::runner::{Control, EngineLink};
@@ -144,6 +145,7 @@ pub fn run() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("{message}");
+            dialog::startup_failed(&message);
             ExitCode::FAILURE
         }
     }
