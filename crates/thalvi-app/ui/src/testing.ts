@@ -1,7 +1,7 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
-import type { AudioStatus, Backend, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
+import type { AudioStatus, Backend, HistoryEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
 import type { Clock } from "./overlay.ts";
 
 export const SETTINGS: Settings = {
@@ -27,6 +27,7 @@ export const SETTINGS: Settings = {
   microphone: null,
   look: "neon",
   recordings: { metrics: true, text: false, audio: false },
+  history: { enabled: true, limit: 200 },
 };
 
 export const NEMOTRON: SpeechModelInfo = {
@@ -69,6 +70,9 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     copyReport: vi.fn<(message: string, causes: string[]) => Promise<void>>(() => Promise.resolve()),
     listMicrophones: vi.fn(() => Promise.resolve(["USB Microphone", "Built-in"])),
     openRecordings: vi.fn(() => Promise.resolve()),
+    getHistory: vi.fn<() => Promise<HistoryEntry[]>>(() => Promise.resolve([])),
+    deleteHistoryEntry: vi.fn<(id: number) => Promise<void>>(() => Promise.resolve()),
+    clearHistory: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     getStartAtLogin: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),
     setStartAtLogin: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
     getMenuEntry: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),

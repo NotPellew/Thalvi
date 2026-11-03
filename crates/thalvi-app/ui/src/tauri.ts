@@ -3,7 +3,7 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AudioStatus, Backend, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
+import type { AudioStatus, Backend, HistoryEntry, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
 
 export function tauriBackend(): Backend {
   return {
@@ -37,6 +37,9 @@ export function tauriBackend(): Backend {
     copyReport: (message, causes) => invoke<undefined>("copy_report", { message, causes }),
     listMicrophones: () => invoke<string[]>("list_microphones"),
     openRecordings: () => invoke<undefined>("open_recordings"),
+    getHistory: () => invoke<HistoryEntry[]>("get_history"),
+    deleteHistoryEntry: (id) => invoke<undefined>("delete_history_entry", { id }),
+    clearHistory: () => invoke<undefined>("clear_history"),
     getStartAtLogin: () => invoke<SwitchState>("get_start_at_login"),
     setStartAtLogin: (on) => invoke<undefined>("set_start_at_login", { on }),
     getMenuEntry: () => invoke<SwitchState>("get_menu_entry"),

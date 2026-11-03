@@ -42,6 +42,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     listening: () => undefined,
     audio: () => undefined,
     speechModel: () => undefined,
+    opened: () => undefined,
   };
 
   function applyView(): void {
@@ -126,6 +127,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
         current = page.id;
         search.value = "";
         applyView();
+        live.opened(page.id);
       });
       return button;
     });

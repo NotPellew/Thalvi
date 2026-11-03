@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Settings } from "./contract.ts";
+import type { HistoryEntry, Settings } from "./contract.ts";
 import { mountSettings, SAVED_TEXT } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend } from "./testing.ts";
 
@@ -77,7 +77,7 @@ function sent(stub: Awaited<ReturnType<typeof open>>): Settings {
 }
 
 describe("pages", () => {
-  it("offers six pages in order, each holding its controls under the right group", async () => {
+  it("offers seven pages in order, each holding its controls under the right group", async () => {
     await open();
     const shape = Array.from(root.querySelectorAll<HTMLElement>("section[data-page]")).map((page) => ({
       id: page.dataset["page"],
@@ -134,6 +134,14 @@ describe("pages", () => {
         id: "tasks",
         title: "Apps & tasks",
         groups: { Apps: ["apps"], Scripts: ["scripts"] },
+      },
+      {
+        id: "history",
+        title: "History",
+        groups: {
+          Keeping: ["keep a history", "entries to keep"],
+          "Kept so far": ["recent dictations", "clear history"],
+        },
       },
       {
         id: "app",
@@ -953,5 +961,123 @@ describe("live controls", () => {
   it("shows the version", async () => {
     await open();
     expect(rowOf("Version").querySelector("output")?.textContent).toBe("1.2.3");
+  });
+});
+
+describe("history", () => {
+  const ENTRIES: HistoryEntry[] = [
+    { id: 30, timestamp_ms: Date.UTC(2026, 10, 3, 9, 30), text: "Remind me to call.", target: "Slack", outcome: "accepted" },
+    { id: 20, timestamp_ms: Date.UTC(2026, 10, 2, 18, 5), text: "The window was gone.", target: null, outcome: "failed" },
+    { id: 10, timestamp_ms: Date.UTC(2026, 10, 1, 7, 0), text: "Never mind this one", target: "Firefox", outcome: "cancelled" },
+  ];
+
+  async function openHistory(...lists: (HistoryEntry[] | Error)[]) {
+    const stub = stubBackend();
+    for (const list of lists) {
+      if (list instanceof Error) stub.backend.getHistory.mockRejectedValueOnce(list);
+      else stub.backend.getHistory.mockResolvedValueOnce(structuredClone(list));
+    }
+    mountSettings(root, stub.backend);
+    await settle();
+    return stub;
+  }
+
+  const cards = (): HTMLElement[] => Array.from(root.querySelectorAll<HTMLElement>(".entry"));
+  const shown = (card: HTMLElement) => ({
+    time: card.querySelector("time")?.getAttribute("datetime"),
+    target: card.querySelector(".target")?.textContent ?? null,
+    outcome: card.querySelector(".outcome")?.textContent,
+    text: card.querySelector("p")?.textContent,
+  });
+
+  it("lists the entries newest first with their time, target, outcome and text", async () => {
+    await openHistory(ENTRIES);
+    expect(cards().map(shown)).toEqual([
+      { time: "2026-11-03T09:30:00.000Z", target: "Slack", outcome: "Delivered", text: "Remind me to call." },
+      { time: "2026-11-02T18:05:00.000Z", target: null, outcome: "Failed", text: "The window was gone." },
+      { time: "2026-11-01T07:00:00.000Z", target: "Firefox", outcome: "Cancelled", text: "Never mind this one" },
+    ]);
+    expect(cards().every((card) => (card.querySelector("time")?.textContent ?? "") !== "")).toBe(true);
+  });
+
+  it("says so when nothing has been kept, and reads the list again whenever the page is opened", async () => {
+    const stub = await openHistory([], ENTRIES);
+    expect(root.querySelector(".entries")?.textContent).toBe("Nothing has been kept yet.");
+    expect(stub.backend.getHistory).toHaveBeenCalledTimes(1);
+    goTo("history");
+    await settle();
+    expect(cards()).toHaveLength(3);
+  });
+
+  it("deletes one entry by id and shows the list without it", async () => {
+    const stub = await openHistory(ENTRIES, [ENTRIES[0] as HistoryEntry, ENTRIES[2] as HistoryEntry]);
+    within(cards()[1] as HTMLElement, "Delete").click();
+    await settle();
+    expect(stub.backend.deleteHistoryEntry).toHaveBeenCalledExactlyOnceWith(20);
+    expect(cards().map((card) => shown(card).text)).toEqual(["Remind me to call.", "Never mind this one"]);
+  });
+
+  it("keeps the list and says why when an entry cannot be deleted", async () => {
+    const stub = await openHistory(ENTRIES);
+    stub.backend.deleteHistoryEntry.mockRejectedValueOnce("The history could not be written.");
+    within(cards()[0] as HTMLElement, "Delete").click();
+    await settle();
+    expect(cards()).toHaveLength(3);
+    expect(rowOf("Recent dictations").querySelector(".note")?.textContent).toBe("The history could not be written.");
+  });
+
+  it("asks before clearing: keeping changes nothing, and confirming clears at once", async () => {
+    const stub = await openHistory(ENTRIES, []);
+    const group = (): HTMLElement => rowOf("Clear history");
+    expect(group().querySelector(".trow")?.hasAttribute("hidden")).toBe(true);
+
+    within(group(), "Clear history").click();
+    expect(group().querySelector(".trow")?.hasAttribute("hidden")).toBe(false);
+    expect(group().textContent).toContain("Delete every entry? This cannot be undone.");
+    expect(within(group(), "Clear history").hidden).toBe(true);
+    within(group(), "Keep history").click();
+    await settle();
+    expect(stub.backend.clearHistory).not.toHaveBeenCalled();
+    expect(cards()).toHaveLength(3);
+    expect(within(group(), "Clear history").hidden).toBe(false);
+
+    within(group(), "Clear history").click();
+    within(group(), "Yes, clear history").click();
+    await settle();
+    expect(stub.backend.clearHistory).toHaveBeenCalledOnce();
+    expect(cards()).toHaveLength(0);
+    expect(root.querySelector(".entries")?.textContent).toBe("Nothing has been kept yet.");
+    expect(group().querySelector(".trow")?.hasAttribute("hidden")).toBe(true);
+  });
+
+  it("shows why the history cannot be read and lets the user start a new one", async () => {
+    const damaged = "The history file /home/me/history.json is damaged (EOF). Clear the history to start a new one.";
+    const stub = await openHistory(new Error(damaged), [ENTRIES[0] as HistoryEntry]);
+    expect(rowOf("Recent dictations").querySelector(".note")?.textContent).toBe(damaged);
+    expect(cards()).toHaveLength(0);
+    expect(root.querySelector(".entries")?.textContent).toBe("");
+
+    within(rowOf("Clear history"), "Clear history").click();
+    within(rowOf("Clear history"), "Yes, clear history").click();
+    await settle();
+    expect(stub.backend.clearHistory).toHaveBeenCalledOnce();
+    expect(rowOf("Recent dictations").querySelector(".note")?.hasAttribute("hidden")).toBe(true);
+    expect(cards()).toHaveLength(1);
+  });
+
+  it("saves the switch and the limit with Save, and says that turning it off keeps what is there", async () => {
+    const stub = await open();
+    expect(control("Keep a history", "input").checked).toBe(true);
+    expect(control("Entries to keep", "input").value).toBe("200");
+    expect(rowOf("Keep a history").textContent).toContain("Kept on this computer only, never uploaded");
+    expect(rowOf("Keep a history").textContent).toContain("deletes none");
+
+    flip(control("Keep a history", "input"));
+    type(control("Entries to keep", "input"), "50");
+    button("Save").click();
+    const expected = structuredClone(SETTINGS);
+    expected.history = { enabled: false, limit: 50 };
+    expect(sent(stub)).toEqual(expected);
+    expect(stub.backend.clearHistory).not.toHaveBeenCalled();
   });
 });

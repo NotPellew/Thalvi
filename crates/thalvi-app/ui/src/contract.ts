@@ -83,6 +83,19 @@ export interface Settings {
   microphone: string | null;
   look: Look;
   recordings: { metrics: boolean; text: boolean; audio: boolean };
+  /** Whether finished captures are kept on this computer, and how many. */
+  history: { enabled: boolean; limit: number };
+}
+
+export type HistoryOutcome = "accepted" | "cancelled" | "failed";
+
+/** One kept dictation; `target` is the window it was meant for, when there was one. */
+export interface HistoryEntry {
+  id: number;
+  timestamp_ms: number;
+  text: string;
+  target: string | null;
+  outcome: HistoryOutcome;
 }
 
 /** A speech model Thalvi can download, as the Rust catalog describes it. */
@@ -125,6 +138,11 @@ export interface Backend {
   copyReport(message: string, causes: string[]): Promise<void>;
   listMicrophones(): Promise<string[]>;
   openRecordings(): Promise<void>;
+  /** The kept dictations, newest first; rejects with the plain reason the history cannot be read. */
+  getHistory(): Promise<HistoryEntry[]>;
+  deleteHistoryEntry(id: number): Promise<void>;
+  /** Removes every entry, and a damaged history file with them. */
+  clearHistory(): Promise<void>;
   /** Whether the OS starts Thalvi at login, read from the OS, and why Thalvi could not put its entry back on start. */
   getStartAtLogin(): Promise<SwitchState>;
   /** Adds or removes the startup entry; rejects unless the OS then holds it as asked. */
