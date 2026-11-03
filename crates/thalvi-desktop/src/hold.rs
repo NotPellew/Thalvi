@@ -325,10 +325,8 @@ enum Main {
     Up,
     /// Down, and the program got it, so its repeats are the program's too.
     Passed,
-    /// Down and kept from the program; `holding` until a modifier is let go first.
-    Swallowed {
-        holding: bool,
-    },
+    /// Down and kept from the program.
+    Swallowed,
 }
 
 /// Decides, event by event, which keys are the hold key. Pure: the hook asks and acts.
@@ -339,6 +337,9 @@ pub struct HoldHook {
     down: [u8; 4],
     /// Alt or Win keys whose next release needs the mask.
     masks: Vec<Modifier>,
+    /// The hold lasts from the press until the key and all its modifiers are up, in either order:
+    /// text typed while a modifier is still down would reach the app as shortcuts.
+    holding: bool,
 }
 
 impl HoldHook {
@@ -349,7 +350,23 @@ impl HoldHook {
             main: Main::Up,
             down: [0; 4],
             masks: Vec::new(),
+            holding: false,
         }
+    }
+
+    /// Ends the hold if nothing of it is down any more; true when it ended.
+    fn end_if_clear(&mut self) -> bool {
+        let clear = self.main != Main::Swallowed
+            && !self
+                .key
+                .modifiers()
+                .iter()
+                .any(|modifier| self.down[*modifier as usize] != 0);
+        if self.holding && clear {
+            self.holding = false;
+            return true;
+        }
+        false
     }
 
     /// The side-specific modifier keys, as Windows reports them.
@@ -413,17 +430,25 @@ impl HoldHook {
             return Decision::PASS;
         }
         self.reconcile(&physically_down);
-        if let Some((modifier, side)) = Self::modifier(event.vk) {
-            return self.on_modifier(modifier, side, event);
-        }
-        if event.scan_code != self.key.scan_code() || event.extended {
-            return Decision::PASS;
-        }
-        match (event.down, self.main) {
-            (true, Main::Swallowed { .. }) => Decision::swallow(None),
+        // A release the hook never saw may have been the last thing the hold waited for.
+        let lost = self.end_if_clear().then_some(false);
+        let mut decision = if let Some((modifier, side)) = Self::modifier(event.vk) {
+            self.on_modifier(modifier, side, event)
+        } else if event.scan_code != self.key.scan_code() || event.extended {
+            Decision::PASS
+        } else {
+            self.on_main(event.down)
+        };
+        decision.change = decision.change.or(lost);
+        decision
+    }
+
+    fn on_main(&mut self, down: bool) -> Decision {
+        match (down, self.main) {
+            (true, Main::Swallowed) => Decision::swallow(None),
             (true, Main::Passed) | (false, Main::Up) => Decision::PASS,
             (true, Main::Up) if self.chord_down() => {
-                self.main = Main::Swallowed { holding: true };
+                self.main = Main::Swallowed;
                 for modifier in self.key.modifiers() {
                     if matches!(modifier, Modifier::Alt | Modifier::Logo)
                         && !self.masks.contains(modifier)
@@ -431,15 +456,15 @@ impl HoldHook {
                         self.masks.push(*modifier);
                     }
                 }
-                Decision::swallow(Some(true))
+                Decision::swallow((!std::mem::replace(&mut self.holding, true)).then_some(true))
             }
             (true, Main::Up) => {
                 self.main = Main::Passed;
                 Decision::PASS
             }
-            (false, Main::Swallowed { holding }) => {
+            (false, Main::Swallowed) => {
                 self.main = Main::Up;
-                Decision::swallow(holding.then_some(false))
+                Decision::swallow(self.end_if_clear().then_some(false))
             }
             (false, Main::Passed) => {
                 self.main = Main::Up;
@@ -456,10 +481,7 @@ impl HoldHook {
         }
         *bits &= !side;
         let mut decision = Decision::PASS;
-        if matches!(self.main, Main::Swallowed { holding: true }) && !self.chord_down() {
-            self.main = Main::Swallowed { holding: false };
-            decision.change = Some(false);
-        }
+        decision.change = self.end_if_clear().then_some(false);
         if self.down[modifier as usize] == 0
             && let Some(at) = self.masks.iter().position(|known| *known == modifier)
         {
@@ -521,11 +543,13 @@ mod tests {
     const WIN: u16 = 0x5B;
     const Z: u16 = 0x5A;
     const X: u16 = 0x58;
+    const F9: u16 = 0x78;
 
     fn scan_of(vk: u16) -> u16 {
         match vk {
             Z => 0x2C,
             X => 0x2D,
+            F9 => 0x43,
             _ => 0x38,
         }
     }
@@ -571,7 +595,8 @@ mod tests {
     #[test]
     fn the_hook_swallows_only_the_hold_keys_press_repeats_and_release_and_reports_each_change() {
         let pressed = decision(Verdict::Swallow, Some(true));
-        let released = decision(Verdict::Swallow, Some(false));
+        // The hold ends with the last of the key and its modifiers, here the Alt.
+        let released = decision(Verdict::Mask, Some(false));
         let got = run(
             "Alt+KeyZ",
             &[
@@ -582,14 +607,18 @@ mod tests {
                 (X, true),
                 (X, false),
                 (Z, false),
+                (ALT, false),
+                (ALT, true),
                 (Z, true),
                 (Z, false),
+                (ALT, false),
             ],
         );
         assert_eq!(
             got,
             [
-                PASS, pressed, SWALLOW, SWALLOW, PASS, PASS, released, pressed, released
+                PASS, pressed, SWALLOW, SWALLOW, PASS, PASS, SWALLOW, released, PASS, pressed,
+                SWALLOW, released
             ]
         );
     }
@@ -657,8 +686,8 @@ mod tests {
             [
                 PASS,
                 decision(Verdict::Swallow, Some(true)),
-                decision(Verdict::Swallow, Some(false)),
-                mask,
+                SWALLOW,
+                decision(Verdict::Mask, Some(false)),
                 PASS,
                 PASS
             ]
@@ -670,7 +699,7 @@ mod tests {
                 &[(CTRL, true), (Z, true), (Z, false), (CTRL, false)]
             )
             .last(),
-            Some(&PASS)
+            Some(&decision(Verdict::Pass, Some(false)))
         );
         assert_eq!(
             run("Alt+KeyZ", &[(ALT, true), (ALT, false)]).last(),
@@ -688,23 +717,76 @@ mod tests {
                 (ALT, false),
             ],
         );
-        assert_eq!(&got[4..], [mask, mask]);
+        assert_eq!(&got[4..], [mask, decision(Verdict::Mask, Some(false))]);
     }
 
     #[test]
-    fn letting_go_of_a_modifier_first_ends_the_hold_and_the_keys_release_is_still_swallowed() {
-        let got = run(
-            "Alt+KeyZ",
-            &[(ALT, true), (Z, true), (ALT, false), (Z, false)],
-        );
+    fn a_hold_ends_only_when_the_key_and_all_its_modifiers_are_up_in_either_order() {
+        let pressed = decision(Verdict::Swallow, Some(true));
+        // Key first: the release comes with the Alt, which is still masked.
         assert_eq!(
-            got,
+            run(
+                "Alt+KeyZ",
+                &[(ALT, true), (Z, true), (Z, false), (ALT, false)]
+            ),
+            [PASS, pressed, SWALLOW, decision(Verdict::Mask, Some(false))]
+        );
+        // Alt first: the key's release ends it, and is still swallowed.
+        assert_eq!(
+            run(
+                "Alt+KeyZ",
+                &[(ALT, true), (Z, true), (ALT, false), (Z, false)]
+            ),
             [
                 PASS,
-                decision(Verdict::Swallow, Some(true)),
-                decision(Verdict::Mask, Some(false)),
-                SWALLOW,
+                pressed,
+                decision(Verdict::Mask, None),
+                decision(Verdict::Swallow, Some(false)),
             ]
+        );
+        // Pressing the key again while a modifier is still down is the same hold.
+        assert_eq!(
+            run(
+                "Alt+KeyZ",
+                &[
+                    (ALT, true),
+                    (Z, true),
+                    (Z, false),
+                    (Z, true),
+                    (Z, false),
+                    (ALT, false)
+                ]
+            ),
+            [
+                PASS,
+                pressed,
+                SWALLOW,
+                SWALLOW,
+                SWALLOW,
+                decision(Verdict::Mask, Some(false)),
+            ]
+        );
+        // A key without modifiers ends with its own release.
+        assert_eq!(
+            run("F9", &[(F9, true), (F9, false)]),
+            [pressed, decision(Verdict::Swallow, Some(false))]
+        );
+    }
+
+    #[test]
+    fn a_modifier_release_lost_while_the_key_is_up_still_ends_the_hold_on_the_next_event() {
+        let mut hook = HoldHook::new(HoldKey::default());
+        let alt = |vk| vk == ALT;
+        assert_eq!(hook.on_event(event(ALT, true), alt), PASS);
+        assert_eq!(
+            hook.on_event(event(Z, true), alt),
+            decision(Verdict::Swallow, Some(true))
+        );
+        assert_eq!(hook.on_event(event(Z, false), alt), SWALLOW);
+        // The lock screen took the Alt release; the next key shows the keyboard has none down.
+        assert_eq!(
+            hook.on_event(event(X, true), |_| false),
+            decision(Verdict::Pass, Some(false))
         );
     }
 
