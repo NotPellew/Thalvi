@@ -37,7 +37,7 @@ pub struct AppState {
 impl AppState {
     /// Reads the config and starts the engine.
     fn start(config: Option<std::path::PathBuf>) -> Result<Self, String> {
-        let store = Store::new(config, std::env::var("THALVI_RECORD").ok())?;
+        let store = Store::new(config)?;
         let config = store.load()?;
         let link = EngineLink::start(
             config.clone(),

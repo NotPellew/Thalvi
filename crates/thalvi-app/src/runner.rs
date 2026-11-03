@@ -389,7 +389,7 @@ impl Runner {
     }
 
     async fn build(&self, config: &DesktopConfig) -> Result<Session, String> {
-        let recorder = Recorder::per_user(config.record).map_err(|error| error.to_string())?;
+        let recorder = Recorder::per_user(config.recordings).map_err(|error| error.to_string())?;
         let store = ModelStore::per_user().map_err(|error| error.to_string())?;
         println!("Loading the wake word models.");
         let started = Instant::now();
@@ -618,9 +618,22 @@ impl Runner {
         self.publisher.mode(Mode::Paused);
     }
 
-    /// Replaces the engine by one built from `config`; the old one stays if that fails.
+    /// Replaces the engine by one built from `config`; the old one stays if that fails. A change
+    /// to the recordings alone only retunes the running engine.
     async fn apply(&mut self, config: DesktopConfig) {
         if config == self.config {
+            return;
+        }
+        let only_recordings = self.config
+            == DesktopConfig {
+                recordings: self.config.recordings,
+                ..config.clone()
+            };
+        if only_recordings {
+            if let Some(session) = self.session.as_mut() {
+                session.engine.set_recordings(config.recordings);
+            }
+            self.config = config;
             return;
         }
         self.close_microphone();
@@ -978,7 +991,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_cancel_that_arrives_as_the_capture_finishes_keeps_its_outcome_from_delivery() {
-        let config = DesktopConfig::from_json_str("{}", None).unwrap();
+        let config = DesktopConfig::from_json_str("{}").unwrap();
         for (control, delivered) in [
             (None, true),
             (Some(Control::Apply(Box::new(config))), true),
@@ -1008,7 +1021,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_latest_listening_request_wins_and_settings_wait_for_the_end() {
-        let config = DesktopConfig::from_json_str("{}", None).unwrap();
+        let config = DesktopConfig::from_json_str("{}").unwrap();
         let (outcome, requests, _) = run(
             vec![],
             vec![
@@ -1063,7 +1076,7 @@ mod tests {
 
     #[test]
     fn listening_requests_queued_before_the_microphone_opens_settle_on_the_latest_one() {
-        let config = DesktopConfig::from_json_str("{}", None).unwrap();
+        let config = DesktopConfig::from_json_str("{}").unwrap();
         for (listening_off, queued, expected) in [
             (false, vec![Control::ToggleListening], true),
             (

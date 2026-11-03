@@ -116,7 +116,7 @@ impl Rig {
     }
 
     fn recording(config: &str, recorder: Recorder) -> (Self, TestEngine, FakeFrames) {
-        let config = DesktopConfig::from_json_str(config, None).unwrap();
+        let config = DesktopConfig::from_json_str(config).unwrap();
         let gate = InputGate::default();
         let (frames, feed) = FakeFrames::new(&gate);
         let (wake_detector, wake) = FakeWake::new();
@@ -2023,6 +2023,38 @@ async fn a_clip_holds_only_what_was_heard_since_listening_began() {
             let mut lengths: Vec<_> = clips.iter().map(|(_, _, samples)| samples.len()).collect();
             lengths.sort_unstable();
             assert_eq!(lengths, [3 * FRAME_SAMPLES, 11 * FRAME_SAMPLES]);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn recordings_changed_between_listens_apply_to_the_next_one() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("switched");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (rig, mut engine, mut frames) = Rig::recording("{}", recorder);
+            let task = tokio::task::spawn_local(async move {
+                engine.listen(&mut frames).await.unwrap();
+                engine.set_recordings(AUDIO_AND_METRICS);
+                engine.listen(&mut frames).await.unwrap();
+                engine.finish().await;
+            });
+            hear(&rig, 1, 10).await;
+            rig.wake.fire(WakeEvent::Conversation);
+            hear(&rig, 11, 11).await;
+            hear(&rig, 20, 21).await;
+            rig.wake.fire(WakeEvent::Capture);
+            hear(&rig, 22, 22).await;
+            finished(task).await;
+
+            let clips = wake_clips(&day_dir(&dir).unwrap());
+            let kinds: Vec<_> = clips.iter().map(|(kind, _, _)| kind.as_str()).collect();
+            assert_eq!(
+                kinds,
+                ["capture"],
+                "only the listen after the change has a clip"
+            );
         })
         .await;
 }

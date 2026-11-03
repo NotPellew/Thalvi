@@ -2,16 +2,15 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use thalvi_desktop::config::{ConfigError, DesktopConfig};
 
-/// Where the config lives and what `THALVI_RECORD` asked for.
+/// Where the config lives.
 #[derive(Clone, Debug)]
 pub struct Store {
     path: PathBuf,
     /// Whether the file must exist: a path given on the command line does.
     required: bool,
-    record: Option<String>,
 }
 
 impl Store {
@@ -19,7 +18,7 @@ impl Store {
     ///
     /// # Errors
     /// Fails when the platform has no per-user config directory.
-    pub fn new(path: Option<PathBuf>, record: Option<String>) -> Result<Self, String> {
+    pub fn new(path: Option<PathBuf>) -> Result<Self, String> {
         let required = path.is_some();
         let path = match path {
             Some(path) => path,
@@ -28,11 +27,7 @@ impl Store {
                 .join("thalvi")
                 .join("desktop.json"),
         };
-        Ok(Self {
-            path,
-            required,
-            record,
-        })
+        Ok(Self { path, required })
     }
 
     /// The config in effect: the file if there is one, else the defaults.
@@ -41,9 +36,9 @@ impl Store {
     /// Fails when the file cannot be read or is not valid.
     pub fn load(&self) -> Result<DesktopConfig, String> {
         if self.required || self.path.exists() {
-            DesktopConfig::load(&self.path, self.record.as_deref())
+            DesktopConfig::load(&self.path)
         } else {
-            DesktopConfig::from_json_str("{}", self.record.as_deref())
+            DesktopConfig::from_json_str("{}")
         }
         .map_err(|error| error.to_string())
     }
@@ -53,19 +48,16 @@ impl Store {
     /// # Errors
     /// The loader's message when the settings are invalid, in which case nothing is written; or
     /// why the file could not be written.
-    pub fn save(&self, mut settings: Value) -> Result<DesktopConfig, String> {
-        if let Some(settings) = settings.as_object_mut() {
-            settings.remove("recordings");
-        }
-        let config = DesktopConfig::from_json_str(&settings.to_string(), self.record.as_deref())
-            .map_err(|error| match error {
+    pub fn save(&self, settings: &Value) -> Result<DesktopConfig, String> {
+        let config =
+            DesktopConfig::from_json_str(&settings.to_string()).map_err(|error| match error {
                 // The window writes this JSON itself, so a line and column would mean nothing.
                 ConfigError::Invalid(error) => {
                     let text = error.to_string();
                     let position = format!(" at line {} column {}", error.line(), error.column());
                     text.strip_suffix(&position).unwrap_or(&text).to_owned()
                 }
-                error => error.to_string(),
+                error @ ConfigError::Read { .. } => error.to_string(),
             })?;
         let json = serde_json::to_string_pretty(&config)
             .map_err(|error| format!("The settings could not be written: {error}"))?;
@@ -79,23 +71,12 @@ impl Store {
     }
 }
 
-/// The settings window's form of `config`: the file form plus what `THALVI_RECORD` records.
+/// The settings window's form of `config`: the file form.
 ///
 /// # Errors
 /// Fails when the config cannot be written as JSON.
 pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
-    let mut settings = serde_json::to_value(config).map_err(|error| error.to_string())?;
-    if let Some(settings) = settings.as_object_mut() {
-        settings.insert(
-            "recordings".to_owned(),
-            json!({
-                "metrics": config.record.metrics,
-                "text": config.record.text,
-                "audio": config.record.audio,
-            }),
-        );
-    }
-    Ok(settings)
+    serde_json::to_value(config).map_err(|error| error.to_string())
 }
 
 fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
@@ -128,24 +109,24 @@ fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use thalvi_desktop::config::{Look, SttEngine};
     use thalvi_desktop::transducer::SpeechChoice;
 
     use super::*;
 
-    fn store(name: &str, record: Option<&str>) -> (Store, PathBuf) {
+    fn store(name: &str) -> (Store, PathBuf) {
         let dir = std::env::temp_dir().join(format!("thalvi-app-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("nested").join("desktop.json");
-        (
-            Store::new(Some(path), record.map(str::to_owned)).unwrap(),
-            dir,
-        )
+        (Store::new(Some(path)).unwrap(), dir)
     }
 
     #[test]
     fn the_effective_config_has_every_field_and_says_what_is_recorded() {
-        let config = DesktopConfig::from_json_str("{}", Some("metrics, audio")).unwrap();
+        let config =
+            DesktopConfig::from_json_str(r#"{"recordings": {"metrics": true, "audio": true}}"#)
+                .unwrap();
         let settings = settings_json(&config).unwrap();
 
         let mut keys: Vec<&str> = settings
@@ -184,16 +165,15 @@ mod tests {
 
     #[test]
     fn saved_settings_replace_the_file_and_are_what_the_next_start_loads() {
-        let (store, dir) = store("save", Some("text"));
+        let (store, dir) = store("save");
         let mut settings = settings_json(&store_defaults()).unwrap();
         settings["overlay"]["draft"] = json!(false);
         settings["microphone"] = json!("USB Mic");
         settings["look"] = json!("holo");
-        settings["recordings"] = json!({"metrics": true, "text": true, "audio": true});
+        settings["recordings"] = json!({"metrics": true, "text": false, "audio": true});
 
-        let saved = store.save(settings).unwrap();
+        let saved = store.save(&settings).unwrap();
         let reloaded = store.load().unwrap();
-        let written = std::fs::read_to_string(&store.path).unwrap();
         let leftovers: Vec<_> = std::fs::read_dir(store.path.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
@@ -204,21 +184,24 @@ mod tests {
         assert_eq!(saved.microphone.as_deref(), Some("USB Mic"));
         assert_eq!(saved.look, Look::Holo);
         assert_eq!(reloaded, saved);
-        assert!(
-            reloaded.record.text && !reloaded.record.audio,
-            "record stays THALVI_RECORD's"
+        assert_eq!(
+            (
+                saved.recordings.metrics,
+                saved.recordings.text,
+                saved.recordings.audio
+            ),
+            (true, false, true)
         );
-        assert!(!written.contains("recordings") && !written.contains("record"));
         assert_eq!(leftovers, ["desktop.json"]);
     }
 
     #[test]
     fn a_custom_speech_model_folder_survives_save_and_reload() {
-        let (store, dir) = store("folder", None);
+        let (store, dir) = store("folder");
         let mut settings = settings_json(&store_defaults()).unwrap();
         settings["stt"] = json!({"engine": "local", "model": "/models/mine"});
 
-        let saved = store.save(settings).unwrap();
+        let saved = store.save(&settings).unwrap();
         let reloaded = store.load().unwrap();
         let shown = settings_json(&reloaded).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -237,7 +220,7 @@ mod tests {
     fn a_saved_config_stays_readable_by_its_owner_only() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (store, dir) = store("private", None);
+        let (store, dir) = store("private");
         let mut settings = settings_json(&store_defaults()).unwrap();
         settings["stt"] =
             json!({"secondary": {"url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k"}});
@@ -247,9 +230,9 @@ mod tests {
         std::fs::write(&leftover, "old").unwrap();
         std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        store.save(settings.clone()).unwrap();
+        store.save(&settings).unwrap();
         let first = std::fs::metadata(&store.path).unwrap().permissions().mode() & 0o777;
-        store.save(settings).unwrap();
+        store.save(&settings).unwrap();
         let again = std::fs::metadata(&store.path).unwrap().permissions().mode() & 0o777;
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -258,11 +241,11 @@ mod tests {
 
     #[test]
     fn invalid_settings_are_refused_with_the_loaders_message_and_nothing_is_written() {
-        let (store, dir) = store("invalid", None);
+        let (store, dir) = store("invalid");
         let mut settings = settings_json(&store_defaults()).unwrap();
         settings["ending_pause"] = json!({"paste": 9});
 
-        let error = store.save(settings).unwrap_err();
+        let error = store.save(&settings).unwrap_err();
         let exists = store.path.exists() || store.path.parent().unwrap().exists();
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -274,6 +257,6 @@ mod tests {
     }
 
     fn store_defaults() -> DesktopConfig {
-        DesktopConfig::from_json_str("{}", None).unwrap()
+        DesktopConfig::from_json_str("{}").unwrap()
     }
 }

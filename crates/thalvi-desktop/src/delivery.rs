@@ -260,7 +260,7 @@ mod tests {
     async fn finish(host: FakeHost, outcome: CaptureOutcome) -> (Option<Finished>, Vec<String>) {
         let delivery = Delivery::new(host);
         let recorder = Recorder::disabled();
-        let config = DesktopConfig::from_json_str(CONFIG, None).unwrap();
+        let config = DesktopConfig::from_json_str(CONFIG).unwrap();
         let bound = delivery.bind(&recorder).await;
         let finished = delivery.finish(&outcome, &bound, &config, &recorder).await;
         (finished, delivery.host.calls())
@@ -653,7 +653,7 @@ mod tests {
         let delivery = Delivery::new(
             FakeHost::default().failing("deliver", HostError::MaybePartial("Stopped.".to_owned())),
         );
-        let config = DesktopConfig::from_json_str(CONFIG, None).unwrap();
+        let config = DesktopConfig::from_json_str(CONFIG).unwrap();
         let bound = delivery.bind(&recorder).await;
         delivery
             .finish(

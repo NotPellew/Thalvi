@@ -203,8 +203,9 @@ The first run downloads the wake models. The app streams to the server's
 `/transcription`, `ws://127.0.0.1:8080` unless `server` says otherwise. The
 config is `desktop.json` in `thalvi/` under the user config directory
 (`~/.config` on Linux, `%APPDATA%` on Windows); without one the defaults apply.
-`THALVI_RECORD=metrics,text,audio` records timings, dictated text and
-microphone audio locally, each opt-in.
+Settings → App has a switch each for recording timings, dictated text and
+microphone audio on this computer; all are off until turned on, and Save applies
+a change between captures.
 
 On Hyprland, `thalvi-desktop toggle`, `pause`, `resume` and `cancel` control
 the running app; they report an error when it is not running. `status` prints

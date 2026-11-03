@@ -685,11 +685,11 @@ function limits({ draft, controls }: PageContext): HTMLElement[] {
   ];
 }
 
-function recordings({ draft, backend }: PageContext): HTMLElement[] {
+function recordings({ draft, backend, controls }: PageContext): HTMLElement[] {
   const kinds = [
-    ["Metrics", draft.recordings.metrics, "Timings and outcomes of every model call."],
-    ["Text", draft.recordings.text, "What was said and what Thalvi answered."],
-    ["Audio", draft.recordings.audio, "Microphone audio, with about two seconds before each wake."],
+    ["Metrics", "metrics", "When each wake, capture and model call happened, how long it took and how it ended. No words or audio."],
+    ["Text", "text", "The words you dictated and what Thalvi did with them."],
+    ["Audio", "audio", "What the microphone heard during each capture, and about two seconds before each wake word."],
   ] as const;
   const problem = note();
   const open = button("Open folder", () => {
@@ -700,11 +700,11 @@ function recordings({ draft, backend }: PageContext): HTMLElement[] {
   });
   return [
     group("Recordings"),
-    ...kinds.map(([label, on, hint]) =>
-      row(`${label} recording`, `${hint} Set THALVI_RECORD before starting Thalvi to change it.`, {
-        node: el("output", { class: "badge", "data-on": String(on) }, on ? "On" : "Off"),
-        field: el("span", { id: uid("f") }),
-      }),
+    ...kinds.map(([label, kind, hint]) =>
+      row(`${label} recording`, `${hint} Kept on this computer only. Off unless you turn it on.`,
+        controls.toggle(draft.recordings[kind], (value) => {
+          draft.recordings[kind] = value;
+        })),
     ),
     group("Right now"),
     row("Recordings folder", "Everything is stored on this computer. Opening it is not part of Save.", {
