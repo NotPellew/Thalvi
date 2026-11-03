@@ -51,7 +51,7 @@ function script(): Status[] {
     { state: "pending", target: slack, route: "paste", text: "Remind me to call", waitingForQuiet: false, pauseMs: 700 },
     { state: "done", target: slack, route: "paste", notice: "Pasted" },
     { state: "starting", target: null },
-    { state: "failed", notice: "The speech server is not reachable. Check the server address in settings." },
+    { state: "failed", notice: "The speech server is not reachable. Check the server address in settings.", causes: [] },
     { state: "loading", notice: "Loading the speech model." },
     { state: "starting", target: "Firefox" },
     { state: "capturing", target: "Firefox", committed: "", partial: null },
@@ -149,6 +149,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
       return Promise.resolve();
     },
     dismissError: () => Promise.resolve(),
+    copyReport: () => Promise.resolve(),
     listMicrophones: () => Promise.resolve([...microphones]),
     openRecordings: () => Promise.resolve(),
     validateSpeechModelFolder: (path) =>

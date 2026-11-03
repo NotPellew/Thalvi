@@ -134,6 +134,7 @@ fn start() -> Result<(), String> {
             commands::set_listening,
             commands::cancel_capture,
             commands::dismiss_error,
+            commands::copy_report,
             commands::list_microphones,
             commands::open_recordings,
             commands::validate_speech_model_folder,
@@ -217,6 +218,7 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
             if changed.is_err() {
                 let failed = Status::Failed {
                     notice: "Thalvi stopped unexpectedly. Restart it.".to_owned(),
+                    causes: Vec::new(),
                 };
                 show(&handle, &tray, &failed);
                 break;

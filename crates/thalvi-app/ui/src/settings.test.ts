@@ -216,7 +216,7 @@ describe("save", () => {
     if (event === "edit") {
       type(root.querySelector<HTMLInputElement>('input[aria-label="Label of script 1"]') as HTMLInputElement, "new label");
     } else {
-      stub.emit({ state: "failed", notice: "The new settings could not be applied." });
+      stub.emit({ state: "failed", notice: "The new settings could not be applied.", causes: [] });
     }
     complete();
     await settle();
@@ -682,19 +682,20 @@ describe("live controls", () => {
     button("Save").click();
     await settle();
     expect(root.querySelector(".msg")?.textContent).toBe(SAVED_TEXT);
-    stub.emit({ state: "failed", notice: "The saved microphone could not be opened." });
+    stub.emit({ state: "failed", notice: "The saved microphone could not be opened.", causes: [] });
     expect(root.querySelector(".msg")?.textContent).toBe("");
     expect(root.querySelector(".err")?.textContent).toBe("The saved microphone could not be opened.");
   });
 
-  it.each<[string, (stub: Awaited<ReturnType<typeof open>>) => Promise<void>, string, (stub: Awaited<ReturnType<typeof open>>) => Promise<void>, number]>([
+  it.each<[string, (stub: Awaited<ReturnType<typeof open>>) => Promise<void>, string, string[], (stub: Awaited<ReturnType<typeof open>>) => Promise<void>, number]>([
     [
       "a runtime failure",
       (stub) => {
-        stub.emit({ state: "failed", notice: "The speech server is not reachable." });
+        stub.emit({ state: "failed", notice: "The speech server is not reachable.", causes: ["connection refused (os error 111)"] });
         return Promise.resolve();
       },
       "The speech server is not reachable.",
+      ["connection refused (os error 111)"],
       (stub) => {
         stub.emit({ state: "starting", target: null });
         return Promise.resolve();
@@ -709,16 +710,15 @@ describe("live controls", () => {
         await settle();
       },
       "The server address must start with ws://.",
+      [],
       async () => {
         button("Save").click();
         await settle();
       },
       0,
     ],
-  ])("keeps %s until dismissed or fixed, and copies its text", async (_name, raise, text, fix, dismissals) => {
+  ])("keeps %s until dismissed or fixed, and copies its report", async (_name, raise, text, causes, fix, dismissals) => {
     vi.useFakeTimers();
-    const writeText = vi.fn(() => Promise.resolve());
-    vi.stubGlobal("navigator", { clipboard: { writeText } });
     const stub = await open();
     const shown = (): string => root.querySelector(".err")?.textContent ?? "";
 
@@ -728,7 +728,7 @@ describe("live controls", () => {
 
     button("Copy").click();
     await settle();
-    expect(writeText).toHaveBeenCalledWith(text);
+    expect(stub.backend.copyReport).toHaveBeenCalledWith(text, causes);
     expect(button("Copied").hidden).toBe(false);
 
     button("×").click();
@@ -743,13 +743,18 @@ describe("live controls", () => {
     expect(shown()).toBe("");
   });
 
-  it("selects the failure text for copying by hand when the clipboard refuses", async () => {
-    vi.stubGlobal("navigator", { clipboard: { writeText: () => Promise.reject(new Error("denied")) } });
+  it("says plainly when the report could not be copied and shows Copied only on success", async () => {
     const stub = await open();
-    stub.emit({ state: "failed", notice: "The speech server is not reachable." });
+    stub.backend.copyReport.mockRejectedValueOnce("No clipboard tool is installed.");
+    stub.emit({ state: "failed", notice: "The speech server is not reachable.", causes: [] });
     button("Copy").click();
     await settle();
-    expect(window.getSelection()?.toString()).toBe("The speech server is not reachable.");
+    expect(root.querySelector(".msg")?.textContent).toBe("Could not copy: No clipboard tool is installed.");
+    expect(button("Copy").hidden).toBe(false);
+    button("Copy").click();
+    await settle();
+    expect(button("Copied").hidden).toBe(false);
+    expect(root.querySelector(".msg")?.textContent).toBe("");
   });
 
   it("resets the microphone meter when listening pauses", async () => {
@@ -766,14 +771,14 @@ describe("live controls", () => {
   it.each([false, true])("uses audio state for listening controls when a failure occurs (paused=%s)", async (paused) => {
     const stub = await open();
     stub.audio({ selected: null, active: paused ? null : "Built-in", paused });
-    stub.emit({ state: "failed", notice: "The last operation failed." });
+    stub.emit({ state: "failed", notice: "The last operation failed.", causes: [] });
     expect(control("Listening", "input").checked).toBe(!paused);
     expect(control("Saved device", "select").disabled).toBe(!paused);
   });
 
   it.each(["save", "revert", "edit"])("retains a runtime problem through %s and clears it on recovery", async (action) => {
     const stub = await open();
-    stub.emit({ state: "failed", notice: "The chosen microphone is unavailable." });
+    stub.emit({ state: "failed", notice: "The chosen microphone is unavailable.", causes: [] });
     if (action === "save") button("Save").click();
     else if (action === "revert") button("Revert").click();
     else type(control("Server address", "input"), "ws://other");

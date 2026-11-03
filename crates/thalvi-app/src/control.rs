@@ -129,6 +129,7 @@ mod tests {
         assert_eq!(state(), "capturing");
         sender.send_replace(Status::Failed {
             notice: "http://user:key@host".to_owned(),
+            causes: Vec::new(),
         });
         assert_eq!(state(), "error");
         sender.send_replace(Status::Loading {

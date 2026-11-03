@@ -34,6 +34,7 @@ export function tauriBackend(): Backend {
     setListening: (on) => invoke<undefined>("set_listening", { on }),
     cancelCapture: () => invoke<undefined>("cancel_capture"),
     dismissError: () => invoke<undefined>("dismiss_error"),
+    copyReport: (message, causes) => invoke<undefined>("copy_report", { message, causes }),
     listMicrophones: () => invoke<string[]>("list_microphones"),
     openRecordings: () => invoke<undefined>("open_recordings"),
     validateSpeechModelFolder: (path) => invoke<undefined>("validate_speech_model_folder", { path }),

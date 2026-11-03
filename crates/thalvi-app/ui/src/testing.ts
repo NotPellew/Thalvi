@@ -66,6 +66,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     setListening: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
     cancelCapture: vi.fn(() => Promise.resolve()),
     dismissError: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+    copyReport: vi.fn<(message: string, causes: string[]) => Promise<void>>(() => Promise.resolve()),
     listMicrophones: vi.fn(() => Promise.resolve(["USB Microphone", "Built-in"])),
     openRecordings: vi.fn(() => Promise.resolve()),
     validateSpeechModelFolder: vi.fn<(path: string) => Promise<void>>(() => Promise.resolve()),

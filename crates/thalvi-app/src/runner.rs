@@ -22,12 +22,13 @@ use thalvi_desktop::host::Desktop;
 use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::ModelStore;
+use thalvi_desktop::report::causes;
 use thalvi_desktop::transducer::TransducerSource;
 use thalvi_desktop::wake::WakeEngine;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
-use crate::status::{Mode, STARTING_NOTICE, Status, View};
+use crate::status::{Failure, Mode, STARTING_NOTICE, Status, View};
 
 /// What the user sees while the speech model downloads or loads.
 const LOADING_NOTICE: &str = "Loading the speech model. The first time it downloads about 650 MB.";
@@ -243,7 +244,7 @@ impl Session {
         }
     }
 
-    async fn open_microphone(&mut self) -> Result<(), String> {
+    async fn open_microphone(&mut self) -> Result<(), Failure> {
         let mut microphone = self.microphone.take().unwrap_or_else(|| {
             Microphone::new(self.gate.clone(), self.device.clone(), self.metrics.clone())
         });
@@ -252,9 +253,12 @@ impl Session {
             (microphone, frames)
         })
         .await
-        .map_err(|error| format!("Thalvi could not open the microphone: {error}"))?;
+        .map_err(|error| Failure {
+            notice: "The microphone's audio thread crashed. Restart Thalvi.".to_owned(),
+            causes: vec![error.to_string()],
+        })?;
         self.microphone = Some(microphone);
-        self.frames = Some(frames.map_err(|error| error.to_string())?);
+        self.frames = Some(frames.map_err(|error| Failure::of(&error))?);
         Ok(())
     }
 
@@ -341,8 +345,8 @@ impl Runner {
                 self.load_speech_model();
                 self.open_microphone().await;
             }
-            Err(message) => {
-                self.fail(&message);
+            Err(failure) => {
+                self.fail(failure);
                 self.publish_audio();
             }
         }
@@ -375,22 +379,24 @@ impl Runner {
                 if let Err(error) = loaded
                     && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
                 {
-                    view.mode = Mode::Failed(format!(
-                        "{error} Dictation will try again when you start it."
-                    ));
+                    view.mode = Mode::Failed(Failure {
+                        notice: format!("{error} Dictation will try again when you start it."),
+                        causes: causes(&error),
+                    });
                 }
             });
         }));
     }
 
-    fn fail(&mut self, message: &str) {
-        println!("{message}");
-        self.publisher.mode(Mode::Failed(message.to_owned()));
+    fn fail(&mut self, failure: Failure) {
+        println!("{}", failure.notice);
+        self.publisher.mode(Mode::Failed(failure));
     }
 
-    async fn build(&self, config: &DesktopConfig) -> Result<Session, String> {
-        let recorder = Recorder::per_user(config.recordings).map_err(|error| error.to_string())?;
-        let store = ModelStore::per_user().map_err(|error| error.to_string())?;
+    async fn build(&self, config: &DesktopConfig) -> Result<Session, Failure> {
+        let recorder =
+            Recorder::per_user(config.recordings).map_err(|error| Failure::of(&error))?;
+        let store = ModelStore::per_user().map_err(|error| Failure::of(&error))?;
         println!("Loading the wake word models.");
         let started = Instant::now();
         let wake = WakeEngine::load(&config.wake, &store).await;
@@ -400,7 +406,7 @@ impl Runner {
             Some(started.elapsed()),
             Value::Null,
         );
-        let wake = wake.map_err(|error| error.to_string())?;
+        let wake = wake.map_err(|error| Failure::of(&error))?;
         let gate = InputGate::default();
         let metrics = recorder.metrics();
         let recognizer = Chosen::new(&config.stt.engine, &config.server, store, metrics.clone());
@@ -499,17 +505,17 @@ impl Runner {
                 self.reopen_failures = None;
                 self.publisher.mode(Mode::Idle);
             }
-            Err(message) => self.microphone_failed(&message),
+            Err(failure) => self.microphone_failed(failure),
         }
         self.publish_audio();
     }
 
     /// Shows why listening has no microphone and schedules the next attempt to reopen it.
-    fn microphone_failed(&mut self, message: &str) {
+    fn microphone_failed(&mut self, failure: Failure) {
         if self.reopen_failures.is_none() {
-            self.fail(message);
+            self.fail(failure);
         } else {
-            tracing::warn!(message, "microphone still unavailable");
+            tracing::warn!(notice = failure.notice, "microphone still unavailable");
         }
         self.reopen_failures = Some(self.reopen_failures.map_or(0, |failures| failures + 1));
     }
@@ -571,7 +577,7 @@ impl Runner {
                 self.close_microphone();
                 // A capture that failed with the microphone has said where its text went.
                 if !self.publisher.failed() {
-                    self.fail(&error.to_string());
+                    self.fail(Failure::of(&error));
                 }
                 self.reopen_failures = Some(0);
                 Flow::Continue
@@ -648,9 +654,9 @@ impl Runner {
                 self.load_speech_model();
                 self.open_microphone().await;
             }
-            Err(message) => {
+            Err(failure) => {
                 self.open_microphone().await;
-                self.fail(&message);
+                self.fail(failure);
             }
         }
     }
@@ -731,7 +737,10 @@ impl Runner {
             }
             (Some(finished), _) => {
                 println!("{}", finished.notice);
-                Mode::Failed(finished.notice)
+                Mode::Failed(Failure {
+                    notice: finished.notice,
+                    causes: finished.causes,
+                })
             }
             (None, _) => Mode::Idle,
         };

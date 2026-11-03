@@ -31,6 +31,8 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   let draft: Settings | null = null;
   let baseline = "";
   let runtimeFailure = "";
+  let runtimeCauses: string[] = [];
+  let copyNote = "";
   let saveFailure = "";
   let saving = false;
   let saved = false;
@@ -66,17 +68,22 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
 
   function feedback(): void {
     const shownFailure = saveFailure || runtimeFailure;
-    if (failure.textContent !== shownFailure) copy.textContent = "Copy";
+    if (failure.textContent !== shownFailure) {
+      copy.textContent = "Copy";
+      copyNote = "";
+    }
     failure.textContent = shownFailure;
     copy.hidden = shownFailure === "";
     dismiss.hidden = shownFailure === "";
     const dirty = draft !== null && JSON.stringify(draft) !== baseline;
     message.textContent = saving ? "Saving…" : dirty ? "Unsaved changes"
+      : copyNote !== "" ? copyNote
       : saved && failure.textContent === "" ? SAVED_TEXT : "";
   }
 
   function showStatus(status: Status): void {
     runtimeFailure = status.state === "failed" ? status.notice : "";
+    runtimeCauses = status.state === "failed" ? status.causes : [];
     feedback();
   }
 
@@ -129,14 +136,16 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   search.addEventListener("input", applyView);
 
   copy.addEventListener("click", () => {
-    // WebView clipboard access can be refused; selecting the text lets the user copy it by hand.
-    const clipboard = navigator.clipboard as Clipboard | undefined;
-    (clipboard ? clipboard.writeText(failure.textContent) : Promise.reject(new Error("no clipboard"))).then(
+    const causes = saveFailure === "" ? runtimeCauses : [];
+    backend.copyReport(failure.textContent, causes).then(
       () => {
+        copyNote = "";
+        feedback();
         copy.textContent = "Copied";
       },
-      () => {
-        window.getSelection()?.selectAllChildren(failure);
+      (error: unknown) => {
+        copyNote = `Could not copy: ${errorText(error)}`;
+        feedback();
       },
     );
   });
@@ -193,6 +202,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   backend.onStatus(showStatus);
   backend.getStatus().then(showStatus).catch((error: unknown) => {
     runtimeFailure = errorText(error);
+    runtimeCauses = [];
     feedback();
   });
   void load();

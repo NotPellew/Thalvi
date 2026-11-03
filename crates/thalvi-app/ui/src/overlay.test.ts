@@ -50,7 +50,7 @@ describe("each status", () => {
     { name: "pending, counting", status: pending(false), hidden: false, label: "SUBMIT IN 2 s", target: "→ Slack", draft: true },
     { name: "pending, short pause", status: pending(false, 700), hidden: false, label: "SUBMIT IN 1 s", target: "→ Slack", draft: true },
     { name: "working", status: { state: "working", target: "Slack", route: "task", cancellable: false }, hidden: false, label: "WORKING", target: "→ Slack", draft: false },
-    { name: "failed", status: { state: "failed", notice: "Server unreachable." }, hidden: false, label: "Server unreachable.", target: "", draft: false },
+    { name: "failed", status: { state: "failed", notice: "Server unreachable.", causes: [] }, hidden: false, label: "Server unreachable.", target: "", draft: false },
     { name: "loading", status: { state: "loading", notice: "Loading the speech model." }, hidden: false, label: "Loading the speech model.", target: "", draft: false },
   ];
   it.each(cases)("$name", async ({ status, hidden, label, target, draft }) => {

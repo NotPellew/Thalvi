@@ -3,6 +3,7 @@
 use serde::Serialize;
 use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 use thalvi_desktop::engine::EngineState;
+use thalvi_desktop::report::causes;
 
 pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not ready yet.";
 
@@ -47,11 +48,31 @@ pub enum Status {
     },
     Failed {
         notice: String,
+        /// The technical causes behind `notice`, outermost first, for the error report.
+        causes: Vec<String>,
     },
     /// The speech model is being fetched or loaded; the wake word already works.
     Loading {
         notice: String,
     },
+}
+
+/// What went wrong: the notice for the user and the technical causes for the error report.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failure {
+    pub notice: String,
+    pub causes: Vec<String>,
+}
+
+impl Failure {
+    /// `error`'s `Display` as the notice and its source chain as the causes.
+    #[must_use]
+    pub fn of(error: &(dyn std::error::Error + 'static)) -> Self {
+        Self {
+            notice: error.to_string(),
+            causes: causes(error),
+        }
+    }
 }
 
 /// What the runner reports besides the engine's own state.
@@ -68,7 +89,7 @@ pub enum Mode {
     /// The last capture was delivered, until the next one starts.
     Done { route: CaptureRoute, notice: String },
     /// The last capture or the microphone failed, until the next one starts or listening resumes.
-    Failed(String),
+    Failed(Failure),
 }
 
 /// Everything the status is derived from.
@@ -109,8 +130,9 @@ impl View {
                 route: *route,
                 notice: notice.clone(),
             },
-            (Mode::Failed(notice), EngineState::Listening) => Status::Failed {
-                notice: notice.clone(),
+            (Mode::Failed(failure), EngineState::Listening) => Status::Failed {
+                notice: failure.notice.clone(),
+                causes: failure.causes.clone(),
             },
             (Mode::Idle | Mode::Done { .. } | Mode::Failed(_), engine) => match engine {
                 EngineState::Listening => Status::Listening,
@@ -231,7 +253,10 @@ mod tests {
             route: CaptureRoute::Paste,
             notice: "Delivered.".to_owned(),
         };
-        let failed = Mode::Failed("The microphone is off.".to_owned());
+        let failed = Mode::Failed(Failure {
+            notice: "The microphone is off.".to_owned(),
+            causes: Vec::new(),
+        });
         let cases = [
             (
                 Mode::Starting,
@@ -271,6 +296,7 @@ mod tests {
                 EngineState::Listening,
                 Status::Failed {
                     notice: "The microphone is off.".to_owned(),
+                    causes: Vec::new(),
                 },
             ),
             (
@@ -311,11 +337,15 @@ mod tests {
         }
         assert_eq!(
             loading(
-                Mode::Failed("The microphone is off.".to_owned()),
+                Mode::Failed(Failure {
+                    notice: "The microphone is off.".to_owned(),
+                    causes: vec!["open failed".to_owned()],
+                }),
                 EngineState::Listening
             ),
             Status::Failed {
-                notice: "The microphone is off.".to_owned()
+                notice: "The microphone is off.".to_owned(),
+                causes: vec!["open failed".to_owned()],
             }
         );
         assert_eq!(
@@ -383,8 +413,9 @@ mod tests {
             (
                 Status::Failed {
                     notice: "No.".to_owned(),
+                    causes: vec!["connection refused (os error 111)".to_owned()],
                 },
-                json!({"state": "failed", "notice": "No."}),
+                json!({"state": "failed", "notice": "No.", "causes": ["connection refused (os error 111)"]}),
             ),
             (
                 Status::Loading {

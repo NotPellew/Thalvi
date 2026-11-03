@@ -311,6 +311,7 @@ mod tests {
             (
                 Status::Failed {
                     notice: "Your text follows: secret words".to_owned(),
+                    causes: Vec::new(),
                 },
                 Icon::Error,
                 "Thalvi: something went wrong",
@@ -398,6 +399,7 @@ mod tests {
             (
                 Status::Failed {
                     notice: String::new(),
+                    causes: Vec::new(),
                 },
                 false,
             ),
