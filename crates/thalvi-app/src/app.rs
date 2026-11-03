@@ -11,10 +11,11 @@ use thalvi_desktop::host::{Desktop, StateServer};
 
 use crate::commands;
 use crate::control;
-use crate::launch::{Command, Launch};
+use crate::launch::{Command, Launch, relaunch_command};
 use crate::overlay::{self, Overlay, Visibility};
 use crate::runner::{Control, EngineLink};
 use crate::settings::Store;
+use crate::startup::LOGIN_ARG;
 use crate::status::Status;
 use crate::tray::{self, Tray};
 
@@ -116,13 +117,14 @@ fn start() -> Result<(), String> {
     };
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
-            // A relaunch that cannot be read still opens the settings.
-            let command = match Launch::parse(args.get(1..).unwrap_or_default()) {
-                Ok(Launch::Run { command, .. }) => command,
-                _ => Command::Show,
-            };
-            act(app, command);
+            act(app, relaunch_command(&args));
         }))
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("Thalvi")
+                .arg(LOGIN_ARG)
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_audio,
@@ -132,6 +134,8 @@ fn start() -> Result<(), String> {
             commands::cancel_capture,
             commands::list_microphones,
             commands::open_recordings,
+            commands::get_start_at_login,
+            commands::set_start_at_login,
         ])
         .setup(move |app| {
             // Only the first instance gets here, so a relaunch never reads the config.
@@ -249,6 +253,7 @@ fn act(app: &AppHandle, command: Command) {
     };
     match command {
         Command::Show => show_settings(app),
+        Command::Login => {}
         Command::Toggle => state.link.send(Control::ToggleListening),
         Command::Pause => state.link.send(Control::SetListening(false)),
         Command::Resume => state.link.send(Control::SetListening(true)),

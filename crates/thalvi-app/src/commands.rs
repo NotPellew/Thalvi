@@ -15,6 +15,7 @@ use crate::app::AppState;
 use crate::overlay;
 use crate::runner::{AudioStatus, Control};
 use crate::settings::settings_json;
+use crate::startup;
 use crate::status::Status;
 
 #[tauri::command]
@@ -113,6 +114,18 @@ pub async fn open_recordings(state: State<'_, AppState>) -> Result<(), String> {
     })
     .await
     .map_err(|error| format!("The folder could not be opened: {error}"))?
+}
+
+/// Whether the OS starts Thalvi at login, read from the OS each time.
+#[tauri::command]
+pub fn get_start_at_login(app: AppHandle) -> Result<bool, String> {
+    startup::state(&app).map_err(|error| error.to_string())
+}
+
+/// Adds or removes the startup entry; fails unless the OS then holds it as asked.
+#[tauri::command]
+pub fn set_start_at_login(on: bool, app: AppHandle) -> Result<(), String> {
+    startup::set(&app, on).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

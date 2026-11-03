@@ -7,6 +7,7 @@ mod launch;
 mod overlay;
 mod runner;
 mod settings;
+mod startup;
 mod status;
 mod tray;
 
