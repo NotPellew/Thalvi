@@ -15,11 +15,12 @@ use thalvi_desktop::capture::EndingPauses;
 use thalvi_desktop::chosen::Chosen;
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::Delivery;
+use thalvi_desktop::draft::{self, Draft};
 use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
 };
 use thalvi_desktop::history::{Capture, Store as History};
-use thalvi_desktop::host::Desktop;
+use thalvi_desktop::host::{Desktop, Host};
 use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::ModelStore;
@@ -36,6 +37,15 @@ const LOADING_NOTICE: &str = "Loading the speech model. The first time it downlo
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The last dictation, for the window the capture was bound to on this desktop.
+pub type Drafts = draft::Drafts<<Desktop as Host>::Target>;
+
+/// Where the engine keeps each finished capture.
+pub struct Records {
+    pub history: Arc<History>,
+    pub drafts: Arc<Drafts>,
+}
 
 /// What the app asks of the engine.
 #[derive(Debug)]
@@ -79,8 +89,8 @@ impl EngineLink {
     /// Fails when the thread or its runtime cannot start.
     pub fn start(
         config: DesktopConfig,
-        host: Desktop,
-        history: Arc<History>,
+        delivery: Arc<Delivery<Desktop>>,
+        records: Records,
     ) -> Result<Self, String> {
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
@@ -112,12 +122,12 @@ impl EngineLink {
                 let publisher = Publisher::new(status_tx, config.ending_pause);
                 let runner = Runner::new(
                     config,
-                    host,
+                    delivery,
                     control_rx,
                     publisher,
                     Arc::new(level_tx),
                     audio_tx,
-                    history,
+                    records,
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
                 let _ = stopped_tx.send(());
@@ -299,8 +309,9 @@ struct Runner {
     publisher: Rc<Publisher>,
     level: Arc<watch::Sender<f32>>,
     audio: watch::Sender<AudioStatus>,
-    delivery: Delivery<Desktop>,
+    delivery: Arc<Delivery<Desktop>>,
     history: Arc<History>,
+    drafts: Arc<Drafts>,
     http: reqwest::Client,
     /// Loads the current engine's speech model.
     loading: Option<JoinHandle<()>>,
@@ -309,12 +320,12 @@ struct Runner {
 impl Runner {
     fn new(
         config: DesktopConfig,
-        host: Desktop,
+        delivery: Arc<Delivery<Desktop>>,
         control: mpsc::UnboundedReceiver<Control>,
         publisher: Rc<Publisher>,
         level: Arc<watch::Sender<f32>>,
         audio: watch::Sender<AudioStatus>,
-        history: Arc<History>,
+        Records { history, drafts }: Records,
     ) -> Self {
         Self {
             config,
@@ -327,8 +338,9 @@ impl Runner {
             publisher,
             level,
             audio,
-            delivery: Delivery::new(host),
+            delivery,
             history,
+            drafts,
             http: reqwest::Client::new(),
             loading: None,
         }
@@ -736,6 +748,9 @@ impl Runner {
         if let Some(capture) = Capture::of(&outcome, finished.as_ref(), bound.window()) {
             self.history
                 .record_in_background(self.config.history, capture);
+        }
+        if let Some(draft) = Draft::of(&outcome, finished.as_ref(), &bound) {
+            self.drafts.offer(draft);
         }
         let mode = match (finished, route) {
             (Some(finished), Some(route)) if finished.delivered => {

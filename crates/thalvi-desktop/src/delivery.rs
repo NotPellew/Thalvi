@@ -199,11 +199,10 @@ where
     pub async fn type_text(
         &self,
         recorder: &Recorder,
-        target: &H::Target,
+        target: H::Target,
         text: &str,
     ) -> Result<(), HostError> {
         let typed = TypedText::new(text)?;
-        let target = target.clone();
         self.call(recorder, "deliver", move |host| {
             host.deliver(&target, &typed, false)
         })

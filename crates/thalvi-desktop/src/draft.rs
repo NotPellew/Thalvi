@@ -220,7 +220,7 @@ impl<T: Clone + std::fmt::Display> Drafts<T> {
         capture_active: bool,
     ) -> Result<(), DraftError> {
         let (id, target) = self.begin_paste(&text, capture_active)?;
-        let result = delivery.type_text(recorder, &target, &text).await;
+        let result = delivery.type_text(recorder, target, &text).await;
         self.finish_paste(id, text, &result);
         result.map_err(DraftError::Host)
     }
