@@ -106,7 +106,7 @@ impl StateServer {
 }
 
 /// A key held while the last key of a [`Shortcut`] is pressed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Modifier {
     Ctrl,
     Shift,

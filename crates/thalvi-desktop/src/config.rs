@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::capture::{CaptureLimits, EndingPauses, Endings};
 use crate::cues::Cues;
+use crate::hold::HoldKey;
 use crate::host::{App, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
 use crate::models::CatalogSpeech;
@@ -63,6 +64,8 @@ pub struct DesktopConfig {
     /// Whether the user wants Thalvi in the app menu. The app rewrites the `AppImage`'s menu
     /// entry from this on start, because the `AppImage` may have moved.
     pub show_in_menu: bool,
+    /// The key held to dictate; where it is bound depends on the desktop.
+    pub hold_key: HoldKey,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +101,8 @@ struct RawDesktopConfig {
     start_at_login: bool,
     #[serde(default)]
     show_in_menu: bool,
+    #[serde(default)]
+    hold_key: HoldKey,
 }
 
 impl DesktopConfig {
@@ -194,6 +199,7 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
             recordings: raw.recordings,
             start_at_login: raw.start_at_login,
             show_in_menu: raw.show_in_menu,
+            hold_key: raw.hold_key,
         })
     }
 }
@@ -485,6 +491,7 @@ struct FileForm<'a> {
     recordings: RecordKinds,
     start_at_login: bool,
     show_in_menu: bool,
+    hold_key: &'a HoldKey,
 }
 
 #[derive(Serialize)]
@@ -573,6 +580,7 @@ impl Serialize for DesktopConfig {
             recordings: self.recordings,
             start_at_login: self.start_at_login,
             show_in_menu: self.show_in_menu,
+            hold_key: &self.hold_key,
         }
         .serialize(serializer)
     }
@@ -670,6 +678,17 @@ mod tests {
         assert_eq!(config.recordings, RecordKinds::default());
         assert!(!config.start_at_login);
         assert!(!config.show_in_menu);
+        assert_eq!(config.hold_key, HoldKey::default());
+    }
+
+    #[test]
+    fn the_hold_key_is_checked_once_when_the_config_loads() {
+        let key = |json: &str| parse(json).map(|config| config.hold_key.to_string());
+        assert_eq!(key(r#"{"hold_key": "Ctrl+KeyY"}"#).unwrap(), "Ctrl+KeyY");
+        let error = key(r#"{"hold_key": "KeyZ"}"#).unwrap_err().to_string();
+        assert!(error.contains("needs a modifier"), "{error}");
+        let error = key(r#"{"hold_key": "Alt+Hyper"}"#).unwrap_err().to_string();
+        assert!(error.contains("not a key name"), "{error}");
     }
 
     #[test]
@@ -1284,7 +1303,8 @@ mod tests {
             "look": "gunmetal",
             "recordings": {"metrics": true, "text": false, "audio": true},
             "start_at_login": true,
-            "show_in_menu": true
+            "show_in_menu": true,
+            "hold_key": "Ctrl+Shift+F9"
         }"#;
         for json in ["{}", full] {
             let config = parse(json).unwrap();
