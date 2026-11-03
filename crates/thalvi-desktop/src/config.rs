@@ -51,6 +51,9 @@ pub struct DesktopConfig {
     /// The input device to open; `None` is the system default.
     pub microphone: Option<String>,
     pub look: Look,
+    /// Whether the user wants Thalvi to start at login. The app restores the OS entry from this
+    /// on start, because a Windows upgrade removes it.
+    pub start_at_login: bool,
     /// From `THALVI_RECORD`, never from the file.
     pub record: RecordKinds,
 }
@@ -82,6 +85,8 @@ struct RawDesktopConfig {
     microphone: Option<String>,
     #[serde(default)]
     look: Look,
+    #[serde(default)]
+    start_at_login: bool,
 }
 
 /// How the overlay and the settings window look; `Gunmetal` unless the user picks another.
@@ -162,6 +167,7 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
             overlay: raw.overlay,
             microphone,
             look: raw.look,
+            start_at_login: raw.start_at_login,
             record: RecordKinds::default(),
         })
     }
@@ -451,6 +457,7 @@ struct FileForm<'a> {
     overlay: &'a OverlayConfig,
     microphone: Option<&'a str>,
     look: Look,
+    start_at_login: bool,
 }
 
 #[derive(Serialize)]
@@ -536,6 +543,7 @@ impl Serialize for DesktopConfig {
             overlay: &self.overlay,
             microphone: self.microphone.as_deref(),
             look: self.look,
+            start_at_login: self.start_at_login,
         }
         .serialize(serializer)
     }
@@ -648,6 +656,7 @@ mod tests {
         assert_eq!(config.ending_pause, EndingPauses::default());
         assert_eq!(config.capture_limits, CaptureLimits::default());
         assert_eq!(config.endings, Endings::default());
+        assert!(!config.start_at_login);
         assert_eq!(config.record, RecordKinds::default());
     }
 
@@ -1255,7 +1264,8 @@ mod tests {
             ],
             "overlay": {"show": false, "draft": true},
             "microphone": " USB Mic ",
-            "look": "gunmetal"
+            "look": "gunmetal",
+            "start_at_login": true
         }"#;
         for json in ["{}", full] {
             let config = DesktopConfig::from_json_str(json, Some("metrics,audio")).unwrap();

@@ -209,8 +209,11 @@ the control commands below run the AppImage with that word:
 **Settings → General → Start Thalvi when I log in** is off by default. It
 writes an XDG autostart entry (Linux) or a `Run` entry for your user (Windows)
 that starts Thalvi in the tray without opening Settings, and the switch shows
-what the system holds. Moving the AppImage breaks its entry: turn the switch off
-and on again, and turn it off before deleting the file. Hyprland does not run
+what the system holds. Thalvi remembers the choice and puts the entry back each
+time it starts, so an upgrade or a moved AppImage is fixed by starting Thalvi
+once more (from its new place); turn the switch off before deleting the file.
+If you turned Thalvi off in the system's startup list, Thalvi leaves it off and
+says so there. Hyprland does not run
 XDG autostart by itself; use `uwsm`, or `dex -a` in `exec-once`.
 
 ### Build from source

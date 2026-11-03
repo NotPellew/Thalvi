@@ -5,6 +5,7 @@
     reason = "Tauri hands a command its state by value"
 )]
 
+use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 use thalvi_desktop::audio;
@@ -66,7 +67,7 @@ pub fn save_settings(
         state.config().microphone.as_deref(),
         state.link.audio().paused,
     )?;
-    let config = state.store.save(settings)?;
+    let config = state.store.save(settings, state.config().start_at_login)?;
     let look = state.config().look;
     state.apply(&config);
     if config.look != look {
@@ -116,16 +117,34 @@ pub async fn open_recordings(state: State<'_, AppState>) -> Result<(), String> {
     .map_err(|error| format!("The folder could not be opened: {error}"))?
 }
 
-/// Whether the OS starts Thalvi at login, read from the OS each time.
-#[tauri::command]
-pub fn get_start_at_login(app: AppHandle) -> Result<bool, String> {
-    startup::state(&app).map_err(|error| error.to_string())
+/// What the Settings switch shows.
+#[derive(Serialize)]
+pub struct LoginState {
+    /// Whether the OS will start Thalvi at login, read from the OS each time.
+    on: bool,
+    /// Why Thalvi could not put its entry back on start, while the entry is off.
+    problem: Option<String>,
 }
 
-/// Adds or removes the startup entry; fails unless the OS then holds it as asked.
 #[tauri::command]
-pub fn set_start_at_login(on: bool, app: AppHandle) -> Result<(), String> {
-    startup::set(&app, on).map_err(|error| error.to_string())
+pub fn get_start_at_login(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<LoginState, String> {
+    let on = startup::state(&app).map_err(|error| error.to_string())?;
+    let problem = if on { None } else { state.login_problem() };
+    Ok(LoginState { on, problem })
+}
+
+/// Adds or removes the startup entry and remembers the choice; fails unless the OS then holds it as
+/// asked.
+#[tauri::command]
+pub fn set_start_at_login(
+    on: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    startup::set(&app, on, || state.remember_login(on)).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

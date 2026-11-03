@@ -49,13 +49,16 @@ impl Store {
     }
 
     /// Validates `settings` as the loader does at startup, then replaces the file in one step.
+    /// `start_at_login` is the preference as it stands: the form never carries it, because the
+    /// switch acts at once and a form opened earlier would otherwise write a stale value back.
     ///
     /// # Errors
     /// The loader's message when the settings are invalid, in which case nothing is written; or
     /// why the file could not be written.
-    pub fn save(&self, mut settings: Value) -> Result<DesktopConfig, String> {
+    pub fn save(&self, mut settings: Value, start_at_login: bool) -> Result<DesktopConfig, String> {
         if let Some(settings) = settings.as_object_mut() {
             settings.remove("recordings");
+            settings.insert("start_at_login".to_owned(), Value::Bool(start_at_login));
         }
         let config = DesktopConfig::from_json_str(&settings.to_string(), self.record.as_deref())
             .map_err(|error| match error {
@@ -77,6 +80,15 @@ impl Store {
         })?;
         Ok(config)
     }
+
+    /// Writes `config` again with the login preference set to `on`.
+    ///
+    /// # Errors
+    /// Why the file could not be written.
+    pub fn save_login(&self, config: &DesktopConfig, on: bool) -> Result<(), String> {
+        let settings = serde_json::to_value(config).map_err(|error| error.to_string())?;
+        self.save(settings, on).map(drop)
+    }
 }
 
 /// The settings window's form of `config`: the file form plus what `THALVI_RECORD` records.
@@ -86,6 +98,7 @@ impl Store {
 pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
     let mut settings = serde_json::to_value(config).map_err(|error| error.to_string())?;
     if let Some(settings) = settings.as_object_mut() {
+        settings.remove("start_at_login");
         settings.insert(
             "recordings".to_owned(),
             json!({
@@ -190,7 +203,7 @@ mod tests {
         settings["look"] = json!("holo");
         settings["recordings"] = json!({"metrics": true, "text": true, "audio": true});
 
-        let saved = store.save(settings).unwrap();
+        let saved = store.save(settings, false).unwrap();
         let reloaded = store.load().unwrap();
         let written = std::fs::read_to_string(&store.path).unwrap();
         let leftovers: Vec<_> = std::fs::read_dir(store.path.parent().unwrap())
@@ -211,6 +224,29 @@ mod tests {
         assert_eq!(leftovers, ["desktop.json"]);
     }
 
+    #[test]
+    fn the_login_preference_is_kept_by_its_switch_and_never_by_the_form() {
+        let (store, dir) = store("login", None);
+        let config = store_defaults();
+        let form = settings_json(&config).unwrap();
+        assert!(form.get("start_at_login").is_none());
+
+        store.save_login(&config, true).unwrap();
+        let after_switch = store.load().unwrap().start_at_login;
+        // A form opened before the switch was flipped saves it as it was then.
+        let mut stale = form.clone();
+        stale["start_at_login"] = json!(false);
+        let after_stale_save = store.save(stale, true).unwrap().start_at_login;
+        store.save_login(&config, false).unwrap();
+        let after_off = store.load().unwrap().start_at_login;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            (after_switch, after_stale_save, after_off),
+            (true, true, false)
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_saved_config_stays_readable_by_its_owner_only() {
@@ -226,9 +262,9 @@ mod tests {
         std::fs::write(&leftover, "old").unwrap();
         std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        store.save(settings.clone()).unwrap();
+        store.save(settings.clone(), false).unwrap();
         let first = std::fs::metadata(&store.path).unwrap().permissions().mode() & 0o777;
-        store.save(settings).unwrap();
+        store.save(settings, false).unwrap();
         let again = std::fs::metadata(&store.path).unwrap().permissions().mode() & 0o777;
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -241,7 +277,7 @@ mod tests {
         let mut settings = settings_json(&store_defaults()).unwrap();
         settings["ending_pause"] = json!({"paste": 9});
 
-        let error = store.save(settings).unwrap_err();
+        let error = store.save(settings, false).unwrap_err();
         let exists = store.path.exists() || store.path.parent().unwrap().exists();
         let _ = std::fs::remove_dir_all(&dir);
 

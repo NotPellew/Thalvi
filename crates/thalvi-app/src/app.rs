@@ -15,7 +15,7 @@ use crate::launch::{Command, Launch, relaunch_command};
 use crate::overlay::{self, Overlay, Visibility};
 use crate::runner::{Control, EngineLink};
 use crate::settings::Store;
-use crate::startup::LOGIN_ARG;
+use crate::startup::{self, APP_NAME, LOGIN_ARG, Registration};
 use crate::status::Status;
 use crate::tray::{self, Tray};
 
@@ -29,6 +29,8 @@ pub struct AppState {
     host: Arc<Desktop>,
     config: Mutex<DesktopConfig>,
     overlay_shown: AtomicBool,
+    /// Why the login entry could not be put back on start, for the switch to show.
+    login_problem: Mutex<Option<String>>,
     /// Answers status bars until the app quits.
     state_server: Mutex<Option<StateServer>>,
 }
@@ -56,6 +58,7 @@ impl AppState {
             overlay: Overlay::default(),
             host: Arc::new(Desktop::detect().map_err(|error| error.to_string())?),
             overlay_shown: AtomicBool::new(config.overlay.show),
+            login_problem: Mutex::new(None),
             config: Mutex::new(config),
             state_server: Mutex::new(state_server),
         })
@@ -72,6 +75,43 @@ impl AppState {
     #[must_use]
     pub fn host(&self) -> Arc<Desktop> {
         Arc::clone(&self.host)
+    }
+
+    /// Puts the startup entry back if the user wants Thalvi to start at login.
+    fn restore_login(&self, registration: &impl Registration) {
+        let problem = startup::restore(registration, self.config().start_at_login)
+            .err()
+            .map(|error| error.to_string());
+        *self
+            .login_problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = problem;
+    }
+
+    /// Why the entry could not be put back on start, if it could not.
+    #[must_use]
+    pub fn login_problem(&self) -> Option<String> {
+        self.login_problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Saves the user's choice to start at login. It is written apart from the settings form,
+    /// which the switch does not wait for.
+    ///
+    /// # Errors
+    /// Why the config file could not be written.
+    pub fn remember_login(&self, on: bool) -> Result<(), String> {
+        let mut config = self.config();
+        self.store.save_login(&config, on)?;
+        config.start_at_login = on;
+        *self.config.lock().unwrap_or_else(PoisonError::into_inner) = config;
+        *self
+            .login_problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        Ok(())
     }
 
     /// Takes `config` into effect: the engine applies it between captures.
@@ -121,7 +161,7 @@ fn start() -> Result<(), String> {
         }))
         .plugin(
             tauri_plugin_autostart::Builder::new()
-                .app_name("Thalvi")
+                .app_name(APP_NAME)
                 .arg(LOGIN_ARG)
                 .build(),
         )
@@ -139,7 +179,9 @@ fn start() -> Result<(), String> {
         ])
         .setup(move |app| {
             // Only the first instance gets here, so a relaunch never reads the config.
-            app.manage(AppState::start(config)?);
+            let state = AppState::start(config)?;
+            state.restore_login(app.handle());
+            app.manage(state);
             create_windows(app.handle())?;
             follow_engine(app.handle())?;
             Ok(())

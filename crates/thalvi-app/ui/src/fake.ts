@@ -137,7 +137,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
     },
     listMicrophones: () => Promise.resolve([...microphones]),
     openRecordings: () => Promise.resolve(),
-    getStartAtLogin: () => Promise.resolve(startAtLogin),
+    getStartAtLogin: () => Promise.resolve({ on: startAtLogin, problem: null }),
     setStartAtLogin: (on) => {
       startAtLogin = on;
       return Promise.resolve();

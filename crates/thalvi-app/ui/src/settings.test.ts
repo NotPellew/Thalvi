@@ -305,7 +305,7 @@ describe("live controls", () => {
     expect(toggle.checked).toBe(true);
     expect(stub.backend.saveSettings).not.toHaveBeenCalled();
 
-    stub.backend.getStartAtLogin.mockResolvedValue(true);
+    stub.backend.getStartAtLogin.mockResolvedValue({ on: true, problem: null });
     document.body.innerHTML = '<div id="settings"></div>';
     root = document.getElementById("settings") as HTMLElement;
     mountSettings(root, stub.backend);
@@ -326,11 +326,27 @@ describe("live controls", () => {
       "Thalvi could not be set to start at login: permission denied",
     );
 
-    stub.backend.getStartAtLogin.mockResolvedValue(true);
+    stub.backend.getStartAtLogin.mockResolvedValue({ on: true, problem: null });
     stub.backend.setStartAtLogin.mockRejectedValue("Thalvi could not be stopped from starting at login: busy");
     flip(toggle);
     await settle();
     expect(toggle.checked).toBe(true);
+  });
+
+  it("says why the entry was not put back on start while leaving the switch usable", async () => {
+    const stub = stubBackend();
+    stub.backend.getStartAtLogin.mockResolvedValue({
+      on: false,
+      problem: "Thalvi is turned off in the system's list of startup apps. Turn it on there, or switch it off and on here.",
+    });
+    mountSettings(root, stub.backend);
+    await settle();
+    const toggle = control("Start Thalvi when I log in", "input");
+    expect(toggle.checked).toBe(false);
+    expect(toggle.disabled).toBe(false);
+    expect(rowOf("Start Thalvi when I log in").querySelector(".note")?.textContent).toBe(
+      "Thalvi is turned off in the system's list of startup apps. Turn it on there, or switch it off and on here.",
+    );
   });
 
   it("keeps the switch off and says why when the OS entry cannot be read", async () => {

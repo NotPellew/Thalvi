@@ -1,6 +1,6 @@
 // The settings pages: each builds its rows against the draft and edits it in place.
 
-import type { AudioStatus, Backend, Ending, ScriptActionKind, SecondaryApi, Settings, SttEngine } from "./contract.ts";
+import type { AudioStatus, Backend, Ending, LoginState, ScriptActionKind, SecondaryApi, Settings, SttEngine } from "./contract.ts";
 import { errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
@@ -16,7 +16,7 @@ export interface PageContext {
   /** The microphone actually open when the pages were built. */
   audio: AudioStatus;
   /** Whether the OS starts Thalvi at login, or why that could not be read. */
-  startAtLogin: boolean | { error: string };
+  startAtLogin: LoginState | { error: string };
   /** The settings window, so a look picked here shows at once. */
   root: HTMLElement;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
@@ -138,12 +138,14 @@ function general({ draft, backend, controls, live, root, startAtLogin }: PageCon
   live.listening = (on) => {
     input.checked = on;
   };
-  const login = controls.toggle(startAtLogin === true, () => undefined);
+  const login = controls.toggle("on" in startAtLogin && startAtLogin.on, () => undefined);
   const loginInput = login.field as HTMLInputElement;
   const loginProblem = note();
-  if (typeof startAtLogin === "object") {
+  if ("error" in startAtLogin) {
     loginInput.disabled = true;
     say(loginProblem, startAtLogin.error);
+  } else {
+    say(loginProblem, startAtLogin.problem ?? "");
   }
   loginInput.addEventListener("change", () => {
     say(loginProblem, "");
@@ -153,7 +155,10 @@ function general({ draft, backend, controls, live, root, startAtLogin }: PageCon
       .setStartAtLogin(wanted)
       .catch(async (error: unknown) => {
         say(loginProblem, errorText(error));
-        loginInput.checked = await backend.getStartAtLogin().catch(() => !wanted);
+        loginInput.checked = await backend
+          .getStartAtLogin()
+          .then((login) => login.on)
+          .catch(() => !wanted);
       })
       .finally(() => {
         loginInput.disabled = false;

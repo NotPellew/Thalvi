@@ -100,11 +100,16 @@ export interface Backend {
   cancelCapture(): Promise<void>;
   listMicrophones(): Promise<string[]>;
   openRecordings(): Promise<void>;
-  /** Whether the OS starts Thalvi at login, read from the OS. */
-  getStartAtLogin(): Promise<boolean>;
+  /** Whether the OS starts Thalvi at login, read from the OS, and why Thalvi could not put its entry back on start. */
+  getStartAtLogin(): Promise<LoginState>;
   /** Adds or removes the startup entry; rejects unless the OS then holds it as asked. */
   setStartAtLogin(on: boolean): Promise<void>;
   appVersion(): Promise<string>;
+}
+
+export interface LoginState {
+  on: boolean;
+  problem: string | null;
 }
 
 export function errorText(error: unknown): string {

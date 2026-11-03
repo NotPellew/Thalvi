@@ -86,9 +86,9 @@ areas your change touches. Editing rules are in
   relaunch; Hyprland status reads a state-only socket in the private runtime folder.
   Why: controls must not start a microphone and the plugin cannot answer queries.
   Rejected: a keyboard listener, TCP, or transcript-bearing status.
-- **Packaged desktop with an OS-held login entry.** AppImage on Linux, per-user NSIS on Windows, released from `desktop-vX.Y.Z` tags that match the Cargo version; login startup is the OS entry (`tauri-plugin-autostart`, run with `--login`), never a config flag.
-  Why: both formats suit the updater (#137), the plugin is Tauri's own, and the switch reads the OS back.
-  Rejected: deb and MSI as well, a config copy of the switch (it drifts), a hand-written `.desktop` and `Run` key writer.
+- **Packaged desktop with an OS-held login entry.** AppImage on Linux, per-user NSIS on Windows, released from `desktop-vX.Y.Z` tags that match the Cargo version; login startup is the OS entry (`tauri-plugin-autostart`, run with `--login`), and the config keeps the preference (`start_at_login`, written by the switch alone, never by Save) so each start restores an entry an upgrade removed.
+  Why: both formats suit the updater (#137), the plugin is Tauri's own, the switch reads the OS back, and the NSIS uninstall hook cannot tell an upgrade from an uninstall.
+  Rejected: deb and MSI as well, a hand-written `.desktop` and `Run` key writer, restoring over a Thalvi entry the user turned off in Windows (read from `StartupApproved` with `windows-registry`).
 - **Pause before changing microphones.** Save device changes only while paused;
   enabling opens the selected device and status names the open stream separately.
   Why: choosing a microphone must not start recording or redirect a capture.
