@@ -4486,7 +4486,6 @@ name = "thalvi-app"
 version = "0.1.0"
 dependencies = [
  "dirs 7.0.0",
- "gtk",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4498,7 +4497,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "windows",
  "windows-registry",
 ]
 
@@ -4510,6 +4508,7 @@ dependencies = [
  "cpal",
  "dirs 7.0.0",
  "futures-util",
+ "gtk",
  "ort",
  "reqwest 0.12.28",
  "rtrb",

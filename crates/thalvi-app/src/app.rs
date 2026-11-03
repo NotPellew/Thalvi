@@ -1,5 +1,6 @@
 //! Wires the engine to the tray, the overlay, the settings window and the commands.
 
+use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -12,7 +13,6 @@ use thalvi_desktop::models::SpeechDownloads;
 
 use crate::commands;
 use crate::control;
-use crate::dialog;
 use crate::launch::{Command, Launch, relaunch_command};
 use crate::menu_entry::{self, MenuEntry};
 use crate::overlay::{self, Overlay, Visibility};
@@ -185,7 +185,10 @@ pub fn run() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("{message}");
-            dialog::startup_failed(&message);
+            // Release Windows builds have no console, and a menu or login launch has no terminal.
+            if !std::io::stderr().is_terminal() {
+                Desktop::show_error("Thalvi couldn't start", &message);
+            }
             ExitCode::FAILURE
         }
     }

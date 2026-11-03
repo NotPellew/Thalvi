@@ -3,7 +3,6 @@
 mod app;
 mod commands;
 mod control;
-mod dialog;
 mod launch;
 mod menu_entry;
 mod overlay;
