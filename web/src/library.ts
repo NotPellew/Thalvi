@@ -67,6 +67,7 @@ export class Library {
   private readonly ports: LibraryPorts;
   private handler: (state: LibraryState) => void = () => undefined;
   private reading: string | null = null;
+  private continuing = false;
 
   constructor(ports: LibraryPorts) {
     this.ports = ports;
@@ -111,19 +112,25 @@ export class Library {
    */
   async continueHere(): Promise<void> {
     const shown = this.state.preview;
-    if (shown === null) return;
+    if (shown === null || this.continuing) return;
     if (shown.id === this.ports.currentId()) {
       this.hide();
       return;
     }
     let latest: ConversationDetail;
+    this.continuing = true;
     try {
       latest = await this.ports.api.detail(shown.id);
     } catch (failure) {
+      if (this.reading !== shown.id) return;
       this.reading = null;
       await this.reload(plain(failure), { preview: null });
       return;
+    } finally {
+      this.continuing = false;
     }
+    // Leaving the preview while the check ran (back, close, New conversation) cancels joining.
+    if (this.reading !== shown.id) return;
     if (latest.live && !shown.live) {
       this.set({ ...this.state, preview: latest, error: CHANGED });
       return;

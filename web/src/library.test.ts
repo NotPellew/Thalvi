@@ -126,6 +126,34 @@ describe("Library", () => {
     expect(library.state).toMatchObject({ open: true, preview: null, error: "That conversation doesn't exist." });
   });
 
+  it.each([
+    ["a second Continue here", (library: Library) => library.continueHere(), ["open s2"]],
+    [
+      "New conversation",
+      (library: Library) => {
+        library.startNew();
+        return Promise.resolve();
+      },
+      ["startNew"],
+    ],
+    [
+      "Back to list",
+      (library: Library) => {
+        library.closePreview();
+        return Promise.resolve();
+      },
+      [],
+    ],
+  ])("joins at most once and not at all after %s while the check runs", async (_name, act, joined) => {
+    const { library, log } = setup("s1");
+    await library.show();
+    await library.read("s2");
+    const first = library.continueHere();
+    await act(library);
+    await first;
+    expect(log.filter((entry) => entry.startsWith("open") || entry === "startNew")).toEqual(joined);
+  });
+
   it("asks again, with the warning, when another device took the conversation while it was being read", async () => {
     const { library, log, setLive } = setup("s1");
     await library.show();
