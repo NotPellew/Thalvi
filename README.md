@@ -217,21 +217,21 @@ Pausing cancels the current capture and closes the microphone. Resuming starts
 fresh wake listening. Windows keeps the tray controls; the status module is
 Hyprland-only.
 
-**Second-pass transcription** in Settings → Speech recognition is off by
+**Second-pass transcription** in Settings → Speech is off by
 default, including for older configs that only name an endpoint. Turning it
 off keeps the endpoint and key, and accepted captures make no second request.
 Turn it on to use the saved endpoint; Save validates it before applying it to
 subsequent captures.
 
-To change the microphone, pause listening in Settings → General first, then
-choose and save a device in Microphone. Saving keeps listening paused; enable
+To change the microphone, pause listening in Settings → Microphone first, then
+choose and save a device there. Saving keeps listening paused; enable
 it explicitly when ready. **Active microphone** names the opened device,
 separately from the saved choice. If that device is unavailable, Thalvi reports
 the error instead of using another microphone. The level meter uses the same
 stream while listening or capturing.
 
 To dictate without the server or a network, set `"stt": {"engine": "local"}` in
-the config or choose "On this computer" under Speech recognition in Settings.
+the config or choose "On this computer" under Speech in Settings.
 The first use downloads about 650 MB (the pill says so); after that it works
 offline. The text comes mostly unpunctuated. The model is NVIDIA Nemotron Speech
 Streaming under the [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/).
