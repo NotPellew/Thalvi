@@ -1242,6 +1242,7 @@ describe("last dictation", () => {
     stub.emit({ state: "working", target: "foot", route: "paste", cancellable: false });
     expect(within(section(), "Paste into foot").disabled).toBe(true);
     stub.emit({ state: "listening" });
+    expect(within(section(), "Paste into foot").disabled, "until the draft that capture left is loaded").toBe(true);
     await settle();
     expect(within(section(), "Paste into foot").disabled).toBe(false);
     expect(stub.backend.getDraft.mock.calls.length).toBeGreaterThan(calls);

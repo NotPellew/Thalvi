@@ -856,6 +856,8 @@ function confirmed(label: string, question: string, yes: string, no: string, act
 function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; refresh: () => void } {
   let current: Draft | null = null;
   let busy = false;
+  // After a capture the shown draft may be stale until the new one loads; Paste waits for it.
+  let loading = false;
   let pasting = false;
   const empty = el("p", { class: "note ok" }, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it.");
   const outcome = el("p", { class: "note ok" });
@@ -919,7 +921,7 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
     if (current === null) return;
     const blank = text.value.trim() === "";
     paste.textContent = current.target === null ? "Paste" : `Paste into ${current.target}`;
-    paste.disabled = blank || busy || pasting || current.pasting || current.target === null;
+    paste.disabled = blank || busy || loading || pasting || current.pasting || current.target === null;
     copy.disabled = blank;
     reset.disabled = text.value === current.original;
     say(why, current.target === null ? "No window was bound when you dictated this, so only Copy is possible."
@@ -927,6 +929,7 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
       : "");
   }
   function show(next: Draft | null): void {
+    loading = false;
     if (next?.id !== current?.id) {
       say(done, "");
       say(problem, "");
@@ -942,6 +945,8 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
   }
   function refresh(): void {
     backend.getDraft().then(show, (error: unknown) => {
+      loading = false;
+      sync();
       say(problem, errorText(error));
     });
   }
@@ -951,6 +956,7 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
   });
   live.status = (status) => {
     busy = CAPTURE_STATES.includes(status.state);
+    loading = !busy;
     sync();
     if (!busy) refresh();
   };
