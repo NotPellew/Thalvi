@@ -292,12 +292,12 @@ impl InputSource {
 }
 
 /// The connection's two independent choices: how the user is heard, and whether replies are spoken.
-struct Modes {
+struct Choices {
     input: InputSource,
     reply_audio: watch::Sender<bool>,
 }
 
-impl Modes {
+impl Choices {
     fn new() -> Self {
         Self {
             input: InputSource::Text,
@@ -314,7 +314,7 @@ impl Modes {
     }
 }
 
-/// `Modes` at one moment, with whether the recognizer can hear the user.
+/// `Choices` at one moment, with whether the recognizer can hear the user.
 #[derive(Clone, Copy)]
 struct Mode {
     input: InputSource,
@@ -466,7 +466,7 @@ pub async fn handle_session<F, M, T>(
         Arc::clone(&persistence.store),
         session_id.clone(),
     );
-    let mut modes = Modes::new();
+    let mut choices = Choices::new();
     let mut recognizer: Option<RecognizerHandle> = None;
     let mut rec_rx: Option<mpsc::Receiver<RecognizerMessage>> = None;
     let mut reply: Option<ActiveReply> = None;
@@ -502,7 +502,7 @@ pub async fn handle_session<F, M, T>(
                         forward_mic(&audio, recognizer.as_ref(), &mut turn_log);
                     }
                     Some(Ok(Message::Text(text))) => {
-                        handle_client_text(&text, &mut sink, &mut recognizer, &mut rec_rx, &factory, &mut modes, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut turn_log, &mut settings).await;
+                        handle_client_text(&text, &mut sink, &mut recognizer, &mut rec_rx, &factory, &mut choices, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut turn_log, &mut settings).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
@@ -513,14 +513,14 @@ pub async fn handle_session<F, M, T>(
                 }
             }
             recognizer_message = recognizer_event => {
-                handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut rec_rx, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut modes, &mut turn_log, &settings).await;
+                handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut rec_rx, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut choices, &mut turn_log, &settings).await;
             }
             event = reply_event => {
                 let Some(event) = event else {
                     reply_rx = None;
                     continue;
                 };
-                handle_reply_event(event, &mut sink, &mut history, &mut reply, &mut reply_rx, &mut client_audio, modes.snapshot(recognizer.as_ref()), &mut turn_log).await;
+                handle_reply_event(event, &mut sink, &mut history, &mut reply, &mut reply_rx, &mut client_audio, choices.snapshot(recognizer.as_ref()), &mut turn_log).await;
             }
         }
     }
@@ -552,7 +552,7 @@ async fn handle_client_text<F, M, T>(
     recognizer: &mut Option<RecognizerHandle>,
     rec_rx: &mut Option<mpsc::Receiver<RecognizerMessage>>,
     factory: &Arc<F>,
-    modes: &mut Modes,
+    choices: &mut Choices,
     history: &mut Vec<ChatMessage>,
     reply: &mut Option<ActiveReply>,
     reply_rx: &mut Option<mpsc::Receiver<ReplyEvent>>,
@@ -575,7 +575,7 @@ async fn handle_client_text<F, M, T>(
                 reply,
                 reply_rx,
                 client_audio,
-                modes.snapshot(recognizer.as_ref()),
+                choices.snapshot(recognizer.as_ref()),
                 "cancel",
                 turn_log,
             )
@@ -584,12 +584,19 @@ async fn handle_client_text<F, M, T>(
         ClientText::Played(bytes) => client_audio.played(bytes),
         ClientText::Input(source) => {
             set_input(
-                source, sink, recognizer, rec_rx, factory, modes, reply, turn_log,
+                source,
+                sink,
+                recognizer,
+                rec_rx,
+                factory,
+                choices,
+                reply.is_some(),
+                turn_log,
             )
             .await;
         }
         ClientText::ReplyAudio(on) => {
-            set_reply_audio(on, sink, modes, reply, client_audio).await;
+            set_reply_audio(on, sink, choices, reply, client_audio).await;
         }
         ClientText::VoiceName(name) => {
             if settings.offered.contains(&name) {
@@ -612,8 +619,8 @@ async fn handle_client_text<F, M, T>(
                     client_audio,
                     model,
                     tts,
-                    &modes.reply_audio,
-                    modes.snapshot(recognizer.as_ref()),
+                    &choices.reply_audio,
+                    choices.snapshot(recognizer.as_ref()),
                     "text",
                     text.clone(),
                     &[],
@@ -650,7 +657,7 @@ async fn handle_recognizer_message<M, T>(
     client_audio: &mut ClientAudio,
     model: &Arc<M>,
     tts: &Arc<T>,
-    modes: &mut Modes,
+    choices: &mut Choices,
     turn_log: &mut TurnLog,
     settings: &ReplySettings,
 ) where
@@ -678,7 +685,7 @@ async fn handle_recognizer_message<M, T>(
                 reply,
                 reply_rx,
                 client_audio,
-                modes.snapshot(recognizer.as_ref()),
+                choices.snapshot(recognizer.as_ref()),
                 "speech start",
                 turn_log,
             )
@@ -704,8 +711,8 @@ async fn handle_recognizer_message<M, T>(
                     client_audio,
                     model,
                     tts,
-                    &modes.reply_audio,
-                    modes.snapshot(recognizer.as_ref()),
+                    &choices.reply_audio,
+                    choices.snapshot(recognizer.as_ref()),
                     "voice",
                     text.clone(),
                     &clip,
@@ -724,27 +731,11 @@ async fn handle_recognizer_message<M, T>(
             .await;
         }
         Some(RecognizerMessage::Disconnected { message, fatal }) => {
-            if let Some(handle) = recognizer {
-                handle.ready = false;
-            }
-            tracing::warn!(%message, fatal, "recognizer disconnected");
-            let message = if fatal {
-                format!(
-                    "Speech recognition stopped and won't retry: {message}. Check the speech settings, then tap Start again."
-                )
-            } else {
-                plain_recognizer_error(&message)
-            };
-            send_json(sink, &json!({"type": "error", "message": message})).await;
-            if fatal {
-                send_input(sink, InputSource::Text, true).await;
-                stop_input(sink, modes, recognizer, rec_rx, reply, turn_log).await;
-            } else {
-                send_input(sink, InputSource::Mic, false).await;
-                if reply.is_none() {
-                    send_state(sink, "starting").await;
-                }
-            }
+            let replying = reply.is_some();
+            recognizer_disconnected(
+                &message, fatal, sink, recognizer, rec_rx, choices, replying, turn_log,
+            )
+            .await;
         }
         Some(RecognizerMessage::Ready) => {
             turn_log.reset_mic();
@@ -757,6 +748,44 @@ async fn handle_recognizer_message<M, T>(
             }
         }
         None => {}
+    }
+}
+
+/// Reports a lost recognizer; a fatal loss falls back to text input.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session state is passed explicitly rather than bundled into a context type"
+)]
+async fn recognizer_disconnected(
+    message: &str,
+    fatal: bool,
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    recognizer: &mut Option<RecognizerHandle>,
+    rec_rx: &mut Option<mpsc::Receiver<RecognizerMessage>>,
+    choices: &mut Choices,
+    replying: bool,
+    turn_log: &mut TurnLog,
+) {
+    if let Some(handle) = recognizer {
+        handle.ready = false;
+    }
+    tracing::warn!(%message, fatal, "recognizer disconnected");
+    let message = if fatal {
+        format!(
+            "Speech recognition stopped and won't retry: {message}. Check the speech settings, then tap Start again."
+        )
+    } else {
+        plain_recognizer_error(message)
+    };
+    send_json(sink, &json!({"type": "error", "message": message})).await;
+    if fatal {
+        send_input(sink, InputSource::Text, true).await;
+        stop_input(sink, choices, recognizer, rec_rx, replying, turn_log).await;
+    } else {
+        send_input(sink, InputSource::Mic, false).await;
+        if !replying {
+            send_state(sink, "starting").await;
+        }
     }
 }
 
@@ -884,23 +913,25 @@ async fn set_input<F>(
     recognizer: &mut Option<RecognizerHandle>,
     rec_rx: &mut Option<mpsc::Receiver<RecognizerMessage>>,
     factory: &Arc<F>,
-    modes: &mut Modes,
-    reply: &Option<ActiveReply>,
+    choices: &mut Choices,
+    replying: bool,
     turn_log: &mut TurnLog,
 ) where
     F: RecognizerFactory + Send + Sync + 'static,
     F::Rec: Send + 'static,
 {
     match source {
-        InputSource::Text => stop_input(sink, modes, recognizer, rec_rx, reply, turn_log).await,
+        InputSource::Text => {
+            stop_input(sink, choices, recognizer, rec_rx, replying, turn_log).await;
+        }
         InputSource::Mic => {
-            modes.input = InputSource::Mic;
+            choices.input = InputSource::Mic;
             if recognizer.is_none() {
                 let (handle, receiver) = spawn_recognizer(factory, turn_log.recorder.clone());
                 *recognizer = Some(handle);
                 *rec_rx = Some(receiver);
                 send_input(sink, InputSource::Mic, false).await;
-                if reply.is_none() {
+                if !replying {
                     send_state(sink, "starting").await;
                 }
             }
@@ -911,13 +942,13 @@ async fn set_input<F>(
 /// Switches to text input: releases the recognizer and leaves the running reply and its audio alone.
 async fn stop_input(
     sink: &mut (impl SinkExt<Message> + Unpin),
-    modes: &mut Modes,
+    choices: &mut Choices,
     recognizer: &mut Option<RecognizerHandle>,
     rec_rx: &mut Option<mpsc::Receiver<RecognizerMessage>>,
-    reply: &Option<ActiveReply>,
+    replying: bool,
     turn_log: &mut TurnLog,
 ) {
-    modes.input = InputSource::Text;
+    choices.input = InputSource::Text;
     let Some(handle) = recognizer.take() else {
         return;
     };
@@ -925,7 +956,7 @@ async fn stop_input(
     *rec_rx = None;
     turn_log.pending.clear();
     turn_log.reset_mic();
-    if reply.is_none() {
+    if !replying {
         send_state(sink, "idle").await;
     }
 }
@@ -934,11 +965,11 @@ async fn stop_input(
 async fn set_reply_audio(
     on: bool,
     sink: &mut (impl SinkExt<Message> + Unpin),
-    modes: &Modes,
+    choices: &Choices,
     reply: &mut Option<ActiveReply>,
     client_audio: &mut ClientAudio,
 ) {
-    modes.reply_audio.send_replace(on);
+    choices.reply_audio.send_replace(on);
     if !on {
         client_audio.clear();
         if let Some(active) = reply {
