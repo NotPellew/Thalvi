@@ -395,19 +395,11 @@ impl SessionStore {
                 }
             }
         } else {
-            let now = now_ms();
-            for message in current_history {
-                if let Some(found) = history::find_match(
-                    current_id,
-                    "Current conversation",
-                    message.role,
-                    &message.content,
-                    now,
-                    &query.text,
-                ) {
-                    matches.push(found);
-                }
-            }
+            matches.extend(history::live_matches(
+                current_id,
+                current_history,
+                &query.text,
+            ));
         }
         if query.scope == HistoryScope::All {
             for stored in state
