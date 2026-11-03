@@ -5,6 +5,8 @@ use std::fmt;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_autostart::ManagerExt;
 
+use crate::switch::{SwitchState, Unavailable};
+
 /// The name of the login entry, which the system's startup list shows.
 pub const APP_NAME: &str = "Thalvi";
 
@@ -25,6 +27,8 @@ pub trait Registration {
     /// Whether the user turned Thalvi off in the system's own startup list, which an entry written
     /// by [`Registration::enable`] would silently override.
     fn turned_off_by_user(&self) -> bool;
+    /// Why this session would never run the entry, when it would not.
+    fn unavailable(&self) -> Option<Unavailable>;
 }
 
 /// The plugin's entry in the user's XDG autostart folder or Windows `Run` key.
@@ -55,6 +59,152 @@ impl<R: Runtime> Registration for AppHandle<R> {
         #[cfg(not(windows))]
         {
             false
+        }
+    }
+
+    fn unavailable(&self) -> Option<Unavailable> {
+        #[cfg(target_os = "linux")]
+        {
+            hyprland::unavailable()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+}
+
+/// Hyprland runs only the `exec-once` lines of `hyprland.conf`. A session manager such as uwsm
+/// runs XDG autostart entries by starting systemd's `xdg-desktop-autostart.target`; that target
+/// being up is what tells an entry will be read. Linux runs only on Hyprland, so reaching this
+/// code means the session is Hyprland.
+#[cfg(target_os = "linux")]
+mod hyprland {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    use super::{LOGIN_ARG, Unavailable};
+
+    pub fn unavailable() -> Option<Unavailable> {
+        if autostart_runs(&target_state()) {
+            return None;
+        }
+        Some(no_autostart(launcher().as_deref()))
+    }
+
+    /// Empty when `systemctl` is missing or fails, as on a session without a systemd user manager.
+    fn target_state() -> String {
+        Command::new("systemctl")
+            .args([
+                "--user",
+                "show",
+                "--property=ActiveState",
+                "--value",
+                "xdg-desktop-autostart.target",
+            ])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .unwrap_or_default()
+    }
+
+    /// `activating` counts: an entry that starts Thalvi at login runs while the target is still coming up.
+    fn autostart_runs(active_state: &str) -> bool {
+        matches!(active_state, "active" | "activating")
+    }
+
+    /// The `AppImage` when there is one, since the executable then sits in a temporary mount.
+    fn launcher() -> Option<String> {
+        std::env::var_os("APPIMAGE")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_exe().ok())
+            .and_then(|path| path.to_str().map(str::to_owned))
+    }
+
+    fn no_autostart(launcher: Option<&str>) -> Unavailable {
+        let (reason, line) = match launcher {
+            Some(path) => (
+                "Hyprland does not start login entries by itself, so a switch here would do nothing. To start Thalvi at login, add this line to hyprland.conf:",
+                Some(exec_once(path)),
+            ),
+            None => (
+                "Hyprland does not start login entries by itself, so a switch here would do nothing. To start Thalvi at login, add an exec-once line to hyprland.conf that runs Thalvi with --login.",
+                None,
+            ),
+        };
+        Unavailable {
+            reason: reason.to_owned(),
+            line,
+        }
+    }
+
+    /// `exec-once` runs its value with `sh -c`, and `hyprland.conf` reads `#` as a comment unless doubled.
+    fn exec_once(path: &str) -> String {
+        let safe = !path.is_empty()
+            && path
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_-./:@%+=,".contains(&byte));
+        let quoted = if safe {
+            path.to_owned()
+        } else {
+            format!("'{}'", path.replace('\'', r"'\''"))
+        };
+        format!("exec-once = {quoted} {LOGIN_ARG}").replace('#', "##")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn only_a_started_autostart_target_means_login_entries_run() {
+            for (state, runs) in [
+                ("active", true),
+                ("activating", true),
+                ("inactive", false),
+                ("failed", false),
+                ("", false),
+            ] {
+                assert_eq!(autostart_runs(state), runs, "{state:?}");
+            }
+        }
+
+        #[test]
+        fn the_line_for_hyprland_conf_quotes_what_the_shell_and_the_config_would_misread() {
+            for (path, line) in [
+                (
+                    "/home/me/Thalvi.AppImage",
+                    "exec-once = /home/me/Thalvi.AppImage --login",
+                ),
+                (
+                    "/home/me/My Apps/Thalvi.AppImage",
+                    "exec-once = '/home/me/My Apps/Thalvi.AppImage' --login",
+                ),
+                (
+                    "/home/me/it's $HOME;x/thalvi",
+                    r"exec-once = '/home/me/it'\''s $HOME;x/thalvi' --login",
+                ),
+                (
+                    "/home/me/#1/thalvi",
+                    "exec-once = '/home/me/##1/thalvi' --login",
+                ),
+            ] {
+                assert_eq!(exec_once(path), line, "{path}");
+            }
+        }
+
+        #[test]
+        fn the_note_carries_the_line_unless_the_path_is_unknown() {
+            let known = no_autostart(Some("/opt/thalvi"));
+            assert_eq!(
+                known.line.as_deref(),
+                Some("exec-once = /opt/thalvi --login")
+            );
+            let unknown = no_autostart(None);
+            assert_eq!(unknown.line, None);
+            assert!(unknown.reason.contains("exec-once"));
         }
     }
 }
@@ -96,6 +246,8 @@ pub enum StartupError {
     },
     /// The user turned Thalvi off in the system's startup list, so Thalvi left the entry alone.
     TurnedOff,
+    /// Nothing in this session would run an entry, so none was written.
+    Unavailable(String),
     /// The OS took the change but still reports the old state, for example because the user
     /// turned Thalvi off in the system's startup list.
     NotKept {
@@ -124,6 +276,7 @@ impl fmt::Display for StartupError {
                 f,
                 "Thalvi is turned off in the system's list of startup apps. Turn it on there, or switch it off and on here."
             ),
+            Self::Unavailable(reason) => f.write_str(reason),
             Self::NotKept { on: true } => write!(
                 f,
                 "Thalvi added its startup entry, but the system reports it as off. Check the system's list of startup apps."
@@ -144,10 +297,28 @@ pub fn state(registration: &impl Registration) -> Result<bool, StartupError> {
     registration.is_enabled().map_err(StartupError::Read)
 }
 
+/// What the Settings switch shows: the OS's state, or why this session offers no switch.
+///
+/// # Errors
+/// [`StartupError::Read`] when the OS cannot be asked.
+pub fn switch(
+    registration: &impl Registration,
+    restore_problem: Option<String>,
+) -> Result<SwitchState, StartupError> {
+    if let Some(unavailable) = registration.unavailable() {
+        return Ok(SwitchState::Unavailable(unavailable));
+    }
+    Ok(SwitchState::available(
+        state(registration)?,
+        restore_problem,
+    ))
+}
+
 /// Adds or removes the startup entry, checks that the OS holds it as asked, then has `remember`
 /// save the choice as Thalvi's login preference. A change the OS did not take is not remembered.
 ///
 /// # Errors
+/// [`StartupError::Unavailable`] when the session would never run the entry,
 /// [`StartupError::Change`] when the OS refuses, [`StartupError::NotKept`] when it does not keep the
 /// change; the entry is then as the OS reports it, which [`state`] tells. [`StartupError::Remember`]
 /// when the entry changed but `remember` failed.
@@ -156,6 +327,9 @@ pub fn set(
     on: bool,
     remember: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), StartupError> {
+    if let Some(unavailable) = registration.unavailable() {
+        return Err(StartupError::Unavailable(unavailable.reason));
+    }
     if on {
         registration.enable()
     } else {
@@ -169,13 +343,14 @@ pub fn set(
 }
 
 /// Re-adds the startup entry on start when the user's preference is on: a Windows upgrade removes
-/// it, and an `AppImage` that moved needs its path refreshed. Does nothing when the preference is off.
+/// it, and an `AppImage` that moved needs its path refreshed. Does nothing when the preference is
+/// off, or when the session would never run the entry; the switch then says why.
 ///
 /// # Errors
 /// [`StartupError::TurnedOff`] when the user turned Thalvi off in the system's startup list,
 /// otherwise as [`set`].
 pub fn restore(registration: &impl Registration, preferred: bool) -> Result<(), StartupError> {
-    if !preferred {
+    if !preferred || registration.unavailable().is_some() {
         return Ok(());
     }
     if registration.turned_off_by_user() {
@@ -199,6 +374,7 @@ mod tests {
         ignores_changes: bool,
         unreadable: bool,
         turned_off_in_system: bool,
+        unavailable: Option<Unavailable>,
         enables: Cell<u32>,
         disables: Cell<u32>,
     }
@@ -231,6 +407,10 @@ mod tests {
 
         fn turned_off_by_user(&self) -> bool {
             self.turned_off_in_system
+        }
+
+        fn unavailable(&self) -> Option<Unavailable> {
+            self.unavailable.clone()
         }
     }
 
@@ -392,6 +572,46 @@ mod tests {
         assert_eq!(restore(&off_in_system, true), Err(StartupError::TurnedOff));
         assert_eq!(off_in_system.enables.get(), 0);
         assert_eq!(restore(&off_in_system, false), Ok(()));
+    }
+
+    #[test]
+    fn a_session_that_runs_no_entry_gets_a_reason_instead_of_a_switch_or_an_entry() {
+        let reason = Unavailable {
+            reason: "Nothing runs it.".to_owned(),
+            line: Some("exec-once = thalvi --login".to_owned()),
+        };
+        let os = Fake {
+            unavailable: Some(reason.clone()),
+            ..Fake::default()
+        };
+        assert_eq!(switch(&os, None), Ok(SwitchState::Unavailable(reason)));
+        assert_eq!(
+            set(&os, true, || Ok(())),
+            Err(StartupError::Unavailable("Nothing runs it.".to_owned()))
+        );
+        assert_eq!(restore(&os, true), Ok(()));
+        assert_eq!((os.enables.get(), os.disables.get()), (0, 0));
+    }
+
+    #[test]
+    fn the_switch_shows_the_os_state_and_a_restore_problem_only_while_off() {
+        let os = Fake::default();
+        let problem = Some("Thalvi could not be set to start at login: busy".to_owned());
+        assert_eq!(
+            switch(&os, problem.clone()),
+            Ok(SwitchState::Available {
+                on: false,
+                problem: problem.clone()
+            })
+        );
+        os.entry.set(true);
+        assert_eq!(
+            switch(&os, problem),
+            Ok(SwitchState::Available {
+                on: true,
+                problem: None
+            })
+        );
     }
 
     #[cfg(windows)]

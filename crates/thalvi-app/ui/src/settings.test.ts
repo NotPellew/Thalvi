@@ -542,7 +542,7 @@ describe("live controls", () => {
     expect(toggle.checked).toBe(true);
     expect(stub.backend.saveSettings).not.toHaveBeenCalled();
 
-    stub.backend.getStartAtLogin.mockResolvedValue({ on: true, problem: null });
+    stub.backend.getStartAtLogin.mockResolvedValue({ kind: "available", on: true, problem: null });
     document.body.innerHTML = '<div id="settings"></div>';
     root = document.getElementById("settings") as HTMLElement;
     mountSettings(root, stub.backend);
@@ -563,7 +563,7 @@ describe("live controls", () => {
       "Thalvi could not be set to start at login: permission denied",
     );
 
-    stub.backend.getStartAtLogin.mockResolvedValue({ on: true, problem: null });
+    stub.backend.getStartAtLogin.mockResolvedValue({ kind: "available", on: true, problem: null });
     stub.backend.setStartAtLogin.mockRejectedValue("Thalvi could not be stopped from starting at login: busy");
     flip(toggle);
     await settle();
@@ -573,6 +573,7 @@ describe("live controls", () => {
   it("says why the entry was not put back on start while leaving the switch usable", async () => {
     const stub = stubBackend();
     stub.backend.getStartAtLogin.mockResolvedValue({
+      kind: "available",
       on: false,
       problem: "Thalvi is turned off in the system's list of startup apps. Turn it on there, or switch it off and on here.",
     });
@@ -597,6 +598,28 @@ describe("live controls", () => {
     expect(rowOf("Start Thalvi when I log in").querySelector(".note")?.textContent).toBe(
       "Thalvi could not check its startup entry: no home folder",
     );
+  });
+
+  it("shows the line for hyprland.conf instead of a switch and copies it", async () => {
+    const stub = stubBackend();
+    const line = "exec-once = /home/me/Thalvi.AppImage --login";
+    stub.backend.getStartAtLogin.mockResolvedValue({ kind: "unavailable", reason: "Hyprland does not start login entries.", line });
+    mountSettings(root, stub.backend);
+    await settle();
+    const login = rowOf("Start Thalvi when I log in");
+    expect(login.querySelector("input")).toBeNull();
+    expect(login.querySelector("code")?.textContent).toBe(line);
+    expect(login.textContent).toContain("Hyprland does not start login entries.");
+
+    within(login, "Copy").click();
+    await settle();
+    expect(stub.backend.copyLoginLine).toHaveBeenCalledTimes(1);
+    expect(within(login, "Copied")).toBeDefined();
+
+    stub.backend.copyLoginLine.mockRejectedValue("wl-copy is not installed.");
+    within(login, "Copied").click();
+    await settle();
+    expect(login.querySelector(".note:not(.ok)")?.textContent).toBe("wl-copy is not installed.");
   });
 
   it("pauses, changes the device, saves and resumes from the Microphone page only", async () => {

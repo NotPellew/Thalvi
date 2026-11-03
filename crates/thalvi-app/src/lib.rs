@@ -9,6 +9,7 @@ mod runner;
 mod settings;
 mod startup;
 mod status;
+mod switch;
 mod tray;
 
 pub use app::run;

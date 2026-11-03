@@ -25,6 +25,7 @@ use crate::runner::{AudioStatus, Control};
 use crate::settings::settings_json;
 use crate::startup;
 use crate::status::Status;
+use crate::switch::{SwitchState, Unavailable};
 
 #[tauri::command]
 pub fn get_status(state: State<'_, AppState>) -> Status {
@@ -233,23 +234,29 @@ pub async fn open_recordings(state: State<'_, AppState>) -> Result<(), String> {
     .map_err(|error| format!("The folder could not be opened: {error}"))?
 }
 
-/// What the Settings switch shows.
-#[derive(Serialize)]
-pub struct LoginState {
-    /// Whether the OS will start Thalvi at login, read from the OS each time.
-    on: bool,
-    /// Why Thalvi could not put its entry back on start, while the entry is off.
-    problem: Option<String>,
-}
-
 #[tauri::command]
 pub fn get_start_at_login(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<LoginState, String> {
-    let on = startup::state(&app).map_err(|error| error.to_string())?;
-    let problem = if on { None } else { state.login_problem() };
-    Ok(LoginState { on, problem })
+) -> Result<SwitchState, String> {
+    startup::switch(&app, state.login_problem()).map_err(|error| error.to_string())
+}
+
+/// Puts the `hyprland.conf` line that starts Thalvi at login on the clipboard.
+#[tauri::command]
+pub async fn copy_login_line(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let Ok(SwitchState::Unavailable(Unavailable {
+        line: Some(line), ..
+    })) = startup::switch(&app, None)
+    else {
+        return Err("There is no line to copy.".to_owned());
+    };
+    let host = state.host();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.copy(&line).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("The line could not be copied: {error}"))?
 }
 
 /// Adds or removes the startup entry and remembers the choice; fails unless the OS then holds it as

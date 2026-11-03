@@ -4,13 +4,13 @@ import type {
   AudioStatus,
   Backend,
   Ending,
-  LoginState,
   ScriptActionKind,
   SecondaryApi,
   Settings,
   SpeechModelInfo,
   SpeechModelProgress,
   SttEngine,
+  SwitchState,
 } from "./contract.ts";
 import { errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
@@ -27,7 +27,7 @@ export interface PageContext {
   /** The microphone actually open when the pages were built. */
   audio: AudioStatus;
   /** Whether the OS starts Thalvi at login, or why that could not be read. */
-  startAtLogin: LoginState | { error: string };
+  startAtLogin: SwitchRead;
   /** The settings window, so a look picked here shows at once. */
   root: HTMLElement;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
@@ -40,6 +40,9 @@ export interface PageContext {
   /** Checks a page adds that must pass before Save sends; each returns null when it has nothing to check. */
   checks: (() => Promise<void> | null)[];
 }
+
+/** An OS switch as read, or why it could not be. */
+export type SwitchRead = SwitchState | { kind: "unreadable"; message: string };
 
 export interface Page {
   id: string;
@@ -138,42 +141,76 @@ function miniField(label: string, field: Field): HTMLElement {
   return el("label", { class: "mini" }, el("span", {}, label), field.node);
 }
 
+interface SwitchOps {
+  read: () => Promise<SwitchState>;
+  set: (on: boolean) => Promise<void>;
+  copy?: () => Promise<void>;
+}
+
+/** A switch that takes effect at once, shows the OS's state, and re-reads it after a failure; or the reason there is none. */
+function switchRow(label: string, hint: string, shown: SwitchRead, controls: Controls, ops: SwitchOps): HTMLElement {
+  if (shown.kind === "unavailable") return row(label, hint, unavailable(shown, ops.copy));
+  const toggle = controls.toggle(shown.kind === "available" && shown.on, () => undefined);
+  const input = toggle.field as HTMLInputElement;
+  const problem = note();
+  if (shown.kind === "unreadable") {
+    input.disabled = true;
+    say(problem, shown.message);
+  } else {
+    say(problem, shown.problem ?? "");
+  }
+  input.addEventListener("change", () => {
+    say(problem, "");
+    const wanted = input.checked;
+    input.disabled = true;
+    ops
+      .set(wanted)
+      .catch(async (error: unknown) => {
+        say(problem, errorText(error));
+        input.checked = await ops
+          .read()
+          .then((state) => state.kind === "available" && state.on)
+          .catch(() => !wanted);
+      })
+      .finally(() => {
+        input.disabled = false;
+      });
+  });
+  return row(label, hint, { node: el("span", { class: "stack" }, toggle.node, problem), field: input });
+}
+
+function unavailable({ reason, line }: Extract<SwitchState, { kind: "unavailable" }>, copy?: () => Promise<void>): HTMLElement {
+  const node = el("span", { class: "stack wide" }, el("p", { class: "note ok" }, reason));
+  if (line !== null && copy) {
+    const problem = note();
+    const copyButton = button("Copy", () => {
+      say(problem, "");
+      copy()
+        .then(() => {
+          copyButton.textContent = "Copied";
+        })
+        .catch((error: unknown) => {
+          say(problem, errorText(error));
+        });
+    });
+    node.append(el("code", { class: "line" }, line), copyButton, problem);
+  }
+  return node;
+}
+
 function general({ draft, backend, controls, root, startAtLogin }: PageContext): HTMLElement[] {
   const server = controls.text(draft.server, (value) => {
     draft.server = value;
   }, { placeholder: "ws://127.0.0.1:8080" });
-  const login = controls.toggle("on" in startAtLogin && startAtLogin.on, () => undefined);
-  const loginInput = login.field as HTMLInputElement;
-  const loginProblem = note();
-  if ("error" in startAtLogin) {
-    loginInput.disabled = true;
-    say(loginProblem, startAtLogin.error);
-  } else {
-    say(loginProblem, startAtLogin.problem ?? "");
-  }
-  loginInput.addEventListener("change", () => {
-    say(loginProblem, "");
-    const wanted = loginInput.checked;
-    loginInput.disabled = true;
-    backend
-      .setStartAtLogin(wanted)
-      .catch(async (error: unknown) => {
-        say(loginProblem, errorText(error));
-        loginInput.checked = await backend
-          .getStartAtLogin()
-          .then((login) => login.on)
-          .catch(() => !wanted);
-      })
-      .finally(() => {
-        loginInput.disabled = false;
-      });
-  });
   return [
     row("Server address", "Where Thalvi sends speech for recognition.", server),
-    row("Start Thalvi when I log in", "Starts the voice app at login, listening as it normally does. This takes effect now; it is not part of Save.", {
-      node: el("span", { class: "stack" }, login.node, loginProblem),
-      field: loginInput,
-    }),
+    switchRow(
+      "Start Thalvi when I log in",
+      "Starts the voice app at login, listening as it normally does. This takes effect now; it is not part of Save.",
+      startAtLogin,
+      controls,
+      { read: () => backend.getStartAtLogin(), set: (on) => backend.setStartAtLogin(on), copy: () => backend.copyLoginLine() },
+    ),
     row("Look", "How the overlay and this window look. The overlay changes after the current capture.",
       lookPicker(draft.look, (look) => {
         draft.look = look;

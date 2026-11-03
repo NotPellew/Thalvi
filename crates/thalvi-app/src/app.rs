@@ -179,6 +179,7 @@ fn start() -> Result<(), String> {
             commands::open_recordings,
             commands::get_start_at_login,
             commands::set_start_at_login,
+            commands::copy_login_line,
             commands::validate_speech_model_folder,
             commands::list_speech_models,
             commands::download_speech_model,

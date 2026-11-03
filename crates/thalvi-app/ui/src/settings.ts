@@ -5,7 +5,7 @@ import { errorText } from "./contract.ts";
 import { createControls } from "./controls.ts";
 import { el } from "./dom.ts";
 import { applyLook } from "./look.ts";
-import { buildPages, type Page, type PageContext } from "./settings-pages.ts";
+import { buildPages, type Page, type PageContext, type SwitchRead } from "./settings-pages.ts";
 
 export const SAVED_TEXT = "Saved — applies after the current capture; the saved microphone is not active until it opens";
 
@@ -100,7 +100,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       return;
     }
     const microphones = await backend.listMicrophones().catch((error: unknown) => ({ error: errorText(error) }));
-    const startAtLogin = await backend.getStartAtLogin().catch((error: unknown) => ({ error: errorText(error) }));
+    const startAtLogin = await backend.getStartAtLogin().catch((error: unknown): SwitchRead => ({ kind: "unreadable", message: errorText(error) }));
     audio = await backend.getAudio().catch(() => ({
       selected: loaded.microphone,
       active: null,

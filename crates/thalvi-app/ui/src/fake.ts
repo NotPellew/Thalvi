@@ -151,11 +151,12 @@ export function fakeBackend(params: URLSearchParams): Backend {
     },
     listMicrophones: () => Promise.resolve([...microphones]),
     openRecordings: () => Promise.resolve(),
-    getStartAtLogin: () => Promise.resolve({ on: startAtLogin, problem: null }),
+    getStartAtLogin: () => Promise.resolve({ kind: "available", on: startAtLogin, problem: null }),
     setStartAtLogin: (on) => {
       startAtLogin = on;
       return Promise.resolve();
     },
+    copyLoginLine: () => Promise.resolve(),
     validateSpeechModelFolder: (path) =>
       path.includes("missing") ? Promise.reject(new Error("Missing required file: tokens.txt")) : Promise.resolve(),
     listSpeechModels: () => Promise.resolve(structuredClone(speechModels)),

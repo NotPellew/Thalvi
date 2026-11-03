@@ -122,9 +122,11 @@ export interface Backend {
   listMicrophones(): Promise<string[]>;
   openRecordings(): Promise<void>;
   /** Whether the OS starts Thalvi at login, read from the OS, and why Thalvi could not put its entry back on start. */
-  getStartAtLogin(): Promise<LoginState>;
+  getStartAtLogin(): Promise<SwitchState>;
   /** Adds or removes the startup entry; rejects unless the OS then holds it as asked. */
   setStartAtLogin(on: boolean): Promise<void>;
+  /** Puts the line that starts Thalvi at login on the clipboard, when the state carries one. */
+  copyLoginLine(): Promise<void>;
   /** Resolves when the folder holds a speech model; rejects with the plain reason it does not. */
   validateSpeechModelFolder(path: string): Promise<void>;
   listSpeechModels(): Promise<SpeechModelInfo[]>;
@@ -136,10 +138,10 @@ export interface Backend {
   appVersion(): Promise<string>;
 }
 
-export interface LoginState {
-  on: boolean;
-  problem: string | null;
-}
+/** An OS setting Thalvi can switch, or the reason it offers no switch and a line to do it by hand. */
+export type SwitchState =
+  | { kind: "available"; on: boolean; problem: string | null }
+  | { kind: "unavailable"; reason: string; line: string | null };
 
 export function errorText(error: unknown): string {
   if (typeof error === "string") return error;
