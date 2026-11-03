@@ -17,6 +17,10 @@ Thalvi has two parts:
 - **The desktop app** (Hyprland and Windows) listens for "Hey Thalvi" and
   types what you dictate into the window you are using.
 
+**Download the desktop app:** the
+[latest release](https://github.com/NotPellew/Thalvi/releases/latest) has the
+Windows installer and the Linux AppImage; see [Install](#install).
+
 It is built to self-host. By default it uses Meta's Muse Voice Transcribe for
 live speech and Muse Spark for reasoning and tool use, and speaks with a voice
 engine on your own machine. Each model is an endpoint in `.env`, so any
