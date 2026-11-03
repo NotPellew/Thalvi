@@ -1003,11 +1003,11 @@ async fn send_session_opening(
         .iter()
         .map(|message| json!({"role": message.role, "text": message.content}))
         .collect();
-    send_json(
-        sink,
-        &json!({"type": "session", "id": session_id, "turns": turns, "private": private}),
-    )
-    .await;
+    let mut opening = json!({"type": "session", "id": session_id, "turns": turns});
+    if private {
+        opening["private"] = json!(true);
+    }
+    send_json(sink, &opening).await;
 }
 
 fn spawn_recognizer<F>(
