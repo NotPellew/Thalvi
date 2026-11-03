@@ -181,6 +181,76 @@ describe("tables", () => {
   });
 });
 
+describe("a custom speech model folder", () => {
+  async function openLocal() {
+    const stub = await open({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    goTo("recognition");
+    return stub;
+  }
+  const result = (): HTMLElement | null => rowOf("Speech model").querySelector<HTMLElement>(".note:not([hidden])");
+
+  it("checks the typed folder and shows the plain answer inline", async () => {
+    const stub = await openLocal();
+    const input = control("Speech model", "input");
+    type(input, "  /models/mine ");
+    button("Check folder").click();
+    await settle();
+    expect(stub.backend.validateSpeechModelFolder).toHaveBeenLastCalledWith("/models/mine");
+    expect(result()?.textContent).toBe("This folder holds a speech model.");
+
+    stub.backend.validateSpeechModelFolder.mockRejectedValueOnce("Missing required files: encoder.int8.onnx, tokens.txt");
+    button("Check folder").click();
+    await settle();
+    expect(result()?.textContent).toBe("Missing required files: encoder.int8.onnx, tokens.txt");
+
+    type(input, "/models/other");
+    expect(result()).toBeNull();
+  });
+
+  it("asks for a path instead of checking nothing or the built-in model", async () => {
+    const stub = await openLocal();
+    button("Check folder").click();
+    expect(result()?.textContent).toBe("Type the folder path first.");
+    type(control("Speech model", "input"), "nemotron_160ms");
+    button("Check folder").click();
+    expect(result()?.textContent).toBe("nemotron_160ms is downloaded on first use; there is no folder to check.");
+    expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
+  });
+
+  it("saves a valid folder as stt.model", async () => {
+    const stub = await openLocal();
+    type(control("Speech model", "input"), "/models/mine");
+    button("Save").click();
+    await settle();
+    expect(stub.backend.validateSpeechModelFolder).toHaveBeenCalledWith("/models/mine");
+    expect(sent(stub).stt).toEqual({ engine: "local", model: "/models/mine", secondary: null });
+    expect(result()?.textContent).toBe("This folder holds a speech model.");
+  });
+
+  it("does not save a folder that fails the check, and says why", async () => {
+    const stub = await openLocal();
+    stub.backend.validateSpeechModelFolder.mockRejectedValueOnce("There is no folder at /models/gone.");
+    type(control("Speech model", "input"), "/models/gone");
+    button("Save").click();
+    await settle();
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    expect(result()?.textContent).toBe("There is no folder at /models/gone.");
+    expect(root.querySelector(".err")?.textContent).toBe("There is no folder at /models/gone.");
+  });
+
+  it.each([
+    ["the built-in model", { engine: "local", model: "nemotron_160ms" }],
+    ["no model", { engine: "local" }],
+    ["the server engine", { engine: "server", model: "/models/mine" }],
+  ] as const)("saves without checking a folder for %s", async (_name, stt) => {
+    const stub = await open({ ...SETTINGS, stt: { ...stt, secondary: null } });
+    goTo("recognition");
+    button("Save").click();
+    expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
+    expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("where speech is recognized", () => {
   it("saves the engine, and the model only for the local engine", async () => {
     const stub = await open();
@@ -193,6 +263,7 @@ describe("where speech is recognized", () => {
     type(control("Speech model", "input"), "/models/mine");
     choose(control("Recognize speech", "select"), "local");
     button("Save").click();
+    await settle();
     expect(sent(stub).stt.engine).toBe("local");
     expect(sent(stub).stt.model).toBe("/models/mine");
 
