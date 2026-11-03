@@ -2159,11 +2159,12 @@ async fn cancel_and_a_new_turn_both_end_a_text_reply_that_is_being_spoken() {
     wait_until(|| harness.tts.inputs().len() == 2).await;
 
     send_json(&mut harness, &json!({"type": "cancel"})).await;
-    let cancelled = collect_until(&mut harness.client, |item| {
-        has_type(std::slice::from_ref(item), "interrupted")
-    })
+    let cancelled = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
+    )
     .await;
-    assert!(has_state(&cancelled, "idle"));
+    assert!(has_type(&cancelled, "interrupted"));
     wait_until(|| harness.tts.dropped.load(Ordering::SeqCst) == 1).await;
 
     harness
