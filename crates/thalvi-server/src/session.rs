@@ -275,27 +275,60 @@ struct RecognizerHandle {
     ready: bool,
 }
 
-/// Whether the user wants voice and whether the recognizer can hear them.
-#[derive(Clone, Copy)]
-struct Voice {
-    on: bool,
-    ready: bool,
+/// Where the user's turns come from; only `Mic` has a recognizer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputSource {
+    Text,
+    Mic,
 }
 
-impl Voice {
-    fn new(on: bool, recognizer: Option<&RecognizerHandle>) -> Self {
+impl InputSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Mic => "mic",
+        }
+    }
+}
+
+/// The connection's two independent choices: how the user is heard, and whether replies are spoken.
+struct Modes {
+    input: InputSource,
+    reply_audio: watch::Sender<bool>,
+}
+
+impl Modes {
+    fn new() -> Self {
         Self {
-            on,
-            ready: recognizer.is_some_and(|handle| handle.ready),
+            input: InputSource::Text,
+            reply_audio: watch::Sender::new(false),
         }
     }
 
+    fn snapshot(&self, recognizer: Option<&RecognizerHandle>) -> Mode {
+        Mode {
+            input: self.input,
+            ready: recognizer.is_some_and(|handle| handle.ready),
+            reply_audio: *self.reply_audio.borrow(),
+        }
+    }
+}
+
+/// `Modes` at one moment, with whether the recognizer can hear the user.
+#[derive(Clone, Copy)]
+struct Mode {
+    input: InputSource,
+    ready: bool,
+    reply_audio: bool,
+}
+
+impl Mode {
     /// The state to report when no reply is running.
     fn resting_state(self) -> &'static str {
-        match (self.on, self.ready) {
-            (false, _) => "idle",
-            (true, true) => "listening",
-            (true, false) => "starting",
+        match (self.input, self.ready) {
+            (InputSource::Text, _) => "idle",
+            (InputSource::Mic, true) => "listening",
+            (InputSource::Mic, false) => "starting",
         }
     }
 }
@@ -433,8 +466,7 @@ pub async fn handle_session<F, M, T>(
         Arc::clone(&persistence.store),
         session_id.clone(),
     );
-    let voice = watch::Sender::new(false);
-    let mut voice_on = false;
+    let mut modes = Modes::new();
     let mut recognizer: Option<RecognizerHandle> = None;
     let mut rec_rx: Option<mpsc::Receiver<RecognizerMessage>> = None;
     let mut reply: Option<ActiveReply> = None;
@@ -470,7 +502,7 @@ pub async fn handle_session<F, M, T>(
                         forward_mic(&audio, recognizer.as_ref(), &mut turn_log);
                     }
                     Some(Ok(Message::Text(text))) => {
-                        handle_client_text(&text, &mut sink, &mut recognizer, &mut rec_rx, &factory, &voice, &mut voice_on, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut turn_log, &mut settings).await;
+                        handle_client_text(&text, &mut sink, &mut recognizer, &mut rec_rx, &factory, &mut modes, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut turn_log, &mut settings).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
@@ -481,14 +513,14 @@ pub async fn handle_session<F, M, T>(
                 }
             }
             recognizer_message = recognizer_event => {
-                handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut rec_rx, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &voice, &mut voice_on, &mut turn_log, &settings).await;
+                handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut rec_rx, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut modes, &mut turn_log, &settings).await;
             }
             event = reply_event => {
                 let Some(event) = event else {
                     reply_rx = None;
                     continue;
                 };
-                handle_reply_event(event, &mut sink, &mut history, &mut reply, &mut reply_rx, &mut client_audio, Voice::new(voice_on, recognizer.as_ref()), &mut turn_log).await;
+                handle_reply_event(event, &mut sink, &mut history, &mut reply, &mut reply_rx, &mut client_audio, modes.snapshot(recognizer.as_ref()), &mut turn_log).await;
             }
         }
     }
@@ -520,8 +552,7 @@ async fn handle_client_text<F, M, T>(
     recognizer: &mut Option<RecognizerHandle>,
     rec_rx: &mut Option<mpsc::Receiver<RecognizerMessage>>,
     factory: &Arc<F>,
-    voice: &watch::Sender<bool>,
-    voice_on: &mut bool,
+    modes: &mut Modes,
     history: &mut Vec<ChatMessage>,
     reply: &mut Option<ActiveReply>,
     reply_rx: &mut Option<mpsc::Receiver<ReplyEvent>>,
@@ -544,27 +575,21 @@ async fn handle_client_text<F, M, T>(
                 reply,
                 reply_rx,
                 client_audio,
-                Voice::new(*voice_on, recognizer.as_ref()),
+                modes.snapshot(recognizer.as_ref()),
                 "cancel",
                 turn_log,
             )
             .await;
         }
         ClientText::Played(bytes) => client_audio.played(bytes),
-        ClientText::Voice(on) => {
-            *voice_on = on;
-            set_voice(
-                on,
-                sink,
-                recognizer,
-                rec_rx,
-                factory,
-                voice,
-                reply,
-                client_audio,
-                turn_log.recorder.clone(),
+        ClientText::Input(source) => {
+            set_input(
+                source, sink, recognizer, rec_rx, factory, modes, reply, turn_log,
             )
             .await;
+        }
+        ClientText::ReplyAudio(on) => {
+            set_reply_audio(on, sink, modes, reply, client_audio).await;
         }
         ClientText::VoiceName(name) => {
             if settings.offered.contains(&name) {
@@ -587,8 +612,8 @@ async fn handle_client_text<F, M, T>(
                     client_audio,
                     model,
                     tts,
-                    voice,
-                    Voice::new(*voice_on, recognizer.as_ref()),
+                    &modes.reply_audio,
+                    modes.snapshot(recognizer.as_ref()),
                     "text",
                     text.clone(),
                     &[],
@@ -625,8 +650,7 @@ async fn handle_recognizer_message<M, T>(
     client_audio: &mut ClientAudio,
     model: &Arc<M>,
     tts: &Arc<T>,
-    voice: &watch::Sender<bool>,
-    voice_on: &mut bool,
+    modes: &mut Modes,
     turn_log: &mut TurnLog,
     settings: &ReplySettings,
 ) where
@@ -654,7 +678,7 @@ async fn handle_recognizer_message<M, T>(
                 reply,
                 reply_rx,
                 client_audio,
-                Voice::new(*voice_on, recognizer.as_ref()),
+                modes.snapshot(recognizer.as_ref()),
                 "speech start",
                 turn_log,
             )
@@ -680,8 +704,8 @@ async fn handle_recognizer_message<M, T>(
                     client_audio,
                     model,
                     tts,
-                    voice,
-                    Voice::new(*voice_on, recognizer.as_ref()),
+                    &modes.reply_audio,
+                    modes.snapshot(recognizer.as_ref()),
                     "voice",
                     text.clone(),
                     &clip,
@@ -713,11 +737,13 @@ async fn handle_recognizer_message<M, T>(
             };
             send_json(sink, &json!({"type": "error", "message": message})).await;
             if fatal {
-                *voice_on = false;
-                send_json(sink, &json!({"type": "voice", "on": false})).await;
-                stop_voice(sink, recognizer, rec_rx, voice, reply, client_audio).await;
-            } else if *voice_on && reply.is_none() {
-                send_state(sink, "starting").await;
+                send_input(sink, InputSource::Text, true).await;
+                stop_input(sink, modes, recognizer, rec_rx, reply, turn_log).await;
+            } else {
+                send_input(sink, InputSource::Mic, false).await;
+                if reply.is_none() {
+                    send_state(sink, "starting").await;
+                }
             }
         }
         Some(RecognizerMessage::Ready) => {
@@ -725,7 +751,8 @@ async fn handle_recognizer_message<M, T>(
             if let Some(handle) = recognizer {
                 handle.ready = true;
             }
-            if *voice_on && reply.is_none() {
+            send_input(sink, InputSource::Mic, true).await;
+            if reply.is_none() {
                 send_state(sink, "listening").await;
             }
         }
@@ -851,62 +878,88 @@ where
     clippy::too_many_arguments,
     reason = "session state is passed explicitly rather than bundled into a context type"
 )]
-async fn set_voice<F>(
-    on: bool,
+async fn set_input<F>(
+    source: InputSource,
     sink: &mut (impl SinkExt<Message> + Unpin),
     recognizer: &mut Option<RecognizerHandle>,
     rec_rx: &mut Option<mpsc::Receiver<RecognizerMessage>>,
     factory: &Arc<F>,
-    voice: &watch::Sender<bool>,
-    reply: &mut Option<ActiveReply>,
-    client_audio: &mut ClientAudio,
-    recorder: Recorder,
+    modes: &mut Modes,
+    reply: &Option<ActiveReply>,
+    turn_log: &mut TurnLog,
 ) where
     F: RecognizerFactory + Send + Sync + 'static,
     F::Rec: Send + 'static,
 {
-    if !on {
-        stop_voice(sink, recognizer, rec_rx, voice, reply, client_audio).await;
-        return;
-    }
-    voice.send_replace(true);
-    if recognizer.is_none() {
-        let (handle, receiver) = spawn_recognizer(factory, recorder);
-        *recognizer = Some(handle);
-        *rec_rx = Some(receiver);
-        if reply.is_none() {
-            send_state(sink, "starting").await;
+    match source {
+        InputSource::Text => stop_input(sink, modes, recognizer, rec_rx, reply, turn_log).await,
+        InputSource::Mic => {
+            modes.input = InputSource::Mic;
+            if recognizer.is_none() {
+                let (handle, receiver) = spawn_recognizer(factory, turn_log.recorder.clone());
+                *recognizer = Some(handle);
+                *rec_rx = Some(receiver);
+                send_input(sink, InputSource::Mic, false).await;
+                if reply.is_none() {
+                    send_state(sink, "starting").await;
+                }
+            }
         }
     }
 }
 
-/// Turns voice off: drops the recognizer and stops speaking the running reply.
-async fn stop_voice(
+/// Switches to text input: releases the recognizer and leaves the running reply and its audio alone.
+async fn stop_input(
     sink: &mut (impl SinkExt<Message> + Unpin),
+    modes: &mut Modes,
     recognizer: &mut Option<RecognizerHandle>,
     rec_rx: &mut Option<mpsc::Receiver<RecognizerMessage>>,
-    voice: &watch::Sender<bool>,
-    reply: &mut Option<ActiveReply>,
-    client_audio: &mut ClientAudio,
+    reply: &Option<ActiveReply>,
+    turn_log: &mut TurnLog,
 ) {
-    voice.send_replace(false);
+    modes.input = InputSource::Text;
     if let Some(handle) = recognizer.take() {
         handle.task.abort();
     }
     *rec_rx = None;
-    client_audio.clear();
-    if let Some(active) = reply {
-        active.spoken_throughout = false;
-        send_state(sink, "thinking").await;
-    } else {
+    turn_log.pending.clear();
+    turn_log.reset_mic();
+    if reply.is_none() {
         send_state(sink, "idle").await;
     }
+}
+
+/// Turns spoken replies on or off; off drops queued audio but the reply's text carries on.
+async fn set_reply_audio(
+    on: bool,
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    modes: &Modes,
+    reply: &mut Option<ActiveReply>,
+    client_audio: &mut ClientAudio,
+) {
+    modes.reply_audio.send_replace(on);
+    if !on {
+        client_audio.clear();
+        if let Some(active) = reply {
+            active.spoken_throughout = false;
+        }
+    }
+    send_json(sink, &json!({"type": "reply_audio", "on": on})).await;
+}
+
+async fn send_input(sink: &mut (impl SinkExt<Message> + Unpin), source: InputSource, ready: bool) {
+    send_json(
+        sink,
+        &json!({"type": "input", "source": source.as_str(), "ready": ready}),
+    )
+    .await;
 }
 
 enum ClientText {
     Cancel,
     Played(u64),
-    Voice(bool),
+    Input(InputSource),
+    ReplyAudio(bool),
     VoiceName(String),
     Text(String),
     Other,
@@ -922,10 +975,15 @@ fn parse_client_text(text: &str) -> ClientText {
             .get("bytes")
             .and_then(serde_json::Value::as_u64)
             .map_or(ClientText::Other, ClientText::Played),
-        Some("voice") => value
+        Some("input") => match value.get("source").and_then(serde_json::Value::as_str) {
+            Some("text") => ClientText::Input(InputSource::Text),
+            Some("mic") => ClientText::Input(InputSource::Mic),
+            _ => ClientText::Other,
+        },
+        Some("reply_audio") => value
             .get("on")
             .and_then(serde_json::Value::as_bool)
-            .map_or(ClientText::Other, ClientText::Voice),
+            .map_or(ClientText::Other, ClientText::ReplyAudio),
         Some("voice_name") => value
             .get("voice")
             .and_then(serde_json::Value::as_str)
@@ -966,8 +1024,8 @@ async fn begin_turn<M, T>(
     client_audio: &mut ClientAudio,
     model: &Arc<M>,
     tts: &Arc<T>,
-    voice: &watch::Sender<bool>,
-    state: Voice,
+    reply_audio: &watch::Sender<bool>,
+    state: Mode,
     source: &'static str,
     text: String,
     clip: &[u8],
@@ -1000,7 +1058,7 @@ where
     let (active, events_rx) = start_reply(
         Arc::clone(model),
         Arc::clone(tts),
-        voice.subscribe(),
+        reply_audio.subscribe(),
         history.clone(),
         audio.zip(caption),
         turn,
@@ -1019,7 +1077,7 @@ where
 fn start_reply<M, T>(
     model: Arc<M>,
     tts: Arc<T>,
-    voice: watch::Receiver<bool>,
+    reply_audio: watch::Receiver<bool>,
     history: Vec<ChatMessage>,
     audio: Option<(Vec<u8>, String)>,
     turn: u64,
@@ -1031,7 +1089,7 @@ where
     T: Tts + 'static,
 {
     let (events_tx, events_rx) = mpsc::channel::<ReplyEvent>(64);
-    let spoken_throughout = *voice.borrow();
+    let spoken_throughout = *reply_audio.borrow();
     let input_audio_ms = audio
         .as_ref()
         .map(|(pcm, _)| u64::try_from(pcm.len()).unwrap_or(u64::MAX) / 48);
@@ -1039,7 +1097,15 @@ where
     let active = ActiveReply {
         handle: tokio::spawn(
             run_reply(
-                model, tts, voice, history, audio, events_tx, turn, recorder, context,
+                model,
+                tts,
+                reply_audio,
+                history,
+                audio,
+                events_tx,
+                turn,
+                recorder,
+                context,
             )
             .in_current_span(),
         ),
@@ -1073,7 +1139,7 @@ async fn handle_reply_event(
     reply: &mut Option<ActiveReply>,
     reply_rx: &mut Option<mpsc::Receiver<ReplyEvent>>,
     client_audio: &mut ClientAudio,
-    state: Voice,
+    state: Mode,
     turn_log: &mut TurnLog,
 ) {
     match event {
@@ -1108,7 +1174,7 @@ async fn handle_reply_event(
                 active.sent_sentences.push(sentence);
             }
         }
-        ReplyEvent::AckAudio(_) | ReplyEvent::Audio(_) if !state.on => {}
+        ReplyEvent::AckAudio(_) | ReplyEvent::Audio(_) if !state.reply_audio => {}
         ReplyEvent::AckAudio(audio) => {
             if let Some(active) = reply {
                 active.speaking_sent = true;
@@ -1255,7 +1321,7 @@ async fn interrupt(
     reply: &mut Option<ActiveReply>,
     reply_rx: &mut Option<mpsc::Receiver<ReplyEvent>>,
     client_audio: &mut ClientAudio,
-    state: Voice,
+    state: Mode,
     reason: &'static str,
     turn_log: &mut TurnLog,
 ) {
@@ -1347,7 +1413,7 @@ impl Drop for AbortOnDrop {
 async fn run_reply<M, T>(
     model: Arc<M>,
     tts: Arc<T>,
-    voice: watch::Receiver<bool>,
+    reply_audio: watch::Receiver<bool>,
     history: Vec<ChatMessage>,
     audio: Option<(Vec<u8>, String)>,
     events: mpsc::Sender<ReplyEvent>,
@@ -1381,7 +1447,7 @@ async fn run_reply<M, T>(
         consume_sentences(
             sentence_rx,
             tts,
-            voice,
+            reply_audio,
             events.clone(),
             turn,
             recorder,
@@ -1715,7 +1781,7 @@ async fn reply_misheard(
 async fn consume_sentences<T>(
     mut sentences: mpsc::UnboundedReceiver<String>,
     tts: Arc<T>,
-    mut voice: watch::Receiver<bool>,
+    mut reply_audio: watch::Receiver<bool>,
     events: mpsc::Sender<ReplyEvent>,
     turn: u64,
     recorder: Recorder,
@@ -1727,7 +1793,7 @@ where
     T: Tts,
 {
     let mut pending_first: Option<String> = None;
-    if ack.enabled && *voice.borrow() {
+    if ack.enabled && *reply_audio.borrow() {
         match tokio::time::timeout(ACK_DELAY, sentences.recv()).await {
             Ok(Some(sentence)) => pending_first = Some(sentence),
             Ok(None) => return true,
@@ -1735,7 +1801,7 @@ where
                 let line = ACK_LINES[usize::try_from(turn.saturating_sub(1) % 3).unwrap_or(0)];
                 if !speak_ack(
                     &tts,
-                    &mut voice,
+                    &mut reply_audio,
                     &events,
                     line,
                     turn,
@@ -1751,10 +1817,10 @@ where
         }
     }
     if let Some(sentence) = pending_first
-        && *voice.borrow()
+        && *reply_audio.borrow()
         && !speak_sentence(
             &tts,
-            &mut voice,
+            &mut reply_audio,
             &events,
             &sentence,
             turn,
@@ -1767,10 +1833,10 @@ where
         return false;
     }
     while let Some(sentence) = sentences.recv().await {
-        if *voice.borrow()
+        if *reply_audio.borrow()
             && !speak_sentence(
                 &tts,
-                &mut voice,
+                &mut reply_audio,
                 &events,
                 &sentence,
                 turn,
@@ -1800,7 +1866,7 @@ fn lock_ack_cache(
 )]
 async fn speak_ack<T: Tts>(
     tts: &Arc<T>,
-    voice: &mut watch::Receiver<bool>,
+    reply_audio: &mut watch::Receiver<bool>,
     events: &mpsc::Sender<ReplyEvent>,
     line: &'static str,
     turn: u64,
@@ -1810,7 +1876,7 @@ async fn speak_ack<T: Tts>(
 ) -> bool {
     tokio::select! {
         biased;
-        () = voice_turned_off(voice) => true,
+        () = reply_audio_muted(reply_audio) => true,
         keep_going = synthesize_ack(tts, events, line, turn, recorder, ack_cache, voice_name) => keep_going,
     }
 }
@@ -1885,7 +1951,7 @@ async fn synthesize_ack<T: Tts>(
     true
 }
 
-/// Speaks one sentence, giving it up as soon as voice turns off.
+/// Speaks one sentence, giving it up as soon as reply audio is muted.
 /// Returns false when the reply should stop (failure reported or session gone).
 #[expect(
     clippy::too_many_arguments,
@@ -1893,7 +1959,7 @@ async fn synthesize_ack<T: Tts>(
 )]
 async fn speak_sentence<T: Tts>(
     tts: &Arc<T>,
-    voice: &mut watch::Receiver<bool>,
+    reply_audio: &mut watch::Receiver<bool>,
     events: &mpsc::Sender<ReplyEvent>,
     sentence: &str,
     turn: u64,
@@ -1903,13 +1969,13 @@ async fn speak_sentence<T: Tts>(
 ) -> bool {
     tokio::select! {
         biased;
-        () = voice_turned_off(voice) => true,
+        () = reply_audio_muted(reply_audio) => true,
         keep_going = synthesize_sentence(tts, events, sentence, turn, recorder, failure_sent, voice_name) => keep_going,
     }
 }
 
-async fn voice_turned_off(voice: &mut watch::Receiver<bool>) {
-    if voice.wait_for(|on| !*on).await.is_err() {
+async fn reply_audio_muted(reply_audio: &mut watch::Receiver<bool>) {
+    if reply_audio.wait_for(|on| !*on).await.is_err() {
         std::future::pending::<()>().await;
     }
 }
@@ -2492,14 +2558,14 @@ mod tests {
                 release: Arc::new(Notify::new()),
                 block_first: AtomicBool::new(false),
             });
-            let (_voice_tx, voice_rx) = watch::channel(false);
+            let (_audio_tx, audio_rx) = watch::channel(false);
             let (events_tx, mut events_rx) = mpsc::channel(64);
             let recorder =
                 start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
             let handle = tokio::spawn(run_reply(
                 Arc::new(EchoToolModel { echo }),
                 tts,
-                voice_rx,
+                audio_rx,
                 vec![ChatMessage::user("yes".to_string())],
                 Some((vec![0, 0], "yes".to_string())),
                 events_tx,
@@ -2571,13 +2637,13 @@ mod tests {
             release: Arc::clone(&release),
             block_first: AtomicBool::new(true),
         });
-        let (_voice_tx, voice_rx) = watch::channel(true);
+        let (_audio_tx, audio_rx) = watch::channel(true);
         let (events_tx, mut events_rx) = mpsc::channel(64);
         let recorder = start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
         let handle = tokio::spawn(run_reply(
             Arc::new(FakeModel),
             tts,
-            voice_rx,
+            audio_rx,
             Vec::new(),
             None,
             events_tx,
@@ -2652,13 +2718,13 @@ mod tests {
             release: Arc::clone(&release),
             block_first: AtomicBool::new(true),
         });
-        let (_voice_tx, voice_rx) = watch::channel(true);
+        let (_audio_tx, audio_rx) = watch::channel(true);
         let (events_tx, mut events_rx) = mpsc::channel(64);
         let recorder = start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
         let handle = tokio::spawn(run_reply(
             Arc::new(ManySentenceModel),
             tts,
-            voice_rx,
+            audio_rx,
             Vec::new(),
             None,
             events_tx,
@@ -2701,7 +2767,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn voice_off_streams_deltas_without_synthesis_and_finishes() {
+    async fn reply_audio_off_streams_deltas_without_synthesis_and_finishes() {
         let spoken = Arc::new(Mutex::new(Vec::new()));
         let tts = Arc::new(FakeTts {
             spoken: Arc::clone(&spoken),
@@ -2709,13 +2775,13 @@ mod tests {
             release: Arc::new(Notify::new()),
             block_first: AtomicBool::new(false),
         });
-        let (_voice_tx, voice_rx) = watch::channel(false);
+        let (_audio_tx, audio_rx) = watch::channel(false);
         let (events_tx, mut events_rx) = mpsc::channel(64);
         let recorder = start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
         let handle = tokio::spawn(run_reply(
             Arc::new(FakeModel),
             tts,
-            voice_rx,
+            audio_rx,
             Vec::new(),
             None,
             events_tx,
@@ -2741,7 +2807,7 @@ mod tests {
             !seen
                 .iter()
                 .any(|event| event.starts_with("sentence:") || event == "audio"),
-            "voice off should not synthesize: {seen:?}"
+            "reply audio off should not synthesize: {seen:?}"
         );
         assert!(spoken.lock().expect("spoken lock").is_empty());
     }
@@ -2769,7 +2835,7 @@ mod tests {
             block_first: AtomicBool::new(false),
         });
         let release = Arc::new(Notify::new());
-        let (_voice_tx, voice_rx) = watch::channel(true);
+        let (_audio_tx, audio_rx) = watch::channel(true);
         let (events_tx, mut events_rx) = mpsc::channel(64);
         let recorder = start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
         let handle = tokio::spawn(run_reply(
@@ -2777,7 +2843,7 @@ mod tests {
                 release: Arc::clone(&release),
             }),
             tts,
-            voice_rx,
+            audio_rx,
             Vec::new(),
             None,
             events_tx,
@@ -2821,13 +2887,13 @@ mod tests {
             release: Arc::new(Notify::new()),
             block_first: AtomicBool::new(false),
         });
-        let (_voice_tx, voice_rx) = watch::channel(true);
+        let (_audio_tx, audio_rx) = watch::channel(true);
         let (events_tx, mut events_rx) = mpsc::channel(64);
         let recorder = start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
         let handle = tokio::spawn(run_reply(
             Arc::new(FakeModel),
             tts,
-            voice_rx,
+            audio_rx,
             Vec::new(),
             None,
             events_tx,
@@ -2866,7 +2932,7 @@ mod tests {
         let cache = new_ack_cache();
         for turn in [1_u64, 4_u64] {
             let release = Arc::new(Notify::new());
-            let (_voice_tx, voice_rx) = watch::channel(true);
+            let (_audio_tx, audio_rx) = watch::channel(true);
             let (events_tx, mut events_rx) = mpsc::channel(64);
             let recorder =
                 start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
@@ -2875,7 +2941,7 @@ mod tests {
                     release: Arc::clone(&release),
                 }),
                 Arc::clone(&tts),
-                voice_rx,
+                audio_rx,
                 Vec::new(),
                 None,
                 events_tx,
@@ -2943,7 +3009,7 @@ mod tests {
         // Turns 1, 4 and 7 draw the same acknowledgement line.
         for (turn, voice) in [(1_u64, "af_heart"), (4, "sohee"), (7, "sohee")] {
             let release = Arc::new(Notify::new());
-            let (_voice_tx, voice_rx) = watch::channel(true);
+            let (_audio_tx, audio_rx) = watch::channel(true);
             let (events_tx, mut events_rx) = mpsc::channel(64);
             let recorder =
                 start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
@@ -2952,7 +3018,7 @@ mod tests {
                     release: Arc::clone(&release),
                 }),
                 Arc::clone(&tts),
-                voice_rx,
+                audio_rx,
                 Vec::new(),
                 None,
                 events_tx,
@@ -2995,7 +3061,7 @@ mod tests {
             entered: Arc::clone(&entered),
         });
         let release = Arc::new(Notify::new());
-        let (_voice_tx, voice_rx) = watch::channel(true);
+        let (_audio_tx, audio_rx) = watch::channel(true);
         let (events_tx, mut events_rx) = mpsc::channel(64);
         let recorder = start_recording(RecordingConfig::disabled(), "test".to_string()).recorder;
         let handle = tokio::spawn(run_reply(
@@ -3003,7 +3069,7 @@ mod tests {
                 release: Arc::clone(&release),
             }),
             tts,
-            voice_rx,
+            audio_rx,
             Vec::new(),
             None,
             events_tx,

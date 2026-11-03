@@ -491,8 +491,15 @@ async fn start_full(
     }
 }
 
+/// What the web client's one-click Voice control sends: both choices together.
+async fn send_voice(harness: &mut Harness, on: bool) {
+    let source = if on { "mic" } else { "text" };
+    send_json(harness, &json!({"type": "input", "source": source})).await;
+    send_json(harness, &json!({"type": "reply_audio", "on": on})).await;
+}
+
 async fn voice_on(harness: &mut Harness) {
-    send_json(harness, &json!({"type": "voice", "on": true})).await;
+    send_voice(harness, true).await;
     let received = collect_until(&mut harness.client, |item| {
         matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
     })
@@ -810,10 +817,10 @@ async fn fatal_recognizer_error_is_not_retried() {
     )
     .await;
     assert!(has_type(&received, "error"));
-    let voice_off = recv(&mut harness.client).await;
+    let input_text = recv(&mut harness.client).await;
     assert!(
-        matches!(&voice_off, Received::Json(v) if v["type"] == "voice" && v["on"] == false),
-        "a fatal recognizer error tells the client voice is off, got {voice_off:?}"
+        matches!(&input_text, Received::Json(v) if v["type"] == "input" && v["source"] == "text" && v["ready"] == true),
+        "a fatal recognizer error tells the client input is back to text, got {input_text:?}"
     );
     let after_error = recv(&mut harness.client).await;
     assert!(
@@ -888,13 +895,17 @@ async fn audio_before_recognizer_ready_is_discarded_and_state_goes_starting_then
     let mut harness = start().await;
     let gate = Arc::new(Notify::new());
     harness.factory.hold_connect(Arc::clone(&gate));
-    send_json(&mut harness, &json!({"type": "voice", "on": true})).await;
+    send_voice(&mut harness, true).await;
     let received = collect_until(&mut harness.client, |item| {
         matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "starting")
     })
     .await;
     assert!(has_state(&received, "starting"));
     assert!(!has_state(&received, "listening"));
+    let _ = collect_until(&mut harness.client, |item| {
+        has_type(std::slice::from_ref(item), "reply_audio")
+    })
+    .await;
 
     for _ in 0..3 {
         harness
@@ -1026,11 +1037,15 @@ async fn turning_voice_off_mid_reply_stops_synthesis_while_text_continues() {
     .await;
     assert_eq!(audios(&received), vec![Bytes::from("AUDIO:One.")]);
 
-    send_json(&mut harness, &json!({"type": "voice", "on": false})).await;
-    let off_state = recv(&mut harness.client).await;
+    send_voice(&mut harness, false).await;
+    let muted = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_audio"),
+    )
+    .await;
     assert!(
-        matches!(&off_state, Received::Json(v) if v["type"] == "state" && v["state"] == "thinking"),
-        "expected thinking after voice off mid-reply, got {off_state:?}"
+        matches!(muted.last(), Some(Received::Json(v)) if v["on"] == false),
+        "expected the reply audio off event, got {muted:?}"
     );
     gate.notify_one();
     let received = collect_until(
@@ -1683,11 +1698,15 @@ async fn cut_off_reply_after_voice_off_keeps_all_the_text_shown() {
         matches!(item, Received::Audio(_))
     })
     .await;
-    send_json(&mut harness, &json!({"type": "voice", "on": false})).await;
-    let off_state = recv(&mut harness.client).await;
+    send_voice(&mut harness, false).await;
+    let muted = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_audio"),
+    )
+    .await;
     assert!(
-        matches!(&off_state, Received::Json(v) if v["type"] == "state" && v["state"] == "thinking"),
-        "expected thinking after voice off mid-reply, got {off_state:?}"
+        matches!(muted.last(), Some(Received::Json(v)) if v["on"] == false),
+        "expected the reply audio off event, got {muted:?}"
     );
     first_gate.notify_one();
     let received = collect_until(
@@ -1724,7 +1743,7 @@ async fn resting_state_waits_for_the_recognizer_after_every_way_a_reply_ends() {
     let mut harness = start().await;
     let connect_gate = Arc::new(Notify::new());
     harness.factory.hold_connect(Arc::clone(&connect_gate));
-    send_json(&mut harness, &json!({"type": "voice", "on": true})).await;
+    send_voice(&mut harness, true).await;
     let _ = collect_until(&mut harness.client, |item| {
         matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "starting")
     })
@@ -1775,8 +1794,17 @@ async fn turning_voice_on_mid_reply_keeps_the_reply_state_until_it_ends() {
 
     let connect_gate = Arc::new(Notify::new());
     harness.factory.hold_connect(Arc::clone(&connect_gate));
-    send_json(&mut harness, &json!({"type": "voice", "on": true})).await;
-    expect_quiet_until_marker(&mut harness).await;
+    send_voice(&mut harness, true).await;
+    let echoed = collect_until(&mut harness.client, |item| {
+        has_type(std::slice::from_ref(item), "reply_audio")
+    })
+    .await;
+    assert!(
+        !echoed
+            .iter()
+            .any(|item| matches!(item, Received::Json(v) if v["type"] == "state")),
+        "a running reply keeps its state while the mic starts: {echoed:?}"
+    );
 
     model_gate.notify_one();
     assert_eq!(
@@ -1855,7 +1883,7 @@ async fn turning_voice_off_stops_the_sentence_being_synthesized_while_text_conti
     harness.factory.complete_turn(0, "question");
     wait_until(|| harness.tts.inputs().len() == 1).await;
 
-    send_json(&mut harness, &json!({"type": "voice", "on": false})).await;
+    send_voice(&mut harness, false).await;
     let received = collect_until(
         &mut harness.client,
         |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
