@@ -101,7 +101,7 @@ const library = new Library({
     controller.switchTo(null);
   },
 });
-createLibraryView(appRoot, library);
+createLibraryView(appRoot, library, () => sessionStorage.getItem(SESSION_KEY));
 createLearningsView(appRoot, new Learnings(learningsApi((input, init) => fetch(input, init))));
 
 function releaseVoice(): void {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ConversationSummary } from "./conversations.ts";
+import type { ConversationDetail, ConversationSummary } from "./conversations.ts";
 import { focusTarget, Library, type FocusTarget, type LibraryState } from "./library.ts";
 
 function setup(current: string | null = "s1") {
@@ -9,11 +9,25 @@ function setup(current: string | null = "s1") {
     { id: "s2", title: "Pasta", ageS: 4000 },
   ];
   let failure: Error | null = null;
+  const live = new Set<string>();
+  const missing = new Set<string>();
   const library = new Library({
     api: {
       list: () => {
         log.push("list");
         return failure ? Promise.reject(failure) : Promise.resolve(rows);
+      },
+      detail: (id) => {
+        log.push(`detail ${id}`);
+        const row = rows.find((candidate) => candidate.id === id);
+        if (missing.has(id) || !row) return Promise.reject(new Error("That conversation doesn't exist."));
+        const detail: ConversationDetail = {
+          id,
+          title: row.title,
+          turns: [{ role: "user", text: `hello from ${id}` }],
+          live: live.has(id),
+        };
+        return Promise.resolve(detail);
       },
       rename: (id, title) => {
         log.push(`rename ${id} ${title}`);
@@ -34,6 +48,8 @@ function setup(current: string | null = "s1") {
   return {
     library,
     log,
+    setLive: (id: string) => live.add(id),
+    deleteBehindTheBack: (id: string) => missing.add(id),
     failWith: (message: string) => {
       failure = new Error(message);
     },
@@ -56,17 +72,110 @@ describe("Library", () => {
     expect(library.state.open).toBe(false);
   });
 
-  it("reopens another conversation and closes, but only closes for the one already open here", async () => {
+  it("reads a conversation for a preview without joining it, then goes back to the list", async () => {
     const { library, log } = setup("s1");
     await library.show();
-    library.reopen("s2");
-    expect(log.slice(1)).toEqual(["open s2"]);
-    expect(library.state.open).toBe(false);
+    await library.read("s2");
+    expect(log).toEqual(["list", "detail s2"]);
+    expect(library.state.preview).toEqual({
+      id: "s2",
+      title: "Pasta",
+      turns: [{ role: "user", text: "hello from s2" }],
+      live: false,
+    });
+    expect(library.state.open).toBe(true);
 
+    library.closePreview();
+    expect(library.state.preview).toBeNull();
+    expect(log).toEqual(["list", "detail s2"]);
+  });
+
+  it.each([
+    ["an idle conversation", false, false],
+    ["a conversation the user is reading while another device uses it", true, true],
+  ])("Continue here joins %s only after re-checking it", async (_name, isLive) => {
+    const { library, log, setLive } = setup("s1");
+    if (isLive) setLive("s2");
     await library.show();
-    library.reopen("s1");
-    expect(log.slice(1)).toEqual(["open s2", "list"]);
+    await library.read("s2");
+    expect(library.state.preview?.live).toBe(isLive);
+    expect(log).not.toContain("open s2");
+
+    await library.continueHere();
+    expect(log.slice(1)).toEqual(["detail s2", "detail s2", "open s2"]);
     expect(library.state.open).toBe(false);
+  });
+
+  it("Continue here on the conversation already open here just closes the list", async () => {
+    const { library, log } = setup("s1");
+    await library.show();
+    await library.read("s1");
+    await library.continueHere();
+    expect(log.slice(1)).toEqual(["detail s1"]);
+    expect(library.state.open).toBe(false);
+  });
+
+  it("shows a plain error and joins nothing when the conversation was deleted during the preview", async () => {
+    const { library, log, deleteBehindTheBack } = setup("s1");
+    await library.show();
+    await library.read("s2");
+    deleteBehindTheBack("s2");
+
+    await library.continueHere();
+    expect(log.filter((entry) => entry.startsWith("open") || entry === "startNew")).toEqual([]);
+    expect(library.state).toMatchObject({ open: true, preview: null, error: "That conversation doesn't exist." });
+  });
+
+  it.each([
+    ["a second Continue here", (library: Library) => library.continueHere(), ["open s2"]],
+    [
+      "New conversation",
+      (library: Library) => {
+        library.startNew();
+        return Promise.resolve();
+      },
+      ["startNew"],
+    ],
+    [
+      "Back to list",
+      (library: Library) => {
+        library.closePreview();
+        return Promise.resolve();
+      },
+      [],
+    ],
+  ])("joins at most once and not at all after %s while the check runs", async (_name, act, joined) => {
+    const { library, log } = setup("s1");
+    await library.show();
+    await library.read("s2");
+    const first = library.continueHere();
+    await act(library);
+    await first;
+    expect(log.filter((entry) => entry.startsWith("open") || entry === "startNew")).toEqual(joined);
+  });
+
+  it("asks again, with the warning, when another device took the conversation while it was being read", async () => {
+    const { library, log, setLive } = setup("s1");
+    await library.show();
+    await library.read("s2");
+    setLive("s2");
+
+    await library.continueHere();
+    expect(log).not.toContain("open s2");
+    expect(library.state.preview?.live).toBe(true);
+    expect(library.state.error).toMatch(/Another device started using this conversation/);
+
+    await library.continueHere();
+    expect(log).toContain("open s2");
+  });
+
+  it("shows the server's message and stays in the list when a conversation cannot be read", async () => {
+    const { library, log, deleteBehindTheBack } = setup("s1");
+    await library.show();
+    deleteBehindTheBack("s2");
+    await library.read("s2");
+    expect(library.state).toMatchObject({ preview: null, loading: false, error: "That conversation doesn't exist." });
+    expect(log).not.toContain("open s2");
   });
 
   it("starts a new conversation and closes", async () => {
@@ -74,6 +183,7 @@ describe("Library", () => {
     await library.show();
     library.startNew();
     expect(log.slice(1)).toEqual(["startNew"]);
+    expect(log.some((entry) => entry.startsWith("open") || entry.startsWith("detail"))).toBe(false);
     expect(library.state.open).toBe(false);
   });
 
@@ -155,6 +265,7 @@ describe("focusTarget", () => {
     open: true,
     loading: false,
     items: [item("a"), item("b"), item("c")],
+    preview: null,
     renaming: null,
     confirmingDelete: null,
     error: null,
@@ -163,6 +274,8 @@ describe("focusTarget", () => {
   const cases: [string, LibraryState, LibraryState, FocusTarget | null][] = [
     ["opening the list focuses New conversation", state({ open: false }), state({}), { control: "new" }],
     ["closing the list returns to its button", state({}), state({ open: false }), { control: "opener" }],
+    ["opening a preview focuses Continue here", state({}), state({ preview: { id: "b", title: "b", turns: [], live: false } }), { control: "continue" }],
+    ["leaving a preview returns to that row", state({ preview: { id: "b", title: "b", turns: [], live: false } }), state({}), { control: "row", id: "b" }],
     ["starting a rename focuses the title input", state({}), state({ renaming: "b" }), { control: "rename-input" }],
     ["asking to delete focuses Keep it", state({}), state({ confirmingDelete: "b" }), { control: "keep" }],
     ["a saved rename returns to that row's Rename button", state({ renaming: "b" }), state({}), { control: "rename", id: "b" }],

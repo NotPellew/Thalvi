@@ -14,6 +14,15 @@ const MARKUP = `
       <button class="o-lib-new" type="button">New conversation</button>
       <p class="o-lib-note" role="status"></p>
       <ul class="o-lib-list"></ul>
+      <section class="o-lib-preview" hidden aria-labelledby="o-lib-preview-title">
+        <h3 id="o-lib-preview-title" class="o-lib-title"></h3>
+        <p class="o-lib-warn"></p>
+        <ol class="o-lib-turns"></ol>
+        <div class="o-lib-preview-actions">
+          <button class="o-lib-act o-lib-back" type="button">Back to list</button>
+          <button class="o-lib-act o-lib-continue" type="button">Continue here</button>
+        </div>
+      </section>
     </section>
   </div>`;
 
@@ -42,7 +51,7 @@ function button(label: string, className: string, onClick: () => void): HTMLButt
 }
 
 /** Adds the list button to the header and the list sheet to the page; the library drives both. */
-export function createLibraryView(root: ParentNode, library: Library): void {
+export function createLibraryView(root: ParentNode, library: Library, currentId: () => string | null): void {
   const page = find(root, ".orb-app", HTMLDivElement);
   const actions = find(page, ".o-head-actions", HTMLDivElement);
   const opener = document.createElement("button");
@@ -58,6 +67,11 @@ export function createLibraryView(root: ParentNode, library: Library): void {
   const newButton = find(page, ".o-lib-new", HTMLButtonElement);
   const note = find(page, ".o-lib-note", HTMLParagraphElement);
   const list = find(page, ".o-lib-list", HTMLUListElement);
+  const preview = find(page, ".o-lib-preview", HTMLElement);
+  const previewTitle = find(preview, ".o-lib-title", HTMLHeadingElement);
+  const warning = find(preview, ".o-lib-warn", HTMLParagraphElement);
+  const turns = find(preview, ".o-lib-turns", HTMLOListElement);
+  const continueButton = find(preview, ".o-lib-continue", HTMLButtonElement);
   const background = [...page.children].filter((child) => child !== overlay);
 
   function row(item: ConversationSummary, state: LibraryState): HTMLLIElement {
@@ -97,7 +111,7 @@ export function createLibraryView(root: ParentNode, library: Library): void {
       line.append(ask, cancel, confirm);
     } else {
       const open = button("", "o-lib-main", () => {
-        library.reopen(item.id);
+        void library.read(item.id);
       });
       const title = document.createElement("span");
       title.className = "o-lib-title";
@@ -130,11 +144,35 @@ export function createLibraryView(root: ParentNode, library: Library): void {
     note.textContent = state.error ?? (state.loading ? "Loading…" : state.items.length === 0 ? "No saved conversations yet." : "");
     const active = document.activeElement;
     const keep = active instanceof HTMLElement && list.contains(active) ? keyOf(active) : null;
+    list.hidden = state.preview !== null;
+    preview.hidden = state.preview === null;
+    if (state.preview) {
+      const here = state.preview.id === currentId();
+      previewTitle.textContent = state.preview.title;
+      warning.textContent = here
+        ? "This conversation is open on this device."
+        : state.preview.live
+          ? "This conversation is open on another device. Continue here moves it to this device and stops it there."
+          : "";
+      warning.hidden = warning.textContent === "";
+      turns.replaceChildren(
+        ...state.preview.turns.map((turn) => {
+          const line = document.createElement("li");
+          line.className = `o-lib-turn o-lib-turn-${turn.role}`;
+          const who = document.createElement("span");
+          who.className = "o-who";
+          who.textContent = turn.role === "user" ? "You" : "Thalvi";
+          line.append(who, turn.text);
+          return line;
+        }),
+      );
+    }
     list.replaceChildren(...state.items.map((item) => row(item, state)));
     if (keep) list.querySelector<HTMLElement>(keep)?.focus();
 
     const target = focusTarget(previous, state);
     if (target?.control === "new") newButton.focus();
+    else if (target?.control === "continue") continueButton.focus();
     else if (target?.control === "opener") opener.focus();
     else if (target?.control === "rename-input") {
       const input = list.querySelector("input");
@@ -157,10 +195,17 @@ export function createLibraryView(root: ParentNode, library: Library): void {
   newButton.addEventListener("click", () => {
     library.startNew();
   });
+  find(preview, ".o-lib-back", HTMLButtonElement).addEventListener("click", () => {
+    library.closePreview();
+  });
+  continueButton.addEventListener("click", () => {
+    void library.continueHere();
+  });
   overlay.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     event.stopPropagation();
-    if (library.state.renaming !== null) library.cancelRename();
+    if (library.state.preview !== null) library.closePreview();
+    else if (library.state.renaming !== null) library.cancelRename();
     else if (library.state.confirmingDelete !== null) library.cancelDelete();
     else library.hide();
   });

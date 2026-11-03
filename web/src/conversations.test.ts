@@ -31,6 +31,28 @@ describe("conversationsApi", () => {
     expect(requests.map((r) => r.path)).toEqual(["/sessions"]);
   });
 
+  it("reads one conversation's title, turns and live flag without any write", async () => {
+    const { api, requests } = recording(() =>
+      respond(200, { id: "a b", title: "Pasta", turns: [{ role: "user", text: "hi" }, { role: "assistant", text: "Hello." }], live: true }),
+    );
+    expect(await api.detail("a b")).toEqual({
+      id: "a b",
+      title: "Pasta",
+      turns: [{ role: "user", text: "hi" }, { role: "assistant", text: "Hello." }],
+      live: true,
+    });
+    expect(requests.map((r) => [r.path, r.init])).toEqual([["/sessions/a%20b", undefined]]);
+  });
+
+  it.each([
+    ["the server's not-found message", () => respond(404, { error: "That conversation doesn't exist." }), "That conversation doesn't exist."],
+    ["a plain message for a conversation this page can't read", () => respond(200, { id: "s1", title: "x", turns: [{ role: "system", text: "x" }], live: false }), "The server sent a conversation this page can't read."],
+    ["a plain message for a missing live flag", () => respond(200, { id: "s1", title: "x", turns: [] }), "The server sent a conversation this page can't read."],
+  ])("reports %s when reading one conversation", async (_name, response, message) => {
+    const { api } = recording(response);
+    await expect(api.detail("s1")).rejects.toThrow(message);
+  });
+
   it("renames and deletes with the id encoded and the title as JSON", async () => {
     const { api, requests } = recording(() => respond(204, null));
     await api.rename("a b/c", "New title");
