@@ -176,6 +176,59 @@ pub struct KeyState {
     pub down: bool,
 }
 
+/// Follows the key so each press is acted on or refused once, however late it is looked at.
+pub struct Presses {
+    state: watch::Receiver<KeyState>,
+    seen: u64,
+}
+
+impl Presses {
+    #[must_use]
+    pub fn new(state: watch::Receiver<KeyState>) -> Self {
+        Self { state, seen: 0 }
+    }
+
+    /// Counts the presses so far as dealt with, and the state as seen.
+    pub fn skip(&mut self) {
+        self.seen = self.state.borrow_and_update().presses;
+    }
+
+    /// Resolves when the key changed since it was last looked at; an error once nothing can
+    /// press it any more.
+    ///
+    /// # Errors
+    /// [`watch::error::RecvError`] when the input is gone.
+    pub async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
+        self.state.changed().await
+    }
+
+    /// The press that went down since the last one was taken, if the key is still down.
+    pub fn take(&mut self) -> Option<u64> {
+        let KeyState { presses, down } = *self.state.borrow_and_update();
+        let fresh = down && presses > self.seen;
+        self.seen = presses;
+        fresh.then_some(presses)
+    }
+
+    /// Whether press number `press` is over: the key is up, or has been pressed again.
+    pub fn is_over(&mut self, press: u64) -> bool {
+        let state = *self.state.borrow_and_update();
+        !state.down || state.presses != press
+    }
+
+    /// Resolves when [`is_over`](Self::is_over) is true; never when the input is gone.
+    pub async fn over(&mut self, press: u64) {
+        if self
+            .state
+            .wait_for(|state| !state.down || state.presses != press)
+            .await
+            .is_err()
+        {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 /// Where the hold key's presses and releases come in, from a compositor bind or the keyboard hook.
 #[derive(Clone)]
 pub struct HoldInput(Arc<watch::Sender<KeyState>>);

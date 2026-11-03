@@ -173,6 +173,7 @@ mod tests {
                 "cues",
                 "ending_pause",
                 "endings",
+                "hold_key",
                 "look",
                 "microphone",
                 "overlay",

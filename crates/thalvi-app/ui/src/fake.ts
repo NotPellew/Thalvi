@@ -27,6 +27,7 @@ const SETTINGS: Settings = {
   microphone: null,
   look: "gunmetal",
   recordings: { metrics: true, text: false, audio: false },
+  hold_key: "Alt+KeyZ",
 };
 
 const SENTENCE = "Hey, I'm running a few minutes late, can we push the call to half past?";

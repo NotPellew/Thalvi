@@ -83,6 +83,8 @@ export interface Settings {
   microphone: string | null;
   look: Look;
   recordings: { metrics: boolean; text: boolean; audio: boolean };
+  /** The key held to dictate, such as `Alt+KeyZ`; only Windows reads it. */
+  hold_key: string;
 }
 
 /** A speech model Thalvi can download, as the Rust catalog describes it. */

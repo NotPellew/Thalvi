@@ -27,6 +27,7 @@ export const SETTINGS: Settings = {
   microphone: null,
   look: "neon",
   recordings: { metrics: true, text: false, audio: false },
+  hold_key: "Alt+KeyZ",
 };
 
 export const NEMOTRON: SpeechModelInfo = {

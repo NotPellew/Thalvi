@@ -64,6 +64,11 @@ pub enum Event {
     EndingPause,
     EndCue,
     CaptureFlow,
+    /// The dictation key went down: it started a capture, or was refused and why.
+    HoldStart,
+    /// The dictation key's capture ended; the duration is how long the key was down, or until
+    /// the capture ended when a spoken ending came first.
+    HoldEnd,
     /// One call to the desktop host; fields hold only the call's name.
     HostCall,
     /// Microphone audio was lost: `xrun` for a discontinuity the system reported, `queue_full`
@@ -90,6 +95,8 @@ impl Event {
             Self::EndingPause => "desktop_ending_pause",
             Self::EndCue => "desktop_end_cue",
             Self::CaptureFlow => "desktop_capture_flow",
+            Self::HoldStart => "desktop_hold_start",
+            Self::HoldEnd => "desktop_hold_end",
             Self::HostCall => "desktop_host_call",
             Self::AudioGap => "desktop_audio_gap",
         }
@@ -651,6 +658,8 @@ mod tests {
             (Event::EndingPause, "desktop_ending_pause"),
             (Event::EndCue, "desktop_end_cue"),
             (Event::CaptureFlow, "desktop_capture_flow"),
+            (Event::HoldStart, "desktop_hold_start"),
+            (Event::HoldEnd, "desktop_hold_end"),
             (Event::HostCall, "desktop_host_call"),
         ] {
             assert_eq!(event.name(), name);

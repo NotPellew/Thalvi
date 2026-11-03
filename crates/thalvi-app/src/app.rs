@@ -396,6 +396,8 @@ fn act(app: &AppHandle, command: Command) {
         Command::Pause => state.link.send(Control::SetListening(false)),
         Command::Resume => state.link.send(Control::SetListening(true)),
         Command::Cancel => state.link.send(Control::Cancel),
+        Command::HoldStart => state.link.hold_input().set(true),
+        Command::HoldEnd => state.link.hold_input().set(false),
         Command::CopyError => copy_last_error(app),
     }
 }
