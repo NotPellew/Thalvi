@@ -63,7 +63,7 @@ export interface ScriptSettings {
   label?: string | null;
 }
 
-/** The desktop config file with every field filled, plus the read-only `recordings`. */
+/** The desktop config file with every field filled. */
 export interface Settings {
   server: string;
   wake: { capture: HeadSettings; conversation: HeadSettings };

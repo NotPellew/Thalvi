@@ -715,12 +715,30 @@ describe("live controls", () => {
     if (action === "edit") expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
   });
 
-  it("shows the recordings kinds and opens the folder", async () => {
+  it("opens the recordings folder", async () => {
     const stub = await open();
-    expect(rowOf("Metrics recording").querySelector("output")?.textContent).toBe("On");
-    expect(rowOf("Text recording").querySelector("output")?.textContent).toBe("Off");
     button("Open folder").click();
     expect(stub.backend.openRecordings).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["Metrics recording", "metrics", false],
+    ["Text recording", "text", true],
+    ["Audio recording", "audio", true],
+  ] as const)("shows %s as a switch and sends it with Save", async (label, kind, turnedOn) => {
+    const stub = await open();
+    const switches = ["Metrics recording", "Text recording", "Audio recording"].map(
+      (name) => control(name, "input").checked,
+    );
+    expect(switches).toEqual([true, false, false]);
+    expect(rowOf(label).textContent).toContain("Kept on this computer only");
+    expect(rowOf(label).textContent).not.toContain("THALVI_RECORD");
+
+    flip(control(label, "input"));
+    button("Save").click();
+    const expected = structuredClone(SETTINGS);
+    expected.recordings[kind] = turnedOn;
+    expect(sent(stub)).toEqual(expected);
   });
 
   it("shows the version", async () => {
