@@ -1,14 +1,16 @@
-//! Opt-in local metrics and capture recordings, written off the capture path.
+//! Opt-in local metrics and the recordings of each dictation, written off the capture path.
 
+use std::fmt::{self, Display};
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -26,9 +28,10 @@ const RECORDING_RATE: u32 = 16_000;
 pub struct RecordKinds {
     /// Timing and outcome events.
     pub metrics: bool,
-    /// Dictation text and its outcome.
+    /// What was heard and how each dictation ended, as `text.txt` in the dictation's folder.
     pub text: bool,
-    /// Microphone audio of the capture, after the wake cue, and about 2 s before each wake.
+    /// Microphone audio of each dictation: `speech.wav` after the wake cue, and `wake.wav` with
+    /// about 2 s before the wake.
     pub audio: bool,
 }
 
@@ -37,8 +40,12 @@ pub struct RecordKinds {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     WakeLoad,
+    /// Every minute of wake listening: how long scoring a frame took.
     WakeInference,
-    WakeClip,
+    /// A wake head's score rose near its threshold and fell back without crossing it.
+    WakeNearMiss,
+    /// A wake that led to no delivery: the dictation's folder and why.
+    WakeNothing,
     WakeReset,
     TranscriptionReady,
     SecondaryStt,
@@ -67,7 +74,8 @@ impl Event {
         match self {
             Self::WakeLoad => "desktop_wake_load",
             Self::WakeInference => "desktop_wake_inference",
-            Self::WakeClip => "desktop_wake_clip",
+            Self::WakeNearMiss => "desktop_wake_near_miss",
+            Self::WakeNothing => "desktop_wake_nothing",
             Self::WakeReset => "desktop_wake_reset",
             Self::TranscriptionReady => "desktop_transcription_ready",
             Self::SecondaryStt => "desktop_secondary_stt",
@@ -99,15 +107,49 @@ pub enum RecorderError {
 enum Message {
     Metric(String),
     Text {
-        ts_ms: u64,
+        dictation: Dictation,
         line: String,
     },
     Audio {
-        ts_ms: u64,
-        name: String,
+        dictation: Dictation,
+        name: &'static str,
         pcm: Vec<i16>,
     },
     Shutdown,
+}
+
+/// The folder of one wake's recordings: `<date>/<time>` in local time, with `-2`, `-3` for
+/// wakes within the same second. Nothing exists on disk until a file is written into it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dictation(String);
+
+impl Display for Dictation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Names dictation folders by the second they began.
+#[derive(Default)]
+struct Names {
+    last: String,
+    repeats: u32,
+}
+
+impl Names {
+    fn next<Tz: TimeZone>(&mut self, at: &DateTime<Tz>) -> Dictation
+    where
+        Tz::Offset: Display,
+    {
+        let name = at.format("%Y-%m-%d/%H-%M-%S").to_string();
+        if name == self.last {
+            self.repeats += 1;
+            return Dictation(format!("{name}-{}", self.repeats + 1));
+        }
+        self.last.clone_from(&name);
+        self.repeats = 0;
+        Dictation(name)
+    }
 }
 
 /// The kinds that are on, shared by a recorder and its handles so a change reaches them all.
@@ -141,6 +183,7 @@ pub struct Recorder {
     sender: Option<SyncSender<Message>>,
     writer: Option<JoinHandle<()>>,
     dropped: Arc<AtomicU64>,
+    names: Mutex<Names>,
 }
 
 impl Recorder {
@@ -153,28 +196,30 @@ impl Recorder {
             sender: None,
             writer: None,
             dropped: Arc::default(),
+            names: Mutex::default(),
         }
     }
 
-    /// Records under `<user data dir>/thalvi`; nothing is created until a kind is on and written.
+    /// Records into [`dir`](Self::dir); nothing is created until a kind is on and written.
     ///
     /// # Errors
     /// Fails when the platform has no per-user data directory or the writer cannot start.
     pub fn per_user(kinds: RecordKinds) -> Result<Self, RecorderError> {
-        Self::in_dir(kinds, Self::user_dir()?)
+        Self::in_dir(kinds, Self::dir()?)
     }
 
-    /// The folder [`per_user`](Self::per_user) records into.
+    /// The folder [`per_user`](Self::per_user) records into. It holds nothing but recordings.
     ///
     /// # Errors
     /// Fails when the platform has no per-user data directory.
-    pub fn user_dir() -> Result<PathBuf, RecorderError> {
+    pub fn dir() -> Result<PathBuf, RecorderError> {
         Ok(dirs::data_local_dir()
             .ok_or(RecorderError::NoDataDir)?
-            .join("thalvi"))
+            .join("thalvi")
+            .join("recordings"))
     }
 
-    /// Records under `root`; files and directories appear on the first event written.
+    /// Records into `root`; files and directories appear on the first event written.
     ///
     /// # Errors
     /// Fails when the writer thread cannot start.
@@ -204,6 +249,7 @@ impl Recorder {
             sender: Some(sender),
             writer: Some(writer),
             dropped: Arc::default(),
+            names: Mutex::default(),
         })
     }
 
@@ -244,46 +290,42 @@ impl Recorder {
         }
     }
 
-    /// Queues one line of dictation text for today's `desktop.jsonl`, with the keys of `fields`.
-    pub fn text(&self, event: &str, fields: Value) {
-        if !self.kinds().text {
-            return;
-        }
-        let ts_ms = now_ms();
-        let line = finish_line(json!({"ts_ms": ts_ms, "event": event}), fields);
-        self.send(Message::Text { ts_ms, line });
+    /// Names the folder for the dictation that begins now.
+    pub fn begin(&self) -> Dictation {
+        self.names
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .next(&Local::now())
     }
 
-    /// Queues one capture's 16 kHz mono audio as a WAV file.
-    pub fn audio(&self, pcm: Vec<i16>) {
-        if self.kinds().audio {
-            let ts_ms = now_ms();
-            self.send(Message::Audio {
-                ts_ms,
-                name: format!("capture-{ts_ms}.wav"),
-                pcm,
+    /// Queues one line for the dictation's `text.txt`.
+    pub fn text(&self, dictation: &Dictation, line: String) {
+        if self.kinds().text {
+            self.send(Message::Text {
+                dictation: dictation.clone(),
+                line,
             });
         }
     }
 
-    /// Queues the 16 kHz mono audio heard up to a wake of `kind` as a WAV file, and a metrics line
-    /// carrying the file name and the keys of `fields`.
-    pub fn wake_clip(&self, kind: &str, pcm: Vec<i16>, fields: Value) {
-        if !self.kinds().audio {
-            return;
+    /// Queues the 16 kHz mono audio heard up to the wake as the dictation's `wake.wav`.
+    pub fn wake_audio(&self, dictation: &Dictation, pcm: Vec<i16>) {
+        self.audio(dictation, "wake.wav", pcm);
+    }
+
+    /// Queues the 16 kHz mono audio of the capture as the dictation's `speech.wav`.
+    pub fn speech(&self, dictation: &Dictation, pcm: Vec<i16>) {
+        self.audio(dictation, "speech.wav", pcm);
+    }
+
+    fn audio(&self, dictation: &Dictation, name: &'static str, pcm: Vec<i16>) {
+        if self.kinds().audio {
+            self.send(Message::Audio {
+                dictation: dictation.clone(),
+                name,
+                pcm,
+            });
         }
-        let ts_ms = now_ms();
-        let name = format!("wake-{ts_ms}-{kind}.wav");
-        self.send(Message::Audio {
-            ts_ms,
-            name: name.clone(),
-            pcm,
-        });
-        let mut linked = json!({"file": name});
-        if let (Some(target), Value::Object(extra)) = (linked.as_object_mut(), fields) {
-            target.extend(extra);
-        }
-        self.metric(Event::WakeClip, kind, None, linked);
     }
 
     fn send(&self, message: Message) {
@@ -369,8 +411,12 @@ impl Writer {
             let result = match message {
                 Message::Shutdown => break,
                 Message::Metric(line) => self.metric(&line),
-                Message::Text { ts_ms, line } => self.text(ts_ms, &line),
-                Message::Audio { ts_ms, name, pcm } => self.audio(ts_ms, &name, &pcm),
+                Message::Text { dictation, line } => self.text(&dictation, &line),
+                Message::Audio {
+                    dictation,
+                    name,
+                    pcm,
+                } => self.audio(&dictation, name, &pcm),
             };
             if let Err(error) = result
                 && !self.failed
@@ -407,18 +453,18 @@ impl Writer {
         Ok(())
     }
 
-    fn text(&self, ts_ms: u64, line: &str) -> io::Result<()> {
-        let dir = self.day_dir(ts_ms)?;
-        writeln!(open_private(&dir.join("desktop.jsonl"))?, "{line}")
+    fn text(&self, dictation: &Dictation, line: &str) -> io::Result<()> {
+        let dir = self.folder(dictation)?;
+        writeln!(open_private(&dir.join("text.txt"))?, "{line}")
     }
 
-    fn audio(&self, ts_ms: u64, name: &str, pcm: &[i16]) -> io::Result<()> {
-        let dir = self.day_dir(ts_ms)?;
+    fn audio(&self, dictation: &Dictation, name: &str, pcm: &[i16]) -> io::Result<()> {
+        let dir = self.folder(dictation)?;
         open_private(&dir.join(name))?.write_all(&wav(pcm))
     }
 
-    fn day_dir(&self, ts_ms: u64) -> io::Result<PathBuf> {
-        let dir = self.root.join("recordings").join(utc_date(ts_ms));
+    fn folder(&self, dictation: &Dictation) -> io::Result<PathBuf> {
+        let dir = self.root.join(&dictation.0);
         create_private_dir(&dir)?;
         Ok(dir)
     }
@@ -477,30 +523,6 @@ fn now_ms() -> u64 {
         })
 }
 
-/// The UTC calendar date (`YYYY-MM-DD`) of an epoch-millisecond instant.
-fn utc_date(epoch_ms: u64) -> String {
-    let days = i64::try_from(epoch_ms / 86_400_000).unwrap_or(i64::MAX);
-    let shifted = days + 719_468;
-    let era = if shifted >= 0 {
-        shifted
-    } else {
-        shifted - 146_096
-    } / 146_097;
-    let day_of_era = shifted - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = if month_prime < 10 {
-        month_prime + 3
-    } else {
-        month_prime - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}")
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -519,7 +541,7 @@ mod tests {
 
         /// The root the recorder will create on first write.
         fn root(&self) -> PathBuf {
-            self.0.join("thalvi")
+            self.0.join("recordings")
         }
     }
 
@@ -549,7 +571,7 @@ mod tests {
             .collect()
     }
 
-    /// Every file and directory under `root`, relative, with the date and timestamp elided.
+    /// Every file and directory under `root`, relative, with the date and time elided.
     fn tree(root: &Path) -> BTreeSet<String> {
         fn walk(dir: &Path, prefix: &str, out: &mut BTreeSet<String>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
@@ -560,8 +582,8 @@ mod tests {
                 let mut name = entry.file_name().to_string_lossy().into_owned();
                 if name.len() == 10 && name.as_bytes()[4] == b'-' {
                     name = "<date>".to_owned();
-                } else if name.starts_with("capture-") {
-                    name = "capture-<ts>.wav".to_owned();
+                } else if name.len() == 8 && name.as_bytes()[2] == b'-' {
+                    name = "<time>".to_owned();
                 }
                 let path = format!("{prefix}{name}");
                 out.insert(path.clone());
@@ -574,9 +596,26 @@ mod tests {
     }
 
     fn emit_everything(recorder: &Recorder) {
+        let dictation = recorder.begin();
         recorder.metric(Event::CaptureFlow, "ok", None, Value::Null);
-        recorder.text("final", json!({"text": "hello"}));
-        recorder.audio(vec![1, 2, 3]);
+        recorder.text(&dictation, "heard: hello".to_owned());
+        recorder.wake_audio(&dictation, vec![4]);
+        recorder.speech(&dictation, vec![1, 2, 3]);
+    }
+
+    /// The one dictation folder under `root`.
+    fn dictation_dir(root: &Path) -> PathBuf {
+        let day = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.is_dir())
+            .unwrap();
+        std::fs::read_dir(day)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
     }
 
     fn set(names: &[&str]) -> BTreeSet<String> {
@@ -588,7 +627,8 @@ mod tests {
         for (event, name) in [
             (Event::WakeLoad, "desktop_wake_load"),
             (Event::WakeInference, "desktop_wake_inference"),
-            (Event::WakeClip, "desktop_wake_clip"),
+            (Event::WakeNearMiss, "desktop_wake_near_miss"),
+            (Event::WakeNothing, "desktop_wake_nothing"),
             (Event::WakeReset, "desktop_wake_reset"),
             (Event::TranscriptionReady, "desktop_transcription_ready"),
             (Event::SecondaryStt, "desktop_secondary_stt"),
@@ -609,15 +649,23 @@ mod tests {
     }
 
     #[test]
-    fn utc_dates_follow_the_calendar() {
-        for (ms, date) in [
-            (0, "1970-01-01"),
-            (1_709_164_800_000, "2024-02-29"),
-            (1_709_251_199_999, "2024-02-29"),
-            (1_793_577_600_000, "2026-11-02"),
-        ] {
-            assert_eq!(utc_date(ms), date);
-        }
+    fn folders_are_named_by_local_date_and_time_and_repeats_within_a_second_are_numbered() {
+        let zone = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+        let at = |second| zone.with_ymd_and_hms(2026, 11, 3, 23, 59, second).unwrap();
+        let mut names = Names::default();
+        let seen: Vec<_> = [58, 58, 58, 59]
+            .into_iter()
+            .map(|second| names.next(&at(second)).to_string())
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                "2026-11-03/23-59-58",
+                "2026-11-03/23-59-58-2",
+                "2026-11-03/23-59-58-3",
+                "2026-11-03/23-59-59",
+            ]
+        );
     }
 
     #[tokio::test]
@@ -657,10 +705,11 @@ mod tests {
     async fn each_kind_writes_only_its_own_files_and_nothing_is_created_when_all_are_off() {
         let all = [
             "metrics.jsonl",
-            "recordings",
-            "recordings/<date>",
-            "recordings/<date>/capture-<ts>.wav",
-            "recordings/<date>/desktop.jsonl",
+            "<date>",
+            "<date>/<time>",
+            "<date>/<time>/speech.wav",
+            "<date>/<time>/text.txt",
+            "<date>/<time>/wake.wav",
         ];
         for (tag, kinds, expected) in [
             ("off", RecordKinds::default(), set(&[])),
@@ -671,11 +720,7 @@ mod tests {
                     text: true,
                     ..RecordKinds::default()
                 },
-                set(&[
-                    "recordings",
-                    "recordings/<date>",
-                    "recordings/<date>/desktop.jsonl",
-                ]),
+                set(&["<date>", "<date>/<time>", "<date>/<time>/text.txt"]),
             ),
             (
                 "audio",
@@ -684,9 +729,10 @@ mod tests {
                     ..RecordKinds::default()
                 },
                 set(&[
-                    "recordings",
-                    "recordings/<date>",
-                    "recordings/<date>/capture-<ts>.wav",
+                    "<date>",
+                    "<date>/<time>",
+                    "<date>/<time>/speech.wav",
+                    "<date>/<time>/wake.wav",
                 ]),
             ),
             ("all", ALL, set(&all)),
@@ -705,29 +751,23 @@ mod tests {
         let dir = TempDir::new("live-kinds");
         let recorder = Recorder::in_dir(METRICS, dir.root()).unwrap();
         let handle = recorder.metrics();
+        let dictation = recorder.begin();
         handle.metric(Event::CaptureFlow, "before", None, Value::Null);
-        recorder.text("before", Value::Null);
+        recorder.text(&dictation, "before".to_owned());
 
         recorder.set_kinds(RecordKinds {
             text: true,
             ..RecordKinds::default()
         });
         handle.metric(Event::CaptureFlow, "after", None, Value::Null);
-        recorder.text("after", Value::Null);
+        recorder.text(&dictation, "after".to_owned());
         recorder.finish().await;
 
         let metrics = lines(&dir.root().join("metrics.jsonl"));
         assert_eq!(metrics.len(), 1);
         assert_eq!(metrics[0]["outcome"], "before");
-        let day = std::fs::read_dir(dir.root().join("recordings"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        let text = lines(&day.join("desktop.jsonl"));
-        assert_eq!(text.len(), 1);
-        assert_eq!(text[0]["event"], "after");
+        let text = std::fs::read_to_string(dictation_dir(&dir.root()).join("text.txt")).unwrap();
+        assert_eq!(text, "after\n");
     }
 
     #[test]
@@ -738,98 +778,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_wake_clip_is_a_wav_named_for_its_kind_and_linked_by_a_metric_line() {
-        let dir = TempDir::new("wake-clip");
-        let recorder = Recorder::in_dir(ALL, dir.root()).unwrap();
-        recorder.wake_clip("capture", vec![1, -2], json!({"capture": 0.5}));
-        recorder.finish().await;
-
-        let day = std::fs::read_dir(dir.root().join("recordings"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        let files: Vec<_> = std::fs::read_dir(&day)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect();
-        assert_eq!(files.len(), 1);
-        let name = files[0].file_name().unwrap().to_string_lossy().into_owned();
-        let stamp = name
-            .strip_prefix("wake-")
-            .and_then(|rest| rest.strip_suffix("-capture.wav"))
-            .unwrap();
-        assert!(stamp.parse::<u64>().unwrap() > 1_700_000_000_000);
-        assert_eq!(std::fs::read(&files[0]).unwrap(), wav(&[1, -2]));
-
-        let written = lines(&dir.root().join("metrics.jsonl"));
-        assert_eq!(written.len(), 1);
-        assert_eq!(written[0]["event"], "desktop_wake_clip");
-        assert_eq!(written[0]["outcome"], "capture");
-        assert_eq!(written[0]["file"], name.as_str());
-        assert_eq!(written[0]["capture"], 0.5);
-    }
-
-    #[tokio::test]
-    async fn a_wake_clip_needs_audio_and_its_metric_line_needs_metrics() {
-        for (tag, kinds, files) in [
-            ("clip-metrics-only", METRICS, set(&[])),
-            (
-                "clip-audio-only",
-                RecordKinds {
-                    audio: true,
-                    ..RecordKinds::default()
-                },
-                set(&[
-                    "recordings",
-                    "recordings/<date>",
-                    "recordings/<date>/wake.wav",
-                ]),
-            ),
-        ] {
-            let dir = TempDir::new(tag);
-            let recorder = Recorder::in_dir(kinds, dir.root()).unwrap();
-            recorder.wake_clip("conversation", vec![0], Value::Null);
-            recorder.finish().await;
-            let seen: BTreeSet<_> = tree(&dir.root())
-                .into_iter()
-                .map(|path| {
-                    if path.contains("/wake-") {
-                        "recordings/<date>/wake.wav".to_owned()
-                    } else {
-                        path
-                    }
-                })
-                .collect();
-            assert_eq!(seen, files, "{tag}");
-        }
-    }
-
-    #[tokio::test]
-    async fn text_and_audio_recordings_are_written_for_the_capture() {
+    async fn a_dictation_folder_holds_its_lines_in_order_and_its_audio_as_wav_files() {
         let dir = TempDir::new("recordings");
         let recorder = Recorder::in_dir(ALL, dir.root()).unwrap();
-        recorder.text("final", json!({"text": "hello"}));
-        recorder.audio(vec![1, -2, 0x0304]);
+        let dictation = recorder.begin();
+        recorder.text(&dictation, "heard: hello".to_owned());
+        recorder.text(&dictation, "cancelled".to_owned());
+        recorder.speech(&dictation, vec![1, -2, 0x0304]);
+        recorder.wake_audio(&dictation, vec![1, -2]);
         recorder.finish().await;
 
-        let day = std::fs::read_dir(dir.root().join("recordings"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        let text = lines(&day.join("desktop.jsonl"));
-        assert_eq!(text.len(), 1);
-        assert_eq!(text[0]["event"], "final");
-        assert_eq!(text[0]["text"], "hello");
-
-        let wav_path = std::fs::read_dir(&day)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| path.extension().is_some_and(|ext| ext == "wav"))
-            .unwrap();
+        let folder = dictation_dir(&dir.root());
+        assert_eq!(
+            std::fs::read_to_string(folder.join("text.txt")).unwrap(),
+            "heard: hello\ncancelled\n"
+        );
+        assert_eq!(
+            std::fs::read(folder.join("wake.wav")).unwrap(),
+            wav(&[1, -2])
+        );
+        let wav_path = folder.join("speech.wav");
         let mut expected = Vec::new();
         expected.extend_from_slice(b"RIFF");
         expected.extend_from_slice(&42_u32.to_le_bytes());
@@ -856,18 +824,12 @@ mod tests {
         recorder.finish().await;
 
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-        let day = std::fs::read_dir(dir.root().join("recordings"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+        let folder = dictation_dir(&dir.root());
         assert_eq!(mode(&dir.root()), 0o700);
-        assert_eq!(mode(&dir.root().join("recordings")), 0o700);
-        assert_eq!(mode(&day), 0o700);
+        assert_eq!(mode(folder.parent().unwrap()), 0o700);
+        assert_eq!(mode(&folder), 0o700);
         assert_eq!(mode(&dir.root().join("metrics.jsonl")), 0o600);
-        assert_eq!(mode(&day.join("desktop.jsonl")), 0o600);
-        for entry in std::fs::read_dir(&day).unwrap() {
+        for entry in std::fs::read_dir(&folder).unwrap() {
             assert_eq!(mode(&entry.unwrap().path()), 0o600);
         }
     }

@@ -46,6 +46,10 @@ areas your change touches. Editing rules are in
   before each wake) are each written locally off the reply path: on the server by
   `THALVI_RECORD`, on the desktop by settings switches, applied between captures. Why: to judge
   changes and misrecognitions on real use. Off by default: they are personal data.
+- **Desktop recordings by wake.** `recordings/` holds only recordings: `metrics.jsonl` and a
+  `<date>/<time>/` folder per wake (`wake.wav`, `speech.wav`, `text.txt`). Wake metrics: near misses
+  (score from 0.15), wakes that deliver nothing, latency per minute. Why: one dictation in one place;
+  95% of old lines were per frame. Rejected: day files linked by timestamp, a line per frame.
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
   interrupts a reply by speaking while mic input is on. Why: hands and eyes are
   busy. Rejected: push-to-talk.
