@@ -132,6 +132,7 @@ fn start() -> Result<(), String> {
             commands::cancel_capture,
             commands::list_microphones,
             commands::open_recordings,
+            commands::validate_speech_model_folder,
         ])
         .setup(move |app| {
             // Only the first instance gets here, so a relaunch never reads the config.

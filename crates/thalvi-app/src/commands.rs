@@ -5,11 +5,14 @@
     reason = "Tauri hands a command its state by value"
 )]
 
+use std::path::Path;
+
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 use thalvi_desktop::audio;
 use thalvi_desktop::host::Host;
 use thalvi_desktop::metrics::Recorder;
+use thalvi_desktop::transducer::check_folder;
 
 use crate::app::AppState;
 use crate::overlay;
@@ -96,6 +99,16 @@ pub async fn list_microphones() -> Result<Vec<String>, String> {
     })
     .await
     .map_err(|error| format!("The microphones could not be listed: {error}"))?
+}
+
+/// Checks that a folder holds a speech model, before it is saved as `stt.model`.
+#[tauri::command]
+pub async fn validate_speech_model_folder(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        check_folder(Path::new(path.trim())).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("The folder could not be checked: {error}"))?
 }
 
 #[tauri::command]

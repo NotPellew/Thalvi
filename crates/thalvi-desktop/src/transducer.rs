@@ -30,6 +30,61 @@ pub struct TransducerFiles {
     pub tokens: PathBuf,
 }
 
+impl TransducerFiles {
+    /// The four files a model folder must hold; the only place their names are written.
+    #[must_use]
+    pub fn in_folder(dir: &Path) -> Self {
+        Self {
+            encoder: dir.join("encoder.int8.onnx"),
+            decoder: dir.join("decoder.int8.onnx"),
+            joiner: dir.join("joiner.int8.onnx"),
+            tokens: dir.join("tokens.txt"),
+        }
+    }
+}
+
+/// Why a folder cannot serve as a speech model. Messages are shown to the user as written.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum FolderError {
+    #[error("There is no folder at {}.", .0.display())]
+    NotFound(PathBuf),
+    #[error("{} is not a folder.", .0.display())]
+    NotAFolder(PathBuf),
+    #[error("The folder {} cannot be read: {}.", .0.display(), .1)]
+    Unreadable(PathBuf, std::io::ErrorKind),
+    #[error("Missing required {}: {}", if .0.len() == 1 { "file" } else { "files" }, .0.join(", "))]
+    Missing(Vec<String>),
+}
+
+/// Checks that `dir` is a readable folder holding every file of a model.
+///
+/// # Errors
+/// The first problem found, with every missing file named when the folder is readable.
+pub fn check_folder(dir: &Path) -> Result<(), FolderError> {
+    let unreadable = |error: &std::io::Error| FolderError::Unreadable(dir.to_owned(), error.kind());
+    match std::fs::metadata(dir) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Err(FolderError::NotAFolder(dir.to_owned())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(FolderError::NotFound(dir.to_owned()));
+        }
+        Err(error) => return Err(unreadable(&error)),
+    }
+    std::fs::read_dir(dir).map_err(|error| unreadable(&error))?;
+    let files = TransducerFiles::in_folder(dir);
+    let missing: Vec<String> = [files.encoder, files.decoder, files.joiner, files.tokens]
+        .iter()
+        .filter(|file| !file.is_file())
+        .filter_map(|file| file.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(FolderError::Missing(missing))
+    }
+}
+
 /// Why a model could not be loaded. Messages are shown to the user as written.
 #[derive(Debug, thiserror::Error)]
 pub enum TransducerError {
@@ -458,12 +513,7 @@ impl TransducerSource {
                         .map_err(|e| plain(&e))?,
                 })
             }
-            SpeechChoice::Folder(dir) => Ok(TransducerFiles {
-                encoder: dir.join("encoder.int8.onnx"),
-                decoder: dir.join("decoder.int8.onnx"),
-                joiner: dir.join("joiner.int8.onnx"),
-                tokens: dir.join("tokens.txt"),
-            }),
+            SpeechChoice::Folder(dir) => Ok(TransducerFiles::in_folder(dir)),
         }
     }
 }
@@ -483,6 +533,142 @@ impl ModelSource for TransducerSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("thalvi-folder-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const FILES: [&str; 4] = [
+        "encoder.int8.onnx",
+        "decoder.int8.onnx",
+        "joiner.int8.onnx",
+        "tokens.txt",
+    ];
+
+    fn folder_with(tag: &str, present: &[&str]) -> PathBuf {
+        let dir = scratch(tag);
+        for name in present {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        dir
+    }
+
+    fn missing(names: &[&str]) -> Result<(), FolderError> {
+        Err(FolderError::Missing(
+            names.iter().map(|name| (*name).to_owned()).collect(),
+        ))
+    }
+
+    #[test]
+    fn a_folder_is_a_model_only_when_all_four_files_are_in_it() {
+        let cases: [(&str, &[&str], Result<(), FolderError>); 7] = [
+            ("all", &FILES, Ok(())),
+            ("no-encoder", &FILES[1..], missing(&["encoder.int8.onnx"])),
+            (
+                "no-decoder",
+                &[FILES[0], FILES[2], FILES[3]],
+                missing(&["decoder.int8.onnx"]),
+            ),
+            (
+                "no-joiner",
+                &[FILES[0], FILES[1], FILES[3]],
+                missing(&["joiner.int8.onnx"]),
+            ),
+            ("no-tokens", &FILES[..3], missing(&["tokens.txt"])),
+            (
+                "two-gone",
+                &[FILES[1], FILES[2]],
+                missing(&["encoder.int8.onnx", "tokens.txt"]),
+            ),
+            (
+                "empty",
+                &[],
+                missing(&[FILES[0], FILES[1], FILES[2], FILES[3]]),
+            ),
+        ];
+        for (tag, present, expected) in cases {
+            let dir = folder_with(tag, present);
+            assert_eq!(check_folder(&dir), expected, "{tag}");
+        }
+    }
+
+    #[test]
+    fn a_missing_file_is_named_in_the_message() {
+        let dir = folder_with("message", &FILES[..3]);
+        let one = check_folder(&dir).unwrap_err().to_string();
+        assert_eq!(one, "Missing required file: tokens.txt");
+        let dir = folder_with("messages", &FILES[1..3]);
+        let two = check_folder(&dir).unwrap_err().to_string();
+        assert_eq!(two, "Missing required files: encoder.int8.onnx, tokens.txt");
+    }
+
+    #[test]
+    fn a_directory_in_place_of_a_file_counts_as_missing() {
+        let dir = folder_with("dir-as-file", &FILES[1..]);
+        std::fs::create_dir(dir.join(FILES[0])).unwrap();
+        assert_eq!(check_folder(&dir), missing(&[FILES[0]]));
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_readable_folder_is_refused_with_its_own_reason() {
+        let dir = scratch("not-folder");
+        let absent = dir.join("absent");
+        assert_eq!(
+            check_folder(&absent),
+            Err(FolderError::NotFound(absent.clone()))
+        );
+        assert_eq!(
+            FolderError::NotFound(absent.clone()).to_string(),
+            format!("There is no folder at {}.", absent.display())
+        );
+        let file = dir.join("model.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            check_folder(&file),
+            Err(FolderError::NotAFolder(file.clone()))
+        );
+        assert_eq!(
+            FolderError::NotAFolder(file.clone()).to_string(),
+            format!("{} is not a folder.", file.display())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_without_read_permission_is_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = folder_with("locked", &FILES);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = check_folder(&dir);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            result,
+            Err(FolderError::Unreadable(
+                dir.clone(),
+                std::io::ErrorKind::PermissionDenied
+            ))
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            format!(
+                "The folder {} cannot be read: permission denied.",
+                dir.display()
+            )
+        );
+    }
+
+    #[test]
+    fn the_files_a_loaded_folder_names_are_the_ones_checked() {
+        let files = TransducerFiles::in_folder(Path::new("/m"));
+        let names: Vec<_> = [&files.encoder, &files.decoder, &files.joiner, &files.tokens]
+            .iter()
+            .map(|path| path.strip_prefix("/m").unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, FILES);
+    }
 
     #[test]
     fn a_new_stretch_of_speech_starts_the_text_afresh_but_keeps_the_encoder_context() {
