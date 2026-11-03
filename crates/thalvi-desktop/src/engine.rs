@@ -49,8 +49,11 @@ const MIC_TIMEOUT: Duration = Duration::from_secs(3);
 /// the user continuing.
 const CONTINUATION_FRAMES: u8 = 3;
 
-/// Frames in one wake level report window, 2 s.
+/// Frames in one wake level window, 2 s.
 const LEVEL_WINDOW: u64 = 25;
+
+/// How long a wake level window lasts.
+const LEVEL_SPAN: Duration = Duration::from_secs(2);
 
 /// Frames of microphone audio kept for the wake clip, 2 s.
 const WAKE_CLIP_FRAMES: usize = 25;
@@ -593,7 +596,7 @@ where
                 }
             };
             self.level.send_replace(loudness(&frame));
-            self.note_level(&frame);
+            self.note_level(&frame, latency);
             self.remember(&frame);
             let wake = match self.wake.process(&frame) {
                 Ok(wake) => wake,
@@ -664,6 +667,9 @@ where
                 "p50_ms": millis(summary.p50),
                 "p95_ms": millis(summary.p95),
                 "max_ms": millis(summary.max),
+                "sound_ms": millis(summary.sound),
+                "quiet_ms": millis(summary.quiet),
+                "switches": summary.switches,
             }),
         );
     }
@@ -691,21 +697,16 @@ where
         self.recorder.wake_audio(dictation, pcm);
     }
 
-    fn note_level(&mut self, frame: &Frame) {
+    fn note_level(&mut self, frame: &Frame, latency: &mut Latency) {
         if !self.recorder.kinds().metrics {
             return;
         }
         self.level_frames += 1;
         self.level_activity |= frame.iter().any(|s| s.unsigned_abs() >= ACTIVITY_PEAK);
-        if self.level_frames == 1 || self.level_frames.is_multiple_of(LEVEL_WINDOW) {
-            let outcome = if self.level_activity {
-                "activity"
-            } else {
-                "quiet"
-            };
+        if self.level_frames == LEVEL_WINDOW {
+            latency.level(self.level_activity, LEVEL_SPAN);
+            self.level_frames = 0;
             self.level_activity = false;
-            self.recorder
-                .metric(Event::WakeLevel, outcome, None, Value::Null);
         }
     }
 

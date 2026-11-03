@@ -253,7 +253,9 @@ what was handed to delivery), each when its switch is on. `metrics.jsonl` sits
 beside the folders. For wake scoring it holds a line for each near miss (a
 score that rose to 0.15 or more and fell back below its threshold), a line for
 each wake that delivered nothing, with the reason and the wake's folder, and
-one line a minute with the count, p50, p95 and maximum scoring time.
+one line a minute with the count, p50, p95 and maximum scoring time, the seconds
+the microphone heard sound and quiet in 2 s steps, and how often it switched
+between them.
 
 On Hyprland, `thalvi-desktop toggle`, `pause`, `resume` and `cancel` control
 the running app; they report an error when it is not running. `status` prints
