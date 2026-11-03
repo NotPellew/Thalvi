@@ -1555,6 +1555,7 @@ async fn operator_log_carries_turn_source_and_length_but_never_the_text() {
     tracing::subscriber::set_global_default(
         tracing_subscriber::fmt()
             .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
             .with_writer(move || writer.clone())
             .finish(),
     )

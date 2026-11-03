@@ -793,9 +793,6 @@ async fn handle_recognizer_message<M, T>(
     M: ChatModel + 'static,
     T: Tts + 'static,
 {
-    if let Some(RecognizerMessage::Event(event)) = &recognizer_message {
-        tracing::debug!(?event, "recognizer event");
-    }
     match recognizer_message {
         Some(RecognizerMessage::Event(RecognizerEvent::SpeechStart {
             turn_id,
