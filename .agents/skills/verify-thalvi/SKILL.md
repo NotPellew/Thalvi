@@ -156,7 +156,8 @@ Handles that stay stable:
 | --- | --- |
 | Current state | `.orb-app` `data-state`: `connecting`, `idle`, `starting`, `listening`, `thinking`, `working`, `speaking`, `reconnecting`, `ended` |
 | Talk / stop button | `button.o-orb`; its label is `Start talking` when idle, `Stop` while thinking, working or speaking, and `End voice` while listening |
-| Voice toggle | `button.o-voice` (`aria-pressed`, text `Voice on` or `Voice off`) |
+| Voice toggle | `button.o-voice` (`aria-pressed`, text `Voice on` or `Voice off`); it also turns Speak replies on or off |
+| Speak replies switch | `button.o-speak` (`role=switch`, `aria-checked` follows the server's `reply_audio` confirmation) |
 | Composer | `#o-message` (label `Message`), `button[aria-label="Send"]` |
 | Turns | `.o-turns > .o-user`, `.o-turns > .o-assistant` |
 | Failure notice | `.o-notice` (`role=alert`); hidden when there is none |

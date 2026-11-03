@@ -49,11 +49,10 @@ areas your change touches. Editing rules are in
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
   interrupts a reply by speaking while mic input is on. Why: hands and eyes are
   busy. Rejected: push-to-talk.
-- **Input and reply audio are separate.** `/session` takes `input` (`text` or
-  `mic`) and `reply_audio` (on or off); only `mic` opens a recognizer, only
-  reply audio calls speech synthesis. Why: typing or locally recognized speech
-  can get spoken replies, and muting must not stop listening. Rejected: one
-  `voice` switch, a compatibility message for it.
+- **Input and reply audio are separate.** `/session` takes `input` (`text` or `mic`) and
+  `reply_audio` (on or off); only `mic` opens a recognizer, only reply audio calls speech
+  synthesis. Web: Voice sets both, Speak replies only reply audio. Why: typed or locally
+  recognized input can get spoken replies. Rejected: one `voice` switch, a compat message.
 - **Two wake entries, endings select the capture route.** One local inference pipeline
   runs separate trained capture and conversation wake heads. Why: defer the action
   choice until an ending without delaying conversation. Rejected: one phrase

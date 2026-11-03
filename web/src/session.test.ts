@@ -8,6 +8,7 @@ describe("displayState", () => {
     ["is Idle with voice off", online, false, "idle"],
     ["is Starting while the microphone permission prompt is open", online, true, "starting"],
     ["keeps Thinking over a pending microphone prompt", { ...online, phase: "thinking" }, true, "thinking"],
+    ["is Speaking while typed-in replies play with voice off", { ...online, playing: true }, false, "speaking"],
     ["keeps Working with voice off", { ...online, phase: "working" }, false, "working"],
     ["keeps Reconnecting over a pending microphone prompt", { ...online, link: "reconnecting" }, true, "reconnecting"],
   ];

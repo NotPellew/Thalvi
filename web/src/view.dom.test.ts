@@ -34,3 +34,26 @@ it("collapses task steps on the next user turn while retaining expansion during 
   expect(details.open).toBe(false);
   expect(details.hidden).toBe(false);
 });
+
+it("shows Speak replies as a switch that follows the server's confirmation and waits while offline", () => {
+  vi.stubGlobal("ResizeObserver", class { observe() { return undefined; } });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const view = createView(root);
+  const speak = root.querySelector<HTMLButtonElement>("button[role=switch]");
+  if (!speak) throw new Error("Speak replies is missing");
+  const clicks: string[] = [];
+  view.onSpeak(() => clicks.push("click"));
+
+  view.render({ ...INITIAL, link: "reconnecting", speak: true });
+  expect(speak.disabled).toBe(true);
+
+  view.render({ ...INITIAL, link: "online", speak: true });
+  expect(speak.disabled).toBe(false);
+  expect(speak.getAttribute("aria-checked")).toBe("false");
+  speak.click();
+  view.render({ ...INITIAL, link: "online", speak: true, replyAudio: true });
+  expect(speak.getAttribute("aria-checked")).toBe("true");
+  expect(speak.textContent).toBe("Speak replies");
+  expect(clicks).toEqual(["click"]);
+});

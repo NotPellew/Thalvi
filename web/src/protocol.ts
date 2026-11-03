@@ -23,6 +23,7 @@ export type ServerMessage =
   | { type: "user"; text: string }
   | { type: "reply"; text: string }
   | { type: "input"; source: InputSource; ready: boolean }
+  | { type: "reply_audio"; on: boolean }
   | { type: "interrupted" }
   | { type: "reply_end" }
   | { type: "error"; message: string }
@@ -110,6 +111,8 @@ export function parseServerMessage(raw: string): ServerMessage | null {
         ? { type, source, ready }
         : null;
     }
+    case "reply_audio":
+      return typeof fields["on"] === "boolean" ? { type, on: fields["on"] } : null;
     case "interrupted":
     case "reply_end":
       return { type };
