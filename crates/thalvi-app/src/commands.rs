@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 use thalvi_desktop::audio;
+use thalvi_desktop::history::{Entry, HistoryError, Store as History};
 use thalvi_desktop::host::{Host, WebUrl};
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{
@@ -277,6 +278,36 @@ pub async fn open_recordings(state: State<'_, AppState>) -> Result<(), String> {
     })
     .await
     .map_err(|error| format!("The folder could not be opened: {error}"))?
+}
+
+/// Runs one history operation off the UI thread; errors reach the UI as plain strings.
+async fn with_history<T: Send + 'static>(
+    state: &AppState,
+    operation: impl FnOnce(&History) -> Result<T, HistoryError> + Send + 'static,
+) -> Result<T, String> {
+    let history = std::sync::Arc::clone(&state.history);
+    tauri::async_runtime::spawn_blocking(move || {
+        operation(&history).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("The history could not be reached: {error}"))?
+}
+
+/// The kept dictations, newest first.
+#[tauri::command]
+pub async fn get_history(state: State<'_, AppState>) -> Result<Vec<Entry>, String> {
+    with_history(&state, History::list).await
+}
+
+#[tauri::command]
+pub async fn delete_history_entry(id: u64, state: State<'_, AppState>) -> Result<(), String> {
+    with_history(&state, move |history| history.delete(id)).await
+}
+
+/// Removes every entry, and a damaged history file with them.
+#[tauri::command]
+pub async fn clear_history(state: State<'_, AppState>) -> Result<(), String> {
+    with_history(&state, History::clear).await
 }
 
 #[tauri::command]
