@@ -35,6 +35,8 @@ export function tauriBackend(): Backend {
     cancelCapture: () => invoke<undefined>("cancel_capture"),
     listMicrophones: () => invoke<string[]>("list_microphones"),
     openRecordings: () => invoke<undefined>("open_recordings"),
+    getStartAtLogin: () => invoke<boolean>("get_start_at_login"),
+    setStartAtLogin: (on) => invoke<undefined>("set_start_at_login", { on }),
     appVersion: getVersion,
   };
 }

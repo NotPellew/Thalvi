@@ -100,6 +100,10 @@ export interface Backend {
   cancelCapture(): Promise<void>;
   listMicrophones(): Promise<string[]>;
   openRecordings(): Promise<void>;
+  /** Whether the OS starts Thalvi at login, read from the OS. */
+  getStartAtLogin(): Promise<boolean>;
+  /** Adds or removes the startup entry; rejects unless the OS then holds it as asked. */
+  setStartAtLogin(on: boolean): Promise<void>;
   appVersion(): Promise<string>;
 }
 

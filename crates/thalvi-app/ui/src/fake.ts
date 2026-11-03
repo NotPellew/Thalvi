@@ -104,6 +104,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
     for (const listener of levelListeners) listener(level);
   }, 80);
 
+  let startAtLogin = false;
   let saved = { ...structuredClone(SETTINGS), look };
   return {
     getStatus: () => Promise.resolve(status),
@@ -136,6 +137,11 @@ export function fakeBackend(params: URLSearchParams): Backend {
     },
     listMicrophones: () => Promise.resolve([...microphones]),
     openRecordings: () => Promise.resolve(),
+    getStartAtLogin: () => Promise.resolve(startAtLogin),
+    setStartAtLogin: (on) => {
+      startAtLogin = on;
+      return Promise.resolve();
+    },
     appVersion: () => Promise.resolve("0.1.0 (fake)"),
   };
 }

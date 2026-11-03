@@ -293,6 +293,59 @@ describe("live controls", () => {
     expect(rowOf("Listening").querySelector(".note")?.textContent).toBe("No microphone.");
   });
 
+  it("starts at login only once the OS holds the entry, and shows the OS state on load", async () => {
+    const stub = await open();
+    const toggle = control("Start Thalvi when I log in", "input");
+    expect(toggle.checked).toBe(false);
+    expect(stub.backend.getStartAtLogin).toHaveBeenCalledTimes(1);
+
+    flip(toggle);
+    await settle();
+    expect(stub.backend.setStartAtLogin).toHaveBeenLastCalledWith(true);
+    expect(toggle.checked).toBe(true);
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+
+    stub.backend.getStartAtLogin.mockResolvedValue(true);
+    document.body.innerHTML = '<div id="settings"></div>';
+    root = document.getElementById("settings") as HTMLElement;
+    mountSettings(root, stub.backend);
+    await settle();
+    expect(control("Start Thalvi when I log in", "input").checked).toBe(true);
+  });
+
+  it("shows the refusal and the real state when the startup entry cannot be changed", async () => {
+    const stub = await open();
+    const toggle = control("Start Thalvi when I log in", "input");
+    stub.backend.setStartAtLogin.mockRejectedValue("Thalvi could not be set to start at login: permission denied");
+    flip(toggle);
+    expect(toggle.disabled).toBe(true);
+    await settle();
+    expect(toggle.checked).toBe(false);
+    expect(toggle.disabled).toBe(false);
+    expect(rowOf("Start Thalvi when I log in").querySelector(".note")?.textContent).toBe(
+      "Thalvi could not be set to start at login: permission denied",
+    );
+
+    stub.backend.getStartAtLogin.mockResolvedValue(true);
+    stub.backend.setStartAtLogin.mockRejectedValue("Thalvi could not be stopped from starting at login: busy");
+    flip(toggle);
+    await settle();
+    expect(toggle.checked).toBe(true);
+  });
+
+  it("keeps the switch off and says why when the OS entry cannot be read", async () => {
+    const stub = stubBackend();
+    stub.backend.getStartAtLogin.mockRejectedValue("Thalvi could not check its startup entry: no home folder");
+    mountSettings(root, stub.backend);
+    await settle();
+    const toggle = control("Start Thalvi when I log in", "input");
+    expect(toggle.checked).toBe(false);
+    expect(toggle.disabled).toBe(true);
+    expect(rowOf("Start Thalvi when I log in").querySelector(".note")?.textContent).toBe(
+      "Thalvi could not check its startup entry: no home folder",
+    );
+  });
+
   it("follows the status for the listening switch", async () => {
     const stub = await open();
     stub.emit({ state: "paused" });

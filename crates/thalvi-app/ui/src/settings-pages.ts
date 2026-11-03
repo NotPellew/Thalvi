@@ -15,6 +15,8 @@ export interface PageContext {
   microphones: string[] | { error: string };
   /** The microphone actually open when the pages were built. */
   audio: AudioStatus;
+  /** Whether the OS starts Thalvi at login, or why that could not be read. */
+  startAtLogin: boolean | { error: string };
   /** The settings window, so a look picked here shows at once. */
   root: HTMLElement;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
@@ -118,7 +120,7 @@ function miniField(label: string, field: Field): HTMLElement {
   return el("label", { class: "mini" }, el("span", {}, label), field.node);
 }
 
-function general({ draft, backend, controls, live, root }: PageContext): HTMLElement[] {
+function general({ draft, backend, controls, live, root, startAtLogin }: PageContext): HTMLElement[] {
   const server = controls.text(draft.server, (value) => {
     draft.server = value;
   }, { placeholder: "ws://127.0.0.1:8080" });
@@ -136,11 +138,36 @@ function general({ draft, backend, controls, live, root }: PageContext): HTMLEle
   live.listening = (on) => {
     input.checked = on;
   };
+  const login = controls.toggle(startAtLogin === true, () => undefined);
+  const loginInput = login.field as HTMLInputElement;
+  const loginProblem = note();
+  if (typeof startAtLogin === "object") {
+    loginInput.disabled = true;
+    say(loginProblem, startAtLogin.error);
+  }
+  loginInput.addEventListener("change", () => {
+    say(loginProblem, "");
+    const wanted = loginInput.checked;
+    loginInput.disabled = true;
+    backend
+      .setStartAtLogin(wanted)
+      .catch(async (error: unknown) => {
+        say(loginProblem, errorText(error));
+        loginInput.checked = await backend.getStartAtLogin().catch(() => !wanted);
+      })
+      .finally(() => {
+        loginInput.disabled = false;
+      });
+  });
   return [
     row("Server address", "Where Thalvi sends speech for recognition.", server),
     row("Listening", "Turns the microphone on or off now; this is not part of Save.", {
       node: el("span", { class: "stack" }, listening.node, problem),
       field: input,
+    }),
+    row("Start Thalvi when I log in", "Starts the voice app at login, listening as it normally does. This takes effect now; it is not part of Save.", {
+      node: el("span", { class: "stack" }, login.node, loginProblem),
+      field: loginInput,
     }),
     row("Look", "How the overlay and this window look. The overlay changes after the current capture.",
       lookPicker(draft.look, (look) => {
