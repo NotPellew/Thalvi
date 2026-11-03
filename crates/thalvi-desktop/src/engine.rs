@@ -26,7 +26,7 @@ use crate::capture::{
 use crate::config::DesktopConfig;
 use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues};
 use crate::frame::{FRAME_SAMPLES, Frame};
-use crate::metrics::{Event, Recorder};
+use crate::metrics::{Event, RecordKinds, Recorder};
 use crate::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
 use crate::secondary::{self, SecondaryApi, SecondaryError, SecondaryStt};
 use crate::vad::VadDetector;
@@ -467,6 +467,12 @@ where
     #[must_use]
     pub fn recorder(&self) -> &Recorder {
         &self.recorder
+    }
+
+    /// Changes what is recorded from the next [`listen`](Self::listen) on. Taking `&mut self` keeps
+    /// it from running during a capture, which finishes under the kinds it started with.
+    pub fn set_recordings(&mut self, kinds: RecordKinds) {
+        self.recorder.set_kinds(kinds);
     }
 
     /// Writes the recordings still queued; call once at shutdown.

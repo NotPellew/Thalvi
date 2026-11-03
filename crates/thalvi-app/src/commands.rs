@@ -73,7 +73,7 @@ pub fn save_settings(
         state.config().microphone.as_deref(),
         state.link.audio().paused,
     )?;
-    let config = state.store.save(settings)?;
+    let config = state.store.save(&settings)?;
     let look = state.config().look;
     state.apply(&config);
     if config.look != look {
@@ -168,7 +168,8 @@ pub async fn download_speech_model(
     let model = CatalogSpeech::named(&name)
         .ok_or_else(|| format!("{name} is not a speech model Thalvi can download."))?;
     let store = ModelStore::per_user().map_err(|error| error.to_string())?;
-    let recorder = Recorder::per_user(state.config().record).map_err(|error| error.to_string())?;
+    let recorder =
+        Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
     let started = Instant::now();
     let result = state
         .speech_downloads
@@ -220,8 +221,7 @@ pub async fn open_recordings(state: State<'_, AppState>) -> Result<(), String> {
     let folder = Recorder::user_dir().map_err(|error| error.to_string())?;
     if !folder.is_dir() {
         return Err(
-            "Nothing has been recorded yet. Start Thalvi with THALVI_RECORD set to record."
-                .to_owned(),
+            "Nothing has been recorded yet. Turn a recording on in the settings.".to_owned(),
         );
     }
     let host = state.host();

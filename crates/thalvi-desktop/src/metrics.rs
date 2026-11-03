@@ -4,11 +4,12 @@ use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// How many events may wait for the writer before new ones are dropped.
@@ -20,7 +21,8 @@ const LOG_LIMIT: u64 = 5 * 1024 * 1024;
 const RECORDING_RATE: u32 = 16_000;
 
 /// Which kinds of data are recorded; all are off by default because they are personal data.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct RecordKinds {
     /// Timing and outcome events.
     pub metrics: bool,
@@ -28,13 +30,6 @@ pub struct RecordKinds {
     pub text: bool,
     /// Microphone audio of the capture, after the wake cue, and about 2 s before each wake.
     pub audio: bool,
-}
-
-impl RecordKinds {
-    #[must_use]
-    pub fn any(self) -> bool {
-        self.metrics || self.text || self.audio
-    }
 }
 
 /// A metrics event. Model and endpoint calls report their real latency; the rest describe what
@@ -115,28 +110,53 @@ enum Message {
     Shutdown,
 }
 
+/// The kinds that are on, shared by a recorder and its handles so a change reaches them all.
+#[derive(Default)]
+struct LiveKinds {
+    metrics: AtomicBool,
+    text: AtomicBool,
+    audio: AtomicBool,
+}
+
+impl LiveKinds {
+    fn get(&self) -> RecordKinds {
+        RecordKinds {
+            metrics: self.metrics.load(Ordering::Relaxed),
+            text: self.text.load(Ordering::Relaxed),
+            audio: self.audio.load(Ordering::Relaxed),
+        }
+    }
+
+    fn set(&self, kinds: RecordKinds) {
+        self.metrics.store(kinds.metrics, Ordering::Relaxed);
+        self.text.store(kinds.text, Ordering::Relaxed);
+        self.audio.store(kinds.audio, Ordering::Relaxed);
+    }
+}
+
 /// Records enabled kinds to the per-user data directory on a writer thread. Recording never
 /// blocks the caller: when the writer falls behind, new events are dropped and counted.
 pub struct Recorder {
-    kinds: RecordKinds,
+    kinds: Arc<LiveKinds>,
     sender: Option<SyncSender<Message>>,
     writer: Option<JoinHandle<()>>,
     dropped: Arc<AtomicU64>,
 }
 
 impl Recorder {
-    /// A recorder that records nothing and creates nothing.
+    /// A recorder that records nothing and creates nothing; [`set_kinds`](Self::set_kinds) does
+    /// not change that.
     #[must_use]
     pub fn disabled() -> Self {
         Self {
-            kinds: RecordKinds::default(),
+            kinds: Arc::default(),
             sender: None,
             writer: None,
             dropped: Arc::default(),
         }
     }
 
-    /// Records under `<user data dir>/thalvi`; nothing is started or created when no kind is on.
+    /// Records under `<user data dir>/thalvi`; nothing is created until a kind is on and written.
     ///
     /// # Errors
     /// Fails when the platform has no per-user data directory or the writer cannot start.
@@ -167,9 +187,6 @@ impl Recorder {
         root: PathBuf,
         gate: Option<Receiver<()>>,
     ) -> Result<Self, RecorderError> {
-        if !kinds.any() {
-            return Ok(Self::disabled());
-        }
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let writer = std::thread::Builder::new()
             .name("thalvi-recorder".to_owned())
@@ -180,8 +197,10 @@ impl Recorder {
                 Writer::new(root).run(&receiver);
             })
             .map_err(RecorderError::Writer)?;
+        let live = LiveKinds::default();
+        live.set(kinds);
         Ok(Self {
-            kinds,
+            kinds: Arc::new(live),
             sender: Some(sender),
             writer: Some(writer),
             dropped: Arc::default(),
@@ -191,7 +210,16 @@ impl Recorder {
     /// Which kinds are on, so callers can skip work that only feeds a recording.
     #[must_use]
     pub fn kinds(&self) -> RecordKinds {
-        self.kinds
+        self.kinds.get()
+    }
+
+    /// Switches kinds on or off for this recorder and the [`Metrics`] handles made from it.
+    /// Events queued so far are written as they were queued. A caller that records a unit of work
+    /// as a whole changes the kinds only between units.
+    pub fn set_kinds(&self, kinds: RecordKinds) {
+        if self.sender.is_some() {
+            self.kinds.set(kinds);
+        }
     }
 
     /// How many events were dropped because the writer fell behind.
@@ -210,7 +238,7 @@ impl Recorder {
     #[must_use]
     pub fn metrics(&self) -> Metrics {
         Metrics {
-            enabled: self.kinds.metrics,
+            kinds: Arc::clone(&self.kinds),
             sender: self.sender.clone(),
             dropped: Arc::clone(&self.dropped),
         }
@@ -218,7 +246,7 @@ impl Recorder {
 
     /// Queues one line of dictation text for today's `desktop.jsonl`, with the keys of `fields`.
     pub fn text(&self, event: &str, fields: Value) {
-        if !self.kinds.text {
+        if !self.kinds().text {
             return;
         }
         let ts_ms = now_ms();
@@ -228,7 +256,7 @@ impl Recorder {
 
     /// Queues one capture's 16 kHz mono audio as a WAV file.
     pub fn audio(&self, pcm: Vec<i16>) {
-        if self.kinds.audio {
+        if self.kinds().audio {
             let ts_ms = now_ms();
             self.send(Message::Audio {
                 ts_ms,
@@ -241,7 +269,7 @@ impl Recorder {
     /// Queues the 16 kHz mono audio heard up to a wake of `kind` as a WAV file, and a metrics line
     /// carrying the file name and the keys of `fields`.
     pub fn wake_clip(&self, kind: &str, pcm: Vec<i16>, fields: Value) {
-        if !self.kinds.audio {
+        if !self.kinds().audio {
             return;
         }
         let ts_ms = now_ms();
@@ -290,7 +318,7 @@ fn send(sender: Option<&SyncSender<Message>>, dropped: &AtomicU64, message: Mess
 /// Records metrics like [`Recorder::metric`] from a thread that does not own the recorder.
 #[derive(Clone)]
 pub struct Metrics {
-    enabled: bool,
+    kinds: Arc<LiveKinds>,
     sender: Option<SyncSender<Message>>,
     dropped: Arc<AtomicU64>,
 }
@@ -299,7 +327,7 @@ impl Metrics {
     /// Queues one metrics line: time, event, `outcome`, the optional `duration` in milliseconds,
     /// and the keys of `fields` when it is a JSON object (`Value::Null` for none).
     pub fn metric(&self, event: Event, outcome: &str, duration: Option<Duration>, fields: Value) {
-        if !self.enabled {
+        if !self.kinds.get().metrics {
             return;
         }
         let mut line = json!({"ts_ms": now_ms(), "event": event.name(), "outcome": outcome});
@@ -670,6 +698,43 @@ mod tests {
             recorder.finish().await;
             assert_eq!(tree(&dir.root()), expected, "{tag}");
         }
+    }
+
+    #[tokio::test]
+    async fn changed_kinds_apply_to_later_events_only_including_through_earlier_handles() {
+        let dir = TempDir::new("live-kinds");
+        let recorder = Recorder::in_dir(METRICS, dir.root()).unwrap();
+        let handle = recorder.metrics();
+        handle.metric(Event::CaptureFlow, "before", None, Value::Null);
+        recorder.text("before", Value::Null);
+
+        recorder.set_kinds(RecordKinds {
+            text: true,
+            ..RecordKinds::default()
+        });
+        handle.metric(Event::CaptureFlow, "after", None, Value::Null);
+        recorder.text("after", Value::Null);
+        recorder.finish().await;
+
+        let metrics = lines(&dir.root().join("metrics.jsonl"));
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0]["outcome"], "before");
+        let day = std::fs::read_dir(dir.root().join("recordings"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let text = lines(&day.join("desktop.jsonl"));
+        assert_eq!(text.len(), 1);
+        assert_eq!(text[0]["event"], "after");
+    }
+
+    #[test]
+    fn a_disabled_recorder_stays_off_when_kinds_are_set() {
+        let recorder = Recorder::disabled();
+        recorder.set_kinds(ALL);
+        assert_eq!(recorder.kinds(), RecordKinds::default());
     }
 
     #[tokio::test]
