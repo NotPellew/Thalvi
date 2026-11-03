@@ -3,7 +3,7 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AudioStatus, Backend, HistoryEntry, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
 
 export function tauriBackend(): Backend {
   return {
@@ -40,6 +40,16 @@ export function tauriBackend(): Backend {
     getHistory: () => invoke<HistoryEntry[]>("get_history"),
     deleteHistoryEntry: (id) => invoke<undefined>("delete_history_entry", { id }),
     clearHistory: () => invoke<undefined>("clear_history"),
+    getDraft: () => invoke<Draft | null>("get_draft"),
+    editDraft: (text) => invoke<undefined>("edit_draft", { text }),
+    copyDraft: (text) => invoke<undefined>("copy_draft", { text }),
+    pasteDraft: (text) => invoke<undefined>("paste_draft", { text }),
+    discardDraft: () => invoke<undefined>("discard_draft"),
+    onOpenPage: (listener) => {
+      void listen<string>("thalvi://open-page", (event) => {
+        listener(event.payload);
+      });
+    },
     getStartAtLogin: () => invoke<SwitchState>("get_start_at_login"),
     setStartAtLogin: (on) => invoke<undefined>("set_start_at_login", { on }),
     getMenuEntry: () => invoke<SwitchState>("get_menu_entry"),

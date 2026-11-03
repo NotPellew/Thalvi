@@ -3,6 +3,8 @@
 import type {
   AudioStatus,
   Backend,
+  Draft,
+  DraftOutcome,
   Ending,
   HistoryEntry,
   HistoryOutcome,
@@ -11,6 +13,7 @@ import type {
   Settings,
   SpeechModelInfo,
   SpeechModelProgress,
+  Status,
   SttEngine,
   SwitchState,
 } from "./contract.ts";
@@ -40,6 +43,7 @@ export interface PageContext {
     listening: (on: boolean) => void;
     audio: (audio: AudioStatus) => void;
     speechModel: (progress: SpeechModelProgress) => void;
+    status: (status: Status) => void;
     /** The page with this id was opened. */
     opened: (id: string) => void;
   };
@@ -86,6 +90,13 @@ const CUES: readonly (readonly [keyof Settings["cues"], string, string])[] = [
 ];
 const WAKE_MODELS = ["hey_thalvi", "hey_mycroft", "hey_jarvis"];
 const OUTCOMES: Record<HistoryOutcome, string> = { accepted: "Delivered", cancelled: "Cancelled", failed: "Failed" };
+const DRAFT_OUTCOMES: Record<DraftOutcome, string> = {
+  delivered: "Delivered.",
+  cancelled: "You cancelled this one, so nothing was typed.",
+  failed: "This was not delivered.",
+  maybePartial: "Typing stopped partway: some of this text may already be in the window. Check it there, and use Copy text rather than pasting again.",
+};
+const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "working"];
 const WHEN = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 export function row(label: string, hint: string | null, control: Field | HTMLElement): HTMLElement {
@@ -841,7 +852,123 @@ function confirmed(label: string, question: string, yes: string, no: string, act
   return el("span", { class: "stack" }, ask, sure);
 }
 
-function history({ draft, backend, controls, live }: PageContext): HTMLElement[] {
+/** The last dictation: editable, with Copy, Paste into its window, and Discard. Nothing is sent until a button is pressed. */
+function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; refresh: () => void } {
+  let current: Draft | null = null;
+  let busy = false;
+  let pasting = false;
+  const empty = el("p", { class: "note ok" }, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it.");
+  const outcome = el("p", { class: "note ok" });
+  const newer = el("p", { class: "note why", hidden: true }, "A newer dictation is waiting. Discard this one to see it.");
+  const why = el("p", { class: "note why", hidden: true });
+  const text = el("textarea", { rows: "4", spellcheck: "false", "aria-label": "Last dictation text" });
+  const done = el("p", { class: "note ok", role: "status", hidden: true });
+  const problem = note();
+  const copy = button("Copy text", () => {
+    say(problem, "");
+    backend.copyDraft(text.value).then(
+      () => {
+        say(done, "Copied to the clipboard.");
+      },
+      (error: unknown) => {
+        say(done, "");
+        say(problem, errorText(error));
+      },
+    );
+  });
+  const paste = button("Paste", () => {
+    if (paste.disabled || current === null) return;
+    const target = current.target ?? "the window";
+    pasting = true;
+    sync();
+    say(problem, "");
+    say(done, "");
+    backend.pasteDraft(text.value).then(
+      () => {
+        say(done, `Pasted into ${target}. Enter was not pressed.`);
+      },
+      (error: unknown) => {
+        say(problem, errorText(error));
+      },
+    ).finally(() => {
+      pasting = false;
+      refresh();
+    });
+  });
+  const reset = button("Reset to original", () => {
+    if (current === null) return;
+    text.value = current.original;
+    sync();
+    saveEdit();
+  }, "quiet");
+  const discard = button("Discard", () => {
+    say(problem, "");
+    say(done, "");
+    backend.discardDraft().then(refresh, (error: unknown) => {
+      say(problem, errorText(error));
+    });
+  }, "quiet");
+  const editor = el("div", { class: "stack wide", hidden: true }, outcome, newer, text, el("span", { class: "trow" }, copy, paste, reset, discard), why, done);
+
+  function saveEdit(): void {
+    backend.editDraft(text.value).catch((error: unknown) => {
+      say(problem, errorText(error));
+    });
+  }
+  function sync(): void {
+    if (current === null) return;
+    const blank = text.value.trim() === "";
+    paste.textContent = current.target === null ? "Paste" : `Paste into ${current.target}`;
+    paste.disabled = blank || busy || pasting || current.pasting || current.target === null;
+    copy.disabled = blank;
+    reset.disabled = text.value === current.original;
+    say(why, current.target === null ? "No window was bound when you dictated this, so only Copy is possible."
+      : busy ? "Thalvi is capturing or delivering. Paste is available again when it has finished."
+      : "");
+  }
+  function show(next: Draft | null): void {
+    if (next?.id !== current?.id) {
+      say(done, "");
+      say(problem, "");
+    }
+    if (next !== null && next.id !== current?.id) text.value = next.text;
+    current = next;
+    empty.hidden = next !== null;
+    editor.hidden = next === null;
+    if (next === null) return;
+    outcome.textContent = next.target === null ? DRAFT_OUTCOMES[next.outcome] : `${DRAFT_OUTCOMES[next.outcome]} Meant for ${next.target}.`;
+    newer.hidden = !next.newerWaiting;
+    sync();
+  }
+  function refresh(): void {
+    backend.getDraft().then(show, (error: unknown) => {
+      say(problem, errorText(error));
+    });
+  }
+  text.addEventListener("input", () => {
+    sync();
+    saveEdit();
+  });
+  live.status = (status) => {
+    busy = CAPTURE_STATES.includes(status.state);
+    sync();
+    if (!busy) refresh();
+  };
+  refresh();
+
+  return {
+    nodes: [
+      group("Last dictation"),
+      row("Last dictation", "Fix it, then Copy it or Paste it into the window it was meant for. Editing sends nothing, and Paste never presses Enter. Kept in memory only, until you discard it or quit.",
+        { node: el("div", { class: "stack wide" }, empty, editor, problem), field: text }),
+    ],
+    refresh,
+  };
+}
+
+function history(context: PageContext): HTMLElement[] {
+  const { draft, backend, controls, live } = context;
+  const last = lastDictation(context);
   const list = el("div", { class: "entries" });
   const problem = note();
   const nothing = el("p", { class: "note ok" }, "Nothing has been kept yet.");
@@ -865,11 +992,15 @@ function history({ draft, backend, controls, live }: PageContext): HTMLElement[]
     });
   }
   live.opened = (id) => {
-    if (id === "history") refresh();
+    if (id === "history") {
+      refresh();
+      last.refresh();
+    }
   };
   refresh();
 
   return [
+    ...last.nodes,
     group("Keeping"),
     row("Keep a history", "What you dictate, when, where it went and how it ended; never audio. Kept on this computer only, never uploaded. Turning this off stops new entries and deletes none: delete them below.",
       controls.toggle(draft.history.enabled, (value) => {

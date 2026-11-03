@@ -42,6 +42,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     listening: () => undefined,
     audio: () => undefined,
     speechModel: () => undefined,
+    status: () => undefined,
     opened: () => undefined,
   };
 
@@ -85,6 +86,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   function showStatus(status: Status): void {
     runtimeFailure = status.state === "failed" ? status.notice : "";
     runtimeCauses = status.state === "failed" ? status.causes : [];
+    live.status(status);
     feedback();
   }
 
@@ -124,10 +126,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     navButtons = pages.map((page) => {
       const button = el("button", { type: "button", "data-page": page.id }, page.title);
       button.addEventListener("click", () => {
-        current = page.id;
-        search.value = "";
-        applyView();
-        live.opened(page.id);
+        open(page.id);
       });
       return button;
     });
@@ -135,6 +134,14 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     showAudio(audio);
     feedback();
     applyView();
+  }
+
+  function open(id: string): void {
+    if (!pages.some((page) => page.id === id)) return;
+    current = id;
+    search.value = "";
+    applyView();
+    live.opened(id);
   }
 
   search.addEventListener("input", applyView);
@@ -203,6 +210,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   backend.onSpeechModelProgress((progress) => {
     live.speechModel(progress);
   });
+  backend.onOpenPage(open);
   backend.onStatus(showStatus);
   backend.getStatus().then(showStatus).catch((error: unknown) => {
     runtimeFailure = errorText(error);

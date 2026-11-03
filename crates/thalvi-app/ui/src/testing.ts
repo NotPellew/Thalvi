@@ -1,7 +1,7 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
-import type { AudioStatus, Backend, HistoryEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
 import type { Clock } from "./overlay.ts";
 
 export const SETTINGS: Settings = {
@@ -46,6 +46,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
   const savedListeners: (() => void)[] = [];
   const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
+  const pageListeners: ((page: string) => void)[] = [];
   let audioState: AudioStatus = {
     selected: settings.microphone,
     active: initial.state === "paused" ? null : (settings.microphone ?? "Built-in"),
@@ -73,6 +74,12 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     getHistory: vi.fn<() => Promise<HistoryEntry[]>>(() => Promise.resolve([])),
     deleteHistoryEntry: vi.fn<(id: number) => Promise<void>>(() => Promise.resolve()),
     clearHistory: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+    getDraft: vi.fn<() => Promise<Draft | null>>(() => Promise.resolve(null)),
+    editDraft: vi.fn<(text: string) => Promise<void>>(() => Promise.resolve()),
+    copyDraft: vi.fn<(text: string) => Promise<void>>(() => Promise.resolve()),
+    pasteDraft: vi.fn<(text: string) => Promise<void>>(() => Promise.resolve()),
+    discardDraft: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+    onOpenPage: vi.fn((listener: (page: string) => void) => pageListeners.push(listener)),
     getStartAtLogin: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),
     setStartAtLogin: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
     getMenuEntry: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),
@@ -105,6 +112,9 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     },
     speechProgress: (progress: SpeechModelProgress) => {
       for (const listener of speechListeners) listener(progress);
+    },
+    openPage: (page: string) => {
+      for (const listener of pageListeners) listener(page);
     },
     saved: () => {
       for (const listener of savedListeners) listener();

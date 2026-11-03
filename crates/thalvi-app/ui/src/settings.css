@@ -10,8 +10,8 @@ nav button { text-align: left; padding: 6px 10px; border: 0; border-radius: 6px;
 nav button:hover { background: var(--surf); }
 nav button[aria-current="page"] { background: var(--deep); color: var(--neon); }
 
-input, select, button { font: inherit; color: var(--fg); }
-input:not([type="checkbox"], [type="range"]), select {
+input, select, textarea, button { font: inherit; color: var(--fg); }
+input:not([type="checkbox"], [type="range"]), select, textarea {
   background: var(--surf); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; min-width: 0;
 }
 input[type="search"] { width: 100%; color: var(--mut); }
@@ -59,6 +59,7 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .card legend { font: 700 12px var(--mono); color: var(--neon); padding: 0 6px; }
 .card button { justify-self: end; align-self: end; grid-column: 2; }
 .trow[hidden] { display: none; }
+textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .entries { display: flex; flex-direction: column; gap: 6px; max-height: 24em; overflow-y: auto; }
 .entry { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; }
 .entry header { grid-column: 1; display: flex; flex-wrap: wrap; gap: 2px 10px; font: 12px var(--mono); color: var(--mut); }
