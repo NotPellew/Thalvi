@@ -22,29 +22,27 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      checks: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.commit.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
       - id: version
         run: |
           [[ "$TAG" =~ ^desktop-v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || { echo "::error::$TAG is not a desktop-vX.Y.Z tag"; exit 1; }
           version=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "thalvi-app") | .version')
           [ "$version" = "${BASH_REMATCH[1]}" ] || { echo "::error::$TAG does not match the app version $version in Cargo.toml"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Require the checks CI runs on main
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # main only receives commits through PRs whose required checks passed.
+      - id: commit
+        name: Require a commit from main
         run: |
           sha=$(git rev-parse HEAD)
-          for check in server desktop-windows desktop-ui; do
-            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?per_page=100" \
-              --jq "[.check_runs[] | select(.name == \"$check\")] | sort_by(.started_at) | last | .conclusion")
-            [ "$conclusion" = "success" ] || { echo "::error::$check is '$conclusion' on $sha; release a commit whose CI passed"; exit 1; }
-          done
+          git merge-base --is-ancestor "$sha" origin/main || { echo "::error::$TAG points at $sha, which is not on main"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
   package:
     name: package (${{ matrix.os }})
@@ -64,7 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.TAG }}
+          ref: ${{ needs.gate.outputs.sha }}
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, respects rust-toolchain.toml
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - if: matrix.os == 'ubuntu-latest'
@@ -86,12 +84,19 @@ jobs:
 
   publish:
     name: publish
-    needs: package
+    needs: [gate, package]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: write
     steps:
+      - name: Require the tag to still name the built commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILT: ${{ needs.gate.outputs.sha }}
+        run: |
+          tagged=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)
+          [ "$tagged" = "$BUILT" ] || { echo "::error::$TAG moved from $BUILT to $tagged during the release"; exit 1; }
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: packages
