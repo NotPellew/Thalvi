@@ -206,6 +206,17 @@ config is `desktop.json` in `thalvi/` under the user config directory
 `THALVI_RECORD=metrics,text,audio` records timings, dictated text and
 microphone audio locally, each opt-in.
 
+On Hyprland, `thalvi-desktop toggle`, `pause`, `resume` and `cancel` control
+the running app; they report an error when it is not running. `status` prints
+Waybar JSON with confirmed state, or `unavailable`. The examples in
+[`integrations/hyprland/`](integrations/hyprland/) add a persistent microphone
+button and compositor shortcuts. Choose your own keys in
+`hyprland-binds.conf`; change or remove those bindings there. Left-clicking
+the button toggles listening without moving focus; right-clicking opens Settings.
+Pausing cancels the current capture and closes the microphone. Resuming starts
+fresh wake listening. Windows keeps the tray controls; the status module is
+Hyprland-only.
+
 **Second-pass transcription** in Settings → Speech recognition is off by
 default, including for older configs that only name an endpoint. Turning it
 off keeps the endpoint and key, and accepted captures make no second request.

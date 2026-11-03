@@ -82,6 +82,10 @@ areas your change touches. Editing rules are in
   defaults off and disabling preserves endpoint settings. Why: avoid uploading
   every dictation and adding latency without an explicit choice. Rejected:
   treating an endpoint's presence as enablement.
+- **Resident controls and private bar status.** Control commands use single-instance
+  relaunch; Hyprland status reads a state-only socket in the private runtime folder.
+  Why: controls must not start a microphone and the plugin cannot answer queries.
+  Rejected: a keyboard listener, TCP, or transcript-bearing status.
 - **Pause before changing microphones.** Save device changes only while paused;
   enabling opens the selected device and status names the open stream separately.
   Why: choosing a microphone must not start recording or redirect a capture.

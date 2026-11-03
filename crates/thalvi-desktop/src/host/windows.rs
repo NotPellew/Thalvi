@@ -5,7 +5,7 @@ mod win32;
 use std::fmt;
 use std::path::Path;
 
-use super::{App, Host, HostError, Modifier, TypedText, WebUrl};
+use super::{App, Host, HostError, Modifier, StateServer, TypedText, WebUrl};
 pub use win32::Real;
 
 /// A window handle as a plain number, so targets stay `Send`.
@@ -86,6 +86,26 @@ impl Windows {
     pub fn detect() -> Result<Self, HostError> {
         Self::new(Real)
     }
+
+    /// # Errors
+    /// Always [`HostError::Unsupported`]: Windows has no private channel for it yet.
+    pub fn serve_state(
+        _state: impl Fn() -> &'static str + Send + 'static,
+    ) -> Result<StateServer, HostError> {
+        Err(no_state())
+    }
+
+    /// # Errors
+    /// Always [`HostError::Unsupported`], as for [`Self::serve_state`].
+    pub fn query_state() -> Result<Option<String>, HostError> {
+        Err(no_state())
+    }
+}
+
+fn no_state() -> HostError {
+    HostError::Unsupported(
+        "Sharing the status with a status bar is not available on Windows yet.".to_owned(),
+    )
 }
 
 impl<A: Win32> Windows<A> {

@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use thalvi_desktop::config::DesktopConfig;
-use thalvi_desktop::host::Desktop;
+use thalvi_desktop::host::{Desktop, StateServer};
 
 use crate::commands;
+use crate::control;
 use crate::launch::{Command, Launch};
 use crate::overlay::{self, Overlay, Visibility};
 use crate::runner::{Control, EngineLink};
@@ -27,6 +28,8 @@ pub struct AppState {
     host: Arc<Desktop>,
     config: Mutex<DesktopConfig>,
     overlay_shown: AtomicBool,
+    /// Answers status bars until the app quits.
+    state_server: Mutex<Option<StateServer>>,
 }
 
 impl AppState {
@@ -38,6 +41,14 @@ impl AppState {
             config.clone(),
             Desktop::detect().map_err(|error| error.to_string())?,
         )?;
+        let state_server = match Desktop::serve_state(control::answer(link.status_updates())) {
+            Ok(server) => Some(server),
+            Err(error) => {
+                // The app works without a status bar; the bar then reports Thalvi as not running.
+                println!("{error} The status bar module stays off.");
+                None
+            }
+        };
         Ok(Self {
             link,
             store,
@@ -45,6 +56,7 @@ impl AppState {
             host: Arc::new(Desktop::detect().map_err(|error| error.to_string())?),
             overlay_shown: AtomicBool::new(config.overlay.show),
             config: Mutex::new(config),
+            state_server: Mutex::new(state_server),
         })
     }
 
@@ -95,12 +107,20 @@ pub fn run() -> ExitCode {
 
 fn start() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let launch = Launch::parse(&args)?;
+    let (command, config) = match Launch::parse(&args)? {
+        Launch::Status => {
+            println!("{}", control::bar_json(Desktop::query_state()));
+            return Ok(());
+        }
+        Launch::Run { command, config } => (command, config),
+    };
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             // A relaunch that cannot be read still opens the settings.
-            let command = Launch::parse(args.get(1..).unwrap_or_default())
-                .map_or(Command::Show, |launch| launch.command);
+            let command = match Launch::parse(args.get(1..).unwrap_or_default()) {
+                Ok(Launch::Run { command, .. }) => command,
+                _ => Command::Show,
+            };
             act(app, command);
         }))
         .invoke_handler(tauri::generate_handler![
@@ -115,13 +135,16 @@ fn start() -> Result<(), String> {
         ])
         .setup(move |app| {
             // Only the first instance gets here, so a relaunch never reads the config.
-            app.manage(AppState::start(launch.config)?);
+            app.manage(AppState::start(config)?);
             create_windows(app.handle())?;
             follow_engine(app.handle())?;
             Ok(())
         })
         .build(tauri::generate_context!())
         .map_err(|error| error.to_string())?;
+    // A relaunch has already been handed to the running app by now, so reaching this point means
+    // no app runs; a control command must not start the engine, the microphone or any window.
+    command.first_start()?;
     app.run(|_, event| {
         // The tray keeps the app alive when no window is open.
         if let RunEvent::ExitRequested {
@@ -227,6 +250,8 @@ fn act(app: &AppHandle, command: Command) {
     match command {
         Command::Show => show_settings(app),
         Command::Toggle => state.link.send(Control::ToggleListening),
+        Command::Pause => state.link.send(Control::SetListening(false)),
+        Command::Resume => state.link.send(Control::SetListening(true)),
         Command::Cancel => state.link.send(Control::Cancel),
     }
 }
@@ -240,7 +265,16 @@ pub fn on_menu(app: &AppHandle, id: &str) {
         tray::QUIT => {
             let app = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                app.state::<AppState>().link.quit();
+                let state = app.state::<AppState>();
+                // Bars read "not running" while the microphone and the recognizer close.
+                drop(
+                    state
+                        .state_server
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take(),
+                );
+                state.link.quit();
                 app.exit(0);
             });
         }

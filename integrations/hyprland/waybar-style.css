@@ -1,0 +1,24 @@
+/* Append to Waybar's style.css. The classes are the states `thalvi-desktop status` reports. */
+#custom-thalvi {
+  padding: 0 10px;
+}
+#custom-thalvi.paused,
+#custom-thalvi.unavailable {
+  color: #a0a0ac;
+}
+#custom-thalvi.listening {
+  color: #22c55e;
+}
+#custom-thalvi.capturing {
+  color: #ef4444;
+}
+#custom-thalvi.pending {
+  color: #f59e0b;
+}
+#custom-thalvi.working,
+#custom-thalvi.loading {
+  color: #3b82f6;
+}
+#custom-thalvi.error {
+  color: #f97316;
+}

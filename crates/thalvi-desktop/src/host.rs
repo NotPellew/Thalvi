@@ -78,6 +78,21 @@ impl WebUrl {
     }
 }
 
+/// Keeps a desktop answering state queries from other programs, such as a status bar; dropping it
+/// stops. An answer is one fixed word chosen by the app, never anything the user said.
+pub struct StateServer {
+    _stop_on_drop: Box<dyn Send + Sync>,
+}
+
+impl StateServer {
+    /// Wraps whatever stops the answering when dropped.
+    pub fn new(stop_on_drop: impl Send + Sync + 'static) -> Self {
+        Self {
+            _stop_on_drop: Box::new(stop_on_drop),
+        }
+    }
+}
+
 /// A key held while the last key of a [`Shortcut`] is pressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Modifier {
