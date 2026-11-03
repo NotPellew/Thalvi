@@ -1131,8 +1131,9 @@ where
                     if has_words(&text) {
                         live.last_words = Instant::now();
                     }
-                    self.on_final(live, &text)
-                        .or_else(|| self.after_final(live))
+                    let done = self.on_final(live, &text);
+                    self.after_final(live);
+                    done
                 }
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),
                 Step::Frame(Ok(frame)) => self.on_frame(live, &frame).await.err().map(Done::from),
@@ -1174,7 +1175,8 @@ where
     }
 
     /// The key came up: a spoken ending already pending keeps deciding the capture; a slip of the
-    /// finger ends it; otherwise the last words get [`RELEASE_TAIL`] to arrive.
+    /// finger ends it; otherwise the last words get [`RELEASE_TAIL`] to arrive, and no recognizer
+    /// signals that nothing more is coming, so the whole tail is waited out.
     fn on_release(&mut self, live: &mut Live<R::Session>, held: Held) -> Option<Done> {
         let now = Instant::now();
         self.held_for = Some(now.duration_since(held.at));
@@ -1190,16 +1192,12 @@ where
         None
     }
 
-    /// After a final transcript: ends a released hold, which has no more words to wait for.
-    fn after_final(&mut self, live: &mut Live<R::Session>) -> Option<Done> {
-        if !matches!(live.release, Release::Tail(_)) {
-            return None;
-        }
-        if live.text.pending().is_some() {
+    /// After a final transcript: a spoken ending heard in the last words decides the capture as
+    /// it does after a wake word. Every other final just joins the text; the tail is the wait.
+    fn after_final(&mut self, live: &mut Live<R::Session>) {
+        if matches!(live.release, Release::Tail(_)) && live.text.pending().is_some() {
             live.release = Release::Over;
-            return None;
         }
-        self.finish_hold(live)
     }
 
     /// Ends a released hold: what was said, with the words still being recognized, is pasted.
@@ -1305,6 +1303,11 @@ where
         let now = Instant::now();
         live.last_audio = now;
         self.level.send_replace(loudness(frame));
+        // Once the key is up nothing more is said to the recognizer: what is still being
+        // recognized finishes, and an aside spoken after the release stays out of the text.
+        if matches!(live.release, Release::Tail(_)) {
+            return Ok(());
+        }
         let pending = live.text.pending().is_some();
         live.speech = self.vad.speech(frame, pending);
         if !pending {

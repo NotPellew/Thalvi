@@ -2912,7 +2912,7 @@ async fn releasing_the_key_pastes_what_was_said_without_a_countdown_or_enter() {
     use Say::{Final, Partial};
     // (what was said and when, release, expected outcome, when the cue that ends the capture starts)
     type Case = (&'static [(u64, Say)], u64, CaptureOutcome, Cue, u64);
-    let cases: [Case; 5] = [
+    let cases: [Case; 7] = [
         (
             &[(1000, Partial("hello world"))],
             1200,
@@ -2925,7 +2925,19 @@ async fn releasing_the_key_pastes_what_was_said_without_a_countdown_or_enter() {
             1200,
             accepted(CaptureRoute::Paste, "hello world"),
             Cue::Accepted,
-            1250,
+            1700,
+        ),
+        // Every final that comes within the tail is kept, not only the first.
+        (
+            &[
+                (800, Final("first line")),
+                (1250, Final("second line")),
+                (1400, Final("third line")),
+            ],
+            1200,
+            accepted(CaptureRoute::Paste, "first line second line third line"),
+            Cue::Accepted,
+            1700,
         ),
         (
             &[(800, Final("first line")), (1000, Partial("second line"))],
@@ -2942,6 +2954,15 @@ async fn releasing_the_key_pastes_what_was_said_without_a_countdown_or_enter() {
             },
             Cue::Cancelled,
             1700,
+        ),
+        (
+            &[(800, Final("first line")), (1250, Final("never mind"))],
+            1200,
+            CaptureOutcome::Cancelled {
+                dictated: Some("first line".to_owned()),
+            },
+            Cue::Cancelled,
+            1250,
         ),
         // The shortest hold that dictates is MIN_HOLD, 300 ms.
         (
@@ -3310,6 +3331,30 @@ async fn speech_that_cancels_an_ending_after_the_release_goes_on_as_a_dictation_
             assert_eq!(
                 finished(task).await,
                 accepted(CaptureRoute::Paste, "hello paste that world again")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn nothing_spoken_after_the_release_reaches_the_recognizer_but_the_words_already_sent_finish()
+{
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.say(1000, Say::Partial("hello")).await;
+            rig.release(1200).await;
+            let before = rig.sent().len();
+            // An aside: the recognizer must never hear it.
+            rig.feed_until(1600, Kind::Voice).await;
+            assert_eq!(rig.sent().len(), before, "audio after the release was sent");
+            rig.finals("hello there").await;
+            rig.at(1700).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "hello there")
             );
         })
         .await;
