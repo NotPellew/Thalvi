@@ -635,6 +635,13 @@ impl Runner {
         self.publisher.mode(Mode::Paused);
     }
 
+    /// Brings the stored history within a changed limit now, rather than at the next capture.
+    fn take_history(&self, config: &DesktopConfig) {
+        if config.history != self.config.history {
+            self.history.trim_in_background(config.history);
+        }
+    }
+
     /// Replaces the engine by one built from `config`; the old one stays if that fails. A change
     /// to the recordings or the history alone only retunes the running engine.
     async fn apply(&mut self, config: DesktopConfig) {
@@ -645,6 +652,7 @@ impl Runner {
             if let Some(session) = self.session.as_mut() {
                 session.engine.set_recordings(config.recordings);
             }
+            self.take_history(&config);
             self.config = config;
             return;
         }
@@ -656,6 +664,7 @@ impl Runner {
                 }
                 self.publisher
                     .update(|view| view.pauses = config.ending_pause);
+                self.take_history(&config);
                 self.config = config;
                 self.load_speech_model();
                 self.open_microphone().await;

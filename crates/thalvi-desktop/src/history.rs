@@ -227,17 +227,46 @@ impl Store {
             target: capture.target,
             outcome: capture.outcome,
         });
-        let surplus = entries.len().saturating_sub(config.limit());
-        entries.drain(..surplus);
+        drop_oldest(&mut entries, config.limit());
+        self.write(&entries)
+    }
+
+    /// Drops the oldest entries past the limit, as [`record`](Self::record) does; does nothing
+    /// when history is off, so turning it off never deletes.
+    ///
+    /// # Errors
+    /// Fails when the file cannot be written or is damaged.
+    pub fn trim(&self, config: HistoryConfig) -> Result<(), HistoryError> {
+        if !config.enabled() {
+            return Ok(());
+        }
+        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut entries = self.read()?;
+        if entries.len() <= config.limit() {
+            return Ok(());
+        }
+        drop_oldest(&mut entries, config.limit());
         self.write(&entries)
     }
 
     /// Like [`record`](Self::record) on a blocking thread, so the caller does not wait for the
     /// disk. A failure is logged; the capture and its delivery are never affected.
     pub fn record_in_background(self: &Arc<Self>, config: HistoryConfig, capture: Capture) {
+        self.in_background(move |store| store.record(config, capture));
+    }
+
+    /// Like [`trim`](Self::trim) on a blocking thread, with failures logged.
+    pub fn trim_in_background(self: &Arc<Self>, config: HistoryConfig) {
+        self.in_background(move |store| store.trim(config));
+    }
+
+    fn in_background(
+        self: &Arc<Self>,
+        work: impl FnOnce(&Self) -> Result<(), HistoryError> + Send + 'static,
+    ) {
         let store = Arc::clone(self);
         drop(tokio::task::spawn_blocking(move || {
-            if let Err(error) = store.record(config, capture) {
+            if let Err(error) = work(&store) {
                 tracing::warn!(%error, "the history could not be written");
             }
         }));
@@ -315,6 +344,11 @@ impl Store {
         }
         written.map_err(io)
     }
+}
+
+fn drop_oldest(entries: &mut Vec<Entry>, limit: usize) {
+    let surplus = entries.len().saturating_sub(limit);
+    entries.drain(..surplus);
 }
 
 fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -555,6 +589,27 @@ mod tests {
             ["e"],
             "a lower limit applies on the next write"
         );
+    }
+
+    #[test]
+    fn a_lowered_limit_trims_at_once_but_a_switched_off_history_keeps_everything() {
+        let dir = TempDir::new("trim");
+        let store = Store::at(dir.file());
+        store.trim(config(r#"{"limit": 1}"#)).unwrap();
+        assert!(!dir.0.exists(), "trimming nothing creates nothing");
+        for text in ["a", "b", "c", "d"] {
+            store
+                .record(HistoryConfig::default(), capture(text))
+                .unwrap();
+        }
+        store.trim(config(r#"{"limit": 10}"#)).unwrap();
+        assert_eq!(texts(&store), ["d", "c", "b", "a"], "within the limit");
+        store
+            .trim(config(r#"{"enabled": false, "limit": 1}"#))
+            .unwrap();
+        assert_eq!(texts(&store), ["d", "c", "b", "a"], "off deletes nothing");
+        store.trim(config(r#"{"limit": 2}"#)).unwrap();
+        assert_eq!(texts(&store), ["d", "c"]);
     }
 
     #[test]
