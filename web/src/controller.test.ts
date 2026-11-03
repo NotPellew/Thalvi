@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import { Controller } from "./controller.ts";
 import { displayState, UNREACHABLE_NOTICE } from "./session.ts";
 
-const VOICE_ON = 'send {"type":"voice","on":true}';
-const VOICE_OFF = 'send {"type":"voice","on":false}';
+const INPUT_MIC = 'send {"type":"input","source":"mic"}';
+const INPUT_TEXT = 'send {"type":"input","source":"text"}';
+const AUDIO_ON = 'send {"type":"reply_audio","on":true}';
+const AUDIO_OFF = 'send {"type":"reply_audio","on":false}';
 
 function setup() {
   const calls: string[] = [];
@@ -45,7 +47,7 @@ describe("Controller", () => {
   it("shows Starting from the voice tap until the server reports listening", () => {
     const { controller, calls, server, shown } = online();
     controller.setVoice(true);
-    expect(calls).toEqual([VOICE_ON]);
+    expect(calls).toEqual([INPUT_MIC, AUDIO_ON]);
     expect(shown()).toBe("starting");
     server({ type: "state", state: "starting" });
     expect(shown()).toBe("starting");
@@ -113,7 +115,7 @@ describe("Controller", () => {
     calls.length = 0;
 
     controller.setVoice(false);
-    expect(calls).toEqual([VOICE_OFF, "flush"]);
+    expect(calls).toEqual([INPUT_TEXT, AUDIO_OFF, "flush"]);
     expect(shown()).toBe("thinking");
     expect(controller.state.playing).toBe(false);
     expect(controller.state.partial).toBe("");
@@ -124,7 +126,7 @@ describe("Controller", () => {
     expect(shown()).toBe("idle");
   });
 
-  it("tears voice down without telling the server when the server turns it off after a fatal error", () => {
+  it("tears voice down and mutes reply audio when the server falls back to text input after a fatal error", () => {
     const { controller, calls, server, shown } = online();
     controller.setVoice(true);
     server({ type: "state", state: "starting" });
@@ -132,10 +134,10 @@ describe("Controller", () => {
     calls.length = 0;
 
     server({ type: "error", message: "The speech service refused the connection." });
-    server({ type: "voice", on: false });
+    server({ type: "input", source: "text", ready: true });
     server({ type: "state", state: "idle" });
 
-    expect(calls).toEqual(["flush", "release"]);
+    expect(calls).toEqual(["flush", "release", AUDIO_OFF]);
     expect(controller.state.voice).toBe(false);
     expect(controller.state.playing).toBe(false);
     expect(shown()).toBe("idle");
@@ -309,12 +311,26 @@ describe("Controller", () => {
         { role: "assistant", text: "Eighty-four." },
       ],
     });
-    expect(calls.slice(2)).toEqual([VOICE_ON, "remember s9"]);
+    expect(calls.slice(2)).toEqual([INPUT_MIC, AUDIO_ON, "remember s9"]);
     expect(controller.state.turns.map((turn) => turn.text)).toEqual(["what's twelve times seven?", "Eighty-four."]);
 
     controller.switchTo(null);
     expect(calls.at(-1)).toBe("connect null");
     expect(controller.state.turns).toEqual([]);
+  });
+
+  it("ignores input readiness updates and a text fallback it already acted on", () => {
+    const { controller, calls, server } = online();
+    controller.setVoice(true);
+    calls.length = 0;
+    server({ type: "input", source: "mic", ready: false });
+    server({ type: "input", source: "mic", ready: true });
+    expect(controller.state.voice).toBe(true);
+
+    controller.setVoice(false);
+    calls.length = 0;
+    server({ type: "input", source: "text", ready: true });
+    expect(calls).toEqual([]);
   });
 
   it("shows Reconnecting when the link drops, then re-enables voice on the new connection", () => {
@@ -329,7 +345,7 @@ describe("Controller", () => {
     expect(calls).toEqual(["flush"]);
 
     controller.opened();
-    expect(calls).toEqual(["flush", VOICE_ON]);
+    expect(calls).toEqual(["flush", INPUT_MIC, AUDIO_ON]);
     expect(shown()).toBe("starting");
     expect(controller.state.notice).toBeNull();
   });
@@ -359,7 +375,7 @@ describe("Controller", () => {
     controller.setVoice(false, "The microphone stopped working.");
     expect(controller.state.voice).toBe(false);
     expect(controller.state.notice).toBe("The microphone stopped working.");
-    expect(calls).toEqual([VOICE_ON, VOICE_OFF, "flush"]);
+    expect(calls).toEqual([INPUT_MIC, AUDIO_ON, INPUT_TEXT, AUDIO_OFF, "flush"]);
   });
 
   it("ignores unknown and malformed messages", () => {

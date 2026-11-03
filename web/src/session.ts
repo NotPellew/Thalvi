@@ -108,8 +108,8 @@ function reduceServer(s: SessionState, m: ServerMessage): SessionState {
           : [...s.turns, { role: "assistant" as const, text: m.text }];
       return { ...s, turns, replyOpen: true };
     }
-    case "voice":
-      return { ...s, voice: false, playing: false, partial: "" };
+    case "input":
+      return m.source === "text" ? { ...s, voice: false, playing: false, partial: "" } : s;
     case "interrupted":
     case "reply_end":
       return { ...s, replyOpen: false };
