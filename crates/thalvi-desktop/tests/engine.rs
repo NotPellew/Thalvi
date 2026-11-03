@@ -11,7 +11,7 @@ use serde_json::json;
 use thalvi_desktop::audio::{AudioError, InputGate};
 use thalvi_desktop::capture::{CaptureRequest, CaptureRoute};
 use thalvi_desktop::config::DesktopConfig;
-use thalvi_desktop::cues::Cue;
+use thalvi_desktop::cues::{Cue, CueTiming};
 use thalvi_desktop::engine::fakes::{
     CueControl, CueLog, FakeCuePlayer, FakeFrames, FakeWake, FrameFeed, WakeControl,
 };
@@ -2221,6 +2221,237 @@ async fn the_capture_limits_still_end_a_capture_whose_recognizer_stopped_taking_
                 assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel), "{name}");
                 assert!(rig.gate.is_enabled(), "{name}");
             }
+        })
+        .await;
+}
+
+/// What the user does in a recorded run of cues.
+#[derive(Clone, Copy)]
+enum Run {
+    /// Wake, an ending, the user continuing, a second ending, and its acceptance.
+    Dictation,
+    /// Wake, then the recognizer fails.
+    Failure,
+}
+
+/// The `desktop_*cue` metric lines of `run`, in order, with every kind recorded.
+async fn cue_lines(name: &str, timing: CueTiming, run: Run) -> Vec<serde_json::Value> {
+    let dir = record_dir(name);
+    let all = RecordKinds {
+        metrics: true,
+        text: true,
+        audio: true,
+    };
+    let (mut rig, engine, frames) = Rig::recording("{}", Recorder::in_dir(all, &dir).unwrap());
+    rig.cues.set_timing(timing);
+    let task = capture_task(engine, frames);
+    match run {
+        Run::Dictation => {
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello submit").await;
+            rig.feed_until(1500, Kind::Quiet).await;
+            rig.partial("more words").await;
+            rig.feed_until(3000, Kind::Quiet).await;
+            rig.finals("more words submit").await;
+            rig.feed_until(5499, Kind::Quiet).await;
+            rig.at(5500).await;
+        }
+        Run::Failure => {
+            rig.open().await;
+            rig.server
+                .fail("Thalvi could not reach speech recognition.");
+            settle().await;
+        }
+    }
+    finished(task).await;
+    read_lines(&dir.join("metrics.jsonl"))
+        .into_iter()
+        .filter(|line| line["cue"].is_string())
+        .collect()
+}
+
+fn cue_names(lines: &[serde_json::Value]) -> Vec<&str> {
+    lines
+        .iter()
+        .map(|line| line["cue"].as_str().unwrap())
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_cue_records_when_it_started_when_it_is_audible_and_what_the_user_waited() {
+    LocalSet::new()
+        .run_until(async {
+            let timing = CueTiming {
+                start: ms(40),
+                output: Some(ms(15)),
+            };
+            let mut lines = cue_lines("cue-timing-dictation", timing, Run::Dictation).await;
+            lines.extend(cue_lines("cue-timing-failure", timing, Run::Failure).await);
+            let mut kinds = cue_names(&lines);
+            kinds.sort_unstable();
+            kinds.dedup();
+            assert_eq!(
+                kinds,
+                ["accepted", "cancelled", "error", "provisional", "wake"]
+            );
+            for line in &lines {
+                let cue = line["cue"].as_str().unwrap();
+                let field = |key: &str| {
+                    line[key]
+                        .as_f64()
+                        .unwrap_or_else(|| panic!("{cue}: {key} missing from {line}"))
+                };
+                assert!((field("start_ms") - 40.0).abs() < 1e-6, "{cue}");
+                assert!((field("output_ms") - 15.0).abs() < 1e-6, "{cue}");
+                assert!((field("audible_ms") - 55.0).abs() < 1e-6, "{cue}");
+                assert!(field("start_ms") <= field("audible_ms"), "{cue}");
+                assert!(field("audible_ms") <= field("perceived_ms"), "{cue}");
+                assert!(
+                    field("perceived_ms") < field("duration_ms"),
+                    "{cue}: the wait ends when the cue starts, not when it drains"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_wake_cue_wait_is_counted_from_the_wake_word_not_from_the_cue_starting() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("cue-timing-wake");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, mut engine, mut frames) = Rig::recording("{}", recorder);
+            let task = tokio::task::spawn_local(async move {
+                engine.listen(&mut frames).await.unwrap();
+                // The caller takes 70 ms to get from the wake word to the capture.
+                tokio::time::sleep(ms(70)).await;
+                let outcome = engine.capture(&mut frames).await;
+                engine.finish().await;
+                outcome
+            });
+            rig.wake_word().await;
+            rig.server.ready();
+            rig.at(70).await;
+            rig.at(70 + 230).await;
+            rig.handle.cancel();
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+            let lines = read_lines(&dir.join("metrics.jsonl"));
+            let wake = lines
+                .iter()
+                .find(|line| line["event"] == "desktop_ready_cue")
+                .unwrap();
+            assert!((wake["start_ms"].as_f64().unwrap() - 25.0).abs() < 1e-6);
+            assert!((wake["audible_ms"].as_f64().unwrap() - 40.0).abs() < 1e-6);
+            assert!(
+                (wake["perceived_ms"].as_f64().unwrap() - 110.0).abs() < 1e-6,
+                "70 ms before the cue started plus 40 ms until it was audible: {wake}"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_device_that_reports_no_delay_leaves_output_empty_and_a_failed_cue_has_no_timing() {
+    LocalSet::new()
+        .run_until(async {
+            let silent = CueTiming {
+                start: ms(30),
+                output: None,
+            };
+            let lines = cue_lines("cue-timing-silent", silent, Run::Dictation).await;
+            let wake = &lines[0];
+            assert_eq!(wake["cue"], "wake");
+            assert!(wake["output_ms"].is_null() && wake.get("output_ms").is_some());
+            assert!((wake["audible_ms"].as_f64().unwrap() - 30.0).abs() < 1e-6);
+
+            let dir = record_dir("cue-timing-failed");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+            rig.cues.fail(Cue::Wake);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.handle.cancel();
+            finished(task).await;
+            let lines = read_lines(&dir.join("metrics.jsonl"));
+            let wake = lines
+                .iter()
+                .find(|line| line["event"] == "desktop_ready_cue")
+                .unwrap();
+            assert_eq!(wake["outcome"], "error");
+            for key in ["start_ms", "output_ms", "audible_ms", "perceived_ms"] {
+                assert!(wake.get(key).is_none(), "{key} on a cue that failed");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cue_lines_hold_timings_only_never_what_was_said_or_heard() {
+    LocalSet::new()
+        .run_until(async {
+            let timing = CueTiming {
+                start: ms(40),
+                output: Some(ms(15)),
+            };
+            let lines = cue_lines("cue-timing-privacy", timing, Run::Dictation).await;
+            assert_eq!(
+                cue_names(&lines),
+                [
+                    "wake",
+                    "provisional",
+                    "cancelled",
+                    "provisional",
+                    "accepted"
+                ]
+            );
+            for line in &lines {
+                let mut keys: Vec<&str> = line
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                keys.sort_unstable();
+                assert_eq!(
+                    keys,
+                    [
+                        "audible_ms",
+                        "cue",
+                        "duration_ms",
+                        "event",
+                        "outcome",
+                        "output_ms",
+                        "perceived_ms",
+                        "start_ms",
+                        "ts_ms"
+                    ],
+                    "{line}"
+                );
+                assert!(!line.to_string().contains("more words"), "{line}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cue_timings_are_not_written_when_metrics_are_off() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("cue-timing-off");
+            let text_only = RecordKinds {
+                metrics: false,
+                text: true,
+                audio: false,
+            };
+            let recorder = Recorder::in_dir(text_only, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+            let task = capture_task(engine, frames);
+            live_words(&mut rig).await;
+            finished(task).await;
+            assert!(dir.join("recordings").exists(), "text was recorded");
+            assert!(!dir.join("metrics.jsonl").exists());
         })
         .await;
 }

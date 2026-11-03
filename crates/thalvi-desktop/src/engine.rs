@@ -24,7 +24,7 @@ use crate::capture::{
     Endings, FinalStep, QuietWindow, has_words,
 };
 use crate::config::DesktopConfig;
-use crate::cues::{Cue, CueEngine, CueError, Cues};
+use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues};
 use crate::frame::{FRAME_SAMPLES, Frame};
 use crate::metrics::{Event, Recorder};
 use crate::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
@@ -90,8 +90,9 @@ impl WakeDetector for WakeEngine {
 
 /// Plays one cue to its end.
 pub trait CuePlayer {
-    /// Resolves when the cue has finished or failed; dropping the future cuts the cue short.
-    fn play(&self, cue: Cue) -> impl Future<Output = Result<(), CueError>>;
+    /// Resolves when the cue has finished or failed; dropping the future cuts the cue short. The
+    /// timing is none when the cue never reached the output.
+    fn play(&self, cue: Cue) -> impl Future<Output = Result<Option<CueTiming>, CueError>>;
 }
 
 /// Plays cues on the default output through [`CueEngine`].
@@ -117,10 +118,11 @@ impl Drop for StopOnDrop {
 }
 
 impl CuePlayer for CpalCuePlayer {
-    async fn play(&self, cue: Cue) -> Result<(), CueError> {
+    async fn play(&self, cue: Cue) -> Result<Option<CueTiming>, CueError> {
+        let called = std::time::Instant::now();
         let engine = Arc::clone(&self.0);
         let mut stop = StopOnDrop(Some(Arc::clone(&self.0)));
-        let played = tokio::task::spawn_blocking(move || engine.play(cue)).await;
+        let played = tokio::task::spawn_blocking(move || engine.play(cue, called)).await;
         stop.0 = None;
         // A panic in the playback thread leaves the output in an unknown state.
         played.unwrap_or(Err(CueError::Stalled))
@@ -307,6 +309,8 @@ pub struct Engine<R, W, C> {
     level_frames: u64,
     level_activity: bool,
     ambiguous: bool,
+    /// When the wake word that opened the next capture was heard.
+    woke: Option<Instant>,
     /// The latest frames scored while listening; filled only while audio is recorded.
     wake_clip: VecDeque<Frame>,
 }
@@ -316,7 +320,9 @@ struct CueEnd {
     cue: Cue,
     played: bool,
     took: Duration,
-    result: Result<(), CueError>,
+    /// From the event that called for the cue until it started playing.
+    waited: Duration,
+    result: Result<Option<CueTiming>, CueError>,
 }
 
 /// One capture in progress, after the recognizer is ready.
@@ -387,6 +393,10 @@ async fn until(at: Option<Instant>) {
     }
 }
 
+fn millis(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
 fn cue_name(cue: Cue) -> &'static str {
     match cue {
         Cue::Wake => "wake",
@@ -447,6 +457,7 @@ where
             level_frames: 0,
             level_activity: false,
             ambiguous: false,
+            woke: None,
             wake_clip: VecDeque::new(),
         };
         (engine, handle)
@@ -529,6 +540,7 @@ where
                     self.clip_wake("capture", &wake);
                     self.gate.set_enabled(false);
                     self.level.send_replace(0.0);
+                    self.woke = Some(Instant::now());
                     return Ok(WakeTrigger::Capture);
                 }
                 Some(WakeEvent::Conversation) => {
@@ -591,12 +603,13 @@ where
         self.cancel.borrow_and_update();
         self.set_state(EngineState::StartingCapture);
         let started = Instant::now();
-        let outcome = match self.start(frames).await {
+        let woke = self.woke.take().unwrap_or(started);
+        let outcome = match self.start(frames, woke).await {
             Ok((mut live, backlog)) => {
-                let done = self.drive(frames, &mut live, backlog).await;
-                self.conclude(done, Some(live)).await
+                let (done, decided) = self.drive(frames, &mut live, backlog).await;
+                self.conclude(done, decided, Some(live)).await
             }
-            Err(done) => self.conclude(done, None).await,
+            Err((done, decided)) => self.conclude(done, decided, None).await,
         };
         self.gate.set_enabled(true);
         self.level.send_replace(0.0);
@@ -635,17 +648,19 @@ where
         });
     }
 
-    /// A future that plays `cue` unless it is switched off.
-    fn cue(&self, cue: Cue) -> LocalBoxFuture<'static, CueEnd> {
+    /// A future that plays `cue` unless it is switched off; `trigger` is when the event that
+    /// called for the cue happened.
+    fn cue(&self, cue: Cue, trigger: Instant) -> LocalBoxFuture<'static, CueEnd> {
         let player = Rc::clone(&self.cues);
         let on = self.cues_on.enabled(cue);
         async move {
             let started = Instant::now();
-            let result = if on { player.play(cue).await } else { Ok(()) };
+            let result = if on { player.play(cue).await } else { Ok(None) };
             CueEnd {
                 cue,
                 played: on,
                 took: started.elapsed(),
+                waited: started.saturating_duration_since(trigger),
                 result,
             }
         }
@@ -657,12 +672,15 @@ where
             return;
         }
         let outcome = if end.result.is_ok() { "ok" } else { "error" };
-        self.recorder.metric(
-            event,
-            outcome,
-            Some(end.took),
-            json!({"cue": cue_name(end.cue)}),
-        );
+        let mut fields = json!({"cue": cue_name(end.cue)});
+        // `duration_ms` is play to drained; these tell our code, the device and the user's wait apart.
+        if let Ok(Some(timing)) = &end.result {
+            fields["start_ms"] = json!(millis(timing.start));
+            fields["output_ms"] = json!(timing.output.map(millis));
+            fields["audible_ms"] = json!(millis(timing.audible()));
+            fields["perceived_ms"] = json!(millis(end.waited + timing.audible()));
+        }
+        self.recorder.metric(event, outcome, Some(end.took), fields);
     }
 
     /// Reports a cue that failed to play; the capture goes on without it.
@@ -673,9 +691,9 @@ where
     }
 
     /// Plays the cue that ends a capture; false when the user cancelled while it played.
-    async fn end_cue(&mut self, cue: Cue) -> bool {
+    async fn end_cue(&mut self, cue: Cue, decided: Instant) -> bool {
         let started = Instant::now();
-        let played = self.cue(cue);
+        let played = self.cue(cue, decided);
         tokio::select! {
             biased;
             _ = self.cancel.changed() => {
@@ -700,7 +718,8 @@ where
     async fn start(
         &mut self,
         frames: &mut impl FrameSource,
-    ) -> Result<(Live<R::Session>, Vec<Frame>), Done> {
+        woke: Instant,
+    ) -> Result<(Live<R::Session>, Vec<Frame>), (Done, Instant)> {
         let started = Instant::now();
         let deadline = started + READY_TIMEOUT;
         let recognizer = &self.recognizer;
@@ -708,7 +727,7 @@ where
             let at = Instant::now();
             (recognizer.connect().await, at.elapsed())
         });
-        let mut wake_cue = self.cue(Cue::Wake);
+        let mut wake_cue = self.cue(Cue::Wake, woke);
         let mut session = None;
         let mut cue_ended = false;
         let mut backlog = Vec::new();
@@ -744,6 +763,7 @@ where
                 break None;
             }
         };
+        let decided = Instant::now();
         self.recorder.metric(
             Event::TranscriptionReady,
             connection.0,
@@ -754,10 +774,10 @@ where
             if let Some(session) = session {
                 session.cancel().await;
             }
-            return Err(done);
+            return Err((done, decided));
         }
         let Some(session) = session else {
-            return Err(Done::Failed(CaptureError::NotReady));
+            return Err((Done::Failed(CaptureError::NotReady), decided));
         };
         let live = Live {
             session,
@@ -785,10 +805,10 @@ where
         frames: &mut impl FrameSource,
         live: &mut Live<R::Session>,
         backlog: Vec<Frame>,
-    ) -> Done {
+    ) -> (Done, Instant) {
         for frame in backlog {
             if let Err(stop) = self.on_frame(live, &frame).await {
-                return stop.into();
+                return (stop.into(), Instant::now());
             }
         }
         loop {
@@ -839,13 +859,13 @@ where
                 Step::TooLong => Some(Done::Failed(CaptureError::TooLong(self.limits.max()))),
             };
             if let Some(done) = done {
-                return done;
+                return (done, Instant::now());
             }
         }
     }
 
     fn queue_cue(&self, live: &Live<R::Session>, cue: Cue) {
-        live.cues.push(self.cue(cue));
+        live.cues.push(self.cue(cue, Instant::now()));
     }
 
     fn on_partial(&self, live: &mut Live<R::Session>, text: String) {
@@ -985,7 +1005,12 @@ where
     }
 
     /// Plays the cue that ends the capture, releases the recognizer and settles the outcome.
-    async fn conclude(&mut self, done: Done, live: Option<Live<R::Session>>) -> CaptureOutcome {
+    async fn conclude(
+        &mut self,
+        done: Done,
+        decided: Instant,
+        live: Option<Live<R::Session>>,
+    ) -> CaptureOutcome {
         let (session, sent, scratched, recoverable_text) = match live {
             // Dropping the rest stops any cue still playing.
             Some(live) => (
@@ -1008,12 +1033,12 @@ where
             }
             Done::NeverMind => {
                 self.gate.set_enabled(false);
-                self.end_with(Cue::Cancelled, session, false).await;
+                self.end_with(Cue::Cancelled, decided, session, false).await;
                 CaptureOutcome::Cancelled
             }
             Done::Failed(error) => {
                 self.gate.set_enabled(false);
-                self.end_with(Cue::Error, session, false).await;
+                self.end_with(Cue::Error, decided, session, false).await;
                 CaptureOutcome::Failed {
                     error,
                     recoverable_text,
@@ -1021,7 +1046,7 @@ where
             }
             Done::Accepted(request) => {
                 self.gate.set_enabled(false);
-                if self.end_with(Cue::Accepted, session, true).await {
+                if self.end_with(Cue::Accepted, decided, session, true).await {
                     self.reconcile(request, &sent, scratched).await
                 } else {
                     CaptureOutcome::Cancelled
@@ -1043,7 +1068,13 @@ where
 
     /// Plays `cue` while releasing `session`: closed when the capture was accepted, cancelled
     /// otherwise. False when the user cancelled while the cue played.
-    async fn end_with(&mut self, cue: Cue, session: Option<R::Session>, close: bool) -> bool {
+    async fn end_with(
+        &mut self,
+        cue: Cue,
+        decided: Instant,
+        session: Option<R::Session>,
+        close: bool,
+    ) -> bool {
         let release = async {
             match session {
                 Some(session) if close => session.close().await,
@@ -1051,7 +1082,7 @@ where
                 None => {}
             }
         };
-        let (completed, ()) = tokio::join!(self.end_cue(cue), release);
+        let (completed, ()) = tokio::join!(self.end_cue(cue, decided), release);
         completed
     }
 
