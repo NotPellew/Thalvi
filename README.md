@@ -1,26 +1,33 @@
 # Thalvi
 
 A voice assistant for the moments when typing isn't an option: hands in the
-dough, eyes on the road, arms full of groceries. Talk to it, interrupt it, show
-it what you're looking at, and it works through the problem with you.
+dough, eyes on the road, arms full of groceries. Talk to it, interrupt it, and
+it works through the problem with you.
 
-- **Cooking:** show it your fridge, pick a recipe together, and get walked
-  through it step by step with timers.
+- **Cooking:** pick a recipe together and get walked through it step by step.
 - **On the road:** a briefing on the topics you care about, then follow-up
   questions in plain conversation.
-- **Messages on the go:** hear what came in, dictate a reply, and confirm it
-  out loud before anything is sent.
+- **Messages on the go:** dictate a reply and confirm it out loud before
+  anything is sent.
 
-Built to self-host. By default it runs on Meta's models: Muse Voice Transcribe
-for live speech, Muse Spark for reasoning and tool use, SAM 3.1 for pointing at
-things in the camera view. Speech runs locally: a Qwen3-TTS clone of Kokoro's
-`af_heart` voice on a GPU, or Kokoro itself on CPU. Each model is an endpoint
-in `.env`, so any server that speaks the same protocol can replace it: Ollama
-or vLLM for the language model, for example.
+Thalvi has two parts:
 
-## Run it
+- **The server and its web client** hold the spoken conversation. Open it in a
+  browser, on your phone for example.
+- **The desktop app** (Hyprland and Windows) listens for "Hey Thalvi" and
+  types what you dictate into the window you are using.
 
-1. Start speech (details in [Speech](#speech)). On an NVIDIA GPU with 9 GB
+It is built to self-host. By default it uses Meta's Muse Voice Transcribe for
+live speech and Muse Spark for reasoning and tool use, and speaks with a voice
+engine on your own machine. Each model is an endpoint in `.env`, so any
+compatible server can replace it, such as Ollama or vLLM. Camera input (SAM
+3.1) is not built yet.
+
+## Server and web client
+
+### Run it
+
+1. Start a speech engine (see [Speech](#speech)). On an NVIDIA GPU with 9 GB
    of free VRAM:
 
    ```sh
@@ -28,28 +35,68 @@ or vLLM for the language model, for example.
    docker compose --profile vllm-omni up -d --wait
    ```
 
-   Without one, `docker compose --profile kokoro up -d --wait`.
-2. `cp .env.example .env` and fill in the API keys and the speech lines for the
-   engine you started.
+   Without one: `docker compose --profile kokoro up -d --wait`.
+2. `cp .env.example .env`, then fill in the API keys and the speech lines for
+   the engine you started. `.env.example` describes every setting.
 3. `npm ci --prefix web && npm run build --prefix web`, then `cargo run --release`.
 4. `tailscale serve --bg 8080` and open the printed HTTPS address on your phone.
 
-## Speech
+There is no authentication: anyone who can reach the server can read and
+delete every conversation, so keep it on your tailnet.
 
-`compose.yaml` runs the speech server in Docker, with pinned images, ports on
-127.0.0.1 and memory limits. Weights and registered voices live under
-`$SPEECH_DIR` (default `~/thalvi-tts`). `--wait` returns once the server answers
-its health check. Thalvi reads `TTS_API`, `TTS_BASE_URL`, `TTS_VOICE` and, for
-`openai`, `TTS_MODEL` from `.env`; to switch engine, change those lines and
-restart Thalvi.
+### Use it
+
+**Voice** turns the microphone on and off. **Speak replies** chooses whether
+replies are spoken; it follows Voice, and you can flip it on its own to type and
+listen, or to talk and read. Talking while Thalvi speaks interrupts it. The
+**1×** chip sets the playback speed, and the **Voice** chip picks the voice (see
+[Voices](#voices)).
+
+An error stays on screen until you dismiss it or it is fixed, and **Copy** puts
+its text on the clipboard.
+
+With `LLM_AUDIO_INPUT=on`, the language model hears each spoken turn instead of
+reading its transcript: the turn's audio, padded by 300 ms on each side, goes
+as an OpenAI `input_audio` WAV part, so the model must accept those. Captions,
+the saved conversation and earlier turns still use the transcript, and typed
+turns are always text.
+
+### Conversations
+
+Every conversation is saved under `$THALVI_DATA_DIR/sessions/` (default
+`data/sessions/`, one JSON file each) until you delete it from **Conversations**.
+A reload or a dropped connection rejoins the same conversation. Opening a
+conversation that is live on another device shows it read-only; **Continue
+here** moves it to this device.
+
+- **Titles** start as your first line. With `BG_LLM_BASE_URL`, `BG_LLM_MODEL`
+  and `BG_LLM_API_KEY` set (all three or none), a background model rewrites each
+  title in three to six words after the first reply. A title you typed is never
+  overwritten.
+- **History search:** Thalvi can call the read-only `search_history` tool for
+  short, timestamped matches in past conversations. The app shows **Working**
+  while it runs; **Task steps** opens the details.
+- **Retirement:** with `THALVI_RETIRE_DAYS=90`, conversations inactive for 90
+  days are replaced by a summary on startup and then daily. Lasting preferences
+  and facts go to `$THALVI_DATA_DIR/learnings.json`, which you can read and
+  edit under **Conversations → Learnings**. A failed model call or write leaves
+  the transcript untouched. Unset or `off` (the default) changes nothing.
+
+### Speech
+
+`compose.yaml` runs the engine in Docker on 127.0.0.1, with weights and voices
+under `$SPEECH_DIR` (default `~/thalvi-tts`). To switch engine, change the
+`TTS_*` lines in `.env` and restart Thalvi.
 
 | Engine | First audio | Cost | Needs |
 | --- | --- | --- | --- |
-| Kokoro | ~0.15 s for a short sentence, ~1 s for a long one | CPU, ~1 GB RAM | nothing |
+| Kokoro | ~0.15 s short sentence, ~1 s long one | CPU, ~1 GB RAM | nothing |
 | Qwen3-TTS clone of `af_heart`, vLLM-Omni | ~50 ms | ~8 GB VRAM, ~8 GB RAM, ~2.5 min to start | NVIDIA GPU, Ampere or newer |
-| Qwen3-TTS clone of `af_heart`, qwentts.cpp | ~60 ms (RTX 2080), ~4.8× real time | ~4 GB VRAM, ~3 GB RAM, starts in seconds | NVIDIA GPU, including pre-Ampere, and the CUDA toolkit to build |
+| Qwen3-TTS clone of `af_heart`, qwentts.cpp | ~60 ms (RTX 2080), ~4.8× real time | ~4 GB VRAM, ~3 GB RAM, starts in seconds | any NVIDIA GPU, CUDA toolkit to build |
 
-**Kokoro** (`--profile kokoro`):
+**Kokoro** (`--profile kokoro`) takes any
+[Kokoro voice](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md)
+as `TTS_VOICE`.
 
 ```sh
 TTS_API=openai
@@ -58,12 +105,9 @@ TTS_MODEL=kokoro
 TTS_VOICE=af_heart
 ```
 
-Any [Kokoro voice](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md)
-name works for `TTS_VOICE`.
-
 **Qwen3-TTS on vLLM-Omni** (`--profile vllm-omni`). The first start also runs
-Kokoro, which reads a reference line for the `af_heart` clone and then stays up
-as the CPU fallback.
+Kokoro, which reads the reference line for the `af_heart` clone and then stays
+up as the CPU fallback.
 
 ```sh
 TTS_API=openai
@@ -72,29 +116,26 @@ TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-Base
 TTS_VOICE=af_heart
 ```
 
-To speak in another voice, register a clip of it (a few seconds of clean
-speech) with its transcript, then put the name in `TTS_VOICE`:
+To use another voice, register a few seconds of clean speech with its
+transcript, then put the name in `TTS_VOICE`:
 
 ```sh
 curl 127.0.0.1:8091/v1/audio/voices -F audio_sample=@me.wav -F consent=mine \
   -F name=me -F "ref_text=What the clip says"
 ```
 
-A misspelled voice name fails with a confusing "does not support
-task_type='CustomVoice'" error. Qwen3's built-in presets (such as `vivian`)
-are not in the Base checkpoint; they need `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`
-in its place (download it, then change the model path and `--served-model-name`
-in `compose.yaml` and `TTS_MODEL`).
+A misspelled voice fails with "does not support task_type='CustomVoice'".
+Qwen3's built-in presets (such as `vivian`) need
+`Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` instead of the Base checkpoint: download
+it, then change the model path and `--served-model-name` in `compose.yaml` and
+`TTS_MODEL`.
 
-**Qwen3-TTS on older GPUs** (before Ampere, such as an RTX 2080, which
-vLLM-Omni does not run on, but any NVIDIA GPU works) runs
-[qwentts.cpp](https://github.com/ServeurpersoCom/qwentts.cpp), a C++ port of
-Qwen3-TTS, as a systemd user service. The script needs no root: it builds the
-server from a pinned commit of [a fork](https://github.com/NotPellew/qwentts.cpp)
-that adds Thalvi's framed streaming route (offered upstream in
-[#45](https://github.com/ServeurpersoCom/qwentts.cpp/pull/45)) and a startup
-voice, downloads the checksummed models, has Kokoro read the `af_heart`
-reference clip once, and writes the unit.
+**Qwen3-TTS on older GPUs** (before Ampere, such as an RTX 2080) runs
+[qwentts.cpp](https://github.com/ServeurpersoCom/qwentts.cpp) as a systemd user
+service, built without root from a pinned
+[fork](https://github.com/NotPellew/qwentts.cpp) that adds Thalvi's streaming
+route (offered upstream in
+[#45](https://github.com/ServeurpersoCom/qwentts.cpp/pull/45)).
 
 ```sh
 docker compose --profile kokoro up -d --wait   # or set KOKORO_URL to a running Kokoro
@@ -102,12 +143,11 @@ speech/qwentts.sh
 systemctl --user enable --now thalvi-qwentts
 ```
 
-It needs `git`, `cmake`, a C++ compiler and the CUDA toolkit (`nvcc` on
-`PATH`). Set `CUDA_ARCH` to build for a GPU other than the one ggml detects
-(`75` for an RTX 2080); `SPEECH_DIR`, `HOST` and `PORT` (default `8011`) change
-where it lives and listens. The server has no authentication, so a `HOST` other
-than `127.0.0.1` exposes it to that network. Rerun the script to resume after an
-error or to upgrade, then restart the service. It prints the lines for `.env`:
+It needs `git`, `cmake`, a C++ compiler and `nvcc`. `CUDA_ARCH` targets
+another GPU than the detected one (`75` for an RTX 2080); `SPEECH_DIR`, `HOST`
+and `PORT` (default `8011`) set where it lives and listens. It has no
+authentication, so keep `HOST` at `127.0.0.1`. Rerun the script to resume or
+upgrade, then restart the service. It prints the `.env` lines:
 
 ```sh
 TTS_API=qwen3
@@ -115,72 +155,37 @@ TTS_BASE_URL=http://127.0.0.1:8011/v1
 TTS_VOICE=af_heart
 ```
 
-**Choosing a voice in the app.** `TTS_VOICES` lists the voices the app offers,
-comma-separated; `TTS_VOICE` stays the default and is always offered first.
-Names must be ones the running engine knows (see above). Tap **Voice** in the
-header to open the picker, which starts closed. **Preview** speaks a short
-phrase in the selected voice, only when tapped, and plays it on that device;
-it neither interrupts a reply nor turns voice on. **Apply** saves the choice in
-that browser only (other devices keep their own) and sends it to the live
-conversation, and again each time the connection reopens. A saved voice the
-server no longer offers falls back to `TTS_VOICE`. Previews are timed in the
-metrics (`voice_preview` events, `THALVI_RECORD=metrics`).
+### Voices
+
+`TTS_VOICES` lists the voices the app offers, comma-separated; `TTS_VOICE` is
+the default and always comes first. The names must be ones the running engine
+knows.
 
 ```sh
 TTS_VOICE=af_heart
 TTS_VOICES=af_heart,af_bella,sohee
 ```
 
-## Audio input
-
-Wake words, dictation into other windows and scripted actions are in the
-[desktop app](#desktop-app); the phone is conversation-only.
-
-With `LLM_AUDIO_INPUT=on` the language model hears a spoken turn instead of
-reading its transcript: the turn's audio, as recorded and padded by 300 ms on
-each side, is sent as an OpenAI `input_audio` WAV part with no text beside it.
-The model must accept such parts; the transcript still drives the captions,
-the saved conversation and earlier turns, which go to the model as text. Typed
-turns are always text. Recordings of replies (`THALVI_RECORD=metrics`) carry
-`input_audio_ms`, the length of the clip sent.
-
-## Conversations
-
-Every conversation is kept under `$THALVI_DATA_DIR/sessions/` (default
-`data/sessions/`, one JSON file each) until you delete it from the list in the
-app. A reload or a dropped connection rejoins the same conversation, and
-opening one that is live on another device moves it there. There is no
-authentication: anyone who can reach the server can list, read and delete
-every conversation, so keep it on your tailnet.
-
-Titles start as the first line you said. Set all three of `BG_LLM_BASE_URL`,
-`BG_LLM_MODEL` and `BG_LLM_API_KEY` (any Chat Completions endpoint, set
-together or not at all) and a background model rewrites each title in three to
-six words after the first reply, off the reply path. A title you typed is
-never overwritten.
-
-Thalvi can use the read-only `search_history` tool to find short, timestamped
-keyword matches in the current and past conversations. Tool results are data,
-not instructions. The app shows **Working** while a search runs; its optional
-**Task steps** section starts collapsed and opens only when you tap it.
-
-With `THALVI_RETIRE_DAYS=90`, inactive conversations older than 90 days are
-replaced by a model-written summary on startup and then once a day. Durable
-preferences and user facts are saved separately in
-`$THALVI_DATA_DIR/learnings.json`; open **Conversations**, then **Learnings**,
-to read or edit them. A failed model call or write leaves the full transcript
-untouched. Unset or `off` disables retirement completely, so no session is
-changed or deleted automatically.
+In the app, the **Voice** chip opens the picker. **Preview** speaks a short
+phrase on that device without interrupting a reply. **Apply** saves the choice
+in that browser only and uses it in the conversation from then on. A saved
+voice the server no longer offers falls back to `TTS_VOICE`.
 
 ## Desktop app
 
-A tray app for the desktop. Say "Hey Thalvi" in any window, then dictate. The
-text is typed into the window you were in when you ended with "paste that" (or
-"finish dictation"), or typed and sent with Enter on "submit". "Do that" runs a
-configured action such as opening a site or focusing an app, "scratch that"
-drops the last piece, and "never mind" drops the capture. A pill and live draft
-at the top of the screen show what it is doing and never take focus; the tray
-pauses, cancels and opens Settings, which edit the config file.
+Say "Hey Thalvi" in any window, dictate, then end with a phrase:
+
+| Say | Thalvi |
+| --- | --- |
+| "paste that" or "finish dictation" | types the text into the window you were in |
+| "submit" | types it and presses Enter |
+| "do that" | runs a configured action, such as opening a site or focusing an app |
+| "scratch that" | drops the last piece |
+| "never mind" | drops the whole capture |
+
+Delivered text is also put on the clipboard. An overlay at the top of the
+screen shows what Thalvi is doing and never takes focus. The tray pauses,
+cancels, copies the last error and opens Settings.
 
 | Desktop | Support |
 | --- | --- |
@@ -195,114 +200,110 @@ Download the latest `desktop-v*` release from
 is needed.
 
 - **Windows:** run `Thalvi_<version>_x64-setup.exe`. It installs for your user
-  only, into `%LOCALAPPDATA%\Programs\Thalvi` (apart from your data in
-  `%LOCALAPPDATA%\thalvi`), adds a Start-menu entry, and downloads WebView2 if
-  missing. Uninstall from Settings → Apps; your config and models stay.
-- **Linux:** `chmod +x Thalvi_<version>_amd64.AppImage`, then run it.
-  Install `hyprctl`, `wtype` and `wl-copy` (listed under Build from source). Update by replacing the
-  file; settings and models stay.
+  into `%LOCALAPPDATA%\Programs\Thalvi`, adds a Start menu entry, and downloads
+  WebView2 if missing. Uninstall from Settings → Apps; your config, models and
+  recordings stay.
+- **Linux:** install `wtype` and `wl-copy`, then
+  `chmod +x Thalvi_<version>_amd64.AppImage` and run it. Keep it on a path
+  without spaces. To update, replace the file; settings and models stay.
 
-Start it once; it lives in the tray. Starting it again opens Settings. On Linux
-the control commands below run the AppImage with that word:
-`Thalvi_<version>_amd64.AppImage toggle`.
+Start it once and it stays in the tray; starting it again opens Settings. The
+first start downloads the wake models. If Thalvi cannot start, for example
+because its config is broken, a message box names the problem and the file.
 
-**Settings → App → Start Thalvi when I log in** is off by default. It
-writes an XDG autostart entry (Linux) or a `Run` entry for your user (Windows)
-that starts Thalvi in the tray without opening Settings, and the switch shows
-what the system holds. Thalvi remembers the choice and puts the entry back each
-time it starts, so an upgrade or a moved AppImage is fixed by starting Thalvi
-once more (from its new place); turn the switch off before deleting the file.
-Keep the AppImage on a path without spaces: the login entry breaks on one.
-If you turned Thalvi off in the system's startup list, Thalvi leaves it off and
-says so there. Hyprland does not run
-XDG autostart by itself, so unless a session manager such as `uwsm` does, the row shows
-the `exec-once = <path> --login` line to add to `hyprland.conf` instead of a switch.
+### Speech recognition
 
-**Settings → App → Show Thalvi in the app menu** is off by default. For an
-AppImage it writes a menu entry and icon under `~/.local/share` and removes them when
-turned off; Thalvi rewrites it on each start, so a moved AppImage stays right. A
-package manager or the Windows installer owns the entry otherwise, and the row says so.
+By default the app streams your speech to the server's `/transcription` at
+`ws://127.0.0.1:8080` (Settings → Speech → Server address). To dictate without
+the server or a network, choose **On this computer** under Speech. The first
+use downloads about 650 MB; after that it works offline. Its text comes mostly
+without punctuation. Settings shows whether the model is downloaded and can
+download it, or you can point to your own model folder and check it before
+saving. The model is NVIDIA Nemotron Speech Streaming under the
+[NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/).
 
-If Thalvi cannot start, for example because the config is malformed, it says so in a
-message box when it was not started from a terminal.
+**Second-pass transcription** (Settings → Speech, off by default) sends each
+accepted capture again to the endpoint you set there. Turning it off keeps the
+endpoint and key.
+
+### Microphone
+
+Settings → Microphone has **Listening**, which pauses and resumes right away,
+and the saved device. To change the device, pause first, then choose and Save;
+listening stays paused until you resume it. **Active microphone** names the
+device actually open. If the saved device is missing, Thalvi reports it
+instead of using another one.
+
+### Start at login and app menu
+
+Settings → App → Startup, both off by default and applied right away:
+
+- **Start Thalvi when I log in** adds a login entry that starts Thalvi in the
+  tray. Thalvi remembers the choice and restores the entry each time it starts,
+  so an upgrade or a moved AppImage is fixed by starting it once. If you turn
+  Thalvi off in the system's startup list, it stays off. Hyprland runs login
+  entries only under a session manager such as `uwsm`; without one, the row
+  shows the `exec-once = … --login` line to add to `hyprland.conf`.
+- **Show Thalvi in the app menu** (AppImage) adds a menu entry and icon under
+  `~/.local/share`. On Windows the installer owns the Start menu entry.
+
+### Recordings
+
+Settings → App has a switch each for metrics, text and audio recordings, all
+off by default; Save applies them between captures. They stay on this computer.
+**Open folder** opens `recordings/` in the data folder (`~/.local/share/thalvi`
+on Linux, `%LOCALAPPDATA%\thalvi` on Windows):
+
+- `<date>/<time>/` per wake, in local time: `wake.wav` (about 2 s before the
+  wake), `speech.wav`, and `text.txt` with what was heard and what was
+  delivered.
+- `metrics.jsonl`: timing and outcome of each step, near misses of the wake
+  word, wakes that delivered nothing, and one summary line a minute for wake
+  detection.
+
+### Errors
+
+An error stays on the overlay until the next capture, in a short headline.
+Settings shows the full text with **Copy** and **Dismiss**. Copy, the tray's
+**Copy last error** and `thalvi-desktop copy-error` all copy the same report:
+the error, its technical cause, time, version, system and relevant settings,
+never API keys.
+
+### Commands and Hyprland
+
+`thalvi-desktop toggle`, `pause`, `resume`, `cancel` and `copy-error` control
+the running app (with the AppImage, run it with that word). `status` prints
+Waybar JSON. These commands work on Hyprland; Windows uses the tray. The
+examples in [`integrations/hyprland/`](integrations/hyprland/) add a Waybar
+microphone button (left click toggles listening without moving focus, right
+click opens Settings) and key bindings in `hyprland-binds.conf`, such as
+`bind = SUPER, E, exec, thalvi-desktop copy-error`. Pausing cancels the
+current capture and closes the microphone.
+
+### Config
+
+Settings edit `desktop.json` in `thalvi/` under the user config folder
+(`~/.config` on Linux, `%APPDATA%` on Windows); without one the defaults apply.
 
 ### Build from source
 
-Needs, besides Rust (`rust-toolchain.toml`) and Node (`.node-version`):
+Needs Rust (`rust-toolchain.toml`) and Node (`.node-version`), plus:
 
-- **Linux:** `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev` to build;
-  `hyprctl`, `wtype` and `wl-copy` to run.
-- **Windows:** the MSVC build tools. WebView2 ships with Windows 11.
+- **Linux:** `libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev`
+  to build; `wtype` and `wl-copy` to run.
+- **Windows:** the MSVC build tools.
 
 ```sh
 npm ci --prefix crates/thalvi-app/ui && npm run build --prefix crates/thalvi-app/ui
 cargo run --release -p thalvi-app   # or: cargo install --path crates/thalvi-app
 ```
 
-The first run downloads the wake models. The app streams to the server's
-`/transcription`, `ws://127.0.0.1:8080` unless `server` says otherwise. The
-config is `desktop.json` in `thalvi/` under the user config directory
-(`~/.config` on Linux, `%APPDATA%` on Windows); without one the defaults apply.
-Settings → App has a switch each for recording timings, dictated text and
-microphone audio on this computer; all are off until turned on, and Save applies
-a change between captures. Open folder shows `recordings/` in the app's data
-folder (`~/.local/share/thalvi` on Linux, `%LOCALAPPDATA%\thalvi` on Windows).
-Each wake has a folder named `<date>/<time>` in local time, holding `wake.wav`
-(about 2 s before the wake), `speech.wav` and `text.txt` (what was heard and
-what was handed to delivery), each when its switch is on. `metrics.jsonl` sits
-beside the folders. For wake scoring it holds a line for each near miss (a
-score that rose to 0.15 or more and fell back below its threshold), a line for
-each wake that delivered nothing, with the reason and the wake's folder, and
-one line a minute with the count, p50, p95 and maximum scoring time, the seconds
-the microphone heard sound and quiet in 2 s steps, and how often it switched
-between them.
-
-On Hyprland, `thalvi-desktop toggle`, `pause`, `resume` and `cancel` control
-the running app; they report an error when it is not running. `status` prints
-Waybar JSON with confirmed state, or `unavailable`. The examples in
-[`integrations/hyprland/`](integrations/hyprland/) add a persistent microphone
-button and compositor shortcuts. Choose your own keys in
-`hyprland-binds.conf`; change or remove those bindings there. Left-clicking
-the button toggles listening without moving focus; right-clicking opens Settings.
-Pausing cancels the current capture and closes the microphone. Resuming starts
-fresh wake listening. Windows keeps the tray controls; the status module is
-Hyprland-only.
-
-Errors stay on screen until dismissed. `thalvi-desktop copy-error` copies the
-report of the last error Thalvi showed, the same text as Settings → Copy,
-without taking focus or opening a window; with no error to copy it says so and
-exits with a failure. The last error is kept after the overlay hides it, until a
-newer one replaces it. Bind it in `hyprland.conf`, for example
-`bind = SUPER, E, exec, thalvi-desktop copy-error`. The tray menu has the same
-**Copy last error** item, which is also what Windows offers; the command itself
-is Hyprland-only, like `status`.
-
-**Second-pass transcription** in Settings → Speech is off by
-default, including for older configs that only name an endpoint. Turning it
-off keeps the endpoint and key, and accepted captures make no second request.
-Turn it on to use the saved endpoint; Save validates it before applying it to
-subsequent captures.
-
-To change the microphone, pause listening in Settings → Microphone first, then
-choose and save a device there. Saving keeps listening paused; enable
-it explicitly when ready. **Active microphone** names the opened device,
-separately from the saved choice. If that device is unavailable, Thalvi reports
-the error instead of using another microphone. The level meter uses the same
-stream while listening or capturing.
-
-To dictate without the server or a network, set `"stt": {"engine": "local"}` in
-the config or choose "On this computer" under Speech in Settings.
-The first use downloads about 650 MB (the pill says so); after that it works
-offline. The text comes mostly unpunctuated. The model is NVIDIA Nemotron Speech
-Streaming under the [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/).
-
 ## Measure a setup
 
 `cargo run --release --bin measure -- --setup data/measure/a.env --setup data/measure/b.env`
-times and grades the same prompts on each setup and prints their numbers side
-by side. A setup is your normal `.env` plus an override file of env lines that
-win over it; keep override files under `data/` (git-ignored), since they may
-hold keys:
+times and grades the same prompts on each setup and prints the numbers side by
+side. A setup is your `.env` plus an override file whose lines win over it.
+Keep override files under `data/` (git-ignored), since they may hold keys:
 
 ```sh
 # data/measure/spark12.env
@@ -310,28 +311,19 @@ LLM_MODEL=muse-spark-1.2
 LLM_REASONING_EFFORT=low
 ```
 
-Setups run interleaved (case 1 on A, B, A, B, then case 2), so they see the
-same network noise. The prompts are `crates/thalvi-server/measure/cases.json`
-(greetings, facts, arithmetic, how-tos, explanations, requested lengths, a
-German question, a follow-up); a multi-turn case lists alternating user and
-assistant turns, ending on the user turn to answer. Flags: `--setup <file>`
-(repeat; none measures the plain `.env`), `--runs <n>` (default 3), `--cases
-<file>`, `--only <id>` (repeat) and `--no-judge`.
+Setups run interleaved, so they share the same network noise, on the prompts
+in `crates/thalvi-server/measure/cases.json`. Flags: `--setup <file>` (repeat;
+none measures the plain `.env`), `--runs <n>` (default 3), `--cases <file>`,
+`--only <id>` (repeat) and `--no-judge`.
 
-Each reply goes through the code Thalvi uses: the chat model, the sentence
-splitter, the speech client from config and `SYSTEM_PROMPT`. The table gives
-median (min-max) seconds from the request start to the first content token, the
-first sentence, the first audio byte and the last audio byte of the whole reply,
-plus sentences and audio seconds per reply, failed replies and the judge's mean
-score. The wait the user perceives adds endpointing (about 0.5-0.75 s). A reply
-that hits an error or takes over 120 s counts as an error. Every reply, grade
-and error is written to `data/measure/run-<time>.json`.
-
-The judge grades each answer from 1 to 5 against a short rubric (correct, length
-fits the question, speakable) after all timing is done. Set `JUDGE_BASE_URL`,
-`JUDGE_MODEL` and `JUDGE_API_KEY` for any OpenAI-compatible model; without them
-quality is reported as "not judged". One judge on a fixed prompt set is a
-yardstick for comparing setups, not a verdict on one reply.
+Replies run through Thalvi's own chat, sentence and speech code. The table
+gives median (min-max) seconds to the first token, first sentence, first and
+last audio byte, plus failures (an error or over 120 s) and the judge's mean
+score. The wait a user feels adds endpointing (about 0.5-0.75 s). Every run is
+saved to `data/measure/run-<time>.json`. The judge scores each answer 1 to 5
+(correct, fitting length, speakable) with any OpenAI-compatible model set in
+`JUDGE_BASE_URL`, `JUDGE_MODEL` and `JUDGE_API_KEY`; without them quality is
+"not judged".
 
 ## Status
 
@@ -342,17 +334,16 @@ Under construction for the
 ## Hackathon provenance
 
 All code in this repository was written during the hackathon; the commit
-history is the record. Pull requests land as merge commits, so the
-individual commits behind each change stay visible, and `main` is never
-rewritten.
+history is the record. Pull requests land as merge commits, so the individual
+commits behind each change stay visible, and `main` is never rewritten.
 
-The idea draws on lessons from an earlier, private voice-assistant prototype
-by the same author. Nothing is copied from it or from any other repository;
+The idea draws on lessons from an earlier, private voice-assistant prototype by
+the same author. Nothing is copied from it or from any other repository;
 third-party code enters only as declared dependencies.
 
 AI assistance is used in this project and disclosed: Claude Code orchestrates
-design, implementation, and review, with other models (such as Meta's Muse)
-as workers. Commits made with an agent carry its `Co-Authored-By` trailer.
+design, implementation and review, with other models (such as Meta's Muse) as
+workers. Commits made with an agent carry its `Co-Authored-By` trailer.
 
 ## License
 
