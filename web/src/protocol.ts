@@ -12,6 +12,9 @@ export interface TaskStep {
   readonly detail?: string;
 }
 
+/** Where the user's turns come from: typing, or microphone audio the server recognizes. */
+export type InputSource = "text" | "mic";
+
 export type ServerMessage =
   | { type: "session"; id: string; turns: Turn[] }
   | { type: "state"; state: Phase }
@@ -19,7 +22,7 @@ export type ServerMessage =
   | { type: "partial"; text: string }
   | { type: "user"; text: string }
   | { type: "reply"; text: string }
-  | { type: "voice"; on: false }
+  | { type: "input"; source: InputSource; ready: boolean }
   | { type: "interrupted" }
   | { type: "reply_end" }
   | { type: "error"; message: string }
@@ -28,8 +31,14 @@ export type ServerMessage =
 export const CANCEL_MESSAGE = JSON.stringify({ type: "cancel" });
 export const MAX_TEXT_LENGTH = 20000;
 
-export function voiceMessage(on: boolean): string {
-  return JSON.stringify({ type: "voice", on });
+/** Chooses text input (no recognizer, no mic upload) or server-recognized microphone input. */
+export function inputMessage(source: InputSource): string {
+  return JSON.stringify({ type: "input", source });
+}
+
+/** Turns spoken replies on or off, whatever the input. */
+export function replyAudioMessage(on: boolean): string {
+  return JSON.stringify({ type: "reply_audio", on });
 }
 
 /** Tells the server that everything up to `bytes` of reply audio on this connection has played or been dropped. */
@@ -48,7 +57,7 @@ export function textMessage(text: string): string {
 
 const PHASES: readonly unknown[] = ["idle", "starting", "listening", "thinking", "working"];
 
-function parseTurns(value: unknown): Turn[] | null {
+export function parseTurns(value: unknown): Turn[] | null {
   if (!Array.isArray(value)) return null;
   const turns: Turn[] = [];
   for (const item of value as unknown[]) {
@@ -95,8 +104,12 @@ export function parseServerMessage(raw: string): ServerMessage | null {
     case "user":
     case "reply":
       return typeof text === "string" ? { type, text } : null;
-    case "voice":
-      return fields["on"] === false ? { type, on: false } : null;
+    case "input": {
+      const { source, ready } = fields;
+      return (source === "text" || source === "mic") && typeof ready === "boolean"
+        ? { type, source, ready }
+        : null;
+    }
     case "interrupted":
     case "reply_end":
       return { type };

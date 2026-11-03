@@ -1,3 +1,5 @@
+import { parseTurns, type Turn } from "./protocol.ts";
+
 export interface ConversationSummary {
   readonly id: string;
   readonly title: string;
@@ -5,8 +7,19 @@ export interface ConversationSummary {
   readonly ageS: number;
 }
 
+/** A read-only look at one saved conversation. */
+export interface ConversationDetail {
+  readonly id: string;
+  readonly title: string;
+  readonly turns: readonly Turn[];
+  /** A connection, maybe this one, has the conversation open right now. */
+  readonly live: boolean;
+}
+
 export interface ConversationsApi {
   list(): Promise<ConversationSummary[]>;
+  /** Reads the conversation without joining it; rejects with the server's message if it no longer exists. */
+  detail(id: string): Promise<ConversationDetail>;
   rename(id: string, title: string): Promise<void>;
   remove(id: string): Promise<void>;
 }
@@ -27,6 +40,14 @@ function parseList(value: unknown): ConversationSummary[] | null {
     list.push({ id, title, ageS });
   }
   return list;
+}
+
+function parseDetail(value: unknown): ConversationDetail | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { id, title, turns, live } = value as Record<string, unknown>;
+  const parsed = parseTurns(turns);
+  if (typeof id !== "string" || typeof title !== "string" || typeof live !== "boolean" || !parsed) return null;
+  return { id, title, turns: parsed, live };
 }
 
 async function failure(response: Response): Promise<Error> {
@@ -58,6 +79,12 @@ export function conversationsApi(fetchImpl: Fetch): ConversationsApi {
       const list = parseList((await response.json()) as unknown);
       if (!list) throw new Error("The server sent a conversation list this page can't read.");
       return list;
+    },
+    async detail(id) {
+      const response = await call(`/sessions/${encodeURIComponent(id)}`);
+      const detail = parseDetail((await response.json()) as unknown);
+      if (!detail) throw new Error("The server sent a conversation this page can't read.");
+      return detail;
     },
     async rename(id, title) {
       await call(`/sessions/${encodeURIComponent(id)}`, {

@@ -141,7 +141,8 @@ fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use thalvi_desktop::config::Look;
+    use thalvi_desktop::config::{Look, SttEngine};
+    use thalvi_desktop::transducer::SpeechChoice;
 
     use super::*;
 
@@ -245,6 +246,26 @@ mod tests {
             (after_switch, after_stale_save, after_off),
             (true, true, false)
         );
+    }
+
+    #[test]
+    fn a_custom_speech_model_folder_survives_save_and_reload() {
+        let (store, dir) = store("folder", None);
+        let mut settings = settings_json(&store_defaults()).unwrap();
+        settings["stt"] = json!({"engine": "local", "model": "/models/mine"});
+
+        let saved = store.save(settings, false).unwrap();
+        let reloaded = store.load().unwrap();
+        let shown = settings_json(&reloaded).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            saved.stt.engine,
+            SttEngine::Local(SpeechChoice::Folder("/models/mine".into()))
+        );
+        assert_eq!(reloaded, saved);
+        assert_eq!(shown["stt"]["engine"], json!("local"));
+        assert_eq!(shown["stt"]["model"], json!("/models/mine"));
     }
 
     #[cfg(unix)]

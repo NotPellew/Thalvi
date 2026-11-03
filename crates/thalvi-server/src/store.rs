@@ -65,6 +65,19 @@ pub struct Summary {
     pub age_s: u64,
 }
 
+/// A read-only view of one saved conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Snapshot {
+    /// Session id to reopen it with.
+    pub id: String,
+    /// What the list shows.
+    pub title: String,
+    /// Every committed turn.
+    pub turns: Vec<Turn>,
+    /// Whether a connection currently owns the conversation.
+    pub live: bool,
+}
+
 /// One inactive old conversation awaiting a generated retirement summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetirementCandidate {
@@ -344,6 +357,18 @@ impl SessionStore {
                 age_s: now.saturating_sub(stored.updated_ms) / 1000,
             })
             .collect()
+    }
+
+    /// Reads a saved conversation without claiming it; `None` if unknown or deleted.
+    pub fn snapshot(&self, id: &str) -> Option<Snapshot> {
+        let state = self.lock();
+        let stored = state.sessions.get(id)?;
+        Some(Snapshot {
+            id: stored.id.clone(),
+            title: stored.title.clone(),
+            turns: stored.turns.clone(),
+            live: state.live.contains_key(id),
+        })
     }
 
     /// Searches the live history and, for `All`, every saved conversation.

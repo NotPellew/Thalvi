@@ -1,6 +1,7 @@
 //! Owns opt-in session recordings written off the reply path.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -68,6 +69,7 @@ impl RecordingConfig {
 enum RecordMessage {
     Line(Value),
     Wav { name: String, pcm: Vec<u8> },
+    AudioChunk { name: String, pcm: Vec<u8> },
 }
 
 /// A handle for emitting recording events without ever blocking.
@@ -172,6 +174,24 @@ impl Recorder {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
+
+    /// Queues the next microphone audio of `<name>.wav`, which grows on disk while the
+    /// recording runs; never blocks.
+    pub fn emit_audio_chunk(&self, name: &str, pcm: &[u8]) {
+        if !self.kinds.audio {
+            return;
+        }
+        let Some(sender) = &self.sender else {
+            return;
+        };
+        let message = RecordMessage::AudioChunk {
+            name: name.to_string(),
+            pcm: pcm.to_vec(),
+        };
+        if sender.try_send(message).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// A running recording: the emit handle plus the writer to await at close.
@@ -259,11 +279,15 @@ async fn write_loop(
         |dir| dir.join(format!("{session}.jsonl")),
     );
     let mut jsonl: Option<tokio::fs::File> = None;
+    let mut growing: HashMap<String, GrowingWav> = HashMap::new();
     let mut error_logged = false;
     while let Some(message) = receiver.recv().await {
-        let result = match &message {
-            RecordMessage::Line(line) => write_line(&mut jsonl, &jsonl_path, line).await,
-            RecordMessage::Wav { name, pcm } => write_wav(&session_dir, name, pcm).await,
+        let result = match message {
+            RecordMessage::Line(line) => write_line(&mut jsonl, &jsonl_path, &line).await,
+            RecordMessage::Wav { name, pcm } => write_wav(&session_dir, &name, &pcm).await,
+            RecordMessage::AudioChunk { name, pcm } => {
+                append_audio(&mut growing, &session_dir, name, &pcm).await
+            }
         };
         if let Err(error) = result
             && !error_logged
@@ -271,6 +295,9 @@ async fn write_loop(
             error_logged = true;
             tracing::warn!(%error, "recording write failed; further recording errors are silent");
         }
+    }
+    for wav in growing.values_mut() {
+        let _ = wav.flush().await;
     }
     if let Some(mut file) = jsonl {
         use tokio::io::AsyncWriteExt;
@@ -308,23 +335,92 @@ async fn write_wav(session_dir: &PathBuf, name: &str, pcm: &[u8]) -> std::io::Re
     tokio::fs::write(path, wav_bytes(pcm)).await
 }
 
+/// Audio waiting in memory is written once it reaches one second.
+const FLUSH_BYTES: usize = 48_000;
+
+const WAV_HEADER_LEN: usize = 44;
+
+/// A `.wav` file that grows chunk by chunk, with valid lengths after every flush.
+struct GrowingWav {
+    file: tokio::fs::File,
+    written: usize,
+    pending: Vec<u8>,
+}
+
+impl GrowingWav {
+    async fn create(path: &Path) -> std::io::Result<Self> {
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::File::create(path).await?;
+        file.write_all(&wav_header(0)).await?;
+        Ok(Self {
+            file,
+            written: 0,
+            pending: Vec::new(),
+        })
+    }
+
+    /// Writes pending audio, then rewrites the header lengths; a stop between the two
+    /// leaves the previous flush's lengths, which stay valid.
+    async fn flush(&mut self) -> std::io::Result<()> {
+        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        self.file.write_all(&self.pending).await?;
+        self.written += self.pending.len();
+        self.pending.clear();
+        self.file.seek(std::io::SeekFrom::Start(0)).await?;
+        self.file.write_all(&wav_header(self.written)).await?;
+        let end = u64::try_from(WAV_HEADER_LEN + self.written).unwrap_or(u64::MAX);
+        self.file.seek(std::io::SeekFrom::Start(end)).await?;
+        Ok(())
+    }
+}
+
+async fn append_audio(
+    growing: &mut HashMap<String, GrowingWav>,
+    session_dir: &Path,
+    name: String,
+    pcm: &[u8],
+) -> std::io::Result<()> {
+    if !growing.contains_key(&name) {
+        tokio::fs::create_dir_all(session_dir).await?;
+        let wav = GrowingWav::create(&session_dir.join(format!("{name}.wav"))).await?;
+        growing.insert(name.clone(), wav);
+    }
+    let Some(wav) = growing.get_mut(&name) else {
+        return Ok(());
+    };
+    wav.pending.extend_from_slice(pcm);
+    if wav.pending.len() >= FLUSH_BYTES {
+        wav.flush().await?;
+    }
+    Ok(())
+}
+
+fn wav_header(pcm_len: usize) -> Vec<u8> {
+    let data_len = u32::try_from(pcm_len).unwrap_or(u32::MAX);
+    let mut header = Vec::with_capacity(WAV_HEADER_LEN);
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&(36_u32 + data_len).to_le_bytes());
+    header.extend_from_slice(b"WAVEfmt ");
+    header.extend_from_slice(&16_u32.to_le_bytes());
+    header.extend_from_slice(&1_u16.to_le_bytes());
+    header.extend_from_slice(&1_u16.to_le_bytes());
+    header.extend_from_slice(&24_000_u32.to_le_bytes());
+    header.extend_from_slice(&48_000_u32.to_le_bytes());
+    header.extend_from_slice(&2_u16.to_le_bytes());
+    header.extend_from_slice(&16_u16.to_le_bytes());
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&data_len.to_le_bytes());
+    header
+}
+
 /// Wraps 24 kHz s16le mono PCM in a WAV container.
 #[must_use]
 pub fn wav_bytes(pcm: &[u8]) -> Vec<u8> {
-    let data_len = u32::try_from(pcm.len()).unwrap_or(u32::MAX);
-    let mut bytes = Vec::with_capacity(44 + pcm.len());
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(36_u32 + data_len).to_le_bytes());
-    bytes.extend_from_slice(b"WAVEfmt ");
-    bytes.extend_from_slice(&16_u32.to_le_bytes());
-    bytes.extend_from_slice(&1_u16.to_le_bytes());
-    bytes.extend_from_slice(&1_u16.to_le_bytes());
-    bytes.extend_from_slice(&24_000_u32.to_le_bytes());
-    bytes.extend_from_slice(&48_000_u32.to_le_bytes());
-    bytes.extend_from_slice(&2_u16.to_le_bytes());
-    bytes.extend_from_slice(&16_u16.to_le_bytes());
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_len.to_le_bytes());
+    let mut bytes = wav_header(pcm.len());
+    bytes.reserve(pcm.len());
     bytes.extend_from_slice(pcm);
     bytes
 }
@@ -436,10 +532,11 @@ impl AudioBuffer {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioBuffer, RecordKinds, RecordingConfig, start_recording_with_gate, utc_date_string,
-        wav_bytes,
+        AudioBuffer, GrowingWav, RecordKinds, RecordingConfig, append_audio,
+        start_recording_with_gate, utc_date_string, wav_bytes,
     };
     use serde_json::json;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[test]
@@ -515,5 +612,66 @@ mod tests {
         drop(recorder);
         active.finish(0).await;
         std::fs::remove_dir_all(&data_dir).unwrap();
+    }
+
+    /// Distinct bytes per chunk so a misplaced or missing chunk shows in the comparison.
+    fn half_second_chunks(count: u8) -> Vec<Vec<u8>> {
+        (1..=count).map(|n| vec![n; 24_000]).collect()
+    }
+
+    #[tokio::test]
+    async fn a_finished_capture_is_the_same_wav_as_one_written_whole() {
+        let data_dir =
+            std::env::temp_dir().join(format!("thalvi-recorder-wav-test-{}", std::process::id()));
+        let config = RecordingConfig {
+            kinds: RecordKinds {
+                metrics: false,
+                text: false,
+                audio: true,
+            },
+            data_dir: data_dir.clone(),
+            ..RecordingConfig::disabled()
+        };
+        let active = start_recording_with_gate(config, "wav-test".to_string(), None);
+        let mut chunks = half_second_chunks(5);
+        chunks.push(vec![9; 100]);
+        for chunk in &chunks {
+            active.recorder.emit_audio_chunk("capture", chunk);
+        }
+        active.finish(0).await;
+        let path = std::fs::read_dir(data_dir.join("recordings"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("wav-test")
+            .join("capture.wav");
+        assert_eq!(std::fs::read(path).unwrap(), wav_bytes(&chunks.concat()));
+        std::fs::remove_dir_all(&data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_capture_keeps_a_playable_wav_of_the_flushed_audio() {
+        let dir =
+            std::env::temp_dir().join(format!("thalvi-recorder-cut-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut growing: HashMap<String, GrowingWav> = HashMap::new();
+        let chunks = half_second_chunks(5);
+        for chunk in &chunks {
+            append_audio(&mut growing, &dir, "capture".to_string(), chunk)
+                .await
+                .unwrap();
+        }
+        // The process dies here: the fifth half second was still waiting in memory.
+        drop(growing);
+        let bytes = std::fs::read(dir.join("capture.wav")).unwrap();
+        let flushed = chunks[..4].concat();
+        let data_len = u32::from_le_bytes(bytes[40..44].try_into().unwrap());
+        let riff_len = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(usize::try_from(data_len).unwrap(), flushed.len());
+        assert_eq!(riff_len, 36 + data_len);
+        assert_eq!(bytes, wav_bytes(&flushed));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

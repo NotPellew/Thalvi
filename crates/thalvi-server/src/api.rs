@@ -1,4 +1,4 @@
-//! Owns the HTTP endpoints that list, rename and delete saved conversations.
+//! Owns the HTTP endpoints that list, read, rename and delete saved conversations.
 
 use std::sync::Arc;
 
@@ -7,7 +7,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch};
+use axum::routing::get;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -17,7 +17,7 @@ use crate::store::{MAX_TITLE_CHARS, SessionStore};
 pub fn routes() -> Router<Arc<SessionStore>> {
     Router::new()
         .route("/sessions", get(list))
-        .route("/sessions/{id}", patch(rename).delete(delete))
+        .route("/sessions/{id}", get(detail).patch(rename).delete(delete))
 }
 
 #[derive(Deserialize)]
@@ -36,6 +36,12 @@ fn not_found() -> Response {
 
 async fn list(State(store): State<Arc<SessionStore>>) -> Response {
     axum::Json(json!({"sessions": store.list()})).into_response()
+}
+
+async fn detail(State(store): State<Arc<SessionStore>>, Path(id): Path<String>) -> Response {
+    store
+        .snapshot(&id)
+        .map_or_else(not_found, |snapshot| axum::Json(snapshot).into_response())
 }
 
 async fn rename(
@@ -190,5 +196,78 @@ mod tests {
             1,
             "a failed delete keeps the conversation listed"
         );
+    }
+
+    async fn get_json(client: &reqwest::Client, url: String) -> (u16, Value) {
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let status = response.status().as_u16();
+        (
+            status,
+            response.json().await.unwrap_or_else(|e| panic!("{e}")),
+        )
+    }
+
+    #[tokio::test]
+    async fn detail_returns_the_title_and_committed_turns_of_an_idle_conversation() {
+        let (_store, id, dir, base) = seeded("detail-idle").await;
+        let (status, body) =
+            get_json(&reqwest::Client::new(), format!("{base}/sessions/{id}")).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(status, 200);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "id": id,
+                "title": "hi",
+                "turns": [{"role": "user", "text": "hi"}],
+                "live": false,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn detail_is_not_found_for_unknown_and_deleted_conversations() {
+        let (store, id, dir, base) = seeded("detail-missing").await;
+        let client = reqwest::Client::new();
+        let (unknown, _) = get_json(&client, format!("{base}/sessions/no-such-session")).await;
+        assert_eq!(unknown, 404, "unknown id");
+        assert_eq!(store.delete(&id).await, Ok(true));
+        let (deleted, body) = get_json(&client, format!("{base}/sessions/{id}")).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(deleted, 404, "deleted id");
+        assert_eq!(body["error"], "That conversation doesn't exist.");
+    }
+
+    #[tokio::test]
+    async fn reading_a_live_conversation_leaves_its_owner_in_place() {
+        let (store, id, dir, base) = seeded("detail-live").await;
+        let mut owner = store.attach(Some(&id)).await;
+        let client = reqwest::Client::new();
+        for _ in 0..2 {
+            let (status, body) = get_json(&client, format!("{base}/sessions/{id}")).await;
+            assert_eq!(status, 200);
+            assert_eq!(body["live"], true);
+            assert_eq!(body["turns"].as_array().map(Vec::len), Some(1));
+            let (listed, _) = get_json(&client, format!("{base}/sessions")).await;
+            assert_eq!(listed, 200);
+        }
+        tokio::select! {
+            biased;
+            reason = owner.detached() => panic!("a read detached the owner: {reason:?}"),
+            () = std::future::ready(()) => {}
+        }
+        assert_eq!(
+            store.list().len(),
+            1,
+            "reads must not create a conversation"
+        );
+        store.release(owner);
+        let (_, body) = get_json(&client, format!("{base}/sessions/{id}")).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(body["live"], false, "released conversations are idle again");
     }
 }

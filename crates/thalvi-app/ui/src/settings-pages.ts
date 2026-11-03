@@ -1,6 +1,17 @@
 // The settings pages: each builds its rows against the draft and edits it in place.
 
-import type { AudioStatus, Backend, Ending, LoginState, ScriptActionKind, SecondaryApi, Settings, SttEngine } from "./contract.ts";
+import type {
+  AudioStatus,
+  Backend,
+  Ending,
+  LoginState,
+  ScriptActionKind,
+  SecondaryApi,
+  Settings,
+  SpeechModelInfo,
+  SpeechModelProgress,
+  SttEngine,
+} from "./contract.ts";
 import { errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
@@ -20,7 +31,14 @@ export interface PageContext {
   /** The settings window, so a look picked here shows at once. */
   root: HTMLElement;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
-  live: { level: (level: number) => void; listening: (on: boolean) => void; audio: (audio: AudioStatus) => void };
+  live: {
+    level: (level: number) => void;
+    listening: (on: boolean) => void;
+    audio: (audio: AudioStatus) => void;
+    speechModel: (progress: SpeechModelProgress) => void;
+  };
+  /** Checks a page adds that must pass before Save sends; each returns null when it has nothing to check. */
+  checks: (() => Promise<void> | null)[];
 }
 
 export interface Page {
@@ -120,24 +138,10 @@ function miniField(label: string, field: Field): HTMLElement {
   return el("label", { class: "mini" }, el("span", {}, label), field.node);
 }
 
-function general({ draft, backend, controls, live, root, startAtLogin }: PageContext): HTMLElement[] {
+function general({ draft, backend, controls, root, startAtLogin }: PageContext): HTMLElement[] {
   const server = controls.text(draft.server, (value) => {
     draft.server = value;
   }, { placeholder: "ws://127.0.0.1:8080" });
-  const listening = controls.toggle(true, () => undefined);
-  const input = listening.field as HTMLInputElement;
-  const problem = note();
-  input.addEventListener("change", () => {
-    say(problem, "");
-    const wanted = input.checked;
-    backend.setListening(wanted).catch((error: unknown) => {
-      input.checked = !wanted;
-      say(problem, errorText(error));
-    });
-  });
-  live.listening = (on) => {
-    input.checked = on;
-  };
   const login = controls.toggle("on" in startAtLogin && startAtLogin.on, () => undefined);
   const loginInput = login.field as HTMLInputElement;
   const loginProblem = note();
@@ -166,10 +170,6 @@ function general({ draft, backend, controls, live, root, startAtLogin }: PageCon
   });
   return [
     row("Server address", "Where Thalvi sends speech for recognition.", server),
-    row("Listening", "Turns the microphone on or off now; this is not part of Save.", {
-      node: el("span", { class: "stack" }, listening.node, problem),
-      field: input,
-    }),
     row("Start Thalvi when I log in", "Starts the voice app at login, listening as it normally does. This takes effect now; it is not part of Save.", {
       node: el("span", { class: "stack" }, login.node, loginProblem),
       field: loginInput,
@@ -276,21 +276,191 @@ function wake(context: PageContext): HTMLElement[] {
   ];
 }
 
-function recognition({ draft, controls }: PageContext): HTMLElement[] {
+function formatSize(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${String(Math.round(bytes / 1e6))} MB`;
+  return `${String(Math.round(bytes / 1e3))} kB`;
+}
+
+interface ModelCard {
+  node: HTMLElement;
+  /** Shows a download step, from this card's button or any other start. */
+  progress: (event: SpeechModelProgress) => void;
+  select: (on: boolean) => void;
+}
+
+/** One catalog speech model: what it is, whether it is downloaded, and how to get it. */
+function modelCard(info: SpeechModelInfo, backend: Backend, pick: () => void): ModelCard {
+  const picker = el("button", { type: "button", role: "radio", "aria-checked": "false", class: "pick" }, info.title);
+  picker.addEventListener("click", pick);
+  const badge = el("span", { class: "badge" });
+  const source = el("a", { href: info.source, target: "_blank", rel: "noreferrer" }, "Source");
+  const meter = el("progress", { max: "100", value: "0", "aria-label": `Download of ${info.title}`, hidden: true });
+  const status = el("span", { class: "unit", role: "status" });
+  const problem = note();
+  const download = button("Download", () => {
+    say(problem, "");
+    show({ name: info.name, percent: 0, status: "verifying", message: null });
+    backend.downloadSpeechModel(info.name).then(
+      () => {
+        show({ name: info.name, percent: 100, status: "done", message: null });
+      },
+      (error: unknown) => {
+        show({ name: info.name, percent: 0, status: "failed", message: errorText(error) });
+      },
+    );
+  });
+  source.addEventListener("click", (event) => {
+    event.preventDefault();
+    backend.openSpeechModelSource(info.name).catch((error: unknown) => {
+      say(problem, errorText(error));
+    });
+  });
+
+  function cached(on: boolean): void {
+    badge.textContent = on ? "Downloaded" : "Not downloaded";
+    badge.dataset["on"] = String(on);
+    download.hidden = on;
+  }
+
+  function show(event: SpeechModelProgress): void {
+    const running = event.status === "verifying" || event.status === "downloading";
+    meter.hidden = !running;
+    meter.value = event.percent;
+    status.textContent = !running
+      ? ""
+      : event.status === "verifying"
+        ? "Checking files…"
+        : `Downloading… ${String(event.percent)}%`;
+    download.disabled = running;
+    if (event.status === "done") cached(true);
+    if (event.status === "failed") say(problem, event.message ?? "The download failed.");
+  }
+
+  cached(info.cached);
+  return {
+    node: el(
+      "div",
+      { class: "model" },
+      el("div", { class: "trow" }, picker, el("span", { class: "unit" }, formatSize(info.size)), badge),
+      el("small", {}, info.description),
+      el("div", { class: "trow" }, source, download, meter, status),
+      problem,
+    ),
+    progress: show,
+    select: (on) => {
+      picker.setAttribute("aria-checked", String(on));
+    },
+  };
+}
+
+function recognition({ draft, controls, backend, checks, live }: PageContext): HTMLElement[] {
   const engine = controls.select(ENGINES, draft.stt.engine, (value) => {
     draft.stt.engine = value;
     syncModel();
   });
-  const speechModel = controls.text(draft.stt.model ?? "", syncModel, { placeholder: SPEECH_MODEL });
+  const catalog = new Map<string, ModelCard>();
+  const listed: string[] = [];
+  let chosen = draft.stt.model ?? "";
+  const isCatalog = (name: string): boolean => name === SPEECH_MODEL || listed.includes(name);
+  const speechModel = controls.text(
+    isCatalog(chosen) ? "" : chosen,
+    (value) => {
+      chosen = value.trim();
+      syncModel();
+    },
+    { placeholder: "/path/to/model-folder", label: "Your own model folder" },
+  );
   const modelInput = speechModel.field as HTMLInputElement;
+  const folderResult = el("p", { class: "note", role: "status", hidden: true });
+  const modelList = el("div", { class: "models", role: "radiogroup", "aria-label": "Speech models" });
+  const listProblem = note();
+  const ownFolder = el(
+    "div",
+    { class: "own" },
+    el("span", { class: "unit" }, "Your own model folder"),
+  );
+
+  live.speechModel = (event) => {
+    catalog.get(event.name)?.progress(event);
+  };
+
+  function showSelection(): void {
+    const active = chosen === "" ? SPEECH_MODEL : chosen;
+    for (const [name, card] of catalog) card.select(name === active);
+    ownFolder.dataset["active"] = String(!isCatalog(active));
+  }
+
+  function pickModel(name: string): void {
+    chosen = name;
+    modelInput.value = "";
+    syncModel();
+    controls.touched();
+  }
+
+  backend.listSpeechModels().then(
+    (models) => {
+      for (const info of models) {
+        listed.push(info.name);
+        const card = modelCard(info, backend, () => {
+          pickModel(info.name);
+        });
+        catalog.set(info.name, card);
+        modelList.append(card.node);
+      }
+      showSelection();
+    },
+    (error: unknown) => {
+      say(listProblem, errorText(error));
+    },
+  );
+
+  function showFolder(message: string, valid: boolean): void {
+    folderResult.classList.toggle("ok", valid);
+    say(folderResult, message);
+  }
+
+  // Bumped by every check and edit, so a slow answer never describes a path that is no longer typed.
+  let latestCheck = 0;
+
+  function checkFolder(path: string): Promise<void> {
+    const check = ++latestCheck;
+    return backend.validateSpeechModelFolder(path).then(
+      () => {
+        if (check === latestCheck) showFolder("This folder holds a speech model.", true);
+      },
+      (error: unknown) => {
+        if (check === latestCheck) showFolder(errorText(error), false);
+        throw error;
+      },
+    );
+  }
+
+  const checkButton = button("Check folder", () => {
+    const path = modelInput.value.trim();
+    if (path === "") showFolder("Type the folder path first.", false);
+    else if (path === SPEECH_MODEL) showFolder(`${SPEECH_MODEL} is downloaded on first use; there is no folder to check.`, false);
+    else checkFolder(path).catch(() => undefined);
+  });
+  checks.push(() => {
+    const path = draft.stt.model;
+    return draft.stt.engine === "local" && path !== undefined && !isCatalog(path) ? checkFolder(path) : null;
+  });
+  ownFolder.append(el("div", { class: "trow check" }, speechModel.node, checkButton), folderResult);
+  const speechModelField: Field = {
+    node: el("div", { class: "stack wide" }, modelList, listProblem, ownFolder),
+    field: modelInput,
+  };
 
   function syncModel(): void {
-    const model = modelInput.value.trim();
-    if (draft.stt.engine === "local" && model !== "") {
-      draft.stt.model = model;
+    latestCheck += 1;
+    say(folderResult, "");
+    if (draft.stt.engine === "local" && chosen !== "") {
+      draft.stt.model = chosen;
     } else {
       delete draft.stt.model;
     }
+    showSelection();
   }
 
   const secondary = draft.stt.secondary ?? null;
@@ -332,8 +502,8 @@ function recognition({ draft, controls }: PageContext): HTMLElement[] {
     row("Recognize speech", "Where your dictation is turned into text. Conversation mode always uses the server.", engine),
     row(
       "Speech model",
-      `For recognition on this computer: ${SPEECH_MODEL} or the folder of a model. Empty uses ${SPEECH_MODEL}. The first use downloads about 650 MB.`,
-      speechModel,
+      `For recognition on this computer. Pick a model, downloading it first or on first use, or point to your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.`,
+      speechModelField,
     ),
     group("Second transcription"),
     row("Second-pass transcription", "Transcribes each accepted capture again on the endpoint below. Off keeps the endpoint and key.", toggle),
@@ -344,7 +514,7 @@ function recognition({ draft, controls }: PageContext): HTMLElement[] {
   ];
 }
 
-function microphone({ draft, controls, microphones, live, audio }: PageContext): HTMLElement[] {
+function microphone({ draft, backend, controls, microphones, live, audio }: PageContext): HTMLElement[] {
   const names = Array.isArray(microphones) ? microphones : [];
   const saved = draft.microphone;
   const options: (readonly [string, string])[] = [
@@ -368,9 +538,27 @@ function microphone({ draft, controls, microphones, live, audio }: PageContext):
   live.level = (level) => {
     meter.style.transform = `scaleX(${Math.min(1, Math.max(0, level)).toFixed(3)})`;
   };
+  const listening = controls.toggle(true, () => undefined);
+  const listeningInput = listening.field as HTMLInputElement;
+  const problem = note();
+  listeningInput.addEventListener("change", () => {
+    say(problem, "");
+    const wanted = listeningInput.checked;
+    backend.setListening(wanted).catch((error: unknown) => {
+      listeningInput.checked = !wanted;
+      say(problem, errorText(error));
+    });
+  });
+  live.listening = (on) => {
+    listeningInput.checked = on;
+  };
   const rows = [
-    row("Saved device", Array.isArray(microphones) ? "Pause listening to change it. Saving writes this choice; it does not prove a microphone opened." : null, picker),
-    row("Active microphone", "The device actually open now. This is different from the saved choice above.", {
+    group("Right now"),
+    row("Listening", "Turns the microphone on or off now; this is not part of Save.", {
+      node: el("span", { class: "stack" }, listening.node, problem),
+      field: listeningInput,
+    }),
+    row("Active microphone", "The device actually open now. This is different from the saved choice below.", {
       node: active,
       field: el("span", { id: uid("f") }),
     }),
@@ -378,6 +566,8 @@ function microphone({ draft, controls, microphones, live, audio }: PageContext):
       node: el("span", { class: "meter", role: "meter", "aria-valuemin": "0", "aria-valuemax": "1" }, meter),
       field: el("span", { id: uid("f") }),
     }),
+    group("Saved with Save"),
+    row("Saved device", Array.isArray(microphones) ? "Pause listening to change it. Saving writes this choice; it does not prove a microphone opened." : null, picker),
   ];
   if (!Array.isArray(microphones)) {
     rows.unshift(el("p", { class: "note", role: "alert" }, `Microphones could not be listed: ${microphones.error}`));

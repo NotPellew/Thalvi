@@ -9,7 +9,7 @@ use tokio::time::Instant;
 
 use super::{CuePlayer, FrameSource, WakeDetector};
 use crate::audio::{AudioError, InputGate};
-use crate::cues::{Cue, CueError};
+use crate::cues::{Cue, CueError, CueTiming};
 use crate::frame::Frame;
 use crate::wake::{WakeError, WakeEvent, WakeFrame};
 
@@ -163,6 +163,7 @@ type Log = Rc<RefCell<Vec<(Duration, CueLog)>>>;
 struct CueScript {
     lengths: Vec<(Cue, Duration)>,
     failing: Vec<Cue>,
+    timing: CueTiming,
 }
 
 /// A cue player whose cues take the lengths a test sets on the runtime's clock.
@@ -180,7 +181,8 @@ pub struct CueControl {
 }
 
 impl FakeCuePlayer {
-    /// Cues take 230 ms for the wake cue and 100 ms for the others.
+    /// Cues take 230 ms for the wake cue and 100 ms for the others, and report starting after
+    /// 25 ms with a 15 ms device delay.
     #[must_use]
     pub fn new() -> (Self, CueControl) {
         let origin = Instant::now();
@@ -188,6 +190,10 @@ impl FakeCuePlayer {
         let script = Rc::new(RefCell::new(CueScript {
             lengths: vec![(Cue::Wake, Duration::from_millis(230))],
             failing: Vec::new(),
+            timing: CueTiming {
+                start: Duration::from_millis(25),
+                output: Some(Duration::from_millis(15)),
+            },
         }));
         (
             Self {
@@ -208,6 +214,11 @@ impl CueControl {
     /// How long `cue` takes to play.
     pub fn set_length(&self, cue: Cue, length: Duration) {
         self.script.borrow_mut().lengths.push((cue, length));
+    }
+
+    /// What every cue reports as the timing of its first sample.
+    pub fn set_timing(&self, timing: CueTiming) {
+        self.script.borrow_mut().timing = timing;
     }
 
     /// `cue` fails to play, after its length.
@@ -250,8 +261,8 @@ impl FakeCuePlayer {
 }
 
 impl CuePlayer for FakeCuePlayer {
-    async fn play(&self, cue: Cue) -> Result<(), CueError> {
-        let (length, fails) = {
+    async fn play(&self, cue: Cue) -> Result<Option<CueTiming>, CueError> {
+        let (length, fails, timing) = {
             let script = self.script.borrow();
             let length = script
                 .lengths
@@ -259,7 +270,7 @@ impl CuePlayer for FakeCuePlayer {
                 .rev()
                 .find(|(known, _)| *known == cue)
                 .map_or(Duration::from_millis(100), |(_, length)| *length);
-            (length, script.failing.contains(&cue))
+            (length, script.failing.contains(&cue), script.timing)
         };
         self.record(CueLog::Started(cue));
         let mut cut = CutOnDrop {
@@ -273,6 +284,6 @@ impl CuePlayer for FakeCuePlayer {
         if fails {
             return Err(CueError::NoOutputDevice);
         }
-        Ok(())
+        Ok(Some(timing))
     }
 }

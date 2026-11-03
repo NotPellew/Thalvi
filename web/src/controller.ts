@@ -2,9 +2,10 @@ import {
   CANCEL_MESSAGE,
   MAX_TEXT_LENGTH,
   parseServerMessage,
+  inputMessage,
   playedMessage,
+  replyAudioMessage,
   textMessage,
-  voiceMessage,
 } from "./protocol.ts";
 import { INITIAL, reduce, type SessionEvent, type SessionState } from "./session.ts";
 
@@ -18,7 +19,7 @@ export interface ControllerPorts {
   stopConnection(): void;
   /** Drops the current connection and joins conversation `id`, or starts a new one for null. */
   connect(id: string | null): void;
-  /** Stops the mic and audio context; the server has turned voice off by itself. */
+  /** Stops the mic and audio context; the server has fallen back to text input by itself. */
   releaseVoice(): void;
   onChange(state: SessionState): void;
 }
@@ -35,7 +36,7 @@ export class Controller {
   opened(): void {
     this.receivedAudioBytes = 0;
     this.apply({ type: "opened" });
-    if (this.state.voice) this.ports.send(voiceMessage(true));
+    if (this.state.voice) this.sendVoice(true);
   }
 
   lost(): void {
@@ -45,7 +46,7 @@ export class Controller {
 
   /** `notice` explains why voice went off by itself; null for the user's own choice. */
   setVoice(on: boolean, notice: string | null = null): void {
-    this.ports.send(voiceMessage(on));
+    this.sendVoice(on);
     if (!on) this.ports.playback.flush();
     this.apply({ type: "voice", on, notice });
   }
@@ -102,12 +103,19 @@ export class Controller {
       this.ports.forget();
       this.ports.stopConnection();
     }
-    if (message.type === "voice") {
+    if (message.type === "input" && message.source === "text") {
       if (!this.state.voice) return;
       this.ports.playback.flush();
       this.ports.releaseVoice();
+      this.ports.send(replyAudioMessage(false));
     }
     this.apply({ type: "server", message });
+  }
+
+  /** The one Voice control drives both server choices together. */
+  private sendVoice(on: boolean): void {
+    this.ports.send(inputMessage(on ? "mic" : "text"));
+    this.ports.send(replyAudioMessage(on));
   }
 
   private apply(event: SessionEvent): void {

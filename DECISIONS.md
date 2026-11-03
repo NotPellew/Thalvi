@@ -47,8 +47,13 @@ areas your change touches. Editing rules are in
   off the reply path. Why: to judge product, model and endpoint changes, misrecognitions
   and false wakes on real use. Off by default: they are personal data.
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
-  interrupts a reply by speaking. Why: hands and eyes are busy. Rejected:
-  push-to-talk.
+  interrupts a reply by speaking while mic input is on. Why: hands and eyes are
+  busy. Rejected: push-to-talk.
+- **Input and reply audio are separate.** `/session` takes `input` (`text` or
+  `mic`) and `reply_audio` (on or off); only `mic` opens a recognizer, only
+  reply audio calls speech synthesis. Why: typing or locally recognized speech
+  can get spoken replies, and muting must not stop listening. Rejected: one
+  `voice` switch, a compatibility message for it.
 - **Two wake entries, endings select the capture route.** One local inference pipeline
   runs separate trained capture and conversation wake heads. Why: defer the action
   choice until an ending without delaying conversation. Rejected: one phrase
@@ -125,6 +130,10 @@ areas your change touches. Editing rules are in
   sessions and returns short excerpts as data; task steps stay collapsed. Why:
   recover earlier details without whole-history context. Rejected: embeddings
   and code mode before a keyword tool proves useful.
+- **Reading a conversation never takes it over.** `GET /sessions/{id}` previews;
+  only an explicit Continue here resumes, moving a live one from its device.
+  Why: browsing must not cut off the device in use. Rejected: resume on open,
+  shared ownership. Desktop conversation clients follow the same split.
 - **Opt-in retirement with editable learnings.** `THALVI_RETIRE_DAYS` replaces
   old transcripts with summaries and keeps durable facts in a separate editable
   store. Why: bound retention without losing useful context. Rejected:

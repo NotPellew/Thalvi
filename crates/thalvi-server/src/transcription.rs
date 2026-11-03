@@ -46,7 +46,7 @@ pub async fn handle_transcription<F: RecognizerFactory>(
             "outcome": if connection.is_ok() { "ok" } else { "failed" },
         }),
     );
-    let mut captured = Vec::new();
+    let mut captured = false;
     let (recognizer, result) = match connection {
         Ok(mut recognizer) => {
             let result = relay(
@@ -71,8 +71,7 @@ pub async fn handle_transcription<F: RecognizerFactory>(
         "outcome": if result.is_ok() { "ok" } else { "failed" },
         "error": result.err(),
     });
-    if !captured.is_empty() {
-        recording.recorder.emit_wav("capture".to_string(), captured);
+    if captured {
         fields["audio"] = json!("capture.wav");
     }
     recording.recorder.emit("transcription", fields);
@@ -97,12 +96,13 @@ fn validate_audio(audio: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Relays one capture; with audio recording on, `captured` collects what reached the recognizer.
+/// Relays one capture; with audio recording on, what reached the recognizer streams to
+/// `capture.wav` and `captured` says whether any did.
 async fn relay<R: Recognizer>(
     socket: &mut WebSocket,
     recognizer: &mut R,
     recorder: &Recorder,
-    captured: &mut Vec<u8>,
+    captured: &mut bool,
 ) -> Result<(), String> {
     send(socket, json!({"type":"ready"})).await?;
     let mut buffered: VecDeque<Bytes> = VecDeque::new();
@@ -133,7 +133,8 @@ async fn relay<R: Recognizer>(
                                 result.map_err(|_| "Speech recognition stopped accepting audio.".to_string())?
                                     .map_err(|error| error.to_string())?;
                                 if recorder.audio_enabled() {
-                                    captured.extend_from_slice(&audio);
+                                    recorder.emit_audio_chunk("capture", &audio);
+                                    *captured = true;
                                 }
                                 break;
                             }

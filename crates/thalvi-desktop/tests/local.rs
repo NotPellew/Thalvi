@@ -239,11 +239,14 @@ fn fails_on_the_third_frame(n: usize) -> Reply {
 
 #[tokio::test]
 async fn a_model_error_reaches_the_caller_after_the_text_before_it_and_stops_the_work() {
-    let rig = rig("error", fails_on_the_third_frame, None, 0);
+    let (release, gate) = mpsc::channel();
+    let rig = rig("error", fails_on_the_third_frame, Some(gate), 0);
     let mut session = rig.recognizer.connect().await.expect("connects");
+    // Queue every frame before the model can fail, so no send meets a stopped worker.
     for _ in 0..6 {
         session.send_frame(&FRAME).await.expect("sends");
     }
+    let _ = release.send(());
     assert_eq!(session.next_event().await, Ok(partial("hel")));
     let error = session.next_event().await.expect_err("fails");
     assert_eq!(error.message, "The speech model stopped working.");

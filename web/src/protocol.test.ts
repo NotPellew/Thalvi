@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { parseServerMessage, voiceNameMessage, type ServerMessage } from "./protocol.ts";
+import {
+  inputMessage,
+  parseServerMessage,
+  replyAudioMessage,
+  voiceNameMessage,
+  type ServerMessage,
+} from "./protocol.ts";
 
 describe("parseServerMessage", () => {
   const valid: [string, ServerMessage][] = [
@@ -31,7 +37,9 @@ describe("parseServerMessage", () => {
     ['{"type":"user","text":"hello"}', { type: "user", text: "hello" }],
     ['{"type":"reply","text":"Hi."}', { type: "reply", text: "Hi." }],
     ['{"type":"interrupted"}', { type: "interrupted" }],
-    ['{"type":"voice","on":false}', { type: "voice", on: false }],
+    ['{"type":"input","source":"text","ready":true}', { type: "input", source: "text", ready: true }],
+    ['{"type":"input","source":"mic","ready":false}', { type: "input", source: "mic", ready: false }],
+    ['{"type":"input","source":"mic","ready":true}', { type: "input", source: "mic", ready: true }],
     ['{"type":"reply_end"}', { type: "reply_end" }],
     ['{"type":"error","message":"TTS failed"}', { type: "error", message: "TTS failed" }],
     [
@@ -59,8 +67,10 @@ describe("parseServerMessage", () => {
     ["task with an unknown status", '{"type":"task","step":{"id":"x","label":"Search","status":"waiting"}}'],
     ["task with a non-string detail", '{"type":"task","step":{"id":"x","label":"Search","status":"done","detail":2}}'],
     ["non-string text", '{"type":"reply","text":7}'],
-    ["voice turned on by the server", '{"type":"voice","on":true}'],
-    ["voice without a flag", '{"type":"voice"}'],
+    ["the removed combined voice message", '{"type":"voice","on":false}'],
+    ["input from an unknown source", '{"type":"input","source":"satellite","ready":true}'],
+    ["input without readiness", '{"type":"input","source":"mic"}'],
+    ["input with non-boolean readiness", '{"type":"input","source":"mic","ready":"yes"}'],
     ["missing text", '{"type":"partial"}'],
     ["session without id", '{"type":"session","turns":[]}'],
     ["session without turns", '{"type":"session","id":"abc"}'],
@@ -79,5 +89,14 @@ describe("parseServerMessage", () => {
 describe("voiceNameMessage", () => {
   it("names the voice for the live session", () => {
     expect(JSON.parse(voiceNameMessage("af_heart"))).toEqual({ type: "voice_name", voice: "af_heart" });
+  });
+});
+
+describe("input and reply audio messages", () => {
+  it("name the input source and the reply audio switch separately", () => {
+    expect(JSON.parse(inputMessage("mic"))).toEqual({ type: "input", source: "mic" });
+    expect(JSON.parse(inputMessage("text"))).toEqual({ type: "input", source: "text" });
+    expect(JSON.parse(replyAudioMessage(true))).toEqual({ type: "reply_audio", on: true });
+    expect(JSON.parse(replyAudioMessage(false))).toEqual({ type: "reply_audio", on: false });
   });
 });

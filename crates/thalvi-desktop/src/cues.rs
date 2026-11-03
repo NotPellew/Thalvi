@@ -2,11 +2,14 @@
 
 use std::f64::consts::PI;
 use std::fmt;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{ErrorKind, FromSample, OutputCallbackInfo, SampleFormat, SizedSample, Stream};
+use cpal::{
+    ErrorKind, FromSample, OutputCallbackInfo, OutputStreamTimestamp, SampleFormat, SizedSample,
+    Stream,
+};
 
 use crate::audio::InputGate;
 
@@ -102,6 +105,28 @@ pub fn synthesize(cue: Cue, rate: u32) -> Vec<f32> {
         .collect()
 }
 
+/// When a cue's first sample reached the output, measured from the call that played it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CueTiming {
+    /// Until the output callback that wrote the first sample: our code and the stream start.
+    pub start: Duration,
+    /// The delay the device reports after that callback; none when the backend reports none.
+    pub output: Option<Duration>,
+}
+
+impl CueTiming {
+    /// When the first sample should reach the speaker; unknown when the device reports no delay.
+    #[must_use]
+    pub fn audible(&self) -> Option<Duration> {
+        self.output.map(|output| self.start + output)
+    }
+}
+
+/// The delay between an output callback and the device playing what it wrote.
+fn output_delay(stamp: OutputStreamTimestamp) -> Option<Duration> {
+    stamp.playback.checked_duration_since(stamp.callback)
+}
+
 /// Why a cue did not play; `Display` is the plain notice for the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CueError {
@@ -140,6 +165,8 @@ enum Phase {
 struct Playback {
     phase: Mutex<Phase>,
     changed: Condvar,
+    /// The instant of the callback that wrote the first sample, and the device delay it reported.
+    first_sample: OnceLock<(Instant, Option<Duration>)>,
 }
 
 impl Playback {
@@ -147,6 +174,7 @@ impl Playback {
         Self {
             phase: Mutex::new(Phase::Playing),
             changed: Condvar::new(),
+            first_sample: OnceLock::new(),
         }
     }
 
@@ -212,7 +240,8 @@ impl CueEngine {
         }
     }
 
-    /// Plays `cue` and returns when it has finished, was stopped, or failed.
+    /// Plays `cue` and returns when it has finished, was stopped, or failed. `called` is when the
+    /// caller asked for it; the timing is none when the cue never reached the output.
     ///
     /// Does nothing if the cue is switched off. Microphone input is dropped from the start of the
     /// cue until it ends and is restored only if it was on before. Concurrent calls play in turn.
@@ -221,8 +250,17 @@ impl CueEngine {
     /// # Errors
     ///
     /// Why the cue could not be played.
-    pub fn play(&self, cue: Cue) -> Result<(), CueError> {
-        self.play_gated(cue, |playback| play_on_default_output(cue, playback))
+    pub fn play(&self, cue: Cue, called: Instant) -> Result<Option<CueTiming>, CueError> {
+        let mut timing = None;
+        self.play_gated(cue, |playback| {
+            let result = play_on_default_output(cue, playback);
+            timing = playback.first_sample.get().map(|&(at, output)| CueTiming {
+                start: at.saturating_duration_since(called),
+                output,
+            });
+            result
+        })?;
+        Ok(timing)
     }
 
     /// Cuts the cue that is playing short; `play` then returns `Ok`.
@@ -348,9 +386,15 @@ impl Voice {
             self.position += 1;
             frame.fill(T::from_sample(value));
         }
+        let stamp = info.timestamp();
+        if start == 0 {
+            let _ = self
+                .playback
+                .first_sample
+                .set((Instant::now(), output_delay(stamp)));
+        }
         if start < self.samples.len() && self.position >= self.samples.len() {
-            let stamp = info.timestamp();
-            let latency = stamp.playback.saturating_duration_since(stamp.callback);
+            let latency = output_delay(stamp).unwrap_or_default();
             let written = self.samples.len() - start;
             let written = u32::try_from(written).unwrap_or(u32::MAX);
             let tail = Duration::from_secs_f64(f64::from(written) / f64::from(self.rate));
@@ -613,5 +657,25 @@ mod tests {
             playback.wait(Duration::from_secs(5)),
             Err(CueError::Failed(error))
         );
+    }
+
+    #[test]
+    fn the_device_delay_is_what_the_backend_reports_after_the_callback_or_nothing() {
+        let at = cpal::StreamInstant::from_millis;
+        let stamp = |callback, playback| OutputStreamTimestamp {
+            callback: at(callback),
+            playback: at(playback),
+        };
+        for (name, callback, playback, expected) in [
+            ("playback after callback", 100, 123, Some(23)),
+            ("playback at callback", 100, 100, Some(0)),
+            ("playback before callback", 100, 90, None),
+        ] {
+            assert_eq!(
+                output_delay(stamp(callback, playback)),
+                expected.map(Duration::from_millis),
+                "{name}"
+            );
+        }
     }
 }

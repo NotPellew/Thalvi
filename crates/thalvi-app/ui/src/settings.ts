@@ -23,6 +23,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   root.append(el("div", { class: "app" }, nav, main));
 
   let pages: Page[] = [];
+  let checks: PageContext["checks"] = [];
   let navButtons: HTMLButtonElement[] = [];
   let current = "general";
   let draft: Settings | null = null;
@@ -32,7 +33,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   let saving = false;
   let saved = false;
   let audio: AudioStatus = { selected: null, active: null, paused: false };
-  const live: PageContext["live"] = { level: () => undefined, listening: () => undefined, audio: () => undefined };
+  const live: PageContext["live"] = {
+    level: () => undefined,
+    listening: () => undefined,
+    audio: () => undefined,
+    speechModel: () => undefined,
+  };
 
   function applyView(): void {
     const query = search.value.trim().toLowerCase();
@@ -103,7 +109,8 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     draft = structuredClone(loaded);
     baseline = JSON.stringify(draft);
     applyLook(root, draft.look);
-    pages = buildPages({ draft, backend, root, controls: createControls(changed), microphones, audio, startAtLogin, live });
+    checks = [];
+    pages = buildPages({ draft, backend, root, controls: createControls(changed), microphones, audio, startAtLogin, live, checks });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {
       const button = el("button", { type: "button", "data-page": page.id }, page.title);
@@ -133,8 +140,9 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     feedback();
     save.disabled = true;
     revert.disabled = true;
-    backend
-      .saveSettings(sending)
+    const pending = checks.map((check) => check()).filter((check) => check !== null);
+    const sent = pending.length === 0 ? backend.saveSettings(sending) : Promise.all(pending).then(() => backend.saveSettings(sending));
+    sent
       .then(() => {
         baseline = JSON.stringify(sending);
         saved = true;
@@ -155,6 +163,9 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     live.level(audio.paused || audio.active === null ? 0 : level);
   });
   backend.onAudio(showAudio);
+  backend.onSpeechModelProgress((progress) => {
+    live.speechModel(progress);
+  });
   backend.onStatus(showStatus);
   backend.getStatus().then(showStatus).catch((error: unknown) => {
     runtimeFailure = errorText(error);

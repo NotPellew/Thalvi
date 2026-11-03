@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Settings } from "./contract.ts";
 import { mountSettings, SAVED_TEXT } from "./settings.ts";
-import { SETTINGS, settle, stubBackend } from "./testing.ts";
+import { NEMOTRON, SETTINGS, settle, stubBackend } from "./testing.ts";
 
 let root: HTMLElement;
 
@@ -45,6 +45,18 @@ function flip(input: HTMLInputElement): void {
 
 function button(name: string): HTMLButtonElement {
   const found = Array.from(root.querySelectorAll("button")).find((candidate) => candidate.textContent === name);
+  if (!found) throw new Error(`no button ${name}`);
+  return found;
+}
+
+function radio(title: string): HTMLButtonElement {
+  const found = Array.from(root.querySelectorAll<HTMLButtonElement>("[role=radio]")).find((candidate) => candidate.textContent === title);
+  if (!found) throw new Error(`no model ${title}`);
+  return found;
+}
+
+function within(parent: HTMLElement, name: string): HTMLButtonElement {
+  const found = Array.from(parent.querySelectorAll("button")).find((candidate) => candidate.textContent === name);
   if (!found) throw new Error(`no button ${name}`);
   return found;
 }
@@ -181,6 +193,89 @@ describe("tables", () => {
   });
 });
 
+describe("a custom speech model folder", () => {
+  async function openLocal() {
+    const stub = await open({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    goTo("recognition");
+    return stub;
+  }
+  const result = (): HTMLElement | null => rowOf("Speech model").querySelector<HTMLElement>(".note:not([hidden])");
+
+  it("checks the typed folder and shows the plain answer inline", async () => {
+    const stub = await openLocal();
+    const input = control("Speech model", "input");
+    type(input, "  /models/mine ");
+    button("Check folder").click();
+    await settle();
+    expect(stub.backend.validateSpeechModelFolder).toHaveBeenLastCalledWith("/models/mine");
+    expect(result()?.textContent).toBe("This folder holds a speech model.");
+
+    stub.backend.validateSpeechModelFolder.mockRejectedValueOnce("Missing required files: encoder.int8.onnx, tokens.txt");
+    button("Check folder").click();
+    await settle();
+    expect(result()?.textContent).toBe("Missing required files: encoder.int8.onnx, tokens.txt");
+
+    type(input, "/models/other");
+    expect(result()).toBeNull();
+  });
+
+  it("drops the answer of a check whose path was edited while it ran", async () => {
+    const stub = await openLocal();
+    const input = control("Speech model", "input");
+    let answer: () => void = () => undefined;
+    stub.backend.validateSpeechModelFolder.mockReturnValueOnce(new Promise<void>((resolve) => (answer = resolve)));
+    type(input, "/models/mine");
+    button("Check folder").click();
+    type(input, "/models/unchecked");
+    answer();
+    await settle();
+    expect(result()).toBeNull();
+  });
+
+  it("asks for a path instead of checking nothing or the built-in model", async () => {
+    const stub = await openLocal();
+    button("Check folder").click();
+    expect(result()?.textContent).toBe("Type the folder path first.");
+    type(control("Speech model", "input"), "nemotron_160ms");
+    button("Check folder").click();
+    expect(result()?.textContent).toBe("nemotron_160ms is downloaded on first use; there is no folder to check.");
+    expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
+  });
+
+  it("saves a valid folder as stt.model", async () => {
+    const stub = await openLocal();
+    type(control("Speech model", "input"), "/models/mine");
+    button("Save").click();
+    await settle();
+    expect(stub.backend.validateSpeechModelFolder).toHaveBeenCalledWith("/models/mine");
+    expect(sent(stub).stt).toEqual({ engine: "local", model: "/models/mine", secondary: null });
+    expect(result()?.textContent).toBe("This folder holds a speech model.");
+  });
+
+  it("does not save a folder that fails the check, and says why", async () => {
+    const stub = await openLocal();
+    stub.backend.validateSpeechModelFolder.mockRejectedValueOnce("There is no folder at /models/gone.");
+    type(control("Speech model", "input"), "/models/gone");
+    button("Save").click();
+    await settle();
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    expect(result()?.textContent).toBe("There is no folder at /models/gone.");
+    expect(root.querySelector(".err")?.textContent).toBe("There is no folder at /models/gone.");
+  });
+
+  it.each([
+    ["the built-in model", { engine: "local", model: "nemotron_160ms" }],
+    ["no model", { engine: "local" }],
+    ["the server engine", { engine: "server", model: "/models/mine" }],
+  ] as const)("saves without checking a folder for %s", async (_name, stt) => {
+    const stub = await open({ ...SETTINGS, stt: { ...stt, secondary: null } });
+    goTo("recognition");
+    button("Save").click();
+    expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
+    expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("where speech is recognized", () => {
   it("saves the engine, and the model only for the local engine", async () => {
     const stub = await open();
@@ -193,6 +288,7 @@ describe("where speech is recognized", () => {
     type(control("Speech model", "input"), "/models/mine");
     choose(control("Recognize speech", "select"), "local");
     button("Save").click();
+    await settle();
     expect(sent(stub).stt.engine).toBe("local");
     expect(sent(stub).stt.model).toBe("/models/mine");
 
@@ -212,7 +308,148 @@ describe("where speech is recognized", () => {
     await open({ ...SETTINGS, stt: { engine: "local", model: "nemotron_160ms", secondary: null } });
     goTo("recognition");
     expect(control("Recognize speech", "select").value).toBe("local");
-    expect(control("Speech model", "input").value).toBe("nemotron_160ms");
+    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("true");
+    expect(control("Speech model", "input").value).toBe("");
+  });
+});
+
+describe("the speech model catalog", () => {
+  async function openCatalog(settings: Settings = { ...SETTINGS, stt: { engine: "local", secondary: null } }) {
+    const stub = await open(settings);
+    goTo("recognition");
+    return stub;
+  }
+  const card = (): HTMLElement => {
+    const found = rowOf("Speech model").querySelector<HTMLElement>(".model");
+    if (!found) throw new Error("no model card");
+    return found;
+  };
+  const text = (selector: string): string | undefined => card().querySelector(selector)?.textContent ?? undefined;
+  const alert = (): string | undefined => card().querySelector(".note:not([hidden])")?.textContent ?? undefined;
+  const download = (): HTMLButtonElement => within(card(), "Download");
+  const meter = (): HTMLProgressElement => card().querySelector("progress") as HTMLProgressElement;
+
+  it("lists the model with its description, size, state and source", async () => {
+    await openCatalog();
+    expect(rowOf("Speech model").querySelectorAll(".model")).toHaveLength(1);
+    expect(card().textContent).toContain("NVIDIA's English streaming recognizer");
+    expect(text(".unit")).toBe("662 MB");
+    expect(text(".badge")).toBe("Not downloaded");
+    expect(card().querySelector("a")?.getAttribute("href")).toBe(NEMOTRON.source);
+    expect(download().hidden).toBe(false);
+  });
+
+  it.each([
+    [661_919_416, "662 MB"],
+    [1_540_000_000, "1.5 GB"],
+    [8_952, "9 kB"],
+  ])("shows %i bytes as %s", async (size, shown) => {
+    const stub = stubBackend({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    stub.backend.listSpeechModels.mockResolvedValueOnce([{ ...NEMOTRON, size }]);
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("recognition");
+    expect(text(".unit")).toBe(shown);
+  });
+
+  it("marks a downloaded model and offers no download", async () => {
+    const stub = stubBackend({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    stub.backend.listSpeechModels.mockResolvedValueOnce([{ ...NEMOTRON, cached: true }]);
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("recognition");
+    expect(text(".badge")).toBe("Downloaded");
+    expect(download().hidden).toBe(true);
+  });
+
+  it("shows the download's progress and flips the badge when it is done", async () => {
+    const stub = await openCatalog();
+    let finish: () => void = () => undefined;
+    stub.backend.downloadSpeechModel.mockReturnValueOnce(new Promise<void>((resolve) => { finish = resolve; }));
+    download().click();
+    expect(stub.backend.downloadSpeechModel).toHaveBeenCalledWith("nemotron_160ms");
+    expect(download().disabled).toBe(true);
+    expect(text("[role=status]")).toBe("Checking files…");
+
+    stub.speechProgress({ name: "nemotron_160ms", percent: 40, status: "downloading", message: null });
+    expect(text("[role=status]")).toBe("Downloading… 40%");
+    expect(meter().value).toBe(40);
+    expect(meter().hidden).toBe(false);
+    expect(text(".badge")).toBe("Not downloaded");
+
+    stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null });
+    finish();
+    await settle();
+    expect(text(".badge")).toBe("Downloaded");
+    expect(meter().hidden).toBe(true);
+    expect(text("[role=status]")).toBe("");
+    expect(download().hidden).toBe(true);
+  });
+
+  it("says plainly why a download failed and lets the user try again", async () => {
+    const stub = await openCatalog();
+    stub.backend.downloadSpeechModel.mockRejectedValueOnce("Could not download the speech model encoder. Check the internet connection and try again.");
+    download().click();
+    await settle();
+    expect(alert()).toBe("Could not download the speech model encoder. Check the internet connection and try again.");
+    expect(text(".badge")).toBe("Not downloaded");
+    expect(meter().hidden).toBe(true);
+    expect(download().disabled).toBe(false);
+
+    download().click();
+    expect(alert()).toBeUndefined();
+    await settle();
+    expect(text(".badge")).toBe("Downloaded");
+  });
+
+  it("shows the reason from a failed event too", async () => {
+    const stub = await openCatalog();
+    stub.speechProgress({ name: "nemotron_160ms", percent: 0, status: "failed", message: "The download did not match its checksum." });
+    expect(alert()).toBe("The download did not match its checksum.");
+  });
+
+  it("opens the source page through the app, not the web view", async () => {
+    const stub = await openCatalog();
+    const link = card().querySelector("a") as HTMLAnchorElement;
+    const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+    link.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(stub.backend.openSpeechModelSource).toHaveBeenCalledWith("nemotron_160ms");
+
+    stub.backend.openSpeechModelSource.mockRejectedValueOnce("No browser could be opened.");
+    link.click();
+    await settle();
+    expect(alert()).toBe("No browser could be opened.");
+  });
+
+  it("says why the catalog could not be listed", async () => {
+    const stub = stubBackend({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    stub.backend.listSpeechModels.mockRejectedValueOnce("Thalvi could not find a folder to keep its models in.");
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("recognition");
+    expect(rowOf("Speech model").querySelector(".note:not([hidden])")?.textContent).toBe(
+      "Thalvi could not find a folder to keep its models in.",
+    );
+  });
+
+  it("saves the selected model as stt.model and leaves the own-folder box empty", async () => {
+    const stub = await openCatalog();
+    type(control("Speech model", "input"), "/models/mine");
+    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("false");
+
+    radio("Nemotron Speech Streaming 0.6B").click();
+    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("true");
+    expect(control("Speech model", "input").value).toBe("");
+    button("Save").click();
+    await settle();
+    expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
+    expect(sent(stub).stt).toEqual({ engine: "local", model: "nemotron_160ms", secondary: null });
+  });
+
+  it("selects the default model when none is saved", async () => {
+    await openCatalog();
+    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("true");
   });
 });
 
@@ -360,6 +597,33 @@ describe("live controls", () => {
     expect(rowOf("Start Thalvi when I log in").querySelector(".note")?.textContent).toBe(
       "Thalvi could not check its startup entry: no home folder",
     );
+  });
+
+  it("pauses, changes the device, saves and resumes from the Microphone page only", async () => {
+    const stub = await open();
+    const pageOf = (label: string): string | null => rowOf(label).closest("section")?.getAttribute("data-page") ?? null;
+    expect(pageOf("Listening")).toBe("microphone");
+    expect(root.querySelectorAll('.row[data-label="listening"]')).toHaveLength(1);
+    expect(root.querySelectorAll('section[data-page="general"] .row[data-label="listening"]')).toHaveLength(0);
+
+    goTo("microphone");
+    const toggle = control("Listening", "input");
+    const picker = control("Saved device", "select");
+    expect(picker.disabled).toBe(true);
+    flip(toggle);
+    expect(stub.backend.setListening).toHaveBeenLastCalledWith(false);
+    stub.emit({ state: "paused" });
+    expect(picker.disabled).toBe(false);
+
+    choose(picker, "USB Microphone");
+    button("Save").click();
+    await settle();
+    expect(sent(stub).microphone).toBe("USB Microphone");
+    expect(toggle.checked).toBe(false);
+    expect(stub.backend.setListening).toHaveBeenCalledTimes(1);
+
+    flip(toggle);
+    expect(stub.backend.setListening).toHaveBeenLastCalledWith(true);
   });
 
   it("follows the status for the listening switch", async () => {

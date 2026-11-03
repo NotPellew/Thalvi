@@ -85,6 +85,27 @@ export interface Settings {
   recordings: { metrics: boolean; text: boolean; audio: boolean };
 }
 
+/** A speech model Thalvi can download, as the Rust catalog describes it. */
+export interface SpeechModelInfo {
+  name: string;
+  title: string;
+  description: string;
+  /** Bytes to download in all. */
+  size: number;
+  /** The model's page. */
+  source: string;
+  /** Every file is on disk and matches its checksum. */
+  cached: boolean;
+}
+
+/** One step of a speech model download; `message` is the plain reason, only with `failed`. */
+export interface SpeechModelProgress {
+  name: string;
+  percent: number;
+  status: "verifying" | "downloading" | "done" | "failed";
+  message: string | null;
+}
+
 /** The Tauri commands and events, behind one interface so tests inject a fake. */
 export interface Backend {
   getStatus(): Promise<Status>;
@@ -104,6 +125,14 @@ export interface Backend {
   getStartAtLogin(): Promise<LoginState>;
   /** Adds or removes the startup entry; rejects unless the OS then holds it as asked. */
   setStartAtLogin(on: boolean): Promise<void>;
+  /** Resolves when the folder holds a speech model; rejects with the plain reason it does not. */
+  validateSpeechModelFolder(path: string): Promise<void>;
+  listSpeechModels(): Promise<SpeechModelInfo[]>;
+  /** Resolves when the model is on disk and verified; rejects with the plain reason it is not. */
+  downloadSpeechModel(name: string): Promise<void>;
+  onSpeechModelProgress(listener: (progress: SpeechModelProgress) => void): void;
+  /** Opens the model's page in the browser. */
+  openSpeechModelSource(name: string): Promise<void>;
   appVersion(): Promise<string>;
 }
 

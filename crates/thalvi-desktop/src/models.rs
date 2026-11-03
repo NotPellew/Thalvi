@@ -1,10 +1,12 @@
 //! Model catalogs (wake heads, speech recognition) and their checksum-verified download into the per-user data directory.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// The most a download may take besides moving its bytes.
@@ -126,8 +128,66 @@ pub struct SpeechAssets<'a> {
     pub tokens: Asset<'a>,
 }
 
+impl<'a> SpeechAssets<'a> {
+    fn all(&self) -> [Asset<'a>; 4] {
+        [self.encoder, self.decoder, self.joiner, self.tokens]
+    }
+
+    /// The bytes of all files together.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.all().iter().map(|asset| asset.size).sum()
+    }
+}
+
+/// What the settings window shows of a catalog speech model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpeechModelInfo {
+    pub name: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    /// Bytes to download in all.
+    pub size: u64,
+    /// The model's page, for reading about it.
+    pub source: &'static str,
+    /// Every file is on disk and matches its checksum.
+    pub cached: bool,
+}
+
 impl CatalogSpeech {
     pub const ALL: [Self; 1] = [Self::Nemotron160ms];
+
+    /// The catalog model called `name` in config.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|model| model.name() == name)
+    }
+
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Nemotron160ms => "Nemotron Speech Streaming 0.6B",
+        }
+    }
+
+    #[must_use]
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Nemotron160ms => {
+                "NVIDIA's English streaming recognizer, int8, answering every 160 ms. Runs on the CPU."
+            }
+        }
+    }
+
+    /// The Hugging Face page of the repository the files come from.
+    #[must_use]
+    pub fn source(self) -> &'static str {
+        match self {
+            Self::Nemotron160ms => {
+                "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25"
+            }
+        }
+    }
 
     /// The name used in config.
     #[must_use]
@@ -204,6 +264,8 @@ pub enum ModelError {
         #[source]
         cause: Box<ModelError>,
     },
+    #[error("The speech model {name} is already being downloaded.")]
+    AlreadyDownloading { name: String },
     #[error("Could not save the {} {file} in {}: {source}", kind.noun(), dir.display())]
     Io {
         kind: ModelKind,
@@ -242,6 +304,18 @@ impl ModelStore {
     /// Fails when the download fails, the checksum does not match (the file is deleted), or the
     /// directory cannot be written. When a damaged stored file was removed first, the error says so.
     pub async fn fetch(&self, asset: &Asset<'_>) -> Result<PathBuf, ModelError> {
+        self.fetch_reporting(asset, |_| {}).await
+    }
+
+    /// Like [`fetch`](Self::fetch); `received` is told how many bytes of the file have arrived.
+    ///
+    /// # Errors
+    /// The same as [`fetch`](Self::fetch).
+    pub async fn fetch_reporting(
+        &self,
+        asset: &Asset<'_>,
+        received: impl FnMut(u64),
+    ) -> Result<PathBuf, ModelError> {
         let path = self.dir.join(asset.file_name);
         let damaged = match stored(&path, asset).await {
             Stored::Intact => return Ok(path),
@@ -258,7 +332,7 @@ impl ModelStore {
                 true
             }
         };
-        match self.download(asset, &path).await {
+        match self.download(asset, &path, received).await {
             Ok(()) => Ok(path),
             Err(cause) if damaged => Err(ModelError::Replaced {
                 kind: asset.kind,
@@ -269,7 +343,12 @@ impl ModelStore {
         }
     }
 
-    async fn download(&self, asset: &Asset<'_>, path: &Path) -> Result<(), ModelError> {
+    async fn download(
+        &self,
+        asset: &Asset<'_>,
+        path: &Path,
+        mut received: impl FnMut(u64),
+    ) -> Result<(), ModelError> {
         let io = |source| ModelError::Io {
             kind: asset.kind,
             file: asset.file_name.to_owned(),
@@ -299,9 +378,12 @@ impl ModelStore {
             .map_err(net)?;
         let mut file = tokio::fs::File::create(&part.0).await.map_err(io)?;
         let mut hasher = Sha256::new();
-        let received = async {
+        let mut total = 0;
+        let written = async {
             while let Some(chunk) = response.chunk().await.map_err(net)? {
                 hasher.update(&chunk);
+                total += chunk.len() as u64;
+                received(total);
                 tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
                     .await
                     .map_err(io)?;
@@ -310,7 +392,7 @@ impl ModelStore {
         }
         .await;
         drop(file);
-        received?;
+        written?;
         if hex(&hasher.finalize()) != asset.sha256 {
             return Err(ModelError::Checksum {
                 kind: asset.kind,
@@ -327,6 +409,130 @@ impl ModelStore {
             Err(source) if !intact().await => Err(io(source)),
             _ => Ok(()),
         }
+    }
+
+    /// Whether every file of `assets` is on disk at its pinned size. Cheap, for showing download
+    /// state; [`fetch`](Self::fetch) still verifies each checksum before a model is used.
+    pub async fn is_cached(&self, assets: &SpeechAssets<'_>) -> bool {
+        for asset in assets.all() {
+            match tokio::fs::metadata(self.dir.join(asset.file_name)).await {
+                Ok(meta) if meta.len() == asset.size => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    /// The catalog models with whether each is already downloaded.
+    pub async fn speech_models(&self) -> Vec<SpeechModelInfo> {
+        let mut models = Vec::new();
+        for model in CatalogSpeech::ALL {
+            let assets = model.assets();
+            models.push(SpeechModelInfo {
+                name: model.name(),
+                title: model.title(),
+                description: model.description(),
+                size: assets.size(),
+                source: model.source(),
+                cached: self.is_cached(&assets).await,
+            });
+        }
+        models
+    }
+
+    /// Fetches the files of `assets` that are not intact yet, telling `progress` how it goes.
+    ///
+    /// # Errors
+    /// The first file's error; files fetched before it stay.
+    pub async fn fetch_speech(
+        &self,
+        assets: &SpeechAssets<'_>,
+        mut progress: impl FnMut(SpeechProgress),
+    ) -> Result<(), ModelError> {
+        progress(SpeechProgress::Verifying);
+        let total = assets.size();
+        let mut done = 0;
+        let mut shown = None;
+        let mut report = |bytes: u64| {
+            let percent = u8::try_from((bytes * 100).checked_div(total).unwrap_or(100).min(100))
+                .unwrap_or(100);
+            if shown != Some(percent) {
+                shown = Some(percent);
+                progress(SpeechProgress::Downloading { percent });
+            }
+        };
+        for asset in assets.all() {
+            let path = self.dir.join(asset.file_name);
+            if !matches!(stored(&path, &asset).await, Stored::Intact) {
+                self.fetch_reporting(&asset, |bytes| report(done + bytes))
+                    .await?;
+            }
+            done += asset.size;
+            report(done);
+        }
+        progress(SpeechProgress::Done);
+        Ok(())
+    }
+}
+
+/// How a speech model download is going.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeechProgress {
+    /// Checking which files are already intact.
+    Verifying,
+    Downloading {
+        percent: u8,
+    },
+    Done,
+}
+
+/// The speech models being downloaded now, so a model is never fetched twice at once.
+#[derive(Debug, Default)]
+pub struct SpeechDownloads {
+    running: Mutex<HashSet<String>>,
+}
+
+impl SpeechDownloads {
+    /// Runs [`ModelStore::fetch_speech`] for the model called `name` unless it is already running.
+    ///
+    /// # Errors
+    /// [`ModelError::AlreadyDownloading`], or the download's own error.
+    pub async fn run(
+        &self,
+        name: &str,
+        store: &ModelStore,
+        assets: &SpeechAssets<'_>,
+        progress: impl FnMut(SpeechProgress),
+    ) -> Result<(), ModelError> {
+        if !self
+            .running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.to_owned())
+        {
+            return Err(ModelError::AlreadyDownloading {
+                name: name.to_owned(),
+            });
+        }
+        let _release = Release {
+            running: &self.running,
+            name,
+        };
+        store.fetch_speech(assets, progress).await
+    }
+}
+
+struct Release<'a> {
+    running: &'a Mutex<HashSet<String>>,
+    name: &'a str,
+}
+
+impl Drop for Release<'_> {
+    fn drop(&mut self) {
+        self.running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(self.name);
     }
 }
 
