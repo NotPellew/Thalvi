@@ -17,9 +17,11 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   const empty = el("p", { class: "empty", hidden: true }, "No settings match your search.");
   const message = el("span", { class: "msg", role: "status" });
   const failure = el("span", { class: "err", role: "alert" });
+  const copy = el("button", { type: "button", class: "quiet" }, "Copy");
+  const dismiss = el("button", { type: "button", class: "quiet", "aria-label": "Dismiss error" }, "×");
   const revert = el("button", { type: "button", class: "quiet" }, "Revert");
   const save = el("button", { type: "button", class: "primary" }, "Save");
-  const main = el("main", {}, pagesNode, empty, el("footer", { class: "bar" }, message, failure, revert, save));
+  const main = el("main", {}, pagesNode, empty, el("footer", { class: "bar" }, message, failure, copy, dismiss, revert, save));
   root.append(el("div", { class: "app" }, nav, main));
 
   let pages: Page[] = [];
@@ -63,20 +65,18 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   }
 
   function feedback(): void {
-    failure.textContent = saveFailure || runtimeFailure;
+    const shownFailure = saveFailure || runtimeFailure;
+    if (failure.textContent !== shownFailure) copy.textContent = "Copy";
+    failure.textContent = shownFailure;
+    copy.hidden = shownFailure === "";
+    dismiss.hidden = shownFailure === "";
     const dirty = draft !== null && JSON.stringify(draft) !== baseline;
     message.textContent = saving ? "Saving…" : dirty ? "Unsaved changes"
       : saved && failure.textContent === "" ? SAVED_TEXT : "";
   }
 
-  function changed(): void {
-    saveFailure = "";
-    feedback();
-  }
-
   function showStatus(status: Status): void {
-    if (status.state === "failed") runtimeFailure = status.notice;
-    else if (["listening", "capturing", "done"].includes(status.state)) runtimeFailure = "";
+    runtimeFailure = status.state === "failed" ? status.notice : "";
     feedback();
   }
 
@@ -109,7 +109,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     baseline = JSON.stringify(draft);
     applyLook(root, draft.look);
     checks = [];
-    pages = buildPages({ draft, backend, root, controls: createControls(changed), microphones, audio, live, checks });
+    pages = buildPages({ draft, backend, root, controls: createControls(feedback), microphones, audio, live, checks });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {
       const button = el("button", { type: "button", "data-page": page.id }, page.title);
@@ -127,6 +127,31 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   }
 
   search.addEventListener("input", applyView);
+
+  copy.addEventListener("click", () => {
+    // WebView clipboard access can be refused; selecting the text lets the user copy it by hand.
+    const clipboard = navigator.clipboard as Clipboard | undefined;
+    (clipboard ? clipboard.writeText(failure.textContent) : Promise.reject(new Error("no clipboard"))).then(
+      () => {
+        copy.textContent = "Copied";
+      },
+      () => {
+        window.getSelection()?.selectAllChildren(failure);
+      },
+    );
+  });
+  dismiss.addEventListener("click", () => {
+    if (saveFailure !== "") {
+      saveFailure = "";
+    } else {
+      runtimeFailure = "";
+      backend.dismissError().catch((error: unknown) => {
+        saveFailure = errorText(error);
+        feedback();
+      });
+    }
+    feedback();
+  });
 
   revert.addEventListener("click", () => {
     void load();

@@ -97,6 +97,12 @@ pub fn cancel_capture(state: State<'_, AppState>) {
     state.link.send(Control::Cancel);
 }
 
+/// Hides the overlay's failure; the status stays failed until the next capture starts.
+#[tauri::command]
+pub fn dismiss_error(app: AppHandle, state: State<'_, AppState>) {
+    state.overlay.apply(&app, overlay::Visibility::Hide);
+}
+
 #[tauri::command]
 pub async fn list_microphones() -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(|| {

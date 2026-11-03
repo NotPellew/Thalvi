@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Settings } from "./contract.ts";
 import { mountSettings, SAVED_TEXT } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend } from "./testing.ts";
@@ -8,6 +8,11 @@ let root: HTMLElement;
 beforeEach(() => {
   document.body.innerHTML = '<div id="settings"></div>';
   root = document.getElementById("settings") as HTMLElement;
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 async function open(settings: Settings = SETTINGS) {
@@ -680,6 +685,71 @@ describe("live controls", () => {
     stub.emit({ state: "failed", notice: "The saved microphone could not be opened." });
     expect(root.querySelector(".msg")?.textContent).toBe("");
     expect(root.querySelector(".err")?.textContent).toBe("The saved microphone could not be opened.");
+  });
+
+  it.each<[string, (stub: Awaited<ReturnType<typeof open>>) => Promise<void>, string, (stub: Awaited<ReturnType<typeof open>>) => Promise<void>, number]>([
+    [
+      "a runtime failure",
+      (stub) => {
+        stub.emit({ state: "failed", notice: "The speech server is not reachable." });
+        return Promise.resolve();
+      },
+      "The speech server is not reachable.",
+      (stub) => {
+        stub.emit({ state: "starting", target: null });
+        return Promise.resolve();
+      },
+      1,
+    ],
+    [
+      "a rejected save",
+      async (stub) => {
+        stub.backend.saveSettings.mockRejectedValueOnce("The server address must start with ws://.");
+        button("Save").click();
+        await settle();
+      },
+      "The server address must start with ws://.",
+      async () => {
+        button("Save").click();
+        await settle();
+      },
+      0,
+    ],
+  ])("keeps %s until dismissed or fixed, and copies its text", async (_name, raise, text, fix, dismissals) => {
+    vi.useFakeTimers();
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const stub = await open();
+    const shown = (): string => root.querySelector(".err")?.textContent ?? "";
+
+    await raise(stub);
+    vi.advanceTimersByTime(60_000);
+    expect(shown()).toBe(text);
+
+    button("Copy").click();
+    await settle();
+    expect(writeText).toHaveBeenCalledWith(text);
+    expect(button("Copied").hidden).toBe(false);
+
+    button("×").click();
+    await settle();
+    expect(shown()).toBe("");
+    expect(button("Copy").hidden).toBe(true);
+    expect(stub.backend.dismissError).toHaveBeenCalledTimes(dismissals);
+
+    await raise(stub);
+    expect(shown()).toBe(text);
+    await fix(stub);
+    expect(shown()).toBe("");
+  });
+
+  it("selects the failure text for copying by hand when the clipboard refuses", async () => {
+    vi.stubGlobal("navigator", { clipboard: { writeText: () => Promise.reject(new Error("denied")) } });
+    const stub = await open();
+    stub.emit({ state: "failed", notice: "The speech server is not reachable." });
+    button("Copy").click();
+    await settle();
+    expect(window.getSelection()?.toString()).toBe("The speech server is not reachable.");
   });
 
   it("resets the microphone meter when listening pauses", async () => {

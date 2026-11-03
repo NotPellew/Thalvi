@@ -148,6 +148,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
       emit({ state: "listening" });
       return Promise.resolve();
     },
+    dismissError: () => Promise.resolve(),
     listMicrophones: () => Promise.resolve([...microphones]),
     openRecordings: () => Promise.resolve(),
     validateSpeechModelFolder: (path) =>

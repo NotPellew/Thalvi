@@ -133,6 +133,7 @@ fn start() -> Result<(), String> {
             commands::save_settings,
             commands::set_listening,
             commands::cancel_capture,
+            commands::dismiss_error,
             commands::list_microphones,
             commands::open_recordings,
             commands::validate_speech_model_folder,

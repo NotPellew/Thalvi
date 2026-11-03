@@ -119,6 +119,8 @@ export interface Backend {
   saveSettings(settings: Settings): Promise<void>;
   setListening(on: boolean): Promise<void>;
   cancelCapture(): Promise<void>;
+  /** The user dismissed the latest error; the overlay stops showing it. */
+  dismissError(): Promise<void>;
   listMicrophones(): Promise<string[]>;
   openRecordings(): Promise<void>;
   /** Resolves when the folder holds a speech model; rejects with the plain reason it does not. */
