@@ -181,7 +181,10 @@ pub struct Script {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScriptAction {
     OpenUrl(WebUrl),
-    FocusApp(App),
+    FocusApp {
+        name: String,
+        app: App,
+    },
     /// The phrase is a prefix: the words after it are the message. Normalized channel URL.
     DiscordMessage {
         destination: String,
@@ -284,11 +287,13 @@ impl RawScript {
                 }
                 ScriptAction::OpenUrl(WebUrl::parse(&destination).map_err(|_| invalid())?)
             }
-            RawAction::FocusApp => ScriptAction::FocusApp(
-                apps.get(&destination)
+            RawAction::FocusApp => ScriptAction::FocusApp {
+                app: apps
+                    .get(&destination)
                     .cloned()
                     .ok_or_else(|| format!("No app named {destination:?} is configured."))?,
-            ),
+                name: destination,
+            },
             RawAction::DiscordMessage => ScriptAction::DiscordMessage {
                 destination: discord_channel(&destination)?,
             },
@@ -496,14 +501,10 @@ impl Serialize for DesktopConfig {
             .map(|script| {
                 let (action, destination) = match &script.action {
                     ScriptAction::OpenUrl(url) => ("open_url", url.as_str()),
-                    ScriptAction::FocusApp(app) => {
-                        let name = self
-                            .apps
-                            .iter()
-                            .find_map(|(name, known)| (known == app).then_some(name))
-                            .ok_or_else(|| {
-                                serde::ser::Error::custom("script app is not configured")
-                            })?;
+                    ScriptAction::FocusApp { name, app } => {
+                        if self.apps.get(name) != Some(app) {
+                            return Err(serde::ser::Error::custom("script app is not configured"));
+                        }
                         ("focus_app", name.as_str())
                     }
                     ScriptAction::DiscordMessage { destination } => {
@@ -854,6 +855,20 @@ mod tests {
     }
 
     #[test]
+    fn saving_a_script_preserves_its_named_app_when_two_apps_have_the_same_settings() {
+        let config = parse(
+            r#"{"apps": {"a": {"classes": ["terminal"]}, "b": {"classes": ["terminal"]}},
+                "scripts": [{"phrase": "switch", "action": "focus_app", "destination": "b"}]}"#,
+        )
+        .unwrap();
+        let mut saved = serde_json::to_value(&config).unwrap();
+        assert_eq!(saved["scripts"][0]["destination"], "b");
+        saved["apps"]["a"]["classes"] = serde_json::json!(["other-terminal"]);
+        let reloaded = parse(&saved.to_string()).unwrap();
+        assert_eq!(reloaded.scripts, config.scripts);
+    }
+
+    #[test]
     fn apps_and_scripts_are_read_into_typed_actions() {
         let config = parse(
             r#"{
@@ -886,7 +901,10 @@ mod tests {
             [
                 Script {
                     phrase: "switch to t3".to_owned(),
-                    action: ScriptAction::FocusApp(t3),
+                    action: ScriptAction::FocusApp {
+                        name: "t3".to_owned(),
+                        app: t3
+                    },
                     label: "T3 Code".to_owned(),
                 },
                 Script {
@@ -927,11 +945,14 @@ mod tests {
             .unwrap();
             assert_eq!(
                 config.scripts[0].action,
-                ScriptAction::FocusApp(App {
-                    classes: vec!["a".to_owned()],
-                    executables: Vec::new(),
-                    shortcut: expected,
-                })
+                ScriptAction::FocusApp {
+                    name: "a".to_owned(),
+                    app: App {
+                        classes: vec!["a".to_owned()],
+                        executables: Vec::new(),
+                        shortcut: expected,
+                    },
+                }
             );
         }
     }
