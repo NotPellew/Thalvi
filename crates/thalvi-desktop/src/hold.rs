@@ -280,6 +280,23 @@ pub enum Verdict {
     Mask,
 }
 
+/// How many events a mask injects: the unused key down and up, and the replayed release.
+pub const MASK_INPUTS: usize = 3;
+
+impl Verdict {
+    /// What becomes of a [`Verdict::Mask`] event once `injected` of its [`MASK_INPUTS`] events
+    /// went in. The physical release is swallowed only when its replay did, or Windows would
+    /// keep the modifier down; a refused injection, as toward an elevated window, lets it pass.
+    #[must_use]
+    pub fn after_mask(injected: usize) -> Self {
+        if injected == MASK_INPUTS {
+            Self::Swallow
+        } else {
+            Self::Pass
+        }
+    }
+}
+
 /// The hook's answer to one event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Decision {
@@ -335,6 +352,29 @@ impl HoldHook {
         }
     }
 
+    /// The side-specific modifier keys, as Windows reports them.
+    const SIDES: [(u16, Modifier, u8); 8] = [
+        (0xA0, Modifier::Shift, 1),
+        (0xA1, Modifier::Shift, 2),
+        (0xA2, Modifier::Ctrl, 1),
+        (0xA3, Modifier::Ctrl, 2),
+        (0xA4, Modifier::Alt, 1),
+        (0xA5, Modifier::Alt, 2),
+        (0x5B, Modifier::Logo, 1),
+        (0x5C, Modifier::Logo, 2),
+    ];
+
+    /// Sets the tracked modifiers to what the keyboard holds down now. A release the hook never
+    /// saw, as on the lock screen, would otherwise keep a modifier down for good.
+    fn reconcile(&mut self, physically_down: &impl Fn(u16) -> bool) {
+        self.down = [0; 4];
+        for (vk, modifier, side) in Self::SIDES {
+            if physically_down(vk) {
+                self.down[modifier as usize] |= side;
+            }
+        }
+    }
+
     /// The modifier a virtual key is, and which side.
     fn modifier(vk: u16) -> Option<(Modifier, u8)> {
         Some(match vk {
@@ -364,11 +404,15 @@ impl HoldHook {
         })
     }
 
+    /// Decides what to do with `event`. `physically_down` says whether the keyboard holds a
+    /// modifier's virtual key down right now; the event itself is applied on top of that, since
+    /// Windows may not have updated it for the key of this very event.
     #[must_use]
-    pub fn on_event(&mut self, event: KeyEvent) -> Decision {
+    pub fn on_event(&mut self, event: KeyEvent, physically_down: impl Fn(u16) -> bool) -> Decision {
         if event.injected {
             return Decision::PASS;
         }
+        self.reconcile(&physically_down);
         if let Some((modifier, side)) = Self::modifier(event.vk) {
             return self.on_modifier(modifier, side, event);
         }
@@ -474,6 +518,7 @@ mod tests {
     const RIGHT_ALT: u16 = 0xA5;
     const SHIFT: u16 = 0xA0;
     const CTRL: u16 = 0xA2;
+    const WIN: u16 = 0x5B;
     const Z: u16 = 0x5A;
     const X: u16 = 0x58;
 
@@ -505,12 +550,21 @@ mod tests {
         change: None,
     };
 
-    /// Feeds `events`, `(vk, down)`, to a hook for `key` and returns what each one got.
+    /// Feeds `events`, `(vk, down)`, to a hook for `key`, with a keyboard that holds down what the
+    /// events pressed, and returns what each one got.
     fn run(key: &str, events: &[(u16, bool)]) -> Vec<Decision> {
         let mut hook = HoldHook::new(HoldKey::parse(key).unwrap());
+        let mut keyboard = std::collections::HashSet::new();
         events
             .iter()
-            .map(|&(vk, down)| hook.on_event(event(vk, down)))
+            .map(|&(vk, down)| {
+                if down {
+                    keyboard.insert(vk);
+                } else {
+                    keyboard.remove(&vk);
+                }
+                hook.on_event(event(vk, down), |vk| keyboard.contains(&vk))
+            })
             .collect()
     }
 
@@ -566,18 +620,19 @@ mod tests {
     #[test]
     fn events_another_program_sent_are_never_the_hold_key() {
         let mut hook = HoldHook::new(HoldKey::default());
-        assert_eq!(hook.on_event(event(ALT, true)), PASS);
+        let alt_down = |vk| vk == ALT;
+        assert_eq!(hook.on_event(event(ALT, true), alt_down), PASS);
         let injected = KeyEvent {
             injected: true,
             ..event(Z, true)
         };
-        assert_eq!(hook.on_event(injected), PASS);
+        assert_eq!(hook.on_event(injected, alt_down), PASS);
         let extended = KeyEvent {
             extended: true,
             ..event(Z, true)
         };
         assert_eq!(
-            hook.on_event(extended),
+            hook.on_event(extended, alt_down),
             PASS,
             "the extended twin of a scan code is another key"
         );
@@ -651,6 +706,35 @@ mod tests {
                 SWALLOW,
             ]
         );
+    }
+
+    #[test]
+    fn a_modifier_release_the_hook_never_saw_does_not_keep_the_hold_key_from_working() {
+        // Win+L: the lock screen takes Win's release, so the hook only saw it go down.
+        let mut hook = HoldHook::new(HoldKey::default());
+        assert_eq!(hook.on_event(event(WIN, true), |vk| vk == WIN), PASS);
+        let keyboard = |vk| vk == ALT;
+        assert_eq!(hook.on_event(event(ALT, true), keyboard), PASS);
+        assert_eq!(
+            hook.on_event(event(Z, true), keyboard),
+            decision(Verdict::Swallow, Some(true))
+        );
+        // A modifier the keyboard really holds still spoils the chord.
+        let mut hook = HoldHook::new(HoldKey::default());
+        let with_win = |vk| vk == WIN || vk == ALT;
+        assert_eq!(hook.on_event(event(ALT, true), with_win), PASS);
+        assert_eq!(hook.on_event(event(Z, true), with_win), PASS);
+    }
+
+    #[test]
+    fn a_mask_whose_replay_did_not_go_in_lets_the_physical_release_through() {
+        for (injected, verdict) in [
+            (MASK_INPUTS, Verdict::Swallow),
+            (MASK_INPUTS - 1, Verdict::Pass),
+            (0, Verdict::Pass),
+        ] {
+            assert_eq!(Verdict::after_mask(injected), verdict, "{injected}");
+        }
     }
 
     #[test]

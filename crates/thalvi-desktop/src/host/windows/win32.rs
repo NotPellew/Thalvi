@@ -29,8 +29,8 @@ use ::windows::Win32::System::Threading::{
 };
 use ::windows::Win32::UI::HiDpi::GetDpiForSystem;
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY,
 };
 use ::windows::Win32::UI::Shell::ShellExecuteW;
 use ::windows::Win32::UI::WindowsAndMessaging::{
@@ -233,19 +233,26 @@ fn virtual_input(code: u16, release: bool, extended: bool) -> INPUT {
     }
 }
 
-/// Taps the unused key, then lets the release of `modifier` through behind it.
-fn mask_release(modifier: u16, extended: bool) {
+/// Taps the unused key, then lets the release of `modifier` through behind it; says how many of
+/// the events went in.
+fn mask_release(modifier: u16, extended: bool) -> usize {
     let inputs = [
         virtual_input(MASK_KEY, false, false),
         virtual_input(MASK_KEY, true, false),
         virtual_input(modifier, true, extended),
     ];
     let Ok(size) = i32::try_from(size_of::<INPUT>()) else {
-        return;
+        return 0;
     };
     // SAFETY: `inputs` is a valid slice of INPUT structures and `size` is the size of one. The hook
     // skips these events, which are marked as injected.
-    unsafe { SendInput(&inputs, size) };
+    unsafe { SendInput(&inputs, size) as usize }
+}
+
+/// Whether the keyboard holds `vk` down right now.
+fn physically_down(vk: u16) -> bool {
+    // SAFETY: GetAsyncKeyState takes a plain key code.
+    unsafe { GetAsyncKeyState(i32::from(vk)) }.cast_unsigned() & 0x8000 != 0
 }
 
 /// The low-level keyboard hook: keeps the hold key from the focused app, passes every other key.
@@ -268,7 +275,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
             let decision = RULES.with(|rules| {
                 let mut rules = rules.try_borrow_mut().ok()?;
                 let rules = rules.as_mut()?;
-                let decision = rules.hook.on_event(event);
+                let decision = rules.hook.on_event(event, physically_down);
                 if let Some(down) = decision.change {
                     (rules.on_change)(down);
                 }
@@ -277,8 +284,9 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
             match decision.map(|decision| decision.verdict) {
                 Some(Verdict::Swallow) => return LRESULT(1),
                 Some(Verdict::Mask) => {
-                    mask_release(event.vk, extended);
-                    return LRESULT(1);
+                    if Verdict::after_mask(mask_release(event.vk, extended)) == Verdict::Swallow {
+                        return LRESULT(1);
+                    }
                 }
                 Some(Verdict::Pass) | None => {}
             }
