@@ -9,6 +9,7 @@ pub mod delivery;
 pub mod engine;
 pub mod fbank;
 pub mod frame;
+pub mod history;
 pub mod host;
 pub mod local;
 pub mod metrics;
