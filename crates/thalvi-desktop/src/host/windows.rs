@@ -5,7 +5,7 @@ mod win32;
 use std::fmt;
 use std::path::Path;
 
-use super::{App, HoldWatch, Host, HostError, Modifier, StateServer, TypedText, WebUrl};
+use super::{App, HoldSource, Host, HostError, Modifier, StateServer, TypedText, WebUrl};
 use crate::hold::HoldKey;
 pub use win32::Real;
 
@@ -104,8 +104,8 @@ impl Windows {
     pub fn watch_hold_key(
         key: &HoldKey,
         on_change: impl Fn(bool) + Send + 'static,
-    ) -> Result<HoldWatch, HostError> {
-        win32::watch_hold_key(key.clone(), Box::new(on_change))
+    ) -> Result<HoldSource, HostError> {
+        win32::watch_hold_key(key.clone(), Box::new(on_change)).map(HoldSource::Hook)
     }
 
     /// # Errors

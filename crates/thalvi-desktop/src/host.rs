@@ -120,6 +120,15 @@ impl HoldWatch {
     }
 }
 
+/// How a desktop reports the hold key.
+pub enum HoldSource {
+    /// The app watches the keyboard until this is dropped.
+    Hook(HoldWatch),
+    /// The compositor reports the key through binds in its own config, as `reason` says: not a
+    /// failure, and nothing for the app to watch.
+    Binds(&'static str),
+}
+
 /// A key held while the last key of a [`Shortcut`] is pressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Modifier {

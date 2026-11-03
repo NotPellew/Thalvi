@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuil
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::history;
 use thalvi_desktop::hold::HoldKey;
-use thalvi_desktop::host::{Desktop, HoldWatch, StateServer};
+use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, StateServer};
 use thalvi_desktop::models::SpeechDownloads;
 
 use crate::commands;
@@ -202,14 +202,21 @@ impl AppState {
     }
 }
 
-/// Starts reporting `key` to the engine where the desktop lets the app see it; says why not
-/// elsewhere.
+/// Starts reporting `key` to the engine where the desktop lets the app see it. Where binds
+/// report it instead, that is only logged; where the desktop refuses, the user is told through
+/// the status, and the rest of the app goes on.
 fn watch_hold_key(key: &HoldKey, link: &EngineLink) -> Option<HoldWatch> {
     let input = link.hold_input();
     match Desktop::watch_hold_key(key, move |down| input.set(down)) {
-        Ok(watch) => Some(watch),
+        Ok(HoldSource::Hook(watch)) => Some(watch),
+        Ok(HoldSource::Binds(reason)) => {
+            println!("{reason}");
+            None
+        }
         Err(error) => {
-            println!("{error}");
+            link.send(Control::HoldKeyFailed(format!(
+                "{error} Dictating by holding a key does not work until Thalvi is restarted or another key is set; the wake word still works."
+            )));
             None
         }
     }

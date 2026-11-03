@@ -1132,7 +1132,7 @@ where
                         live.last_words = Instant::now();
                     }
                     let done = self.on_final(live, &text);
-                    self.after_final(live);
+                    Self::after_final(live);
                     done
                 }
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),
@@ -1194,7 +1194,7 @@ where
 
     /// After a final transcript: a spoken ending heard in the last words decides the capture as
     /// it does after a wake word. Every other final just joins the text; the tail is the wait.
-    fn after_final(&mut self, live: &mut Live<R::Session>) {
+    fn after_final(live: &mut Live<R::Session>) {
         if matches!(live.release, Release::Tail(_)) && live.text.pending().is_some() {
             live.release = Release::Over;
         }

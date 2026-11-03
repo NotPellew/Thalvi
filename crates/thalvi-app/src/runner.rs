@@ -49,6 +49,8 @@ pub enum Control {
     Cancel,
     /// Takes new settings in between captures.
     Apply(Box<DesktopConfig>),
+    /// The desktop refused to report the hold key; the notice says so in plain words.
+    HoldKeyFailed(String),
     /// Cancels any capture, closes the microphone and the recognizer, and stops.
     Quit,
 }
@@ -315,6 +317,8 @@ struct Runner {
     reopen_failures: Option<u32>,
     /// Settings that arrived during a capture.
     pending: Option<DesktopConfig>,
+    /// A refused hold key not yet shown.
+    hold_problem: Option<String>,
     control: mpsc::UnboundedReceiver<Control>,
     publisher: Rc<Publisher>,
     level: Arc<watch::Sender<f32>>,
@@ -346,6 +350,7 @@ impl Runner {
             stopping: false,
             reopen_failures: None,
             pending: None,
+            hold_problem: None,
             control,
             publisher,
             level,
@@ -516,6 +521,7 @@ impl Runner {
         requests.read_queued(&mut self.control);
         self.paused = requests.listening_off;
         self.stopping |= requests.quit;
+        self.hold_problem = requests.hold_problem.or(self.hold_problem.take());
         if let Some(config) = requests.pending
             && config != self.config
         {
@@ -561,6 +567,7 @@ impl Runner {
         if self.stopping {
             return Flow::Quit;
         }
+        self.show_hold_problem();
         if let Some(config) = self.pending.take() {
             self.apply(config).await;
             return Flow::Continue;
@@ -658,9 +665,21 @@ impl Runner {
             Control::ToggleListening => self.set_listening(self.paused).await,
             Control::Cancel => {}
             Control::Apply(config) => self.apply(*config).await,
+            Control::HoldKeyFailed(notice) => self.hold_problem = Some(notice),
             Control::Quit => return Flow::Quit,
         }
         Flow::Continue
+    }
+
+    /// Shows a refused hold key once nothing else is on the status: the failure stays until the
+    /// next capture or resumed listening, like any other.
+    fn show_hold_problem(&mut self) {
+        if self.paused || self.publisher.failed() {
+            return;
+        }
+        if let Some(notice) = self.hold_problem.take() {
+            self.fail(hold_failure(notice));
+        }
     }
 
     async fn set_listening(&mut self, on: bool) {
@@ -771,6 +790,7 @@ impl Runner {
         if let Some(config) = requests.pending.take() {
             self.pending = Some(config);
         }
+        self.hold_problem = requests.hold_problem.take().or(self.hold_problem.take());
         if requests.quit {
             // Nothing is delivered after a quit.
             return Flow::Quit;
@@ -896,6 +916,15 @@ fn report_refusal(recorder: &Recorder, refusal: Refusal) {
     println!("{}", refusal.notice());
 }
 
+/// The failure that tells the user the hold key is not working.
+fn hold_failure(notice: String) -> Failure {
+    Failure {
+        causes: vec![notice.clone()],
+        notice,
+        headline: "Hold key unavailable",
+    }
+}
+
 /// Whether `new` differs from `old` only in settings a running engine takes without a rebuild.
 fn retunes_only(old: &DesktopConfig, new: &DesktopConfig) -> bool {
     *old == DesktopConfig {
@@ -946,6 +975,8 @@ struct Requests {
     quit: bool,
     /// Settings to apply once the capture is over.
     pending: Option<DesktopConfig>,
+    /// A refused hold key, to show once the capture is over.
+    hold_problem: Option<String>,
 }
 
 impl Requests {
@@ -972,6 +1003,10 @@ impl Requests {
             }
             Some(Control::Apply(config)) => {
                 self.pending = Some(*config);
+                false
+            }
+            Some(Control::HoldKeyFailed(notice)) => {
+                self.hold_problem = Some(notice);
                 false
             }
             Some(Control::Quit) | None => {
@@ -1313,6 +1348,30 @@ mod tests {
         let (outcome, requests, _) = run(vec![], vec![Control::ToggleListening]).await;
         assert_eq!(outcome, Some("cancelled"));
         assert!(requests.listening_off, "one toggle during a capture pauses");
+    }
+
+    #[test]
+    fn a_refused_hold_key_is_kept_through_a_capture_and_told_in_plain_words() {
+        let (sender, mut control) = mpsc::unbounded_channel();
+        sender
+            .send(Control::HoldKeyFailed(
+                "Windows refused the hook.".to_owned(),
+            ))
+            .unwrap();
+        let mut requests = Requests::default();
+        assert!(
+            !requests.read_queued(&mut control),
+            "it does not end a capture"
+        );
+        assert_eq!(
+            requests.hold_problem.as_deref(),
+            Some("Windows refused the hook.")
+        );
+        let failure = hold_failure("Windows refused the hook.".to_owned());
+        assert_eq!(
+            (failure.notice.as_str(), failure.headline),
+            ("Windows refused the hook.", "Hold key unavailable")
+        );
     }
 
     #[test]
