@@ -25,7 +25,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   let pages: Page[] = [];
   let checks: PageContext["checks"] = [];
   let navButtons: HTMLButtonElement[] = [];
-  let current = "general";
+  let current = "speech";
   let draft: Settings | null = null;
   let baseline = "";
   let runtimeFailure = "";

@@ -291,7 +291,7 @@ describe("the settings window's look", () => {
     return found;
   };
 
-  it("wears the saved look and offers the three looks on the General page", async () => {
+  it("wears the saved look and offers the three looks on the Feedback and appearance page", async () => {
     await open("gunmetal");
     expect(root.dataset["look"]).toBe("gunmetal");
     expect(Array.from(root.querySelectorAll(".lk")).map((choice) => choice.textContent)).toEqual(["Gunmetal", "Holo", "Neon"]);
@@ -318,14 +318,20 @@ describe("the settings window's look", () => {
     await open();
     const headings = (page: string) =>
       Array.from(root.querySelectorAll(`section[data-page="${page}"] .grp`)).map((group) => group.querySelector("h4")?.textContent ?? "");
-    expect(headings("general")).toEqual([""]);
-    expect(headings("wake")).toEqual(["Dictation wake word", "Conversation wake word", "Endings", "Quiet before acting"]);
+    expect(headings("feedback")).toEqual(["Overlay", "Look", "Sounds"]);
+    expect(headings("capture")).toEqual([
+      "Dictation wake word",
+      "Conversation wake word",
+      "Endings",
+      "Quiet before acting",
+      "Capture limits",
+    ]);
     expect(root.querySelectorAll(".grp > .grp, section > .row").length).toBe(0);
   });
 
   it("fills a slider up to its handle", async () => {
     await open();
-    const slider = pick(root, 'section[data-page="wake"] input[type="range"]') as HTMLInputElement;
+    const slider = pick(root, 'section[data-page="capture"] input[type="range"]') as HTMLInputElement;
     expect(slider.style.getPropertyValue("--p")).toBe("0.474");
     slider.value = "1";
     slider.dispatchEvent(new Event("input", { bubbles: true }));
