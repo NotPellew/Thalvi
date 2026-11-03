@@ -1,5 +1,6 @@
 //! Wires the engine to the tray, the overlay, the settings window and the commands.
 
+use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -12,10 +13,12 @@ use thalvi_desktop::models::SpeechDownloads;
 
 use crate::commands;
 use crate::control;
-use crate::launch::{Command, Launch};
+use crate::launch::{Command, Launch, relaunch_command};
+use crate::menu_entry::{self, MenuEntry};
 use crate::overlay::{self, Overlay, Visibility};
 use crate::runner::{Control, EngineLink};
 use crate::settings::Store;
+use crate::startup::{self, APP_NAME, LOGIN_ARG, Registration};
 use crate::status::{LastError, Status};
 use crate::tray::{self, CopyItem, Tray};
 
@@ -34,6 +37,10 @@ pub struct AppState {
     host: Arc<Desktop>,
     config: Mutex<DesktopConfig>,
     overlay_shown: AtomicBool,
+    /// Why the login entry could not be put back on start, for the switch to show.
+    login_problem: Mutex<Option<String>>,
+    /// Why the app menu entry could not be rewritten on start, for the switch to show.
+    menu_problem: Mutex<Option<String>>,
     /// Answers status bars until the app quits.
     state_server: Mutex<Option<StateServer>>,
 }
@@ -68,6 +75,8 @@ impl AppState {
             tray: OnceLock::new(),
             host: Arc::new(Desktop::detect().map_err(|error| error.to_string())?),
             overlay_shown: AtomicBool::new(config.overlay.show),
+            login_problem: Mutex::new(None),
+            menu_problem: Mutex::new(None),
             config: Mutex::new(config),
             state_server: Mutex::new(state_server),
         })
@@ -84,6 +93,79 @@ impl AppState {
     #[must_use]
     pub fn host(&self) -> Arc<Desktop> {
         Arc::clone(&self.host)
+    }
+
+    /// Puts the startup entry back if the user wants Thalvi to start at login.
+    fn restore_login(&self, registration: &impl Registration) {
+        let problem = startup::restore(registration, self.config().start_at_login)
+            .err()
+            .map(|error| error.to_string());
+        *self
+            .login_problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = problem;
+    }
+
+    /// Why the entry could not be put back on start, if it could not.
+    #[must_use]
+    pub fn login_problem(&self) -> Option<String> {
+        self.login_problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Rewrites the app menu entry if the user wants Thalvi in the menu.
+    fn restore_menu_entry(&self, entry: &impl MenuEntry) {
+        let problem = menu_entry::restore(entry, self.config().show_in_menu).err();
+        *self
+            .menu_problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = problem;
+    }
+
+    /// Why the entry could not be rewritten on start, if it could not.
+    #[must_use]
+    pub fn menu_problem(&self) -> Option<String> {
+        self.menu_problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Saves the user's choice to start at login. It is written apart from the settings form,
+    /// which the switch does not wait for.
+    ///
+    /// # Errors
+    /// Why the config file could not be written.
+    pub fn remember_login(&self, on: bool) -> Result<(), String> {
+        self.remember(|config| config.start_at_login = on)?;
+        *self
+            .login_problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        Ok(())
+    }
+
+    /// Saves the user's choice to have Thalvi in the app menu, apart from the settings form.
+    ///
+    /// # Errors
+    /// Why the config file could not be written.
+    pub fn remember_menu_entry(&self, on: bool) -> Result<(), String> {
+        self.remember(|config| config.show_in_menu = on)?;
+        *self
+            .menu_problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        Ok(())
+    }
+
+    fn remember(&self, change: impl FnOnce(&mut DesktopConfig)) -> Result<(), String> {
+        let mut config = self.config();
+        change(&mut config);
+        self.store.save_switches(&config)?;
+        *self.config.lock().unwrap_or_else(PoisonError::into_inner) = config;
+        Ok(())
     }
 
     /// Takes `config` into effect: the engine applies it between captures.
@@ -112,9 +194,18 @@ pub fn run() -> ExitCode {
     match start() {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("{message}");
+            report_failure(&message);
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Says why Thalvi could not start: on stderr, and in a message box when no terminal shows it,
+/// as for a menu or login launch, or a release Windows build, which has no console.
+fn report_failure(message: &str) {
+    eprintln!("{message}");
+    if !std::io::stderr().is_terminal() {
+        Desktop::show_error("Thalvi couldn't start", message);
     }
 }
 
@@ -134,13 +225,14 @@ fn start() -> Result<(), String> {
     };
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
-            // A relaunch that cannot be read still opens the settings.
-            let command = match Launch::parse(args.get(1..).unwrap_or_default()) {
-                Ok(Launch::Run { command, .. }) => command,
-                _ => Command::Show,
-            };
-            act(app, command);
+            act(app, relaunch_command(&args));
         }))
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name(APP_NAME)
+                .arg(LOGIN_ARG)
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_audio,
@@ -152,16 +244,22 @@ fn start() -> Result<(), String> {
             commands::copy_report,
             commands::list_microphones,
             commands::open_recordings,
+            commands::get_start_at_login,
+            commands::set_start_at_login,
+            commands::copy_login_line,
+            commands::get_menu_entry,
+            commands::set_menu_entry,
             commands::validate_speech_model_folder,
             commands::list_speech_models,
             commands::download_speech_model,
             commands::open_speech_model_source,
         ])
         .setup(move |app| {
-            // Only the first instance gets here, so a relaunch never reads the config.
-            app.manage(AppState::start(config)?);
-            create_windows(app.handle())?;
-            follow_engine(app.handle())?;
+            // Tauri turns an error from this hook into a panic, so it is reported here instead.
+            if let Err(message) = setup(app.handle(), config) {
+                report_failure(&message);
+                std::process::exit(1);
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -179,6 +277,17 @@ fn start() -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+/// Reads the config and starts the engine, the tray and the windows.
+fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), String> {
+    // Only the first instance gets here, so a relaunch never reads the config.
+    let state = AppState::start(config)?;
+    state.restore_login(app);
+    state.restore_menu_entry(&menu_entry::System::from_env());
+    app.manage(state);
+    create_windows(app).map_err(|error| error.to_string())?;
+    follow_engine(app).map_err(|error| error.to_string())
 }
 
 fn create_windows(app: &AppHandle) -> tauri::Result<()> {
@@ -281,6 +390,7 @@ fn act(app: &AppHandle, command: Command) {
     };
     match command {
         Command::Show => show_settings(app),
+        Command::Login => {}
         Command::Toggle => state.link.send(Control::ToggleListening),
         Command::Pause => state.link.send(Control::SetListening(false)),
         Command::Resume => state.link.send(Control::SetListening(true)),

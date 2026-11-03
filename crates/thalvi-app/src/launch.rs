@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use crate::startup::LOGIN_ARG;
+
 const USAGE: &str =
     "Usage: thalvi-desktop [toggle | pause | resume | cancel | copy-error | status | config-file]";
 
@@ -10,6 +12,8 @@ const USAGE: &str =
 pub enum Command {
     /// Open the settings window.
     Show,
+    /// What the login entry asks for: start in the tray, and leave a running app as it is.
+    Login,
     /// Pause listening, or resume it.
     Toggle,
     /// Close the microphone and drop any capture in progress.
@@ -27,12 +31,23 @@ impl Command {
     /// Why this command may not start the app: only opening it may, the others control a running one.
     pub fn first_start(self) -> Result<(), String> {
         match self {
-            Self::Show => Ok(()),
+            Self::Show | Self::Login => Ok(()),
             _ => Err(
                 "Thalvi is not running, so there is nothing to control. Start Thalvi first."
                     .to_owned(),
             ),
         }
+    }
+}
+
+/// What a second launch, with its full command line, asks the running app to do.
+///
+/// A line that cannot be read still opens the settings.
+#[must_use]
+pub fn relaunch_command(args: &[String]) -> Command {
+    match Launch::parse(args.get(1..).unwrap_or_default()) {
+        Ok(Launch::Run { command, .. }) => command,
+        _ => Command::Show,
     }
 }
 
@@ -57,6 +72,7 @@ impl Launch {
             [] => run(Command::Show, None),
             [word] => match word.as_str() {
                 "status" => Ok(Self::Status),
+                LOGIN_ARG => run(Command::Login, None),
                 "toggle" => run(Command::Toggle, None),
                 "pause" => run(Command::Pause, None),
                 "resume" => run(Command::Resume, None),
@@ -93,6 +109,7 @@ mod tests {
             (&["cancel"][..], run(Command::Cancel, None)),
             (&["copy-error"][..], run(Command::CopyError, None)),
             (&["status"][..], Ok(Launch::Status)),
+            (&["--login"][..], run(Command::Login, None)),
             (
                 &["desktop.json"][..],
                 run(Command::Show, Some("desktop.json")),
@@ -105,9 +122,26 @@ mod tests {
     }
 
     #[test]
+    fn a_relaunch_from_the_menu_opens_settings_but_one_from_login_does_not() {
+        let relaunch = |args: &[&str]| {
+            relaunch_command(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
+        };
+        for (args, expected) in [
+            (&["thalvi-desktop"][..], Command::Show),
+            (&["thalvi-desktop", "--login"][..], Command::Login),
+            (&["thalvi-desktop", "toggle"][..], Command::Toggle),
+            (&["thalvi-desktop", "a", "b"][..], Command::Show),
+            (&[][..], Command::Show),
+        ] {
+            assert_eq!(relaunch(args), expected, "{args:?}");
+        }
+    }
+
+    #[test]
     fn only_opening_the_app_may_start_it() {
         for (command, starts) in [
             (Command::Show, true),
+            (Command::Login, true),
             (Command::Toggle, false),
             (Command::Pause, false),
             (Command::Resume, false),

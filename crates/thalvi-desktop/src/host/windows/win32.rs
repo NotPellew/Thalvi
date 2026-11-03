@@ -33,11 +33,11 @@ use ::windows::Win32::UI::Input::KeyboardAndMouse::{
 use ::windows::Win32::UI::Shell::ShellExecuteW;
 use ::windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongW,
-    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SPI_GETWORKAREA, SW_RESTORE,
-    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, ShowWindow,
-    SystemParametersInfoW, WS_EX_TOOLWINDOW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, MB_ICONERROR, MB_OK,
+    MessageBoxW, SPI_GETWORKAREA, SW_RESTORE, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SetForegroundWindow, ShowWindow, SystemParametersInfoW, WS_EX_TOOLWINDOW,
 };
-use ::windows::core::{BOOL, PCWSTR, PWSTR, w};
+use ::windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
 use super::{Hwnd, Identity, Key, KeyEvent, Process, Win32};
 
@@ -59,6 +59,20 @@ impl Drop for Owned {
 }
 
 /// Who runs process `pid`, or `None` when it is gone or Windows will not say.
+/// Shows `message` in an error box titled `title` and waits until it is closed.
+pub(super) fn message_box(title: &str, message: &str) {
+    // SAFETY: both texts are `HSTRING`s, null-terminated and alive for the whole call, and no
+    // owner window is given.
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(message),
+            &HSTRING::from(title),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
 pub(super) fn process_by_pid(pid: u32) -> Option<Process> {
     // SAFETY: OpenProcess takes plain values; the handle it returns is owned by `Owned`.
     let process =

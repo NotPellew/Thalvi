@@ -139,6 +139,7 @@ describe("pages", () => {
         id: "app",
         title: "App",
         groups: {
+          Startup: ["start thalvi when i log in", "show thalvi in the app menu"],
           Recordings: ["metrics recording", "text recording", "audio recording"],
           "Right now": ["recordings folder"],
           About: ["version"],
@@ -606,12 +607,139 @@ describe("live controls", () => {
     expect(rowOf("Listening").querySelector(".note")?.textContent).toBe("No microphone.");
   });
 
+  it("starts at login only once the OS holds the entry, and shows the OS state on load", async () => {
+    const stub = await open();
+    const toggle = control("Start Thalvi when I log in", "input");
+    expect(toggle.checked).toBe(false);
+    expect(stub.backend.getStartAtLogin).toHaveBeenCalledTimes(1);
+
+    flip(toggle);
+    await settle();
+    expect(stub.backend.setStartAtLogin).toHaveBeenLastCalledWith(true);
+    expect(toggle.checked).toBe(true);
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+
+    stub.backend.getStartAtLogin.mockResolvedValue({ kind: "available", on: true, problem: null });
+    document.body.innerHTML = '<div id="settings"></div>';
+    root = document.getElementById("settings") as HTMLElement;
+    mountSettings(root, stub.backend);
+    await settle();
+    expect(control("Start Thalvi when I log in", "input").checked).toBe(true);
+  });
+
+  it("shows the refusal and the real state when the startup entry cannot be changed", async () => {
+    const stub = await open();
+    const toggle = control("Start Thalvi when I log in", "input");
+    stub.backend.setStartAtLogin.mockRejectedValue("Thalvi could not be set to start at login: permission denied");
+    flip(toggle);
+    expect(toggle.disabled).toBe(true);
+    await settle();
+    expect(toggle.checked).toBe(false);
+    expect(toggle.disabled).toBe(false);
+    expect(rowOf("Start Thalvi when I log in").querySelector(".note")?.textContent).toBe(
+      "Thalvi could not be set to start at login: permission denied",
+    );
+
+    stub.backend.getStartAtLogin.mockResolvedValue({ kind: "available", on: true, problem: null });
+    stub.backend.setStartAtLogin.mockRejectedValue("Thalvi could not be stopped from starting at login: busy");
+    flip(toggle);
+    await settle();
+    expect(toggle.checked).toBe(true);
+  });
+
+  it("says why the entry was not put back on start while leaving the switch usable", async () => {
+    const stub = stubBackend();
+    stub.backend.getStartAtLogin.mockResolvedValue({
+      kind: "available",
+      on: false,
+      problem: "Thalvi is turned off in the system's list of startup apps. Turn it on there, or switch it off and on here.",
+    });
+    mountSettings(root, stub.backend);
+    await settle();
+    const toggle = control("Start Thalvi when I log in", "input");
+    expect(toggle.checked).toBe(false);
+    expect(toggle.disabled).toBe(false);
+    expect(rowOf("Start Thalvi when I log in").querySelector(".note")?.textContent).toBe(
+      "Thalvi is turned off in the system's list of startup apps. Turn it on there, or switch it off and on here.",
+    );
+  });
+
+  it("keeps the switch off and says why when the OS entry cannot be read", async () => {
+    const stub = stubBackend();
+    stub.backend.getStartAtLogin.mockRejectedValue("Thalvi could not check its startup entry: no home folder");
+    mountSettings(root, stub.backend);
+    await settle();
+    const toggle = control("Start Thalvi when I log in", "input");
+    expect(toggle.checked).toBe(false);
+    expect(toggle.disabled).toBe(true);
+    expect(rowOf("Start Thalvi when I log in").querySelector(".note")?.textContent).toBe(
+      "Thalvi could not check its startup entry: no home folder",
+    );
+  });
+
+  it("shows the line for hyprland.conf instead of a switch and copies it", async () => {
+    const stub = stubBackend();
+    const line = "exec-once = /home/me/Thalvi.AppImage --login";
+    stub.backend.getStartAtLogin.mockResolvedValue({ kind: "unavailable", reason: "Hyprland does not start login entries.", line });
+    mountSettings(root, stub.backend);
+    await settle();
+    const login = rowOf("Start Thalvi when I log in");
+    expect(login.querySelector("input")).toBeNull();
+    expect(login.querySelector("code")?.textContent).toBe(line);
+    expect(login.textContent).toContain("Hyprland does not start login entries.");
+
+    within(login, "Copy").click();
+    await settle();
+    expect(stub.backend.copyLoginLine).toHaveBeenCalledTimes(1);
+    expect(within(login, "Copied")).toBeDefined();
+
+    stub.backend.copyLoginLine.mockRejectedValue("wl-copy is not installed.");
+    within(login, "Copied").click();
+    await settle();
+    expect(login.querySelector(".note:not(.ok)")?.textContent).toBe("wl-copy is not installed.");
+  });
+
+  it("adds and removes the app menu entry at once, and shows the real state after a failure", async () => {
+    const stub = await open();
+    const toggle = control("Show Thalvi in the app menu", "input");
+    expect(toggle.checked).toBe(false);
+    flip(toggle);
+    await settle();
+    expect(stub.backend.setMenuEntry).toHaveBeenLastCalledWith(true);
+    expect(toggle.checked).toBe(true);
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+
+    stub.backend.getMenuEntry.mockResolvedValue({ kind: "available", on: true, problem: null });
+    stub.backend.setMenuEntry.mockRejectedValue("Thalvi could not remove Thalvi from the app menu: read-only folder");
+    flip(toggle);
+    await settle();
+    expect(toggle.checked).toBe(true);
+    expect(rowOf("Show Thalvi in the app menu").querySelector(".note")?.textContent).toBe(
+      "Thalvi could not remove Thalvi from the app menu: read-only folder",
+    );
+  });
+
+  it("says who adds the app menu entry instead of offering a switch where Thalvi cannot", async () => {
+    const stub = stubBackend();
+    stub.backend.getMenuEntry.mockResolvedValue({
+      kind: "unavailable",
+      reason: "Added by the installer; uninstalling removes it.",
+      line: null,
+    });
+    mountSettings(root, stub.backend);
+    await settle();
+    const menu = rowOf("Show Thalvi in the app menu");
+    expect(menu.querySelector("input")).toBeNull();
+    expect(menu.querySelector("button")).toBeNull();
+    expect(menu.textContent).toContain("Added by the installer; uninstalling removes it.");
+  });
+
   it("pauses, changes the device, saves and resumes from the Microphone page only", async () => {
     const stub = await open();
     const pageOf = (label: string): string | null => rowOf(label).closest("section")?.getAttribute("data-page") ?? null;
     expect(pageOf("Listening")).toBe("microphone");
     expect(root.querySelectorAll('.row[data-label="listening"]')).toHaveLength(1);
-    expect(root.querySelector('section[data-page="general"] input[type=checkbox]')).toBeNull();
+    expect(root.querySelectorAll('section[data-page="app"] .row[data-label="listening"]')).toHaveLength(0);
 
     goTo("microphone");
     const toggle = control("Listening", "input");

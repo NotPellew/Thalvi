@@ -61,6 +61,35 @@ impl Hyprland {
     pub fn query_state() -> Result<Option<String>, HostError> {
         state::query()
     }
+
+    /// Shows `message` in an error box titled `title` and waits until it is closed. Needs no
+    /// detected desktop, so a failure to detect one can be shown. Does nothing without a display.
+    pub fn show_error(title: &str, message: &str) {
+        use gtk::prelude::Cast;
+
+        if gtk::init().is_err() {
+            return;
+        }
+        let dialog = gtk::MessageDialog::new(
+            None::<&gtk::Window>,
+            gtk::DialogFlags::MODAL,
+            gtk::MessageType::Error,
+            gtk::ButtonsType::Ok,
+            message,
+        );
+        gtk::prelude::GtkWindowExt::set_title(&dialog, title);
+        // So the user can copy the message, such as a path, out of the box.
+        if let Ok(area) =
+            gtk::prelude::MessageDialogExt::message_area(&dialog).downcast::<gtk::Container>()
+        {
+            for child in gtk::prelude::ContainerExt::children(&area) {
+                if let Ok(label) = child.downcast::<gtk::Label>() {
+                    gtk::prelude::LabelExt::set_selectable(&label, true);
+                }
+            }
+        }
+        gtk::prelude::DialogExt::run(&dialog);
+    }
 }
 
 fn detect_in(signature: Option<&str>, desktop: Option<&str>) -> Result<(), HostError> {

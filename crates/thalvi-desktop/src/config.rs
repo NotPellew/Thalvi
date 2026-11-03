@@ -26,6 +26,14 @@ pub enum ConfigError {
     },
     #[error("The desktop config is not valid: {0}")]
     Invalid(#[from] serde_json::Error),
+    #[error(
+        "The desktop config at {path} is not valid: {source}. Fix or remove the file, then start Thalvi again."
+    )]
+    InvalidFile {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 /// What the desktop app is configured to do. Every setting is optional in the file and has
@@ -49,6 +57,12 @@ pub struct DesktopConfig {
     pub look: Look,
     /// What is recorded on this computer; nothing unless the user turns it on.
     pub recordings: RecordKinds,
+    /// Whether the user wants Thalvi to start at login. The app restores the OS entry from this
+    /// on start, because a Windows upgrade removes it.
+    pub start_at_login: bool,
+    /// Whether the user wants Thalvi in the app menu. The app rewrites the `AppImage`'s menu
+    /// entry from this on start, because the `AppImage` may have moved.
+    pub show_in_menu: bool,
 }
 
 #[derive(Deserialize)]
@@ -80,6 +94,10 @@ struct RawDesktopConfig {
     look: Look,
     #[serde(default)]
     recordings: RecordKinds,
+    #[serde(default)]
+    start_at_login: bool,
+    #[serde(default)]
+    show_in_menu: bool,
 }
 
 impl DesktopConfig {
@@ -174,6 +192,8 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
             microphone,
             look: raw.look,
             recordings: raw.recordings,
+            start_at_login: raw.start_at_login,
+            show_in_menu: raw.show_in_menu,
         })
     }
 }
@@ -463,6 +483,8 @@ struct FileForm<'a> {
     microphone: Option<&'a str>,
     look: Look,
     recordings: RecordKinds,
+    start_at_login: bool,
+    show_in_menu: bool,
 }
 
 #[derive(Serialize)]
@@ -549,6 +571,8 @@ impl Serialize for DesktopConfig {
             microphone: self.microphone.as_deref(),
             look: self.look,
             recordings: self.recordings,
+            start_at_login: self.start_at_login,
+            show_in_menu: self.show_in_menu,
         }
         .serialize(serializer)
     }
@@ -564,7 +588,10 @@ impl DesktopConfig {
             path: path.to_owned(),
             source,
         })?;
-        Self::from_json_str(&json)
+        serde_json::from_str(&json).map_err(|source| ConfigError::InvalidFile {
+            path: path.to_owned(),
+            source,
+        })
     }
 
     /// Validates config `json`.
@@ -641,6 +668,8 @@ mod tests {
         assert_eq!(config.capture_limits, CaptureLimits::default());
         assert_eq!(config.endings, Endings::default());
         assert_eq!(config.recordings, RecordKinds::default());
+        assert!(!config.start_at_login);
+        assert!(!config.show_in_menu);
     }
 
     #[test]
@@ -1253,7 +1282,9 @@ mod tests {
             "overlay": {"show": false, "draft": true},
             "microphone": " USB Mic ",
             "look": "gunmetal",
-            "recordings": {"metrics": true, "text": false, "audio": true}
+            "recordings": {"metrics": true, "text": false, "audio": true},
+            "start_at_login": true,
+            "show_in_menu": true
         }"#;
         for json in ["{}", full] {
             let config = parse(json).unwrap();
@@ -1318,7 +1349,7 @@ mod tests {
     }
 
     #[test]
-    fn load_reads_a_file_and_names_one_it_cannot_read() {
+    fn load_reads_a_file_and_names_one_it_cannot_read_or_understand() {
         let dir = std::env::temp_dir().join(format!("thalvi-config-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1327,6 +1358,9 @@ mod tests {
 
         let loaded = DesktopConfig::load(&path).unwrap();
         let missing = DesktopConfig::load(&dir.join("missing.json")).unwrap_err();
+        let broken_path = dir.join("broken.json");
+        std::fs::write(&broken_path, "{1: 2}").unwrap();
+        let broken = DesktopConfig::load(&broken_path).unwrap_err();
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(
@@ -1335,5 +1369,13 @@ mod tests {
         );
         assert!(matches!(missing, ConfigError::Read { .. }));
         assert!(missing.to_string().contains("missing.json"));
+        assert_eq!(
+            broken.to_string(),
+            format!(
+                "The desktop config at {} is not valid: key must be a string at line 1 column 2. \
+                 Fix or remove the file, then start Thalvi again.",
+                broken_path.display()
+            )
+        );
     }
 }

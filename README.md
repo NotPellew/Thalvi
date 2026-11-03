@@ -188,6 +188,46 @@ pauses, cancels and opens Settings, which edit the config file.
 | Windows | Full |
 | GNOME | Not yet ([#101](https://github.com/NotPellew/Thalvi/issues/101)) |
 
+### Install
+
+Download the latest `desktop-v*` release from
+[Releases](https://github.com/NotPellew/Thalvi/releases). No Git, Rust or Node
+is needed.
+
+- **Windows:** run `Thalvi_<version>_x64-setup.exe`. It installs for your user
+  only, into `%LOCALAPPDATA%\Programs\Thalvi` (apart from your data in
+  `%LOCALAPPDATA%\thalvi`), adds a Start-menu entry, and downloads WebView2 if
+  missing. Uninstall from Settings → Apps; your config and models stay.
+- **Linux:** `chmod +x Thalvi_<version>_amd64.AppImage`, then run it.
+  Install `hyprctl`, `wtype` and `wl-copy` (listed under Build from source). Update by replacing the
+  file; settings and models stay.
+
+Start it once; it lives in the tray. Starting it again opens Settings. On Linux
+the control commands below run the AppImage with that word:
+`Thalvi_<version>_amd64.AppImage toggle`.
+
+**Settings → App → Start Thalvi when I log in** is off by default. It
+writes an XDG autostart entry (Linux) or a `Run` entry for your user (Windows)
+that starts Thalvi in the tray without opening Settings, and the switch shows
+what the system holds. Thalvi remembers the choice and puts the entry back each
+time it starts, so an upgrade or a moved AppImage is fixed by starting Thalvi
+once more (from its new place); turn the switch off before deleting the file.
+Keep the AppImage on a path without spaces: the login entry breaks on one.
+If you turned Thalvi off in the system's startup list, Thalvi leaves it off and
+says so there. Hyprland does not run
+XDG autostart by itself, so unless a session manager such as `uwsm` does, the row shows
+the `exec-once = <path> --login` line to add to `hyprland.conf` instead of a switch.
+
+**Settings → App → Show Thalvi in the app menu** is off by default. For an
+AppImage it writes a menu entry and icon under `~/.local/share` and removes them when
+turned off; Thalvi rewrites it on each start, so a moved AppImage stays right. A
+package manager or the Windows installer owns the entry otherwise, and the row says so.
+
+If Thalvi cannot start, for example because the config is malformed, it says so in a
+message box when it was not started from a terminal.
+
+### Build from source
+
 Needs, besides Rust (`rust-toolchain.toml`) and Node (`.node-version`):
 
 - **Linux:** `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev` to build;

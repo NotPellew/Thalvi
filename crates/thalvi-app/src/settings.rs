@@ -44,11 +44,24 @@ impl Store {
     }
 
     /// Validates `settings` as the loader does at startup, then replaces the file in one step.
+    /// The OS switches' preferences are `current`'s: the form never carries them, because a switch
+    /// acts at once and a form opened earlier would otherwise write a stale value back.
     ///
     /// # Errors
     /// The loader's message when the settings are invalid, in which case nothing is written; or
     /// why the file could not be written.
-    pub fn save(&self, settings: &Value) -> Result<DesktopConfig, String> {
+    pub fn save(
+        &self,
+        mut settings: Value,
+        current: &DesktopConfig,
+    ) -> Result<DesktopConfig, String> {
+        if let Some(settings) = settings.as_object_mut() {
+            settings.insert(
+                "start_at_login".to_owned(),
+                Value::Bool(current.start_at_login),
+            );
+            settings.insert("show_in_menu".to_owned(), Value::Bool(current.show_in_menu));
+        }
         let config =
             DesktopConfig::from_json_str(&settings.to_string()).map_err(|error| match error {
                 // The window writes this JSON itself, so a line and column would mean nothing.
@@ -57,7 +70,9 @@ impl Store {
                     let position = format!(" at line {} column {}", error.line(), error.column());
                     text.strip_suffix(&position).unwrap_or(&text).to_owned()
                 }
-                error @ ConfigError::Read { .. } => error.to_string(),
+                error @ (ConfigError::Read { .. } | ConfigError::InvalidFile { .. }) => {
+                    error.to_string()
+                }
             })?;
         let json = serde_json::to_string_pretty(&config)
             .map_err(|error| format!("The settings could not be written: {error}"))?;
@@ -69,6 +84,15 @@ impl Store {
         })?;
         Ok(config)
     }
+
+    /// Writes `config` again, including its OS switches' preferences.
+    ///
+    /// # Errors
+    /// Why the file could not be written.
+    pub fn save_switches(&self, config: &DesktopConfig) -> Result<(), String> {
+        let settings = serde_json::to_value(config).map_err(|error| error.to_string())?;
+        self.save(settings, config).map(drop)
+    }
 }
 
 /// The settings window's form of `config`: the file form.
@@ -76,7 +100,12 @@ impl Store {
 /// # Errors
 /// Fails when the config cannot be written as JSON.
 pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
-    serde_json::to_value(config).map_err(|error| error.to_string())
+    let mut settings = serde_json::to_value(config).map_err(|error| error.to_string())?;
+    if let Some(settings) = settings.as_object_mut() {
+        settings.remove("start_at_login");
+        settings.remove("show_in_menu");
+    }
+    Ok(settings)
 }
 
 fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
@@ -172,7 +201,7 @@ mod tests {
         settings["look"] = json!("holo");
         settings["recordings"] = json!({"metrics": true, "text": false, "audio": true});
 
-        let saved = store.save(&settings).unwrap();
+        let saved = store.save(settings, &store_defaults()).unwrap();
         let reloaded = store.load().unwrap();
         let leftovers: Vec<_> = std::fs::read_dir(store.path.parent().unwrap())
             .unwrap()
@@ -196,12 +225,42 @@ mod tests {
     }
 
     #[test]
+    fn the_switch_preferences_are_kept_by_their_switches_and_never_by_the_form() {
+        let (store, dir) = store("switches");
+        let off = store_defaults();
+        let on = DesktopConfig {
+            start_at_login: true,
+            show_in_menu: true,
+            ..off.clone()
+        };
+        let form = settings_json(&off).unwrap();
+        assert!(form.get("start_at_login").is_none() && form.get("show_in_menu").is_none());
+        let switches = |config: &DesktopConfig| (config.start_at_login, config.show_in_menu);
+
+        store.save_switches(&on).unwrap();
+        let after_switches = switches(&store.load().unwrap());
+        // A form opened before the switches were flipped saves them as they were then.
+        let mut stale = form.clone();
+        stale["start_at_login"] = json!(false);
+        stale["show_in_menu"] = json!(false);
+        let after_stale_save = switches(&store.save(stale, &on).unwrap());
+        store.save_switches(&off).unwrap();
+        let after_off = switches(&store.load().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            (after_switches, after_stale_save, after_off),
+            ((true, true), (true, true), (false, false))
+        );
+    }
+
+    #[test]
     fn a_custom_speech_model_folder_survives_save_and_reload() {
         let (store, dir) = store("folder");
         let mut settings = settings_json(&store_defaults()).unwrap();
         settings["stt"] = json!({"engine": "local", "model": "/models/mine"});
 
-        let saved = store.save(&settings).unwrap();
+        let saved = store.save(settings, &store_defaults()).unwrap();
         let reloaded = store.load().unwrap();
         let shown = settings_json(&reloaded).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -230,9 +289,9 @@ mod tests {
         std::fs::write(&leftover, "old").unwrap();
         std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        store.save(&settings).unwrap();
+        store.save(settings.clone(), &store_defaults()).unwrap();
         let first = std::fs::metadata(&store.path).unwrap().permissions().mode() & 0o777;
-        store.save(&settings).unwrap();
+        store.save(settings, &store_defaults()).unwrap();
         let again = std::fs::metadata(&store.path).unwrap().permissions().mode() & 0o777;
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -245,7 +304,7 @@ mod tests {
         let mut settings = settings_json(&store_defaults()).unwrap();
         settings["ending_pause"] = json!({"paste": 9});
 
-        let error = store.save(&settings).unwrap_err();
+        let error = store.save(settings, &store_defaults()).unwrap_err();
         let exists = store.path.exists() || store.path.parent().unwrap().exists();
         let _ = std::fs::remove_dir_all(&dir);
 

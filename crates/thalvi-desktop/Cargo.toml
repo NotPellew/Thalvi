@@ -26,6 +26,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 webrtc-vad.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
 

@@ -5,7 +5,7 @@ import { errorText } from "./contract.ts";
 import { createControls } from "./controls.ts";
 import { el } from "./dom.ts";
 import { applyLook } from "./look.ts";
-import { buildPages, type Page, type PageContext } from "./settings-pages.ts";
+import { buildPages, type Page, type PageContext, type SwitchRead } from "./settings-pages.ts";
 
 export const SAVED_TEXT = "Saved — applies after the current capture; the saved microphone is not active until it opens";
 
@@ -107,6 +107,8 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       return;
     }
     const microphones = await backend.listMicrophones().catch((error: unknown) => ({ error: errorText(error) }));
+    const startAtLogin = await backend.getStartAtLogin().catch((error: unknown): SwitchRead => ({ kind: "unreadable", message: errorText(error) }));
+    const menuEntry = await backend.getMenuEntry().catch((error: unknown): SwitchRead => ({ kind: "unreadable", message: errorText(error) }));
     audio = await backend.getAudio().catch(() => ({
       selected: loaded.microphone,
       active: null,
@@ -116,7 +118,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     baseline = JSON.stringify(draft);
     applyLook(root, draft.look);
     checks = [];
-    pages = buildPages({ draft, backend, root, controls: createControls(feedback), microphones, audio, live, checks });
+    pages = buildPages({ draft, backend, root, controls: createControls(feedback), microphones, audio, startAtLogin, menuEntry, live, checks });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {
       const button = el("button", { type: "button", "data-page": page.id }, page.title);

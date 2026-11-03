@@ -100,6 +100,12 @@ impl Windows {
     pub fn query_state() -> Result<Option<String>, HostError> {
         Err(no_state())
     }
+
+    /// Shows `message` in an error box titled `title` and waits until it is closed. Needs no
+    /// detected desktop, so a failure to detect one can be shown.
+    pub fn show_error(title: &str, message: &str) {
+        win32::message_box(title, message);
+    }
 }
 
 fn no_state() -> HostError {

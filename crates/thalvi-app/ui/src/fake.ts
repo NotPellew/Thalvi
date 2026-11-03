@@ -118,6 +118,10 @@ export function fakeBackend(params: URLSearchParams): Backend {
     for (const listener of levelListeners) listener(level);
   }, 80);
 
+  let startAtLogin = false;
+  let menuEntry = false;
+  const hyprland = params.has("hyprland");
+  const installer = params.has("installer");
   let saved = { ...structuredClone(SETTINGS), look };
   return {
     getStatus: () => Promise.resolve(status),
@@ -152,6 +156,31 @@ export function fakeBackend(params: URLSearchParams): Backend {
     copyReport: () => Promise.resolve(),
     listMicrophones: () => Promise.resolve([...microphones]),
     openRecordings: () => Promise.resolve(),
+    getStartAtLogin: () =>
+      Promise.resolve(
+        hyprland
+          ? {
+              kind: "unavailable",
+              reason: "Hyprland does not start login entries by itself, so a switch here would do nothing. To start Thalvi at login, add this line to hyprland.conf:",
+              line: "exec-once = '/home/me/My Apps/Thalvi.AppImage' --login",
+            }
+          : { kind: "available", on: startAtLogin, problem: null },
+      ),
+    setStartAtLogin: (on) => {
+      startAtLogin = on;
+      return Promise.resolve();
+    },
+    getMenuEntry: () =>
+      Promise.resolve(
+        installer
+          ? { kind: "unavailable", reason: "Added by the installer; uninstalling removes it.", line: null }
+          : { kind: "available", on: menuEntry, problem: null },
+      ),
+    setMenuEntry: (on) => {
+      menuEntry = on;
+      return Promise.resolve();
+    },
+    copyLoginLine: () => Promise.resolve(),
     validateSpeechModelFolder: (path) =>
       path.includes("missing") ? Promise.reject(new Error("Missing required file: tokens.txt")) : Promise.resolve(),
     listSpeechModels: () => Promise.resolve(structuredClone(speechModels)),

@@ -62,6 +62,8 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .mini input, .mini select { font-size: 13px; color: var(--fg); }
 .note { margin: 6px 0 0; color: var(--warn); font-size: 12px; }
 .note.ok { color: var(--mut); }
+.stack.wide > button { align-self: flex-start; }
+code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surf); font-family: ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; user-select: all; }
 .note.why { margin: 4px 0 0; color: var(--amber); }
 .empty { color: var(--mut); }
 

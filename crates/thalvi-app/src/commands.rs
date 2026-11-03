@@ -21,10 +21,13 @@ use thalvi_desktop::report::{Report, System};
 use thalvi_desktop::transducer::check_folder;
 
 use crate::app::AppState;
+use crate::menu_entry;
 use crate::overlay;
 use crate::runner::{AudioStatus, Control};
 use crate::settings::settings_json;
+use crate::startup;
 use crate::status::Status;
+use crate::switch::{SwitchState, Unavailable};
 
 #[tauri::command]
 pub fn get_status(state: State<'_, AppState>) -> Status {
@@ -74,7 +77,7 @@ pub fn save_settings(
         state.config().microphone.as_deref(),
         state.link.audio().paused,
     )?;
-    let config = state.store.save(&settings)?;
+    let config = state.store.save(settings, &state.config())?;
     let look = state.config().look;
     state.apply(&config);
     if config.look != look {
@@ -274,6 +277,55 @@ pub async fn open_recordings(state: State<'_, AppState>) -> Result<(), String> {
     })
     .await
     .map_err(|error| format!("The folder could not be opened: {error}"))?
+}
+
+#[tauri::command]
+pub fn get_start_at_login(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SwitchState, String> {
+    startup::switch(&app, state.login_problem()).map_err(|error| error.to_string())
+}
+
+/// Puts the `hyprland.conf` line that starts Thalvi at login on the clipboard.
+#[tauri::command]
+pub async fn copy_login_line(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let Ok(SwitchState::Unavailable(Unavailable {
+        line: Some(line), ..
+    })) = startup::switch(&app, None)
+    else {
+        return Err("There is no line to copy.".to_owned());
+    };
+    let host = state.host();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.copy(&line).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("The line could not be copied: {error}"))?
+}
+
+/// Adds or removes the startup entry and remembers the choice; fails unless the OS then holds it as
+/// asked.
+#[tauri::command]
+pub fn set_start_at_login(
+    on: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    startup::set(&app, on, || state.remember_login(on)).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn get_menu_entry(state: State<'_, AppState>) -> Result<SwitchState, String> {
+    menu_entry::switch(&menu_entry::System::from_env(), state.menu_problem())
+}
+
+/// Adds or removes Thalvi's app menu entry and remembers the choice.
+#[tauri::command]
+pub fn set_menu_entry(on: bool, state: State<'_, AppState>) -> Result<(), String> {
+    menu_entry::set(&menu_entry::System::from_env(), on, || {
+        state.remember_menu_entry(on)
+    })
 }
 
 #[cfg(test)]

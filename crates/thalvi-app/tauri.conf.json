@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Thalvi",
-  "version": "0.1.0",
   "identifier": "dev.thalvi.desktop",
   "build": {
     "frontendDist": "ui/dist"
@@ -14,6 +13,22 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": [
+      "appimage",
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "category": "Utility",
+    "shortDescription": "Voice assistant for when hands and eyes are busy",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "windows/hooks.nsi"
+      }
+    }
   }
 }

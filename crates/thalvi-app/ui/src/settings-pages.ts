@@ -10,6 +10,7 @@ import type {
   SpeechModelInfo,
   SpeechModelProgress,
   SttEngine,
+  SwitchState,
 } from "./contract.ts";
 import { errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
@@ -25,6 +26,10 @@ export interface PageContext {
   microphones: string[] | { error: string };
   /** The microphone actually open when the pages were built. */
   audio: AudioStatus;
+  /** Whether the OS starts Thalvi at login, or why that could not be read. */
+  startAtLogin: SwitchRead;
+  /** Whether Thalvi is in the app menu, or why that could not be read. */
+  menuEntry: SwitchRead;
   /** The settings window, so a look picked here shows at once. */
   root: HTMLElement;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
@@ -37,6 +42,9 @@ export interface PageContext {
   /** Checks a page adds that must pass before Save sends; each returns null when it has nothing to check. */
   checks: (() => Promise<void> | null)[];
 }
+
+/** An OS switch as read, or why it could not be. */
+export type SwitchRead = SwitchState | { kind: "unreadable"; message: string };
 
 export interface Page {
   id: string;
@@ -690,6 +698,83 @@ function limits({ draft, controls }: PageContext): HTMLElement[] {
   ];
 }
 
+interface SwitchOps {
+  read: () => Promise<SwitchState>;
+  set: (on: boolean) => Promise<void>;
+  copy?: () => Promise<void>;
+}
+
+/** A switch that takes effect at once, shows the OS's state, and re-reads it after a failure; or the reason there is none. */
+function switchRow(label: string, hint: string, shown: SwitchRead, controls: Controls, ops: SwitchOps): HTMLElement {
+  if (shown.kind === "unavailable") return row(label, hint, unavailable(shown, ops.copy));
+  const toggle = controls.toggle(shown.kind === "available" && shown.on, () => undefined);
+  const input = toggle.field as HTMLInputElement;
+  const problem = note();
+  if (shown.kind === "unreadable") {
+    input.disabled = true;
+    say(problem, shown.message);
+  } else {
+    say(problem, shown.problem ?? "");
+  }
+  input.addEventListener("change", () => {
+    say(problem, "");
+    const wanted = input.checked;
+    input.disabled = true;
+    ops
+      .set(wanted)
+      .catch(async (error: unknown) => {
+        say(problem, errorText(error));
+        input.checked = await ops
+          .read()
+          .then((state) => state.kind === "available" && state.on)
+          .catch(() => !wanted);
+      })
+      .finally(() => {
+        input.disabled = false;
+      });
+  });
+  return row(label, hint, { node: el("span", { class: "stack" }, toggle.node, problem), field: input });
+}
+
+function unavailable({ reason, line }: Extract<SwitchState, { kind: "unavailable" }>, copy?: () => Promise<void>): HTMLElement {
+  const node = el("span", { class: "stack wide" }, el("p", { class: "note ok" }, reason));
+  if (line !== null && copy) {
+    const problem = note();
+    const copyButton = button("Copy", () => {
+      say(problem, "");
+      copy()
+        .then(() => {
+          copyButton.textContent = "Copied";
+        })
+        .catch((error: unknown) => {
+          say(problem, errorText(error));
+        });
+    });
+    node.append(el("code", { class: "line" }, line), copyButton, problem);
+  }
+  return node;
+}
+
+function startup({ backend, controls, startAtLogin, menuEntry }: PageContext): HTMLElement[] {
+  return [
+    group("Startup"),
+    switchRow(
+      "Start Thalvi when I log in",
+      "Starts the voice app at login, listening as it normally does. This takes effect now; it is not part of Save.",
+      startAtLogin,
+      controls,
+      { read: () => backend.getStartAtLogin(), set: (on) => backend.setStartAtLogin(on), copy: () => backend.copyLoginLine() },
+    ),
+    switchRow(
+      "Show Thalvi in the app menu",
+      "Lets you start Thalvi from your desktop's app menu. This takes effect now; it is not part of Save.",
+      menuEntry,
+      controls,
+      { read: () => backend.getMenuEntry(), set: (on) => backend.setMenuEntry(on) },
+    ),
+  ];
+}
+
 function recordings({ draft, backend, controls }: PageContext): HTMLElement[] {
   const kinds = [
     ["Metrics", "metrics", "When each wake, capture and model call happened, how long it took and how it ended. No words or audio."],
@@ -736,7 +821,7 @@ function about({ backend }: PageContext): HTMLElement[] {
 }
 
 function app(context: PageContext): HTMLElement[] {
-  return [...recordings(context), ...about(context)];
+  return [...startup(context), ...recordings(context), ...about(context)];
 }
 
 const PAGES: readonly (readonly [string, string, (context: PageContext) => HTMLElement[]])[] = [
