@@ -201,7 +201,11 @@ const MARKUP = `
         <p class="o-hint"></p>
       </section>
       <div class="o-right">
-        <p class="o-notice" role="alert" hidden>${icon("alert")}<span class="o-notice-text"></span></p>
+        <div class="o-notice" role="alert" hidden>
+          ${icon("alert")}<span class="o-notice-text"></span>
+          <button class="o-notice-copy" type="button">Copy</button>
+          <button class="o-notice-close" type="button" aria-label="Dismiss">×</button>
+        </div>
         <section class="o-scroll" tabindex="0" aria-label="Conversation">
           <div class="o-flow">
             <div class="o-empty" hidden>
@@ -324,8 +328,10 @@ export function createView(root: HTMLElement) {
   const coreIc = find(page, ".o-core-ic", HTMLSpanElement);
   const stateName = find(page, ".o-state", HTMLHeadingElement);
   const hint = find(page, ".o-hint", HTMLParagraphElement);
-  const notice = find(page, ".o-notice", HTMLParagraphElement);
+  const notice = find(page, ".o-notice", HTMLDivElement);
   const noticeText = find(page, ".o-notice-text", HTMLSpanElement);
+  const noticeCopy = find(page, ".o-notice-copy", HTMLButtonElement);
+  const noticeClose = find(page, ".o-notice-close", HTMLButtonElement);
   const scroller = find(page, ".o-scroll", HTMLElement);
   const empty = find(page, ".o-empty", HTMLDivElement);
   const tasks = find(page, ".o-tasks", HTMLDetailsElement);
@@ -464,6 +470,21 @@ export function createView(root: HTMLElement) {
     fit();
   }
 
+  noticeCopy.addEventListener("click", () => {
+    const text = noticeText.textContent;
+    // Browsers leave navigator.clipboard undefined on plain-http pages.
+    const clipboard = navigator.clipboard as Clipboard | undefined;
+    const copied = clipboard ? clipboard.writeText(text) : Promise.reject(new Error("no clipboard"));
+    copied.then(
+      () => {
+        noticeCopy.textContent = "Copied";
+      },
+      () => {
+        window.getSelection()?.selectAllChildren(noticeText);
+      },
+    );
+  });
+
   const syncSend = (): void => {
     send.disabled = !online || composer.value.trim() === "";
   };
@@ -523,6 +544,7 @@ export function createView(root: HTMLElement) {
       orb.classList.toggle("o-is-stop", busy);
 
       notice.hidden = s.notice === null;
+      if (noticeText.textContent !== (s.notice ?? "")) noticeCopy.textContent = "Copy";
       noticeText.textContent = s.notice ?? "";
 
       voice.setAttribute("aria-pressed", String(s.voice));
@@ -581,6 +603,9 @@ export function createView(root: HTMLElement) {
     onVoice(handler: () => void) {
       voiceHandler = handler;
       voice.onclick = handler;
+    },
+    onDismissNotice(handler: () => void) {
+      noticeClose.onclick = handler;
     },
     onSpeak(handler: () => void) {
       speak.onclick = handler;
