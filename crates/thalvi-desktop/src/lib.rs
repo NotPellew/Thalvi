@@ -14,6 +14,7 @@ pub mod local;
 pub mod metrics;
 pub mod models;
 pub mod recognizer;
+pub mod report;
 pub mod runtime;
 pub mod secondary;
 pub mod segments;

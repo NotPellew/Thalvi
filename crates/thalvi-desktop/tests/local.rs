@@ -44,17 +44,15 @@ impl ModelSource for Source {
             })
             .is_ok();
         std::future::ready(if failing {
-            Err(RecognizerError {
-                message: "Could not download the speech model.".to_owned(),
-            })
+            Err(RecognizerError::said(
+                "Could not download the speech model.",
+            ))
         } else {
             self.fake
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .take()
-                .ok_or_else(|| RecognizerError {
-                    message: "The fake model loads once.".to_owned(),
-                })
+                .ok_or_else(|| RecognizerError::said("The fake model loads once."))
         })
     }
 }
@@ -231,9 +229,7 @@ fn fails_on_the_third_frame(n: usize) -> Reply {
     match n {
         0 => Ok(vec![partial("hel")]),
         1 => Ok(vec![]),
-        _ => Err(RecognizerError {
-            message: "The speech model stopped working.".to_owned(),
-        }),
+        _ => Err(RecognizerError::said("The speech model stopped working.")),
     }
 }
 
@@ -249,7 +245,7 @@ async fn a_model_error_reaches_the_caller_after_the_text_before_it_and_stops_the
     let _ = release.send(());
     assert_eq!(session.next_event().await, Ok(partial("hel")));
     let error = session.next_event().await.expect_err("fails");
-    assert_eq!(error.message, "The speech model stopped working.");
+    assert_eq!(error.to_string(), "The speech model stopped working.");
     let seen = Arc::clone(&rig.seen);
     assert_eq!(rig.metric().await["outcome"], "error");
     assert_eq!(seen.load(Ordering::SeqCst), 3);
@@ -288,7 +284,7 @@ async fn a_model_that_cannot_be_fetched_is_reported_and_fetched_again_on_the_nex
         .await
         .err()
         .expect("first try fails");
-    assert_eq!(error.message, "Could not download the speech model.");
+    assert_eq!(error.to_string(), "Could not download the speech model.");
     let mut session = rig.recognizer.connect().await.expect("second try loads");
     session.send_frame(&FRAME).await.expect("sends");
     session.send_frame(&FRAME).await.expect("sends");

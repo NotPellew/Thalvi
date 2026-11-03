@@ -22,7 +22,8 @@ use thalvi_desktop::engine::{
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
 use thalvi_desktop::recognizer::{
-    FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent,
+    FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, ServerUrl,
+    SpeechSource,
 };
 use thalvi_desktop::vad::VadDetector;
 use thalvi_desktop::wake::WakeEvent;
@@ -954,9 +955,7 @@ async fn inflict(rig: &mut Rig, task: &JoinHandle<CaptureOutcome>, fault: Fault)
             rig.finals(&first).await;
             rig.at(1100).await;
             match fault {
-                Fault::RecognizerDrops => rig.server.emit(Err(RecognizerError {
-                    message: DISCONNECTED.to_owned(),
-                })),
+                Fault::RecognizerDrops => rig.server.emit(Err(RecognizerError::said(DISCONNECTED))),
                 Fault::MicDies => rig.feed.fail(AudioError::DeviceLost),
                 _ => rig.finals(&"y".repeat(20)).await,
             }
@@ -977,10 +976,10 @@ async fn inflict(rig: &mut Rig, task: &JoinHandle<CaptureOutcome>, fault: Fault)
 #[tokio::test(start_paused = true)]
 async fn a_failed_capture_says_what_happened_keeps_the_text_and_returns_to_listening() {
     let saved = Some("Saved paragraph".to_owned());
-    let recognizer = |message: &str| {
-        CaptureError::Recognizer(RecognizerError {
-            message: message.to_owned(),
-        })
+    let recognizer = |message: &str| CaptureError::Recognizer(RecognizerError::said(message));
+    let not_ready = || CaptureError::NotReady {
+        waited: Duration::from_secs(8),
+        speech: SpeechSource::Server(ServerUrl::default()),
     };
     // Fault, the error, the text kept, when the error cue plays, and whether a stream was open.
     let cases = [
@@ -1012,14 +1011,8 @@ async fn a_failed_capture_says_what_happened_keeps_the_text_and_returns_to_liste
             0,
             false,
         ),
-        (Fault::NeverReady, CaptureError::NotReady, None, 8000, false),
-        (
-            Fault::WakeCueTooLong,
-            CaptureError::NotReady,
-            None,
-            8000,
-            true,
-        ),
+        (Fault::NeverReady, not_ready(), None, 8000, false),
+        (Fault::WakeCueTooLong, not_ready(), None, 8000, true),
         (
             Fault::Full,
             CaptureError::Full(thalvi_desktop::capture::CaptureFullError),

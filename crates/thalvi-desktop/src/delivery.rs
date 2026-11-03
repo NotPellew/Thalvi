@@ -11,6 +11,7 @@ use crate::config::DesktopConfig;
 use crate::engine::{CaptureOutcome, EngineState};
 use crate::host::{Host, HostError, TypedText};
 use crate::metrics::{Event, Recorder};
+use crate::report::causes;
 use crate::tasks::{self, Task};
 
 #[cfg(test)]
@@ -49,6 +50,8 @@ pub struct Finished {
     pub delivered: bool,
     /// Says what happened and where the dictated text went.
     pub notice: String,
+    /// The technical causes behind a failure, outermost first.
+    pub causes: Vec<String>,
 }
 
 impl Finished {
@@ -56,6 +59,7 @@ impl Finished {
         Self {
             delivered: true,
             notice,
+            causes: Vec::new(),
         }
     }
 
@@ -63,6 +67,7 @@ impl Finished {
         Self {
             delivered: false,
             notice,
+            causes: Vec::new(),
         }
     }
 }
@@ -109,10 +114,13 @@ where
             CaptureOutcome::Failed {
                 error,
                 recoverable_text,
-            } => Some(Finished::kept(match recoverable_text {
-                Some(text) => self.keep(recorder, text, &error.to_string()).await,
-                None => error.to_string(),
-            })),
+            } => Some(Finished {
+                causes: causes(error),
+                ..Finished::kept(match recoverable_text {
+                    Some(text) => self.keep(recorder, text, &error.to_string()).await,
+                    None => error.to_string(),
+                })
+            }),
             CaptureOutcome::Accepted(request) => Some(match request.route {
                 CaptureRoute::Paste => self.type_in(recorder, bound, &request.text, false).await,
                 CaptureRoute::Submit => self.type_in(recorder, bound, &request.text, true).await,
@@ -237,6 +245,8 @@ mod tests {
     use crate::capture::CaptureRequest;
     use crate::engine::CaptureError;
     use crate::metrics::RecordKinds;
+    use crate::recognizer::{ConnectFailure, Detail, RecognizerError, ServerUrl, SpeechSource};
+    use std::time::Duration;
 
     const CONFIG: &str = r#"{
         "apps": {"editor": {"classes": ["Code"]}},
@@ -500,16 +510,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_capture_hands_on_the_technical_causes() {
+        let (finished, _) = finish(
+            FakeHost::default(),
+            CaptureOutcome::Failed {
+                error: CaptureError::Recognizer(RecognizerError::Unreachable {
+                    server: ServerUrl::default(),
+                    reason: ConnectFailure::Refused,
+                    detail: Detail("Connection refused (os error 111)".to_owned()),
+                }),
+                recoverable_text: None,
+            },
+        )
+        .await;
+        assert_eq!(
+            finished.map(|finished| finished.causes),
+            Some(vec!["Connection refused (os error 111)".to_owned()])
+        );
+    }
+
+    #[tokio::test]
     async fn a_failed_capture_keeps_what_was_dictated_and_a_cancelled_one_does_nothing() {
         let failed = |recoverable_text: Option<&str>| CaptureOutcome::Failed {
-            error: CaptureError::NotReady,
+            error: CaptureError::NotReady {
+                waited: Duration::from_secs(8),
+                speech: SpeechSource::Server(ServerUrl::default()),
+            },
             recoverable_text: recoverable_text.map(str::to_owned),
         };
         let (notice, seen) = run(FakeHost::default(), failed(Some("so far"))).await;
         assert_eq!(
             notice.as_deref(),
             Some(
-                "Speech recognition was not ready in time. Nothing was delivered. Captured text is on the clipboard."
+                "The speech server at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix Settings → Speech → Server address. Captured text is on the clipboard."
             )
         );
         assert_eq!(seen, calls(&["capture_target", "copy:\"so far\""]));
@@ -517,7 +550,9 @@ mod tests {
         let (notice, seen) = run(FakeHost::default(), failed(None)).await;
         assert_eq!(
             notice.as_deref(),
-            Some("Speech recognition was not ready in time. Nothing was delivered.")
+            Some(
+                "The speech server at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix Settings → Speech → Server address."
+            )
         );
         assert_eq!(seen, calls(&["capture_target"]));
 

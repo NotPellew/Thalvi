@@ -33,12 +33,12 @@ impl fmt::Display for AudioError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::NoDevice => {
-                "No microphone was found. Plug one in or set a default input in the system sound settings."
+                "No microphone was found. Plug one in or set a default input in the system sound settings, then turn listening on again."
             }
             Self::DeviceMissing(name) => {
                 return write!(
                     f,
-                    "The microphone {name:?} is not connected. Plug it in or choose another one in Thalvi's settings."
+                    "The microphone {name:?} is not connected. Plug it in or choose another under Settings → Microphone."
                 );
             }
             Self::PermissionDenied => {
@@ -46,7 +46,7 @@ impl fmt::Display for AudioError {
             }
             Self::Busy => "The microphone is in use by another app.",
             Self::OpenFailed(_) => {
-                "The microphone could not be opened. Check the device and its permission."
+                "The microphone could not be opened. Check the device and its permission, or choose another under Settings → Microphone."
             }
             Self::DeviceLost => "The microphone was disconnected. Capture stopped without delivery.",
             Self::DeviceChanged => {
@@ -140,7 +140,7 @@ mod tests {
     fn a_missing_chosen_microphone_is_named_in_the_notice() {
         assert_eq!(
             AudioError::DeviceMissing("USB Mic".to_owned()).to_string(),
-            "The microphone \"USB Mic\" is not connected. Plug it in or choose another one in Thalvi's settings."
+            "The microphone \"USB Mic\" is not connected. Plug it in or choose another under Settings → Microphone."
         );
     }
 

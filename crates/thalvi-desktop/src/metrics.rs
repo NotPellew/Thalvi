@@ -478,7 +478,7 @@ fn now_ms() -> u64 {
 }
 
 /// The UTC calendar date (`YYYY-MM-DD`) of an epoch-millisecond instant.
-fn utc_date(epoch_ms: u64) -> String {
+pub(crate) fn utc_date(epoch_ms: u64) -> String {
     let days = i64::try_from(epoch_ms / 86_400_000).unwrap_or(i64::MAX);
     let shifted = days + 719_468;
     let era = if shifted >= 0 {
