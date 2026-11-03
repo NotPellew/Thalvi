@@ -15,6 +15,7 @@ const SAMPLES: u8 = 4;
 
 pub const TOGGLE: &str = "toggle";
 pub const CANCEL: &str = "cancel";
+pub const COPY_ERROR: &str = "copy-error";
 pub const SETTINGS: &str = "settings";
 pub const QUIT: &str = "quit";
 
@@ -173,6 +174,30 @@ pub fn can_cancel(status: &Status) -> bool {
     )
 }
 
+/// What the "copy last error" menu item offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CopyItem {
+    /// Nothing has failed yet.
+    NoError,
+    Ready,
+    /// The last copy failed, for this reason; clicking tries again.
+    Failed(String),
+}
+
+impl CopyItem {
+    fn text(&self) -> String {
+        match self {
+            Self::NoError => "No error to copy".to_owned(),
+            Self::Ready => "Copy last error".to_owned(),
+            Self::Failed(reason) => format!("Could not copy: {reason}"),
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        !matches!(self, Self::NoError)
+    }
+}
+
 /// The tray icon and the menu items that follow the status.
 pub struct Tray {
     icon: tauri::tray::TrayIcon,
@@ -180,6 +205,7 @@ pub struct Tray {
     header: MenuItem<Wry>,
     toggle: MenuItem<Wry>,
     cancel: MenuItem<Wry>,
+    copy_error: MenuItem<Wry>,
 }
 
 impl Tray {
@@ -195,9 +221,19 @@ impl Tray {
             can_cancel(status),
             None::<&str>,
         )?;
+        let copy_error = MenuItem::with_id(
+            app,
+            COPY_ERROR,
+            CopyItem::NoError.text(),
+            CopyItem::NoError.enabled(),
+            None::<&str>,
+        )?;
         let settings = MenuItem::with_id(app, SETTINGS, "Settings…", true, None::<&str>)?;
         let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
-        let menu = Menu::with_items(app, &[&header, &toggle, &cancel, &settings, &quit])?;
+        let menu = Menu::with_items(
+            app,
+            &[&header, &toggle, &cancel, &copy_error, &settings, &quit],
+        )?;
         let icon = TrayIconBuilder::with_id("thalvi")
             .icon(Image::new_owned(
                 Icon::of(status).pixels(),
@@ -213,6 +249,7 @@ impl Tray {
             header,
             toggle,
             cancel,
+            copy_error,
         })
     }
 
@@ -225,6 +262,14 @@ impl Tray {
         let _ = self.icon.set_tooltip(Some(title(status)));
         let _ = self.header.set_text(title(status));
         let _ = self.cancel.set_enabled(can_cancel(status));
+        if matches!(status, Status::Failed { .. }) {
+            self.copy_item(&CopyItem::Ready);
+        }
+    }
+
+    pub fn copy_item(&self, item: &CopyItem) {
+        let _ = self.copy_error.set_text(item.text());
+        let _ = self.copy_error.set_enabled(item.enabled());
     }
 }
 
@@ -311,6 +356,8 @@ mod tests {
             (
                 Status::Failed {
                     notice: "Your text follows: secret words".to_owned(),
+                    headline: "Failed",
+                    causes: Vec::new(),
                 },
                 Icon::Error,
                 "Thalvi: something went wrong",
@@ -398,11 +445,32 @@ mod tests {
             (
                 Status::Failed {
                     notice: String::new(),
+                    headline: "Failed",
+                    causes: Vec::new(),
                 },
                 false,
             ),
         ] {
             assert_eq!(can_cancel(&status), cancellable, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn the_copy_item_offers_the_last_error_when_there_is_one_and_says_why_a_copy_failed() {
+        for (item, text, enabled) in [
+            (CopyItem::NoError, "No error to copy", false),
+            (CopyItem::Ready, "Copy last error", true),
+            (
+                CopyItem::Failed("wl-copy is not installed.".to_owned()),
+                "Could not copy: wl-copy is not installed.",
+                true,
+            ),
+        ] {
+            assert_eq!(
+                (item.text().as_str(), item.enabled()),
+                (text, enabled),
+                "{item:?}"
+            );
         }
     }
 }

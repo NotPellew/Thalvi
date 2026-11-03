@@ -361,10 +361,13 @@ describe("Controller", () => {
     expect(calls).toEqual(["flush"]);
   });
 
-  it("shows server errors until the next user turn", () => {
+  it("shows server errors until dismissed or the next user turn", () => {
     const { controller, server } = online();
     server({ type: "error", message: "The voice service failed." });
     expect(controller.state.notice).toBe("The voice service failed.");
+    controller.dismissNotice();
+    expect(controller.state.notice).toBeNull();
+    server({ type: "error", message: "The voice service failed." });
     server({ type: "user", text: "hello" });
     expect(controller.state.notice).toBeNull();
   });

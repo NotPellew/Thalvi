@@ -9,6 +9,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::report::UserError;
+
 /// The most a download may take besides moving its bytes.
 const DOWNLOAD_BASE: Duration = Duration::from_secs(120);
 
@@ -274,6 +276,19 @@ pub enum ModelError {
         #[source]
         source: std::io::Error,
     },
+}
+
+impl UserError for ModelError {
+    fn headline(&self) -> &'static str {
+        match self {
+            Self::NoDataDir => "No folder to keep models in",
+            Self::Download { .. } => "Download failed — check internet",
+            Self::Checksum { .. } => "Downloaded model was damaged",
+            Self::Replaced { .. } => "Stored model was damaged",
+            Self::AlreadyDownloading { .. } => "Model is already downloading",
+            Self::Io { .. } => "Can't save the model file",
+        }
+    }
 }
 
 /// A directory of verified model files that fills itself by downloading on first use.

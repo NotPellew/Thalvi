@@ -304,7 +304,7 @@ pub struct TransducerStream {
 
 fn failed(reason: impl std::fmt::Display) -> RecognizerError {
     tracing::warn!(%reason, "local speech recognition failed");
-    RecognizerError::new("Local speech recognition failed. Nothing was delivered.")
+    RecognizerError::said("Local speech recognition failed. Nothing was delivered.")
 }
 
 fn dims(shape: &[usize]) -> Vec<usize> {
@@ -491,7 +491,7 @@ impl TransducerSource {
     }
 
     async fn files(&self) -> Result<TransducerFiles, RecognizerError> {
-        let plain = |error: &dyn std::fmt::Display| RecognizerError::new(error.to_string());
+        let plain = |error: &dyn std::fmt::Display| RecognizerError::said(error.to_string());
         match &self.choice {
             SpeechChoice::Catalog(catalog) => {
                 let assets = catalog.assets();
@@ -530,8 +530,8 @@ impl ModelSource for TransducerSource {
         let files = self.files().await?;
         tokio::task::spawn_blocking(move || Transducer::load(&files))
             .await
-            .map_err(|_| RecognizerError::new("The speech model could not be loaded."))?
-            .map_err(|error| RecognizerError::new(error.to_string()))
+            .map_err(|_| RecognizerError::said("The speech model could not be loaded."))?
+            .map_err(|error| RecognizerError::said(error.to_string()))
     }
 }
 

@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::frame::Frame;
 use crate::models::{self, CatalogHead, ModelError, ModelStore};
+use crate::report::UserError;
 use crate::runtime;
 
 const MEL_BINS: usize = 32;
@@ -213,6 +214,18 @@ pub enum WakeError {
     Head { model: String, reason: &'static str },
     #[error("Wake word detection failed: {0}")]
     Inference(String),
+}
+
+impl UserError for WakeError {
+    fn headline(&self) -> &'static str {
+        match self {
+            Self::Model(error) => error.headline(),
+            Self::Runtime(_) => "Wake word engine won't start",
+            Self::Load { .. } => "Wake model can't be loaded",
+            Self::Head { .. } => "Wake model can't be used",
+            Self::Inference(_) => "Wake word detection failed",
+        }
+    }
 }
 
 struct Head {

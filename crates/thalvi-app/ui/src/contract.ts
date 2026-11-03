@@ -17,7 +17,7 @@ export type Status =
     }
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
   | { state: "done"; target: string | null; route: Route; notice: string }
-  | { state: "failed"; notice: string }
+  | { state: "failed"; notice: string; headline: string; causes: string[] } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report
   | { state: "loading"; notice: string }; // the speech model is being fetched or loaded
 
 export interface Level {
@@ -119,6 +119,10 @@ export interface Backend {
   saveSettings(settings: Settings): Promise<void>;
   setListening(on: boolean): Promise<void>;
   cancelCapture(): Promise<void>;
+  /** The user dismissed the latest error; the overlay stops showing it. */
+  dismissError(): Promise<void>;
+  /** Puts an error report for `message` on the clipboard; rejects with the plain reason it could not. */
+  copyReport(message: string, causes: string[]): Promise<void>;
   listMicrophones(): Promise<string[]>;
   openRecordings(): Promise<void>;
   /** Resolves when the folder holds a speech model; rejects with the plain reason it does not. */

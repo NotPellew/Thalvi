@@ -73,6 +73,10 @@ export class Controller {
     this.apply({ type: "notice", notice });
   }
 
+  dismissNotice(): void {
+    this.apply({ type: "notice", notice: null });
+  }
+
   /** Returns whether the text was sent, so the caller knows to clear the composer. */
   sendText(raw: string): boolean {
     const text = raw.trim();

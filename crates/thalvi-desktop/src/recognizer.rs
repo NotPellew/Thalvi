@@ -14,10 +14,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
-    tungstenite::{Message, protocol::WebSocketConfig},
+    tungstenite::{self, Message, protocol::WebSocketConfig},
 };
 
 use crate::frame::{FRAME_SAMPLES, Frame};
+use crate::report::UserError;
 
 /// Samples in one frame after upsampling to 24 kHz.
 pub const UPSAMPLED_SAMPLES: usize = FRAME_SAMPLES / 2 * 3;
@@ -32,18 +33,123 @@ pub enum RecognizerEvent {
     Final(String),
 }
 
-/// A failure the user can be told about in plain words.
+/// What the user does when the speech server cannot be used.
+const START_SERVER: &str = "Start the Thalvi server, or fix Settings → Speech → Server address.";
+
+/// Where dictation is recognized, as the settings name it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpeechSource {
+    Server(ServerUrl),
+    /// The model on this computer; `model` is its name or folder.
+    Local {
+        model: String,
+    },
+}
+
+impl SpeechSource {
+    /// Names what is not working, for the start of a sentence.
+    fn subject(&self) -> String {
+        match self {
+            Self::Server(server) => format!("The speech server at {server}"),
+            Self::Local { model } => format!("The speech model {model}"),
+        }
+    }
+
+    /// What to do about it, naming the setting.
+    pub(crate) fn fix(&self) -> &'static str {
+        match self {
+            Self::Server(_) => START_SERVER,
+            Self::Local { .. } => {
+                "Wait for it to finish loading, or pick another under Settings → Speech → Speech model."
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for SpeechSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.subject())
+    }
+}
+
+/// Why connecting to the server failed, as plain words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ConnectFailure {
+    #[error("connection refused")]
+    Refused,
+    #[error("timed out")]
+    TimedOut,
+    #[error("network or host unreachable")]
+    Unreachable,
+    #[error("it answered HTTP {0} instead of a speech connection")]
+    Rejected(u16),
+    #[error("the secure connection failed")]
+    Tls,
+    #[error("network error")]
+    Other,
+}
+
+impl ConnectFailure {
+    fn of(error: &tungstenite::Error) -> Self {
+        use std::io::ErrorKind;
+        match error {
+            tungstenite::Error::Io(io) => match io.kind() {
+                ErrorKind::ConnectionRefused => Self::Refused,
+                ErrorKind::TimedOut => Self::TimedOut,
+                ErrorKind::NetworkUnreachable | ErrorKind::HostUnreachable => Self::Unreachable,
+                _ => Self::Other,
+            },
+            tungstenite::Error::Http(response) => Self::Rejected(response.status().as_u16()),
+            tungstenite::Error::Tls(_) => Self::Tls,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// The technical text behind a failure, kept for the error report.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("{message}")]
-pub struct RecognizerError {
-    pub message: String,
+#[error("{0}")]
+pub struct Detail(pub String);
+
+/// A failure the user can be told about in plain words; `Display` says what failed, why and
+/// what to do.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RecognizerError {
+    #[error("Thalvi could not reach the speech server at {server} ({reason}). {START_SERVER}")]
+    Unreachable {
+        server: ServerUrl,
+        reason: ConnectFailure,
+        #[source]
+        detail: Detail,
+    },
+    #[error(
+        "The speech server at {server} closed the connection. Nothing was delivered. Check that the Thalvi server is still running."
+    )]
+    Dropped { server: ServerUrl },
+    #[error(
+        "The speech server at {server} sent something Thalvi did not understand. Check that Settings → Speech → Server address points at a Thalvi server."
+    )]
+    NotUnderstood { server: ServerUrl },
+    /// Text the recognizer wrote for the user itself.
+    #[error("{0}")]
+    Said(String),
+}
+
+impl UserError for RecognizerError {
+    fn headline(&self) -> &'static str {
+        match self {
+            Self::Unreachable { .. } => "Can't reach speech server — Settings",
+            Self::Dropped { .. } => "Speech server hung up — Settings",
+            Self::NotUnderstood { .. } => "Bad speech server reply — Settings",
+            Self::Said(_) => "Speech recognition failed — Settings",
+        }
+    }
 }
 
 impl RecognizerError {
-    pub(crate) fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
+    #[must_use]
+    pub fn said(message: impl Into<String>) -> Self {
+        Self::Said(message.into())
     }
 }
 
@@ -186,6 +292,7 @@ type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 pub struct ServerSession {
     socket: Socket,
     upsampler: Upsampler,
+    server: ServerUrl,
 }
 
 #[derive(Deserialize)]
@@ -199,16 +306,16 @@ enum ServerMessage {
     Error { message: Option<String> },
 }
 
-fn not_understood() -> RecognizerError {
-    RecognizerError::new("Speech recognition sent something Thalvi did not understand.")
+fn parse(text: &str, server: &ServerUrl) -> Result<ServerMessage, RecognizerError> {
+    serde_json::from_str(text).map_err(|_| RecognizerError::NotUnderstood {
+        server: server.clone(),
+    })
 }
 
-fn parse(text: &str) -> Result<ServerMessage, RecognizerError> {
-    serde_json::from_str(text).map_err(|_| not_understood())
-}
-
-fn disconnected() -> RecognizerError {
-    RecognizerError::new("Speech recognition disconnected. Nothing was delivered.")
+fn dropped(server: &ServerUrl) -> RecognizerError {
+    RecognizerError::Dropped {
+        server: server.clone(),
+    }
 }
 
 impl Recognizer for ServerRecognizer {
@@ -216,28 +323,40 @@ impl Recognizer for ServerRecognizer {
 
     async fn connect(&self) -> Result<ServerSession, RecognizerError> {
         let config = WebSocketConfig::default().max_message_size(Some(MAX_MESSAGE_BYTES));
-        let (mut socket, _) =
-            connect_async_with_config(self.url.transcription(), Some(config), true)
-                .await
-                .map_err(|_| RecognizerError::new("Thalvi could not reach speech recognition."))?;
-        let could_not_start = || RecognizerError::new("Speech recognition could not start.");
+        let server = &self.url;
+        let (mut socket, _) = connect_async_with_config(server.transcription(), Some(config), true)
+            .await
+            .map_err(|error| RecognizerError::Unreachable {
+                server: server.clone(),
+                reason: ConnectFailure::of(&error),
+                detail: Detail(error.to_string()),
+            })?;
         loop {
             match socket.next().await {
-                Some(Ok(Message::Text(text))) => match parse(&text) {
+                Some(Ok(Message::Text(text))) => match parse(&text, server) {
                     Ok(ServerMessage::Ready) => break,
                     Ok(ServerMessage::Error {
                         message: Some(message),
-                    }) => return Err(RecognizerError::new(message)),
-                    _ => return Err(could_not_start()),
+                    }) => return Err(RecognizerError::said(message)),
+                    _ => {
+                        return Err(RecognizerError::NotUnderstood {
+                            server: server.clone(),
+                        });
+                    }
                 },
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                Some(Ok(Message::Close(_)) | Err(_)) | None => return Err(disconnected()),
-                Some(Ok(_)) => return Err(could_not_start()),
+                Some(Ok(Message::Close(_)) | Err(_)) | None => return Err(dropped(server)),
+                Some(Ok(_)) => {
+                    return Err(RecognizerError::NotUnderstood {
+                        server: server.clone(),
+                    });
+                }
             }
         }
         Ok(ServerSession {
             socket,
             upsampler: Upsampler::default(),
+            server: server.clone(),
         })
     }
 }
@@ -253,30 +372,34 @@ impl RecognizerSession for ServerSession {
         self.socket
             .send(Message::Binary(bytes.into()))
             .await
-            .map_err(|_| disconnected())
+            .map_err(|_| dropped(&self.server))
     }
 
     async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
         loop {
             match self.socket.next().await {
-                Some(Ok(Message::Text(text))) => match parse(&text)? {
+                Some(Ok(Message::Text(text))) => match parse(&text, &self.server)? {
                     ServerMessage::Partial { text } => return Ok(RecognizerEvent::Partial(text)),
                     ServerMessage::Final { text } => return Ok(RecognizerEvent::Final(text)),
                     ServerMessage::Error { message } => {
-                        return Err(RecognizerError::new(
+                        return Err(RecognizerError::said(
                             message.unwrap_or_else(|| "Speech recognition failed.".to_string()),
                         ));
                     }
                     ServerMessage::SpeechStart | ServerMessage::SpeechEnd => {}
-                    ServerMessage::Ready => return Err(not_understood()),
+                    ServerMessage::Ready => {
+                        return Err(RecognizerError::NotUnderstood {
+                            server: self.server.clone(),
+                        });
+                    }
                 },
                 Some(Ok(Message::Binary(_))) => {
-                    return Err(RecognizerError::new(
-                        "Speech recognition returned audio instead of text.",
-                    ));
+                    return Err(RecognizerError::NotUnderstood {
+                        server: self.server.clone(),
+                    });
                 }
                 Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
-                Some(Ok(Message::Close(_)) | Err(_)) | None => return Err(disconnected()),
+                Some(Ok(Message::Close(_)) | Err(_)) | None => return Err(dropped(&self.server)),
             }
         }
     }
@@ -356,14 +479,18 @@ fn take<T>(slot: &Mutex<Option<T>>) -> Option<T> {
     slot.lock().unwrap_or_else(PoisonError::into_inner).take()
 }
 
+fn fake_dropped() -> RecognizerError {
+    RecognizerError::said("Speech recognition disconnected. Nothing was delivered.")
+}
+
 impl Recognizer for FakeRecognizer {
     type Session = FakeSession;
 
     async fn connect(&self) -> Result<FakeSession, RecognizerError> {
         let (Some(ready), Some(events)) = (take(&self.ready), take(&self.events)) else {
-            return Err(RecognizerError::new("The fake recognizer connects once."));
+            return Err(RecognizerError::said("The fake recognizer connects once."));
         };
-        ready.await.map_err(|_| disconnected())??;
+        ready.await.map_err(|_| fake_dropped())??;
         Ok(FakeSession {
             events,
             calls: Arc::clone(&self.calls),
@@ -381,7 +508,7 @@ impl FakeControl {
 
     pub fn fail(&mut self, message: &str) {
         if let Some(ready) = self.ready.take() {
-            let _ = ready.send(Err(RecognizerError::new(message)));
+            let _ = ready.send(Err(RecognizerError::said(message)));
         }
     }
 
@@ -431,7 +558,7 @@ impl RecognizerSession for FakeSession {
         self.events
             .recv()
             .await
-            .unwrap_or_else(|| Err(disconnected()))
+            .unwrap_or_else(|| Err(fake_dropped()))
     }
 
     fn cancel(self) -> impl Future<Output = ()> + Send {
@@ -442,5 +569,70 @@ impl RecognizerSession for FakeSession {
     fn close(self) -> impl Future<Output = ()> + Send {
         self.record(FakeCall::Close);
         std::future::ready(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Error as IoError, ErrorKind};
+
+    use super::*;
+
+    fn http(status: u16) -> tungstenite::Error {
+        let response = tungstenite::http::Response::builder()
+            .status(status)
+            .body(None)
+            .unwrap();
+        tungstenite::Error::Http(Box::new(response))
+    }
+
+    #[test]
+    fn a_failed_connection_is_told_apart_and_says_what_to_fix() {
+        let server = ServerUrl::parse("ws://127.0.0.1:9").unwrap();
+        let cases = [
+            (
+                tungstenite::Error::Io(IoError::from(ErrorKind::ConnectionRefused)),
+                ConnectFailure::Refused,
+                "connection refused",
+            ),
+            (
+                tungstenite::Error::Io(IoError::from(ErrorKind::TimedOut)),
+                ConnectFailure::TimedOut,
+                "timed out",
+            ),
+            (
+                tungstenite::Error::Io(IoError::from(ErrorKind::HostUnreachable)),
+                ConnectFailure::Unreachable,
+                "network or host unreachable",
+            ),
+            (
+                tungstenite::Error::Io(IoError::from(ErrorKind::PermissionDenied)),
+                ConnectFailure::Other,
+                "network error",
+            ),
+            (
+                http(404),
+                ConnectFailure::Rejected(404),
+                "it answered HTTP 404 instead of a speech connection",
+            ),
+        ];
+        for (error, reason, words) in cases {
+            assert_eq!(ConnectFailure::of(&error), reason, "{error}");
+            let failure = RecognizerError::Unreachable {
+                server: server.clone(),
+                reason,
+                detail: Detail(error.to_string()),
+            };
+            assert_eq!(
+                failure.to_string(),
+                format!(
+                    "Thalvi could not reach the speech server at ws://127.0.0.1:9 ({words}). Start the Thalvi server, or fix Settings → Speech → Server address."
+                )
+            );
+            assert_eq!(
+                std::error::Error::source(&failure).map(ToString::to_string),
+                Some(error.to_string())
+            );
+        }
     }
 }

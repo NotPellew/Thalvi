@@ -14,6 +14,8 @@ use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::report::UserError;
+
 /// How many events may wait for the writer before new ones are dropped.
 pub const QUEUE_CAPACITY: usize = 256;
 
@@ -102,6 +104,15 @@ pub enum RecorderError {
     NoDataDir,
     #[error("The recording writer could not start: {0}")]
     Writer(#[source] io::Error),
+}
+
+impl UserError for RecorderError {
+    fn headline(&self) -> &'static str {
+        match self {
+            Self::NoDataDir => "No folder to record into",
+            Self::Writer(_) => "Recording can't start",
+        }
+    }
 }
 
 enum Message {

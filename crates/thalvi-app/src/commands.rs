@@ -17,6 +17,7 @@ use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{
     CatalogSpeech, ModelError, ModelStore, SpeechModelInfo, SpeechProgress,
 };
+use thalvi_desktop::report::{Report, System};
 use thalvi_desktop::transducer::check_folder;
 
 use crate::app::AppState;
@@ -95,6 +96,49 @@ pub fn set_listening(on: bool, state: State<'_, AppState>) {
 #[tauri::command]
 pub fn cancel_capture(state: State<'_, AppState>) {
     state.link.send(Control::Cancel);
+}
+
+/// Hides the overlay's failure; the status stays failed until the next capture starts.
+#[tauri::command]
+pub fn dismiss_error(app: AppHandle, state: State<'_, AppState>) {
+    state.overlay.apply(&app, overlay::Visibility::Hide);
+}
+
+/// Puts an error report on the clipboard through the desktop; a web view's own clipboard is refused
+/// or ignored on some desktops.
+#[tauri::command]
+pub async fn copy_report(
+    message: String,
+    causes: Vec<String>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    copy(&app, &state, &message, &causes).await
+}
+
+/// Copies the report for an error to the clipboard through the desktop.
+///
+/// # Errors
+/// Why the clipboard could not be written, in plain words.
+pub async fn copy(
+    app: &AppHandle,
+    state: &AppState,
+    message: &str,
+    causes: &[String],
+) -> Result<(), String> {
+    let report = Report::new(
+        message,
+        causes,
+        &app.package_info().version.to_string(),
+        System::current(),
+        &state.config(),
+    );
+    let host = state.host();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.copy(&report.text()).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("The report could not be copied: {error}"))?
 }
 
 #[tauri::command]

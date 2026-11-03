@@ -8,6 +8,8 @@ mod windows;
 use std::fmt;
 use std::path::Path;
 
+use crate::report::UserError;
+
 /// The title of the status overlay window, by which a desktop recognises it.
 pub const OVERLAY_TITLE: &str = "Thalvi overlay";
 
@@ -30,6 +32,16 @@ pub enum HostError {
     /// Some input may have reached a window.
     #[error("{0}")]
     MaybePartial(String),
+}
+
+impl UserError for HostError {
+    fn headline(&self) -> &'static str {
+        match self {
+            Self::Unsupported(_) => "Desktop can't do that — Settings",
+            Self::NothingTyped(_) => "Nothing was typed — Settings",
+            Self::MaybePartial(_) => "Some input may have been typed",
+        }
+    }
 }
 
 /// Text that holds no control characters, so typing it can only insert characters.
@@ -79,7 +91,7 @@ impl WebUrl {
 }
 
 /// Keeps a desktop answering state queries from other programs, such as a status bar; dropping it
-/// stops. An answer is one fixed word chosen by the app, never anything the user said.
+/// stops. An answer is one short line the app chooses, never anything the user said.
 pub struct StateServer {
     _stop_on_drop: Box<dyn Send + Sync>,
 }

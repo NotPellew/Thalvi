@@ -11,6 +11,7 @@ use crate::config::DesktopConfig;
 use crate::engine::{CaptureOutcome, EngineState};
 use crate::host::{Host, HostError, TypedText};
 use crate::metrics::{Event, Recorder};
+use crate::report::{UserError, causes};
 use crate::tasks::{self, Task};
 
 #[cfg(test)]
@@ -49,6 +50,10 @@ pub struct Finished {
     pub delivered: bool,
     /// Says what happened and where the dictated text went.
     pub notice: String,
+    /// `notice` as one short line for the overlay.
+    pub headline: &'static str,
+    /// The technical causes behind a failure, outermost first.
+    pub causes: Vec<String>,
 }
 
 impl Finished {
@@ -56,13 +61,17 @@ impl Finished {
         Self {
             delivered: true,
             notice,
+            headline: "Delivered",
+            causes: Vec::new(),
         }
     }
 
-    fn kept(notice: String) -> Self {
+    fn kept(notice: String, headline: &'static str) -> Self {
         Self {
             delivered: false,
             notice,
+            headline,
+            causes: Vec::new(),
         }
     }
 }
@@ -109,10 +118,14 @@ where
             CaptureOutcome::Failed {
                 error,
                 recoverable_text,
-            } => Some(Finished::kept(match recoverable_text {
-                Some(text) => self.keep(recorder, text, &error.to_string()).await,
-                None => error.to_string(),
-            })),
+            } => Some(
+                self.keep(
+                    recorder,
+                    recoverable_text.as_deref().unwrap_or_default(),
+                    error,
+                )
+                .await,
+            ),
             CaptureOutcome::Accepted(request) => Some(match request.route {
                 CaptureRoute::Paste => self.type_in(recorder, bound, &request.text, false).await,
                 CaptureRoute::Submit => self.type_in(recorder, bound, &request.text, true).await,
@@ -129,7 +142,7 @@ where
         enter: bool,
     ) -> Finished {
         if text.is_empty() && !enter {
-            return Finished::kept("There was nothing to type.".to_owned());
+            return Finished::kept("There was nothing to type.".to_owned(), "Nothing to type");
         }
         let result = match (&bound.0, TypedText::new(text)) {
             (Ok(target), Ok(typed)) => {
@@ -155,7 +168,7 @@ where
                 }
                 Finished::delivered("Delivered.".to_owned())
             }
-            Err(error) => Finished::kept(self.keep(recorder, text, &error.to_string()).await),
+            Err(error) => self.keep(recorder, text, &error).await,
         }
     }
 
@@ -163,7 +176,7 @@ where
         let task = match tasks::decide(text, config) {
             Ok(task) => task,
             Err(error) => {
-                return Finished::kept(self.keep(recorder, text, &error.to_string()).await);
+                return self.keep(recorder, text, &error).await;
             }
         };
         let (call, keep) = match &task {
@@ -176,25 +189,42 @@ where
             .await
         {
             Ok(notice) => Finished::delivered(notice),
-            Err(error) => Finished::kept(self.keep(recorder, &keep, &error.to_string()).await),
+            Err(error) => self.keep(recorder, &keep, &error).await,
         }
     }
 
-    /// Puts `text` on the clipboard after `what_happened`, and says so; if the clipboard fails
-    /// too, the notice carries the text.
-    async fn keep(&self, recorder: &Recorder, text: &str, what_happened: &str) -> String {
-        if text.is_empty() {
-            return what_happened.to_owned();
-        }
-        let owned = text.to_owned();
-        match self
-            .call(recorder, "copy", move |host| host.copy(&owned))
-            .await
-        {
-            Ok(()) => format!("{what_happened} Captured text is on the clipboard."),
-            Err(error) => format!(
-                "{what_happened} Clipboard recovery failed: {error} Your text follows:\n{text}"
-            ),
+    /// Puts `text` on the clipboard after `error`, and says so; if the clipboard fails too, the
+    /// notice carries the text and the headline says to look for it.
+    async fn keep(
+        &self,
+        recorder: &Recorder,
+        text: &str,
+        error: &(impl UserError + 'static),
+    ) -> Finished {
+        let what_happened = error.to_string();
+        let (notice, headline) = if text.is_empty() {
+            (what_happened, error.headline())
+        } else {
+            let owned = text.to_owned();
+            match self
+                .call(recorder, "copy", move |host| host.copy(&owned))
+                .await
+            {
+                Ok(()) => (
+                    format!("{what_happened} Captured text is on the clipboard."),
+                    error.headline(),
+                ),
+                Err(copy_error) => (
+                    format!(
+                        "{what_happened} Clipboard recovery failed: {copy_error} Your text follows:\n{text}"
+                    ),
+                    "Clipboard failed — text in Settings",
+                ),
+            }
+        };
+        Finished {
+            causes: causes(error),
+            ..Finished::kept(notice, headline)
         }
     }
 
@@ -234,9 +264,12 @@ where
 mod tests {
     use super::fakes::{FakeHost, FakeWindow};
     use super::*;
+    use crate::audio::AudioError;
     use crate::capture::CaptureRequest;
     use crate::engine::CaptureError;
     use crate::metrics::RecordKinds;
+    use crate::recognizer::{ConnectFailure, Detail, RecognizerError, ServerUrl, SpeechSource};
+    use std::time::Duration;
 
     const CONFIG: &str = r#"{
         "apps": {"editor": {"classes": ["Code"]}},
@@ -500,16 +533,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn each_failure_has_a_headline_for_the_overlay_and_a_lost_clipboard_says_where_the_text_is()
+     {
+        let failed = |error| CaptureOutcome::Failed {
+            error,
+            recoverable_text: Some("kept".to_owned()),
+        };
+        let no_clipboard = || {
+            FakeHost::default().failing("copy", HostError::Unsupported("No clipboard.".to_owned()))
+        };
+        let cases = [
+            (
+                FakeHost::default(),
+                failed(CaptureError::Audio(AudioError::Busy)),
+                "Microphone is used by another app",
+            ),
+            (
+                no_clipboard(),
+                failed(CaptureError::Audio(AudioError::Busy)),
+                "Clipboard failed — text in Settings",
+            ),
+            (
+                FakeHost::default().failing("deliver", HostError::NothingTyped("Nope.".to_owned())),
+                accepted(CaptureRoute::Paste, "text"),
+                "Nothing was typed — Settings",
+            ),
+            (
+                FakeHost::default(),
+                accepted(CaptureRoute::Task, "do a backflip"),
+                "That task isn't configured yet",
+            ),
+            (
+                FakeHost::default(),
+                accepted(CaptureRoute::Paste, ""),
+                "Nothing to type",
+            ),
+            (
+                FakeHost::default(),
+                accepted(CaptureRoute::Paste, "hi"),
+                "Delivered",
+            ),
+        ];
+        for (host, outcome, headline) in cases {
+            let (finished, _) = finish(host, outcome).await;
+            assert_eq!(finished.map(|finished| finished.headline), Some(headline));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_capture_hands_on_the_technical_causes() {
+        let (finished, _) = finish(
+            FakeHost::default(),
+            CaptureOutcome::Failed {
+                error: CaptureError::Recognizer(RecognizerError::Unreachable {
+                    server: ServerUrl::default(),
+                    reason: ConnectFailure::Refused,
+                    detail: Detail("Connection refused (os error 111)".to_owned()),
+                }),
+                recoverable_text: None,
+            },
+        )
+        .await;
+        assert_eq!(
+            finished.map(|finished| finished.causes),
+            Some(vec!["Connection refused (os error 111)".to_owned()])
+        );
+    }
+
+    #[tokio::test]
     async fn a_failed_capture_keeps_what_was_dictated_and_a_cancelled_one_does_nothing() {
         let failed = |recoverable_text: Option<&str>| CaptureOutcome::Failed {
-            error: CaptureError::NotReady,
+            error: CaptureError::NotReady {
+                waited: Duration::from_secs(8),
+                speech: SpeechSource::Server(ServerUrl::default()),
+            },
             recoverable_text: recoverable_text.map(str::to_owned),
         };
         let (notice, seen) = run(FakeHost::default(), failed(Some("so far"))).await;
         assert_eq!(
             notice.as_deref(),
             Some(
-                "Speech recognition was not ready in time. Nothing was delivered. Captured text is on the clipboard."
+                "The speech server at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix Settings → Speech → Server address. Captured text is on the clipboard."
             )
         );
         assert_eq!(seen, calls(&["capture_target", "copy:\"so far\""]));
@@ -517,7 +621,9 @@ mod tests {
         let (notice, seen) = run(FakeHost::default(), failed(None)).await;
         assert_eq!(
             notice.as_deref(),
-            Some("Speech recognition was not ready in time. Nothing was delivered.")
+            Some(
+                "The speech server at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix Settings → Speech → Server address."
+            )
         );
         assert_eq!(seen, calls(&["capture_target"]));
 

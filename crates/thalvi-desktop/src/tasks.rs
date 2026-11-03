@@ -2,6 +2,7 @@
 
 use crate::config::{DesktopConfig, ScriptAction};
 use crate::host::{App, Host, HostError, WebUrl};
+use crate::report::UserError;
 
 /// What the task ending asked for, as a typed action.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +26,12 @@ pub enum Task {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("That task isn't configured yet.")]
 pub struct NotConfigured;
+
+impl UserError for NotConfigured {
+    fn headline(&self) -> &'static str {
+        "That task isn't configured yet"
+    }
+}
 
 /// The refusal for every Discord message: live Discord actions are switched off.
 const DISCORD_OFF: &str = "Discord messages are switched off for now. Nothing was typed or sent.";

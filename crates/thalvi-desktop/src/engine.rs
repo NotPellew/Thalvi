@@ -27,7 +27,10 @@ use crate::config::DesktopConfig;
 use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues};
 use crate::frame::{FRAME_SAMPLES, Frame};
 use crate::metrics::{Dictation, Event, RecordKinds, Recorder};
-use crate::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
+use crate::recognizer::{
+    Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
+};
+use crate::report::UserError;
 use crate::secondary::{self, SecondaryApi, SecondaryError, SecondaryStt};
 use crate::vad::VadDetector;
 use crate::wake::{WakeEngine, WakeError, WakeEvent, WakeFrame};
@@ -176,8 +179,15 @@ pub enum EngineState {
 pub enum CaptureError {
     #[error(transparent)]
     Recognizer(#[from] RecognizerError),
-    #[error("Speech recognition was not ready in time. Nothing was delivered.")]
-    NotReady,
+    #[error(
+        "{speech} was not ready after {}. Nothing was delivered. {}",
+        plain_duration(*waited),
+        speech.fix()
+    )]
+    NotReady {
+        waited: Duration,
+        speech: SpeechSource,
+    },
     #[error(transparent)]
     Audio(#[from] AudioError),
     #[error("Microphone audio stopped. Nothing was delivered.")]
@@ -188,6 +198,27 @@ pub enum CaptureError {
     TooLong(Duration),
     #[error(transparent)]
     Full(#[from] CaptureFullError),
+}
+
+impl UserError for CaptureError {
+    fn headline(&self) -> &'static str {
+        match self {
+            Self::Recognizer(error) => error.headline(),
+            Self::NotReady {
+                speech: SpeechSource::Server(_),
+                ..
+            } => "Speech server not ready — Settings",
+            Self::NotReady {
+                speech: SpeechSource::Local { .. },
+                ..
+            } => "Speech model not ready — Settings",
+            Self::Audio(error) => error.headline(),
+            Self::MicStopped => "Microphone stopped mid-capture",
+            Self::NoEnding(_) => "No words heard",
+            Self::TooLong(_) => "Capture too long — not delivered",
+            Self::Full(_) => "Capture full — finish or cancel",
+        }
+    }
 }
 
 /// Whole minutes read as minutes, anything else as seconds.
@@ -207,7 +238,7 @@ impl CaptureError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Recognizer(_) => "recognizer",
-            Self::NotReady => "not_ready",
+            Self::NotReady { .. } => "not_ready",
             Self::Audio(_) => "audio",
             Self::MicStopped => "mic_stopped",
             Self::NoEnding(_) => "no_ending",
@@ -238,6 +269,15 @@ pub enum ListenError {
     Audio(#[from] AudioError),
     #[error(transparent)]
     Wake(#[from] WakeError),
+}
+
+impl UserError for ListenError {
+    fn headline(&self) -> &'static str {
+        match self {
+            Self::Audio(error) => error.headline(),
+            Self::Wake(error) => error.headline(),
+        }
+    }
 }
 
 /// The part of the engine other threads may hold: cancel a capture and watch the state.
@@ -303,6 +343,7 @@ pub struct Engine<R, W, C> {
     pauses: EndingPauses,
     limits: CaptureLimits,
     secondary: Option<SecondaryStt>,
+    speech: SpeechSource,
     http: reqwest::Client,
     recorder: Recorder,
     notice: Box<dyn Fn(&str)>,
@@ -472,6 +513,7 @@ where
             pauses: config.ending_pause,
             limits: config.capture_limits,
             secondary: config.stt.secondary.clone(),
+            speech: config.speech_source(),
             http: parts.http,
             recorder,
             notice: parts.notice,
@@ -667,6 +709,13 @@ where
         }
     }
 
+    fn not_ready(&self) -> CaptureError {
+        CaptureError::NotReady {
+            waited: READY_TIMEOUT,
+            speech: self.speech.clone(),
+        }
+    }
+
     /// Plays the wake cue while the recognizer connects, then takes the user's dictation until
     /// they end it, cancel it, or something fails.
     ///
@@ -839,7 +888,7 @@ where
                     self.cue_metric(Event::ReadyCue, &end);
                     self.cue_failed(&end, "The capture continues.");
                 }
-                () = tokio::time::sleep_until(deadline) => break Some(Done::Failed(CaptureError::NotReady)),
+                () = tokio::time::sleep_until(deadline) => break Some(Done::Failed(self.not_ready())),
                 frame = frames.next(), if cue_ended => match frame {
                     Ok(frame) => backlog.push(frame),
                     Err(error) => break Some(Done::Failed(error.into())),
@@ -863,7 +912,7 @@ where
             return Err((done, decided));
         }
         let Some(session) = session else {
-            return Err((Done::Failed(CaptureError::NotReady), decided));
+            return Err((Done::Failed(self.not_ready()), decided));
         };
         let live = Live {
             session,
@@ -1259,5 +1308,34 @@ where
             }
         }
         (!text.is_empty()).then_some(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::recognizer::ServerUrl;
+
+    #[test]
+    fn not_ready_names_what_waited_and_the_setting_to_fix() {
+        let cases = [
+            (
+                SpeechSource::Server(ServerUrl::parse("ws://127.0.0.1:9").unwrap()),
+                "The speech server at ws://127.0.0.1:9 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix Settings → Speech → Server address.",
+            ),
+            (
+                SpeechSource::Local {
+                    model: "nemotron_160ms".to_owned(),
+                },
+                "The speech model nemotron_160ms was not ready after 8 seconds. Nothing was delivered. Wait for it to finish loading, or pick another under Settings → Speech → Speech model.",
+            ),
+        ];
+        for (speech, expected) in cases {
+            let error = CaptureError::NotReady {
+                waited: READY_TIMEOUT,
+                speech,
+            };
+            assert_eq!(error.to_string(), expected);
+        }
     }
 }

@@ -12,12 +12,15 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::routing::get;
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::recognizer::{
-    FakeCall, FakeRecognizer, Recognizer, RecognizerError, RecognizerEvent, RecognizerSession,
-    ServerRecognizer, ServerUrl, ServerUrlError, UPSAMPLED_SAMPLES, Upsampler,
+    ConnectFailure, FakeCall, FakeRecognizer, Recognizer, RecognizerError, RecognizerEvent,
+    RecognizerSession, ServerRecognizer, ServerUrl, ServerUrlError, UPSAMPLED_SAMPLES, Upsampler,
 };
 use tokio::sync::{Notify, mpsc};
 
 const WAIT: Duration = Duration::from_secs(5);
+
+/// The error a scripted server should produce, given its address.
+type Expected = fn(ServerUrl) -> RecognizerError;
 
 async fn serve<F, Fut>(handler: F) -> ServerUrl
 where
@@ -171,31 +174,40 @@ async fn connect_failures_say_why() {
         ServerUrl::parse(&format!("ws://{}", unused.local_addr().expect("address"))).expect("url");
     drop(unused);
 
-    let could_not_start = "Speech recognition could not start.";
-    let disconnected = "Speech recognition disconnected. Nothing was delivered.";
-    let cases = [
+    let not_understood: Expected = |server| RecognizerError::NotUnderstood { server };
+    let dropped: Expected = |server| RecognizerError::Dropped { server };
+    let cases: [(Vec<Message>, Expected); 6] = [
         (
             vec![text(
                 r#"{"type":"error","message":"The model is loading."}"#,
             )],
-            "The model is loading.",
+            |_| RecognizerError::said("The model is loading."),
         ),
-        (vec![text(r#"{"type":"error"}"#)], could_not_start),
+        (vec![text(r#"{"type":"error"}"#)], not_understood),
         (
             vec![text(r#"{"type":"partial","text":"hi"}"#)],
-            could_not_start,
+            not_understood,
         ),
-        (vec![text("not json")], could_not_start),
-        (vec![Message::Binary(vec![0, 0].into())], could_not_start),
-        (vec![Message::Close(None)], disconnected),
+        (vec![text("not json")], not_understood),
+        (vec![Message::Binary(vec![0, 0].into())], not_understood),
+        (vec![Message::Close(None)], dropped),
     ];
     for (script, expected) in cases {
         let url = scripted(script.clone()).await;
-        let error = connect(url).await.err().expect("connect fails");
-        assert_eq!(error.message, expected, "script {script:?}");
+        let error = connect(url.clone()).await.err().expect("connect fails");
+        assert_eq!(error, expected(url), "script {script:?}");
     }
-    let error = connect(refused).await.err().expect("connect fails");
-    assert_eq!(error.message, "Thalvi could not reach speech recognition.");
+    let error = connect(refused.clone()).await.err().expect("connect fails");
+    assert!(
+        matches!(&error, RecognizerError::Unreachable { server, reason: ConnectFailure::Refused, .. } if *server == refused),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "Thalvi could not reach the speech server at {refused} (connection refused). Start the Thalvi server, or fix Settings → Speech → Server address."
+        )
+    );
 }
 
 #[tokio::test]
@@ -222,45 +234,37 @@ async fn events_arrive_in_order_and_speech_markers_and_pings_are_skipped() {
     assert_eq!(next().await, Ok(RecognizerEvent::Final("hello".into())));
     assert_eq!(
         next().await,
-        Err(RecognizerError {
-            message: "The model went away.".into()
-        })
+        Err(RecognizerError::said("The model went away."))
     );
     assert_eq!(
         next().await,
-        Err(RecognizerError {
-            message: "Speech recognition failed.".into()
-        })
+        Err(RecognizerError::said("Speech recognition failed."))
     );
 }
 
 #[tokio::test]
 async fn unusable_messages_after_ready_end_the_stream_with_a_reason() {
-    let not_understood = "Speech recognition sent something Thalvi did not understand.";
-    let cases = [
+    let not_understood: Expected = |server| RecognizerError::NotUnderstood { server };
+    let cases: [(Message, Expected); 8] = [
         (text(r#"{"type":"mystery"}"#), not_understood),
         (text(r#"{"type":"partial","text":7}"#), not_understood),
         (text(r#"{"type":"final"}"#), not_understood),
         (text("[]"), not_understood),
         (text("not json"), not_understood),
         (ready(), not_understood),
-        (
-            Message::Binary(vec![0, 0].into()),
-            "Speech recognition returned audio instead of text.",
-        ),
-        (
-            Message::Close(None),
-            "Speech recognition disconnected. Nothing was delivered.",
-        ),
+        (Message::Binary(vec![0, 0].into()), not_understood),
+        (Message::Close(None), |server| RecognizerError::Dropped {
+            server,
+        }),
     ];
     for (message, expected) in cases {
         let url = scripted(vec![ready(), message.clone()]).await;
-        let mut session = connect(url).await.expect("ready");
+        let mut session = connect(url.clone()).await.expect("ready");
         let error = tokio::time::timeout(WAIT, session.next_event())
             .await
             .expect("event")
             .expect_err("the stream fails");
-        assert_eq!(error.message, expected, "message {message:?}");
+        assert_eq!(error, expected(url), "message {message:?}");
     }
 }
 
@@ -274,7 +278,7 @@ async fn a_message_is_accepted_at_100_kb_and_refused_past_it() {
             text(&format!(r#"{{"type":"partial","text":"{filler}"}}"#)),
         ])
         .await;
-        let mut session = connect(url).await.expect("ready");
+        let mut session = connect(url.clone()).await.expect("ready");
         let event = tokio::time::timeout(WAIT, session.next_event())
             .await
             .expect("event");
@@ -283,9 +287,7 @@ async fn a_message_is_accepted_at_100_kb_and_refused_past_it() {
             if accepted {
                 Ok(RecognizerEvent::Partial(filler))
             } else {
-                Err(RecognizerError {
-                    message: "Speech recognition disconnected. Nothing was delivered.".into(),
-                })
+                Err(RecognizerError::Dropped { server: url })
             },
             "{size} bytes"
         );
@@ -424,7 +426,7 @@ async fn the_fake_recognizer_is_driven_by_its_control() {
     let (fake, mut control) = FakeRecognizer::new();
     control.fail("No model.");
     assert_eq!(
-        fake.connect().await.err().expect("fails").message,
+        fake.connect().await.err().expect("fails").to_string(),
         "No model."
     );
 }

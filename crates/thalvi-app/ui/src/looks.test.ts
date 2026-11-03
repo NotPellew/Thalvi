@@ -120,11 +120,11 @@ describe("the overlay in the holo and gunmetal looks", () => {
     },
     {
       name: "failed",
-      status: { state: "failed", notice: "Server unreachable." },
+      status: { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:9 (connection refused). Start the Thalvi server, or fix Settings → Speech → Server address.", headline: "Can't reach speech server — Settings", causes: [] },
       tone: "failed",
       label: "NOT SENT",
       tag: true,
-      line: "Server unreachable.",
+      line: "Can't reach speech server — Settings",
       message: "",
     },
   ];
@@ -193,12 +193,12 @@ describe("the overlay in the holo and gunmetal looks", () => {
       expect(run().style.transform).toBe("translateX(0px)");
 
       wide = 500;
-      emit({ state: "failed", notice: "A notice longer than the line." });
+      emit({ state: "failed", notice: "A notice.", headline: "A headline longer than the line.", causes: [] });
       expect(run().classList.contains("scroll")).toBe(true);
       expect(run().style.getPropertyValue("--over")).toBe("232px");
 
       wide = 120;
-      emit({ state: "failed", notice: "Short." });
+      emit({ state: "failed", notice: "Short.", headline: "Short.", causes: [] });
       expect(run().classList.contains("scroll")).toBe(false);
     } finally {
       if (descriptor) Object.defineProperty(Element.prototype, "scrollWidth", descriptor);
@@ -212,7 +212,7 @@ describe("the overlay in the holo and gunmetal looks", () => {
     emit({ state: "capturing", target: "Slack", committed: "secret", partial: null });
     expect(line()).toBe("");
     expect(module().dataset["text"]).toBe("false");
-    emit({ state: "failed", notice: "Server unreachable." });
+    emit({ state: "failed", notice: "Server unreachable.", headline: "Server unreachable.", causes: [] });
     expect(line()).toBe("Server unreachable.");
     expect(module().dataset["text"]).toBe("true");
   });
