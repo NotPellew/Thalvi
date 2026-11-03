@@ -66,6 +66,11 @@ impl FakeFactory {
         let _ = sender.send(item);
     }
 
+    /// Whether the session let go of this connection's recognizer.
+    fn released(&self, connection: usize) -> bool {
+        self.inner.connections.lock().unwrap()[connection].is_closed()
+    }
+
     fn latest_connection(&self) -> usize {
         self.inner.connections.lock().unwrap().len() - 1
     }
@@ -1899,6 +1904,383 @@ async fn turning_voice_off_stops_the_sentence_being_synthesized_while_text_conti
     tts_gate.notify_one();
     expect_quiet_until_marker(&mut harness).await;
     assert_eq!(harness.tts.inputs(), vec!["Hello there.".to_string()]);
+    harness.server.abort();
+}
+
+// ---------- input and reply audio are independent ----------
+
+async fn set_modes(harness: &mut Harness, source: &str, reply_audio: bool) {
+    send_json(harness, &json!({"type": "input", "source": source})).await;
+    send_json(harness, &json!({"type": "reply_audio", "on": reply_audio})).await;
+    let (mut echoed, mut listening) = (false, source == "text");
+    while !(echoed && listening) {
+        if let Received::Json(v) = recv(&mut harness.client).await {
+            if v["type"] == "reply_audio" {
+                assert_eq!(v["on"], reply_audio);
+                echoed = true;
+            }
+            listening |= v["type"] == "state" && v["state"] == "listening";
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_input_and_reply_audio_combination_opens_only_the_services_it_uses() {
+    for (source, reply_audio) in [
+        ("text", false),
+        ("text", true),
+        ("mic", false),
+        ("mic", true),
+    ] {
+        let mut harness = start().await;
+        set_modes(&mut harness, source, reply_audio).await;
+        harness
+            .model
+            .add_script(vec![ModelChunk::Delta("Hi there.".to_string())]);
+        if source == "mic" {
+            harness.factory.complete_turn(0, "hello");
+        } else {
+            send_json(&mut harness, &json!({"type": "text", "text": "hello"})).await;
+        }
+        let received = collect_until(
+            &mut harness.client,
+            |item| matches!(item, Received::Json(v) if v["type"] == "reply_end"),
+        )
+        .await;
+
+        let case = format!("{source} input, reply audio {reply_audio}");
+        assert_eq!(reply_text(&received), "Hi there.", "{case}");
+        assert_eq!(
+            audios(&received),
+            if reply_audio {
+                vec![Bytes::from("AUDIO:Hi there.")]
+            } else {
+                Vec::new()
+            },
+            "{case}"
+        );
+        assert_eq!(
+            harness.factory.attempts(),
+            usize::from(source == "mic"),
+            "{case}: recognizer connections"
+        );
+        assert_eq!(
+            harness.tts.inputs().len(),
+            usize::from(reply_audio),
+            "{case}: speech requests"
+        );
+        assert_eq!(
+            harness.model.calls()[0],
+            vec![ChatMessage::user("hello".to_string())],
+            "{case}"
+        );
+        harness.server.abort();
+    }
+}
+
+#[tokio::test]
+async fn text_input_ignores_microphone_audio_and_stray_voice_controls() {
+    let mut harness = start().await;
+    send_json(&mut harness, &json!({"type": "reply_audio", "on": true})).await;
+    for stray in [
+        json!({"type": "voice", "on": true}),
+        json!({"type": "input", "source": "satellite"}),
+        json!({"type": "input"}),
+        json!({"type": "reply_audio", "on": "yes"}),
+    ] {
+        send_json(&mut harness, &stray).await;
+    }
+    harness
+        .client
+        .send(ClientMessage::Binary(vec![5_u8; 3840].into()))
+        .await
+        .unwrap();
+    let echoed = recv(&mut harness.client).await;
+    assert!(
+        matches!(&echoed, Received::Json(v) if v["type"] == "reply_audio" && v["on"] == true),
+        "only the valid reply audio control is answered, got {echoed:?}"
+    );
+    expect_quiet_until_marker(&mut harness).await;
+    assert_eq!(harness.factory.attempts(), 0);
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn stopping_input_releases_the_recognizer_and_keeps_the_spoken_reply_going() {
+    let mut harness = start().await;
+    set_modes(&mut harness, "mic", true).await;
+    let gate = Arc::new(Notify::new());
+    harness.model.add_script(vec![
+        ModelChunk::Delta("One. ".to_string()),
+        ModelChunk::Wait(Arc::clone(&gate)),
+        ModelChunk::Delta("Two.".to_string()),
+    ]);
+    harness.factory.complete_turn(0, "question");
+    let received = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Audio(_))
+    })
+    .await;
+    assert_eq!(audios(&received), vec![Bytes::from("AUDIO:One.")]);
+
+    send_json(&mut harness, &json!({"type": "input", "source": "text"})).await;
+    wait_until(|| harness.factory.released(0)).await;
+    gate.notify_one();
+    let rest = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
+    )
+    .await;
+    assert_eq!(reply_text(&rest), "Two.");
+    assert_eq!(
+        audios(&rest),
+        vec![Bytes::from("AUDIO:Two.")],
+        "reply audio stays on after input stops"
+    );
+
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Typed.".to_string())]);
+    send_json(&mut harness, &json!({"type": "text", "text": "typed"})).await;
+    let typed = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_end"),
+    )
+    .await;
+    assert_eq!(audios(&typed), vec![Bytes::from("AUDIO:Typed.")]);
+    assert_eq!(harness.factory.attempts(), 1, "no new recognizer for text");
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn muting_reply_audio_drops_queued_audio_but_keeps_text_and_listening() {
+    let mut harness = start().await;
+    set_modes(&mut harness, "mic", true).await;
+    let tts_gate = Arc::new(Notify::new());
+    harness
+        .tts
+        .add_script(TtsScript::Gated(Arc::clone(&tts_gate)));
+    harness.model.add_script(vec![
+        ModelChunk::Delta("Hello there. ".to_string()),
+        ModelChunk::Delta("Second.".to_string()),
+    ]);
+    harness.factory.complete_turn(0, "question");
+    wait_until(|| harness.tts.inputs().len() == 1).await;
+
+    send_json(&mut harness, &json!({"type": "reply_audio", "on": false})).await;
+    let received = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening"),
+    )
+    .await;
+    assert_eq!(reply_text(&received), "Hello there. Second.");
+    assert_eq!(audios(&received), Vec::<Bytes>::new());
+    wait_until(|| harness.tts.dropped.load(Ordering::SeqCst) == 1).await;
+    tts_gate.notify_one();
+
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Quiet answer.".to_string())]);
+    harness.factory.complete_turn(0, "still listening");
+    let quiet = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_end"),
+    )
+    .await;
+    assert_eq!(reply_text(&quiet), "Quiet answer.");
+    assert_eq!(audios(&quiet), Vec::<Bytes>::new());
+    assert!(!harness.factory.released(0), "muting never stops the mic");
+
+    send_json(&mut harness, &json!({"type": "reply_audio", "on": true})).await;
+    let _ = collect_until(&mut harness.client, |item| {
+        has_type(std::slice::from_ref(item), "reply_audio")
+    })
+    .await;
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Loud answer.".to_string())]);
+    harness.factory.complete_turn(0, "again");
+    let loud = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_end"),
+    )
+    .await;
+    assert_eq!(audios(&loud), vec![Bytes::from("AUDIO:Loud answer.")]);
+    assert_eq!(
+        harness.tts.inputs(),
+        vec!["Hello there.".to_string(), "Loud answer.".to_string()]
+    );
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn unmuting_mid_reply_speaks_only_the_sentences_that_follow() {
+    let mut harness = start().await;
+    set_modes(&mut harness, "text", false).await;
+    let gate = Arc::new(Notify::new());
+    harness.model.add_script(vec![
+        ModelChunk::Delta("Early. ".to_string()),
+        ModelChunk::Wait(Arc::clone(&gate)),
+        ModelChunk::Delta("Later.".to_string()),
+    ]);
+    send_json(&mut harness, &json!({"type": "text", "text": "question"})).await;
+    let _ = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply" && v["text"] == "Early. "),
+    )
+    .await;
+
+    send_json(&mut harness, &json!({"type": "reply_audio", "on": true})).await;
+    let _ = recv(&mut harness.client).await;
+    gate.notify_one();
+    let rest = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_end"),
+    )
+    .await;
+    assert_eq!(audios(&rest), vec![Bytes::from("AUDIO:Later.")]);
+    assert_eq!(harness.tts.inputs(), vec!["Later.".to_string()]);
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn cancel_and_a_new_turn_both_end_a_text_reply_that_is_being_spoken() {
+    let mut harness = start().await;
+    set_modes(&mut harness, "text", true).await;
+    harness.model.add_script(vec![ModelChunk::Delta(
+        "First sentence. Second sentence.".to_string(),
+    )]);
+    harness.tts.add_script(TtsScript::Audio);
+    harness.tts.add_script(TtsScript::Hang);
+    send_json(&mut harness, &json!({"type": "text", "text": "one"})).await;
+    let _ = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Audio(_))
+    })
+    .await;
+    wait_until(|| harness.tts.inputs().len() == 2).await;
+
+    send_json(&mut harness, &json!({"type": "cancel"})).await;
+    let cancelled = collect_until(&mut harness.client, |item| {
+        has_type(std::slice::from_ref(item), "interrupted")
+    })
+    .await;
+    assert!(has_state(&cancelled, "idle"));
+    wait_until(|| harness.tts.dropped.load(Ordering::SeqCst) == 1).await;
+
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Slow one. Slow two.".to_string())]);
+    harness.tts.add_script(TtsScript::Audio);
+    harness.tts.add_script(TtsScript::Hang);
+    send_json(&mut harness, &json!({"type": "text", "text": "two"})).await;
+    let _ = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Audio(_))
+    })
+    .await;
+    wait_until(|| harness.tts.inputs().len() == 4).await;
+
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Fresh.".to_string())]);
+    send_json(&mut harness, &json!({"type": "text", "text": "three"})).await;
+    let superseding = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_end"),
+    )
+    .await;
+    assert!(has_type(&superseding, "interrupted"));
+    assert_eq!(audios(&superseding), vec![Bytes::from("AUDIO:Fresh.")]);
+    wait_until(|| harness.tts.dropped.load(Ordering::SeqCst) == 2).await;
+    assert_eq!(harness.factory.attempts(), 0);
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn a_fatal_recognizer_failure_falls_back_to_text_input_and_keeps_reply_audio() {
+    let mut harness = start().await;
+    set_modes(&mut harness, "mic", true).await;
+    harness.factory.push(
+        0,
+        Err(RecognizerError::Fatal(
+            "invalid request (code 1008)".to_string(),
+        )),
+    );
+    let received = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
+    )
+    .await;
+    assert!(received.iter().any(|item| matches!(item, Received::Json(v)
+        if v["type"] == "input" && v["source"] == "text" && v["ready"] == true)));
+    assert!(
+        !has_type(&received, "reply_audio"),
+        "the failure does not touch reply audio: {received:?}"
+    );
+    wait_until(|| harness.factory.released(0)).await;
+
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Still talking.".to_string())]);
+    send_json(&mut harness, &json!({"type": "text", "text": "typed"})).await;
+    let typed = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_end"),
+    )
+    .await;
+    assert_eq!(audios(&typed), vec![Bytes::from("AUDIO:Still talking.")]);
+    assert_eq!(harness.factory.attempts(), 1);
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn a_reconnect_resumes_without_repeating_turns_and_releases_the_old_recognizer() {
+    let mut harness = start().await;
+    set_modes(&mut harness, "mic", true).await;
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Answer one.".to_string())]);
+    harness.factory.complete_turn(0, "first question");
+    let _ = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_end"),
+    )
+    .await;
+    let id = harness.session_id.clone();
+    harness.client.close(None).await.unwrap();
+    wait_closed(&harness, 1).await;
+    wait_until(|| harness.factory.released(0)).await;
+
+    let turns = harness.reconnect(Some(&id)).await;
+    assert_eq!(
+        turns,
+        json!([
+            {"role": "user", "text": "first question"},
+            {"role": "assistant", "text": "Answer one."},
+        ])
+    );
+    send_voice(&mut harness, true).await;
+    let _ = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+    })
+    .await;
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Answer two.".to_string())]);
+    harness.factory.complete_turn(1, "second question");
+    let received = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "reply_end"),
+    )
+    .await;
+    assert_eq!(audios(&received), vec![Bytes::from("AUDIO:Answer two.")]);
+    assert_eq!(harness.factory.attempts(), 2);
+    assert_eq!(
+        harness.model.calls()[1],
+        vec![
+            ChatMessage::user("first question".to_string()),
+            ChatMessage::assistant("Answer one.".to_string()),
+            ChatMessage::user("second question".to_string()),
+        ]
+    );
     harness.server.abort();
 }
 

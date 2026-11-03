@@ -918,9 +918,10 @@ async fn stop_input(
     turn_log: &mut TurnLog,
 ) {
     modes.input = InputSource::Text;
-    if let Some(handle) = recognizer.take() {
-        handle.task.abort();
-    }
+    let Some(handle) = recognizer.take() else {
+        return;
+    };
+    handle.task.abort();
     *rec_rx = None;
     turn_log.pending.clear();
     turn_log.reset_mic();
