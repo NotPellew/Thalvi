@@ -528,7 +528,7 @@ function microphone({ draft, backend, controls, microphones, live, audio }: Page
       field: el("span", { id: uid("f") }),
     }),
     group("Saved with Save"),
-    row("Saved device", Array.isArray(microphones) ? "Pause listening to change it. Saving writes this choice; it does not prove a microphone opened." : null, {
+    row("Saved device", Array.isArray(microphones) ? "Saving writes this choice; it does not prove a microphone opened." : null, {
       node: el("span", { class: "stack" }, picker.node, whyLocked),
       field: pickerInput,
     }),
