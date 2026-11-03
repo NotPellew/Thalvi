@@ -48,7 +48,7 @@ export function textMessage(text: string): string {
 
 const PHASES: readonly unknown[] = ["idle", "starting", "listening", "thinking", "working"];
 
-function parseTurns(value: unknown): Turn[] | null {
+export function parseTurns(value: unknown): Turn[] | null {
   if (!Array.isArray(value)) return null;
   const turns: Turn[] = [];
   for (const item of value as unknown[]) {

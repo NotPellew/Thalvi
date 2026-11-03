@@ -113,6 +113,14 @@ body { margin: 0; }
 .o-lib-row .o-lib-act { flex: 1; }
 .o-lib-ask { flex: 1 1 100%; margin: 0; padding: 4px 6px; font-weight: 700; overflow-wrap: anywhere; }
 .o-lib-input { flex: 1 1 100%; min-height: 48px; padding: 0 12px; border: 2px solid var(--line); border-radius: 6px; background: var(--bg); color: inherit; font: inherit; font-size: 16px; }
+.o-lib-preview { display: grid; gap: 10px; }
+.o-lib-preview[hidden], .o-lib-warn[hidden], .o-lib-list[hidden] { display: none; }
+.o-lib-warn { margin: 0; padding: 8px 10px; border: 2px solid var(--warn); border-radius: 6px; font-weight: 700; overflow-wrap: anywhere; }
+.o-lib-turns { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.o-lib-turn { padding: 8px 10px; border: 2px solid var(--line); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.o-lib-turn-user { background: var(--surf); }
+.o-lib-preview-actions { display: flex; gap: 8px; position: sticky; bottom: 0; padding: 8px 0; background: var(--bg); }
+.o-lib-preview-actions .o-lib-act { flex: 1; }
 .o-lib-danger { border-color: var(--warn); background: var(--warn); color: light-dark(#fff, #2d0402); }
 .o-learn { display: grid; gap: 10px; margin-top: 6px; }
 .o-learn-toggle {
