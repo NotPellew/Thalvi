@@ -184,13 +184,18 @@ pub fn run() -> ExitCode {
     match start() {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("{message}");
-            // Release Windows builds have no console, and a menu or login launch has no terminal.
-            if !std::io::stderr().is_terminal() {
-                Desktop::show_error("Thalvi couldn't start", &message);
-            }
+            report_failure(&message);
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Says why Thalvi could not start: on stderr, and in a message box when no terminal shows it,
+/// as for a menu or login launch, or a release Windows build, which has no console.
+fn report_failure(message: &str) {
+    eprintln!("{message}");
+    if !std::io::stderr().is_terminal() {
+        Desktop::show_error("Thalvi couldn't start", message);
     }
 }
 
@@ -233,13 +238,11 @@ fn start() -> Result<(), String> {
             commands::open_speech_model_source,
         ])
         .setup(move |app| {
-            // Only the first instance gets here, so a relaunch never reads the config.
-            let state = AppState::start(config)?;
-            state.restore_login(app.handle());
-            state.restore_menu_entry(&menu_entry::System::from_env());
-            app.manage(state);
-            create_windows(app.handle())?;
-            follow_engine(app.handle())?;
+            // Tauri turns an error from this hook into a panic, so it is reported here instead.
+            if let Err(message) = setup(app.handle(), config) {
+                report_failure(&message);
+                std::process::exit(1);
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -257,6 +260,17 @@ fn start() -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+/// Reads the config and starts the engine, the tray and the windows.
+fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), String> {
+    // Only the first instance gets here, so a relaunch never reads the config.
+    let state = AppState::start(config)?;
+    state.restore_login(app);
+    state.restore_menu_entry(&menu_entry::System::from_env());
+    app.manage(state);
+    create_windows(app).map_err(|error| error.to_string())?;
+    follow_engine(app).map_err(|error| error.to_string())
 }
 
 fn create_windows(app: &AppHandle) -> tauri::Result<()> {
