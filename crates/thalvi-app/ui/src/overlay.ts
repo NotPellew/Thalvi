@@ -182,7 +182,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
         pillView("done", `✓ ${doneText(next.route, next.target, next.notice)}`, null);
         break;
       case "failed":
-        pillView("failed", next.notice, null);
+        pillView("failed", next.headline, null);
         break;
       case "loading":
         pillView("working", next.notice, null);

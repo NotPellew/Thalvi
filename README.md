@@ -226,6 +226,15 @@ Pausing cancels the current capture and closes the microphone. Resuming starts
 fresh wake listening. Windows keeps the tray controls; the status module is
 Hyprland-only.
 
+Errors stay on screen until dismissed. `thalvi-desktop copy-error` copies the
+report of the last error Thalvi showed, the same text as Settings → Copy,
+without taking focus or opening a window; with no error to copy it says so and
+exits with a failure. The last error is kept after the overlay hides it, until a
+newer one replaces it. Bind it in `hyprland.conf`, for example
+`bind = SUPER, E, exec, thalvi-desktop copy-error`. The tray menu has the same
+**Copy last error** item, which is also what Windows offers; the command itself
+is Hyprland-only, like `status`.
+
 **Second-pass transcription** in Settings → Speech is off by
 default, including for older configs that only name an endpoint. Turning it
 off keeps the endpoint and key, and accepted captures make no second request.

@@ -22,7 +22,7 @@ use thalvi_desktop::host::Desktop;
 use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::ModelStore;
-use thalvi_desktop::report::causes;
+use thalvi_desktop::report::{UserError, causes};
 use thalvi_desktop::transducer::TransducerSource;
 use thalvi_desktop::wake::WakeEngine;
 use tokio::sync::{mpsc, watch};
@@ -255,6 +255,7 @@ impl Session {
         .await
         .map_err(|error| Failure {
             notice: "The microphone's audio thread crashed. Restart Thalvi.".to_owned(),
+            headline: "Microphone crashed — restart Thalvi",
             causes: vec![error.to_string()],
         })?;
         self.microphone = Some(microphone);
@@ -381,6 +382,7 @@ impl Runner {
                 {
                     view.mode = Mode::Failed(Failure {
                         notice: format!("{error} Dictation will try again when you start it."),
+                        headline: error.headline(),
                         causes: causes(&error),
                     });
                 }
@@ -739,6 +741,7 @@ impl Runner {
                 println!("{}", finished.notice);
                 Mode::Failed(Failure {
                     notice: finished.notice,
+                    headline: finished.headline,
                     causes: finished.causes,
                 })
             }

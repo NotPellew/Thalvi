@@ -18,6 +18,7 @@ use tokio_tungstenite::{
 };
 
 use crate::frame::{FRAME_SAMPLES, Frame};
+use crate::report::UserError;
 
 /// Samples in one frame after upsampling to 24 kHz.
 pub const UPSAMPLED_SAMPLES: usize = FRAME_SAMPLES / 2 * 3;
@@ -132,6 +133,17 @@ pub enum RecognizerError {
     /// Text the recognizer wrote for the user itself.
     #[error("{0}")]
     Said(String),
+}
+
+impl UserError for RecognizerError {
+    fn headline(&self) -> &'static str {
+        match self {
+            Self::Unreachable { .. } => "Can't reach speech server — Settings",
+            Self::Dropped { .. } => "Speech server hung up — Settings",
+            Self::NotUnderstood { .. } => "Bad speech server reply — Settings",
+            Self::Said(_) => "Speech recognition failed — Settings",
+        }
+    }
 }
 
 impl RecognizerError {

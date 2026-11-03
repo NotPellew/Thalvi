@@ -1,4 +1,4 @@
-//! The state socket: the running app tells each program that connects its state word, for status bars.
+//! The state socket: the running app tells each program that connects its state line, for status bars.
 
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -35,7 +35,7 @@ fn runtime_dir() -> Result<PathBuf, HostError> {
         })
 }
 
-pub fn serve(state: impl Fn() -> &'static str + Send + 'static) -> Result<StateServer, HostError> {
+pub fn serve(state: impl Fn() -> String + Send + 'static) -> Result<StateServer, HostError> {
     serve_in(&runtime_dir()?, state)
 }
 
@@ -45,7 +45,7 @@ pub fn query() -> Result<Option<String>, HostError> {
 
 fn serve_in(
     dir: &Path,
-    state: impl Fn() -> &'static str + Send + 'static,
+    state: impl Fn() -> String + Send + 'static,
 ) -> Result<StateServer, HostError> {
     let mode = std::fs::metadata(dir)
         .map_err(|error| unsupported(format!("The runtime folder could not be read: {error}.")))?
@@ -194,7 +194,7 @@ mod tests {
         let dir = Dir::new("serve", 0o700);
         let current = Arc::new(Mutex::new("listening"));
         let shared = Arc::clone(&current);
-        let server = serve_in(&dir.0, move || *shared.lock().unwrap()).unwrap();
+        let server = serve_in(&dir.0, move || (*shared.lock().unwrap()).to_owned()).unwrap();
         assert_eq!(ask(&dir).unwrap(), Some("listening".to_owned()));
         *current.lock().unwrap() = "paused";
         assert_eq!(ask(&dir).unwrap(), Some("paused".to_owned()));
@@ -210,7 +210,7 @@ mod tests {
         drop(UnixListener::bind(dir.socket()).unwrap());
         assert!(dir.socket().exists());
         assert_eq!(ask(&dir), Ok(None), "a socket nothing listens on");
-        let server = serve_in(&dir.0, || "listening").unwrap();
+        let server = serve_in(&dir.0, || "listening".to_owned()).unwrap();
         assert_eq!(
             ask(&dir).unwrap(),
             Some("listening".to_owned()),
@@ -222,8 +222,8 @@ mod tests {
     #[test]
     fn a_second_app_leaves_a_live_socket_alone() {
         let dir = Dir::new("live", 0o700);
-        let _first = serve_in(&dir.0, || "listening").unwrap();
-        let second = serve_in(&dir.0, || "paused");
+        let _first = serve_in(&dir.0, || "listening".to_owned()).unwrap();
+        let second = serve_in(&dir.0, || "paused".to_owned());
         assert_eq!(
             second.err(),
             Some(unsupported("Another Thalvi already shares its status."))
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn a_runtime_folder_open_to_other_users_shares_nothing() {
         let dir = Dir::new("open", 0o755);
-        let served = serve_in(&dir.0, || "listening");
+        let served = serve_in(&dir.0, || "listening".to_owned());
         assert_eq!(
             served.err(),
             Some(unsupported(

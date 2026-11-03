@@ -2,7 +2,7 @@
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -16,8 +16,8 @@ use crate::launch::{Command, Launch};
 use crate::overlay::{self, Overlay, Visibility};
 use crate::runner::{Control, EngineLink};
 use crate::settings::Store;
-use crate::status::Status;
-use crate::tray::{self, Tray};
+use crate::status::{LastError, Status};
+use crate::tray::{self, CopyItem, Tray};
 
 const SETTINGS: &str = "settings";
 
@@ -27,6 +27,10 @@ pub struct AppState {
     pub store: Store,
     pub overlay: Overlay,
     pub speech_downloads: SpeechDownloads,
+    /// The latest failure shown, for "Copy last error" in the tray and `copy-error`.
+    last_error: LastError,
+    /// Set once the engine's first status is in; the tray menu and the commands update it.
+    tray: OnceLock<Tray>,
     host: Arc<Desktop>,
     config: Mutex<DesktopConfig>,
     overlay_shown: AtomicBool,
@@ -43,7 +47,11 @@ impl AppState {
             config.clone(),
             Desktop::detect().map_err(|error| error.to_string())?,
         )?;
-        let state_server = match Desktop::serve_state(control::answer(link.status_updates())) {
+        let last_error = LastError::default();
+        let state_server = match Desktop::serve_state(control::answer(
+            link.status_updates(),
+            last_error.clone(),
+        )) {
             Ok(server) => Some(server),
             Err(error) => {
                 // The app works without a status bar; the bar then reports Thalvi as not running.
@@ -56,6 +64,8 @@ impl AppState {
             store,
             overlay: Overlay::default(),
             speech_downloads: SpeechDownloads::default(),
+            last_error,
+            tray: OnceLock::new(),
             host: Arc::new(Desktop::detect().map_err(|error| error.to_string())?),
             overlay_shown: AtomicBool::new(config.overlay.show),
             config: Mutex::new(config),
@@ -115,7 +125,12 @@ fn start() -> Result<(), String> {
             println!("{}", control::bar_json(Desktop::query_state()));
             return Ok(());
         }
-        Launch::Run { command, config } => (command, config),
+        Launch::Run { command, config } => {
+            if command == Command::CopyError {
+                control::check_copy_error(Desktop::query_state())?;
+            }
+            (command, config)
+        }
     };
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
@@ -199,17 +214,20 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
     let mut level = state.link.level_updates();
     let mut audio = state.link.audio_updates();
     let tray = Tray::new(app, &status.borrow(), state.link.audio().paused)?;
+    let _ = state.tray.set(tray);
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {
             let current = status.borrow_and_update().clone();
-            show(&handle, &tray, &current);
+            show(&handle, &current);
             let changed = tokio::select! {
                 changed = status.changed() => changed,
                 changed = audio.changed() => {
                     if changed.is_ok() {
                         let current = audio.borrow_and_update().clone();
-                        tray.listening(current.paused);
+                        if let Some(tray) = handle.state::<AppState>().tray.get() {
+                            tray.listening(current.paused);
+                        }
                         let _ = handle.emit("thalvi://audio", current);
                     }
                     changed
@@ -218,9 +236,10 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
             if changed.is_err() {
                 let failed = Status::Failed {
                     notice: "Thalvi stopped unexpectedly. Restart it.".to_owned(),
+                    headline: "Thalvi stopped — restart it",
                     causes: Vec::new(),
                 };
-                show(&handle, &tray, &failed);
+                show(&handle, &failed);
                 break;
             }
         }
@@ -235,10 +254,13 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-fn show(app: &AppHandle, tray: &Tray, status: &Status) {
-    tray.show(status);
-    let _ = app.emit("thalvi://status", status);
+fn show(app: &AppHandle, status: &Status) {
     let state = app.state::<AppState>();
+    state.last_error.record(status);
+    if let Some(tray) = state.tray.get() {
+        tray.show(status);
+    }
+    let _ = app.emit("thalvi://status", status);
     let enabled = state.overlay_shown.load(Ordering::SeqCst);
     state.overlay.apply(app, Visibility::of(status, enabled));
 }
@@ -263,7 +285,29 @@ fn act(app: &AppHandle, command: Command) {
         Command::Pause => state.link.send(Control::SetListening(false)),
         Command::Resume => state.link.send(Control::SetListening(true)),
         Command::Cancel => state.link.send(Control::Cancel),
+        Command::CopyError => copy_last_error(app),
     }
+}
+
+/// Copies the last error's report; a failure shows on the tray item and in the log.
+fn copy_last_error(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let Some(failure) = state.last_error.get() else {
+            return;
+        };
+        let item = match commands::copy(&app, &state, &failure.notice, &failure.causes).await {
+            Ok(()) => CopyItem::Ready,
+            Err(reason) => {
+                eprintln!("The error report could not be copied: {reason}");
+                CopyItem::Failed(reason)
+            }
+        };
+        if let Some(tray) = state.tray.get() {
+            tray.copy_item(&item);
+        }
+    });
 }
 
 /// Handles a tray menu item.
@@ -271,6 +315,7 @@ pub fn on_menu(app: &AppHandle, id: &str) {
     match id {
         tray::TOGGLE => act(app, Command::Toggle),
         tray::CANCEL => act(app, Command::Cancel),
+        tray::COPY_ERROR => act(app, Command::CopyError),
         tray::SETTINGS => act(app, Command::Show),
         tray::QUIT => {
             let app = app.clone();

@@ -17,7 +17,7 @@ export type Status =
     }
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
   | { state: "done"; target: string | null; route: Route; notice: string }
-  | { state: "failed"; notice: string; causes: string[] } // causes: the technical chain behind the notice, for the error report
+  | { state: "failed"; notice: string; headline: string; causes: string[] } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report
   | { state: "loading"; notice: string }; // the speech model is being fetched or loaded
 
 export interface Level {

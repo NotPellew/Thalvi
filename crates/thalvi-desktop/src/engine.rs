@@ -30,6 +30,7 @@ use crate::metrics::{Dictation, Event, RecordKinds, Recorder};
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
 };
+use crate::report::UserError;
 use crate::secondary::{self, SecondaryApi, SecondaryError, SecondaryStt};
 use crate::vad::VadDetector;
 use crate::wake::{WakeEngine, WakeError, WakeEvent, WakeFrame};
@@ -199,6 +200,27 @@ pub enum CaptureError {
     Full(#[from] CaptureFullError),
 }
 
+impl UserError for CaptureError {
+    fn headline(&self) -> &'static str {
+        match self {
+            Self::Recognizer(error) => error.headline(),
+            Self::NotReady {
+                speech: SpeechSource::Server(_),
+                ..
+            } => "Speech server not ready — Settings",
+            Self::NotReady {
+                speech: SpeechSource::Local { .. },
+                ..
+            } => "Speech model not ready — Settings",
+            Self::Audio(error) => error.headline(),
+            Self::MicStopped => "Microphone stopped mid-capture",
+            Self::NoEnding(_) => "No words heard",
+            Self::TooLong(_) => "Capture too long — not delivered",
+            Self::Full(_) => "Capture full — finish or cancel",
+        }
+    }
+}
+
 /// Whole minutes read as minutes, anything else as seconds.
 fn plain_duration(duration: Duration) -> String {
     let seconds = duration.as_secs();
@@ -247,6 +269,15 @@ pub enum ListenError {
     Audio(#[from] AudioError),
     #[error(transparent)]
     Wake(#[from] WakeError),
+}
+
+impl UserError for ListenError {
+    fn headline(&self) -> &'static str {
+        match self {
+            Self::Audio(error) => error.headline(),
+            Self::Wake(error) => error.headline(),
+        }
+    }
 }
 
 /// The part of the engine other threads may hold: cancel a capture and watch the state.

@@ -113,9 +113,22 @@ pub async fn copy_report(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    copy(&app, &state, &message, &causes).await
+}
+
+/// Copies the report for an error to the clipboard through the desktop.
+///
+/// # Errors
+/// Why the clipboard could not be written, in plain words.
+pub async fn copy(
+    app: &AppHandle,
+    state: &AppState,
+    message: &str,
+    causes: &[String],
+) -> Result<(), String> {
     let report = Report::new(
-        &message,
-        &causes,
+        message,
+        causes,
         &app.package_info().version.to_string(),
         System::current(),
         &state.config(),

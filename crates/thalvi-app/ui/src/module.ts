@@ -159,7 +159,7 @@ export function createModule(onCancel: () => void): Module {
         break;
       case "failed":
         lines(true, () => {
-          ticker.notice(status.notice);
+          ticker.notice(status.headline);
         });
         show("failed", { label: "NOT SENT" });
         break;

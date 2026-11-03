@@ -220,6 +220,7 @@ mod tests {
             (
                 Status::Failed {
                     notice: String::new(),
+                    headline: "Failed",
                     causes: Vec::new(),
                 },
                 Visibility::Show,

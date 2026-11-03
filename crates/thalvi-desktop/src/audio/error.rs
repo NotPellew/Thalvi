@@ -4,6 +4,8 @@ use std::fmt;
 
 use cpal::ErrorKind;
 
+use crate::report::UserError;
+
 /// A microphone problem; `Display` is the plain notice shown to the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AudioError {
@@ -58,6 +60,23 @@ impl fmt::Display for AudioError {
             Self::StreamFailed(_) => "The microphone stopped working. Capture stopped without delivery.",
             Self::Closed => "The microphone is off.",
         })
+    }
+}
+
+impl UserError for AudioError {
+    fn headline(&self) -> &'static str {
+        match self {
+            Self::NoDevice => "No microphone found — plug one in",
+            Self::DeviceMissing(_) => "Microphone not connected — Settings",
+            Self::PermissionDenied => "Microphone blocked by the system",
+            Self::Busy => "Microphone is used by another app",
+            Self::OpenFailed(_) => "Can't open microphone — Settings",
+            Self::DeviceLost => "Microphone disconnected",
+            Self::DeviceChanged => "Default microphone changed",
+            Self::Dropped => "Can't keep up with the microphone",
+            Self::StreamFailed(_) => "Microphone stopped working",
+            Self::Closed => "Microphone is off",
+        }
     }
 }
 

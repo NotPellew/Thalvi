@@ -216,7 +216,7 @@ describe("save", () => {
     if (event === "edit") {
       type(root.querySelector<HTMLInputElement>('input[aria-label="Label of script 1"]') as HTMLInputElement, "new label");
     } else {
-      stub.emit({ state: "failed", notice: "The new settings could not be applied.", causes: [] });
+      stub.emit({ state: "failed", notice: "The new settings could not be applied.", headline: "Failed — Settings", causes: [] });
     }
     complete();
     await settle();
@@ -688,7 +688,7 @@ describe("live controls", () => {
     button("Save").click();
     await settle();
     expect(root.querySelector(".msg")?.textContent).toBe(SAVED_TEXT);
-    stub.emit({ state: "failed", notice: "The saved microphone could not be opened.", causes: [] });
+    stub.emit({ state: "failed", notice: "The saved microphone could not be opened.", headline: "Failed — Settings", causes: [] });
     expect(root.querySelector(".msg")?.textContent).toBe("");
     expect(root.querySelector(".err")?.textContent).toBe("The saved microphone could not be opened.");
   });
@@ -697,7 +697,7 @@ describe("live controls", () => {
     [
       "a runtime failure",
       (stub) => {
-        stub.emit({ state: "failed", notice: "The speech server is not reachable.", causes: ["connection refused (os error 111)"] });
+        stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: ["connection refused (os error 111)"] });
         return Promise.resolve();
       },
       "The speech server is not reachable.",
@@ -752,7 +752,7 @@ describe("live controls", () => {
   it("says plainly when the report could not be copied and shows Copied only on success", async () => {
     const stub = await open();
     stub.backend.copyReport.mockRejectedValueOnce("No clipboard tool is installed.");
-    stub.emit({ state: "failed", notice: "The speech server is not reachable.", causes: [] });
+    stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: [] });
     button("Copy").click();
     await settle();
     expect(root.querySelector(".msg")?.textContent).toBe("Could not copy: No clipboard tool is installed.");
@@ -777,14 +777,14 @@ describe("live controls", () => {
   it.each([false, true])("uses audio state for listening controls when a failure occurs (paused=%s)", async (paused) => {
     const stub = await open();
     stub.audio({ selected: null, active: paused ? null : "Built-in", paused });
-    stub.emit({ state: "failed", notice: "The last operation failed.", causes: [] });
+    stub.emit({ state: "failed", notice: "The last operation failed.", headline: "Failed — Settings", causes: [] });
     expect(control("Listening", "input").checked).toBe(!paused);
     expect(control("Saved device", "select").disabled).toBe(!paused);
   });
 
   it.each(["save", "revert", "edit"])("retains a runtime problem through %s and clears it on recovery", async (action) => {
     const stub = await open();
-    stub.emit({ state: "failed", notice: "The chosen microphone is unavailable.", causes: [] });
+    stub.emit({ state: "failed", notice: "The chosen microphone is unavailable.", headline: "Failed — Settings", causes: [] });
     if (action === "save") button("Save").click();
     else if (action === "revert") button("Revert").click();
     else type(control("Server address", "input"), "ws://other");

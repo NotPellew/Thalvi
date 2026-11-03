@@ -1,4 +1,4 @@
-//! The error report a user copies: the message shown plus what a helper needs to diagnose it.
+//! The error report a user copies, and the headline an error shows where its full text does not fit.
 
 use std::error::Error;
 use std::fmt::Write as _;
@@ -15,6 +15,15 @@ pub fn causes(error: &(dyn Error + 'static)) -> Vec<String> {
     std::iter::successors(error.source(), |cause| (*cause).source())
         .map(ToString::to_string)
         .collect()
+}
+
+/// The most characters a headline has, so the overlay's narrowest look shows it without scrolling.
+pub const MAX_HEADLINE_CHARS: usize = 36;
+
+/// An error the user is shown: `Display` is the full text for Settings and the report, and
+/// `headline` a line short enough for the overlay to show whole.
+pub trait UserError: Error {
+    fn headline(&self) -> &'static str;
 }
 
 /// The computer Thalvi runs on.
