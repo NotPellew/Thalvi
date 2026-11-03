@@ -3144,3 +3144,27 @@ async fn holds_record_their_start_end_and_how_the_key_decided() {
         })
         .await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_sends_only_the_audio_that_comes_after_its_start_cue() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = hold_task(engine, frames);
+            rig.press().await;
+            rig.server.ready();
+            settle().await;
+            // Said while the cue plays, so the cue could reach the recognizer.
+            rig.at(100).await;
+            rig.feed.send(quiet(5));
+            settle().await;
+            rig.at(230).await;
+            rig.at(240).await;
+            rig.feed.send(quiet(9));
+            settle().await;
+            assert_eq!(tags(&rig.sent()), [9]);
+            rig.handle.cancel();
+            assert_eq!(finished(task).await, CaptureOutcome::Cancelled);
+        })
+        .await;
+}
