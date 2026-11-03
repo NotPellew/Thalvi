@@ -42,10 +42,10 @@ areas your change touches. Editing rules are in
   on GPUs vLLM-Omni can't use. Why: the developer preferred its sound, and first
   audio takes ~50 ms where Kokoro synthesizes a whole sentence first. Rejected:
   Chatterbox (AGPL), Kyutai (no cloning), Orpheus and qwen3-tts-server (slower).
-- **Opt-in recordings.** `THALVI_RECORD` turns on metrics, turn, dictation and reply
-  text, and mic audio (with ~2 s before each wake), each separately, written locally
-  off the reply path. Why: to judge product, model and endpoint changes, misrecognitions
-  and false wakes on real use. Off by default: they are personal data.
+- **Opt-in recordings.** Metrics, turn, dictation and reply text, and mic audio (with ~2 s
+  before each wake) are each written locally off the reply path: on the server by
+  `THALVI_RECORD`, on the desktop by settings switches, applied between captures. Why: to judge
+  changes and misrecognitions on real use. Off by default: they are personal data.
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
   interrupts a reply by speaking while mic input is on. Why: hands and eyes are
   busy. Rejected: push-to-talk.
