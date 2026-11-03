@@ -3,7 +3,7 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AudioStatus, Backend, Level, Settings, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Level, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
 
 export function tauriBackend(): Backend {
   return {
@@ -36,6 +36,14 @@ export function tauriBackend(): Backend {
     listMicrophones: () => invoke<string[]>("list_microphones"),
     openRecordings: () => invoke<undefined>("open_recordings"),
     validateSpeechModelFolder: (path) => invoke<undefined>("validate_speech_model_folder", { path }),
+    listSpeechModels: () => invoke<SpeechModelInfo[]>("list_speech_models"),
+    downloadSpeechModel: (name) => invoke<undefined>("download_speech_model", { name }),
+    onSpeechModelProgress: (listener) => {
+      void listen<SpeechModelProgress>("thalvi://speech-model-progress", (event) => {
+        listener(event.payload);
+      });
+    },
+    openSpeechModelSource: (name) => invoke<undefined>("open_speech_model_source", { name }),
     appVersion: getVersion,
   };
 }

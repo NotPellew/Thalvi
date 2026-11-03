@@ -1,6 +1,16 @@
 // The settings pages: each builds its rows against the draft and edits it in place.
 
-import type { AudioStatus, Backend, Ending, ScriptActionKind, SecondaryApi, Settings, SttEngine } from "./contract.ts";
+import type {
+  AudioStatus,
+  Backend,
+  Ending,
+  ScriptActionKind,
+  SecondaryApi,
+  Settings,
+  SpeechModelInfo,
+  SpeechModelProgress,
+  SttEngine,
+} from "./contract.ts";
 import { errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
@@ -18,7 +28,12 @@ export interface PageContext {
   /** The settings window, so a look picked here shows at once. */
   root: HTMLElement;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
-  live: { level: (level: number) => void; listening: (on: boolean) => void; audio: (audio: AudioStatus) => void };
+  live: {
+    level: (level: number) => void;
+    listening: (on: boolean) => void;
+    audio: (audio: AudioStatus) => void;
+    speechModel: (progress: SpeechModelProgress) => void;
+  };
   /** Checks a page adds that must pass before Save sends; each returns null when it has nothing to check. */
   checks: (() => Promise<void> | null)[];
 }
@@ -246,14 +261,144 @@ function wake(context: PageContext): HTMLElement[] {
   ];
 }
 
-function recognition({ draft, controls, backend, checks }: PageContext): HTMLElement[] {
+function formatSize(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${String(Math.round(bytes / 1e6))} MB`;
+  return `${String(Math.round(bytes / 1e3))} kB`;
+}
+
+interface ModelCard {
+  node: HTMLElement;
+  /** Shows a download step, from this card's button or any other start. */
+  progress: (event: SpeechModelProgress) => void;
+  select: (on: boolean) => void;
+}
+
+/** One catalog speech model: what it is, whether it is downloaded, and how to get it. */
+function modelCard(info: SpeechModelInfo, backend: Backend, pick: () => void): ModelCard {
+  const picker = el("button", { type: "button", role: "radio", "aria-checked": "false", class: "pick" }, info.title);
+  picker.addEventListener("click", pick);
+  const badge = el("span", { class: "badge" });
+  const source = el("a", { href: info.source, target: "_blank", rel: "noreferrer" }, "Source");
+  const meter = el("progress", { max: "100", value: "0", "aria-label": `Download of ${info.title}`, hidden: true });
+  const status = el("span", { class: "unit", role: "status" });
+  const problem = note();
+  const download = button("Download", () => {
+    say(problem, "");
+    show({ name: info.name, percent: 0, status: "verifying", message: null });
+    backend.downloadSpeechModel(info.name).then(
+      () => {
+        show({ name: info.name, percent: 100, status: "done", message: null });
+      },
+      (error: unknown) => {
+        show({ name: info.name, percent: 0, status: "failed", message: errorText(error) });
+      },
+    );
+  });
+  source.addEventListener("click", (event) => {
+    event.preventDefault();
+    backend.openSpeechModelSource(info.name).catch((error: unknown) => {
+      say(problem, errorText(error));
+    });
+  });
+
+  function cached(on: boolean): void {
+    badge.textContent = on ? "Downloaded" : "Not downloaded";
+    badge.dataset["on"] = String(on);
+    download.hidden = on;
+  }
+
+  function show(event: SpeechModelProgress): void {
+    const running = event.status === "verifying" || event.status === "downloading";
+    meter.hidden = !running;
+    meter.value = event.percent;
+    status.textContent = !running
+      ? ""
+      : event.status === "verifying"
+        ? "Checking files…"
+        : `Downloading… ${String(event.percent)}%`;
+    download.disabled = running;
+    if (event.status === "done") cached(true);
+    if (event.status === "failed") say(problem, event.message ?? "The download failed.");
+  }
+
+  cached(info.cached);
+  return {
+    node: el(
+      "div",
+      { class: "model" },
+      el("div", { class: "trow" }, picker, el("span", { class: "unit" }, formatSize(info.size)), badge),
+      el("small", {}, info.description),
+      el("div", { class: "trow" }, source, download, meter, status),
+      problem,
+    ),
+    progress: show,
+    select: (on) => {
+      picker.setAttribute("aria-checked", String(on));
+    },
+  };
+}
+
+function recognition({ draft, controls, backend, checks, live }: PageContext): HTMLElement[] {
   const engine = controls.select(ENGINES, draft.stt.engine, (value) => {
     draft.stt.engine = value;
     syncModel();
   });
-  const speechModel = controls.text(draft.stt.model ?? "", syncModel, { placeholder: SPEECH_MODEL });
+  const catalog = new Map<string, ModelCard>();
+  const listed: string[] = [];
+  let chosen = draft.stt.model ?? "";
+  const isCatalog = (name: string): boolean => name === SPEECH_MODEL || listed.includes(name);
+  const speechModel = controls.text(
+    isCatalog(chosen) ? "" : chosen,
+    (value) => {
+      chosen = value.trim();
+      syncModel();
+    },
+    { placeholder: "/path/to/model-folder", label: "Your own model folder" },
+  );
   const modelInput = speechModel.field as HTMLInputElement;
   const folderResult = el("p", { class: "note", role: "status", hidden: true });
+  const modelList = el("div", { class: "models", role: "radiogroup", "aria-label": "Speech models" });
+  const listProblem = note();
+  const ownFolder = el(
+    "div",
+    { class: "own" },
+    el("span", { class: "unit" }, "Your own model folder"),
+  );
+
+  live.speechModel = (event) => {
+    catalog.get(event.name)?.progress(event);
+  };
+
+  function showSelection(): void {
+    const active = chosen === "" ? SPEECH_MODEL : chosen;
+    for (const [name, card] of catalog) card.select(name === active);
+    ownFolder.dataset["active"] = String(!isCatalog(active));
+  }
+
+  function pickModel(name: string): void {
+    chosen = name;
+    modelInput.value = "";
+    syncModel();
+    controls.touched();
+  }
+
+  backend.listSpeechModels().then(
+    (models) => {
+      for (const info of models) {
+        listed.push(info.name);
+        const card = modelCard(info, backend, () => {
+          pickModel(info.name);
+        });
+        catalog.set(info.name, card);
+        modelList.append(card.node);
+      }
+      showSelection();
+    },
+    (error: unknown) => {
+      say(listProblem, errorText(error));
+    },
+  );
 
   function showFolder(message: string, valid: boolean): void {
     folderResult.classList.toggle("ok", valid);
@@ -280,21 +425,22 @@ function recognition({ draft, controls, backend, checks }: PageContext): HTMLEle
   });
   checks.push(() => {
     const path = draft.stt.model;
-    return draft.stt.engine === "local" && path !== undefined && path !== SPEECH_MODEL ? checkFolder(path) : null;
+    return draft.stt.engine === "local" && path !== undefined && !isCatalog(path) ? checkFolder(path) : null;
   });
+  ownFolder.append(el("div", { class: "trow check" }, speechModel.node, checkButton), folderResult);
   const speechModelField: Field = {
-    node: el("div", { class: "stack wide" }, el("div", { class: "trow check" }, speechModel.node, checkButton), folderResult),
+    node: el("div", { class: "stack wide" }, modelList, listProblem, ownFolder),
     field: modelInput,
   };
 
   function syncModel(): void {
     say(folderResult, "");
-    const model = modelInput.value.trim();
-    if (draft.stt.engine === "local" && model !== "") {
-      draft.stt.model = model;
+    if (draft.stt.engine === "local" && chosen !== "") {
+      draft.stt.model = chosen;
     } else {
       delete draft.stt.model;
     }
+    showSelection();
   }
 
   const secondary = draft.stt.secondary ?? null;
@@ -336,7 +482,7 @@ function recognition({ draft, controls, backend, checks }: PageContext): HTMLEle
     row("Recognize speech", "Where your dictation is turned into text. Conversation mode always uses the server.", engine),
     row(
       "Speech model",
-      `For recognition on this computer: ${SPEECH_MODEL} or the path of your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt. Empty uses ${SPEECH_MODEL}, downloaded on first use (about 650 MB).`,
+      `For recognition on this computer. Pick a model, downloading it first or on first use, or point to your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.`,
       speechModelField,
     ),
     group("Second transcription"),

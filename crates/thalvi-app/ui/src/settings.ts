@@ -33,7 +33,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   let saving = false;
   let saved = false;
   let audio: AudioStatus = { selected: null, active: null, paused: false };
-  const live: PageContext["live"] = { level: () => undefined, listening: () => undefined, audio: () => undefined };
+  const live: PageContext["live"] = {
+    level: () => undefined,
+    listening: () => undefined,
+    audio: () => undefined,
+    speechModel: () => undefined,
+  };
 
   function applyView(): void {
     const query = search.value.trim().toLowerCase();
@@ -157,6 +162,9 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     live.level(audio.paused || audio.active === null ? 0 : level);
   });
   backend.onAudio(showAudio);
+  backend.onSpeechModelProgress((progress) => {
+    live.speechModel(progress);
+  });
   backend.onStatus(showStatus);
   backend.getStatus().then(showStatus).catch((error: unknown) => {
     runtimeFailure = errorText(error);
