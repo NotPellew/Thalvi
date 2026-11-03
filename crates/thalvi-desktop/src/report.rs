@@ -113,10 +113,7 @@ impl Report {
     /// The text for the clipboard.
     #[must_use]
     pub fn text(&self) -> String {
-        let mut text = format!(
-            "This is a Thalvi desktop error report; Thalvi is a voice dictation app, and I need help fixing the error below.\n\nError: {}\n",
-            self.message
-        );
+        let mut text = format!("Error: {}\n", self.message);
         if !self.causes.is_empty() {
             text.push_str("\nTechnical cause:\n");
             for cause in &self.causes {
@@ -162,14 +159,13 @@ mod tests {
     }
 
     #[test]
-    fn the_report_says_what_it_is_and_carries_the_message_causes_time_version_system_and_settings()
-    {
+    fn the_report_carries_the_message_causes_time_version_system_and_settings() {
         let cases = [
             (
                 "Hyprland",
                 vec!["connection refused (os error 111)".to_owned()],
                 r#"{"server": "ws://127.0.0.1:9", "microphone": "USB Mic"}"#,
-                "This is a Thalvi desktop error report; Thalvi is a voice dictation app, and I need help fixing the error below.\n\n\
+                "\
                  Error: Thalvi could not reach the speech server.\n\n\
                  Technical cause:\n- connection refused (os error 111)\n\n\
                  Time: 2026-11-03 12:34:56 UTC\nThalvi: 1.2.3\nSystem: linux, Hyprland\n\n\
@@ -179,7 +175,7 @@ mod tests {
                 "",
                 vec![],
                 r#"{"stt": {"engine": "local"}}"#,
-                "This is a Thalvi desktop error report; Thalvi is a voice dictation app, and I need help fixing the error below.\n\n\
+                "\
                  Error: Thalvi could not reach the speech server.\n\n\
                  Time: 2026-11-03 12:34:56 UTC\nThalvi: 1.2.3\nSystem: linux\n\n\
                  Settings:\n- Speech recognition: on this computer, model nemotron_160ms\n- Microphone: system default\n- Second transcription: off\n",
