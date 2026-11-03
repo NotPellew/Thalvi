@@ -56,6 +56,18 @@ pub enum CaptureRoute {
     Task,
 }
 
+impl CaptureRoute {
+    /// The route's name in recordings.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Paste => "paste",
+            Self::Submit => "submit",
+            Self::Task => "task",
+        }
+    }
+}
+
 /// Why a set of ending phrases was rejected. Messages are shown to the user as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EndingsError {

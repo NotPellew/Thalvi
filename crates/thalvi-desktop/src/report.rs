@@ -2,10 +2,10 @@
 
 use std::error::Error;
 use std::fmt::Write as _;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use chrono::{DateTime, Utc};
 
 use crate::config::DesktopConfig;
-use crate::metrics::utc_date;
 use crate::recognizer::SpeechSource;
 use crate::secondary::SecondaryStt;
 
@@ -41,8 +41,7 @@ impl System {
 pub struct Report {
     pub message: String,
     pub causes: Vec<String>,
-    /// Milliseconds since the Unix epoch.
-    pub at_ms: u64,
+    pub at: DateTime<Utc>,
     pub version: String,
     pub system: System,
     settings: Vec<(&'static str, String)>,
@@ -57,17 +56,12 @@ impl Report {
         system: System,
         config: &DesktopConfig,
     ) -> Self {
-        let at_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| {
-                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-            });
-        Self::at(at_ms, message, causes, version, system, config)
+        Self::at(Utc::now(), message, causes, version, system, config)
     }
 
     #[must_use]
     pub fn at(
-        at_ms: u64,
+        at: DateTime<Utc>,
         message: &str,
         causes: &[String],
         version: &str,
@@ -100,7 +94,7 @@ impl Report {
         Self {
             message: message.to_owned(),
             causes: causes.to_vec(),
-            at_ms,
+            at,
             version: version.to_owned(),
             system,
             settings,
@@ -110,7 +104,6 @@ impl Report {
     /// The text for the clipboard.
     #[must_use]
     pub fn text(&self) -> String {
-        let seconds = self.at_ms / 1000 % 86_400;
         let mut text = format!(
             "This is a Thalvi desktop error report; Thalvi is a voice dictation app, and I need help fixing the error below.\n\nError: {}\n",
             self.message
@@ -123,11 +116,8 @@ impl Report {
         }
         let _ = write!(
             text,
-            "\nTime: {} {:02}:{:02}:{:02} UTC\nThalvi: {}\nSystem: {}{}{}\n\nSettings:\n",
-            utc_date(self.at_ms),
-            seconds / 3600,
-            seconds / 60 % 60,
-            seconds % 60,
+            "\nTime: {}\nThalvi: {}\nSystem: {}{}{}\n\nSettings:\n",
+            self.at.format("%Y-%m-%d %H:%M:%S UTC"),
             self.version,
             self.system.os,
             if self.system.desktop.is_empty() {
@@ -146,6 +136,8 @@ impl Report {
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone as _;
+
     use super::*;
     use crate::recognizer::{ConnectFailure, Detail, RecognizerError, ServerUrl};
 
@@ -186,7 +178,7 @@ mod tests {
         ];
         for (desktop, causes, json, expected) in cases {
             let report = Report::at(
-                1_793_709_296_000,
+                Utc.with_ymd_and_hms(2026, 11, 3, 12, 34, 56).unwrap(),
                 "Thalvi could not reach the speech server.",
                 &causes,
                 "1.2.3",

@@ -26,13 +26,14 @@ use crate::capture::{
 use crate::config::DesktopConfig;
 use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues};
 use crate::frame::{FRAME_SAMPLES, Frame};
-use crate::metrics::{Event, RecordKinds, Recorder};
+use crate::metrics::{Dictation, Event, RecordKinds, Recorder};
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
 };
 use crate::secondary::{self, SecondaryApi, SecondaryError, SecondaryStt};
 use crate::vad::VadDetector;
 use crate::wake::{WakeEngine, WakeError, WakeEvent, WakeFrame};
+use crate::wake_stats::{Latency, LatencySummary, NearMisses};
 
 /// How long the recognizer and the wake cue have to be ready before the capture is abandoned.
 const READY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -131,10 +132,14 @@ impl CuePlayer for CpalCuePlayer {
     }
 }
 
+/// A score to three decimals.
+fn round3(score: f32) -> f64 {
+    (f64::from(score) * 1000.0).round() / 1000.0
+}
+
 /// Both heads' scores for one frame, to three decimals.
 fn scores(wake: &WakeFrame) -> Value {
-    let round = |score: f32| (f64::from(score) * 1000.0).round() / 1000.0;
-    json!({"capture": round(wake.capture), "conversation": round(wake.conversation)})
+    json!({"capture": round3(wake.capture), "conversation": round3(wake.conversation)})
 }
 
 /// What the engine does with a wake word, for the caller to act on.
@@ -319,10 +324,18 @@ pub struct Engine<R, W, C> {
     level_frames: u64,
     level_activity: bool,
     ambiguous: bool,
-    /// When the wake word that opened the next capture was heard.
-    woke: Option<Instant>,
+    /// The capture and conversation thresholds the wake detector runs with.
+    thresholds: (f32, f32),
+    /// The wake word that opened the next capture.
+    woke: Option<Woke>,
     /// The latest frames scored while listening; filled only while audio is recorded.
     wake_clip: VecDeque<Frame>,
+}
+
+/// A wake word heard: when, and the folder of its recordings.
+struct Woke {
+    at: Instant,
+    dictation: Dictation,
 }
 
 /// How a cue ended.
@@ -338,6 +351,7 @@ struct CueEnd {
 /// One capture in progress, after the recognizer is ready.
 struct Live<S> {
     session: S,
+    dictation: Dictation,
     text: CaptureSession,
     partial: Option<String>,
     /// Frames the recognizer received, kept only when something will use them.
@@ -417,6 +431,17 @@ fn cue_name(cue: Cue) -> &'static str {
     }
 }
 
+/// Why a capture ended with nothing to deliver; `None` when something was.
+fn nothing_delivered(outcome: &CaptureOutcome) -> Option<&'static str> {
+    match outcome {
+        CaptureOutcome::Accepted(request) => {
+            (request.text.is_empty() && request.route != CaptureRoute::Submit).then_some("empty")
+        }
+        CaptureOutcome::Cancelled => Some("cancelled"),
+        CaptureOutcome::Failed { error, .. } => Some(error.kind()),
+    }
+}
+
 /// What the user dictated, for recovery: the armed ending's text, else everything so far.
 fn recoverable(text: &CaptureSession) -> Option<String> {
     let kept = text
@@ -468,6 +493,10 @@ where
             level_frames: 0,
             level_activity: false,
             ambiguous: false,
+            thresholds: (
+                config.wake.capture().threshold.get(),
+                config.wake.conversation().threshold.get(),
+            ),
             woke: None,
             wake_clip: VecDeque::new(),
         };
@@ -508,6 +537,21 @@ where
         self.wake_clip.clear();
         self.recorder
             .metric(Event::WakeReset, "ok", Some(reset.elapsed()), Value::Null);
+        let mut misses = NearMisses::new(self.thresholds.0, self.thresholds.1);
+        let mut latency = Latency::default();
+        let heard = self.scan(frames, &mut misses, &mut latency).await;
+        if let Some(summary) = latency.finish() {
+            self.latency_line(summary);
+        }
+        heard
+    }
+
+    async fn scan(
+        &mut self,
+        frames: &mut impl FrameSource,
+        misses: &mut NearMisses,
+        latency: &mut Latency,
+    ) -> Result<WakeTrigger, ListenError> {
         let metrics = self.recorder.kinds().metrics;
         loop {
             let frame = match frames.next().await {
@@ -520,33 +564,37 @@ where
             self.level.send_replace(loudness(&frame));
             self.note_level(&frame);
             self.remember(&frame);
-            let scored = self.wake.process(&frame);
-            let (outcome, took, fields) = match &scored {
-                Ok(wake) => (
-                    match wake.event {
-                        None => "none",
-                        Some(WakeEvent::Capture) => "capture",
-                        Some(WakeEvent::Conversation) => "conversation",
-                        Some(WakeEvent::Ambiguous) => "ambiguous",
-                    },
-                    Some(wake.inference),
-                    if metrics { scores(wake) } else { Value::Null },
-                ),
-                Err(_) => ("error", None, Value::Null),
-            };
-            self.recorder
-                .metric(Event::WakeInference, outcome, took, fields);
-            let wake = match scored {
+            let wake = match self.wake.process(&frame) {
                 Ok(wake) => wake,
                 Err(error) => {
+                    self.recorder
+                        .metric(Event::WakeInference, "error", None, Value::Null);
                     self.level.send_replace(0.0);
                     return Err(error.into());
                 }
             };
+            if metrics {
+                for miss in misses.observe(&wake) {
+                    self.recorder.metric(
+                        Event::WakeNearMiss,
+                        miss.head,
+                        None,
+                        json!({"peak": round3(miss.peak), "threshold": round3(miss.threshold)}),
+                    );
+                }
+                if let Some(summary) = latency.record(Instant::now(), wake.inference) {
+                    self.latency_line(summary);
+                }
+            }
             if wake.event == Some(WakeEvent::Ambiguous) {
                 if !self.ambiguous {
                     (self.notice)("Wake was ambiguous; still listening.");
-                    self.clip_wake("ambiguous", &wake);
+                    let dictation = self.recorder.begin();
+                    self.clip_wake(&dictation);
+                    let mut fields = scores(&wake);
+                    fields["dictation"] = json!(dictation.to_string());
+                    self.recorder
+                        .metric(Event::WakeNothing, "ambiguous", None, fields);
                 }
                 self.ambiguous = true;
                 continue;
@@ -554,20 +602,39 @@ where
             self.ambiguous = false;
             match wake.event {
                 Some(WakeEvent::Capture) => {
-                    self.woke = Some(Instant::now());
-                    self.clip_wake("capture", &wake);
+                    let dictation = self.recorder.begin();
+                    self.clip_wake(&dictation);
+                    self.woke = Some(Woke {
+                        at: Instant::now(),
+                        dictation,
+                    });
                     self.gate.set_enabled(false);
                     self.level.send_replace(0.0);
                     return Ok(WakeTrigger::Capture);
                 }
                 Some(WakeEvent::Conversation) => {
-                    self.clip_wake("conversation", &wake);
+                    let dictation = self.recorder.begin();
+                    self.clip_wake(&dictation);
                     self.level.send_replace(0.0);
                     return Ok(WakeTrigger::Conversation);
                 }
                 Some(WakeEvent::Ambiguous) | None => {}
             }
         }
+    }
+
+    fn latency_line(&self, summary: LatencySummary) {
+        self.recorder.metric(
+            Event::WakeInference,
+            "summary",
+            None,
+            json!({
+                "count": summary.count,
+                "p50_ms": millis(summary.p50),
+                "p95_ms": millis(summary.p95),
+                "max_ms": millis(summary.max),
+            }),
+        );
     }
 
     /// Keeps `frame` for the wake clip when audio is recorded.
@@ -582,7 +649,7 @@ where
     }
 
     /// Records the frames up to and including the wake frame, oldest first.
-    fn clip_wake(&self, kind: &str, wake: &WakeFrame) {
+    fn clip_wake(&self, dictation: &Dictation) {
         if !self.recorder.kinds().audio {
             return;
         }
@@ -590,7 +657,7 @@ where
         for frame in &self.wake_clip {
             pcm.extend_from_slice(frame);
         }
-        self.recorder.wake_clip(kind, pcm, scores(wake));
+        self.recorder.wake_audio(dictation, pcm);
     }
 
     fn note_level(&mut self, frame: &Frame) {
@@ -627,13 +694,17 @@ where
         self.cancel.borrow_and_update();
         self.set_state(EngineState::StartingCapture);
         let started = Instant::now();
-        let woke = self.woke.take().unwrap_or(started);
-        let outcome = match self.start(frames, woke).await {
+        let woke = self.woke.take().unwrap_or_else(|| Woke {
+            at: started,
+            dictation: self.recorder.begin(),
+        });
+        let outcome = match self.start(frames, &woke).await {
             Ok((mut live, backlog)) => {
                 let (done, decided) = self.drive(frames, &mut live, backlog).await;
-                self.conclude(done, decided, Some(live)).await
+                self.conclude(done, decided, Some(live), &woke.dictation)
+                    .await
             }
-            Err((done, decided)) => self.conclude(done, decided, None).await,
+            Err((done, decided)) => self.conclude(done, decided, None, &woke.dictation).await,
         };
         self.gate.set_enabled(true);
         self.level.send_replace(0.0);
@@ -645,6 +716,14 @@ where
         };
         self.recorder
             .metric(Event::CaptureFlow, flow, Some(started.elapsed()), fields);
+        if let Some(reason) = nothing_delivered(&outcome) {
+            self.recorder.metric(
+                Event::WakeNothing,
+                reason,
+                None,
+                json!({"dictation": woke.dictation.to_string()}),
+            );
+        }
         outcome
     }
 
@@ -743,7 +822,7 @@ where
     async fn start(
         &mut self,
         frames: &mut impl FrameSource,
-        woke: Instant,
+        woke: &Woke,
     ) -> Result<(Live<R::Session>, Vec<Frame>), (Done, Instant)> {
         let started = Instant::now();
         let deadline = started + READY_TIMEOUT;
@@ -752,7 +831,7 @@ where
             let at = Instant::now();
             (recognizer.connect().await, at.elapsed())
         });
-        let mut wake_cue = self.cue(Cue::Wake, woke);
+        let mut wake_cue = self.cue(Cue::Wake, woke.at);
         let mut session = None;
         let mut cue_ended = false;
         let mut backlog = Vec::new();
@@ -806,6 +885,7 @@ where
         };
         let live = Live {
             session,
+            dictation: woke.dictation.clone(),
             text: CaptureSession::new(self.endings.clone(), self.pauses),
             partial: None,
             sent: Vec::new(),
@@ -903,7 +983,8 @@ where
     }
 
     fn on_final(&self, live: &mut Live<R::Session>, text: &str) -> Option<Done> {
-        self.recorder.text("final", json!({"text": text}));
+        self.recorder
+            .text(&live.dictation, format!("heard: {text}"));
         live.partial = None;
         let now = Instant::now();
         match live.text.on_final(text, now, live.speech) {
@@ -1035,6 +1116,7 @@ where
         done: Done,
         decided: Instant,
         live: Option<Live<R::Session>>,
+        dictation: &Dictation,
     ) -> CaptureOutcome {
         let (session, sent, scratched, recoverable_text) = match live {
             // Dropping the rest stops any cue still playing.
@@ -1047,7 +1129,8 @@ where
             None => (None, Vec::new(), false, None),
         };
         if !sent.is_empty() {
-            self.recorder.audio(sent.as_flattened().to_vec());
+            self.recorder
+                .speech(dictation, sent.as_flattened().to_vec());
         }
         let outcome = match done {
             Done::Stopped => {
@@ -1072,22 +1155,22 @@ where
             Done::Accepted(request) => {
                 self.gate.set_enabled(false);
                 if self.end_with(Cue::Accepted, decided, session, true).await {
-                    self.reconcile(request, &sent, scratched).await
+                    self.reconcile(request, &sent, scratched, dictation).await
                 } else {
                     CaptureOutcome::Cancelled
                 }
             }
         };
-        match &outcome {
-            CaptureOutcome::Accepted(request) => self.recorder.text(
-                "accepted",
-                json!({"route": request.route, "text": request.text}),
-            ),
-            CaptureOutcome::Cancelled => self.recorder.text("cancelled", Value::Null),
-            CaptureOutcome::Failed { error, .. } => self
-                .recorder
-                .text("failed", json!({"error": error.to_string()})),
-        }
+        self.recorder.text(
+            dictation,
+            match &outcome {
+                CaptureOutcome::Accepted(request) => {
+                    format!("accepted ({}): {}", request.route.name(), request.text)
+                }
+                CaptureOutcome::Cancelled => "cancelled".to_owned(),
+                CaptureOutcome::Failed { error, .. } => format!("failed: {error}"),
+            },
+        );
         outcome
     }
 
@@ -1118,6 +1201,7 @@ where
         request: CaptureRequest,
         sent: &[Frame],
         scratched: bool,
+        dictation: &Dictation,
     ) -> CaptureOutcome {
         let Some(settings) = self
             .secondary
@@ -1145,7 +1229,8 @@ where
         let (outcome, replaced) = match heard {
             None => ("cancelled", None),
             Some(Ok(raw)) => {
-                self.recorder.text("secondary", json!({"text": raw}));
+                self.recorder
+                    .text(dictation, format!("second transcription: {raw}"));
                 match self.agreed(&raw, request.route) {
                     Some(text) => ("ok", Some(text)),
                     None => ("error", None),

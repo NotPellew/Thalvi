@@ -22,3 +22,4 @@ pub mod tasks;
 pub mod transducer;
 pub mod vad;
 pub mod wake;
+pub mod wake_stats;

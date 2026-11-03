@@ -4387,6 +4387,7 @@ name = "thalvi-desktop"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "cpal",
  "dirs",
  "futures-util",

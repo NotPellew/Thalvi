@@ -651,14 +651,20 @@ describe("live controls", () => {
     expect(options).toEqual(["System default", "USB Microphone", "Built-in", "Old Mic (not found)"]);
   });
 
-  it("disables the saved-device picker until listening is paused", async () => {
+  it("disables the saved-device picker until listening is paused, and says why beside it", async () => {
     const stub = await open();
+    const why = () => rowOf("Saved device").querySelector<HTMLElement>(".note.why") as HTMLElement;
     goTo("microphone");
     expect(control("Saved device", "select").disabled).toBe(true);
+    expect(why().hidden).toBe(false);
+    expect(why().textContent).toBe("Pause listening above to change the microphone.");
+    expect(control("Saved device", "select").getAttribute("aria-describedby")).toBe(why().id);
     stub.emit({ state: "paused" });
     expect(control("Saved device", "select").disabled).toBe(false);
+    expect(why().hidden).toBe(true);
     stub.audio({ selected: null, active: "Built-in", paused: false });
     expect(control("Saved device", "select").disabled).toBe(true);
+    expect(why().hidden).toBe(false);
   });
 
   it("shows the active microphone separately from the saved choice and stays paused after saving while paused", async () => {
