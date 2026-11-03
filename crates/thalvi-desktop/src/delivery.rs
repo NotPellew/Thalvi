@@ -94,8 +94,9 @@ where
     /// Acts on how a capture ended and says what came of it; `None` when the user cancelled and
     /// there is nothing to report.
     ///
-    /// Text that cannot be delivered is put on the clipboard, and the notice says whether anything
-    /// may have been typed.
+    /// Text typed into the window is also copied to the clipboard, so it can be pasted elsewhere
+    /// if the window was the wrong one. Text that cannot be delivered is put on the clipboard, and
+    /// the notice says whether anything may have been typed.
     pub async fn finish(
         &self,
         outcome: &CaptureOutcome,
@@ -144,7 +145,16 @@ where
             ))),
         };
         match result {
-            Ok(()) => Finished::delivered("Delivered.".to_owned()),
+            Ok(()) => {
+                if !text.is_empty() {
+                    // Best effort: the text already reached the window, and a failed call is recorded.
+                    let owned = text.to_owned();
+                    let _ = self
+                        .call(recorder, "copy", move |host| host.copy(&owned))
+                        .await;
+                }
+                Finished::delivered("Delivered.".to_owned())
+            }
             Err(error) => Finished::kept(self.keep(recorder, text, &error.to_string()).await),
         }
     }
@@ -317,27 +327,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paste_and_submit_type_the_exact_text_into_the_bound_window() {
-        for (route, text, call) in [
+    async fn paste_and_submit_type_the_exact_text_and_copy_it_unless_there_is_none() {
+        let copy_fails =
+            || FakeHost::default().failing("copy", HostError::Unsupported("No.".to_owned()));
+        for (host, route, text, expected) in [
             (
+                FakeHost::default(),
                 CaptureRoute::Paste,
                 "café 👋 --help $(x)",
-                "deliver:the editor:\"café 👋 --help $(x)\":enter=false",
+                &[
+                    "deliver:the editor:\"café 👋 --help $(x)\":enter=false",
+                    "copy:\"café 👋 --help $(x)\"",
+                ][..],
             ),
             (
+                FakeHost::default(),
                 CaptureRoute::Submit,
                 "run it",
-                "deliver:the editor:\"run it\":enter=true",
+                &[
+                    "deliver:the editor:\"run it\":enter=true",
+                    "copy:\"run it\"",
+                ],
             ),
             (
+                FakeHost::default(),
                 CaptureRoute::Submit,
                 "",
-                "deliver:the editor:\"\":enter=true",
+                &["deliver:the editor:\"\":enter=true"],
+            ),
+            (
+                copy_fails(),
+                CaptureRoute::Paste,
+                "hi",
+                &["deliver:the editor:\"hi\":enter=false", "copy:\"hi\""],
             ),
         ] {
-            let (notice, seen) = run(FakeHost::default(), accepted(route, text)).await;
-            assert_eq!(notice.as_deref(), Some("Delivered."), "{route:?} {text}");
-            assert_eq!(seen, calls(&["capture_target", call]), "{route:?} {text}");
+            let (finished, seen) = finish(host, accepted(route, text)).await;
+            let finished = finished.unwrap();
+            assert!(finished.delivered, "{route:?} {text}");
+            assert_eq!(finished.notice, "Delivered.", "{route:?} {text}");
+            let mut want = vec!["capture_target"];
+            want.extend_from_slice(expected);
+            assert_eq!(seen, calls(&want), "{route:?} {text}");
         }
     }
 
