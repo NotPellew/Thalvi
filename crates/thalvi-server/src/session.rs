@@ -2211,6 +2211,12 @@ async fn synthesize_sentence<T: Tts>(
     true
 }
 
+/// The metrics fields for a lost recognizer: a fixed category and whether reconnecting is
+/// allowed, never the provider's message, which may echo request or transcript details.
+fn stt_disconnect_fields(fatal: bool) -> serde_json::Value {
+    json!({"category": "recognizer_disconnect", "fatal": fatal})
+}
+
 async fn note_disconnect(
     events: &mpsc::Sender<RecognizerMessage>,
     message: String,
@@ -2220,7 +2226,7 @@ async fn note_disconnect(
     fatal: &mut bool,
     recorder: &Recorder,
 ) {
-    recorder.emit("stt_disconnect", json!({"reason": message}));
+    recorder.emit("stt_disconnect", stt_disconnect_fields(is_fatal));
     let _ = events
         .send(RecognizerMessage::Disconnected {
             message,
@@ -2273,7 +2279,7 @@ async fn attempt_reconnect<F>(
             );
             if error.is_fatal() {
                 *fatal = true;
-                recorder.emit("stt_disconnect", json!({"reason": error.to_string()}));
+                recorder.emit("stt_disconnect", stt_disconnect_fields(true));
                 let _ = events
                     .send(RecognizerMessage::Disconnected {
                         message: error.to_string(),
@@ -2455,11 +2461,13 @@ async fn run_recognizer<F>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ACK_LINES, AckCache, AckSettings, ActiveReply, ForwardClock, ReplyContext, ReplyEvent,
-        record_assistant_history, reply_loop_ms, run_reply,
+        ACK_LINES, AckCache, AckSettings, ActiveReply, ForwardClock, RecognizerMessage,
+        ReplyContext, ReplyEvent, record_assistant_history, reply_loop_ms, run_recognizer,
+        run_reply,
     };
     use crate::model::{ChatEvent, ChatMessage, ChatModel, DeltaStream, ModelError};
-    use crate::recorder::{RecordingConfig, start_recording};
+    use crate::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerFactory};
+    use crate::recorder::{RecordKinds, RecordingConfig, start_recording};
     use crate::store::SessionStore;
     use crate::tts::{AudioStream, Tts, TtsError};
     use bytes::Bytes;
@@ -2785,6 +2793,156 @@ mod tests {
         assert!(log.contains("capture control"));
         assert!(!log.contains(heard));
         assert!(!log.contains(caption));
+    }
+
+    struct FailingRecognizer {
+        error: Option<RecognizerError>,
+    }
+
+    impl Recognizer for FailingRecognizer {
+        fn send_audio(
+            &mut self,
+            _: &[u8],
+        ) -> impl std::future::Future<Output = Result<(), RecognizerError>> + Send {
+            std::future::ready(Ok(()))
+        }
+
+        fn next_event(
+            &mut self,
+        ) -> impl std::future::Future<Output = Option<Result<RecognizerEvent, RecognizerError>>> + Send
+        {
+            std::future::ready(self.error.take().map(Err))
+        }
+
+        async fn close(&mut self) {}
+    }
+
+    struct FailingFactory {
+        calls: AtomicUsize,
+        during_connect: bool,
+        marker: &'static str,
+    }
+
+    impl RecognizerFactory for FailingFactory {
+        type Rec = FailingRecognizer;
+
+        fn connect(
+            &self,
+        ) -> impl std::future::Future<Output = Result<FailingRecognizer, RecognizerError>> + Send
+        {
+            let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
+            let fatal = RecognizerError::Fatal(self.marker.to_owned());
+            std::future::ready(if self.during_connect {
+                Err(if attempt == 0 {
+                    RecognizerError::Retryable(self.marker.to_owned())
+                } else {
+                    fatal
+                })
+            } else {
+                Ok(FailingRecognizer { error: Some(fatal) })
+            })
+        }
+    }
+
+    fn recorded_files(root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
+        let mut pending = vec![root.to_path_buf()];
+        let mut files = Vec::new();
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let text = String::from_utf8(std::fs::read(&path).unwrap())
+                        .expect("private metrics must contain only text artifacts");
+                    files.push((path, text));
+                }
+            }
+        }
+        files
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn private_disconnect_and_reconnect_keep_provider_text_out_of_every_recording() {
+        for (during_connect, expected_fatal) in [(false, vec![true]), (true, vec![false, true])] {
+            let marker = "PROVIDER_MARKER_7f3a_transcript_echo";
+            let data_dir = std::env::temp_dir().join(format!(
+                "thalvi-session-stt-private-{}-{during_connect}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&data_dir);
+            let recording = start_recording(
+                RecordingConfig {
+                    kinds: RecordKinds {
+                        metrics: true,
+                        text: true,
+                        audio: true,
+                    },
+                    data_dir: data_dir.clone(),
+                    stt_model: "test-stt".to_owned(),
+                    llm_model: String::new(),
+                    reasoning_effort: None,
+                    tts_model: String::new(),
+                    tts_voice: String::new(),
+                }
+                .metrics_only(),
+                "private-stt-test".to_owned(),
+            );
+            let (audio_tx, audio_rx) = mpsc::channel(32);
+            let (events_tx, mut events_rx) = mpsc::channel(32);
+            let task = tokio::spawn(run_recognizer(
+                Arc::new(FailingFactory {
+                    calls: AtomicUsize::new(0),
+                    during_connect,
+                    marker,
+                }),
+                audio_rx,
+                events_tx,
+                recording.recorder.clone(),
+            ));
+            for expected in &expected_fatal {
+                loop {
+                    let event = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if let RecognizerMessage::Disconnected { message, fatal } = event {
+                        assert_eq!((message.as_str(), fatal), (marker, *expected));
+                        break;
+                    }
+                }
+            }
+            drop(audio_tx);
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap();
+            recording.finish(0).await;
+
+            let files = recorded_files(&data_dir);
+            std::fs::remove_dir_all(&data_dir).unwrap();
+            assert!(!files.is_empty(), "the metrics recording must exist");
+            let mut actual_fatal = Vec::new();
+            for (path, text) in files {
+                assert!(
+                    !text.contains(marker),
+                    "provider text reached {}",
+                    path.display()
+                );
+                for line in text.lines() {
+                    let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                    if event["event"] == "stt_disconnect" {
+                        assert_eq!(event["category"], "recognizer_disconnect");
+                        assert!(event.get("reason").is_none());
+                        actual_fatal.push(event["fatal"].as_bool().unwrap());
+                    }
+                }
+            }
+            assert_eq!(
+                actual_fatal, expected_fatal,
+                "during_connect={during_connect}"
+            );
+        }
     }
 
     #[tokio::test]
