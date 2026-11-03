@@ -16,17 +16,21 @@ import { holdWakeLock } from "./wake-lock.ts";
 
 const SESSION_KEY = "thalvi.session";
 
-interface VoiceAudio {
+interface ReplyAudio {
   readonly ctx: AudioContext;
-  readonly mic: Mic;
   readonly playback: Playback;
+}
+
+interface MicInput {
+  readonly mic: Mic;
   readonly releaseWakeLock: () => void;
 }
 
 const appRoot = document.getElementById("app");
 if (!appRoot) throw new Error("#app is missing from index.html");
 const view = createView(appRoot);
-let voiceAudio: VoiceAudio | null = null;
+let audio: ReplyAudio | null = null;
+let micInput: MicInput | null = null;
 let currentSpeed: Speed = loadSpeed(localStorage);
 view.setSpeed(currentSpeed);
 
@@ -36,10 +40,10 @@ const controller = new Controller({
   },
   playback: {
     enqueue: (bytes) => {
-      voiceAudio?.playback.enqueue(bytes);
+      audio?.playback.enqueue(bytes);
     },
     flush: () => {
-      voiceAudio?.playback.flush();
+      audio?.playback.flush();
     },
   },
   remember: (id) => {
@@ -57,7 +61,7 @@ const controller = new Controller({
     connection.close();
     connection.connect();
   },
-  releaseVoice,
+  releaseUnused,
   onChange: (state) => {
     view.render(state);
   },
@@ -104,63 +108,85 @@ const library = new Library({
 createLibraryView(appRoot, library, () => sessionStorage.getItem(SESSION_KEY));
 createLearningsView(appRoot, new Learnings(learningsApi((input, init) => fetch(input, init))));
 
-function releaseVoice(): void {
-  const current = voiceAudio;
-  if (!current) return;
-  voiceAudio = null;
-  current.mic.stop();
-  current.releaseWakeLock();
-  void current.ctx.close();
+function releaseUnused(): void {
+  const { voice, speak } = controller.state;
+  if (!voice && micInput) {
+    micInput.mic.stop();
+    micInput.releaseWakeLock();
+    micInput = null;
+  }
+  if (!voice && !speak && audio) {
+    void audio.ctx.close();
+    audio = null;
+  }
 }
 
-function stopVoice(notice: string | null): void {
-  if (!voiceAudio) return;
-  controller.setVoice(false, notice);
-  releaseVoice();
-}
-
-async function startVoice(): Promise<void> {
-  view.setVoiceBusy(true);
-  // Audio must be created and the mic requested inside the tap's user activation.
+/** Must be called inside the tap's user activation, because it creates the audio context. */
+async function acquireAudio(): Promise<ReplyAudio> {
+  if (audio) return audio;
   const ctx = new AudioContext({ latencyHint: "interactive" });
   try {
     await ctx.resume();
+  } catch (error) {
+    void ctx.close();
+    throw error;
+  }
+  const playback = new Playback(ctx, (playing) => {
+    controller.playing(playing);
+  });
+  playback.setRate(currentSpeed);
+  audio = { ctx, playback };
+  return audio;
+}
+
+async function startVoice(): Promise<void> {
+  view.setBusy("mic");
+  try {
+    const { ctx } = await acquireAudio();
     const mic = await openMic(
       ctx,
       (frame) => {
         if (controller.state.voice) connection.send(frame);
       },
       () => {
-        stopVoice("The microphone stopped working.");
+        if (micInput) controller.micStopped("The microphone stopped working.");
       },
     );
-    const playback = new Playback(ctx, (playing) => {
-      controller.playing(playing);
-    });
-    playback.setRate(currentSpeed);
-    voiceAudio = {
-      ctx,
-      mic,
-      playback,
-      releaseWakeLock: holdWakeLock(),
-    };
+    micInput = { mic, releaseWakeLock: holdWakeLock() };
     controller.setVoice(true);
   } catch (error) {
-    void ctx.close();
+    releaseUnused();
     controller.notify(micErrorMessage(error));
   } finally {
-    view.setVoiceBusy(false);
+    view.setBusy(null);
+  }
+}
+
+async function startSpeak(): Promise<void> {
+  view.setBusy("audio");
+  try {
+    await acquireAudio();
+    controller.setSpeak(true);
+  } catch {
+    releaseUnused();
+    controller.notify("Couldn't start audio on this device.");
+  } finally {
+    view.setBusy(null);
   }
 }
 
 view.onSpeed((rate) => {
   currentSpeed = rate;
   saveSpeed(localStorage, rate);
-  voiceAudio?.playback.setRate(rate);
+  audio?.playback.setRate(rate);
 });
 view.onVoice(() => {
-  if (voiceAudio) stopVoice(null);
+  if (controller.state.voice) controller.setVoice(false);
   else void startVoice();
+});
+view.onSpeak(() => {
+  if (controller.state.speak) controller.setSpeak(false);
+  else void startSpeak();
 });
 view.onStop(() => {
   controller.stop();

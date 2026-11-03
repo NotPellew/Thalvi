@@ -40,6 +40,8 @@ describe("parseServerMessage", () => {
     ['{"type":"input","source":"text","ready":true}', { type: "input", source: "text", ready: true }],
     ['{"type":"input","source":"mic","ready":false}', { type: "input", source: "mic", ready: false }],
     ['{"type":"input","source":"mic","ready":true}', { type: "input", source: "mic", ready: true }],
+    ['{"type":"reply_audio","on":true}', { type: "reply_audio", on: true }],
+    ['{"type":"reply_audio","on":false}', { type: "reply_audio", on: false }],
     ['{"type":"reply_end"}', { type: "reply_end" }],
     ['{"type":"error","message":"TTS failed"}', { type: "error", message: "TTS failed" }],
     [
@@ -71,6 +73,7 @@ describe("parseServerMessage", () => {
     ["input from an unknown source", '{"type":"input","source":"satellite","ready":true}'],
     ["input without readiness", '{"type":"input","source":"mic"}'],
     ["input with non-boolean readiness", '{"type":"input","source":"mic","ready":"yes"}'],
+    ["reply audio without a boolean", '{"type":"reply_audio","on":"yes"}'],
     ["missing text", '{"type":"partial"}'],
     ["session without id", '{"type":"session","turns":[]}'],
     ["session without turns", '{"type":"session","id":"abc"}'],

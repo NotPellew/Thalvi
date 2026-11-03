@@ -167,7 +167,7 @@ describe("a conversation the server ended", () => {
         connection.close();
         connection.connect();
       },
-      releaseVoice: () => undefined,
+      releaseUnused: () => undefined,
       onChange: () => undefined,
     });
     const deliver = (socket: FakeSocket | undefined, message: object) => {
