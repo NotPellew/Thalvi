@@ -1136,10 +1136,9 @@ mod tests {
         let (input, state) = HoldInput::new();
         let mut key = Presses::new(state);
         input.set(true);
-        assert!(matches!(
-            next(&mut control, &mut key, None).await,
-            Next::Key
-        ));
+        let pressed =
+            tokio::time::timeout(Duration::from_secs(60), next(&mut control, &mut key, None)).await;
+        assert!(matches!(pressed, Ok(Next::Key)), "a press wakes the wait");
         assert_eq!(key.take(), Some(1));
         input.set(true);
         input.set(false);
