@@ -2364,7 +2364,13 @@ async fn a_device_that_reports_no_delay_leaves_output_empty_and_a_failed_cue_has
             let wake = &lines[0];
             assert_eq!(wake["cue"], "wake");
             assert!(wake["output_ms"].is_null() && wake.get("output_ms").is_some());
-            assert!((wake["audible_ms"].as_f64().unwrap() - 30.0).abs() < 1e-6);
+            assert!((wake["start_ms"].as_f64().unwrap() - 30.0).abs() < 1e-6);
+            for key in ["audible_ms", "perceived_ms"] {
+                assert!(
+                    wake[key].is_null() && wake.get(key).is_some(),
+                    "{key} without a device delay"
+                );
+            }
 
             let dir = record_dir("cue-timing-failed");
             let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();

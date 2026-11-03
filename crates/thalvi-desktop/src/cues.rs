@@ -115,10 +115,10 @@ pub struct CueTiming {
 }
 
 impl CueTiming {
-    /// When the first sample should reach the speaker; an unreported device delay counts as none.
+    /// When the first sample should reach the speaker; unknown when the device reports no delay.
     #[must_use]
-    pub fn audible(&self) -> Duration {
-        self.start + self.output.unwrap_or_default()
+    pub fn audible(&self) -> Option<Duration> {
+        self.output.map(|output| self.start + output)
     }
 }
 

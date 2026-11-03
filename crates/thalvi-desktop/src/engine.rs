@@ -537,10 +537,10 @@ where
             self.ambiguous = false;
             match wake.event {
                 Some(WakeEvent::Capture) => {
+                    self.woke = Some(Instant::now());
                     self.clip_wake("capture", &wake);
                     self.gate.set_enabled(false);
                     self.level.send_replace(0.0);
-                    self.woke = Some(Instant::now());
                     return Ok(WakeTrigger::Capture);
                 }
                 Some(WakeEvent::Conversation) => {
@@ -677,8 +677,9 @@ where
         if let Ok(Some(timing)) = &end.result {
             fields["start_ms"] = json!(millis(timing.start));
             fields["output_ms"] = json!(timing.output.map(millis));
-            fields["audible_ms"] = json!(millis(timing.audible()));
-            fields["perceived_ms"] = json!(millis(end.waited + timing.audible()));
+            fields["audible_ms"] = json!(timing.audible().map(millis));
+            fields["perceived_ms"] =
+                json!(timing.audible().map(|audible| millis(end.waited + audible)));
         }
         self.recorder.metric(event, outcome, Some(end.took), fields);
     }
