@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Settings } from "./contract.ts";
 import { mountSettings, SAVED_TEXT } from "./settings.ts";
-import { SETTINGS, settle, stubBackend } from "./testing.ts";
+import { NEMOTRON, SETTINGS, settle, stubBackend } from "./testing.ts";
 
 let root: HTMLElement;
 
@@ -45,6 +45,18 @@ function flip(input: HTMLInputElement): void {
 
 function button(name: string): HTMLButtonElement {
   const found = Array.from(root.querySelectorAll("button")).find((candidate) => candidate.textContent === name);
+  if (!found) throw new Error(`no button ${name}`);
+  return found;
+}
+
+function radio(title: string): HTMLButtonElement {
+  const found = Array.from(root.querySelectorAll<HTMLButtonElement>("[role=radio]")).find((candidate) => candidate.textContent === title);
+  if (!found) throw new Error(`no model ${title}`);
+  return found;
+}
+
+function within(parent: HTMLElement, name: string): HTMLButtonElement {
+  const found = Array.from(parent.querySelectorAll("button")).find((candidate) => candidate.textContent === name);
   if (!found) throw new Error(`no button ${name}`);
   return found;
 }
@@ -296,7 +308,148 @@ describe("where speech is recognized", () => {
     await open({ ...SETTINGS, stt: { engine: "local", model: "nemotron_160ms", secondary: null } });
     goTo("recognition");
     expect(control("Recognize speech", "select").value).toBe("local");
-    expect(control("Speech model", "input").value).toBe("nemotron_160ms");
+    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("true");
+    expect(control("Speech model", "input").value).toBe("");
+  });
+});
+
+describe("the speech model catalog", () => {
+  async function openCatalog(settings: Settings = { ...SETTINGS, stt: { engine: "local", secondary: null } }) {
+    const stub = await open(settings);
+    goTo("recognition");
+    return stub;
+  }
+  const card = (): HTMLElement => {
+    const found = rowOf("Speech model").querySelector<HTMLElement>(".model");
+    if (!found) throw new Error("no model card");
+    return found;
+  };
+  const text = (selector: string): string | undefined => card().querySelector(selector)?.textContent ?? undefined;
+  const alert = (): string | undefined => card().querySelector(".note:not([hidden])")?.textContent ?? undefined;
+  const download = (): HTMLButtonElement => within(card(), "Download");
+  const meter = (): HTMLProgressElement => card().querySelector("progress") as HTMLProgressElement;
+
+  it("lists the model with its description, size, state and source", async () => {
+    await openCatalog();
+    expect(rowOf("Speech model").querySelectorAll(".model")).toHaveLength(1);
+    expect(card().textContent).toContain("NVIDIA's English streaming recognizer");
+    expect(text(".unit")).toBe("662 MB");
+    expect(text(".badge")).toBe("Not downloaded");
+    expect(card().querySelector("a")?.getAttribute("href")).toBe(NEMOTRON.source);
+    expect(download().hidden).toBe(false);
+  });
+
+  it.each([
+    [661_919_416, "662 MB"],
+    [1_540_000_000, "1.5 GB"],
+    [8_952, "9 kB"],
+  ])("shows %i bytes as %s", async (size, shown) => {
+    const stub = stubBackend({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    stub.backend.listSpeechModels.mockResolvedValueOnce([{ ...NEMOTRON, size }]);
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("recognition");
+    expect(text(".unit")).toBe(shown);
+  });
+
+  it("marks a downloaded model and offers no download", async () => {
+    const stub = stubBackend({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    stub.backend.listSpeechModels.mockResolvedValueOnce([{ ...NEMOTRON, cached: true }]);
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("recognition");
+    expect(text(".badge")).toBe("Downloaded");
+    expect(download().hidden).toBe(true);
+  });
+
+  it("shows the download's progress and flips the badge when it is done", async () => {
+    const stub = await openCatalog();
+    let finish: () => void = () => undefined;
+    stub.backend.downloadSpeechModel.mockReturnValueOnce(new Promise<void>((resolve) => { finish = resolve; }));
+    download().click();
+    expect(stub.backend.downloadSpeechModel).toHaveBeenCalledWith("nemotron_160ms");
+    expect(download().disabled).toBe(true);
+    expect(text("[role=status]")).toBe("Checking files…");
+
+    stub.speechProgress({ name: "nemotron_160ms", percent: 40, status: "downloading", message: null });
+    expect(text("[role=status]")).toBe("Downloading… 40%");
+    expect(meter().value).toBe(40);
+    expect(meter().hidden).toBe(false);
+    expect(text(".badge")).toBe("Not downloaded");
+
+    stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null });
+    finish();
+    await settle();
+    expect(text(".badge")).toBe("Downloaded");
+    expect(meter().hidden).toBe(true);
+    expect(text("[role=status]")).toBe("");
+    expect(download().hidden).toBe(true);
+  });
+
+  it("says plainly why a download failed and lets the user try again", async () => {
+    const stub = await openCatalog();
+    stub.backend.downloadSpeechModel.mockRejectedValueOnce("Could not download the speech model encoder. Check the internet connection and try again.");
+    download().click();
+    await settle();
+    expect(alert()).toBe("Could not download the speech model encoder. Check the internet connection and try again.");
+    expect(text(".badge")).toBe("Not downloaded");
+    expect(meter().hidden).toBe(true);
+    expect(download().disabled).toBe(false);
+
+    download().click();
+    expect(alert()).toBeUndefined();
+    await settle();
+    expect(text(".badge")).toBe("Downloaded");
+  });
+
+  it("shows the reason from a failed event too", async () => {
+    const stub = await openCatalog();
+    stub.speechProgress({ name: "nemotron_160ms", percent: 0, status: "failed", message: "The download did not match its checksum." });
+    expect(alert()).toBe("The download did not match its checksum.");
+  });
+
+  it("opens the source page through the app, not the web view", async () => {
+    const stub = await openCatalog();
+    const link = card().querySelector("a") as HTMLAnchorElement;
+    const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+    link.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(stub.backend.openSpeechModelSource).toHaveBeenCalledWith("nemotron_160ms");
+
+    stub.backend.openSpeechModelSource.mockRejectedValueOnce("No browser could be opened.");
+    link.click();
+    await settle();
+    expect(alert()).toBe("No browser could be opened.");
+  });
+
+  it("says why the catalog could not be listed", async () => {
+    const stub = stubBackend({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    stub.backend.listSpeechModels.mockRejectedValueOnce("Thalvi could not find a folder to keep its models in.");
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("recognition");
+    expect(rowOf("Speech model").querySelector(".note:not([hidden])")?.textContent).toBe(
+      "Thalvi could not find a folder to keep its models in.",
+    );
+  });
+
+  it("saves the selected model as stt.model and leaves the own-folder box empty", async () => {
+    const stub = await openCatalog();
+    type(control("Speech model", "input"), "/models/mine");
+    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("false");
+
+    radio("Nemotron Speech Streaming 0.6B").click();
+    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("true");
+    expect(control("Speech model", "input").value).toBe("");
+    button("Save").click();
+    await settle();
+    expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
+    expect(sent(stub).stt).toEqual({ engine: "local", model: "nemotron_160ms", secondary: null });
+  });
+
+  it("selects the default model when none is saved", async () => {
+    await openCatalog();
+    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("true");
   });
 });
 

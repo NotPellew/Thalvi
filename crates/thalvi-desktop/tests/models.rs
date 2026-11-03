@@ -14,7 +14,10 @@ use axum::body::{Body, Bytes};
 use axum::http::StatusCode;
 use axum::routing::get;
 use sha2::{Digest, Sha256};
-use thalvi_desktop::models::{Asset, ModelError, ModelKind, ModelStore};
+use thalvi_desktop::models::{
+    Asset, CatalogSpeech, ModelError, ModelKind, ModelStore, SpeechAssets, SpeechDownloads,
+    SpeechProgress,
+};
 
 const GOOD: &[u8] = b"pretend this is a model";
 
@@ -348,4 +351,185 @@ async fn a_file_that_another_fetch_stored_first_is_used_and_not_replaced() {
         .expect("past");
     assert!(age > Duration::from_mins(30), "replaced: {age:?}");
     assert_eq!(leftovers(&dir), ["good.onnx"]);
+}
+
+const FILES: [&str; 4] = [
+    "m.encoder.onnx",
+    "m.decoder.onnx",
+    "m.joiner.onnx",
+    "m.tokens.txt",
+];
+
+/// A four-file speech model whose files all hold `GOOD` and are fetched from `urls`.
+fn speech<'a>(urls: [&'a str; 4], sha: &'a str) -> SpeechAssets<'a> {
+    let [encoder, decoder, joiner, tokens] = std::array::from_fn(|i| Asset {
+        kind: ModelKind::Speech,
+        file_name: FILES[i],
+        url: urls[i],
+        size: GOOD.len() as u64,
+        sha256: sha,
+    });
+    SpeechAssets {
+        encoder,
+        decoder,
+        joiner,
+        tokens,
+    }
+}
+
+#[tokio::test]
+async fn a_speech_model_is_cached_only_when_every_file_has_its_pinned_size() {
+    let sha = sha256(GOOD);
+    let assets = speech(["http://unused"; 4], &sha);
+    for (case, files, cached) in [
+        ("all present", &[GOOD, GOOD, GOOD, GOOD][..], true),
+        ("one missing", &[GOOD, GOOD, GOOD][..], false),
+        (
+            "one cut short",
+            &[GOOD, GOOD, b"pretend this", GOOD][..],
+            false,
+        ),
+        ("none", &[][..], false),
+    ] {
+        let dir = dir(&format!("cached-{}", case.replace(' ', "-")));
+        fs::create_dir_all(&dir).expect("dir");
+        for (file, bytes) in FILES.iter().zip(files) {
+            fs::write(dir.join(file), bytes).expect("file");
+        }
+        assert_eq!(
+            ModelStore::in_dir(&dir).is_cached(&assets).await,
+            cached,
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_catalog_lists_each_model_with_its_size_source_and_whether_it_is_downloaded() {
+    let models = ModelStore::in_dir(dir("catalog")).speech_models().await;
+
+    let [model] = models.as_slice() else {
+        panic!("one catalog model, got {models:?}");
+    };
+    assert_eq!(model.name, "nemotron_160ms");
+    assert_eq!(model.size, 661_919_416);
+    assert_eq!(
+        model.source,
+        "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25"
+    );
+    assert!(!model.cached);
+    assert_eq!(
+        CatalogSpeech::named(model.name),
+        Some(CatalogSpeech::Nemotron160ms)
+    );
+    assert_eq!(CatalogSpeech::named("elsewhere"), None);
+}
+
+#[tokio::test]
+async fn a_speech_download_reports_progress_up_to_done() {
+    let (address, _server) = serve().await;
+    let dir = dir("speech-progress");
+    let url = format!("http://{address}/good.onnx");
+    let sha = sha256(GOOD);
+    let assets = speech([&url; 4], &sha);
+    let store = ModelStore::in_dir(&dir);
+
+    let mut events = Vec::new();
+    store
+        .fetch_speech(&assets, |event| events.push(event))
+        .await
+        .expect("downloads");
+
+    assert_eq!(
+        events,
+        [
+            SpeechProgress::Verifying,
+            SpeechProgress::Downloading { percent: 25 },
+            SpeechProgress::Downloading { percent: 50 },
+            SpeechProgress::Downloading { percent: 75 },
+            SpeechProgress::Downloading { percent: 100 },
+            SpeechProgress::Done,
+        ]
+    );
+    assert!(store.is_cached(&assets).await);
+    assert_eq!(leftovers(&dir).len(), 4);
+}
+
+#[tokio::test]
+async fn a_speech_download_with_a_bad_checksum_says_so_and_is_not_cached() {
+    let (address, _server) = serve().await;
+    let dir = dir("speech-checksum");
+    let good = format!("http://{address}/good.onnx");
+    let other = format!("http://{address}/other.onnx");
+    let sha = sha256(GOOD);
+    let assets = speech([&good, &good, &other, &good], &sha);
+    let store = ModelStore::in_dir(&dir);
+
+    let mut events = Vec::new();
+    let error = store
+        .fetch_speech(&assets, |event| events.push(event))
+        .await
+        .expect_err("refused");
+
+    assert_eq!(
+        error.to_string(),
+        "The downloaded speech model m.joiner.onnx did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
+    );
+    assert_ne!(events.last(), Some(&SpeechProgress::Done));
+    let mut kept = leftovers(&dir);
+    kept.sort();
+    assert_eq!(kept, ["m.decoder.onnx", "m.encoder.onnx"]);
+    assert!(!store.is_cached(&assets).await);
+}
+
+#[tokio::test]
+async fn a_speech_model_is_downloaded_once_at_a_time() {
+    let (address, _server) = serve().await;
+    let dir = dir("speech-twice");
+    let stalls = format!("http://{address}/stalls.onnx");
+    let good = format!("http://{address}/good.onnx");
+    let sha = sha256(GOOD);
+    let downloads = Arc::new(SpeechDownloads::default());
+    let store = ModelStore::in_dir(&dir);
+    let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+    let first = {
+        let (downloads, store, stalls, sha) = (
+            Arc::clone(&downloads),
+            store.clone(),
+            stalls.clone(),
+            sha.clone(),
+        );
+        tokio::spawn(async move {
+            let assets = speech([&stalls; 4], &sha);
+            downloads
+                .run("m", &store, &assets, |event| {
+                    let _ = started_tx.send(event);
+                })
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), started.recv())
+        .await
+        .expect("the first download starts");
+
+    let assets = speech([&good; 4], &sha);
+    let refused = downloads
+        .run("m", &store, &assets, |_| {})
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        refused.to_string(),
+        "The speech model m is already being downloaded."
+    );
+    downloads
+        .run("other", &store, &assets, |_| {})
+        .await
+        .expect("a different model is not held up");
+
+    first.abort();
+    assert!(first.await.expect_err("cancelled").is_cancelled());
+    downloads
+        .run("m", &store, &assets, |_| {})
+        .await
+        .expect("a finished or cancelled download frees the model");
 }

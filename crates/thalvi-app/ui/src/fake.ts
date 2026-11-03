@@ -1,6 +1,6 @@
 // Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the overlay to the n-th status of the script and `?look=holo` or `?look=gunmetal` picks the look.
 
-import type { AudioStatus, Backend, Settings, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
 import { LOOKS } from "./look.ts";
 
 const SETTINGS: Settings = {
@@ -73,6 +73,20 @@ export function fakeBackend(params: URLSearchParams): Backend {
   const statusListeners: ((status: Status) => void)[] = [];
   const levelListeners: ((level: number) => void)[] = [];
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
+  const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
+  const speechModels: SpeechModelInfo[] = [
+    {
+      name: "nemotron_160ms",
+      title: "Nemotron Speech Streaming 0.6B",
+      description: "NVIDIA's English streaming recognizer, int8, answering every 160 ms. Runs on the CPU.",
+      size: 661_919_416,
+      source: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25",
+      cached: false,
+    },
+  ];
+  const speak = (progress: SpeechModelProgress): void => {
+    for (const listener of speechListeners) listener(progress);
+  };
   const microphones = ["Built-in Audio Analog Stereo", "USB Microphone"];
   let audioState: AudioStatus = { selected: null, active: "Built-in Audio Analog Stereo", paused: false };
   const emitAudio = (next: AudioStatus): void => {
@@ -138,6 +152,26 @@ export function fakeBackend(params: URLSearchParams): Backend {
     openRecordings: () => Promise.resolve(),
     validateSpeechModelFolder: (path) =>
       path.includes("missing") ? Promise.reject(new Error("Missing required file: tokens.txt")) : Promise.resolve(),
+    listSpeechModels: () => Promise.resolve(structuredClone(speechModels)),
+    downloadSpeechModel: (name) =>
+      new Promise((resolve) => {
+        speak({ name, percent: 0, status: "verifying", message: null });
+        let percent = 0;
+        const timer = setInterval(() => {
+          percent += 10;
+          if (percent < 100) {
+            speak({ name, percent, status: "downloading", message: null });
+            return;
+          }
+          clearInterval(timer);
+          const model = speechModels.find((candidate) => candidate.name === name);
+          if (model) model.cached = true;
+          speak({ name, percent: 100, status: "done", message: null });
+          resolve();
+        }, 400);
+      }),
+    onSpeechModelProgress: (listener) => speechListeners.push(listener),
+    openSpeechModelSource: () => Promise.resolve(),
     appVersion: () => Promise.resolve("0.1.0 (fake)"),
   };
 }

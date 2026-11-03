@@ -1,7 +1,7 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
-import type { AudioStatus, Backend, Settings, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
 import type { Clock } from "./overlay.ts";
 
 export const SETTINGS: Settings = {
@@ -29,12 +29,22 @@ export const SETTINGS: Settings = {
   recordings: { metrics: true, text: false, audio: false },
 };
 
+export const NEMOTRON: SpeechModelInfo = {
+  name: "nemotron_160ms",
+  title: "Nemotron Speech Streaming 0.6B",
+  description: "NVIDIA's English streaming recognizer, int8, answering every 160 ms. Runs on the CPU.",
+  size: 661_919_416,
+  source: "https://huggingface.co/example/nemotron",
+  cached: false,
+};
+
 /** A backend whose calls are spies and whose events the test emits. */
 export function stubBackend(settings: Settings = SETTINGS, initial: Status = { state: "listening" }) {
   const statusListeners: ((status: Status) => void)[] = [];
   const levelListeners: ((level: number) => void)[] = [];
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
   const savedListeners: (() => void)[] = [];
+  const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
   let audioState: AudioStatus = {
     selected: settings.microphone,
     active: initial.state === "paused" ? null : (settings.microphone ?? "Built-in"),
@@ -58,6 +68,10 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     listMicrophones: vi.fn(() => Promise.resolve(["USB Microphone", "Built-in"])),
     openRecordings: vi.fn(() => Promise.resolve()),
     validateSpeechModelFolder: vi.fn<(path: string) => Promise<void>>(() => Promise.resolve()),
+    listSpeechModels: vi.fn<() => Promise<SpeechModelInfo[]>>(() => Promise.resolve([{ ...NEMOTRON }])),
+    downloadSpeechModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
+    onSpeechModelProgress: vi.fn((listener: (progress: SpeechModelProgress) => void) => speechListeners.push(listener)),
+    openSpeechModelSource: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     appVersion: vi.fn(() => Promise.resolve("1.2.3")),
   } satisfies Backend;
   return {
@@ -77,6 +91,9 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     audioState: () => structuredClone(audioState),
     level: (level: number) => {
       for (const listener of levelListeners) listener(level);
+    },
+    speechProgress: (progress: SpeechModelProgress) => {
+      for (const listener of speechListeners) listener(progress);
     },
     saved: () => {
       for (const listener of savedListeners) listener();

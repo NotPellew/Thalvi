@@ -8,6 +8,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::host::{Desktop, StateServer};
+use thalvi_desktop::models::SpeechDownloads;
 
 use crate::commands;
 use crate::control;
@@ -25,6 +26,7 @@ pub struct AppState {
     pub link: EngineLink,
     pub store: Store,
     pub overlay: Overlay,
+    pub speech_downloads: SpeechDownloads,
     host: Arc<Desktop>,
     config: Mutex<DesktopConfig>,
     overlay_shown: AtomicBool,
@@ -53,6 +55,7 @@ impl AppState {
             link,
             store,
             overlay: Overlay::default(),
+            speech_downloads: SpeechDownloads::default(),
             host: Arc::new(Desktop::detect().map_err(|error| error.to_string())?),
             overlay_shown: AtomicBool::new(config.overlay.show),
             config: Mutex::new(config),
@@ -133,6 +136,9 @@ fn start() -> Result<(), String> {
             commands::list_microphones,
             commands::open_recordings,
             commands::validate_speech_model_folder,
+            commands::list_speech_models,
+            commands::download_speech_model,
+            commands::open_speech_model_source,
         ])
         .setup(move |app| {
             // Only the first instance gets here, so a relaunch never reads the config.
