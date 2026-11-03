@@ -386,7 +386,7 @@ async fn a_speech_model_is_cached_only_when_every_file_is_intact() {
         ("one missing", &[GOOD, GOOD, GOOD][..], false),
         (
             "wrong checksum",
-            &[GOOD, GOOD, b"same size, not it!!!!!!"][..],
+            &[GOOD, GOOD, b"same size, not it!!!!!!", GOOD][..],
             false,
         ),
         ("none", &[][..], false),
