@@ -119,6 +119,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
   }, 80);
 
   let startAtLogin = false;
+  let menuEntry = false;
   let saved = { ...structuredClone(SETTINGS), look };
   return {
     getStatus: () => Promise.resolve(status),
@@ -154,6 +155,11 @@ export function fakeBackend(params: URLSearchParams): Backend {
     getStartAtLogin: () => Promise.resolve({ kind: "available", on: startAtLogin, problem: null }),
     setStartAtLogin: (on) => {
       startAtLogin = on;
+      return Promise.resolve();
+    },
+    getMenuEntry: () => Promise.resolve({ kind: "available", on: menuEntry, problem: null }),
+    setMenuEntry: (on) => {
+      menuEntry = on;
       return Promise.resolve();
     },
     copyLoginLine: () => Promise.resolve(),

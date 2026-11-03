@@ -20,6 +20,7 @@ use thalvi_desktop::models::{
 use thalvi_desktop::transducer::check_folder;
 
 use crate::app::AppState;
+use crate::menu_entry;
 use crate::overlay;
 use crate::runner::{AudioStatus, Control};
 use crate::settings::settings_json;
@@ -75,7 +76,7 @@ pub fn save_settings(
         state.config().microphone.as_deref(),
         state.link.audio().paused,
     )?;
-    let config = state.store.save(settings, state.config().start_at_login)?;
+    let config = state.store.save(settings, &state.config())?;
     let look = state.config().look;
     state.apply(&config);
     if config.look != look {
@@ -268,6 +269,19 @@ pub fn set_start_at_login(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     startup::set(&app, on, || state.remember_login(on)).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn get_menu_entry(state: State<'_, AppState>) -> Result<SwitchState, String> {
+    menu_entry::switch(&menu_entry::System::from_env(), state.menu_problem())
+}
+
+/// Adds or removes Thalvi's app menu entry and remembers the choice.
+#[tauri::command]
+pub fn set_menu_entry(on: bool, state: State<'_, AppState>) -> Result<(), String> {
+    menu_entry::set(&menu_entry::System::from_env(), on, || {
+        state.remember_menu_entry(on)
+    })
 }
 
 #[cfg(test)]

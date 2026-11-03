@@ -5,6 +5,7 @@ mod commands;
 mod control;
 mod dialog;
 mod launch;
+mod menu_entry;
 mod overlay;
 mod runner;
 mod settings;

@@ -197,8 +197,7 @@ is needed.
 - **Windows:** run `Thalvi_<version>_x64-setup.exe`. It installs for your user
   only, adds a Start-menu entry, and downloads WebView2 if missing. Uninstall
   from Settings → Apps; your config and models stay.
-- **Linux:** `chmod +x Thalvi_<version>_amd64.AppImage`, then run it. An
-  AppImage adds no menu entry itself; AppImageLauncher or Gear Lever add one.
+- **Linux:** `chmod +x Thalvi_<version>_amd64.AppImage`, then run it.
   Install `hyprctl`, `wtype` and `wl-copy` (listed under Build from source). Update by replacing the
   file; settings and models stay.
 
@@ -214,7 +213,16 @@ time it starts, so an upgrade or a moved AppImage is fixed by starting Thalvi
 once more (from its new place); turn the switch off before deleting the file.
 If you turned Thalvi off in the system's startup list, Thalvi leaves it off and
 says so there. Hyprland does not run
-XDG autostart by itself; use `uwsm`, or `dex -a` in `exec-once`.
+XDG autostart by itself, so unless a session manager such as `uwsm` does, the row shows
+the `exec-once = <path> --login` line to add to `hyprland.conf` instead of a switch.
+
+**Settings → General → Show Thalvi in the app menu** is off by default. For an
+AppImage it writes a menu entry and icon under `~/.local/share` and removes them when
+turned off; Thalvi rewrites it on each start, so a moved AppImage stays right. A
+package manager or the Windows installer owns the entry otherwise, and the row says so.
+
+If Thalvi cannot start, for example because the config is malformed, it says so in a
+message box when it was not started from a terminal.
 
 ### Build from source
 

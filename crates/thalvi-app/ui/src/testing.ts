@@ -69,6 +69,8 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     openRecordings: vi.fn(() => Promise.resolve()),
     getStartAtLogin: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),
     setStartAtLogin: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
+    getMenuEntry: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),
+    setMenuEntry: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
     copyLoginLine: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     validateSpeechModelFolder: vi.fn<(path: string) => Promise<void>>(() => Promise.resolve()),
     listSpeechModels: vi.fn<() => Promise<SpeechModelInfo[]>>(() => Promise.resolve([{ ...NEMOTRON }])),

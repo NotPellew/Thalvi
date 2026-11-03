@@ -125,6 +125,10 @@ export interface Backend {
   getStartAtLogin(): Promise<SwitchState>;
   /** Adds or removes the startup entry; rejects unless the OS then holds it as asked. */
   setStartAtLogin(on: boolean): Promise<void>;
+  /** Whether Thalvi is in the app menu, or why it offers no switch for that. */
+  getMenuEntry(): Promise<SwitchState>;
+  /** Adds or removes the app menu entry; rejects with the plain reason it could not. */
+  setMenuEntry(on: boolean): Promise<void>;
   /** Puts the line that starts Thalvi at login on the clipboard, when the state carries one. */
   copyLoginLine(): Promise<void>;
   /** Resolves when the folder holds a speech model; rejects with the plain reason it does not. */

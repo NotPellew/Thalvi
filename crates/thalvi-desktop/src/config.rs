@@ -54,6 +54,9 @@ pub struct DesktopConfig {
     /// Whether the user wants Thalvi to start at login. The app restores the OS entry from this
     /// on start, because a Windows upgrade removes it.
     pub start_at_login: bool,
+    /// Whether the user wants Thalvi in the app menu. The app rewrites the `AppImage`'s menu
+    /// entry from this on start, because the `AppImage` may have moved.
+    pub show_in_menu: bool,
     /// From `THALVI_RECORD`, never from the file.
     pub record: RecordKinds,
 }
@@ -87,6 +90,8 @@ struct RawDesktopConfig {
     look: Look,
     #[serde(default)]
     start_at_login: bool,
+    #[serde(default)]
+    show_in_menu: bool,
 }
 
 /// How the overlay and the settings window look; `Gunmetal` unless the user picks another.
@@ -168,6 +173,7 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
             microphone,
             look: raw.look,
             start_at_login: raw.start_at_login,
+            show_in_menu: raw.show_in_menu,
             record: RecordKinds::default(),
         })
     }
@@ -458,6 +464,7 @@ struct FileForm<'a> {
     microphone: Option<&'a str>,
     look: Look,
     start_at_login: bool,
+    show_in_menu: bool,
 }
 
 #[derive(Serialize)]
@@ -544,6 +551,7 @@ impl Serialize for DesktopConfig {
             microphone: self.microphone.as_deref(),
             look: self.look,
             start_at_login: self.start_at_login,
+            show_in_menu: self.show_in_menu,
         }
         .serialize(serializer)
     }
@@ -657,6 +665,7 @@ mod tests {
         assert_eq!(config.capture_limits, CaptureLimits::default());
         assert_eq!(config.endings, Endings::default());
         assert!(!config.start_at_login);
+        assert!(!config.show_in_menu);
         assert_eq!(config.record, RecordKinds::default());
     }
 
@@ -1265,7 +1274,8 @@ mod tests {
             "overlay": {"show": false, "draft": true},
             "microphone": " USB Mic ",
             "look": "gunmetal",
-            "start_at_login": true
+            "start_at_login": true,
+            "show_in_menu": true
         }"#;
         for json in ["{}", full] {
             let config = DesktopConfig::from_json_str(json, Some("metrics,audio")).unwrap();

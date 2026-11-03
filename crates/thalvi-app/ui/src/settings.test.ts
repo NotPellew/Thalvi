@@ -622,6 +622,41 @@ describe("live controls", () => {
     expect(login.querySelector(".note:not(.ok)")?.textContent).toBe("wl-copy is not installed.");
   });
 
+  it("adds and removes the app menu entry at once, and shows the real state after a failure", async () => {
+    const stub = await open();
+    const toggle = control("Show Thalvi in the app menu", "input");
+    expect(toggle.checked).toBe(false);
+    flip(toggle);
+    await settle();
+    expect(stub.backend.setMenuEntry).toHaveBeenLastCalledWith(true);
+    expect(toggle.checked).toBe(true);
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+
+    stub.backend.getMenuEntry.mockResolvedValue({ kind: "available", on: true, problem: null });
+    stub.backend.setMenuEntry.mockRejectedValue("Thalvi could not remove Thalvi from the app menu: read-only folder");
+    flip(toggle);
+    await settle();
+    expect(toggle.checked).toBe(true);
+    expect(rowOf("Show Thalvi in the app menu").querySelector(".note")?.textContent).toBe(
+      "Thalvi could not remove Thalvi from the app menu: read-only folder",
+    );
+  });
+
+  it("says who adds the app menu entry instead of offering a switch where Thalvi cannot", async () => {
+    const stub = stubBackend();
+    stub.backend.getMenuEntry.mockResolvedValue({
+      kind: "unavailable",
+      reason: "Added by the installer; uninstalling removes it.",
+      line: null,
+    });
+    mountSettings(root, stub.backend);
+    await settle();
+    const menu = rowOf("Show Thalvi in the app menu");
+    expect(menu.querySelector("input")).toBeNull();
+    expect(menu.querySelector("button")).toBeNull();
+    expect(menu.textContent).toContain("Added by the installer; uninstalling removes it.");
+  });
+
   it("pauses, changes the device, saves and resumes from the Microphone page only", async () => {
     const stub = await open();
     const pageOf = (label: string): string | null => rowOf(label).closest("section")?.getAttribute("data-page") ?? null;

@@ -14,6 +14,7 @@ use crate::commands;
 use crate::control;
 use crate::dialog;
 use crate::launch::{Command, Launch, relaunch_command};
+use crate::menu_entry::{self, MenuEntry};
 use crate::overlay::{self, Overlay, Visibility};
 use crate::runner::{Control, EngineLink};
 use crate::settings::Store;
@@ -34,6 +35,8 @@ pub struct AppState {
     overlay_shown: AtomicBool,
     /// Why the login entry could not be put back on start, for the switch to show.
     login_problem: Mutex<Option<String>>,
+    /// Why the app menu entry could not be rewritten on start, for the switch to show.
+    menu_problem: Mutex<Option<String>>,
     /// Answers status bars until the app quits.
     state_server: Mutex<Option<StateServer>>,
 }
@@ -63,6 +66,7 @@ impl AppState {
             host: Arc::new(Desktop::detect().map_err(|error| error.to_string())?),
             overlay_shown: AtomicBool::new(config.overlay.show),
             login_problem: Mutex::new(None),
+            menu_problem: Mutex::new(None),
             config: Mutex::new(config),
             state_server: Mutex::new(state_server),
         })
@@ -101,20 +105,56 @@ impl AppState {
             .clone()
     }
 
+    /// Rewrites the app menu entry if the user wants Thalvi in the menu.
+    fn restore_menu_entry(&self, entry: &impl MenuEntry) {
+        let problem = menu_entry::restore(entry, self.config().show_in_menu).err();
+        *self
+            .menu_problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = problem;
+    }
+
+    /// Why the entry could not be rewritten on start, if it could not.
+    #[must_use]
+    pub fn menu_problem(&self) -> Option<String> {
+        self.menu_problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Saves the user's choice to start at login. It is written apart from the settings form,
     /// which the switch does not wait for.
     ///
     /// # Errors
     /// Why the config file could not be written.
     pub fn remember_login(&self, on: bool) -> Result<(), String> {
-        let mut config = self.config();
-        self.store.save_login(&config, on)?;
-        config.start_at_login = on;
-        *self.config.lock().unwrap_or_else(PoisonError::into_inner) = config;
+        self.remember(|config| config.start_at_login = on)?;
         *self
             .login_problem
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
+        Ok(())
+    }
+
+    /// Saves the user's choice to have Thalvi in the app menu, apart from the settings form.
+    ///
+    /// # Errors
+    /// Why the config file could not be written.
+    pub fn remember_menu_entry(&self, on: bool) -> Result<(), String> {
+        self.remember(|config| config.show_in_menu = on)?;
+        *self
+            .menu_problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        Ok(())
+    }
+
+    fn remember(&self, change: impl FnOnce(&mut DesktopConfig)) -> Result<(), String> {
+        let mut config = self.config();
+        change(&mut config);
+        self.store.save_switches(&config)?;
+        *self.config.lock().unwrap_or_else(PoisonError::into_inner) = config;
         Ok(())
     }
 
@@ -182,6 +222,8 @@ fn start() -> Result<(), String> {
             commands::get_start_at_login,
             commands::set_start_at_login,
             commands::copy_login_line,
+            commands::get_menu_entry,
+            commands::set_menu_entry,
             commands::validate_speech_model_folder,
             commands::list_speech_models,
             commands::download_speech_model,
@@ -191,6 +233,7 @@ fn start() -> Result<(), String> {
             // Only the first instance gets here, so a relaunch never reads the config.
             let state = AppState::start(config)?;
             state.restore_login(app.handle());
+            state.restore_menu_entry(&menu_entry::System::from_env());
             app.manage(state);
             create_windows(app.handle())?;
             follow_engine(app.handle())?;

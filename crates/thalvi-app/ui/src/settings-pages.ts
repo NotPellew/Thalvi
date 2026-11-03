@@ -28,6 +28,8 @@ export interface PageContext {
   audio: AudioStatus;
   /** Whether the OS starts Thalvi at login, or why that could not be read. */
   startAtLogin: SwitchRead;
+  /** Whether Thalvi is in the app menu, or why that could not be read. */
+  menuEntry: SwitchRead;
   /** The settings window, so a look picked here shows at once. */
   root: HTMLElement;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
@@ -198,7 +200,7 @@ function unavailable({ reason, line }: Extract<SwitchState, { kind: "unavailable
   return node;
 }
 
-function general({ draft, backend, controls, root, startAtLogin }: PageContext): HTMLElement[] {
+function general({ draft, backend, controls, root, startAtLogin, menuEntry }: PageContext): HTMLElement[] {
   const server = controls.text(draft.server, (value) => {
     draft.server = value;
   }, { placeholder: "ws://127.0.0.1:8080" });
@@ -210,6 +212,13 @@ function general({ draft, backend, controls, root, startAtLogin }: PageContext):
       startAtLogin,
       controls,
       { read: () => backend.getStartAtLogin(), set: (on) => backend.setStartAtLogin(on), copy: () => backend.copyLoginLine() },
+    ),
+    switchRow(
+      "Show Thalvi in the app menu",
+      "Lets you start Thalvi from your desktop's app menu. This takes effect now; it is not part of Save.",
+      menuEntry,
+      controls,
+      { read: () => backend.getMenuEntry(), set: (on) => backend.setMenuEntry(on) },
     ),
     row("Look", "How the overlay and this window look. The overlay changes after the current capture.",
       lookPicker(draft.look, (look) => {

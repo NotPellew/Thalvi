@@ -101,6 +101,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     }
     const microphones = await backend.listMicrophones().catch((error: unknown) => ({ error: errorText(error) }));
     const startAtLogin = await backend.getStartAtLogin().catch((error: unknown): SwitchRead => ({ kind: "unreadable", message: errorText(error) }));
+    const menuEntry = await backend.getMenuEntry().catch((error: unknown): SwitchRead => ({ kind: "unreadable", message: errorText(error) }));
     audio = await backend.getAudio().catch(() => ({
       selected: loaded.microphone,
       active: null,
@@ -110,7 +111,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     baseline = JSON.stringify(draft);
     applyLook(root, draft.look);
     checks = [];
-    pages = buildPages({ draft, backend, root, controls: createControls(changed), microphones, audio, startAtLogin, live, checks });
+    pages = buildPages({ draft, backend, root, controls: createControls(changed), microphones, audio, startAtLogin, menuEntry, live, checks });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {
       const button = el("button", { type: "button", "data-page": page.id }, page.title);
