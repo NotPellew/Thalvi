@@ -27,6 +27,7 @@ const SETTINGS: Settings = {
   microphone: null,
   look: "gunmetal",
   recordings: { metrics: true, text: false, audio: false },
+  hold_key: "Alt+KeyZ",
   history: { enabled: true, limit: 200 },
 };
 

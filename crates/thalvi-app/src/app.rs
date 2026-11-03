@@ -9,7 +9,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::history;
-use thalvi_desktop::host::{Desktop, StateServer};
+use thalvi_desktop::hold::HoldKey;
+use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, StateServer};
 use thalvi_desktop::models::SpeechDownloads;
 
 use crate::commands;
@@ -46,6 +47,8 @@ pub struct AppState {
     menu_problem: Mutex<Option<String>>,
     /// Answers status bars until the app quits.
     state_server: Mutex<Option<StateServer>>,
+    /// Reports the hold key where the app sees the keyboard itself; empty elsewhere.
+    hold_watch: Mutex<Option<HoldWatch>>,
 }
 
 impl AppState {
@@ -71,6 +74,7 @@ impl AppState {
                 None
             }
         };
+        let hold_watch = watch_hold_key(&config.hold_key, &link);
         Ok(Self {
             link,
             store,
@@ -85,6 +89,7 @@ impl AppState {
             menu_problem: Mutex::new(None),
             config: Mutex::new(config),
             state_server: Mutex::new(state_server),
+            hold_watch: Mutex::new(hold_watch),
         })
     }
 
@@ -178,8 +183,42 @@ impl AppState {
     pub fn apply(&self, config: &DesktopConfig) {
         self.overlay_shown
             .store(config.overlay.show, Ordering::SeqCst);
-        *self.config.lock().unwrap_or_else(PoisonError::into_inner) = config.clone();
+        let key_changed = {
+            let mut current = self.config.lock().unwrap_or_else(PoisonError::into_inner);
+            let changed = current.hold_key != config.hold_key;
+            *current = config.clone();
+            changed
+        };
+        if key_changed {
+            let mut watch = self
+                .hold_watch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            // The old hook goes before the new one comes.
+            *watch = None;
+            *watch = watch_hold_key(&config.hold_key, &self.link);
+        }
         self.link.send(Control::Apply(Box::new(config.clone())));
+    }
+}
+
+/// Starts reporting `key` to the engine where the desktop lets the app see it. Where binds
+/// report it instead, that is only logged; where the desktop refuses, the user is told through
+/// the status, and the rest of the app goes on.
+fn watch_hold_key(key: &HoldKey, link: &EngineLink) -> Option<HoldWatch> {
+    let input = link.hold_input();
+    match Desktop::watch_hold_key(key, move |down| input.set(down)) {
+        Ok(HoldSource::Hook(watch)) => Some(watch),
+        Ok(HoldSource::Binds(reason)) => {
+            println!("{reason}");
+            None
+        }
+        Err(error) => {
+            link.send(Control::HoldKeyFailed(format!(
+                "{error} Dictating by holding a key does not work until Thalvi is restarted or another key is set; the wake word still works."
+            )));
+            None
+        }
     }
 }
 
@@ -405,6 +444,8 @@ fn act(app: &AppHandle, command: Command) {
         Command::Pause => state.link.send(Control::SetListening(false)),
         Command::Resume => state.link.send(Control::SetListening(true)),
         Command::Cancel => state.link.send(Control::Cancel),
+        Command::HoldStart => state.link.hold_input().set(true),
+        Command::HoldEnd => state.link.hold_input().set(false),
         Command::CopyError => copy_last_error(app),
     }
 }

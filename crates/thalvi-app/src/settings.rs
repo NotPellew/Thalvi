@@ -174,6 +174,7 @@ mod tests {
                 "ending_pause",
                 "endings",
                 "history",
+                "hold_key",
                 "look",
                 "microphone",
                 "overlay",

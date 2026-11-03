@@ -105,8 +105,32 @@ impl StateServer {
     }
 }
 
+/// Keeps a desktop reporting the hold key's presses and releases; dropping it stops, and lets the
+/// key go if it was held.
+pub struct HoldWatch {
+    _stop_on_drop: Box<dyn Send>,
+}
+
+impl HoldWatch {
+    /// Wraps whatever stops the watching when dropped.
+    pub fn new(stop_on_drop: impl Send + 'static) -> Self {
+        Self {
+            _stop_on_drop: Box::new(stop_on_drop),
+        }
+    }
+}
+
+/// How a desktop reports the hold key.
+pub enum HoldSource {
+    /// The app watches the keyboard until this is dropped.
+    Hook(HoldWatch),
+    /// The compositor reports the key through binds in its own config, as `reason` says: not a
+    /// failure, and nothing for the app to watch.
+    Binds(&'static str),
+}
+
 /// A key held while the last key of a [`Shortcut`] is pressed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Modifier {
     Ctrl,
     Shift,

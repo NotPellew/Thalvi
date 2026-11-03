@@ -10,6 +10,7 @@ pub mod engine;
 pub mod fbank;
 pub mod frame;
 pub mod history;
+pub mod hold;
 pub mod host;
 pub mod local;
 pub mod metrics;

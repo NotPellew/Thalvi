@@ -5,7 +5,8 @@ mod win32;
 use std::fmt;
 use std::path::Path;
 
-use super::{App, Host, HostError, Modifier, StateServer, TypedText, WebUrl};
+use super::{App, HoldSource, Host, HostError, Modifier, StateServer, TypedText, WebUrl};
+use crate::hold::HoldKey;
 pub use win32::Real;
 
 /// A window handle as a plain number, so targets stay `Send`.
@@ -93,6 +94,18 @@ impl Windows {
         _state: impl Fn() -> String + Send + 'static,
     ) -> Result<StateServer, HostError> {
         Err(no_state())
+    }
+
+    /// Reports each press and release of `key` to `on_change` until the guard is dropped, and keeps
+    /// the key from the focused app. `on_change` runs inside the keyboard hook: it must not block.
+    ///
+    /// # Errors
+    /// [`HostError::Unsupported`] when Windows refuses the keyboard hook.
+    pub fn watch_hold_key(
+        key: &HoldKey,
+        on_change: impl Fn(bool) + Send + 'static,
+    ) -> Result<HoldSource, HostError> {
+        win32::watch_hold_key(key.clone(), Box::new(on_change)).map(HoldSource::Hook)
     }
 
     /// # Errors

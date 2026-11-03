@@ -93,6 +93,11 @@ fn recognition() -> Cases {
         ),
         (Box::new(CaptureError::NoEnding(seconds)), "No words heard"),
         (
+            Box::new(CaptureError::HoldTooShort),
+            "Key released too soon",
+        ),
+        (Box::new(CaptureError::NothingHeard), "No words heard"),
+        (
             Box::new(CaptureError::TooLong(seconds)),
             "Capture too long — not delivered",
         ),

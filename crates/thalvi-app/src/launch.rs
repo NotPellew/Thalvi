@@ -4,8 +4,7 @@ use std::path::PathBuf;
 
 use crate::startup::LOGIN_ARG;
 
-const USAGE: &str =
-    "Usage: thalvi-desktop [toggle | pause | resume | cancel | copy-error | status | config-file]";
+const USAGE: &str = "Usage: thalvi-desktop [toggle | pause | resume | cancel | hold-start | hold-end | copy-error | status | config-file]";
 
 /// What a relaunch makes the running app do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +21,10 @@ pub enum Command {
     Resume,
     /// Cancel the capture in progress.
     Cancel,
+    /// The dictation key went down: start a capture that its release ends.
+    HoldStart,
+    /// The dictation key came up.
+    HoldEnd,
     /// Copy the report of the last error shown, without opening a window.
     CopyError,
 }
@@ -77,6 +80,8 @@ impl Launch {
                 "pause" => run(Command::Pause, None),
                 "resume" => run(Command::Resume, None),
                 "cancel" => run(Command::Cancel, None),
+                "hold-start" => run(Command::HoldStart, None),
+                "hold-end" => run(Command::HoldEnd, None),
                 "copy-error" => run(Command::CopyError, None),
                 path => run(Command::Show, Some(PathBuf::from(path))),
             },
@@ -107,6 +112,8 @@ mod tests {
             (&["pause"][..], run(Command::Pause, None)),
             (&["resume"][..], run(Command::Resume, None)),
             (&["cancel"][..], run(Command::Cancel, None)),
+            (&["hold-start"][..], run(Command::HoldStart, None)),
+            (&["hold-end"][..], run(Command::HoldEnd, None)),
             (&["copy-error"][..], run(Command::CopyError, None)),
             (&["status"][..], Ok(Launch::Status)),
             (&["--login"][..], run(Command::Login, None)),
@@ -130,6 +137,8 @@ mod tests {
             (&["thalvi-desktop"][..], Command::Show),
             (&["thalvi-desktop", "--login"][..], Command::Login),
             (&["thalvi-desktop", "toggle"][..], Command::Toggle),
+            (&["thalvi-desktop", "hold-start"][..], Command::HoldStart),
+            (&["thalvi-desktop", "hold-end"][..], Command::HoldEnd),
             (&["thalvi-desktop", "a", "b"][..], Command::Show),
             (&[][..], Command::Show),
         ] {
@@ -146,6 +155,8 @@ mod tests {
             (Command::Pause, false),
             (Command::Resume, false),
             (Command::Cancel, false),
+            (Command::HoldStart, false),
+            (Command::HoldEnd, false),
             (Command::CopyError, false),
         ] {
             assert_eq!(command.first_start().is_ok(), starts, "{command:?}");

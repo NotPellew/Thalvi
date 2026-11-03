@@ -26,6 +26,7 @@ use crate::capture::{
 use crate::config::DesktopConfig;
 use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues};
 use crate::frame::{FRAME_SAMPLES, Frame};
+use crate::hold::{KeyState, Presses};
 use crate::metrics::{Dictation, Event, RecordKinds, Recorder};
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
@@ -48,6 +49,13 @@ const MIC_TIMEOUT: Duration = Duration::from_secs(3);
 /// Consecutive speech frames, 240 ms, that make audio held back during a pending ending count as
 /// the user continuing.
 const CONTINUATION_FRAMES: u8 = 3;
+
+/// The shortest hold of the dictation key that dictates; a shorter one is a slip of the finger.
+pub const MIN_HOLD: Duration = Duration::from_millis(300);
+
+/// How long after the key is released the recognizer may still return the last words before the
+/// capture ends without them.
+const RELEASE_TAIL: Duration = Duration::from_millis(500);
 
 /// Frames in one wake level window, 2 s.
 const LEVEL_WINDOW: u64 = 25;
@@ -153,6 +161,9 @@ pub enum WakeTrigger {
     Capture,
     /// The caller starts a conversation.
     Conversation,
+    /// The dictation key went down: the caller binds its capture target, then calls
+    /// [`Engine::capture`], which ends with the key's release.
+    Hold,
 }
 
 /// What the engine is doing right now.
@@ -195,6 +206,10 @@ pub enum CaptureError {
     Audio(#[from] AudioError),
     #[error("Microphone audio stopped. Nothing was delivered.")]
     MicStopped,
+    #[error("The key was released too quickly to dictate. Nothing was typed.")]
+    HoldTooShort,
+    #[error("No words were heard while the key was held. Nothing was typed.")]
+    NothingHeard,
     #[error("No words heard for {}.", plain_duration(*.0))]
     NoEnding(Duration),
     #[error("Capture stopped after {} without an ending.", plain_duration(*.0))]
@@ -217,7 +232,8 @@ impl UserError for CaptureError {
             } => "Speech model not ready — Settings",
             Self::Audio(error) => error.headline(),
             Self::MicStopped => "Microphone stopped mid-capture",
-            Self::NoEnding(_) => "No words heard",
+            Self::HoldTooShort => "Key released too soon",
+            Self::NothingHeard | Self::NoEnding(_) => "No words heard",
             Self::TooLong(_) => "Capture too long — not delivered",
             Self::Full(_) => "Capture full — finish or cancel",
         }
@@ -244,6 +260,8 @@ impl CaptureError {
             Self::NotReady { .. } => "not_ready",
             Self::Audio(_) => "audio",
             Self::MicStopped => "mic_stopped",
+            Self::HoldTooShort => "hold_too_short",
+            Self::NothingHeard => "hold_empty",
             Self::NoEnding(_) => "no_ending",
             Self::TooLong(_) => "too_long",
             Self::Full(_) => "full",
@@ -342,6 +360,8 @@ pub struct Parts<R, W, C> {
     /// The gate of the microphone `frames` come from.
     pub gate: InputGate,
     pub http: reqwest::Client,
+    /// Whether the dictation key is down.
+    pub hold: watch::Receiver<KeyState>,
     /// Tells the user about something that did not stop the capture.
     pub notice: Box<dyn Fn(&str)>,
 }
@@ -376,6 +396,20 @@ pub struct Engine<R, W, C> {
     woke: Option<Woke>,
     /// The latest frames scored while listening; filled only while audio is recorded.
     wake_clip: VecDeque<Frame>,
+    key: Presses,
+    /// The hold that opened the next capture.
+    held: Option<Held>,
+    /// How the latest hold ended, when the key decided it.
+    hold_end: Option<&'static str>,
+    /// How long the latest hold's key was down, once it came up.
+    held_for: Option<Duration>,
+}
+
+/// A press of the dictation key that opened a capture.
+#[derive(Clone, Copy)]
+struct Held {
+    press: u64,
+    at: Instant,
 }
 
 /// A wake word heard: when, and the folder of its recordings.
@@ -414,6 +448,28 @@ struct Live<S> {
     /// When the recognizer last returned words.
     last_words: Instant,
     cues: FuturesUnordered<LocalBoxFuture<'static, CueEnd>>,
+    release: Release,
+}
+
+/// What the dictation key's release does to a capture.
+#[derive(Clone, Copy)]
+enum Release {
+    /// The key is down and its release ends the capture; or no key opened this capture.
+    Down,
+    /// The key came up at this instant; the last words may still arrive.
+    Tail(Instant),
+    /// Nothing more comes of the key: the capture is not a hold, or a spoken ending decided it.
+    Over,
+}
+
+impl<S> Live<S> {
+    /// When a released hold stops waiting for words; none while a spoken ending is pending.
+    fn tail(&self) -> Option<Instant> {
+        match self.release {
+            Release::Tail(at) if self.text.pending().is_none() => Some(at + RELEASE_TAIL),
+            _ => None,
+        }
+    }
 }
 
 /// Why sending audio stopped the capture.
@@ -454,6 +510,18 @@ enum Step {
     Silent,
     Idle,
     TooLong,
+    Tail,
+    /// The dictation key changed; false when it can no longer change.
+    Key(bool),
+}
+
+/// Why a hold ended before the recognizer could take any speech, and how the metrics name it.
+fn released_early(pressed: Instant) -> (CaptureError, &'static str) {
+    if pressed.elapsed() < MIN_HOLD {
+        (CaptureError::HoldTooShort, "too_short")
+    } else {
+        (CaptureError::NothingHeard, "empty")
+    }
 }
 
 async fn until(at: Option<Instant>) {
@@ -545,6 +613,10 @@ where
             ),
             woke: None,
             wake_clip: VecDeque::new(),
+            key: Presses::new(parts.hold),
+            held: None,
+            hold_end: None,
+            held_for: None,
         };
         (engine, handle)
     }
@@ -566,7 +638,8 @@ where
         self.recorder.finish().await;
     }
 
-    /// Scores microphone frames until a wake word is heard.
+    /// Scores microphone frames until a wake word is heard or the dictation key goes down. A key
+    /// already down when listening starts counts for nothing until it is released and pressed again.
     ///
     /// On [`WakeTrigger::Capture`] the microphone gate is already off, so nothing said before
     /// the wake cue reaches the capture; call [`capture`](Self::capture) next.
@@ -578,6 +651,7 @@ where
         frames: &mut impl FrameSource,
     ) -> Result<WakeTrigger, ListenError> {
         self.set_state(EngineState::Listening);
+        self.key.skip();
         let reset = std::time::Instant::now();
         self.wake.reset();
         self.wake_clip.clear();
@@ -599,8 +673,21 @@ where
         latency: &mut Latency,
     ) -> Result<WakeTrigger, ListenError> {
         let metrics = self.recorder.kinds().metrics;
+        let mut key_open = true;
         loop {
-            let frame = match frames.next().await {
+            let frame = tokio::select! {
+                biased;
+                changed = self.key.changed(), if key_open => {
+                    key_open = changed.is_ok();
+                    if let Some(press) = self.key.take() {
+                        self.begin_hold(press);
+                        return Ok(WakeTrigger::Hold);
+                    }
+                    continue;
+                }
+                frame = frames.next() => frame,
+            };
+            let frame = match frame {
                 Ok(frame) => frame,
                 Err(error) => {
                     self.level.send_replace(0.0);
@@ -669,6 +756,19 @@ where
         }
     }
 
+    /// Starts the capture the way a wake word does: the gate shuts so nothing said before the
+    /// cue is sent.
+    fn begin_hold(&mut self, press: u64) {
+        let at = Instant::now();
+        self.held = Some(Held { press, at });
+        self.woke = Some(Woke {
+            at,
+            dictation: self.recorder.begin(),
+        });
+        self.gate.set_enabled(false);
+        self.level.send_replace(0.0);
+    }
+
     fn latency_line(&self, summary: LatencySummary) {
         self.recorder.metric(
             Event::WakeInference,
@@ -730,21 +830,35 @@ where
     }
 
     /// Plays the wake cue while the recognizer connects, then takes the user's dictation until
-    /// they end it, cancel it, or something fails.
+    /// they end it, cancel it, or something fails. After [`WakeTrigger::Hold`] releasing the key
+    /// ends it, pasting what was said at once; a spoken ending still decides it as it does after
+    /// a wake word.
     ///
-    /// Call after [`listen`](Self::listen) returned [`WakeTrigger::Capture`]. Cancellation through
-    /// [`EngineHandle::cancel`] applies to this call only. Returns to listening in every case.
+    /// Call after [`listen`](Self::listen) returned [`WakeTrigger::Capture`] or
+    /// [`WakeTrigger::Hold`]. Cancellation through [`EngineHandle::cancel`] applies to this call
+    /// only. Returns to listening in every case.
     pub async fn capture(&mut self, frames: &mut impl FrameSource) -> CaptureOutcome {
         self.cancel.borrow_and_update();
         self.set_state(EngineState::StartingCapture);
         let started = Instant::now();
+        let held = self.held.take();
+        self.hold_end = None;
+        self.held_for = None;
         let woke = self.woke.take().unwrap_or_else(|| Woke {
             at: started,
             dictation: self.recorder.begin(),
         });
-        let outcome = match self.start(frames, &woke).await {
+        if held.is_some() {
+            self.recorder.metric(
+                Event::HoldStart,
+                "ok",
+                None,
+                json!({"dictation": woke.dictation.to_string()}),
+            );
+        }
+        let outcome = match self.start(frames, &woke, held).await {
             Ok((mut live, backlog)) => {
-                let (done, decided) = self.drive(frames, &mut live, backlog).await;
+                let (done, decided) = self.drive(frames, &mut live, backlog, held).await;
                 self.conclude(done, decided, Some(live), &woke.dictation)
                     .await
             }
@@ -760,6 +874,14 @@ where
         };
         self.recorder
             .metric(Event::CaptureFlow, flow, Some(started.elapsed()), fields);
+        if let Some(held) = held {
+            self.recorder.metric(
+                Event::HoldEnd,
+                self.hold_end.take().unwrap_or("other"),
+                Some(self.held_for.take().unwrap_or_else(|| held.at.elapsed())),
+                json!({"dictation": woke.dictation.to_string()}),
+            );
+        }
         if let Some(reason) = nothing_delivered(&outcome) {
             self.recorder.metric(
                 Event::WakeNothing,
@@ -867,6 +989,7 @@ where
         &mut self,
         frames: &mut impl FrameSource,
         woke: &Woke,
+        held: Option<Held>,
     ) -> Result<(Live<R::Session>, Vec<Frame>), (Done, Instant)> {
         let started = Instant::now();
         let deadline = started + READY_TIMEOUT;
@@ -900,6 +1023,12 @@ where
                     self.gate.set_enabled(true);
                     self.cue_metric(Event::ReadyCue, &end);
                     self.cue_failed(&end, "The capture continues.");
+                }
+                () = self.key.over(held.map_or(0, |held| held.press)), if held.is_some() => {
+                    let (error, how) = released_early(woke.at);
+                    self.hold_end = Some(how);
+                    self.held_for = Some(woke.at.elapsed());
+                    break Some(Done::Failed(error));
                 }
                 () = tokio::time::sleep_until(deadline) => break Some(Done::Failed(self.not_ready())),
                 frame = frames.next(), if cue_ended => match frame {
@@ -943,6 +1072,11 @@ where
             started: Instant::now(),
             last_words: Instant::now(),
             cues: FuturesUnordered::new(),
+            release: if held.is_some() {
+                Release::Down
+            } else {
+                Release::Over
+            },
         };
         self.publish(&live);
         Ok((live, backlog))
@@ -954,12 +1088,14 @@ where
         frames: &mut impl FrameSource,
         live: &mut Live<R::Session>,
         backlog: Vec<Frame>,
+        held: Option<Held>,
     ) -> (Done, Instant) {
         for frame in backlog {
             if let Err(stop) = self.on_frame(live, &frame).await {
                 return (stop.into(), Instant::now());
             }
         }
+        let mut key_open = true;
         loop {
             let limit = if live.text.pending().is_some() {
                 MIC_WATCHDOG
@@ -967,14 +1103,17 @@ where
                 MIC_TIMEOUT
             };
             let watchdog = live.cues.is_empty().then(|| live.last_audio + limit);
+            let tail = live.tail();
             let step = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => Step::Cancel,
+                changed = self.key.changed(), if key_open => Step::Key(changed.is_ok()),
                 event = live.session.next_event() => Step::Event(event),
                 frame = frames.next() => Step::Frame(frame),
                 Some(end) = live.cues.next() => Step::Cue(end),
                 () = until(live.text.ready_at()) => Step::Quiet,
                 () = until(watchdog) => Step::Silent,
+                () = until(tail) => Step::Tail,
                 () = tokio::time::sleep_until(live.last_words + self.limits.idle()) => Step::Idle,
                 () = tokio::time::sleep_until(live.started + self.limits.max()) => Step::TooLong,
             };
@@ -992,7 +1131,9 @@ where
                     if has_words(&text) {
                         live.last_words = Instant::now();
                     }
-                    self.on_final(live, &text)
+                    let done = self.on_final(live, &text);
+                    Self::after_final(live);
+                    done
                 }
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),
                 Step::Frame(Ok(frame)) => self.on_frame(live, &frame).await.err().map(Done::from),
@@ -1006,11 +1147,87 @@ where
                 Step::Silent => Some(Done::Failed(CaptureError::MicStopped)),
                 Step::Idle => Some(Done::Failed(CaptureError::NoEnding(self.limits.idle()))),
                 Step::TooLong => Some(Done::Failed(CaptureError::TooLong(self.limits.max()))),
+                Step::Tail => self.finish_hold(live),
+                Step::Key(open) => {
+                    key_open = open;
+                    self.on_key(live, held)
+                }
             };
             if let Some(done) = done {
                 return (done, Instant::now());
             }
         }
+    }
+
+    /// The dictation key changed during a capture: its release ends a hold, and a press during a
+    /// dictation by wake word is refused.
+    fn on_key(&mut self, live: &mut Live<R::Session>, held: Option<Held>) -> Option<Done> {
+        let Some(held) = held else {
+            if self.key.take().is_some() {
+                self.refuse_press("capturing");
+            }
+            return None;
+        };
+        if self.key.is_over(held.press) && matches!(live.release, Release::Down) {
+            return self.on_release(live, held);
+        }
+        None
+    }
+
+    /// The key came up: a spoken ending already pending keeps deciding the capture; a slip of the
+    /// finger ends it; otherwise the last words get [`RELEASE_TAIL`] to arrive, and no recognizer
+    /// signals that nothing more is coming, so the whole tail is waited out.
+    fn on_release(&mut self, live: &mut Live<R::Session>, held: Held) -> Option<Done> {
+        let now = Instant::now();
+        self.held_for = Some(now.duration_since(held.at));
+        if live.text.pending().is_some() {
+            live.release = Release::Over;
+            return None;
+        }
+        if now.duration_since(held.at) < MIN_HOLD {
+            self.hold_end = Some("too_short");
+            return Some(Done::Failed(CaptureError::HoldTooShort));
+        }
+        live.release = Release::Tail(now);
+        None
+    }
+
+    /// After a final transcript: a spoken ending heard in the last words decides the capture as
+    /// it does after a wake word. Every other final just joins the text; the tail is the wait.
+    fn after_final(live: &mut Live<R::Session>) {
+        if matches!(live.release, Release::Tail(_)) && live.text.pending().is_some() {
+            live.release = Release::Over;
+        }
+    }
+
+    /// Ends a released hold: what was said, with the words still being recognized, is pasted.
+    fn finish_hold(&mut self, live: &mut Live<R::Session>) -> Option<Done> {
+        if let Some(partial) = live.partial.take().filter(|text| has_words(text)) {
+            if let Some(done) = self.on_final(live, &partial) {
+                return Some(done);
+            }
+            if live.text.pending().is_some() {
+                live.release = Release::Over;
+                return None;
+            }
+        }
+        let text = live.text.text();
+        if !has_words(&text) {
+            self.hold_end = Some("empty");
+            return Some(Done::Failed(CaptureError::NothingHeard));
+        }
+        self.hold_end = Some("released");
+        Some(Done::Accepted(CaptureRequest {
+            route: CaptureRoute::Paste,
+            text,
+        }))
+    }
+
+    /// Says that a press of the dictation key started nothing, and why.
+    fn refuse_press(&self, reason: &str) {
+        self.recorder
+            .metric(Event::HoldStart, "refused", None, json!({"reason": reason}));
+        (self.notice)("A dictation is already running, so pressing the key started nothing.");
     }
 
     fn queue_cue(&self, live: &Live<R::Session>, cue: Cue) {
@@ -1086,6 +1303,11 @@ where
         let now = Instant::now();
         live.last_audio = now;
         self.level.send_replace(loudness(frame));
+        // Once the key is up nothing more is said to the recognizer: what is still being
+        // recognized finishes, and an aside spoken after the release stays out of the text.
+        if matches!(live.release, Release::Tail(_)) {
+            return Ok(());
+        }
         let pending = live.text.pending().is_some();
         live.speech = self.vad.speech(frame, pending);
         if !pending {
