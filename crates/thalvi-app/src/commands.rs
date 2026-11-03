@@ -6,12 +6,17 @@
 )]
 
 use std::path::Path;
+use std::time::Instant;
 
-use serde_json::Value;
+use serde::Serialize;
+use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 use thalvi_desktop::audio;
-use thalvi_desktop::host::Host;
-use thalvi_desktop::metrics::Recorder;
+use thalvi_desktop::host::{Host, WebUrl};
+use thalvi_desktop::metrics::{Event, Recorder};
+use thalvi_desktop::models::{
+    CatalogSpeech, ModelError, ModelStore, SpeechModelInfo, SpeechProgress,
+};
 use thalvi_desktop::transducer::check_folder;
 
 use crate::app::AppState;
@@ -111,6 +116,105 @@ pub async fn validate_speech_model_folder(path: String) -> Result<(), String> {
     .map_err(|error| format!("The folder could not be checked: {error}"))?
 }
 
+/// The catalog speech models and whether each is downloaded.
+#[tauri::command]
+pub async fn list_speech_models() -> Result<Vec<SpeechModelInfo>, String> {
+    let store = ModelStore::per_user().map_err(|error| error.to_string())?;
+    Ok(store.speech_models().await)
+}
+
+/// What `thalvi://speech-model-progress` carries.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct SpeechModelProgress<'a> {
+    name: &'a str,
+    percent: u8,
+    status: &'static str,
+    /// Why it failed, in plain words; only with `failed`.
+    message: Option<String>,
+}
+
+impl<'a> SpeechModelProgress<'a> {
+    fn of(name: &'a str, progress: SpeechProgress) -> Self {
+        let (percent, status) = match progress {
+            SpeechProgress::Verifying => (0, "verifying"),
+            SpeechProgress::Downloading { percent } => (percent, "downloading"),
+            SpeechProgress::Done => (100, "done"),
+        };
+        Self {
+            name,
+            percent,
+            status,
+            message: None,
+        }
+    }
+
+    fn failed(name: &'a str, message: String) -> Self {
+        Self {
+            name,
+            percent: 0,
+            status: "failed",
+            message: Some(message),
+        }
+    }
+}
+
+/// Downloads a catalog speech model, telling the UI how far it is.
+#[tauri::command]
+pub async fn download_speech_model(
+    name: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let model = CatalogSpeech::named(&name)
+        .ok_or_else(|| format!("{name} is not a speech model Thalvi can download."))?;
+    let store = ModelStore::per_user().map_err(|error| error.to_string())?;
+    let recorder = Recorder::per_user(state.config().record).map_err(|error| error.to_string())?;
+    let started = Instant::now();
+    let result = state
+        .speech_downloads
+        .run(model.name(), &store, &model.assets(), |progress| {
+            let _ = app.emit(
+                "thalvi://speech-model-progress",
+                SpeechModelProgress::of(model.name(), progress),
+            );
+        })
+        .await;
+    if matches!(result, Err(ModelError::AlreadyDownloading { .. })) {
+        return result.map_err(|error| error.to_string());
+    }
+    recorder.metric(
+        Event::SpeechDownload,
+        if result.is_ok() { "ok" } else { "error" },
+        Some(started.elapsed()),
+        json!({"model": model.name()}),
+    );
+    result.map_err(|error| {
+        let message = error.to_string();
+        let _ = app.emit(
+            "thalvi://speech-model-progress",
+            SpeechModelProgress::failed(model.name(), message.clone()),
+        );
+        message
+    })
+}
+
+/// Opens a catalog speech model's page in the browser.
+#[tauri::command]
+pub async fn open_speech_model_source(
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let model = CatalogSpeech::named(&name)
+        .ok_or_else(|| format!("{name} is not a speech model Thalvi knows."))?;
+    let url = WebUrl::parse(model.source()).map_err(|error| error.to_string())?;
+    let host = state.host();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.open_url(&url).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("The page could not be opened: {error}"))?
+}
+
 #[tauri::command]
 pub async fn open_recordings(state: State<'_, AppState>) -> Result<(), String> {
     let folder = Recorder::user_dir().map_err(|error| error.to_string())?;
@@ -133,6 +237,33 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn progress_reaches_the_ui_as_name_percent_and_status() {
+        for (progress, expected) in [
+            (
+                SpeechProgress::Verifying,
+                json!({"name": "m", "percent": 0, "status": "verifying", "message": null}),
+            ),
+            (
+                SpeechProgress::Downloading { percent: 42 },
+                json!({"name": "m", "percent": 42, "status": "downloading", "message": null}),
+            ),
+            (
+                SpeechProgress::Done,
+                json!({"name": "m", "percent": 100, "status": "done", "message": null}),
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(SpeechModelProgress::of("m", progress)).ok(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(SpeechModelProgress::failed("m", "No network.".to_owned())).ok(),
+            Some(json!({"name": "m", "percent": 0, "status": "failed", "message": "No network."}))
+        );
+    }
 
     #[test]
     fn a_microphone_change_needs_a_pause_but_other_saves_do_not() {
