@@ -2,6 +2,7 @@
 
 mod app;
 mod commands;
+mod control;
 mod launch;
 mod overlay;
 mod runner;

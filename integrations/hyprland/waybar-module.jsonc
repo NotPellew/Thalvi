@@ -1,0 +1,22 @@
+// Add "custom/thalvi" to a Waybar modules list and merge this object into the config.
+//  /  /  are Font Awesome (or Nerd Font) microphone, microphone-slash, warning.
+// Left click pauses or resumes without moving focus; right click opens the settings.
+"custom/thalvi": {
+  "exec": "thalvi-desktop status",
+  "return-type": "json",
+  "interval": 1,
+  "format": "{icon}",
+  "format-icons": {
+    "paused": "",
+    "listening": "",
+    "capturing": "",
+    "pending": "",
+    "working": "",
+    "loading": "",
+    "error": "",
+    "unavailable": ""
+  },
+  "tooltip": true,
+  "on-click": "thalvi-desktop toggle",
+  "on-click-right": "thalvi-desktop"
+}

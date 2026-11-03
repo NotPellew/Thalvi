@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 
+const USAGE: &str =
+    "Usage: thalvi-desktop [toggle | pause | resume | cancel | status | config-file]";
+
 /// What a relaunch makes the running app do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -9,40 +12,56 @@ pub enum Command {
     Show,
     /// Pause listening, or resume it.
     Toggle,
+    /// Close the microphone and drop any capture in progress.
+    Pause,
+    /// Open the microphone again; the wake word still starts a capture.
+    Resume,
     /// Cancel the capture in progress.
     Cancel,
 }
 
+impl Command {
+    /// # Errors
+    /// Why this command may not start the app: only opening it may, the others control a running one.
+    pub fn first_start(self) -> Result<(), String> {
+        match self {
+            Self::Show => Ok(()),
+            _ => Err(
+                "Thalvi is not running, so there is nothing to control. Start Thalvi first."
+                    .to_owned(),
+            ),
+        }
+    }
+}
+
 /// The command line after the program name.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Launch {
-    pub command: Command,
-    /// A config file to use instead of the per-user one.
-    pub config: Option<PathBuf>,
+pub enum Launch {
+    /// Print the running app's state for a status bar; never starts the app.
+    Status,
+    Run {
+        command: Command,
+        /// A config file to use instead of the per-user one.
+        config: Option<PathBuf>,
+    },
 }
 
 impl Launch {
     /// # Errors
     /// The usage line when there is more than one argument.
     pub fn parse(args: &[String]) -> Result<Self, String> {
+        let run = |command, config| Ok(Self::Run { command, config });
         match args {
-            [] => Ok(Self {
-                command: Command::Show,
-                config: None,
-            }),
-            [word] if word == "toggle" => Ok(Self {
-                command: Command::Toggle,
-                config: None,
-            }),
-            [word] if word == "cancel" => Ok(Self {
-                command: Command::Cancel,
-                config: None,
-            }),
-            [path] => Ok(Self {
-                command: Command::Show,
-                config: Some(PathBuf::from(path)),
-            }),
-            _ => Err("Usage: thalvi-desktop [toggle | cancel | config-file]".to_owned()),
+            [] => run(Command::Show, None),
+            [word] => match word.as_str() {
+                "status" => Ok(Self::Status),
+                "toggle" => run(Command::Toggle, None),
+                "pause" => run(Command::Pause, None),
+                "resume" => run(Command::Resume, None),
+                "cancel" => run(Command::Cancel, None),
+                path => run(Command::Show, Some(PathBuf::from(path))),
+            },
+            _ => Err(USAGE.to_owned()),
         }
     }
 }
@@ -57,26 +76,40 @@ mod tests {
 
     #[test]
     fn a_launch_names_a_command_or_a_config_file() {
-        let launch = |command, config: Option<&str>| {
-            Ok(Launch {
+        let run = |command, config: Option<&str>| {
+            Ok(Launch::Run {
                 command,
                 config: config.map(PathBuf::from),
             })
         };
         for (args, expected) in [
-            (&[][..], launch(Command::Show, None)),
-            (&["toggle"][..], launch(Command::Toggle, None)),
-            (&["cancel"][..], launch(Command::Cancel, None)),
+            (&[][..], run(Command::Show, None)),
+            (&["toggle"][..], run(Command::Toggle, None)),
+            (&["pause"][..], run(Command::Pause, None)),
+            (&["resume"][..], run(Command::Resume, None)),
+            (&["cancel"][..], run(Command::Cancel, None)),
+            (&["status"][..], Ok(Launch::Status)),
             (
                 &["desktop.json"][..],
-                launch(Command::Show, Some("desktop.json")),
+                run(Command::Show, Some("desktop.json")),
             ),
-            (
-                &["a", "b"][..],
-                Err("Usage: thalvi-desktop [toggle | cancel | config-file]".to_owned()),
-            ),
+            (&["a", "b"][..], Err(USAGE.to_owned())),
+            (&["toggle", "x"][..], Err(USAGE.to_owned())),
         ] {
             assert_eq!(parse(args), expected, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn only_opening_the_app_may_start_it() {
+        for (command, starts) in [
+            (Command::Show, true),
+            (Command::Toggle, false),
+            (Command::Pause, false),
+            (Command::Resume, false),
+            (Command::Cancel, false),
+        ] {
+            assert_eq!(command.first_start().is_ok(), starts, "{command:?}");
         }
     }
 }

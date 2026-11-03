@@ -1,6 +1,7 @@
 //! Hyprland host: hyprctl, wtype and wl-copy.
 
 mod command;
+mod state;
 
 use std::fmt;
 use std::path::Path;
@@ -8,7 +9,9 @@ use std::path::Path;
 use serde::Deserialize;
 
 use self::command::{CommandError, CommandRunner, SystemRunner};
-use super::{App, Host, HostError, Modifier, OVERLAY_TITLE, Shortcut, TypedText, WebUrl};
+use super::{
+    App, Host, HostError, Modifier, OVERLAY_TITLE, Shortcut, StateServer, TypedText, WebUrl,
+};
 
 /// The window as Hyprland identifies it; the pid tells a reused address from the original window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +41,25 @@ impl Hyprland {
             std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
         )
         .map(|()| Self { run: SystemRunner })
+    }
+
+    /// Answers each query on the user's private runtime folder with `state()` until the guard is
+    /// dropped.
+    ///
+    /// # Errors
+    /// [`HostError::Unsupported`] when no private folder is available or another app answers.
+    pub fn serve_state(
+        state: impl Fn() -> &'static str + Send + 'static,
+    ) -> Result<StateServer, HostError> {
+        state::serve(state)
+    }
+
+    /// The running app's state word; `None` when no app answers.
+    ///
+    /// # Errors
+    /// [`HostError::Unsupported`] when the answer could not be asked or read.
+    pub fn query_state() -> Result<Option<String>, HostError> {
+        state::query()
     }
 }
 
