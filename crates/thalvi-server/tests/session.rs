@@ -3479,6 +3479,7 @@ async fn a_private_conversation_leaves_no_content_on_disk_with_every_recording_o
             "Secret title",
         ],
     );
+    harness.store.flush().await;
     assert!(
         files_under(&harness.dir.0.join("sessions")).is_empty(),
         "no conversation file"
@@ -3662,6 +3663,7 @@ async fn failure_cancel_and_disconnect_in_a_private_conversation_save_nothing_an
             harness.client.close(None).await.unwrap();
             wait_closed(&harness, 2).await;
         }
+        harness.store.flush().await;
         assert!(
             files_under(&harness.dir.0.join("sessions")).is_empty(),
             "{case}: a conversation file was written"
@@ -3701,6 +3703,7 @@ async fn a_private_conversation_cannot_be_resumed_and_the_refusal_starts_nothing
         expect_closed(&mut client).await;
     }
     assert_eq!(harness.model.calls().len(), calls_before);
+    harness.store.flush().await;
     assert_eq!(saved_titles(&harness), Vec::<String>::new());
     harness.server.abort();
 }
