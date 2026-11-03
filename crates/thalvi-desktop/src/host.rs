@@ -141,6 +141,9 @@ pub trait Host: Send + Sync {
     /// `Display` names it in notices, without its title.
     type Target: Clone + PartialEq + fmt::Debug + fmt::Display + Send + 'static;
 
+    /// Whether a click on the overlay reaches it; where it does not, the overlay shows no buttons.
+    const OVERLAY_TAKES_CLICKS: bool;
+
     /// Binds the focused window.
     ///
     /// # Errors

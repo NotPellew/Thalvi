@@ -16,8 +16,9 @@ function pick(selector: string): HTMLElement {
   return found;
 }
 
-function mount(settings = SETTINGS) {
+function mount(settings = SETTINGS, clicks = true) {
   const stub = stubBackend(settings);
+  stub.backend.overlayTakesClicks.mockResolvedValue(clicks);
   const clock = manualClock();
   mountOverlay(root, stub.backend, clock);
   return { ...stub, clock };
@@ -186,19 +187,25 @@ describe("level bars", () => {
   });
 });
 
-describe("the cancel button", () => {
-  it("shows while a capture can still be cancelled and hides once delivery starts", async () => {
-    const { emit } = mount();
-    await settle();
-    const shown = (status: Status): boolean => {
-      emit(status);
-      return !pick(".x").hidden;
-    };
-    expect(shown({ state: "capturing", target: null, committed: "", partial: null })).toBe(true);
-    expect(shown({ state: "working", target: "Slack", route: "task", cancellable: true })).toBe(true);
-    expect(shown({ state: "working", target: "Slack", route: "task", cancellable: false })).toBe(false);
-    expect(shown({ state: "done", target: "Slack", route: "task", notice: "Done" })).toBe(false);
-  });
+describe("the cancel buttons", () => {
+  it.each([
+    { clicks: true, capturing: true, working: true },
+    { clicks: false, capturing: false, working: false },
+  ])(
+    "with clicks reaching the overlay: $clicks, show while a capture can still be cancelled",
+    async ({ clicks, capturing, working }) => {
+      const { emit } = mount(SETTINGS, clicks);
+      await settle();
+      const shown = (status: Status): boolean[] => {
+        emit(status);
+        return [!pick(".x").hidden, !pick(".mx").hidden];
+      };
+      expect(shown({ state: "capturing", target: null, committed: "", partial: null })).toEqual([capturing, capturing]);
+      expect(shown({ state: "working", target: "Slack", route: "task", cancellable: true })).toEqual([working, working]);
+      expect(shown({ state: "working", target: "Slack", route: "task", cancellable: false })).toEqual([false, false]);
+      expect(shown({ state: "done", target: "Slack", route: "task", notice: "Done" })).toEqual([false, false]);
+    },
+  );
 });
 
 describe("backend calls", () => {

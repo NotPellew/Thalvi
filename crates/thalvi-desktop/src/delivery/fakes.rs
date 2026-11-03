@@ -66,6 +66,8 @@ impl FakeHost {
 impl Host for FakeHost {
     type Target = FakeWindow;
 
+    const OVERLAY_TAKES_CLICKS: bool = true;
+
     fn capture_target(&self) -> Result<FakeWindow, HostError> {
         self.record("capture_target", "capture_target".to_owned())?;
         Ok(FakeWindow("the editor"))
