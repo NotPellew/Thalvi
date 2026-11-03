@@ -822,15 +822,29 @@ function recordings({ draft, backend, controls }: PageContext): HTMLElement[] {
   ];
 }
 
-function entryCard(entry: HistoryEntry, remove: () => void): HTMLElement {
+function entryCard(entry: HistoryEntry, remove: () => void, copyText: (text: string) => Promise<void>): HTMLElement {
   const when = new Date(entry.timestamp_ms);
   const time = el("time", { datetime: when.toISOString() }, WHEN.format(when));
   const header = el("header", {}, time);
   if (entry.target !== null) header.append(el("span", { class: "target" }, entry.target));
   header.append(el("span", { class: "outcome" }, OUTCOMES[entry.outcome]));
+  const result = el("p", { class: "note", role: "status", hidden: true });
+  const copy = button("Copy", () => {
+    copyText(entry.text).then(
+      () => {
+        result.className = "note ok";
+        say(result, "Copied to the clipboard.");
+      },
+      (error: unknown) => {
+        result.className = "note";
+        say(result, errorText(error));
+      },
+    );
+  }, "quiet");
+  copy.setAttribute("aria-label", `Copy the entry from ${time.textContent}`);
   const del = button("Delete", remove, "quiet");
   del.setAttribute("aria-label", `Delete the entry from ${time.textContent}`);
-  return el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, entry.text), del);
+  return el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, entry.text), result, el("span", { class: "trow" }, copy, del));
 }
 
 /** A button that asks before it acts: it is replaced by the question and a yes and a no. */
@@ -864,7 +878,7 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
   const problem = note();
   const copy = button("Copy text", () => {
     say(problem, "");
-    backend.copyDraft(text.value).then(
+    backend.copyText(text.value).then(
       () => {
         say(done, "Copied to the clipboard.");
       },
@@ -948,7 +962,7 @@ function history(context: PageContext): HTMLElement[] {
     backend.getHistory().then(
       (entries) => {
         say(problem, "");
-        list.replaceChildren(...(entries.length === 0 ? [nothing] : entries.map((entry) => entryCard(entry, () => { change(backend.deleteHistoryEntry(entry.id)); }))));
+        list.replaceChildren(...(entries.length === 0 ? [nothing] : entries.map((entry) => entryCard(entry, () => { change(backend.deleteHistoryEntry(entry.id)); }, (text) => backend.copyText(text)))));
       },
       (error: unknown) => {
         say(problem, errorText(error));

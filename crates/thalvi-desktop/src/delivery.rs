@@ -327,6 +327,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn copying_text_puts_it_on_the_clipboard_and_says_why_it_could_not() {
+        let locked = HostError::Unsupported("The clipboard is locked.".to_owned());
+        for (host, expected) in [
+            (FakeHost::default(), Ok(())),
+            (
+                FakeHost::default().failing("copy", locked.clone()),
+                Err(locked),
+            ),
+        ] {
+            let delivery = Delivery::new(host);
+            let result = delivery.copy_text(&Recorder::disabled(), "fixed").await;
+            assert_eq!(result, expected);
+            assert_eq!(delivery.host.calls(), ["copy:\"fixed\""]);
+        }
+    }
+
+    #[tokio::test]
     async fn only_text_that_reached_its_destination_counts_as_delivered() {
         let deliver_fails =
             || FakeHost::default().failing("deliver", HostError::NothingTyped("No.".to_owned()));

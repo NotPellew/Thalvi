@@ -284,7 +284,7 @@ fn start() -> Result<(), String> {
             commands::clear_history,
             commands::get_draft,
             commands::edit_draft,
-            commands::copy_draft,
+            commands::copy_text,
             commands::discard_draft,
         ])
         .setup(move |app| {

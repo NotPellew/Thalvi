@@ -1,4 +1,4 @@
-//! The last dictation, kept in memory so the user can fix it and copy it.
+//! The last dictation, kept in memory so the user can fix it before copying it.
 
 use std::fmt::Display;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -6,11 +6,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use serde::Serialize;
 
 use crate::capture::CaptureRoute;
-use crate::delivery::{Bound, Delivery, Finished};
+use crate::delivery::{Bound, Finished};
 use crate::engine::CaptureOutcome;
 use crate::history::{Capture, Outcome};
-use crate::host::{Host, HostError};
-use crate::metrics::Recorder;
 
 /// What the last delivery of the draft's text came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -24,16 +22,10 @@ pub enum DraftOutcome {
     MaybePartial,
 }
 
-/// Why a draft action was refused. Messages are shown to the user as written.
+/// There is no draft to edit. Shown to the user as written.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub enum DraftError {
-    #[error("There is no dictation to work on.")]
-    NoDraft,
-    #[error("There is no text. Type some, or discard this draft.")]
-    Empty,
-    #[error("{0}")]
-    Host(HostError),
-}
+#[error("There is no dictation to work on.")]
+pub struct NoDraft;
 
 /// A draft as the UI shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -147,39 +139,19 @@ impl Drafts {
     /// Stores the edited `text`; nothing is recognized, copied or sent.
     ///
     /// # Errors
-    /// [`DraftError::NoDraft`] when there is no draft.
-    pub fn edit(&self, text: String) -> Result<(), DraftError> {
+    /// [`NoDraft`] when there is no draft.
+    pub fn edit(&self, text: String) -> Result<(), NoDraft> {
         self.slot()
             .current
             .as_mut()
             .map(|draft| draft.text = text)
-            .ok_or(DraftError::NoDraft)
+            .ok_or(NoDraft)
     }
 
     /// Drops the draft; a newer dictation that waited takes its place.
     pub fn discard(&self) {
         let mut slot = self.slot();
         slot.current = slot.newer.take();
-    }
-
-    /// Puts the edited `text` on the clipboard.
-    ///
-    /// # Errors
-    /// Why there is nothing to copy, or why the clipboard could not be set.
-    pub async fn copy<H: Host + 'static>(
-        &self,
-        delivery: &Delivery<H>,
-        recorder: &Recorder,
-        text: String,
-    ) -> Result<(), DraftError> {
-        self.edit(text.clone())?;
-        if text.trim().is_empty() {
-            return Err(DraftError::Empty);
-        }
-        delivery
-            .copy_text(recorder, &text)
-            .await
-            .map_err(DraftError::Host)
     }
 }
 
@@ -188,8 +160,10 @@ mod tests {
     use super::*;
     use crate::capture::CaptureRequest;
     use crate::config::DesktopConfig;
-    use crate::delivery::fakes::FakeHost;
+    use crate::delivery::{Delivery, fakes::FakeHost};
     use crate::engine::CaptureError;
+    use crate::host::HostError;
+    use crate::metrics::Recorder;
 
     fn paste_outcome(text: &str) -> CaptureOutcome {
         CaptureOutcome::Accepted(CaptureRequest {
@@ -325,43 +299,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_edit_cannot_be_copied() {
-        let (drafts, delivery) = offered(FakeHost::default(), &cancelled("hello")).await;
-        let before = delivery.host().calls();
-        for text in ["", "  \n "] {
-            assert_eq!(
-                drafts
-                    .copy(&delivery, &Recorder::disabled(), text.to_owned())
-                    .await,
-                Err(DraftError::Empty),
-                "{text:?}"
-            );
-        }
-        assert_eq!(delivery.host().calls(), before);
-    }
-
-    #[tokio::test]
-    async fn copy_puts_the_edit_on_the_clipboard_and_a_failure_keeps_the_text() {
-        let denied = HostError::Unsupported("The clipboard is locked.".to_owned());
-        for (host, expected) in [
-            (FakeHost::default(), Ok(())),
-            (
-                FakeHost::default().failing("copy", denied.clone()),
-                Err(DraftError::Host(denied)),
-            ),
-        ] {
-            let (drafts, delivery) = offered(host, &cancelled("wrong")).await;
-            let before = delivery.host().calls().len();
-            let result = drafts
-                .copy(&delivery, &Recorder::disabled(), "fixed".to_owned())
-                .await;
-            assert_eq!(result, expected);
-            assert_eq!(delivery.host().calls()[before..], ["copy:\"fixed\""]);
-            assert_eq!(drafts.view().unwrap().text, "fixed");
-        }
-    }
-
-    #[tokio::test]
     async fn a_newer_dictation_waits_while_the_draft_is_edited() {
         let shown = |drafts: &Drafts| drafts.view().map(|view| (view.text, view.newer_waiting));
         let some = |text: &str, waiting| Some((text.to_owned(), waiting));
@@ -396,6 +333,6 @@ mod tests {
         let (drafts, _) = offered(FakeHost::default(), &cancelled("hello")).await;
         drafts.discard();
         assert_eq!(drafts.view(), None);
-        assert_eq!(drafts.edit("x".to_owned()), Err(DraftError::NoDraft));
+        assert_eq!(drafts.edit("x".to_owned()), Err(NoDraft));
     }
 }

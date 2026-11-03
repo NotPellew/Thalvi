@@ -186,7 +186,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
       if (draft) draft.text = text;
       return Promise.resolve();
     },
-    copyDraft: () => Promise.resolve(),
+    copyText: () => Promise.resolve(),
     discardDraft: () => {
       draft = null;
       return Promise.resolve();

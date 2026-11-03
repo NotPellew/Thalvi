@@ -64,7 +64,7 @@ textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .entry { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; }
 .entry header { grid-column: 1; display: flex; flex-wrap: wrap; gap: 2px 10px; font: 12px var(--mono); color: var(--mut); }
 .entry p { grid-column: 1; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.entry button { grid-column: 2; grid-row: 1 / span 2; align-self: start; }
+.entry .trow { grid-column: 2; grid-row: 1 / span 2; align-self: start; }
 .entry[data-outcome="failed"] .outcome { color: var(--warn); }
 .mini { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--mut); }
 .mini input, .mini select { font-size: 13px; color: var(--fg); }

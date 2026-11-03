@@ -77,7 +77,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     clearHistory: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     getDraft: vi.fn<() => Promise<Draft | null>>(() => Promise.resolve(null)),
     editDraft: vi.fn<(text: string) => Promise<void>>(() => Promise.resolve()),
-    copyDraft: vi.fn<(text: string) => Promise<void>>(() => Promise.resolve()),
+    copyText: vi.fn<(text: string) => Promise<void>>(() => Promise.resolve()),
     discardDraft: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     onOpenPage: vi.fn((listener: (page: string) => void) => pageListeners.push(listener)),
     getStartAtLogin: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),

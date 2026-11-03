@@ -1051,6 +1051,21 @@ describe("history", () => {
     expect(group().querySelector(".trow")?.hasAttribute("hidden")).toBe(true);
   });
 
+  it("copies exactly one entry's text and says so on that row, or says why it could not", async () => {
+    const stub = await openHistory(ENTRIES);
+    const rows = cards();
+    within(rows[1] as HTMLElement, "Copy").click();
+    await settle();
+    expect(stub.backend.copyText).toHaveBeenCalledExactlyOnceWith("The window was gone.");
+    expect(rows.map((card) => card.querySelector(".note")?.textContent ?? "")).toEqual(["", "Copied to the clipboard.", ""]);
+    expect(within(rows[1] as HTMLElement, "Copy").getAttribute("aria-label")).toMatch(/^Copy the entry from /);
+
+    stub.backend.copyText.mockRejectedValueOnce("The clipboard is locked.");
+    within(rows[0] as HTMLElement, "Copy").click();
+    await settle();
+    expect(rows.map((card) => card.querySelector(".note")?.textContent ?? "")).toEqual(["The clipboard is locked.", "Copied to the clipboard.", ""]);
+  });
+
   it("shows why the history cannot be read and lets the user start a new one", async () => {
     const damaged = "The history file /home/me/history.json is damaged (EOF). Clear the history to start a new one.";
     const stub = await openHistory(new Error(damaged), [ENTRIES[0] as HistoryEntry]);
@@ -1147,7 +1162,7 @@ describe("last dictation", () => {
     within(section(), "Reset to original").click();
     expect(area().value).toBe(DRAFT.original);
     expect(stub.backend.editDraft).toHaveBeenLastCalledWith(DRAFT.original);
-    expect(stub.backend.copyDraft).not.toHaveBeenCalled();
+    expect(stub.backend.copyText).not.toHaveBeenCalled();
     expect(stub.backend.saveSettings).not.toHaveBeenCalled();
   });
 
@@ -1166,10 +1181,10 @@ describe("last dictation", () => {
     edit("fixed text");
     within(section(), "Copy text").click();
     await settle();
-    expect(stub.backend.copyDraft).toHaveBeenCalledExactlyOnceWith("fixed text");
+    expect(stub.backend.copyText).toHaveBeenCalledExactlyOnceWith("fixed text");
     expect(notes()).toContain("Copied to the clipboard.");
 
-    stub.backend.copyDraft.mockRejectedValueOnce("The clipboard is locked.");
+    stub.backend.copyText.mockRejectedValueOnce("The clipboard is locked.");
     within(section(), "Copy text").click();
     await settle();
     expect(notes()).toContain("The clipboard is locked.");

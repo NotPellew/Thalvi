@@ -164,8 +164,8 @@ export interface Backend {
   getDraft(): Promise<Draft | null>;
   /** Keeps the edited text; nothing is recognized, copied or typed. */
   editDraft(text: string): Promise<void>;
-  /** Puts the text on the clipboard; rejects with the plain reason it could not. */
-  copyDraft(text: string): Promise<void>;
+  /** Puts the text on the clipboard through the desktop; rejects with the plain reason it could not. */
+  copyText(text: string): Promise<void>;
   discardDraft(): Promise<void>;
   /** The tray asked for the settings page with this id. */
   onOpenPage(listener: (page: string) => void): void;

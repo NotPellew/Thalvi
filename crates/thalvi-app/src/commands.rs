@@ -328,14 +328,14 @@ pub fn edit_draft(text: String, state: State<'_, AppState>) -> Result<(), String
     state.drafts.edit(text).map_err(|error| error.to_string())
 }
 
-/// Puts the edited text on the clipboard.
+/// Puts `text` on the clipboard through the desktop.
 #[tauri::command]
-pub async fn copy_draft(text: String, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn copy_text(text: String, state: State<'_, AppState>) -> Result<(), String> {
     let recorder =
         Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
     state
-        .drafts
-        .copy(&state.delivery, &recorder, text)
+        .delivery
+        .copy_text(&recorder, &text)
         .await
         .map_err(|error| error.to_string())
 }
