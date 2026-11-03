@@ -774,6 +774,20 @@ mod tests {
     }
 
     #[test]
+    fn the_modifier_release_ends_the_hold_even_while_windows_still_reports_the_modifier_down() {
+        let mut hook = HoldHook::new(HoldKey::default());
+        let alt = |vk| vk == ALT;
+        let _ = hook.on_event(event(ALT, true), alt);
+        let _ = hook.on_event(event(Z, true), alt);
+        assert_eq!(hook.on_event(event(Z, false), alt), SWALLOW);
+        // Windows has not yet cleared the Alt this very event releases.
+        assert_eq!(
+            hook.on_event(event(ALT, false), alt),
+            decision(Verdict::Mask, Some(false))
+        );
+    }
+
+    #[test]
     fn a_modifier_release_lost_while_the_key_is_up_still_ends_the_hold_on_the_next_event() {
         let mut hook = HoldHook::new(HoldKey::default());
         let alt = |vk| vk == ALT;
