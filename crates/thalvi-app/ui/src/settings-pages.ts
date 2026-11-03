@@ -118,30 +118,12 @@ function miniField(label: string, field: Field): HTMLElement {
   return el("label", { class: "mini" }, el("span", {}, label), field.node);
 }
 
-function general({ draft, backend, controls, live, root }: PageContext): HTMLElement[] {
+function general({ draft, controls, root }: PageContext): HTMLElement[] {
   const server = controls.text(draft.server, (value) => {
     draft.server = value;
   }, { placeholder: "ws://127.0.0.1:8080" });
-  const listening = controls.toggle(true, () => undefined);
-  const input = listening.field as HTMLInputElement;
-  const problem = note();
-  input.addEventListener("change", () => {
-    say(problem, "");
-    const wanted = input.checked;
-    backend.setListening(wanted).catch((error: unknown) => {
-      input.checked = !wanted;
-      say(problem, errorText(error));
-    });
-  });
-  live.listening = (on) => {
-    input.checked = on;
-  };
   return [
     row("Server address", "Where Thalvi sends speech for recognition.", server),
-    row("Listening", "Turns the microphone on or off now; this is not part of Save.", {
-      node: el("span", { class: "stack" }, listening.node, problem),
-      field: input,
-    }),
     row("Look", "How the overlay and this window look. The overlay changes after the current capture.",
       lookPicker(draft.look, (look) => {
         draft.look = look;
@@ -312,7 +294,7 @@ function recognition({ draft, controls }: PageContext): HTMLElement[] {
   ];
 }
 
-function microphone({ draft, controls, microphones, live, audio }: PageContext): HTMLElement[] {
+function microphone({ draft, backend, controls, microphones, live, audio }: PageContext): HTMLElement[] {
   const names = Array.isArray(microphones) ? microphones : [];
   const saved = draft.microphone;
   const options: (readonly [string, string])[] = [
@@ -336,9 +318,27 @@ function microphone({ draft, controls, microphones, live, audio }: PageContext):
   live.level = (level) => {
     meter.style.transform = `scaleX(${Math.min(1, Math.max(0, level)).toFixed(3)})`;
   };
+  const listening = controls.toggle(true, () => undefined);
+  const listeningInput = listening.field as HTMLInputElement;
+  const problem = note();
+  listeningInput.addEventListener("change", () => {
+    say(problem, "");
+    const wanted = listeningInput.checked;
+    backend.setListening(wanted).catch((error: unknown) => {
+      listeningInput.checked = !wanted;
+      say(problem, errorText(error));
+    });
+  });
+  live.listening = (on) => {
+    listeningInput.checked = on;
+  };
   const rows = [
-    row("Saved device", Array.isArray(microphones) ? "Pause listening to change it. Saving writes this choice; it does not prove a microphone opened." : null, picker),
-    row("Active microphone", "The device actually open now. This is different from the saved choice above.", {
+    group("Right now"),
+    row("Listening", "Turns the microphone on or off now; this is not part of Save.", {
+      node: el("span", { class: "stack" }, listening.node, problem),
+      field: listeningInput,
+    }),
+    row("Active microphone", "The device actually open now. This is different from the saved choice below.", {
       node: active,
       field: el("span", { id: uid("f") }),
     }),
@@ -346,6 +346,8 @@ function microphone({ draft, controls, microphones, live, audio }: PageContext):
       node: el("span", { class: "meter", role: "meter", "aria-valuemin": "0", "aria-valuemax": "1" }, meter),
       field: el("span", { id: uid("f") }),
     }),
+    group("Saved with Save"),
+    row("Saved device", Array.isArray(microphones) ? "Pause listening to change it. Saving writes this choice; it does not prove a microphone opened." : null, picker),
   ];
   if (!Array.isArray(microphones)) {
     rows.unshift(el("p", { class: "note", role: "alert" }, `Microphones could not be listed: ${microphones.error}`));

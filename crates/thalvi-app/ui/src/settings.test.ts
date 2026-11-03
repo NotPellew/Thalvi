@@ -293,6 +293,33 @@ describe("live controls", () => {
     expect(rowOf("Listening").querySelector(".note")?.textContent).toBe("No microphone.");
   });
 
+  it("pauses, changes the device, saves and resumes from the Microphone page only", async () => {
+    const stub = await open();
+    const pageOf = (label: string): string | null => rowOf(label).closest("section")?.getAttribute("data-page") ?? null;
+    expect(pageOf("Listening")).toBe("microphone");
+    expect(root.querySelectorAll('.row[data-label="listening"]')).toHaveLength(1);
+    expect(root.querySelector('section[data-page="general"] input[type=checkbox]')).toBeNull();
+
+    goTo("microphone");
+    const toggle = control("Listening", "input");
+    const picker = control("Saved device", "select");
+    expect(picker.disabled).toBe(true);
+    flip(toggle);
+    expect(stub.backend.setListening).toHaveBeenLastCalledWith(false);
+    stub.emit({ state: "paused" });
+    expect(picker.disabled).toBe(false);
+
+    choose(picker, "USB Microphone");
+    button("Save").click();
+    await settle();
+    expect(sent(stub).microphone).toBe("USB Microphone");
+    expect(toggle.checked).toBe(false);
+    expect(stub.backend.setListening).toHaveBeenCalledTimes(1);
+
+    flip(toggle);
+    expect(stub.backend.setListening).toHaveBeenLastCalledWith(true);
+  });
+
   it("follows the status for the listening switch", async () => {
     const stub = await open();
     stub.emit({ state: "paused" });
