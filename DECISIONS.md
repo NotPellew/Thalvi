@@ -151,6 +151,10 @@ areas your change touches. Editing rules are in
   only an explicit Continue here resumes, moving a live one from its device.
   Why: browsing must not cut off the device in use. Rejected: resume on open,
   shared ownership. Desktop conversation clients follow the same split.
+- **Private conversations hold no store.** `/session?private=1` opens one with no store handle: never saved,
+  listed, titled, retired or searched from others, metrics only whatever `THALVI_RECORD` says; closing ends it
+  and a `private-` id can't be resumed. Desktop clients send the same flag and keep nothing derived locally.
+  Why: a type that cannot write beats a flag that must not. Rejected: a private flag on saved sessions, reconnecting into a fresh saved one.
 - **Opt-in retirement with editable learnings.** `THALVI_RETIRE_DAYS` replaces
   old transcripts with summaries and keeps durable facts in a separate editable
   store. Why: bound retention without losing useful context. Rejected:

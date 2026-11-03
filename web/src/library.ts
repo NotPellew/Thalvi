@@ -20,6 +20,8 @@ export interface LibraryPorts {
   /** Joins `id`, taking it over from any other device. */
   open(id: string): void;
   startNew(): void;
+  /** Starts a conversation the server keeps in memory only. */
+  startPrivate(): void;
 }
 
 /** The control the view should focus after the list changes from `previous` to `state`. */
@@ -141,6 +143,11 @@ export class Library {
 
   startNew(): void {
     this.ports.startNew();
+    this.hide();
+  }
+
+  startPrivate(): void {
+    this.ports.startPrivate();
     this.hide();
   }
 

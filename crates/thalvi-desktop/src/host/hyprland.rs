@@ -251,6 +251,9 @@ impl<R: CommandRunner> Hyprland<R> {
 impl<R: CommandRunner> Host for Hyprland<R> {
     type Target = Window;
 
+    // Hyprland routes no pointer input to a `no_focus` window, and the overlay must stay one.
+    const OVERLAY_TAKES_CLICKS: bool = false;
+
     fn capture_target(&self) -> Result<Window, HostError> {
         self.active()
     }

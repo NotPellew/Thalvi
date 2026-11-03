@@ -148,6 +148,8 @@ export interface Backend {
   saveSettings(settings: Settings): Promise<void>;
   setListening(on: boolean): Promise<void>;
   cancelCapture(): Promise<void>;
+  /** Whether a click on the overlay reaches it; Hyprland gives a window that never takes focus no clicks. */
+  overlayTakesClicks(): Promise<boolean>;
   /** The user dismissed the latest error; the overlay stops showing it. */
   dismissError(): Promise<void>;
   /** Puts an error report for `message` on the clipboard; rejects with the plain reason it could not. */

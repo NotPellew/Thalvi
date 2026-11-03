@@ -14,7 +14,7 @@ use tauri::{AppHandle, Emitter, State};
 use thalvi_desktop::audio;
 use thalvi_desktop::draft::DraftView;
 use thalvi_desktop::history::{Entry, HistoryError, Store as History};
-use thalvi_desktop::host::{Host, WebUrl};
+use thalvi_desktop::host::{Desktop, Host, WebUrl};
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{
     CatalogSpeech, ModelError, ModelStore, SpeechModelInfo, SpeechProgress,
@@ -34,6 +34,11 @@ use crate::switch::{SwitchState, Unavailable};
 #[tauri::command]
 pub fn get_status(state: State<'_, AppState>) -> Status {
     state.link.status()
+}
+
+#[tauri::command]
+pub fn overlay_takes_clicks() -> bool {
+    Desktop::OVERLAY_TAKES_CLICKS
 }
 
 #[tauri::command]

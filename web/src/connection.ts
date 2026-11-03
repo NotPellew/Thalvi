@@ -29,6 +29,12 @@ export function sessionUrl(
   return `${scheme}://${location.host}/session${query}`;
 }
 
+/** The address of a new private conversation: no resume id, and nothing the server keeps. */
+export function privateSessionUrl(location: Pick<Location, "protocol" | "host">): string {
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  return `${scheme}://${location.host}/session?private=1`;
+}
+
 export class Connection {
   private socket: Socket | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -36,15 +42,19 @@ export class Connection {
   private readonly url: () => string;
   private readonly handlers: ConnectionHandlers;
   private readonly openSocket: (url: string) => Socket;
+  private readonly reconnects: () => boolean;
 
+  /** `reconnects` is asked after each loss; false leaves the connection closed for good. */
   constructor(
     url: () => string,
     handlers: ConnectionHandlers,
     openSocket: (url: string) => Socket = (u) => new WebSocket(u),
+    reconnects: () => boolean = () => true,
   ) {
     this.url = url;
     this.handlers = handlers;
     this.openSocket = openSocket;
+    this.reconnects = reconnects;
   }
 
   connect(): void {
@@ -62,6 +72,7 @@ export class Connection {
     socket.onclose = () => {
       this.socket = null;
       this.handlers.onLost();
+      if (!this.reconnects()) return;
       this.timer = setTimeout(() => {
         this.connect();
       }, reconnectDelay(this.failures++));
