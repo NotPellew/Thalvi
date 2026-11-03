@@ -15,9 +15,8 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `9e45370212e60a7fe9b1344efcc347e1c7a2e69d`; the recorded file
-hashes describe the working change that fixes the failure below, until it is
-committed and the commit is moved here. The model was updated for that change
+Sync commit: `edbeca9e587acc338edbd31517ea1951a251c443`. The recorded file hashes
+match the committed capture fixes. The model was updated from those changes
 before it was rerun.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
