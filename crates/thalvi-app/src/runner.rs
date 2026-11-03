@@ -850,12 +850,13 @@ async fn while_delivering<T>(
     let mut delivery = pin!(delivery);
     loop {
         tokio::select! {
-            finished = &mut delivery => return finished,
+            biased;
             Ok(()) = key.changed() => {
                 if key.take().is_some() {
                     refuse();
                 }
             }
+            finished = &mut delivery => return finished,
         }
     }
 }
