@@ -19,8 +19,8 @@ export interface ControllerPorts {
   stopConnection(): void;
   /** Drops the current connection and joins conversation `id`, or starts a new one for null. */
   connect(id: string | null): void;
-  /** Stops the mic and audio context; the server has fallen back to text input by itself. */
-  releaseVoice(): void;
+  /** Stops the mic and the audio context that neither Voice nor Speak replies needs any more. */
+  releaseUnused(): void;
   onChange(state: SessionState): void;
 }
 
@@ -36,7 +36,8 @@ export class Controller {
   opened(): void {
     this.receivedAudioBytes = 0;
     this.apply({ type: "opened" });
-    if (this.state.voice) this.sendVoice(true);
+    if (this.state.voice) this.ports.send(inputMessage("mic"));
+    if (this.state.speak) this.ports.send(replyAudioMessage(true));
   }
 
   lost(): void {
@@ -44,11 +45,28 @@ export class Controller {
     this.apply({ type: "lost" });
   }
 
-  /** `notice` explains why voice went off by itself; null for the user's own choice. */
-  setVoice(on: boolean, notice: string | null = null): void {
-    this.sendVoice(on);
+  /** The one-click Voice control: microphone input and spoken replies together. */
+  setVoice(on: boolean): void {
+    this.ports.send(inputMessage(on ? "mic" : "text"));
+    this.ports.send(replyAudioMessage(on));
     if (!on) this.ports.playback.flush();
-    this.apply({ type: "voice", on, notice });
+    this.apply({ type: "voice", on, speak: on, notice: null });
+    if (!on) this.ports.releaseUnused();
+  }
+
+  /** Spoken replies on or off, whatever the input; off drops the queued reply audio. */
+  setSpeak(on: boolean): void {
+    this.ports.send(replyAudioMessage(on));
+    if (!on) this.ports.playback.flush();
+    this.apply({ type: "speak", on });
+    if (!on) this.ports.releaseUnused();
+  }
+
+  /** The microphone failed: falls back to text input and leaves spoken replies as they were. */
+  micStopped(notice: string): void {
+    this.ports.send(inputMessage("text"));
+    this.apply({ type: "voice", on: false, speak: this.state.speak, notice });
+    this.ports.releaseUnused();
   }
 
   notify(notice: string): void {
@@ -99,23 +117,19 @@ export class Controller {
     if (message.type === "session") this.ports.remember(message.id);
     if (message.type === "ended") {
       this.ports.playback.flush();
-      if (this.state.voice) this.ports.releaseVoice();
+      this.apply({ type: "server", message });
+      this.ports.releaseUnused();
       this.ports.forget();
       this.ports.stopConnection();
+      return;
     }
     if (message.type === "input" && message.source === "text") {
       if (!this.state.voice) return;
-      this.ports.playback.flush();
-      this.ports.releaseVoice();
-      this.ports.send(replyAudioMessage(false));
+      this.apply({ type: "server", message });
+      this.ports.releaseUnused();
+      return;
     }
     this.apply({ type: "server", message });
-  }
-
-  /** The one Voice control drives both server choices together. */
-  private sendVoice(on: boolean): void {
-    this.ports.send(inputMessage(on ? "mic" : "text"));
-    this.ports.send(replyAudioMessage(on));
   }
 
   private apply(event: SessionEvent): void {

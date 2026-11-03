@@ -185,6 +185,7 @@ const MARKUP = `
       <span class="o-brand">Thalvi</span>
       <div class="o-head-actions">
         <button class="o-speed-chip" type="button" aria-expanded="false" aria-label="Playback speed 1×">1×</button>
+        <button class="o-speak" type="button" role="switch" aria-checked="false">Speak replies</button>
         <button class="o-voice" type="button" aria-pressed="false">${icon("mic")}<span class="o-voice-text">Voice off</span></button>
       </div>
     </header>
@@ -317,6 +318,7 @@ export function createView(root: HTMLElement) {
   const page = find(root, ".orb-app", HTMLDivElement);
   const voice = find(page, ".o-voice", HTMLButtonElement);
   const voiceText = find(page, ".o-voice-text", HTMLSpanElement);
+  const speak = find(page, ".o-speak", HTMLButtonElement);
   const orb = find(page, ".o-orb", HTMLButtonElement);
   const orbArt = find(page, ".o-orb-art", HTMLSpanElement);
   const coreIc = find(page, ".o-core-ic", HTMLSpanElement);
@@ -389,7 +391,7 @@ export function createView(root: HTMLElement) {
   let submitHandler: ((text: string) => void) | null = null;
   let stopHandler: (() => void) | null = null;
   let voiceHandler: (() => void) | null = null;
-  let voiceBusy = false;
+  let busyWith: "mic" | "audio" | null = null;
   let online = false;
   let ended = false;
   let shownState: DisplayState | null = null;
@@ -483,7 +485,7 @@ export function createView(root: HTMLElement) {
   const api = {
     render(s: SessionState) {
       lastState = s;
-      const display = displayState(s, voiceBusy);
+      const display = displayState(s, busyWith === "mic");
       const text = stateText(display, s.voice);
       if (hint.textContent !== text.hint) hint.textContent = text.hint;
       const nearBottom =
@@ -513,7 +515,7 @@ export function createView(root: HTMLElement) {
       const busy = display === "speaking" || display === "thinking" || display === "working";
       const offline = display === "connecting" || display === "reconnecting" || display === "ended";
       orbAction = busy ? "stop" : offline ? "none" : "voice";
-      orb.disabled = orbAction === "none" || (orbAction === "voice" && voiceBusy);
+      orb.disabled = orbAction === "none" || (orbAction === "voice" && busyWith !== null);
       orb.setAttribute(
         "aria-label",
         busy ? "Stop" : display === "idle" ? "Start talking" : offline ? STATES[display].label : "End voice",
@@ -525,7 +527,9 @@ export function createView(root: HTMLElement) {
 
       voice.setAttribute("aria-pressed", String(s.voice));
       voiceText.textContent = s.voice ? "Voice on" : "Voice off";
-      voice.disabled = voiceBusy || ended;
+      voice.disabled = busyWith !== null || ended;
+      speak.setAttribute("aria-checked", String(s.replyAudio));
+      speak.disabled = busyWith !== null || !online;
 
       empty.hidden = s.turns.length > 0 || s.partial !== "";
       tasks.hidden = s.tasks.length === 0;
@@ -559,8 +563,9 @@ export function createView(root: HTMLElement) {
         scroller.scrollTop += latest.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 26;
       }
     },
-    setVoiceBusy(busy: boolean) {
-      voiceBusy = busy;
+    /** The Voice and Speak replies controls wait while the mic or the audio context is starting. */
+    setBusy(busy: "mic" | "audio" | null) {
+      busyWith = busy;
       if (lastState) api.render(lastState);
     },
     clearComposer() {
@@ -576,6 +581,9 @@ export function createView(root: HTMLElement) {
     onVoice(handler: () => void) {
       voiceHandler = handler;
       voice.onclick = handler;
+    },
+    onSpeak(handler: () => void) {
+      speak.onclick = handler;
     },
     setSpeed(rate: Speed) {
       currentSpeed = rate;

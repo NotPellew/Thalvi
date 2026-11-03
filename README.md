@@ -205,7 +205,7 @@ Start it once; it lives in the tray. Starting it again opens Settings. On Linux
 the control commands below run the AppImage with that word:
 `Thalvi_<version>_amd64.AppImage toggle`.
 
-**Settings → General → Start Thalvi when I log in** is off by default. It
+**Settings → App → Start Thalvi when I log in** is off by default. It
 writes an XDG autostart entry (Linux) or a `Run` entry for your user (Windows)
 that starts Thalvi in the tray without opening Settings, and the switch shows
 what the system holds. Thalvi remembers the choice and puts the entry back each
@@ -217,7 +217,7 @@ says so there. Hyprland does not run
 XDG autostart by itself, so unless a session manager such as `uwsm` does, the row shows
 the `exec-once = <path> --login` line to add to `hyprland.conf` instead of a switch.
 
-**Settings → General → Show Thalvi in the app menu** is off by default. For an
+**Settings → App → Show Thalvi in the app menu** is off by default. For an
 AppImage it writes a menu entry and icon under `~/.local/share` and removes them when
 turned off; Thalvi rewrites it on each start, so a moved AppImage stays right. A
 package manager or the Windows installer owns the entry otherwise, and the row says so.
@@ -242,8 +242,9 @@ The first run downloads the wake models. The app streams to the server's
 `/transcription`, `ws://127.0.0.1:8080` unless `server` says otherwise. The
 config is `desktop.json` in `thalvi/` under the user config directory
 (`~/.config` on Linux, `%APPDATA%` on Windows); without one the defaults apply.
-`THALVI_RECORD=metrics,text,audio` records timings, dictated text and
-microphone audio locally, each opt-in.
+Settings → App has a switch each for recording timings, dictated text and
+microphone audio on this computer; all are off until turned on, and Save applies
+a change between captures.
 
 On Hyprland, `thalvi-desktop toggle`, `pause`, `resume` and `cancel` control
 the running app; they report an error when it is not running. `status` prints
@@ -256,21 +257,21 @@ Pausing cancels the current capture and closes the microphone. Resuming starts
 fresh wake listening. Windows keeps the tray controls; the status module is
 Hyprland-only.
 
-**Second-pass transcription** in Settings → Speech recognition is off by
+**Second-pass transcription** in Settings → Speech is off by
 default, including for older configs that only name an endpoint. Turning it
 off keeps the endpoint and key, and accepted captures make no second request.
 Turn it on to use the saved endpoint; Save validates it before applying it to
 subsequent captures.
 
-To change the microphone, pause listening in Settings → General first, then
-choose and save a device in Microphone. Saving keeps listening paused; enable
+To change the microphone, pause listening in Settings → Microphone first, then
+choose and save a device there. Saving keeps listening paused; enable
 it explicitly when ready. **Active microphone** names the opened device,
 separately from the saved choice. If that device is unavailable, Thalvi reports
 the error instead of using another microphone. The level meter uses the same
 stream while listening or capturing.
 
 To dictate without the server or a network, set `"stt": {"engine": "local"}` in
-the config or choose "On this computer" under Speech recognition in Settings.
+the config or choose "On this computer" under Speech in Settings.
 The first use downloads about 650 MB (the pill says so); after that it works
 offline. The text comes mostly unpunctuated. The model is NVIDIA Nemotron Speech
 Streaming under the [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/).

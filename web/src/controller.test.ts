@@ -19,7 +19,7 @@ function setup() {
     forget: () => calls.push("forget"),
     stopConnection: () => calls.push("stopConnection"),
     connect: (id) => calls.push(`connect ${String(id)}`),
-    releaseVoice: () => calls.push("release"),
+    releaseUnused: () => calls.push("release"),
     onChange: () => undefined,
   });
   const server = (message: object) => {
@@ -115,7 +115,7 @@ describe("Controller", () => {
     calls.length = 0;
 
     controller.setVoice(false);
-    expect(calls).toEqual([INPUT_TEXT, AUDIO_OFF, "flush"]);
+    expect(calls).toEqual([INPUT_TEXT, AUDIO_OFF, "flush", "release"]);
     expect(shown()).toBe("thinking");
     expect(controller.state.playing).toBe(false);
     expect(controller.state.partial).toBe("");
@@ -126,21 +126,24 @@ describe("Controller", () => {
     expect(shown()).toBe("idle");
   });
 
-  it("tears voice down and mutes reply audio when the server falls back to text input after a fatal error", () => {
+  it.each([
+    ["spoken replies were on", true],
+    ["spoken replies were off", false],
+  ])("tears the mic down and leaves reply audio as it was when the server falls back to text input and %s", (_name, speak) => {
     const { controller, calls, server, shown } = online();
     controller.setVoice(true);
+    if (!speak) controller.setSpeak(false);
     server({ type: "state", state: "starting" });
-    controller.playing(true);
+    if (speak) controller.playing(true);
     calls.length = 0;
 
     server({ type: "error", message: "The speech service refused the connection." });
     server({ type: "input", source: "text", ready: true });
     server({ type: "state", state: "idle" });
 
-    expect(calls).toEqual(["flush", "release", AUDIO_OFF]);
-    expect(controller.state.voice).toBe(false);
-    expect(controller.state.playing).toBe(false);
-    expect(shown()).toBe("idle");
+    expect(calls).toEqual(["release"]);
+    expect(controller.state).toMatchObject({ voice: false, speak, playing: speak });
+    expect(shown()).toBe(speak ? "speaking" : "idle");
     expect(controller.state.notice).toBe("The speech service refused the connection.");
   });
 
@@ -285,6 +288,7 @@ describe("Controller", () => {
     expect(shown()).toBe("ended");
     expect(controller.state).toMatchObject({
       voice: false,
+      speak: false,
       playing: false,
       notice: "This conversation continued on another device.",
     });
@@ -365,17 +369,97 @@ describe("Controller", () => {
     expect(controller.state.notice).toBeNull();
   });
 
-  it("keeps voice off and tells the user when the mic cannot start or stops", () => {
+  it("keeps voice off and tells the user when the mic cannot start or stops, leaving reply audio as it was", () => {
     const { controller, calls } = online();
     controller.notify("No microphone was found.");
     expect(controller.state.voice).toBe(false);
     expect(controller.state.notice).toBe("No microphone was found.");
 
     controller.setVoice(true);
-    controller.setVoice(false, "The microphone stopped working.");
-    expect(controller.state.voice).toBe(false);
+    controller.micStopped("The microphone stopped working.");
+    expect(controller.state).toMatchObject({ voice: false, speak: true });
     expect(controller.state.notice).toBe("The microphone stopped working.");
-    expect(calls).toEqual([INPUT_MIC, AUDIO_ON, INPUT_TEXT, AUDIO_OFF, "flush"]);
+    expect(calls).toEqual([INPUT_MIC, AUDIO_ON, INPUT_TEXT, "release"]);
+  });
+
+  const SPEAK_OFF = ["flush", "release"];
+  it.each([
+    ["Voice on speaks replies too", (c: Controller) => { c.setVoice(true); }, [INPUT_MIC, AUDIO_ON], true, true],
+    [
+      "Voice on, Speak replies off: speaking, read replies",
+      (c: Controller) => { c.setVoice(true); c.setSpeak(false); },
+      [INPUT_MIC, AUDIO_ON, AUDIO_OFF, ...SPEAK_OFF],
+      true,
+      false,
+    ],
+    ["typing with Speak replies on", (c: Controller) => { c.setSpeak(true); }, [AUDIO_ON], false, true],
+    [
+      "Voice off also turns Speak replies off",
+      (c: Controller) => { c.setVoice(true); c.setVoice(false); },
+      [INPUT_MIC, AUDIO_ON, INPUT_TEXT, AUDIO_OFF, "flush", "release"],
+      false,
+      false,
+    ],
+    [
+      "Voice off after Speak replies was turned off stays off",
+      (c: Controller) => { c.setVoice(true); c.setSpeak(false); c.setVoice(false); },
+      [INPUT_MIC, AUDIO_ON, AUDIO_OFF, ...SPEAK_OFF, INPUT_TEXT, AUDIO_OFF, "flush", "release"],
+      false,
+      false,
+    ],
+    [
+      "Voice on turns Speak replies back on",
+      (c: Controller) => { c.setVoice(true); c.setSpeak(false); c.setVoice(false); c.setVoice(true); },
+      [INPUT_MIC, AUDIO_ON, AUDIO_OFF, ...SPEAK_OFF, INPUT_TEXT, AUDIO_OFF, "flush", "release", INPUT_MIC, AUDIO_ON],
+      true,
+      true,
+    ],
+    [
+      "Speak replies on, then off, with typing",
+      (c: Controller) => { c.setSpeak(true); c.setSpeak(false); },
+      [AUDIO_ON, AUDIO_OFF, ...SPEAK_OFF],
+      false,
+      false,
+    ],
+  ] as const)("%s", (_name, act, calls, voice, speak) => {
+    const t = online();
+    act(t.controller);
+    expect(t.calls).toEqual(calls);
+    expect(t.controller.state).toMatchObject({ voice, speak });
+  });
+
+  it("turning Speak replies off mid-reply drops the queued audio and keeps the text", () => {
+    const { controller, calls, server, shown } = online();
+    controller.setSpeak(true);
+    server({ type: "reply_audio", on: true });
+    server({ type: "user", text: "tell me a story" });
+    server({ type: "reply", text: "Once upon" });
+    controller.playing(true);
+    expect(shown()).toBe("speaking");
+    calls.length = 0;
+
+    controller.setSpeak(false);
+    controller.playing(false);
+    server({ type: "reply_audio", on: false });
+    server({ type: "reply", text: " a time." });
+    expect(calls).toEqual([AUDIO_OFF, "flush", "release", 'send {"type":"played","bytes":0}']);
+    expect(controller.state.turns.at(-1)).toEqual({ role: "assistant", text: "Once upon a time." });
+    expect(controller.state.replyAudio).toBe(false);
+  });
+
+  it("shows Speak replies as on only once the server confirms, and asks again on a new connection", () => {
+    const { controller, calls, server } = online();
+    controller.setSpeak(true);
+    expect(controller.state).toMatchObject({ speak: true, replyAudio: false });
+    server({ type: "reply_audio", on: true });
+    expect(controller.state.replyAudio).toBe(true);
+
+    controller.lost();
+    controller.opened();
+    expect(controller.state).toMatchObject({ speak: true, replyAudio: false });
+    expect(calls).toEqual([AUDIO_ON, "flush", AUDIO_ON]);
+    server({ type: "reply_audio", on: true });
+    expect(controller.state.replyAudio).toBe(true);
   });
 
   it("ignores unknown and malformed messages", () => {

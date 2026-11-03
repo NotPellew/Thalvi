@@ -42,18 +42,17 @@ areas your change touches. Editing rules are in
   on GPUs vLLM-Omni can't use. Why: the developer preferred its sound, and first
   audio takes ~50 ms where Kokoro synthesizes a whole sentence first. Rejected:
   Chatterbox (AGPL), Kyutai (no cloning), Orpheus and qwen3-tts-server (slower).
-- **Opt-in recordings.** `THALVI_RECORD` turns on metrics, turn, dictation and reply
-  text, and mic audio (with ~2 s before each wake), each separately, written locally
-  off the reply path. Why: to judge product, model and endpoint changes, misrecognitions
-  and false wakes on real use. Off by default: they are personal data.
+- **Opt-in recordings.** Metrics, turn, dictation and reply text, and mic audio (with ~2 s
+  before each wake) are each written locally off the reply path: on the server by
+  `THALVI_RECORD`, on the desktop by settings switches, applied between captures. Why: to judge
+  changes and misrecognitions on real use. Off by default: they are personal data.
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
   interrupts a reply by speaking while mic input is on. Why: hands and eyes are
   busy. Rejected: push-to-talk.
-- **Input and reply audio are separate.** `/session` takes `input` (`text` or
-  `mic`) and `reply_audio` (on or off); only `mic` opens a recognizer, only
-  reply audio calls speech synthesis. Why: typing or locally recognized speech
-  can get spoken replies, and muting must not stop listening. Rejected: one
-  `voice` switch, a compatibility message for it.
+- **Input and reply audio are separate.** `/session` takes `input` (`text` or `mic`) and
+  `reply_audio` (on or off); only `mic` opens a recognizer, only reply audio calls speech
+  synthesis. Web: Voice sets both, Speak replies only reply audio. Why: typed or locally
+  recognized input can get spoken replies. Rejected: one `voice` switch, a compat message.
 - **Two wake entries, endings select the capture route.** One local inference pipeline
   runs separate trained capture and conversation wake heads. Why: defer the action
   choice until an ending without delaying conversation. Rejected: one phrase

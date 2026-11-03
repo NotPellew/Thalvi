@@ -196,7 +196,6 @@ mod tests {
                      "destination": "https://discord.com/channels/1/2", "label": "Demo"}
                 ]
             }"#,
-            None,
         )
         .unwrap()
     }

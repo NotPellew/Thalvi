@@ -143,92 +143,6 @@ function miniField(label: string, field: Field): HTMLElement {
   return el("label", { class: "mini" }, el("span", {}, label), field.node);
 }
 
-interface SwitchOps {
-  read: () => Promise<SwitchState>;
-  set: (on: boolean) => Promise<void>;
-  copy?: () => Promise<void>;
-}
-
-/** A switch that takes effect at once, shows the OS's state, and re-reads it after a failure; or the reason there is none. */
-function switchRow(label: string, hint: string, shown: SwitchRead, controls: Controls, ops: SwitchOps): HTMLElement {
-  if (shown.kind === "unavailable") return row(label, hint, unavailable(shown, ops.copy));
-  const toggle = controls.toggle(shown.kind === "available" && shown.on, () => undefined);
-  const input = toggle.field as HTMLInputElement;
-  const problem = note();
-  if (shown.kind === "unreadable") {
-    input.disabled = true;
-    say(problem, shown.message);
-  } else {
-    say(problem, shown.problem ?? "");
-  }
-  input.addEventListener("change", () => {
-    say(problem, "");
-    const wanted = input.checked;
-    input.disabled = true;
-    ops
-      .set(wanted)
-      .catch(async (error: unknown) => {
-        say(problem, errorText(error));
-        input.checked = await ops
-          .read()
-          .then((state) => state.kind === "available" && state.on)
-          .catch(() => !wanted);
-      })
-      .finally(() => {
-        input.disabled = false;
-      });
-  });
-  return row(label, hint, { node: el("span", { class: "stack" }, toggle.node, problem), field: input });
-}
-
-function unavailable({ reason, line }: Extract<SwitchState, { kind: "unavailable" }>, copy?: () => Promise<void>): HTMLElement {
-  const node = el("span", { class: "stack wide" }, el("p", { class: "note ok" }, reason));
-  if (line !== null && copy) {
-    const problem = note();
-    const copyButton = button("Copy", () => {
-      say(problem, "");
-      copy()
-        .then(() => {
-          copyButton.textContent = "Copied";
-        })
-        .catch((error: unknown) => {
-          say(problem, errorText(error));
-        });
-    });
-    node.append(el("code", { class: "line" }, line), copyButton, problem);
-  }
-  return node;
-}
-
-function general({ draft, backend, controls, root, startAtLogin, menuEntry }: PageContext): HTMLElement[] {
-  const server = controls.text(draft.server, (value) => {
-    draft.server = value;
-  }, { placeholder: "ws://127.0.0.1:8080" });
-  return [
-    row("Server address", "Where Thalvi sends speech for recognition.", server),
-    switchRow(
-      "Start Thalvi when I log in",
-      "Starts the voice app at login, listening as it normally does. This takes effect now; it is not part of Save.",
-      startAtLogin,
-      controls,
-      { read: () => backend.getStartAtLogin(), set: (on) => backend.setStartAtLogin(on), copy: () => backend.copyLoginLine() },
-    ),
-    switchRow(
-      "Show Thalvi in the app menu",
-      "Lets you start Thalvi from your desktop's app menu. This takes effect now; it is not part of Save.",
-      menuEntry,
-      controls,
-      { read: () => backend.getMenuEntry(), set: (on) => backend.setMenuEntry(on) },
-    ),
-    row("Look", "How the overlay and this window look. The overlay changes after the current capture.",
-      lookPicker(draft.look, (look) => {
-        draft.look = look;
-        applyLook(root, look);
-        controls.touched();
-      })),
-  ];
-}
-
 function head(
   draft: Settings,
   controls: Controls,
@@ -298,7 +212,7 @@ function endingsTable({ draft, controls }: PageContext): HTMLElement {
   return el("div", { class: "stack wide" }, list, el("div", { class: "trow add" }, phrase.node, action.node, add), problem);
 }
 
-function wake(context: PageContext): HTMLElement[] {
+function capture(context: PageContext): HTMLElement[] {
   const { draft, controls } = context;
   const pause = (key: "paste" | "submit" | "task", label: string): HTMLElement =>
     row(
@@ -319,6 +233,7 @@ function wake(context: PageContext): HTMLElement[] {
     pause("paste", "Quiet before paste"),
     pause("submit", "Quiet before paste and Enter"),
     pause("task", "Quiet before running a task"),
+    ...limits(context),
   ];
 }
 
@@ -400,7 +315,7 @@ function modelCard(info: SpeechModelInfo, backend: Backend, pick: () => void): M
   };
 }
 
-function recognition({ draft, controls, backend, checks, live }: PageContext): HTMLElement[] {
+function speech({ draft, controls, backend, checks, live }: PageContext): HTMLElement[] {
   const engine = controls.select(ENGINES, draft.stt.engine, (value) => {
     draft.stt.engine = value;
     syncModel();
@@ -543,7 +458,12 @@ function recognition({ draft, controls, backend, checks, live }: PageContext): H
           };
   }
   syncEnabled();
+  const server = controls.text(draft.server, (value) => {
+    draft.server = value;
+  }, { placeholder: "ws://127.0.0.1:8080" });
   return [
+    group("Server"),
+    row("Server address", "Where Thalvi sends speech for recognition.", server),
     group("Dictation"),
     row("Recognize speech", "Where your dictation is turned into text. Conversation mode always uses the server.", engine),
     row(
@@ -623,6 +543,7 @@ function microphone({ draft, backend, controls, microphones, live, audio }: Page
 
 function overlay({ draft, controls }: PageContext): HTMLElement[] {
   return [
+    group("Overlay"),
     row("Show the overlay", "A small pill at the top of the screen while Thalvi is capturing.",
       controls.toggle(draft.overlay.show, (value) => {
         draft.overlay.show = value;
@@ -634,12 +555,28 @@ function overlay({ draft, controls }: PageContext): HTMLElement[] {
   ];
 }
 
+function look({ draft, controls, root }: PageContext): HTMLElement[] {
+  return [
+    group("Look"),
+    row("Look", "How the overlay and this window look. The overlay changes after the current capture.",
+      lookPicker(draft.look, (next) => {
+        draft.look = next;
+        applyLook(root, next);
+        controls.touched();
+      })),
+  ];
+}
+
 function sounds({ draft, controls }: PageContext): HTMLElement[] {
-  return CUES.map(([key, label, hint]) =>
+  return [group("Sounds"), ...CUES.map(([key, label, hint]) =>
     row(`${label} sound`, hint, controls.toggle(draft.cues[key], (value) => {
       draft.cues[key] = value;
     })),
-  );
+  )];
+}
+
+function feedback(context: PageContext): HTMLElement[] {
+  return [...overlay(context), ...look(context), ...sounds(context)];
 }
 
 function appsTable({ draft, controls }: PageContext, onApps: () => void): HTMLElement {
@@ -744,6 +681,7 @@ function tasks(context: PageContext): HTMLElement[] {
 
 function limits({ draft, controls }: PageContext): HTMLElement[] {
   return [
+    group("Capture limits"),
     row("Stop after silence", "Stops a capture that hears no words for this long, 10 to 600 s.",
       controls.number(draft.capture_limits.idle, { min: 10, max: 600, step: 1, unit: "s" }, (value) => {
         draft.capture_limits.idle = value;
@@ -755,11 +693,88 @@ function limits({ draft, controls }: PageContext): HTMLElement[] {
   ];
 }
 
-function recordings({ draft, backend }: PageContext): HTMLElement[] {
+interface SwitchOps {
+  read: () => Promise<SwitchState>;
+  set: (on: boolean) => Promise<void>;
+  copy?: () => Promise<void>;
+}
+
+/** A switch that takes effect at once, shows the OS's state, and re-reads it after a failure; or the reason there is none. */
+function switchRow(label: string, hint: string, shown: SwitchRead, controls: Controls, ops: SwitchOps): HTMLElement {
+  if (shown.kind === "unavailable") return row(label, hint, unavailable(shown, ops.copy));
+  const toggle = controls.toggle(shown.kind === "available" && shown.on, () => undefined);
+  const input = toggle.field as HTMLInputElement;
+  const problem = note();
+  if (shown.kind === "unreadable") {
+    input.disabled = true;
+    say(problem, shown.message);
+  } else {
+    say(problem, shown.problem ?? "");
+  }
+  input.addEventListener("change", () => {
+    say(problem, "");
+    const wanted = input.checked;
+    input.disabled = true;
+    ops
+      .set(wanted)
+      .catch(async (error: unknown) => {
+        say(problem, errorText(error));
+        input.checked = await ops
+          .read()
+          .then((state) => state.kind === "available" && state.on)
+          .catch(() => !wanted);
+      })
+      .finally(() => {
+        input.disabled = false;
+      });
+  });
+  return row(label, hint, { node: el("span", { class: "stack" }, toggle.node, problem), field: input });
+}
+
+function unavailable({ reason, line }: Extract<SwitchState, { kind: "unavailable" }>, copy?: () => Promise<void>): HTMLElement {
+  const node = el("span", { class: "stack wide" }, el("p", { class: "note ok" }, reason));
+  if (line !== null && copy) {
+    const problem = note();
+    const copyButton = button("Copy", () => {
+      say(problem, "");
+      copy()
+        .then(() => {
+          copyButton.textContent = "Copied";
+        })
+        .catch((error: unknown) => {
+          say(problem, errorText(error));
+        });
+    });
+    node.append(el("code", { class: "line" }, line), copyButton, problem);
+  }
+  return node;
+}
+
+function startup({ backend, controls, startAtLogin, menuEntry }: PageContext): HTMLElement[] {
+  return [
+    group("Startup"),
+    switchRow(
+      "Start Thalvi when I log in",
+      "Starts the voice app at login, listening as it normally does. This takes effect now; it is not part of Save.",
+      startAtLogin,
+      controls,
+      { read: () => backend.getStartAtLogin(), set: (on) => backend.setStartAtLogin(on), copy: () => backend.copyLoginLine() },
+    ),
+    switchRow(
+      "Show Thalvi in the app menu",
+      "Lets you start Thalvi from your desktop's app menu. This takes effect now; it is not part of Save.",
+      menuEntry,
+      controls,
+      { read: () => backend.getMenuEntry(), set: (on) => backend.setMenuEntry(on) },
+    ),
+  ];
+}
+
+function recordings({ draft, backend, controls }: PageContext): HTMLElement[] {
   const kinds = [
-    ["Metrics", draft.recordings.metrics, "Timings and outcomes of every model call."],
-    ["Text", draft.recordings.text, "What was said and what Thalvi answered."],
-    ["Audio", draft.recordings.audio, "Microphone audio, with about two seconds before each wake."],
+    ["Metrics", "metrics", "When each wake, capture and model call happened, how long it took and how it ended. No words or audio."],
+    ["Text", "text", "The words you dictated and what Thalvi did with them."],
+    ["Audio", "audio", "What the microphone heard during each capture, and about two seconds before each wake word."],
   ] as const;
   const problem = note();
   const open = button("Open folder", () => {
@@ -769,13 +784,15 @@ function recordings({ draft, backend }: PageContext): HTMLElement[] {
     });
   });
   return [
-    ...kinds.map(([label, on, hint]) =>
-      row(`${label} recording`, `${hint} Set THALVI_RECORD before starting Thalvi to change it.`, {
-        node: el("output", { class: "badge", "data-on": String(on) }, on ? "On" : "Off"),
-        field: el("span", { id: uid("f") }),
-      }),
+    group("Recordings"),
+    ...kinds.map(([label, kind, hint]) =>
+      row(`${label} recording`, `${hint} Kept on this computer only. Off unless you turn it on.`,
+        controls.toggle(draft.recordings[kind], (value) => {
+          draft.recordings[kind] = value;
+        })),
     ),
-    row("Recordings folder", "Everything is stored on this computer.", {
+    group("Right now"),
+    row("Recordings folder", "Everything is stored on this computer. Opening it is not part of Save.", {
       node: el("span", { class: "stack" }, open, problem),
       field: open,
     }),
@@ -793,21 +810,22 @@ function about({ backend }: PageContext): HTMLElement[] {
       version.textContent = errorText(error);
     });
   return [
+    group("About"),
     row("Version", null, { node: version, field: el("span", { id: uid("f") }) }),
   ];
 }
 
+function app(context: PageContext): HTMLElement[] {
+  return [...startup(context), ...recordings(context), ...about(context)];
+}
+
 const PAGES: readonly (readonly [string, string, (context: PageContext) => HTMLElement[]])[] = [
-  ["general", "General", general],
-  ["wake", "Wake & endings", wake],
-  ["recognition", "Speech recognition", recognition],
+  ["speech", "Speech", speech],
   ["microphone", "Microphone", microphone],
-  ["overlay", "Overlay", overlay],
-  ["sounds", "Sounds", sounds],
+  ["capture", "Capture", capture],
+  ["feedback", "Feedback and appearance", feedback],
   ["tasks", "Apps & tasks", tasks],
-  ["limits", "Capture limits", limits],
-  ["recordings", "Recordings", recordings],
-  ["about", "About", about],
+  ["app", "App", app],
 ];
 
 /** Wraps each group heading and the rows after it in a box the looks can frame. */

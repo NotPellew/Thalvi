@@ -26,10 +26,6 @@ pub enum ConfigError {
     },
     #[error("The desktop config is not valid: {0}")]
     Invalid(#[from] serde_json::Error),
-    #[error(
-        "THALVI_RECORD contains an unknown value: {0:?}. Use a comma-separated list of metrics, text and audio."
-    )]
-    Record(String),
 }
 
 /// What the desktop app is configured to do. Every setting is optional in the file and has
@@ -51,14 +47,14 @@ pub struct DesktopConfig {
     /// The input device to open; `None` is the system default.
     pub microphone: Option<String>,
     pub look: Look,
+    /// What is recorded on this computer; nothing unless the user turns it on.
+    pub recordings: RecordKinds,
     /// Whether the user wants Thalvi to start at login. The app restores the OS entry from this
     /// on start, because a Windows upgrade removes it.
     pub start_at_login: bool,
     /// Whether the user wants Thalvi in the app menu. The app rewrites the `AppImage`'s menu
     /// entry from this on start, because the `AppImage` may have moved.
     pub show_in_menu: bool,
-    /// From `THALVI_RECORD`, never from the file.
-    pub record: RecordKinds,
 }
 
 #[derive(Deserialize)]
@@ -88,6 +84,8 @@ struct RawDesktopConfig {
     microphone: Option<String>,
     #[serde(default)]
     look: Look,
+    #[serde(default)]
+    recordings: RecordKinds,
     #[serde(default)]
     start_at_login: bool,
     #[serde(default)]
@@ -172,9 +170,9 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
             overlay: raw.overlay,
             microphone,
             look: raw.look,
+            recordings: raw.recordings,
             start_at_login: raw.start_at_login,
             show_in_menu: raw.show_in_menu,
-            record: RecordKinds::default(),
         })
     }
 }
@@ -463,6 +461,7 @@ struct FileForm<'a> {
     overlay: &'a OverlayConfig,
     microphone: Option<&'a str>,
     look: Look,
+    recordings: RecordKinds,
     start_at_login: bool,
     show_in_menu: bool,
 }
@@ -550,6 +549,7 @@ impl Serialize for DesktopConfig {
             overlay: &self.overlay,
             microphone: self.microphone.as_deref(),
             look: self.look,
+            recordings: self.recordings,
             start_at_login: self.start_at_login,
             show_in_menu: self.show_in_menu,
         }
@@ -558,46 +558,25 @@ impl Serialize for DesktopConfig {
 }
 
 impl DesktopConfig {
-    /// Reads and validates the config at `path`; `record` is the value of `THALVI_RECORD`.
+    /// Reads and validates the config at `path`.
     ///
     /// # Errors
-    /// Fails when the file cannot be read, a setting is unknown or out of range, or `record`
-    /// names an unknown kind.
-    pub fn load(path: &Path, record: Option<&str>) -> Result<Self, ConfigError> {
+    /// Fails when the file cannot be read or a setting is unknown or out of range.
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let json = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_owned(),
             source,
         })?;
-        Self::from_json_str(&json, record)
+        Self::from_json_str(&json)
     }
 
-    /// Validates config `json`; `record` is the value of `THALVI_RECORD`.
+    /// Validates config `json`.
     ///
     /// # Errors
-    /// Fails when a setting is unknown or out of range, or `record` names an unknown kind.
-    pub fn from_json_str(json: &str, record: Option<&str>) -> Result<Self, ConfigError> {
-        let mut config: Self = serde_json::from_str(json)?;
-        config.record = record_kinds(record)?;
-        Ok(config)
+    /// Fails when a setting is unknown or out of range.
+    pub fn from_json_str(json: &str) -> Result<Self, ConfigError> {
+        Ok(serde_json::from_str(json)?)
     }
-}
-
-fn record_kinds(raw: Option<&str>) -> Result<RecordKinds, ConfigError> {
-    let mut kinds = RecordKinds::default();
-    let values = raw
-        .into_iter()
-        .flat_map(|raw| raw.split(','))
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    for value in values {
-        match value {
-            "metrics" => kinds.metrics = true,
-            "text" => kinds.text = true,
-            "audio" => kinds.audio = true,
-            other => return Err(ConfigError::Record(other.to_owned())),
-        }
-    }
-    Ok(kinds)
 }
 
 #[derive(Deserialize)]
@@ -647,7 +626,7 @@ mod tests {
     use crate::wake::HeadModel;
 
     fn parse(json: &str) -> Result<DesktopConfig, ConfigError> {
-        DesktopConfig::from_json_str(json, None)
+        DesktopConfig::from_json_str(json)
     }
 
     #[test]
@@ -664,9 +643,9 @@ mod tests {
         assert_eq!(config.ending_pause, EndingPauses::default());
         assert_eq!(config.capture_limits, CaptureLimits::default());
         assert_eq!(config.endings, Endings::default());
+        assert_eq!(config.recordings, RecordKinds::default());
         assert!(!config.start_at_login);
         assert!(!config.show_in_menu);
-        assert_eq!(config.record, RecordKinds::default());
     }
 
     #[test]
@@ -772,9 +751,9 @@ mod tests {
                 "endings": {
                     "Send It": "submit", "paste": "paste", "do it": "task",
                     "scratch": "scratch", "cancel": "cancel"
-                }
+                },
+                "recordings": {"metrics": true, "audio": true}
             }"#,
-            Some("metrics, audio"),
         )
         .unwrap();
         assert_eq!(
@@ -836,7 +815,7 @@ mod tests {
             .unwrap()
         );
         assert_eq!(
-            config.record,
+            config.recordings,
             RecordKinds {
                 metrics: true,
                 text: false,
@@ -1221,29 +1200,34 @@ mod tests {
     }
 
     #[test]
-    fn record_kinds_come_from_a_comma_separated_list() {
-        for (raw, expected) in [
-            (None, Ok((false, false, false))),
-            (Some(""), Ok((false, false, false))),
-            (Some("text"), Ok((false, true, false))),
-            (Some(" metrics , audio,"), Ok((true, false, true))),
-            (Some("metrics,text,audio"), Ok((true, true, true))),
-            (Some("metrics,speech"), Err("speech")),
-            (Some("on"), Err("on")),
+    fn recordings_are_off_unless_the_file_turns_them_on_and_name_only_known_kinds() {
+        for (json, expected) in [
+            ("{}", Ok((false, false, false))),
+            (r#"{"recordings": {}}"#, Ok((false, false, false))),
+            (
+                r#"{"recordings": {"text": true}}"#,
+                Ok((false, true, false)),
+            ),
+            (
+                r#"{"recordings": {"metrics": true, "text": true, "audio": true}}"#,
+                Ok((true, true, true)),
+            ),
+            (r#"{"recordings": {"speech": true}}"#, Err("speech")),
+            (r#"{"recordings": {"audio": "yes"}}"#, Err("boolean")),
         ] {
-            let result = DesktopConfig::from_json_str("{}", raw).map(|config| {
+            let result = parse(json).map(|config| {
                 (
-                    config.record.metrics,
-                    config.record.text,
-                    config.record.audio,
+                    config.recordings.metrics,
+                    config.recordings.text,
+                    config.recordings.audio,
                 )
             });
             match (result, expected) {
-                (Ok(kinds), Ok(expected)) => assert_eq!(kinds, expected, "{raw:?}"),
-                (Err(ConfigError::Record(value)), Err(expected)) => {
-                    assert_eq!(value, expected, "{raw:?}");
+                (Ok(kinds), Ok(expected)) => assert_eq!(kinds, expected, "{json}"),
+                (Err(error), Err(expected)) => {
+                    assert!(error.to_string().contains(expected), "{json}: {error}");
                 }
-                (other, expected) => panic!("{raw:?}: {other:?} vs {expected:?}"),
+                (other, expected) => panic!("{json}: {other:?} vs {expected:?}"),
             }
         }
     }
@@ -1274,22 +1258,14 @@ mod tests {
             "overlay": {"show": false, "draft": true},
             "microphone": " USB Mic ",
             "look": "gunmetal",
+            "recordings": {"metrics": true, "text": false, "audio": true},
             "start_at_login": true,
             "show_in_menu": true
         }"#;
         for json in ["{}", full] {
-            let config = DesktopConfig::from_json_str(json, Some("metrics,audio")).unwrap();
+            let config = parse(json).unwrap();
             let written = serde_json::to_string(&config).unwrap();
-            let again = DesktopConfig::from_json_str(&written, None).unwrap();
-            assert_eq!(
-                again,
-                DesktopConfig {
-                    record: RecordKinds::default(),
-                    ..config
-                },
-                "{written}"
-            );
-            assert!(!written.contains("record"), "{written}");
+            assert_eq!(parse(&written).unwrap(), config, "{written}");
         }
     }
 
@@ -1356,8 +1332,8 @@ mod tests {
         let path = dir.join("config.json");
         std::fs::write(&path, r#"{"ending_pause": {"task": 2}}"#).unwrap();
 
-        let loaded = DesktopConfig::load(&path, None).unwrap();
-        let missing = DesktopConfig::load(&dir.join("missing.json"), None).unwrap_err();
+        let loaded = DesktopConfig::load(&path).unwrap();
+        let missing = DesktopConfig::load(&dir.join("missing.json")).unwrap_err();
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(

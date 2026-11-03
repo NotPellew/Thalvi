@@ -71,6 +71,79 @@ function sent(stub: Awaited<ReturnType<typeof open>>): Settings {
   return call[0];
 }
 
+describe("pages", () => {
+  it("offers six pages in order, each holding its controls under the right group", async () => {
+    await open();
+    const shape = Array.from(root.querySelectorAll<HTMLElement>("section[data-page]")).map((page) => ({
+      id: page.dataset["page"],
+      title: page.querySelector("h3")?.textContent,
+      groups: Object.fromEntries(
+        Array.from(page.querySelectorAll(".grp")).map((group): [string, (string | undefined)[]] => [
+          group.querySelector("h4")?.textContent ?? "",
+          Array.from(group.querySelectorAll<HTMLElement>(".row")).map((row) => row.dataset["label"]),
+        ]),
+      ),
+    }));
+    expect(Array.from(root.querySelectorAll("nav [data-page]")).map((item) => item.getAttribute("data-page"))).toEqual(
+      shape.map((page) => page.id),
+    );
+    expect(shape).toEqual([
+      {
+        id: "speech",
+        title: "Speech",
+        groups: {
+          Server: ["server address"],
+          Dictation: ["recognize speech", "speech model"],
+          "Second transcription": ["second-pass transcription", "endpoint address", "model", "api", "api key"],
+        },
+      },
+      {
+        id: "microphone",
+        title: "Microphone",
+        groups: {
+          "Right now": ["listening", "active microphone", "level"],
+          "Saved with Save": ["saved device"],
+        },
+      },
+      {
+        id: "capture",
+        title: "Capture",
+        groups: {
+          "Dictation wake word": ["wake model (dictation)", "threshold (dictation)"],
+          "Conversation wake word": ["wake model (conversation)", "threshold (conversation)"],
+          Endings: ["ending phrases"],
+          "Quiet before acting": ["quiet before paste", "quiet before paste and enter", "quiet before running a task"],
+          "Capture limits": ["stop after silence", "stop after"],
+        },
+      },
+      {
+        id: "feedback",
+        title: "Feedback and appearance",
+        groups: {
+          Overlay: ["show the overlay", "show the draft"],
+          Look: ["look"],
+          Sounds: ["wake sound", "ending heard sound", "cancelled sound", "accepted sound", "error sound"],
+        },
+      },
+      {
+        id: "tasks",
+        title: "Apps & tasks",
+        groups: { Apps: ["apps"], Scripts: ["scripts"] },
+      },
+      {
+        id: "app",
+        title: "App",
+        groups: {
+          Startup: ["start thalvi when i log in", "show thalvi in the app menu"],
+          Recordings: ["metrics recording", "text recording", "audio recording"],
+          "Right now": ["recordings folder"],
+          About: ["version"],
+        },
+      },
+    ]);
+  });
+});
+
 describe("save", () => {
   it("sends the settings unchanged when nothing was edited", async () => {
     const stub = await open();
@@ -82,17 +155,16 @@ describe("save", () => {
 
   it("sends exactly the edits", async () => {
     const stub = await open();
-    goTo("general");
+    goTo("speech");
     type(control("Server address", "input"), "wss://thalvi.example");
-    goTo("wake");
+    goTo("capture");
     type(control("Quiet before paste", "input"), "1.5");
     type(control("Threshold (dictation)", "input"), "0.8");
     type(control("Wake model (conversation)", "input"), "hey_jarvis");
-    goTo("overlay");
+    goTo("feedback");
     flip(control("Show the draft", "input"));
-    goTo("sounds");
     flip(control("Wake sound", "input"));
-    goTo("limits");
+    goTo("capture");
     type(control("Stop after", "input"), "120");
     goTo("microphone");
     stub.emit({ state: "paused" });
@@ -154,7 +226,7 @@ describe("save", () => {
 describe("tables", () => {
   it("adds an ending phrase normalized and removes another", async () => {
     const stub = await open();
-    goTo("wake");
+    goTo("capture");
     const add = rowOf("Ending phrases");
     type(add.querySelector<HTMLInputElement>(".add input") as HTMLInputElement, "  Send   It ");
     choose(add.querySelector<HTMLSelectElement>(".add select") as HTMLSelectElement, "submit");
@@ -196,7 +268,7 @@ describe("tables", () => {
 describe("a custom speech model folder", () => {
   async function openLocal() {
     const stub = await open({ ...SETTINGS, stt: { engine: "local", secondary: null } });
-    goTo("recognition");
+    goTo("speech");
     return stub;
   }
   const result = (): HTMLElement | null => rowOf("Speech model").querySelector<HTMLElement>(".note:not([hidden])");
@@ -269,7 +341,7 @@ describe("a custom speech model folder", () => {
     ["the server engine", { engine: "server", model: "/models/mine" }],
   ] as const)("saves without checking a folder for %s", async (_name, stt) => {
     const stub = await open({ ...SETTINGS, stt: { ...stt, secondary: null } });
-    goTo("recognition");
+    goTo("speech");
     button("Save").click();
     expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
     expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
@@ -279,7 +351,7 @@ describe("a custom speech model folder", () => {
 describe("where speech is recognized", () => {
   it("saves the engine, and the model only for the local engine", async () => {
     const stub = await open();
-    goTo("recognition");
+    goTo("speech");
     expect(control("Recognize speech", "select").value).toBe("server");
     expect(Array.from(control("Recognize speech", "select").options).map((option) => option.textContent)).toEqual([
       "On this computer",
@@ -306,7 +378,7 @@ describe("where speech is recognized", () => {
 
   it("shows the saved local model", async () => {
     await open({ ...SETTINGS, stt: { engine: "local", model: "nemotron_160ms", secondary: null } });
-    goTo("recognition");
+    goTo("speech");
     expect(control("Recognize speech", "select").value).toBe("local");
     expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("true");
     expect(control("Speech model", "input").value).toBe("");
@@ -316,7 +388,7 @@ describe("where speech is recognized", () => {
 describe("the speech model catalog", () => {
   async function openCatalog(settings: Settings = { ...SETTINGS, stt: { engine: "local", secondary: null } }) {
     const stub = await open(settings);
-    goTo("recognition");
+    goTo("speech");
     return stub;
   }
   const card = (): HTMLElement => {
@@ -348,7 +420,7 @@ describe("the speech model catalog", () => {
     stub.backend.listSpeechModels.mockResolvedValueOnce([{ ...NEMOTRON, size }]);
     mountSettings(root, stub.backend);
     await settle();
-    goTo("recognition");
+    goTo("speech");
     expect(text(".unit")).toBe(shown);
   });
 
@@ -357,7 +429,7 @@ describe("the speech model catalog", () => {
     stub.backend.listSpeechModels.mockResolvedValueOnce([{ ...NEMOTRON, cached: true }]);
     mountSettings(root, stub.backend);
     await settle();
-    goTo("recognition");
+    goTo("speech");
     expect(text(".badge")).toBe("Downloaded");
     expect(download().hidden).toBe(true);
   });
@@ -427,7 +499,7 @@ describe("the speech model catalog", () => {
     stub.backend.listSpeechModels.mockRejectedValueOnce("Thalvi could not find a folder to keep its models in.");
     mountSettings(root, stub.backend);
     await settle();
-    goTo("recognition");
+    goTo("speech");
     expect(rowOf("Speech model").querySelector(".note:not([hidden])")?.textContent).toBe(
       "Thalvi could not find a folder to keep its models in.",
     );
@@ -456,7 +528,7 @@ describe("the speech model catalog", () => {
 describe("second transcription", () => {
   it("stays off until the switch is flipped, and keeps its fields when flipped off", async () => {
     const stub = await open();
-    goTo("recognition");
+    goTo("speech");
     expect(control("Second-pass transcription", "input").checked).toBe(false);
     expect(control("Endpoint address", "input").disabled).toBe(true);
     flip(control("Second-pass transcription", "input"));
@@ -488,7 +560,7 @@ describe("second transcription", () => {
       ...SETTINGS,
       stt: { engine: "server", secondary: { enabled: false, url: "http://127.0.0.1:9000/v1", model: "whisper", api: "meta", api_key: "k" } },
     });
-    goTo("recognition");
+    goTo("speech");
     expect(control("Second-pass transcription", "input").checked).toBe(false);
     expect(control("Endpoint address", "input").value).toBe("http://127.0.0.1:9000/v1");
     expect(control("Model", "input").value).toBe("whisper");
@@ -511,8 +583,8 @@ describe("search", () => {
     expect(root.querySelector(".empty")?.hasAttribute("hidden")).toBe(false);
 
     type(search, "");
-    expect(root.querySelector<HTMLElement>("section[data-page=general]")?.hidden).toBe(false);
-    expect(root.querySelector<HTMLElement>("section[data-page=wake]")?.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>("section[data-page=speech]")?.hidden).toBe(false);
+    expect(root.querySelector<HTMLElement>("section[data-page=capture]")?.hidden).toBe(true);
   });
 });
 
@@ -662,7 +734,7 @@ describe("live controls", () => {
     const pageOf = (label: string): string | null => rowOf(label).closest("section")?.getAttribute("data-page") ?? null;
     expect(pageOf("Listening")).toBe("microphone");
     expect(root.querySelectorAll('.row[data-label="listening"]')).toHaveLength(1);
-    expect(root.querySelectorAll('section[data-page="general"] .row[data-label="listening"]')).toHaveLength(0);
+    expect(root.querySelectorAll('section[data-page="app"] .row[data-label="listening"]')).toHaveLength(0);
 
     goTo("microphone");
     const toggle = control("Listening", "input");
@@ -771,12 +843,30 @@ describe("live controls", () => {
     if (action === "edit") expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
   });
 
-  it("shows the recordings kinds and opens the folder", async () => {
+  it("opens the recordings folder", async () => {
     const stub = await open();
-    expect(rowOf("Metrics recording").querySelector("output")?.textContent).toBe("On");
-    expect(rowOf("Text recording").querySelector("output")?.textContent).toBe("Off");
     button("Open folder").click();
     expect(stub.backend.openRecordings).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["Metrics recording", "metrics", false],
+    ["Text recording", "text", true],
+    ["Audio recording", "audio", true],
+  ] as const)("shows %s as a switch and sends it with Save", async (label, kind, turnedOn) => {
+    const stub = await open();
+    const switches = ["Metrics recording", "Text recording", "Audio recording"].map(
+      (name) => control(name, "input").checked,
+    );
+    expect(switches).toEqual([true, false, false]);
+    expect(rowOf(label).textContent).toContain("Kept on this computer only");
+    expect(rowOf(label).textContent).not.toContain("THALVI_RECORD");
+
+    flip(control(label, "input"));
+    button("Save").click();
+    const expected = structuredClone(SETTINGS);
+    expected.recordings[kind] = turnedOn;
+    expect(sent(stub)).toEqual(expected);
   });
 
   it("shows the version", async () => {
