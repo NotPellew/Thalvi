@@ -349,7 +349,10 @@ pub enum FinalStep {
     /// An ending is armed (replacing any earlier one) and its quiet window starts.
     Armed(PendingEnding),
     /// The user said "never mind": the capture is discarded.
-    Cancelled,
+    Cancelled {
+        /// What was dictated before the phrase; nothing was delivered.
+        dictated: Option<String>,
+    },
 }
 
 /// The capture cannot take more text.
@@ -438,10 +441,12 @@ impl CaptureSession {
             .join(" ");
         let cancelled_pending = self.pending.is_some();
         match self.endings.find(&combined) {
-            Some((Ending::Cancel, _)) => {
+            Some((Ending::Cancel, before)) => {
                 self.pieces.clear();
                 self.pending = None;
-                Ok(FinalStep::Cancelled)
+                Ok(FinalStep::Cancelled {
+                    dictated: (!before.trim().is_empty()).then(|| before.to_owned()),
+                })
             }
             Some((Ending::Scratch, before)) => {
                 self.scratched = true;
@@ -707,6 +712,12 @@ mod tests {
 
     fn armed(route: CaptureRoute, text: &str) -> (CaptureRoute, String) {
         (route, text.to_owned())
+    }
+
+    fn cancelled(dictated: &str) -> FinalStep {
+        FinalStep::Cancelled {
+            dictated: Some(dictated.to_owned()),
+        }
     }
 
     fn armed_parts(step: &FinalStep) -> (CaptureRoute, String) {
@@ -981,7 +992,7 @@ mod tests {
             let step = feed(&mut session, &finals);
             match expected {
                 Some(expected) => assert_eq!(armed_parts(&step), expected, "{finals:?}"),
-                None => assert_eq!(step, FinalStep::Cancelled, "{finals:?}"),
+                None => assert!(matches!(step, FinalStep::Cancelled { .. }), "{finals:?}"),
             }
         }
     }
@@ -1079,7 +1090,10 @@ mod tests {
         feed(&mut session, &["Second thought."]);
         feed(&mut session, &["scratch that"]);
         assert_eq!(session.text(), "Keep the first thought.");
-        assert_eq!(feed(&mut session, &["never mind"]), FinalStep::Cancelled);
+        assert_eq!(
+            feed(&mut session, &["never mind"]),
+            cancelled("Keep the first thought.")
+        );
         assert_eq!(session.text(), "");
     }
 
@@ -1128,7 +1142,10 @@ mod tests {
     fn never_mind_discards_the_capture_and_any_armed_ending() {
         let mut session = session();
         feed(&mut session, &["Draft words", "hello submit"]);
-        assert_eq!(feed(&mut session, &["never mind"]), FinalStep::Cancelled);
+        assert_eq!(
+            feed(&mut session, &["never mind"]),
+            cancelled("Draft words hello submit")
+        );
         assert_eq!(session.pending(), None);
         assert_eq!(session.text(), "");
     }

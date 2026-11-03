@@ -495,7 +495,7 @@ fn open_private(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
-fn create_private_dir(path: &Path) -> io::Result<()> {
+pub(crate) fn create_private_dir(path: &Path) -> io::Result<()> {
     let mut builder = DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -525,7 +525,7 @@ fn wav(pcm: &[i16]) -> Vec<u8> {
     bytes
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| {

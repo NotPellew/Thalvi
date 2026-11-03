@@ -1,6 +1,6 @@
 // Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the overlay to the n-th status of the script and `?look=holo` or `?look=gunmetal` picks the look.
 
-import type { AudioStatus, Backend, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
+import type { AudioStatus, Backend, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
 import { LOOKS } from "./look.ts";
 
 const SETTINGS: Settings = {
@@ -27,6 +27,7 @@ const SETTINGS: Settings = {
   microphone: null,
   look: "gunmetal",
   recordings: { metrics: true, text: false, audio: false },
+  history: { enabled: true, limit: 200 },
 };
 
 const SENTENCE = "Hey, I'm running a few minutes late, can we push the call to half past?";
@@ -118,6 +119,12 @@ export function fakeBackend(params: URLSearchParams): Backend {
     for (const listener of levelListeners) listener(level);
   }, 80);
 
+  const now = Date.now();
+  let history: HistoryEntry[] = [
+    { id: 3, timestamp_ms: now - 60_000, text: "Remind me to call the dentist tomorrow morning.", target: "Slack", outcome: "accepted" },
+    { id: 2, timestamp_ms: now - 3_600_000, text: "Thalvi could not reach the window that was open when you started.", target: null, outcome: "failed" },
+    { id: 1, timestamp_ms: now - 86_400_000, text: "Hey, I'm running a few minutes late", target: "Firefox", outcome: "cancelled" },
+  ];
   let startAtLogin = false;
   let menuEntry = false;
   const hyprland = params.has("hyprland");
@@ -157,6 +164,15 @@ export function fakeBackend(params: URLSearchParams): Backend {
     copyReport: () => Promise.resolve(),
     listMicrophones: () => Promise.resolve([...microphones]),
     openRecordings: () => Promise.resolve(),
+    getHistory: () => Promise.resolve(structuredClone(history)),
+    deleteHistoryEntry: (id) => {
+      history = history.filter((entry) => entry.id !== id);
+      return Promise.resolve();
+    },
+    clearHistory: () => {
+      history = [];
+      return Promise.resolve();
+    },
     getStartAtLogin: () =>
       Promise.resolve(
         hyprland

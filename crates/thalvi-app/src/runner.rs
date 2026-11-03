@@ -18,6 +18,7 @@ use thalvi_desktop::delivery::Delivery;
 use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
 };
+use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::host::Desktop;
 use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
@@ -76,7 +77,11 @@ impl EngineLink {
     ///
     /// # Errors
     /// Fails when the thread or its runtime cannot start.
-    pub fn start(config: DesktopConfig, host: Desktop) -> Result<Self, String> {
+    pub fn start(
+        config: DesktopConfig,
+        host: Desktop,
+        history: Arc<History>,
+    ) -> Result<Self, String> {
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
             notice: STARTING_NOTICE.to_owned(),
@@ -112,6 +117,7 @@ impl EngineLink {
                     publisher,
                     Arc::new(level_tx),
                     audio_tx,
+                    history,
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
                 let _ = stopped_tx.send(());
@@ -294,6 +300,7 @@ struct Runner {
     level: Arc<watch::Sender<f32>>,
     audio: watch::Sender<AudioStatus>,
     delivery: Delivery<Desktop>,
+    history: Arc<History>,
     http: reqwest::Client,
     /// Loads the current engine's speech model.
     loading: Option<JoinHandle<()>>,
@@ -307,6 +314,7 @@ impl Runner {
         publisher: Rc<Publisher>,
         level: Arc<watch::Sender<f32>>,
         audio: watch::Sender<AudioStatus>,
+        history: Arc<History>,
     ) -> Self {
         Self {
             config,
@@ -320,6 +328,7 @@ impl Runner {
             level,
             audio,
             delivery: Delivery::new(host),
+            history,
             http: reqwest::Client::new(),
             loading: None,
         }
@@ -626,21 +635,24 @@ impl Runner {
         self.publisher.mode(Mode::Paused);
     }
 
+    /// Brings the stored history within a changed limit now, rather than at the next capture.
+    fn take_history(&self, config: &DesktopConfig) {
+        if config.history != self.config.history {
+            self.history.trim_in_background(config.history);
+        }
+    }
+
     /// Replaces the engine by one built from `config`; the old one stays if that fails. A change
-    /// to the recordings alone only retunes the running engine.
+    /// to the recordings or the history alone only retunes the running engine.
     async fn apply(&mut self, config: DesktopConfig) {
         if config == self.config {
             return;
         }
-        let only_recordings = self.config
-            == DesktopConfig {
-                recordings: self.config.recordings,
-                ..config.clone()
-            };
-        if only_recordings {
+        if retunes_only(&self.config, &config) {
             if let Some(session) = self.session.as_mut() {
                 session.engine.set_recordings(config.recordings);
             }
+            self.take_history(&config);
             self.config = config;
             return;
         }
@@ -652,6 +664,7 @@ impl Runner {
                 }
                 self.publisher
                     .update(|view| view.pauses = config.ending_pause);
+                self.take_history(&config);
                 self.config = config;
                 self.load_speech_model();
                 self.open_microphone().await;
@@ -729,6 +742,10 @@ impl Runner {
             }
             None => None,
         };
+        if let Some(capture) = Capture::of(&outcome, finished.as_ref(), bound.window()) {
+            self.history
+                .record_in_background(self.config.history, capture);
+        }
         let mode = match (finished, route) {
             (Some(finished), Some(route)) if finished.delivered => {
                 println!("{}", finished.notice);
@@ -752,6 +769,15 @@ impl Runner {
             self.pause();
         }
         Flow::Continue
+    }
+}
+
+/// Whether `new` differs from `old` only in settings a running engine takes without a rebuild.
+fn retunes_only(old: &DesktopConfig, new: &DesktopConfig) -> bool {
+    *old == DesktopConfig {
+        recordings: old.recordings,
+        history: old.history,
+        ..new.clone()
     }
 }
 
@@ -962,6 +988,24 @@ mod tests {
             assert!(started, "{label}");
             assert_eq!(requests.quit, quit, "{label}");
             assert_eq!(requests.listening_off, listening_off, "{label}");
+        }
+    }
+
+    #[test]
+    fn only_the_recordings_and_the_history_are_taken_without_rebuilding_the_engine() {
+        let old = DesktopConfig::from_json_str("{}").unwrap();
+        for (change, rebuilds) in [
+            (r#"{"recordings": {"text": true}}"#, false),
+            (r#"{"history": {"enabled": false}}"#, false),
+            (
+                r#"{"history": {"limit": 5}, "recordings": {"audio": true}}"#,
+                false,
+            ),
+            (r#"{"look": "neon"}"#, true),
+            (r#"{"history": {"limit": 5}, "look": "neon"}"#, true),
+        ] {
+            let new = DesktopConfig::from_json_str(change).unwrap();
+            assert_eq!(!retunes_only(&old, &new), rebuilds, "{change}");
         }
     }
 

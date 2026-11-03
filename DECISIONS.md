@@ -46,6 +46,10 @@ areas your change touches. Editing rules are in
   before each wake) are each written locally off the reply path: on the server by
   `THALVI_RECORD`, on the desktop by settings switches, applied between captures. Why: to judge
   changes and misrecognitions on real use. Off by default: they are personal data.
+- **Dictation history is on by default.** `history` keeps the text, time, target and outcome of the last 200
+  captures (1 to 1000) in one file in the per-user data directory; switching it off stops writes and deletes nothing.
+  Why: the user can recover what they dictated, and text alone never leaves the computer. Rejected: opt-in like the
+  recordings (audio and metrics stay off), deleting entries when it is switched off.
 - **Desktop recordings by wake.** `recordings/` holds only recordings: `metrics.jsonl` and a
   `<date>/<time>/` folder per wake (`wake.wav`, `speech.wav`, `text.txt`). Wake metrics: near misses
   (score from 0.15), wakes that deliver nothing, one summary a minute (scoring latency, seconds
