@@ -11,7 +11,8 @@ count, and the answer can draw on earlier and past conversations.
   the model as data.
 - `search-working` shows the `working` state while the tool runs.
 - `search-steps` adds a `Task steps` section, collapsed by default, with
-  `Searching conversations`, its status and the match count.
+  `Searching conversations`, its status and the match count. Each new user
+  turn clears it, so it starts collapsed again or hides when nothing ran.
 - `search-past` finds matches in other saved conversations, not only the
   current one.
 
@@ -51,6 +52,12 @@ Steps:
   - `$V ab $R eval 'document.querySelector(".o-tasks").open'` is `false`.
   - Run `$V ab $R click '.o-tasks summary'`; `.o-task-list` reads
     `Searching conversations`, `DONE` and `<n> matches`.
+- **Next turn.** With the steps still open, send
+  `Search for leftover rice again` and run
+  `$V reply $R --after "Search for leftover rice again"`.
+  - `.o-tasks` is visible again with `1 step` and `open` is `false`.
+  - Send `Thanks for that` and wait with `reply --after`; `.o-tasks` is
+    `hidden`.
 - **Proof.** Screenshot with the steps open, plus the two `llm_request` lines.
 
 ## Gotchas
@@ -67,7 +74,4 @@ Steps:
   conversation's `session_id`, not the total.
 - The fake requests scope `all`; it does not exercise current-only searches or
   invalid tool arguments. The server caps matches at eight.
-- After opening Task steps, another search currently leaves it open. The
-  collapsed assertion above applies after page load. This differs from the
-  DECISIONS.md rule that task steps stay collapsed; report it as a product
-  discrepancy, not proof that every search starts collapsed.
+- `get text` returns the status as rendered (`DONE`); the DOM text is `Done`.
