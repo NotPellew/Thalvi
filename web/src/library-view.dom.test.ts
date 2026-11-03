@@ -24,6 +24,7 @@ function mount(detail: ConversationDetail, currentId: string | null) {
     currentId: () => currentId,
     open,
     startNew: () => undefined,
+    startPrivate: () => undefined,
   });
   createLibraryView(root, library, () => currentId);
   const query = (selector: string): HTMLElement => {
@@ -61,4 +62,15 @@ it.each([
     expect(query(".o-library").hidden).toBe(true);
   });
   expect(open).toHaveBeenCalledTimes(current === "s2" ? 0 : 1);
+});
+
+it("offers New private conversation beside the ordinary one, with one line on what it does not cover", () => {
+  const { library, query } = mount({ id: "s1", title: "Pasta", turns: [], live: false }, null);
+  const started = vi.spyOn(library, "startPrivate");
+  expect(query(".o-lib-new").nextElementSibling).toBe(query(".o-lib-new-private"));
+  expect(query(".o-lib-new-private").textContent).toBe("New private conversation");
+  expect(query(".o-lib-private-note").textContent).toMatch(/Providers still process your requests.*recordings are a separate setting/);
+
+  query(".o-lib-new-private").click();
+  expect(started).toHaveBeenCalledTimes(1);
 });

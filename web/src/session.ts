@@ -1,6 +1,8 @@
 import type { Phase, ServerMessage, TaskStep, Turn } from "./protocol.ts";
 
 export interface SessionState {
+  /** This conversation is kept in memory only and can't be resumed. */
+  readonly private: boolean;
   /** Microphone input is on. */
   readonly voice: boolean;
   /** The user wants spoken replies; sent again on every new connection. */
@@ -26,11 +28,12 @@ export type SessionEvent =
   | { type: "speak"; on: boolean }
   | { type: "notice"; notice: string | null }
   | { type: "stopped" }
-  | { type: "switched" }
+  | { type: "switched"; private: boolean }
   | { type: "playing"; playing: boolean }
   | { type: "server"; message: ServerMessage };
 
 export const INITIAL: SessionState = {
+  private: false,
   voice: false,
   speak: false,
   replyAudio: false,
@@ -45,6 +48,8 @@ export const INITIAL: SessionState = {
 };
 
 export const UNREACHABLE_NOTICE = "Can't reach the server. Trying again…";
+export const PRIVATE_LOST_NOTICE =
+  "This private conversation ended when the connection dropped, and can't be resumed. Start a new conversation.";
 
 /** What the user is told: the server phase, corrected for what the client knows locally. */
 export function displayState(s: SessionState, micPending = false): DisplayState {
@@ -62,9 +67,10 @@ export function reduce(s: SessionState, event: SessionEvent): SessionState {
     case "opened":
       return { ...s, link: "online", replyAudio: false, phase: "idle", partial: "", tasks: [], replyOpen: false, notice: null };
     case "lost":
+      if (s.private) return endedState(s, PRIVATE_LOST_NOTICE);
       return { ...s, link: "reconnecting", phase: "idle", partial: "", replyOpen: false, notice: UNREACHABLE_NOTICE };
     case "switched":
-      return { ...s, link: "connecting", phase: "idle", playing: false, partial: "", turns: [], tasks: [], replyOpen: false, notice: null };
+      return { ...s, private: event.private, link: "connecting", phase: "idle", playing: false, partial: "", turns: [], tasks: [], replyOpen: false, notice: null };
     case "voice":
       return {
         ...s,
@@ -90,7 +96,7 @@ export function reduce(s: SessionState, event: SessionEvent): SessionState {
 function reduceServer(s: SessionState, m: ServerMessage): SessionState {
   switch (m.type) {
     case "session":
-      return { ...s, turns: m.turns, partial: "", tasks: [], replyOpen: false };
+      return { ...s, private: m.private === true, turns: m.turns, partial: "", tasks: [], replyOpen: false };
     case "state":
       return { ...s, phase: m.state, partial: m.state === "listening" ? s.partial : "" };
     case "task": {
@@ -129,6 +135,10 @@ function reduceServer(s: SessionState, m: ServerMessage): SessionState {
     case "error":
       return { ...s, notice: m.message };
     case "ended":
-      return { ...s, link: "ended", voice: false, speak: false, replyAudio: false, phase: "idle", playing: false, partial: "", replyOpen: false, notice: m.message };
+      return endedState(s, m.message);
   }
+}
+
+function endedState(s: SessionState, notice: string): SessionState {
+  return { ...s, link: "ended", voice: false, speak: false, replyAudio: false, phase: "idle", playing: false, partial: "", replyOpen: false, notice };
 }

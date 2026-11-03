@@ -16,7 +16,7 @@ export interface TaskStep {
 export type InputSource = "text" | "mic";
 
 export type ServerMessage =
-  | { type: "session"; id: string; turns: Turn[] }
+  | { type: "session"; id: string; turns: Turn[]; private?: true }
   | { type: "state"; state: Phase }
   | { type: "task"; step: TaskStep }
   | { type: "partial"; text: string }
@@ -27,7 +27,7 @@ export type ServerMessage =
   | { type: "interrupted" }
   | { type: "reply_end" }
   | { type: "error"; message: string }
-  | { type: "ended"; reason: "moved" | "deleted"; message: string };
+  | { type: "ended"; reason: "moved" | "deleted" | "private"; message: string };
 
 export const CANCEL_MESSAGE = JSON.stringify({ type: "cancel" });
 export const MAX_TEXT_LENGTH = 20000;
@@ -93,7 +93,10 @@ export function parseServerMessage(raw: string): ServerMessage | null {
   switch (type) {
     case "session": {
       const restored = parseTurns(turns);
-      return typeof id === "string" && restored ? { type, id, turns: restored } : null;
+      if (typeof id !== "string" || !restored) return null;
+      return fields["private"] === true
+        ? { type, id, turns: restored, private: true }
+        : { type, id, turns: restored };
     }
     case "state":
       return PHASES.includes(state) ? { type, state: state as Phase } : null;
@@ -119,7 +122,7 @@ export function parseServerMessage(raw: string): ServerMessage | null {
     case "error":
       return typeof message === "string" ? { type, message } : null;
     case "ended":
-      return (fields["reason"] === "moved" || fields["reason"] === "deleted") &&
+      return (fields["reason"] === "moved" || fields["reason"] === "deleted" || fields["reason"] === "private") &&
         typeof message === "string"
         ? { type, reason: fields["reason"], message }
         : null;
