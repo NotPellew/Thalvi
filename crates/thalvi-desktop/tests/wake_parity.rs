@@ -134,7 +134,7 @@ async fn scores_match_openwakeword_for_every_catalog_head_and_a_path_head() {
     for (name, scenario, input) in &inputs {
         let mut default = engine(by_name).await;
         let ran = run(&mut default, input, &scenario.reset_before);
-        let capture = &scenario.scores["hey_thalvi_v0.0.13"];
+        let capture = &scenario.scores["hey_thalvi_v0.0.14"];
         let conversation = &scenario.scores["hey_mycroft_v0.1"];
         let capture = max_error(capture, ran.iter().map(|f| f.capture));
         let conversation = max_error(conversation, ran.iter().map(|f| f.conversation));
@@ -146,7 +146,7 @@ async fn scores_match_openwakeword_for_every_catalog_head_and_a_path_head() {
             ran.iter().map(|f| f.capture),
         );
         let path_thalvi = max_error(
-            &scenario.scores["hey_thalvi_v0.0.13"],
+            &scenario.scores["hey_thalvi_v0.0.14"],
             ran.iter().map(|f| f.conversation),
         );
         eprintln!(
@@ -227,7 +227,8 @@ async fn both_heads_crossing_together_is_ambiguous() {
 
 #[tokio::test]
 async fn a_start_or_reset_scores_zero_for_five_frames_then_real_scores() {
-    let mut engine = engine("{}").await;
+    // hey_jarvis scores above zero on the formula signal; hey_thalvi rounds to exactly zero there.
+    let mut engine = engine(r#"{"capture":{"model":"hey_jarvis"}}"#).await;
     let ran = run(&mut engine, &formula_frames(50), &[40]);
     for first in [0, 40] {
         assert!(
