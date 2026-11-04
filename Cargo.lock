@@ -4483,7 +4483,7 @@ dependencies = [
 
 [[package]]
 name = "thalvi-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs 7.0.0",
  "reqwest 0.12.28",
@@ -4502,7 +4502,7 @@ dependencies = [
 
 [[package]]
 name = "thalvi-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "chrono",
@@ -4527,7 +4527,7 @@ dependencies = [
 
 [[package]]
 name = "thalvi-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
