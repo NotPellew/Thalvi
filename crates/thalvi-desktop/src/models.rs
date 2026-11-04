@@ -92,10 +92,10 @@ impl CatalogHead {
         match self {
             Self::HeyThalvi => Asset {
                 kind: ModelKind::Wake,
-                file_name: "hey_thalvi_v0.0.13.onnx",
-                url: "https://github.com/NotPellew/Thalvi/releases/download/wake-models-v1/hey_thalvi_v0.0.13.onnx",
-                size: 395_095,
-                sha256: "f0491728ee36bb0b7f8860ad35a290b3b5b518cf8d2a378179b31ef9494b37e3",
+                file_name: "hey_thalvi_v0.0.14.onnx",
+                url: "https://github.com/NotPellew/Thalvi/releases/download/wake-models-v2/hey_thalvi_v0.0.14.onnx",
+                size: 395_406,
+                sha256: "2462290e29875bc9458c866387ddf7a6f75168849aae9f45cfc587d2f07ad29e",
             },
             Self::HeyMycroft => Asset {
                 kind: ModelKind::Wake,

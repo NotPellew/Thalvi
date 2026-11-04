@@ -17,7 +17,7 @@ import openwakeword
 from openwakeword.model import Model
 
 FRAME = 1280
-HEADS = ("hey_thalvi_v0.0.13", "hey_mycroft_v0.1", "hey_jarvis_v0.1")
+HEADS = ("hey_thalvi_v0.0.14", "hey_mycroft_v0.1", "hey_jarvis_v0.1")
 
 
 def lcg(seed):
