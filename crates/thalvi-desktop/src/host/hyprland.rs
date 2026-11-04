@@ -282,7 +282,8 @@ impl<R: CommandRunner> Host for Hyprland<R> {
         self.focus(target).map_err(nothing_typed)?;
         let mut args = vec!["-"];
         if enter {
-            args.extend(["-k", "Return"]);
+            // Terminal agents read an Enter that arrives right after typed text as a new line.
+            args.extend(["-s", "250", "-k", "Return"]);
         }
         self.run
             .run("wtype", &args, Some(text.as_str()))
@@ -613,7 +614,7 @@ mod tests {
         let text = "--help $(not-a-command) `nor-this` café 👋";
         for (enter, wtype) in [
             (false, format!("wtype - <{text}>")),
-            (true, format!("wtype - -k Return <{text}>")),
+            (true, format!("wtype - -s 250 -k Return <{text}>")),
         ] {
             let host = desktop(
                 vec![row("0x1", 1, "browser", 0), row("0x2", 2, "terminal", 1)],
