@@ -95,7 +95,7 @@ pub fn execute(task: &Task, host: &impl Host) -> Result<String, HostError> {
 /// Lowercase, whitespace collapsed, without sentence punctuation around it.
 fn normalize(text: &str) -> String {
     text.to_lowercase()
-        .trim_matches([' ', '.', '!', '?', '\t', '\r', '\n'])
+        .trim_matches([' ', '.', ',', '!', '?', '\t', '\r', '\n'])
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -221,6 +221,8 @@ mod tests {
             "open the project page",
             "  Open the PROJECT   page. ",
             "open the project page?!",
+            "open the project page,",
+            ", open the project page",
         ] {
             assert_eq!(
                 decide(spoken, &config),
