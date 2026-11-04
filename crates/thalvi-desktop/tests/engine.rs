@@ -20,7 +20,7 @@ use thalvi_desktop::engine::{
     WakeTrigger,
 };
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
-use thalvi_desktop::hold::HoldInput;
+use thalvi_desktop::hold::{HoldInput, Refusal};
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
 use thalvi_desktop::recognizer::{
     FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, ServerUrl,
@@ -3356,6 +3356,448 @@ async fn nothing_spoken_after_the_release_reaches_the_recognizer_but_the_words_a
                 finished(task).await,
                 accepted(CaptureRoute::Paste, "hello there")
             );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_released_before_the_recognizer_connects_still_sends_its_speech_within_the_wait() {
+    // (speech after the start cue, recognizer ready at, what comes of it)
+    type Case = (Kind, Option<u64>, Option<CaptureOutcome>);
+    let cases: [Case; 3] = [
+        (
+            Kind::Voice,
+            Some(1000),
+            Some(accepted(CaptureRoute::Paste, "hello world")),
+        ),
+        // Nothing but silence was held: the same honest failure as before, without waiting.
+        (
+            Kind::Quiet,
+            Some(1000),
+            Some(CaptureOutcome::Failed {
+                error: CaptureError::NothingHeard,
+                recoverable_text: None,
+            }),
+        ),
+        // The connection never comes within the bounded wait.
+        (Kind::Voice, None, None),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for (case, (kind, ready, expected)) in cases.into_iter().enumerate() {
+                let label = format!("case {case}");
+                let (mut rig, engine, frames) = Rig::new("{}");
+                let task = hold_task(engine, frames);
+                rig.press().await;
+                rig.at(230).await;
+                rig.feed_until(600, kind).await;
+                let spoken = tags(&(3..8).map(|id| kind.frame(id)).collect::<Vec<Frame>>());
+                rig.release(600).await;
+                if !matches!(kind, Kind::Quiet) {
+                    // An aside after the release stays out of what the recognizer is sent.
+                    rig.feed_until(900, kind).await;
+                }
+                let Some(ready) = ready else {
+                    rig.at(8000).await;
+                    assert!(
+                        matches!(
+                            finished(task).await,
+                            CaptureOutcome::Failed {
+                                error: CaptureError::NotReady { .. },
+                                ..
+                            }
+                        ),
+                        "{label}"
+                    );
+                    assert_eq!(rig.sent().len(), 0, "{label}");
+                    continue;
+                };
+                if matches!(kind, Kind::Quiet) {
+                    assert_eq!(
+                        rig.started(Cue::Error),
+                        [600],
+                        "{label}: ends at the release"
+                    );
+                    assert_eq!(rig.sent().len(), 0, "{label}");
+                    assert_eq!(finished(task).await, expected.unwrap(), "{label}");
+                    continue;
+                }
+                rig.at(ready).await;
+                assert!(!task.is_finished(), "{label}: waiting for the connection");
+                rig.server.ready();
+                settle().await;
+                assert_eq!(
+                    tags(&rig.sent()),
+                    spoken,
+                    "{label}: the buffered speech arrived"
+                );
+                rig.partial("hello world").await;
+                // The words get the tail from the moment they were sent.
+                rig.at(ready + 500).await;
+                assert_eq!(rig.started(Cue::Accepted), [ready + 500], "{label}");
+                assert_eq!(finished(task).await, expected.unwrap(), "{label}");
+                assert_eq!(rig.notices(), Vec::<String>::new(), "{label}");
+            }
+        })
+        .await;
+}
+
+#[derive(Clone, Copy)]
+enum Connect {
+    /// The recognizer is still connecting when the key comes up, and is ready long after.
+    Pending,
+    /// The connection completes before the engine has looked at the frames or the release.
+    SamePoll,
+    /// The recognizer was ready before the speech began.
+    AlreadyReady,
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_sends_what_was_queued_before_its_release_and_nothing_queued_after_it() {
+    use Connect::{AlreadyReady, Pending, SamePoll};
+    use Kind::{Quiet, Voice};
+    // (connect, queued before the release, queued after it before the engine looked,
+    // whether the recognizer is sent the former, whether the words are pasted)
+    type Case = (Connect, Kind, Kind, bool, bool);
+    let cases: [Case; 12] = [
+        (Pending, Voice, Quiet, true, true),
+        (Pending, Voice, Voice, true, true),
+        (Pending, Quiet, Quiet, false, false),
+        (Pending, Quiet, Voice, false, false),
+        (SamePoll, Voice, Quiet, true, true),
+        (SamePoll, Voice, Voice, true, true),
+        (SamePoll, Quiet, Quiet, false, false),
+        (SamePoll, Quiet, Voice, false, false),
+        (AlreadyReady, Voice, Quiet, true, true),
+        (AlreadyReady, Voice, Voice, true, true),
+        (AlreadyReady, Quiet, Quiet, true, false),
+        (AlreadyReady, Quiet, Voice, true, false),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for tap in [false, true] {
+                for (case, (connect, before, after, sent, pasted)) in cases.into_iter().enumerate()
+                {
+                    let label = format!("case {case}, with a full tap while pending: {tap}");
+                    let (mut rig, mut engine, mut frames) = Rig::new("{}");
+                    let task = tokio::task::spawn_local(async move {
+                        assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                        let outcome = engine.capture(&mut frames).await;
+                        let ignored = engine.take_ignored();
+                        engine.finish().await;
+                        (outcome, ignored)
+                    });
+                    rig.press().await;
+                    if matches!(connect, AlreadyReady) {
+                        rig.server.ready();
+                        settle().await;
+                    }
+                    rig.at(600).await;
+                    for id in 3..8 {
+                        rig.feed.send(before.frame(id));
+                    }
+                    rig.key.set(false);
+                    for id in 8..13 {
+                        rig.feed.send(after.frame(id));
+                    }
+                    if tap {
+                        rig.key.set(true);
+                        rig.key.set(false);
+                    }
+                    match connect {
+                        Pending => {
+                            settle().await;
+                            rig.at(1000).await;
+                            rig.server.ready();
+                        }
+                        SamePoll => rig.server.ready(),
+                        AlreadyReady => {}
+                    }
+                    settle().await;
+                    let queued: Vec<Frame> = (3..8).map(|id| before.frame(id)).collect();
+                    let expected = if sent { tags(&queued) } else { vec![] };
+                    assert_eq!(tags(&rig.sent()), expected, "{label}: frames sent");
+                    if pasted {
+                        rig.partial("hello world").await;
+                    }
+                    rig.at(1500).await;
+                    let (outcome, ignored) = finished(task).await;
+                    let expected = if pasted {
+                        accepted(CaptureRoute::Paste, "hello world")
+                    } else {
+                        CaptureOutcome::Failed {
+                            error: CaptureError::NothingHeard,
+                            recoverable_text: None,
+                        }
+                    };
+                    assert_eq!(outcome, expected, "{label}");
+                    assert_eq!(
+                        tags(&rig.sent()),
+                        if sent { tags(&queued) } else { vec![] },
+                        "{label}: frames sent by the end"
+                    );
+                    let refused: Vec<Refusal> = if tap {
+                        vec![Refusal::Capturing]
+                    } else {
+                        vec![]
+                    };
+                    assert_eq!(ignored, refused, "{label}");
+                    let told: Vec<&str> = refused.iter().map(|r| r.notice()).collect();
+                    assert_eq!(rig.notices(), told, "{label}");
+                }
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_abandoned_before_its_capture_leaves_nothing_for_the_next_wake_capture() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, mut engine, mut frames) = Rig::new("{}");
+            let task = tokio::task::spawn_local(async move {
+                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                // A cancel landed while the window was bound: the capture never ran.
+                assert_eq!(
+                    engine.listen(&mut frames).await.unwrap(),
+                    WakeTrigger::Capture
+                );
+                let outcome = engine.capture(&mut frames).await;
+                engine.finish().await;
+                outcome
+            });
+            rig.press().await;
+            rig.key.set(false);
+            settle().await;
+            // The caller reopens the gate the hold's start shut.
+            rig.gate.set_enabled(true);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello").await;
+            rig.feed_until(1500, Kind::Quiet).await;
+            rig.finals("world paste that").await;
+            rig.feed_until(3000, Kind::Quiet).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "Hello world")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn presses_that_start_nothing_are_told_counted_and_left_to_the_caller() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("presses-ignored");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, mut engine, mut frames) = Rig::recording("{}", recorder);
+            let task = tokio::task::spawn_local(async move {
+                let trigger = engine.listen(&mut frames).await.unwrap();
+                assert_eq!(trigger, WakeTrigger::Capture);
+                let outcome = engine.capture(&mut frames).await;
+                let ignored = engine.take_ignored();
+                engine.finish().await;
+                (outcome, ignored)
+            });
+            // Pressed and released before the engine looked: no hold, and no silence either.
+            settle().await;
+            rig.key.set(true);
+            rig.key.set(false);
+            settle().await;
+            assert_eq!(rig.notices(), [Refusal::TooQuick.notice()]);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello").await;
+            // During a dictation by wake word, a press is refused; so is one that was over already.
+            rig.key.set(true);
+            settle().await;
+            rig.key.set(false);
+            rig.key.set(true);
+            rig.key.set(false);
+            settle().await;
+            rig.finals("never mind").await;
+            let (outcome, ignored) = finished(task).await;
+            assert_eq!(
+                outcome,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("Hello".to_owned())
+                }
+            );
+            assert_eq!(
+                ignored,
+                [Refusal::TooQuick, Refusal::Capturing, Refusal::Capturing]
+            );
+            assert_eq!(
+                rig.notices(),
+                [
+                    Refusal::TooQuick.notice(),
+                    Refusal::Capturing.notice(),
+                    Refusal::Capturing.notice()
+                ]
+            );
+            let lines = read_lines(&dir.join("metrics.jsonl"));
+            let refused: Vec<(String, u64)> = lines
+                .iter()
+                .filter(|line| line["event"] == "desktop_hold_start")
+                .map(|line| {
+                    (
+                        line["reason"].as_str().unwrap().to_owned(),
+                        line["count"].as_u64().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                refused,
+                [
+                    ("too_quick".to_owned(), 1),
+                    ("capturing".to_owned(), 1),
+                    ("capturing".to_owned(), 1)
+                ]
+            );
+        })
+        .await;
+}
+
+enum Publication {
+    BeforeRelease,
+    Continuation { release: bool },
+}
+
+struct PublishDuringPoll {
+    inner: FakeFrames,
+    feed: FrameFeed,
+    key: HoldInput,
+    arm: Rc<std::cell::Cell<bool>>,
+    waker: Rc<RefCell<Option<std::task::Waker>>>,
+    publication: Publication,
+}
+impl thalvi_desktop::engine::FrameSource for PublishDuringPoll {
+    async fn next(&mut self) -> Result<thalvi_desktop::frame::Queued, AudioError> {
+        use std::future::Future;
+        let Self {
+            inner,
+            feed,
+            key,
+            arm,
+            waker,
+            publication,
+        } = self;
+        let mut next = std::pin::pin!(thalvi_desktop::engine::FrameSource::next(inner));
+        std::future::poll_fn(|cx| {
+            *waker.borrow_mut() = Some(cx.waker().clone());
+            let result = next.as_mut().poll(cx);
+            if result.is_pending() && arm.replace(false) {
+                match publication {
+                    Publication::BeforeRelease => {
+                        for id in 3..8 {
+                            feed.send(voiced(id));
+                        }
+                        key.set(false);
+                        for id in 8..13 {
+                            feed.send(voiced(id));
+                        }
+                    }
+                    Publication::Continuation { release } => {
+                        if *release {
+                            key.set(false);
+                        }
+                        for id in 20..23 {
+                            feed.send(voiced(id));
+                        }
+                        return next.as_mut().poll(cx);
+                    }
+                }
+            }
+            result
+        })
+        .await
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn a_frame_published_after_pending_poll_but_before_release_is_not_lost() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, mut engine, frames) = Rig::new("{}");
+            let (_unused, dummy) = FakeFrames::new(&rig.gate);
+            let feed = std::mem::replace(&mut rig.feed, dummy);
+            let arm = Rc::new(std::cell::Cell::new(false));
+            let waker = Rc::new(RefCell::new(None));
+            let mut frames = PublishDuringPoll {
+                inner: frames,
+                feed,
+                key: rig.key.clone(),
+                arm: Rc::clone(&arm),
+                waker: Rc::clone(&waker),
+                publication: Publication::BeforeRelease,
+            };
+            let task = tokio::task::spawn_local(async move {
+                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                let outcome = engine.capture(&mut frames).await;
+                engine.finish().await;
+                outcome
+            });
+            rig.press().await;
+            rig.at(600).await;
+            arm.set(true);
+            waker.borrow().as_ref().unwrap().wake_by_ref();
+            settle().await;
+            rig.at(1000).await;
+            rig.server.ready();
+            settle().await;
+            assert_eq!(
+                rig.sent().len(),
+                5,
+                "pre-release frames arrived between the pending audio poll and the release poll"
+            );
+            rig.partial("hello world").await;
+            rig.at(1500).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "hello world")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pending_spoken_ending_keeps_continuation_published_during_release() {
+    LocalSet::new()
+        .run_until(async {
+            for release in [false, true] {
+                let (mut rig, mut engine, frames) = Rig::new(SLOW_PASTE);
+                let (_unused, dummy) = FakeFrames::new(&rig.gate);
+                let feed = std::mem::replace(&mut rig.feed, dummy);
+                let arm = Rc::new(std::cell::Cell::new(false));
+                let waker = Rc::new(RefCell::new(None));
+                let mut frames = PublishDuringPoll {
+                    inner: frames,
+                    feed,
+                    key: rig.key.clone(),
+                    arm: Rc::clone(&arm),
+                    waker: Rc::clone(&waker),
+                    publication: Publication::Continuation { release },
+                };
+                let task = tokio::task::spawn_local(async move {
+                    assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                    engine.capture(&mut frames).await
+                });
+                rig.press().await;
+                rig.server.ready();
+                rig.at(230).await;
+                rig.finals("hello paste that").await;
+                arm.set(true);
+                waker.borrow().as_ref().unwrap().wake_by_ref();
+                settle().await;
+                let expected: Vec<Frame> = (20..23).map(voiced).collect();
+                assert_eq!(
+                    tags(&rig.sent()),
+                    tags(&expected),
+                    "release={release}: all continuation reaches recognition"
+                );
+                task.abort();
+                let _ = task.await;
+            }
         })
         .await;
 }

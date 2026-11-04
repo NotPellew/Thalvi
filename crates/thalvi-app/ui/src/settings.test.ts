@@ -1221,6 +1221,39 @@ describe("last dictation", () => {
     expect(notes()).toContain("A newer dictation is waiting. Discard this one to see it.");
   });
 
+  it("ignores a draft answer that a newer refresh and a later edit superseded", async () => {
+    const stub = await openDraft();
+    let answerOlder: (draft: Draft | null) => void = () => undefined;
+    let answerNewer: (draft: Draft | null) => void = () => undefined;
+    stub.backend.getDraft
+      .mockImplementationOnce(() => new Promise<Draft | null>((resolve) => { answerOlder = resolve; }))
+      .mockImplementationOnce(() => new Promise<Draft | null>((resolve) => { answerNewer = resolve; }));
+    stub.emit({ state: "listening" });
+    stub.emit({ state: "listening" });
+    answerNewer({ ...DRAFT, id: 8, original: "A newer one.", text: "A newer one." });
+    await settle();
+    expect(area().value).toBe("A newer one.");
+
+    edit("A newer one, fixed.");
+    answerOlder(structuredClone(DRAFT));
+    await settle();
+    expect(area().value).toBe("A newer one, fixed.");
+    expect(stub.backend.editDraft).toHaveBeenLastCalledWith("A newer one, fixed.");
+  });
+
+  it("keeps Reset when an earlier draft refresh arrives afterward", async () => {
+    const stub = await openDraft();
+    edit("Typed edit.");
+    let answerOlder: (draft: Draft | null) => void = () => undefined;
+    stub.backend.getDraft.mockImplementationOnce(() => new Promise<Draft | null>((resolve) => { answerOlder = resolve; }));
+    stub.emit({ state: "listening" });
+    within(section(), "Reset to original").click();
+    answerOlder({ ...DRAFT, id: 6, original: "An older draft.", text: "An older draft." });
+    await settle();
+    expect(area().value).toBe(DRAFT.original);
+    expect(stub.backend.editDraft).toHaveBeenLastCalledWith(DRAFT.original);
+  });
+
   it("discards the draft and shows the one that waited", async () => {
     const stub = await openDraft({ ...DRAFT, newerWaiting: true });
     stub.backend.getDraft.mockResolvedValueOnce({ ...DRAFT, id: 9, original: "Waiting.", text: "Waiting." });

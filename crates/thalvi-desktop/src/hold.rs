@@ -1,12 +1,14 @@
 //! The hold-to-dictate key: its name in the config and the signal that it is down.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+use crate::frame::Order;
 use crate::host::Modifier;
+use crate::metrics::{Event, Recorder};
 
 /// The keys a hold key may be, as W3C `KeyboardEvent.code` names with their Windows scan codes.
 const CODES: [(&str, u16); 49] = [
@@ -170,27 +172,59 @@ impl Serialize for HoldKey {
 }
 
 /// Whether the hold key is down, and how many times it has been pressed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct KeyState {
     pub presses: u64,
     pub down: bool,
+    /// The latest press's release.
+    pub release: Cutoff,
+}
+
+/// Where in the [`Order`] of queued frames one press of the key was first released. The first
+/// release stays however many presses follow, and every clone sees it.
+#[derive(Clone, Debug, Default)]
+pub struct Cutoff(Arc<OnceLock<Order>>);
+
+impl Cutoff {
+    fn release(&self) {
+        self.0.get_or_init(Order::next);
+    }
+
+    /// Whether the key was released before a frame queued at `order`.
+    #[must_use]
+    pub fn precedes(&self, order: Order) -> bool {
+        self.0.get().is_some_and(|released| *released < order)
+    }
+}
+
+/// A press that opens a hold.
+#[derive(Clone, Debug)]
+pub struct Press {
+    pub number: u64,
+    pub release: Cutoff,
 }
 
 /// Follows the key so each press is acted on or refused once, however late it is looked at.
 pub struct Presses {
     state: watch::Receiver<KeyState>,
     seen: u64,
+    lost: u64,
 }
 
 impl Presses {
     #[must_use]
     pub fn new(state: watch::Receiver<KeyState>) -> Self {
-        Self { state, seen: 0 }
+        Self {
+            state,
+            seen: 0,
+            lost: 0,
+        }
     }
 
     /// Counts the presses so far as dealt with, and the state as seen.
     pub fn skip(&mut self) {
         self.seen = self.state.borrow_and_update().presses;
+        self.lost = 0;
     }
 
     /// Resolves when the key changed since it was last looked at; an error once nothing can
@@ -202,17 +236,29 @@ impl Presses {
         self.state.changed().await
     }
 
-    /// The press that went down since the last one was taken, if the key is still down.
-    pub fn take(&mut self) -> Option<u64> {
-        let KeyState { presses, down } = *self.state.borrow_and_update();
-        let fresh = down && presses > self.seen;
-        self.seen = presses;
-        fresh.then_some(presses)
+    /// The press that went down since the last one was taken, if the key is still down. Earlier
+    /// presses that were released or pressed again before anyone looked are counted by
+    /// [`take_lost`](Self::take_lost).
+    pub fn take(&mut self) -> Option<Press> {
+        let state = self.state.borrow_and_update();
+        let unseen = state.presses - self.seen;
+        let fresh = state.down && unseen > 0;
+        self.lost += unseen - u64::from(fresh);
+        self.seen = state.presses;
+        fresh.then(|| Press {
+            number: state.presses,
+            release: state.release.clone(),
+        })
+    }
+
+    /// How many presses [`take`](Self::take) passed over since this was last asked.
+    pub fn take_lost(&mut self) -> u64 {
+        std::mem::take(&mut self.lost)
     }
 
     /// Whether press number `press` is over: the key is up, or has been pressed again.
     pub fn is_over(&mut self, press: u64) -> bool {
-        let state = *self.state.borrow_and_update();
+        let state = self.state.borrow_and_update();
         !state.down || state.presses != press
     }
 
@@ -226,6 +272,76 @@ impl Presses {
         {
             std::future::pending::<()>().await;
         }
+    }
+}
+
+/// Why a press of the hold key started nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    Paused,
+    MicrophoneClosed,
+    Delivering,
+    /// A dictation by wake word was already running.
+    Capturing,
+    /// The key came up before anyone looked: the press was over before it could start anything.
+    TooQuick,
+}
+
+impl Refusal {
+    /// How the metrics name it.
+    #[must_use]
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Paused => "paused",
+            Self::MicrophoneClosed => "microphone_closed",
+            Self::Delivering => "delivering",
+            Self::Capturing => "capturing",
+            Self::TooQuick => "too_quick",
+        }
+    }
+
+    /// Says in plain words what happened.
+    #[must_use]
+    pub fn notice(self) -> &'static str {
+        match self {
+            Self::Paused => {
+                "Thalvi is paused, so pressing the key started nothing. Resume listening first."
+            }
+            Self::MicrophoneClosed => {
+                "The microphone is not open, so pressing the key started nothing."
+            }
+            Self::Delivering => {
+                "Thalvi is still delivering the last dictation, so pressing the key started nothing."
+            }
+            Self::Capturing => {
+                "A dictation is already running, so pressing the key started nothing."
+            }
+            Self::TooQuick => {
+                "The key was pressed and released too quickly, so pressing it started nothing."
+            }
+        }
+    }
+
+    /// `notice` as one short line for the overlay.
+    #[must_use]
+    pub fn headline(self) -> &'static str {
+        match self {
+            Self::Paused => "Paused — key ignored",
+            Self::MicrophoneClosed => "Microphone closed — key ignored",
+            Self::Delivering => "Delivering — key ignored",
+            Self::Capturing => "Dictating — key ignored",
+            Self::TooQuick => "Key released too quickly",
+        }
+    }
+
+    /// Records `count` presses refused for this reason.
+    pub fn record(self, recorder: &Recorder, count: u64) {
+        recorder.metric(
+            Event::HoldStart,
+            "refused",
+            None,
+            serde_json::json!({"reason": self.reason(), "count": count}),
+        );
     }
 }
 
@@ -250,6 +366,9 @@ impl HoldInput {
             state.down = down;
             if down {
                 state.presses += 1;
+                state.release = Cutoff::default();
+            } else {
+                state.release.release();
             }
             true
         });
@@ -836,33 +955,75 @@ mod tests {
     #[test]
     fn auto_repeat_is_not_another_press_and_each_release_allows_the_next() {
         let (input, state) = HoldInput::new();
-        let seen = || *state.borrow();
+        let seen = || {
+            let state = state.borrow();
+            (state.presses, state.down)
+        };
         input.set(true);
         input.set(true);
         input.set(true);
-        assert_eq!(
-            seen(),
-            KeyState {
-                presses: 1,
-                down: true
-            }
-        );
+        assert_eq!(seen(), (1, true));
         input.set(false);
         input.set(false);
-        assert_eq!(
-            seen(),
-            KeyState {
-                presses: 1,
-                down: false
-            }
-        );
+        assert_eq!(seen(), (1, false));
         input.set(true);
-        assert_eq!(
-            seen(),
-            KeyState {
-                presses: 2,
-                down: true
+        assert_eq!(seen(), (2, true));
+    }
+
+    #[test]
+    fn a_press_released_or_repeated_before_it_is_looked_at_is_counted_as_lost() {
+        // (events since the last look, the press taken, presses lost)
+        for (events, taken, lost) in [
+            (vec![true], Some(1), 0),
+            (vec![true, false], None, 1),
+            (vec![true, false, true], Some(2), 1),
+            (vec![true, false, true, false, true], Some(3), 2),
+            (vec![], None, 0),
+        ] {
+            let (input, state) = HoldInput::new();
+            let mut presses = Presses::new(state);
+            for down in &events {
+                input.set(*down);
             }
+            assert_eq!(
+                presses.take().map(|press| press.number),
+                taken,
+                "{events:?}"
+            );
+            assert_eq!(presses.take_lost(), lost, "{events:?}");
+            assert_eq!(presses.take_lost(), 0, "{events:?}: asked once");
+        }
+
+        let (input, state) = HoldInput::new();
+        let mut presses = Presses::new(state);
+        input.set(true);
+        input.set(false);
+        presses.skip();
+        assert!(presses.take().is_none());
+        assert_eq!(presses.take_lost(), 0, "a press dealt with is not lost");
+    }
+
+    #[test]
+    fn a_press_keeps_its_first_release_whatever_presses_follow_before_anyone_looks() {
+        let (input, state) = HoldInput::new();
+        let mut presses = Presses::new(state);
+        input.set(true);
+        let press = presses.take().expect("a fresh press");
+        let while_down = Order::next();
+        input.set(false);
+        let after_release = Order::next();
+        input.set(false);
+        input.set(true);
+        input.set(false);
+        let after_tap = Order::next();
+        assert!(!press.release.precedes(while_down), "no release while down");
+        assert!(
+            press.release.precedes(after_release),
+            "a later tap's release does not move this press's"
         );
+        assert!(press.release.precedes(after_tap));
+        assert_eq!(presses.take_lost(), 0, "nothing was passed over yet");
+        assert!(presses.take().is_none());
+        assert_eq!(presses.take_lost(), 1, "the tap is counted once");
     }
 }

@@ -23,7 +23,7 @@ pub use error::AudioError;
 pub use framer::Framer;
 pub use gate::InputGate;
 
-use crate::frame::Frame;
+use crate::frame::{Frame, Queued};
 use crate::metrics::{Event, Metrics};
 
 /// Frames queued between the capture thread and the consumer: 10 s.
@@ -96,7 +96,7 @@ impl Shared {
 /// A frame and the gate epoch it was captured in, so a consumer can tell stale ones apart.
 struct Tagged {
     epoch: u64,
-    frame: Frame,
+    queued: Queued,
 }
 
 /// The capture callback's state; feeding it never allocates or locks.
@@ -153,7 +153,7 @@ impl Sink {
             if producer
                 .push(Tagged {
                     epoch,
-                    frame: *frame,
+                    queued: Queued::now(*frame),
                 })
                 .is_ok()
             {
@@ -189,7 +189,7 @@ pub struct Frames {
 }
 
 impl Frames {
-    /// Waits for the next 80 ms frame.
+    /// Waits for the next 80 ms frame, stamped with its place in the order frames were queued.
     ///
     /// After a failure, or once the microphone is paused, every call returns that error.
     /// Frames captured before the input gate last changed are discarded.
@@ -197,7 +197,7 @@ impl Frames {
     /// # Errors
     ///
     /// The [`AudioError`] that ended capture.
-    pub async fn next(&mut self) -> Result<Frame, AudioError> {
+    pub async fn next(&mut self) -> Result<Queued, AudioError> {
         poll_fn(|cx| {
             if let Some(result) = self.try_frame() {
                 return Poll::Ready(result);
@@ -209,7 +209,7 @@ impl Frames {
         .await
     }
 
-    fn try_frame(&mut self) -> Option<Result<Frame, AudioError>> {
+    fn try_frame(&mut self) -> Option<Result<Queued, AudioError>> {
         if let Some(error) = &self.failure {
             return Some(Err(error.clone()));
         }
@@ -236,11 +236,11 @@ impl Frames {
             return Some(Err(error));
         }
         let (_, current) = self.gate.state();
-        while let Ok(Tagged { epoch, frame }) = self.consumer.pop() {
+        while let Ok(Tagged { epoch, queued }) = self.consumer.pop() {
             if epoch != current {
                 continue;
             }
-            return Some(Ok(frame));
+            return Some(Ok(queued));
         }
         None
     }
@@ -451,6 +451,7 @@ mod tests {
 
     use super::*;
     use crate::frame::FRAME_SAMPLES;
+    use crate::hold::{HoldInput, Presses};
     use crate::metrics::{RecordKinds, Recorder};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -501,10 +502,14 @@ mod tests {
         sink.feed(data, StreamInstant::ZERO, StreamInstant::ZERO);
     }
 
-    async fn next(frames: &mut Frames) -> Result<Frame, AudioError> {
+    async fn next_queued(frames: &mut Frames) -> Result<Queued, AudioError> {
         tokio::time::timeout(TEST_TIMEOUT, frames.next())
             .await
             .expect("a frame or an error should arrive")
+    }
+
+    async fn next(frames: &mut Frames) -> Result<Frame, AudioError> {
+        next_queued(frames).await.map(|queued| queued.frame)
     }
 
     #[tokio::test]
@@ -518,6 +523,24 @@ mod tests {
         live(&mut sink, &stereo);
         let frame = next(&mut frames).await.expect("frame");
         assert!(frame.iter().all(|&s| s == 2_000));
+    }
+
+    #[tokio::test]
+    async fn frames_are_ordered_against_a_key_release_by_when_they_were_queued() {
+        let gate = InputGate::default();
+        let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
+        let (key, state) = HoldInput::new();
+        key.set(true);
+        let press = Presses::new(state).take().expect("a fresh press");
+        live(&mut sink, &block(1));
+        key.set(false);
+        live(&mut sink, &block(2));
+        // Both frames are queued before the consumer reads either.
+        let before = next_queued(&mut frames).await.expect("frame");
+        let after = next_queued(&mut frames).await.expect("frame");
+        assert_eq!((before.frame[0], after.frame[0]), (1, 2));
+        assert!(!press.release.precedes(before.order));
+        assert!(press.release.precedes(after.order));
     }
 
     #[tokio::test]

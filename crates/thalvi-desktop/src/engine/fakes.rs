@@ -10,20 +10,20 @@ use tokio::time::Instant;
 use super::{CuePlayer, FrameSource, WakeDetector};
 use crate::audio::{AudioError, InputGate};
 use crate::cues::{Cue, CueError, CueTiming};
-use crate::frame::Frame;
+use crate::frame::{Frame, Queued};
 use crate::wake::{WakeError, WakeEvent, WakeFrame};
 
 /// Microphone frames a test feeds in, dropped while the gate is off or from before it changed,
 /// as the capture callback does.
 pub struct FakeFrames {
     gate: InputGate,
-    frames: mpsc::UnboundedReceiver<(u64, Result<Frame, AudioError>)>,
+    frames: mpsc::UnboundedReceiver<(u64, Result<Queued, AudioError>)>,
 }
 
 /// Test-side handle of [`FakeFrames`].
 pub struct FrameFeed {
     gate: InputGate,
-    frames: mpsc::UnboundedSender<(u64, Result<Frame, AudioError>)>,
+    frames: mpsc::UnboundedSender<(u64, Result<Queued, AudioError>)>,
 }
 
 impl FakeFrames {
@@ -48,7 +48,7 @@ impl FrameFeed {
     pub fn send(&self, frame: Frame) {
         let (enabled, epoch) = self.gate.state();
         if enabled {
-            let _ = self.frames.send((epoch, Ok(frame)));
+            let _ = self.frames.send((epoch, Ok(Queued::now(frame))));
         }
     }
 
@@ -60,7 +60,7 @@ impl FrameFeed {
 }
 
 impl FrameSource for FakeFrames {
-    async fn next(&mut self) -> Result<Frame, AudioError> {
+    async fn next(&mut self) -> Result<Queued, AudioError> {
         loop {
             let (epoch, frame) = self.frames.recv().await.ok_or(AudioError::Closed)?;
             if frame.is_err() || epoch == self.gate.state().1 {

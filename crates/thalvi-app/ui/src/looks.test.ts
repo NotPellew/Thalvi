@@ -116,7 +116,7 @@ describe("the overlay in the holo and gunmetal looks", () => {
       label: "",
       tag: false,
       line: "",
-      message: "✓ SENT TO SLACK",
+      message: "✓ Sent to Slack. Sent",
     },
     {
       name: "failed",

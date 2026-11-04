@@ -127,9 +127,11 @@ impl Capture {
                 } else {
                     Outcome::Failed
                 };
-                let target = (request.route != CaptureRoute::Task)
-                    .then_some(window)
-                    .flatten();
+                let target = if request.route == CaptureRoute::Task {
+                    finished.and_then(|finished| finished.task_target.clone())
+                } else {
+                    window
+                };
                 (request.text.clone(), outcome, target)
             }
             CaptureOutcome::Cancelled { dictated } => {
@@ -426,6 +428,14 @@ mod tests {
             notice: String::new(),
             headline: "",
             causes: Vec::new(),
+            task_target: None,
+        }
+    }
+
+    fn finished_task(delivered: bool, target: &str) -> Finished {
+        Finished {
+            task_target: Some(target.to_owned()),
+            ..finished(delivered)
         }
     }
 
@@ -476,6 +486,26 @@ mod tests {
                 request(CaptureRoute::Task, "open the docs"),
                 Some(finished(true)),
                 kept("open the docs", None, Outcome::Accepted),
+            ),
+            (
+                "a delivered task names its destination, not the wake window",
+                request(CaptureRoute::Task, "open the docs"),
+                Some(finished_task(true, "https://example.com/docs")),
+                kept(
+                    "open the docs",
+                    Some("https://example.com/docs".to_owned()),
+                    Outcome::Accepted,
+                ),
+            ),
+            (
+                "a failed task names what it tried, not the wake window",
+                request(CaptureRoute::Task, "switch to editor"),
+                Some(finished_task(false, "the editor")),
+                kept(
+                    "switch to editor",
+                    Some("the editor".to_owned()),
+                    Outcome::Failed,
+                ),
             ),
             (
                 "a cancel after words",

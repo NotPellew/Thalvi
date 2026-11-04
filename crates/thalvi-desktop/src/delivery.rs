@@ -56,6 +56,10 @@ pub struct Finished {
     pub headline: &'static str,
     /// The technical causes behind a failure, outermost first.
     pub causes: Vec<String>,
+    /// The selected task's destination (the address opened or the app focused), when delivery
+    /// chose a task; `None` for other routes and when no task could be chosen. Never the
+    /// window bound at wake.
+    pub task_target: Option<String>,
 }
 
 impl Finished {
@@ -66,6 +70,7 @@ impl Finished {
             notice,
             headline: "Delivered",
             causes: Vec::new(),
+            task_target: None,
         }
     }
 
@@ -76,6 +81,7 @@ impl Finished {
             notice,
             headline,
             causes: Vec::new(),
+            task_target: None,
         }
     }
 }
@@ -201,6 +207,11 @@ where
                 return self.keep(recorder, text, &error).await;
             }
         };
+        let target = match &task {
+            Task::OpenUrl { url, .. } => url.as_str().to_owned(),
+            Task::FocusApp { label, .. } => label.clone(),
+            Task::DiscordMessage { destination, .. } => destination.clone(),
+        };
         let (call, keep) = match &task {
             Task::OpenUrl { .. } => ("open_url", text.to_owned()),
             Task::FocusApp { .. } => ("focus_app", text.to_owned()),
@@ -210,8 +221,14 @@ where
             .call(recorder, call, move |host| tasks::execute(&task, host))
             .await
         {
-            Ok(notice) => Finished::delivered(notice),
-            Err(error) => self.keep(recorder, &keep, &error).await,
+            Ok(notice) => Finished {
+                task_target: Some(target),
+                ..Finished::delivered(notice)
+            },
+            Err(error) => Finished {
+                task_target: Some(target),
+                ..self.keep(recorder, &keep, &error).await
+            },
         }
     }
 
@@ -699,6 +716,67 @@ mod tests {
             assert_eq!(seen_notice.as_deref(), Some(notice), "{spoken}");
             assert_eq!(seen, calls(&["capture_target", call]), "{spoken}");
         }
+    }
+
+    #[tokio::test]
+    async fn task_captures_record_the_destination_they_tried_never_the_wake_window() {
+        use crate::history::{Capture, Outcome};
+
+        const TASK_CONFIG: &str = r#"{
+            "apps": {"editor": {"classes": ["Code"]}},
+            "scripts": [
+                {"phrase": "open the project page", "action": "open_url",
+                 "destination": "https://github.com/NotPellew/Thalvi", "label": "the project page"},
+                {"phrase": "switch to editor", "action": "focus_app", "destination": "editor",
+                 "label": "the code editor"}
+            ]
+        }"#;
+
+        async fn capture_of(host: FakeHost, spoken: &str) -> Option<Capture> {
+            let delivery = Delivery::new(host);
+            let recorder = Recorder::disabled();
+            let config = DesktopConfig::from_json_str(TASK_CONFIG).unwrap();
+            let bound = delivery.bind(&recorder).await;
+            assert_eq!(bound.window().as_deref(), Some("the editor"));
+            let outcome = accepted(CaptureRoute::Task, spoken);
+            let finished = delivery.finish(&outcome, &bound, &config, &recorder).await;
+            Capture::of(&outcome, finished.as_ref(), bound.window())
+        }
+
+        for (spoken, target, outcome) in [
+            (
+                "open the project page",
+                Some("https://github.com/NotPellew/Thalvi"),
+                Outcome::Accepted,
+            ),
+            (
+                "switch to editor",
+                Some("the code editor"),
+                Outcome::Accepted,
+            ),
+            ("do a backflip", None, Outcome::Failed),
+        ] {
+            let capture = capture_of(FakeHost::default(), spoken).await.unwrap();
+            assert_eq!(
+                (capture.target.as_deref(), capture.outcome),
+                (target, outcome),
+                "{spoken}"
+            );
+        }
+
+        let failed = capture_of(
+            FakeHost::default().failing(
+                "focus_app",
+                HostError::NothingTyped("No window of that app is open.".to_owned()),
+            ),
+            "switch to editor",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (failed.target.as_deref(), failed.outcome),
+            (Some("the code editor"), Outcome::Failed)
+        );
     }
 
     #[tokio::test]
