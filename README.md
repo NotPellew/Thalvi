@@ -1,8 +1,15 @@
 # Thalvi
 
-A voice assistant for the moments when typing isn't an option: hands in the
-dough, eyes on the road, arms full of groceries. Talk to it, interrupt it, and
-it works through the problem with you.
+Talk to your coding agents instead of typing to them. Say "Hey Thalvi" in any
+window, say the whole thing, then decide: paste it, send it, or drop it.
+
+Typing a good prompt is a chore, so prompts end up short and leave out what the
+agent needs. Speaking takes that barrier away, most of all for long prompts. You
+can correct yourself as you go and look at something else while you talk, and
+the words still land in the window you started from. The agent workflow is
+tested with Muse Code on Hyprland.
+
+The same voice helps whenever typing isn't an option:
 
 - **Cooking:** pick a recipe together and get walked through it step by step.
 - **On the road:** a briefing on the topics you care about, then follow-up
@@ -12,10 +19,10 @@ it works through the problem with you.
 
 Thalvi has two parts:
 
-- **The server and its web client** hold the spoken conversation. Open it in a
-  browser, on your phone for example.
 - **The desktop app** (Hyprland and Windows) listens for "Hey Thalvi" and
   types what you dictate into the window you are using.
+- **The server and its web client** hold the spoken conversation. Open it in a
+  browser, on your phone for example, and talk over it to interrupt.
 
 **Download the desktop app:** the
 [latest release](https://github.com/NotPellew/Thalvi/releases/latest) has the
@@ -350,7 +357,7 @@ saved to `data/measure/run-<time>.json`. The judge scores each answer 1 to 5
 
 ## Status
 
-Under construction for the
+Built for the
 [Meta Global AI Developer Hackathon](https://cerebralvalley.ai/e/meta-ai-developer-hackathon)
 (October 26 – November 4, 2026).
 
