@@ -3,7 +3,7 @@
 use std::{
     future::Future,
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, LazyLock, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -247,38 +247,78 @@ impl TryFrom<String> for ServerUrl {
     }
 }
 
-/// Converts a 16 kHz stream to 24 kHz by 2:3 linear interpolation, carrying one sample across frames.
-#[derive(Clone, Debug, Default)]
-pub struct Upsampler {
-    previous: Option<i16>,
+/// Taps of the 16 to 24 kHz interpolation filter, at the 48 kHz rate between up by 3 and down by 2.
+const TAPS: usize = 145;
+/// Taps that meet an input sample for any one output sample.
+const PHASE_TAPS: usize = TAPS.div_ceil(3);
+/// Input samples an output still needs from earlier frames.
+const HISTORY: usize = PHASE_TAPS - 1;
+
+static PHASES: LazyLock<[[f32; PHASE_TAPS]; 3]> = LazyLock::new(phases);
+
+/// A Blackman-windowed sinc cutting at 8 kHz, split by phase: flat to 7 kHz, images 75 dB down from 9 kHz.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "tap indices are tiny, and f32 holds the taps to well below a 16-bit step"
+)]
+fn phases() -> [[f32; PHASE_TAPS]; 3] {
+    let centre = (TAPS - 1) as f64 / 2.0;
+    let kernel: Vec<f64> = (0..TAPS)
+        .map(|k| {
+            let x = std::f64::consts::PI * (k as f64 - centre) / 3.0;
+            let sinc = if 2 * k == TAPS - 1 { 1.0 } else { x.sin() / x };
+            let angle = std::f64::consts::TAU * k as f64 / (TAPS - 1) as f64;
+            sinc * (0.42 - 0.5 * angle.cos() + 0.08 * (2.0 * angle).cos())
+        })
+        .collect();
+    let gain = 3.0 / kernel.iter().sum::<f64>();
+    let mut phases = [[0.0; PHASE_TAPS]; 3];
+    for (k, tap) in kernel.iter().enumerate() {
+        phases[k % 3][k / 3] = (tap * gain) as f32;
+    }
+    phases
 }
 
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "a weighted average of two i16 values fits in i16"
+    reason = "float to integer casts saturate, so loud input clips"
 )]
-fn mix(a: i16, b: i16) -> i16 {
-    (i32::from(a) + 2 * i32::from(b) + 1).div_euclid(3) as i16
+fn to_i16(sample: f32) -> i16 {
+    sample.round() as i16
+}
+
+/// Converts a 16 kHz stream to 24 kHz: up by 3, a low-pass filter, down by 2, carrying the filter's input across frames.
+pub struct Upsampler {
+    // Boxed so the sessions and futures that hold one stay small.
+    samples: Box<[i16; HISTORY + FRAME_SAMPLES]>,
+}
+
+impl Default for Upsampler {
+    fn default() -> Self {
+        Self {
+            samples: Box::new([0; HISTORY + FRAME_SAMPLES]),
+        }
+    }
 }
 
 impl Upsampler {
-    /// Upsamples the next frame; the output is delayed by one input sample so every frame yields exactly [`UPSAMPLED_SAMPLES`].
+    /// Upsamples the next frame; the output lags the input by the filter's 1.5 ms so every frame yields exactly [`UPSAMPLED_SAMPLES`].
     pub fn push(&mut self, frame: &Frame) -> [i16; UPSAMPLED_SAMPLES] {
-        let mut previous = self.previous.unwrap_or(frame[0]);
+        self.samples.copy_within(FRAME_SAMPLES.., 0);
+        self.samples[HISTORY..].copy_from_slice(frame);
         let mut out = [0; UPSAMPLED_SAMPLES];
-        for ([b, c], out) in frame
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .zip(out.as_chunks_mut::<3>().0)
-        {
-            let (b, c) = (*b, *c);
-            out[0] = previous;
-            out[1] = mix(previous, b);
-            out[2] = mix(c, b);
-            previous = c;
+        for (m, out) in out.iter_mut().enumerate() {
+            // Output m sits at 48 kHz sample 2m, which meets input samples on one phase of the filter.
+            let phase = 2 * m % 3;
+            let newest = HISTORY + (2 * m - phase) / 3;
+            let sum: f32 = PHASES[phase]
+                .iter()
+                .zip(self.samples[newest - HISTORY..=newest].iter().rev())
+                .map(|(tap, &sample)| tap * f32::from(sample))
+                .sum();
+            *out = to_i16(sum);
         }
-        self.previous = Some(previous);
         out
     }
 }

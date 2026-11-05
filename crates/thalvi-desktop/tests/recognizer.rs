@@ -10,7 +10,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::routing::get;
-use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
+use thalvi_desktop::frame::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
 use thalvi_desktop::recognizer::{
     ConnectFailure, FakeCall, FakeRecognizer, Recognizer, RecognizerError, RecognizerEvent,
     RecognizerSession, ServerRecognizer, ServerUrl, ServerUrlError, UPSAMPLED_SAMPLES, Upsampler,
@@ -295,54 +295,91 @@ async fn a_message_is_accepted_at_100_kb_and_refused_past_it() {
 }
 
 #[tokio::test]
-async fn frames_reach_the_server_as_continuous_24_khz_audio() {
+async fn frames_reach_the_server_upsampled_to_24_khz() {
     let (url, mut rx) = recording().await;
     let mut session = connect(url).await.expect("ready");
-    for index in 0..2 {
-        session.send_frame(&ramp(index)).await.expect("send");
-    }
-    let mut heard = Vec::new();
-    for _ in 0..2 {
+    let mut next = tone(1_000.0, 8_000.0);
+    let frames = [next(), next()];
+    let mut upsampler = Upsampler::default();
+    for frame in &frames {
+        session.send_frame(frame).await.expect("send");
         let Some(Seen::Binary(bytes)) = tokio::time::timeout(WAIT, rx.recv()).await.expect("audio")
         else {
             panic!("the server only receives audio");
         };
-        assert_eq!(bytes.len(), 3_840);
-        heard.extend(samples(&bytes));
+        assert_eq!(samples(&bytes), upsampler.push(frame));
     }
-    // The ramp 3i upsampled by 3/2 is the line 2n - 3 once past the first two samples,
-    // across the frame boundary too.
-    assert_eq!(heard[..3], [0, 0, 1]);
-    for (n, sample) in heard.iter().enumerate().skip(3) {
-        assert_eq!(
-            i64::from(*sample),
-            2 * i64::try_from(n).unwrap() - 3,
-            "sample {n}"
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "sample indices are tiny and the tone stays within i16"
+)]
+fn tone(hz: f64, amplitude: f64) -> impl FnMut() -> Frame {
+    let mut n = 0_usize;
+    move || {
+        std::array::from_fn(|_| {
+            n += 1;
+            let phase = std::f64::consts::TAU * hz * n as f64 / f64::from(SAMPLE_RATE);
+            (amplitude * phase.sin()).round() as i16
+        })
+    }
+}
+
+/// The amplitude of `hz` in 24 kHz `signal`, which must hold a whole number of its periods.
+#[expect(clippy::cast_precision_loss, reason = "sample indices are tiny")]
+fn amplitude(signal: &[i16], hz: f64) -> f64 {
+    let (re, im) = signal
+        .iter()
+        .enumerate()
+        .fold((0.0, 0.0), |(re, im), (n, &x)| {
+            let phase = std::f64::consts::TAU * hz * n as f64 / 24_000.0;
+            (
+                re + f64::from(x) * phase.cos(),
+                im - f64::from(x) * phase.sin(),
+            )
+        });
+    2.0 * re.hypot(im) / signal.len() as f64
+}
+
+#[test]
+fn upsampling_keeps_speech_up_to_7_khz_and_drops_its_images() {
+    // Images of f sit at 16 kHz ± f before the final halving, which folds them to these.
+    for (hz, images) in [
+        (1_000.0, [7_000.0, 9_000.0]),
+        (3_000.0, [5_000.0, 11_000.0]),
+        (7_000.0, [1_000.0, 9_000.0]),
+    ] {
+        let mut next = tone(hz, 16_384.0);
+        let mut upsampler = Upsampler::default();
+        upsampler.push(&next());
+        // Four frames are 0.32 s, a whole number of periods of every frequency here.
+        let out: Vec<i16> = (0..4).flat_map(|_| upsampler.push(&next())).collect();
+        let db = |level: f64| 20.0 * (level / 16_384.0).log10();
+        assert!(
+            db(amplitude(&out, hz)).abs() < 0.1,
+            "{hz} Hz: {:.2} dB",
+            db(amplitude(&out, hz))
         );
+        for image in images {
+            assert!(
+                db(amplitude(&out, image)) < -60.0,
+                "{hz} Hz image at {image} Hz: {:.1} dB",
+                db(amplitude(&out, image))
+            );
+        }
     }
 }
 
 #[test]
-fn upsampler_keeps_constants_and_extremes_in_range() {
+fn upsampling_clips_the_overshoot_of_loud_input() {
     let mut upsampler = Upsampler::default();
-    for level in [0, 1_000, -1_000, i16::MAX, i16::MIN] {
-        let mut out = Upsampler::default().push(&[level; FRAME_SAMPLES]);
-        assert_eq!(out, [level; UPSAMPLED_SAMPLES], "constant {level}");
-        out = upsampler.push(&std::array::from_fn(|i| {
-            if i % 2 == 0 { i16::MAX } else { i16::MIN }
-        }));
-        assert_eq!(out.len(), UPSAMPLED_SAMPLES);
-    }
-}
-
-#[test]
-fn upsampler_rounds_to_the_nearest_sample() {
-    for (a, b, rounded) in [(1, 0, 1), (-1, 0, -1)] {
-        let alternating: Frame = std::array::from_fn(|i| if i % 2 == 0 { a } else { b });
-        let out = Upsampler::default().push(&alternating);
-        assert_eq!(out[..3], [a, a, rounded], "first pair of {a},{b}");
-        assert_eq!(out[3..6], [b, rounded, rounded], "second pair of {a},{b}");
-    }
+    upsampler.push(&[i16::MIN; FRAME_SAMPLES]);
+    let out = upsampler.push(&[i16::MAX; FRAME_SAMPLES]);
+    // The step reaches the output after the filter's 1.5 ms; its ringing must not wrap to negative.
+    assert!(out[60..].iter().all(|&sample| sample > 0));
+    assert_eq!(out.iter().max(), Some(&i16::MAX));
 }
 
 #[tokio::test]

@@ -10,6 +10,7 @@ use axum::body::to_bytes;
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
+use thalvi_desktop::recognizer::Upsampler;
 use thalvi_desktop::secondary::{
     SecondaryApi, SecondaryError, SecondaryStt, SecondarySttError, transcribe,
 };
@@ -162,14 +163,12 @@ async fn each_api_gets_its_request_and_a_24_khz_wav_of_the_whole_capture() {
             .iter()
             .map(|pair| i16::from_le_bytes(*pair))
             .collect();
-        assert_eq!(heard.len(), 2 * 1_920);
-        for (n, sample) in heard.iter().enumerate().skip(3) {
-            assert_eq!(
-                i64::from(*sample),
-                2 * i64::try_from(n).unwrap() - 3,
-                "sample {n}"
-            );
-        }
+        let mut upsampler = Upsampler::default();
+        let live: Vec<i16> = [ramp(0), ramp(1)]
+            .iter()
+            .flat_map(|frame| upsampler.push(frame))
+            .collect();
+        assert_eq!(heard, live, "the live stream's 24 kHz audio");
     }
 }
 
