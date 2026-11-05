@@ -1,4 +1,4 @@
-//! Exercises the desktop transcription-only route against a local ASR WebSocket.
+//! Exercises the desktop transcription-only route and the word list against a local ASR WebSocket.
 #![expect(clippy::unwrap_used, reason = "test setup failures panic immediately")]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -161,6 +161,85 @@ async fn malformed_audio_and_upstream_failure_are_reported_without_a_completed_c
         .unwrap();
     let event: Value = serde_json::from_str(event.to_text().unwrap()).unwrap();
     assert_eq!(event["type"], "error");
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn http(url: &str) -> String {
+    url.replace("ws://", "http://")
+        .replace("/transcription", "/phrases")
+}
+
+#[tokio::test]
+async fn the_word_list_is_saved_and_the_recognizer_says_whether_it_boosts_it() {
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let asr = tokio::spawn(async move {
+        let (stream, _) = upstream.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        socket.next().await.unwrap().unwrap();
+        socket
+            .send(Message::Text(
+                r#"{"sessionId":"probe","phraseBoosting":true}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let end = socket.next().await.unwrap().unwrap();
+        assert_eq!(end.to_text().unwrap(), r#"{"type":"endStream"}"#);
+    });
+    let (url, dir, server) = serve(&format!("ws://{address}")).await;
+    let client = reqwest::Client::new();
+    let get = || async {
+        client
+            .get(http(&url))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    };
+    assert_eq!(get().await, json!({"phrases": [], "boosting": true}));
+    let saved = client
+        .put(http(&url))
+        .json(&json!({"phrases": [" Cybrex2 ", "Thalvi"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), 204);
+    assert_eq!(
+        get().await,
+        json!({"phrases": ["Cybrex2", "Thalvi"], "boosting": true})
+    );
+    let refused = client
+        .put(http(&url))
+        .json(&json!({"phrases": [""]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 400);
+    assert_eq!(
+        refused.json::<Value>().await.unwrap(),
+        json!({"error": "Each word list entry must be 1 to 40 characters."})
+    );
+    tokio::time::timeout(Duration::from_secs(2), asr)
+        .await
+        .unwrap()
+        .unwrap();
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn an_unreachable_recognizer_leaves_boosting_unknown() {
+    let (url, dir, server) = serve("ws://127.0.0.1:1").await;
+    let body = reqwest::get(http(&url))
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(body, json!({"phrases": [], "boosting": null}));
     server.abort();
     let _ = std::fs::remove_dir_all(dir);
 }

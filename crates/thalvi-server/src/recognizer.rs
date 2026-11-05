@@ -1,5 +1,6 @@
 //! Owns the speech recognizer trait and the Meta realtime ASR client.
 
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -7,6 +8,8 @@ use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+use crate::phrases::PhraseStore;
 
 /// One event from the recognizer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,23 +106,35 @@ pub trait RecognizerFactory: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Self::Rec, RecognizerError>> + Send;
 }
 
-/// Recognizer factory for the Meta realtime ASR service.
-#[derive(Debug, Clone)]
+/// Recognizer factory for the Meta realtime ASR protocol, spoken by Meta and by `speech/asr`.
+#[derive(Clone)]
 pub struct MetaRecognizerFactory {
     url: String,
     model: String,
     api_key: String,
+    phrases: Arc<PhraseStore>,
+    /// What the last handshake said about phrase boosting; `None` before one.
+    boosting: Arc<Mutex<Option<bool>>>,
 }
 
 impl MetaRecognizerFactory {
-    /// Creates a factory from validated configuration values.
+    /// Creates a factory from validated configuration values; recognizers that announce phrase
+    /// boosting get `phrases` before any audio.
     #[must_use]
-    pub fn new(url: String, model: String, api_key: String) -> Self {
+    pub fn new(url: String, model: String, api_key: String, phrases: Arc<PhraseStore>) -> Self {
         Self {
             url,
             model,
             api_key,
+            phrases,
+            boosting: Arc::default(),
         }
+    }
+
+    /// Whether the recognizer boosts a word list, as its last handshake said; `None` before one.
+    #[must_use]
+    pub fn boosts_phrases(&self) -> Option<bool> {
+        *self.boosting.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -164,6 +179,21 @@ impl RecognizerFactory for MetaRecognizerFactory {
                     ))
                 })?;
                 if value.get("sessionId").is_some() {
+                    let boosts = value.get("phraseBoosting").and_then(Value::as_bool) == Some(true);
+                    *self.boosting.lock().unwrap_or_else(PoisonError::into_inner) = Some(boosts);
+                    let phrases = self.phrases.list();
+                    // Meta's recognizer doesn't announce boosting and never sees this message.
+                    if boosts && !phrases.is_empty() {
+                        let message = json!({"type": "phrases", "phrases": &*phrases});
+                        socket
+                            .send(WsMessage::Text(message.to_string().into()))
+                            .await
+                            .map_err(|error| {
+                                RecognizerError::retryable(format!(
+                                    "recognizer handshake failed: {error}"
+                                ))
+                            })?;
+                    }
                     Ok(Self::Rec { socket })
                 } else if value.get("type").and_then(Value::as_str) == Some("error") {
                     let message = value

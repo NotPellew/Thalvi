@@ -199,7 +199,8 @@ fn valid(text: &str) -> Result<String, LearningError> {
     }
 }
 
-fn write_atomic(path: &Path, json: &[u8]) -> std::io::Result<()> {
+/// Writes `json` to a temporary file beside `path`, then renames it over `path`.
+pub(crate) fn write_atomic(path: &Path, json: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

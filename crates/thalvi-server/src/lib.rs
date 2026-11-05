@@ -9,6 +9,7 @@ pub mod learning;
 pub mod learning_api;
 pub mod measure;
 pub mod model;
+pub mod phrases;
 pub mod recognizer;
 pub mod recorder;
 pub mod report;
