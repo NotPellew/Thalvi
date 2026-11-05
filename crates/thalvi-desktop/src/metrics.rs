@@ -56,6 +56,8 @@ pub enum Event {
     SpeechLoad,
     /// Downloading a catalog speech model from the settings window.
     SpeechDownload,
+    /// Asking the server about its word list (`check`) or saving the list there (`share`).
+    WordList,
     /// One local recognition: its engine, device, model latency and outcome.
     LocalStt,
     ReadyCue,
@@ -88,6 +90,7 @@ impl Event {
             Self::SecondaryStt => "desktop_secondary_stt",
             Self::SpeechLoad => "desktop_speech_load",
             Self::SpeechDownload => "desktop_speech_download",
+            Self::WordList => "desktop_word_list",
             Self::LocalStt => "desktop_local_stt",
             Self::ReadyCue => "desktop_ready_cue",
             Self::Cue => "desktop_cue",
@@ -651,6 +654,7 @@ mod tests {
             (Event::SecondaryStt, "desktop_secondary_stt"),
             (Event::SpeechLoad, "desktop_speech_load"),
             (Event::SpeechDownload, "desktop_speech_download"),
+            (Event::WordList, "desktop_word_list"),
             (Event::LocalStt, "desktop_local_stt"),
             (Event::ReadyCue, "desktop_ready_cue"),
             (Event::Cue, "desktop_cue"),

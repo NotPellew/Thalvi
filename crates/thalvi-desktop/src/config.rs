@@ -12,6 +12,7 @@ use crate::hold::HoldKey;
 use crate::host::{App, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
 use crate::models::CatalogSpeech;
+use crate::phrases::WordList;
 use crate::recognizer::{ServerUrl, SpeechSource};
 use crate::secondary::SecondaryStt;
 use crate::transducer::SpeechChoice;
@@ -410,6 +411,8 @@ struct RawStt {
     engine: Option<EngineName>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    phrases: WordList,
 }
 
 impl TryFrom<RawStt> for SttConfig {
@@ -444,6 +447,7 @@ impl TryFrom<RawStt> for SttConfig {
         Ok(Self {
             secondary: raw.secondary,
             engine,
+            phrases: raw.phrases,
         })
     }
 }
@@ -455,6 +459,8 @@ pub struct SttConfig {
     /// Re-transcribes each accepted capture on this endpoint only when its `enabled` switch is on.
     pub secondary: Option<SecondaryStt>,
     pub engine: SttEngine,
+    /// Spellings recognition favours, on this computer and on a server whose recognizer boosts phrases.
+    pub phrases: WordList,
 }
 
 impl Serialize for SttConfig {
@@ -465,6 +471,8 @@ impl Serialize for SttConfig {
             engine: &'static str,
             #[serde(skip_serializing_if = "Option::is_none")]
             model: Option<String>,
+            #[serde(skip_serializing_if = "WordList::is_empty")]
+            phrases: &'a WordList,
         }
         let (engine, model) = match &self.engine {
             SttEngine::Server => ("server", None),
@@ -474,6 +482,7 @@ impl Serialize for SttConfig {
             secondary: &self.secondary,
             engine,
             model,
+            phrases: &self.phrases,
         }
         .serialize(serializer)
     }
@@ -791,6 +800,23 @@ mod tests {
         ] {
             assert_eq!(parse(json).unwrap().stt.engine, engine, "{json}");
         }
+    }
+
+    #[test]
+    fn the_word_list_round_trips_trimmed_and_a_refused_one_names_the_limit() {
+        let config = parse(r#"{"stt": {"phrases": [" Cybrex2 ", "Thalvi"]}}"#).unwrap();
+        assert_eq!(config.stt.phrases.phrases(), ["Cybrex2", "Thalvi"]);
+        let written = serde_json::to_string(&config).unwrap();
+        assert_eq!(parse(&written).unwrap().stt.phrases, config.stt.phrases);
+        assert!(
+            !serde_json::to_string(&parse("{}").unwrap())
+                .unwrap()
+                .contains("phrases")
+        );
+        let error = parse(r#"{"stt": {"phrases": [""]}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("1 to 40 characters"), "{error}");
     }
 
     #[test]

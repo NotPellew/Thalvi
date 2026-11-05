@@ -19,6 +19,8 @@ use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{
     CatalogSpeech, ModelError, ModelStore, SpeechModelInfo, SpeechProgress,
 };
+use thalvi_desktop::phrases;
+use thalvi_desktop::recognizer::ServerUrl;
 use thalvi_desktop::report::{Report, System};
 use thalvi_desktop::transducer::check_folder;
 
@@ -210,6 +212,29 @@ impl<'a> SpeechModelProgress<'a> {
             message: Some(message),
         }
     }
+}
+
+/// Whether the recognizer behind `server` boosts a word list, so Settings can offer one.
+#[tauri::command]
+pub async fn word_list_support(server: String, state: State<'_, AppState>) -> Result<bool, String> {
+    let server = ServerUrl::parse(&server).map_err(|error| error.to_string())?;
+    let recorder =
+        Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
+    phrases::server_boosts(&reqwest::Client::new(), &server, &recorder.metrics()).await
+}
+
+/// Saves the stored word list on the server, which gives it to its recognizer.
+#[tauri::command]
+pub async fn share_word_list(state: State<'_, AppState>) -> Result<(), String> {
+    let config = state.config();
+    let recorder = Recorder::per_user(config.recordings).map_err(|error| error.to_string())?;
+    phrases::share(
+        &reqwest::Client::new(),
+        &config.server,
+        &config.stt.phrases,
+        &recorder.metrics(),
+    )
+    .await
 }
 
 /// Downloads a catalog speech model, telling the UI how far it is.
