@@ -69,6 +69,13 @@ const WAKE_CLIP_FRAMES: usize = 25;
 /// The sample peak from which a wake level window counts as activity.
 const ACTIVITY_PEAK: u16 = 1_000;
 
+/// The head's context, 1.28 s: the last frames whose peak a wake must reach.
+const WAKE_FLOOR_FRAMES: usize = 16;
+
+/// The sample peak below which a wake is too quiet to be speech at the microphone. Real wakes
+/// peaked at 2,073 or more and faint false wakes at 1,152 or less.
+const WAKE_FLOOR_PEAK: u16 = 1_500;
+
 /// Microphone frames in order.
 pub trait FrameSource {
     /// Waits for the next frame; safe to drop and call again.
@@ -390,11 +397,13 @@ pub struct Engine<R, W, C> {
     level_frames: u64,
     level_activity: bool,
     ambiguous: bool,
+    /// Whether the previous frame's wake was refused as too quiet.
+    refused: bool,
     /// The capture and conversation thresholds the wake detector runs with.
     thresholds: (f32, f32),
     /// The wake word that opened the next capture.
     woke: Option<Woke>,
-    /// The latest frames scored while listening; filled only while audio is recorded.
+    /// The latest frames scored while listening.
     wake_clip: VecDeque<Frame>,
     key: Presses,
     /// The hold that opened the next capture.
@@ -646,6 +655,7 @@ where
             level_frames: 0,
             level_activity: false,
             ambiguous: false,
+            refused: false,
             thresholds: (
                 config.wake.capture().threshold.get(),
                 config.wake.conversation().threshold.get(),
@@ -705,6 +715,7 @@ where
         let reset = std::time::Instant::now();
         self.wake.reset();
         self.wake_clip.clear();
+        self.refused = false;
         self.recorder
             .metric(Event::WakeReset, "ok", Some(reset.elapsed()), Value::Null);
         let mut misses = NearMisses::new(self.thresholds.0, self.thresholds.1);
@@ -771,6 +782,25 @@ where
                     self.latency_line(summary);
                 }
             }
+            if let Some(event) = wake.event {
+                let level = self.wake_peak();
+                if level < WAKE_FLOOR_PEAK {
+                    if !self.refused {
+                        self.refused = true;
+                        let head = match event {
+                            WakeEvent::Capture => "capture",
+                            WakeEvent::Conversation => "conversation",
+                            WakeEvent::Ambiguous => "ambiguous",
+                        };
+                        let mut fields = scores(&wake);
+                        fields["level"] = json!(level);
+                        fields["floor"] = json!(WAKE_FLOOR_PEAK);
+                        self.recorder.metric(Event::WakeRefused, head, None, fields);
+                    }
+                    continue;
+                }
+            }
+            self.refused = false;
             if wake.event == Some(WakeEvent::Ambiguous) {
                 if !self.ambiguous {
                     (self.notice)("Wake was ambiguous; still listening.");
@@ -842,15 +872,21 @@ where
         );
     }
 
-    /// Keeps `frame` for the wake clip when audio is recorded.
+    /// Keeps `frame` for the wake level check and, when audio is recorded, the wake clip.
     fn remember(&mut self, frame: &Frame) {
-        if !self.recorder.kinds().audio {
-            return;
-        }
         if self.wake_clip.len() == WAKE_CLIP_FRAMES {
             self.wake_clip.pop_front();
         }
         self.wake_clip.push_back(*frame);
+    }
+
+    /// The largest sample magnitude over the last [`WAKE_FLOOR_FRAMES`] frames.
+    fn wake_peak(&self) -> u16 {
+        let recent = self.wake_clip.iter().rev().take(WAKE_FLOOR_FRAMES);
+        recent
+            .flat_map(|frame| frame.iter().map(|sample| sample.unsigned_abs()))
+            .max()
+            .unwrap_or(0)
     }
 
     /// Records the frames up to and including the wake frame, oldest first.
