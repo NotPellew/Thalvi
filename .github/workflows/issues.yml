@@ -1,10 +1,9 @@
 name: Issues
 
-# pull_request_target, so PRs from forks also get a token that can write
-# issues. It runs this file from the base branch and never checks out PR code.
+# push, because pull_request_target always runs the default branch's copy of
+# this file.
 on:
-  pull_request_target:
-    types: [closed]
+  push:
     branches: [development]
 
 permissions:
@@ -15,7 +14,6 @@ permissions:
 jobs:
   sync:
     name: sync
-    if: github.event.pull_request.merged
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -25,12 +23,11 @@ jobs:
           sparse-checkout: .github/scripts
       # gh issue close and reopen skip an issue already in that state without
       # commenting, but act on PRs too.
-      - name: close the issues this PR closes, reopen those a PR it reverts closed
+      - name: close the issues merged PRs close, reopen those a reverted PR closed
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          BODY: ${{ github.event.pull_request.body }}
+          COMMITS: ${{ join(github.event.commits.*.id, ' ') }}
         run: |
           status=0
           refs() { .github/scripts/issue-refs.sh "$1" "$GH_REPO"; }
@@ -40,22 +37,40 @@ jobs:
             pr=$(gh api "repos/$GH_REPO/issues/$number" --jq '.pull_request != null') &&
               if [[ $pr == false ]]; then gh issue "$action" "$number" "$@"; fi
           }
-          closes=$(refs closes <<< "$BODY")
-          for number in $closes; do
-            issue close "$number" --reason completed --comment "Fixed by #$PR, merged into \`development\`. If #$PR is taken out of \`development\` before it reaches \`main\`, reopen this issue." ||
-              { echo "::error::could not close #$number"; status=1; }
-          done
-          reverts=$(refs reverts <<< "$BODY")
-          for reverted in $reverts; do
-            if ! reverted_body=$(gh pr view "$reverted" --json body --jq .body); then
-              echo "::error::could not read reverted PR #$reverted"
+          prs=
+          for sha in $COMMITS; do
+            if ! found=$(gh api "repos/$GH_REPO/commits/$sha/pulls" \
+              --jq '.[] | select(.merged_at != null and .base.ref == "development") | .number'); then
+              echo "::error::could not find the PR of commit $sha"
               status=1
               continue
             fi
-            closes=$(refs closes <<< "$reverted_body")
+            prs+=$found$'\n'
+          done
+          prs=$(awk 'NF && !seen[$0]++' <<< "$prs")
+          for PR in $prs; do
+            if ! body=$(gh pr view "$PR" --json body --jq .body); then
+              echo "::error::could not read PR #$PR"
+              status=1
+              continue
+            fi
+            closes=$(refs closes <<< "$body")
             for number in $closes; do
-              issue reopen "$number" --comment "Reopened by #$PR, which reverted #$reverted out of \`development\`." ||
-                { echo "::error::could not reopen #$number"; status=1; }
+              issue close "$number" --reason completed --comment "Fixed by #$PR, merged into \`development\`. If #$PR is taken out of \`development\` before it reaches \`main\`, reopen this issue." ||
+                { echo "::error::could not close #$number"; status=1; }
+            done
+            reverts=$(refs reverts <<< "$body")
+            for reverted in $reverts; do
+              if ! reverted_body=$(gh pr view "$reverted" --json body --jq .body); then
+                echo "::error::could not read reverted PR #$reverted"
+                status=1
+                continue
+              fi
+              closes=$(refs closes <<< "$reverted_body")
+              for number in $closes; do
+                issue reopen "$number" --comment "Reopened by #$PR, which reverted #$reverted out of \`development\`." ||
+                  { echo "::error::could not reopen #$number"; status=1; }
+              done
             done
           done
           exit "$status"
