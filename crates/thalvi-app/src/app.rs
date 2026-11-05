@@ -295,6 +295,7 @@ fn start() -> Result<(), String> {
                 .arg(LOGIN_ARG)
                 .build(),
         )
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_audio,
@@ -313,6 +314,9 @@ fn start() -> Result<(), String> {
             commands::get_menu_entry,
             commands::set_menu_entry,
             commands::validate_speech_model_folder,
+            commands::list_wake_models,
+            commands::validate_wake_model_choices,
+            commands::download_wake_model,
             commands::list_speech_models,
             commands::download_speech_model,
             commands::open_speech_model_source,

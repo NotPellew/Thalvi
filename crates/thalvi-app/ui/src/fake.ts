@@ -1,6 +1,6 @@
 // Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the overlay to the n-th status of the script and `?look=holo` or `?look=gunmetal` picks the look.
 
-import type { AudioStatus, Backend, Draft, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status, WakeModelInfo } from "./contract.ts";
 import { LOOKS } from "./look.ts";
 
 const SETTINGS: Settings = {
@@ -76,6 +76,11 @@ export function fakeBackend(params: URLSearchParams): Backend {
   const levelListeners: ((level: number) => void)[] = [];
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
   const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
+  const wakeModels: WakeModelInfo[] = [
+    { name: "hey_thalvi", title: "Hey Thalvi", size: 395_406, cached: true },
+    { name: "hey_mycroft", title: "Hey Mycroft", size: 857_691, cached: false },
+    { name: "hey_jarvis", title: "Hey Jarvis", size: 1_271_370, cached: false },
+  ];
   const speechModels: SpeechModelInfo[] = [
     {
       name: "nemotron_160ms",
@@ -220,6 +225,22 @@ export function fakeBackend(params: URLSearchParams): Backend {
     copyLoginLine: () => Promise.resolve(),
     validateSpeechModelFolder: (path) =>
       path.includes("missing") ? Promise.reject(new Error("Missing required file: tokens.txt")) : Promise.resolve(),
+    listWakeModels: () => Promise.resolve(structuredClone(wakeModels)),
+    validateWakeModels: (capture, conversation) => {
+      if (capture === conversation) return Promise.reject(new Error("The capture and conversation wake models must be different."));
+      for (const model of [capture, conversation]) {
+        if (!wakeModels.some((info) => info.name === model) && (model.includes("bad") || model.includes("missing") || !model.endsWith(".onnx"))) {
+          return Promise.reject(new Error(`The wake model ${model} could not be loaded: not a wake model.`));
+        }
+      }
+      return Promise.resolve();
+    },
+    downloadWakeModel: (name) => {
+      const model = wakeModels.find((candidate) => candidate.name === name);
+      if (model) model.cached = true;
+      return Promise.resolve();
+    },
+    pickWakeModelFile: () => Promise.resolve("/models/custom.onnx"),
     listSpeechModels: () => Promise.resolve(structuredClone(speechModels)),
     downloadSpeechModel: (name) =>
       new Promise((resolve) => {

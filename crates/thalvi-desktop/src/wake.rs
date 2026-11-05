@@ -166,17 +166,27 @@ fn default_conversation() -> HeadConfig {
     default_head(CatalogHead::HeyMycroft)
 }
 
+impl WakeConfig {
+    /// Builds both heads, refusing the same model for both.
+    ///
+    /// # Errors
+    /// [`ConfigError::SameModel`] when both heads use the same model.
+    pub fn new(capture: HeadConfig, conversation: HeadConfig) -> Result<Self, ConfigError> {
+        if capture.model == conversation.model {
+            return Err(ConfigError::SameModel);
+        }
+        Ok(Self {
+            capture,
+            conversation,
+        })
+    }
+}
+
 impl TryFrom<RawWakeConfig> for WakeConfig {
     type Error = ConfigError;
 
     fn try_from(raw: RawWakeConfig) -> Result<Self, ConfigError> {
-        if raw.capture.model == raw.conversation.model {
-            return Err(ConfigError::SameModel);
-        }
-        Ok(Self {
-            capture: raw.capture,
-            conversation: raw.conversation,
-        })
+        Self::new(raw.capture, raw.conversation)
     }
 }
 
@@ -201,9 +211,39 @@ impl WakeConfig {
     }
 }
 
+/// Checks two chosen wake models the way listening will use them: each catalog name must be
+/// known, each local file must load as a wake head, and the two must differ. Catalog heads are
+/// not downloaded here; they download on first use, as before.
+///
+/// # Errors
+/// The plain reason a choice cannot be used: an unknown name, a file that cannot be loaded as
+/// a head, or the same model chosen for both.
+pub fn validate_wake_models(capture: &str, conversation: &str) -> Result<(), WakeError> {
+    let capture = HeadModel::try_from(capture.trim().to_owned())?;
+    let conversation = HeadModel::try_from(conversation.trim().to_owned())?;
+    for model in [&capture, &conversation] {
+        if let HeadModel::File(path) = model {
+            open_head(path, default_threshold())?;
+        }
+    }
+    WakeConfig::new(
+        HeadConfig {
+            model: capture,
+            threshold: default_threshold(),
+        },
+        HeadConfig {
+            model: conversation,
+            threshold: default_threshold(),
+        },
+    )?;
+    Ok(())
+}
+
 /// Why wake could not load or stopped scoring. Messages are shown to the user as written.
 #[derive(Debug, thiserror::Error)]
 pub enum WakeError {
+    #[error(transparent)]
+    Config(#[from] ConfigError),
     #[error(transparent)]
     Model(#[from] ModelError),
     #[error("Could not start the wake word engine: {0}")]
@@ -219,6 +259,7 @@ pub enum WakeError {
 impl UserError for WakeError {
     fn headline(&self) -> &'static str {
         match self {
+            Self::Config(_) => "Wake settings can't be used",
             Self::Model(error) => error.headline(),
             Self::Runtime(_) => "Wake word engine won't start",
             Self::Load { .. } => "Wake model can't be loaded",
@@ -600,6 +641,152 @@ mod tests {
 
     fn read(json: &str) -> Result<WakeConfig, String> {
         serde_json::from_str(json).map_err(|error| error.to_string())
+    }
+
+    fn varint(mut value: u64, out: &mut Vec<u8>) {
+        loop {
+            let byte = u8::try_from(value & 0x7f).unwrap_or_default();
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    fn bytes_field(field: u32, bytes: &[u8], out: &mut Vec<u8>) {
+        varint(u64::from(field) << 3 | 2, out);
+        varint(bytes.len() as u64, out);
+        out.extend_from_slice(bytes);
+    }
+
+    fn str_field(field: u32, value: &str, out: &mut Vec<u8>) {
+        bytes_field(field, value.as_bytes(), out);
+    }
+
+    fn int_field(field: u32, value: i64, out: &mut Vec<u8>) {
+        varint(u64::from(field) << 3, out);
+        varint(value.cast_unsigned(), out);
+    }
+
+    fn value_info(name: &str, dims: &[i64]) -> Vec<u8> {
+        let mut shape = Vec::new();
+        for dim in dims {
+            let mut dimension = Vec::new();
+            int_field(1, *dim, &mut dimension);
+            bytes_field(1, &dimension, &mut shape);
+        }
+        let mut tensor = Vec::new();
+        int_field(1, 1, &mut tensor);
+        bytes_field(2, &shape, &mut tensor);
+        let mut ty = Vec::new();
+        bytes_field(1, &tensor, &mut ty);
+        let mut info = Vec::new();
+        str_field(1, name, &mut info);
+        bytes_field(2, &ty, &mut info);
+        info
+    }
+
+    fn attribute_ints(name: &str, values: &[i64]) -> Vec<u8> {
+        let mut packed = Vec::new();
+        for value in values {
+            varint(value.cast_unsigned(), &mut packed);
+        }
+        let mut attribute = Vec::new();
+        str_field(1, name, &mut attribute);
+        bytes_field(8, &packed, &mut attribute);
+        int_field(20, 7, &mut attribute);
+        attribute
+    }
+
+    fn attribute_int(name: &str, value: i64) -> Vec<u8> {
+        let mut attribute = Vec::new();
+        str_field(1, name, &mut attribute);
+        int_field(3, value, &mut attribute);
+        int_field(20, 2, &mut attribute);
+        attribute
+    }
+
+    fn node(op: &str, input: &str, output: &str, attributes: &[Vec<u8>]) -> Vec<u8> {
+        let mut node = Vec::new();
+        str_field(1, input, &mut node);
+        str_field(2, output, &mut node);
+        str_field(4, op, &mut node);
+        for attribute in attributes {
+            bytes_field(5, attribute, &mut node);
+        }
+        node
+    }
+
+    /// A head ONNX taking `input` and giving the mean of all embeddings as `[1, 1]`; it loads in
+    /// ONNX Runtime without any downloaded model.
+    fn head_onnx(input: &[i64]) -> Vec<u8> {
+        let reduce = node(
+            "ReduceMean",
+            "x",
+            "r",
+            &[
+                attribute_ints("axes", &[1, 2]),
+                attribute_int("keepdims", 0),
+            ],
+        );
+        let unsqueeze = node("Unsqueeze", "r", "y", &[attribute_ints("axes", &[1])]);
+        let mut graph = Vec::new();
+        bytes_field(1, &reduce, &mut graph);
+        bytes_field(1, &unsqueeze, &mut graph);
+        str_field(2, "head", &mut graph);
+        bytes_field(11, &value_info("x", input), &mut graph);
+        bytes_field(12, &value_info("y", &[1, 1]), &mut graph);
+        let mut opset = Vec::new();
+        int_field(2, 7, &mut opset);
+        let mut model = Vec::new();
+        int_field(1, 7, &mut model);
+        bytes_field(7, &graph, &mut model);
+        bytes_field(8, &opset, &mut model);
+        model
+    }
+
+    #[test]
+    fn validate_wake_models_checks_catalog_files_and_sameness() {
+        let dir = std::env::temp_dir().join(format!("thalvi-wake-validate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let valid = dir.join("custom.onnx");
+        std::fs::write(&valid, head_onnx(&[1, 16, 96])).expect("valid head");
+        let wrong = dir.join("wrong.onnx");
+        std::fs::write(&wrong, head_onnx(&[1, 8, 96])).expect("wrong-shape head");
+        let not_model = dir.join("not-model.onnx");
+        std::fs::write(&not_model, b"not a model").expect("non-model");
+        let missing = dir.join("missing.onnx");
+        let valid = valid.display().to_string();
+        let not_model = not_model.display().to_string();
+        let missing = missing.display().to_string();
+        let wrong = wrong.display().to_string();
+        // (capture, conversation, expected message part; empty means valid)
+        let cases: [(&str, &str, &str); 8] = [
+            ("hey_thalvi", "hey_mycroft", ""),
+            (valid.as_str(), "hey_mycroft", ""),
+            (missing.as_str(), "hey_mycroft", "could not be loaded"),
+            (not_model.as_str(), "hey_mycroft", "could not be loaded"),
+            (wrong.as_str(), "hey_mycroft", "wake head"),
+            ("hey_siri", "hey_mycroft", "Unknown wake model"),
+            ("hey_thalvi", "hey_thalvi", "must be different"),
+            (valid.as_str(), valid.as_str(), "must be different"),
+        ];
+        for (capture, conversation, expected) in cases {
+            let result = validate_wake_models(capture, conversation);
+            if expected.is_empty() {
+                assert!(result.is_ok(), "{capture} / {conversation}: {result:?}");
+            } else {
+                let error = result.expect_err("must refuse").to_string();
+                assert!(
+                    error.contains(expected),
+                    "{capture} / {conversation}: {error}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

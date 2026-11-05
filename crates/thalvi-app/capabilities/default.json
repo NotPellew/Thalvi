@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "The overlay and the settings window listen to Thalvi's events and call its commands; settings shows the app version.",
   "windows": ["overlay", "settings"],
-  "permissions": ["core:event:default", "core:app:allow-version"]
+  "permissions": ["core:event:default", "core:app:allow-version", "dialog:allow-open"]
 }

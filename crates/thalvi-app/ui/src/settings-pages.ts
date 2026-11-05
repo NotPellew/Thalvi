@@ -14,6 +14,7 @@ import type {
   SpeechModelInfo,
   SpeechModelProgress,
   Status,
+  WakeModelInfo,
   SttEngine,
   SwitchState,
 } from "./contract.ts";
@@ -88,7 +89,12 @@ const CUES: readonly (readonly [keyof Settings["cues"], string, string])[] = [
   ["accepted", "Accepted", "The capture was delivered."],
   ["error", "Error", "Something failed."],
 ];
-const WAKE_MODELS = ["hey_thalvi", "hey_mycroft", "hey_jarvis"];
+const WAKE_MODELS: readonly (readonly [string, string])[] = [
+  ["hey_thalvi", "Hey Thalvi"],
+  ["hey_mycroft", "Hey Mycroft"],
+  ["hey_jarvis", "Hey Jarvis"],
+];
+const CUSTOM_MODEL = "__custom";
 const OUTCOMES: Record<HistoryOutcome, string> = { accepted: "Delivered", cancelled: "Cancelled", failed: "Failed" };
 const DRAFT_OUTCOMES: Record<DraftOutcome, string> = {
   delivered: "Delivered.",
@@ -161,32 +167,177 @@ function miniField(label: string, field: Field): HTMLElement {
   return el("label", { class: "mini" }, el("span", {}, label), field.node);
 }
 
-function head(
-  draft: Settings,
-  controls: Controls,
-  key: "capture" | "conversation",
-  title: string,
-  listId: string,
-): HTMLElement[] {
-  const config = draft.wake[key];
-  const name = key === "capture" ? "dictation" : "conversation";
-  return [
-    group(title),
-    row(
-      `Wake model (${name})`,
-      "A model name or the path of an .onnx file. Catalog models download on first use.",
-      controls.text(config.model, (value) => {
-        config.model = value;
-      }, { list: listId }),
-    ),
-    row(
-      `Threshold (${name})`,
-      "Higher wakes less often by mistake; lower catches quieter speech.",
-      controls.slider(config.threshold, { min: 0.05, max: 1, step: 0.05 }, (value) => {
-        config.threshold = value;
-      }),
-    ),
-  ];
+function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+interface WakeHead {
+  key: "capture" | "conversation";
+  custom: boolean;
+  customPath: string;
+  render: () => void;
+  sayProblem: (message: string) => void;
+}
+
+/** Both wake pickers: catalog phrases with download badges, or a custom `.onnx` file. */
+function wakeHeads(context: PageContext): HTMLElement[] {
+  const { draft, controls, backend, checks } = context;
+  const infos = new Map<string, WakeModelInfo>();
+  const downloading = new Set<string>();
+  const heads: WakeHead[] = [];
+  let latestCheck = 0;
+
+  function validate(target?: WakeHead): Promise<void> {
+    for (const head of heads) {
+      if (head.custom && head.customPath === "") {
+        const message = "Pick a wake model file with Browse… first.";
+        (target ?? head).sayProblem(message);
+        return Promise.reject(new Error(message));
+      }
+    }
+    const check = ++latestCheck;
+    return backend.validateWakeModels(draft.wake.capture.model, draft.wake.conversation.model).then(
+      () => {
+        if (check === latestCheck) for (const head of heads) head.sayProblem("");
+      },
+      (error: unknown) => {
+        if (check === latestCheck) {
+          if (target) target.sayProblem(errorText(error));
+          else for (const head of heads) head.sayProblem(errorText(error));
+        }
+        throw error;
+      },
+    );
+  }
+  // Catalog choices are known-good names and the picker disables the other head's phrase, so
+  // only a custom file or an equal pair needs the Rust check before Save.
+  checks.push(() =>
+    heads.some((head) => head.custom) || draft.wake.capture.model === draft.wake.conversation.model ? validate() : null,
+  );
+
+  function head(key: "capture" | "conversation", title: string): HTMLElement[] {
+    const config = draft.wake[key];
+    const name = key === "capture" ? "dictation" : "conversation";
+    const picker = el("select", { id: uid("f") });
+    const badge = el("span", { class: "badge" });
+    const problem = note();
+    const chosenFile = el("span", { class: "unit" });
+    const state: WakeHead = {
+      key,
+      custom: !WAKE_MODELS.some(([model]) => model === config.model),
+      customPath: "",
+      render: () => undefined,
+      sayProblem: (message) => {
+        say(problem, message);
+      },
+    };
+    if (state.custom) state.customPath = config.model;
+    const download = button("Download", () => {
+      const model = config.model;
+      downloading.add(model);
+      state.render();
+      backend.downloadWakeModel(model).then(
+        () => {
+          downloading.delete(model);
+          const info = infos.get(model);
+          if (info) info.cached = true;
+          for (const other of heads) other.render();
+        },
+        (error: unknown) => {
+          downloading.delete(model);
+          state.sayProblem(errorText(error));
+          state.render();
+        },
+      );
+    });
+    const browse = button("Browse…", () => {
+      backend.pickWakeModelFile().then(
+        (path) => {
+          if (path === null) return;
+          state.customPath = path;
+          config.model = path;
+          controls.touched();
+          for (const other of heads) other.render();
+          validate(state).catch(() => undefined);
+        },
+        (error: unknown) => {
+          state.sayProblem(errorText(error));
+        },
+      );
+    });
+    const customRow = el("div", { class: "trow" }, el("span", { class: "unit" }, "Custom model"), browse, chosenFile);
+    state.render = () => {
+      const other = heads.find((candidate) => candidate.key !== key);
+      picker.replaceChildren(
+        ...WAKE_MODELS.map(([model, label]) => {
+          const info = infos.get(model);
+          const status = downloading.has(model) ? "Downloading…" : info ? (info.cached ? "Ready" : "Not downloaded") : "";
+          const option = el("option", { value: model }, status === "" ? label : `${label} — ${status}`);
+          option.disabled = other !== undefined && draft.wake[other.key].model === model && config.model !== model;
+          return option;
+        }),
+        el("option", { value: CUSTOM_MODEL }, "Custom model…"),
+      );
+      picker.value = state.custom ? CUSTOM_MODEL : config.model;
+      const info = infos.get(config.model);
+      badge.textContent = state.custom
+        ? state.customPath === ""
+          ? "No file chosen"
+          : "Custom model"
+        : downloading.has(config.model)
+          ? "Downloading…"
+          : info
+            ? info.cached
+              ? "Ready"
+              : "Not downloaded"
+            : "Checking…";
+      badge.dataset["on"] = String(!state.custom && info?.cached === true);
+      download.hidden = state.custom || downloading.has(config.model) || info?.cached !== false;
+      customRow.hidden = !state.custom;
+      chosenFile.textContent = state.customPath === "" ? "" : fileName(state.customPath);
+    };
+    picker.addEventListener("change", () => {
+      if (picker.value === CUSTOM_MODEL) {
+        state.custom = true;
+        if (state.customPath === "") state.sayProblem("Pick a wake model file with Browse… first.");
+      } else {
+        state.custom = false;
+        config.model = picker.value;
+        state.sayProblem("");
+      }
+      controls.touched();
+      for (const other of heads) other.render();
+    });
+    heads.push(state);
+    const field: Field = {
+      node: el("div", { class: "stack wide" }, el("div", { class: "trow" }, picker, badge, download), customRow, problem),
+      field: picker,
+    };
+    return [
+      group(title),
+      row(`Wake model (${name})`, "Pick a built-in phrase, or your own .onnx wake model file.", field),
+      row(
+        `Threshold (${name})`,
+        "Higher wakes less often by mistake; lower catches quieter speech.",
+        controls.slider(config.threshold, { min: 0.05, max: 1, step: 0.05 }, (value) => {
+          config.threshold = value;
+        }),
+      ),
+    ];
+  }
+
+  const nodes = [...head("capture", "Dictation wake word"), ...head("conversation", "Conversation wake word")];
+  backend.listWakeModels().then(
+    (models) => {
+      for (const info of models) infos.set(info.name, info);
+      for (const state of heads) state.render();
+    },
+    (error: unknown) => {
+      for (const state of heads) state.sayProblem(errorText(error));
+    },
+  );
+  for (const state of heads) state.render();
+  return nodes;
 }
 
 function endingsTable({ draft, controls }: PageContext): HTMLElement {
@@ -303,11 +454,8 @@ function capture(context: PageContext): HTMLElement[] {
         draft.ending_pause[key] = value;
       }),
     );
-  const models = el("datalist", { id: "wake-models" }, ...WAKE_MODELS.map((model) => el("option", { value: model })));
   return [
-    models,
-    ...head(draft, controls, "capture", "Dictation wake word", "wake-models"),
-    ...head(draft, controls, "conversation", "Conversation wake word", "wake-models"),
+    ...wakeHeads(context),
     group("Endings"),
     row("Ending phrases", "Say one to finish a capture. Every action needs at least one phrase.", endingsTable(context)),
     group("Quiet before acting"),

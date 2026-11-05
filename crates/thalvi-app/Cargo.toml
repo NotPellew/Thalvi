@@ -22,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 tauri.workspace = true
 tauri-plugin-autostart.workspace = true
+tauri-plugin-dialog.workspace = true
 tauri-plugin-single-instance.workspace = true
 thalvi-desktop = { path = "../thalvi-desktop" }
 tokio.workspace = true
