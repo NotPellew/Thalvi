@@ -230,49 +230,63 @@ function endingsTable({ draft, controls }: PageContext): HTMLElement {
   return el("div", { class: "stack wide" }, list, el("div", { class: "trow add" }, phrase.node, action.node, add), problem);
 }
 
-/** One box per word list entry, a Remove beside each and + for another; blank boxes are not saved. */
+/** The word list as chips with a remove button each, and one box whose + (or Enter) adds its word. */
 function wordListTable(draft: Settings, controls: Controls): { node: HTMLElement; enable: (on: boolean) => void } {
-  const entries = [...(draft.stt.phrases ?? [])];
-  if (entries.length === 0) entries.push("");
-  const list = el("div", { class: "table" });
+  const chips = el("div", { class: "chips" });
+  const problem = note();
+  const entry = controls.text("", () => undefined, { label: "New word", placeholder: "Add a name or term" });
+  const input = entry.field as HTMLInputElement;
   let enabled = true;
 
-  function store(): void {
-    draft.stt.phrases = entries.map((entry) => entry.trim()).filter((entry) => entry !== "");
-  }
-
-  function render(focusLast = false): void {
-    list.replaceChildren(
-      ...entries.map((entry, index) => {
-        const box = controls.text(entry, (value) => {
-          entries[index] = value;
-          store();
-        }, { label: `Word ${String(index + 1)}`, placeholder: "Name or term" });
-        const remove = button("Remove", () => {
-          entries.splice(index, 1);
-          if (entries.length === 0) entries.push("");
-          store();
+  function render(): void {
+    const words = draft.stt.phrases ?? [];
+    chips.replaceChildren(
+      ...words.map((word) => {
+        const remove = button("×", () => {
+          draft.stt.phrases = (draft.stt.phrases ?? []).filter((kept) => kept !== word);
           controls.touched();
           render();
         }, "quiet");
-        remove.setAttribute("aria-label", `Remove word ${String(index + 1)}`);
-        (box.field as HTMLInputElement).disabled = !enabled;
+        remove.setAttribute("aria-label", `Remove ${word}`);
         remove.disabled = !enabled;
-        return el("div", { class: "trow" }, box.node, remove);
+        return el("span", { class: "badge chip" }, el("span", {}, word), remove);
       }),
     );
-    if (focusLast) (list.lastElementChild?.querySelector("input") as HTMLInputElement | null)?.focus();
   }
-  render();
-  const add = button("+", () => {
-    entries.push("");
-    render(true);
+
+  function addWord(): void {
+    const word = input.value.trim();
+    const words = draft.stt.phrases ?? [];
+    if (word === "") {
+      say(problem, "Type the word to add first.");
+      return;
+    }
+    if (words.includes(word)) {
+      say(problem, `${word} is already in the list.`);
+      return;
+    }
+    say(problem, "");
+    draft.stt.phrases = [...words, word];
+    input.value = "";
+    controls.touched();
+    render();
+    input.focus();
+  }
+
+  const add = button("+", addWord);
+  add.setAttribute("aria-label", "Add the word");
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addWord();
+    }
   });
-  add.setAttribute("aria-label", "Add a word");
+  render();
   return {
-    node: el("div", { class: "stack wide" }, list, el("div", { class: "trow add" }, add)),
+    node: el("div", { class: "stack wide" }, chips, el("div", { class: "trow add" }, entry.node, add), problem),
     enable: (on) => {
       enabled = on;
+      input.disabled = !on;
       add.disabled = !on;
       render();
     },
@@ -535,7 +549,7 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
   const wordProblem = note();
   const wordRow = row(
     "Word list",
-    "Names and terms, one per box. Recognition through the server favours these spellings, in dictation and conversations.",
+    "Names and terms to spell your way, added one at a time. Recognition through the server favours them, in dictation and conversations.",
     words.node,
   );
   wordRow.querySelector(".ctl")?.append(wordProblem);

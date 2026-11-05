@@ -372,12 +372,18 @@ describe("the word list", () => {
     return stub;
   }
 
-  function boxes(): HTMLInputElement[] {
-    return Array.from(rowOf("Word list").querySelectorAll<HTMLInputElement>("input"));
+  function box(): HTMLInputElement {
+    return rowOf("Word list").querySelector('input[aria-label="New word"]') as HTMLInputElement;
   }
 
-  function addBox(): void {
-    (rowOf("Word list").querySelector('button[aria-label="Add a word"]') as HTMLButtonElement).click();
+  function chips(): string[] {
+    return Array.from(rowOf("Word list").querySelectorAll(".chip > span")).map((chip) => chip.textContent);
+  }
+
+  function add(word: string, by: "plus" | "enter" = "plus"): void {
+    type(box(), word);
+    if (by === "enter") box().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    else (rowOf("Word list").querySelector('button[aria-label="Add the word"]') as HTMLButtonElement).click();
   }
 
   function offered(): boolean {
@@ -403,18 +409,23 @@ describe("the word list", () => {
     const stub = await openWith(engine, support);
     expect(stub.backend.wordListSupport).toHaveBeenCalledTimes(engine === "server" ? 1 : 0);
     expect(offered()).toBe(expected.shown);
-    expect(boxes()[0]?.disabled).toBe(expected.disabled);
-    expect(rowOf("Word list").querySelector(".note")?.textContent).toBe(expected.problem);
+    expect(box().disabled).toBe(expected.disabled);
+    const said = Array.from(rowOf("Word list").querySelectorAll(".note")).map((note) => note.textContent).join("");
+    expect(said).toBe(expected.problem);
   });
 
-  it("saves one word per box, skips blank boxes and shares the list with the server once per change", async () => {
+  it("adds a typed word by + or Enter, refuses a blank or repeated one, and shares the list once per change", async () => {
     const stub = await openWith("server", () => Promise.resolve(true));
-    expect(boxes()).toHaveLength(1);
-    type(boxes()[0] as HTMLInputElement, "  Cybrex2 ");
-    addBox();
-    expect(document.activeElement).toBe(boxes()[1]);
-    type(boxes()[1] as HTMLInputElement, "Thalvi");
-    addBox();
+    add("  Cybrex2 ");
+    add("Thalvi", "enter");
+    expect(chips()).toEqual(["Cybrex2", "Thalvi"]);
+    expect(box().value).toBe("");
+    const problem = (): string => Array.from(rowOf("Word list").querySelectorAll(".note")).map((note) => note.textContent).join("");
+    add("  ");
+    expect(problem()).toBe("Type the word to add first.");
+    add("Cybrex2");
+    expect(problem()).toBe("Cybrex2 is already in the list.");
+    expect(chips()).toEqual(["Cybrex2", "Thalvi"]);
     button("Save").click();
     await settle();
     expect(sent(stub).stt.phrases).toEqual(["Cybrex2", "Thalvi"]);
@@ -427,7 +438,7 @@ describe("the word list", () => {
   it("says when the server could not take the list, and the save stands", async () => {
     const stub = await openWith("server", () => Promise.resolve(true));
     stub.backend.shareWordList.mockRejectedValue("The word list is saved here, but Thalvi could not reach the server.");
-    type(boxes()[0] as HTMLInputElement, "Cybrex2");
+    add("Cybrex2");
     button("Save").click();
     await settle();
     expect(root.querySelector(".err")?.textContent).toBe("The word list is saved here, but Thalvi could not reach the server.");
@@ -435,11 +446,11 @@ describe("the word list", () => {
     expect(root.querySelector(".msg")?.textContent).not.toBe("Unsaved changes");
   });
 
-  it("shows a saved list one box per word and removes a word", async () => {
+  it("shows a saved list as chips and removes a word", async () => {
     const stub = await openWith("server", () => Promise.resolve(true), ["Cybrex2", "Thalvi"]);
-    expect(boxes().map((box) => box.value)).toEqual(["Cybrex2", "Thalvi"]);
-    (rowOf("Word list").querySelector('button[aria-label="Remove word 1"]') as HTMLButtonElement).click();
-    expect(boxes().map((box) => box.value)).toEqual(["Thalvi"]);
+    expect(chips()).toEqual(["Cybrex2", "Thalvi"]);
+    (rowOf("Word list").querySelector('button[aria-label="Remove Cybrex2"]') as HTMLButtonElement).click();
+    expect(chips()).toEqual(["Thalvi"]);
     button("Save").click();
     await settle();
     expect(sent(stub).stt.phrases).toEqual(["Thalvi"]);

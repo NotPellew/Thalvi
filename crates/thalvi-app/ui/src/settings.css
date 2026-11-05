@@ -92,3 +92,8 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
 .own { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
 .model a { color: var(--neon); }
 .row.off { display: none; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips:empty { display: none; }
+.chip { display: inline-flex; align-items: center; gap: 2px; font: 13px var(--mono); }
+#settings[data-look] main .chip > button { height: auto; padding: 0 2px 0 6px; border: 0; background: none; box-shadow: none; font: 13px var(--mono); text-transform: none; }
+#settings[data-look] main .chip > button:hover { color: var(--neon); background: none; }
