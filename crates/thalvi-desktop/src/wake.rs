@@ -719,9 +719,9 @@ mod tests {
         node
     }
 
-    /// A minimal head ONNX: mean of all embeddings, as `[1, 1]`; loads in ONNX Runtime and
-    /// passes `check_head`, without any downloaded model.
-    fn minimal_head_onnx() -> Vec<u8> {
+    /// A head ONNX taking `input` and giving the mean of all embeddings as `[1, 1]`; it loads in
+    /// ONNX Runtime without any downloaded model.
+    fn head_onnx(input: &[i64]) -> Vec<u8> {
         let reduce = node(
             "ReduceMean",
             "x",
@@ -736,7 +736,7 @@ mod tests {
         bytes_field(1, &reduce, &mut graph);
         bytes_field(1, &unsqueeze, &mut graph);
         str_field(2, "head", &mut graph);
-        bytes_field(11, &value_info("x", &[1, 16, 96]), &mut graph);
+        bytes_field(11, &value_info("x", input), &mut graph);
         bytes_field(12, &value_info("y", &[1, 1]), &mut graph);
         let mut opset = Vec::new();
         int_field(2, 7, &mut opset);
@@ -753,19 +753,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         let valid = dir.join("custom.onnx");
-        std::fs::write(&valid, minimal_head_onnx()).expect("valid head");
+        std::fs::write(&valid, head_onnx(&[1, 16, 96])).expect("valid head");
+        let wrong = dir.join("wrong.onnx");
+        std::fs::write(&wrong, head_onnx(&[1, 8, 96])).expect("wrong-shape head");
         let not_model = dir.join("not-model.onnx");
         std::fs::write(&not_model, b"not a model").expect("non-model");
         let missing = dir.join("missing.onnx");
         let valid = valid.display().to_string();
         let not_model = not_model.display().to_string();
         let missing = missing.display().to_string();
+        let wrong = wrong.display().to_string();
         // (capture, conversation, expected message part; empty means valid)
-        let cases: [(&str, &str, &str); 7] = [
+        let cases: [(&str, &str, &str); 8] = [
             ("hey_thalvi", "hey_mycroft", ""),
             (valid.as_str(), "hey_mycroft", ""),
             (missing.as_str(), "hey_mycroft", "could not be loaded"),
             (not_model.as_str(), "hey_mycroft", "could not be loaded"),
+            (wrong.as_str(), "hey_mycroft", "wake head"),
             ("hey_siri", "hey_mycroft", "Unknown wake model"),
             ("hey_thalvi", "hey_thalvi", "must be different"),
             (valid.as_str(), valid.as_str(), "must be different"),
@@ -782,41 +786,6 @@ mod tests {
                 );
             }
         }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn validate_wake_models_refuses_a_head_with_the_wrong_shape() {
-        let dir = std::env::temp_dir().join(format!("thalvi-wake-shape-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        // A loadable ONNX whose output is not [batch, 1]: ReduceMean alone gives [1].
-        let reduce = node(
-            "ReduceMean",
-            "x",
-            "y",
-            &[
-                attribute_ints("axes", &[1, 2]),
-                attribute_int("keepdims", 0),
-            ],
-        );
-        let mut graph = Vec::new();
-        bytes_field(1, &reduce, &mut graph);
-        str_field(2, "head", &mut graph);
-        bytes_field(11, &value_info("x", &[1, 16, 96]), &mut graph);
-        bytes_field(12, &value_info("y", &[1]), &mut graph);
-        let mut opset = Vec::new();
-        int_field(2, 7, &mut opset);
-        let mut model = Vec::new();
-        int_field(1, 7, &mut model);
-        bytes_field(7, &graph, &mut model);
-        bytes_field(8, &opset, &mut model);
-        let wrong = dir.join("wrong.onnx");
-        std::fs::write(&wrong, model).expect("wrong head");
-        let error = validate_wake_models(&wrong.display().to_string(), "hey_mycroft")
-            .expect_err("must refuse")
-            .to_string();
-        assert!(error.contains("cannot be used as a wake head"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
