@@ -180,7 +180,7 @@ dictation through the server and for conversations. It runs NVIDIA's
 [Nemotron unified ASR 0.6B](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b)
 (OpenMDW licence) live with about 0.56 s of lookahead, finds the language
 itself (English, German, Spanish and 22 more European languages) and
-punctuates. On an RTX 2080 it uses about 1.6 GB of VRAM next to qwentts.cpp
+punctuates. On an RTX 2080 it uses about 3 GB of VRAM next to qwentts.cpp
 and takes about 75 ms for each 0.16 s of audio. Run it from a checkout on the GPU
 machine:
 
