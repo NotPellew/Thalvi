@@ -34,6 +34,10 @@ areas your change touches. Editing rules are in
   0.6B (NeMo, buffered, 0.56 s lookahead, language detected) behind `STT_URL`. Why: no server change;
   5.8–6.6% word errors on the developer's takes (Meta-free, en/de/es), fits next to TTS on an 8 GB
   RTX 2080. Rejected: Voxtral 4B Realtime (too big), Nemotron 3.5 streaming (15%), Qwen3-ASR (2 s chunks).
+- **The word list is a recognition hint, kept on the server.** Settings' list goes to the server,
+  which gives it to recognizers that announce `phraseBoosting` (dictation and conversations). Why: NeMo
+  boosting fixed "Cybrex2" with no new errors; text replacement can't fix what was misheard. Rejected:
+  on-device boosting by a flat logit bonus (no fix, stray tokens in silence), sending it to Meta.
 - **Self-hosted; parts swap by endpoint.** Config sets each part's address on a
   standard protocol (Chat Completions, OpenAI speech, MCP); Meta's realtime ASR
   and Qwen3-TTS's framed PCM stream are the custom adapters. Why: any provider
