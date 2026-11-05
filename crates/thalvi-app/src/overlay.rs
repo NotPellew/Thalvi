@@ -69,12 +69,18 @@ impl Visibility {
             return Self::Hide;
         }
         match status {
-            Status::Paused | Status::Listening => Self::Hide,
+            Status::Paused
+            | Status::Listening
+            | Status::Loading {
+                downloading: false, ..
+            } => Self::Hide,
             Status::Starting { .. }
             | Status::Capturing { .. }
             | Status::Pending { .. }
             | Status::Working { .. }
-            | Status::Loading { .. }
+            | Status::Loading {
+                downloading: true, ..
+            }
             | Status::Failed { .. } => Self::Show,
             Status::Done { .. } => Self::ShowFor(DONE_FOR),
         }
@@ -342,8 +348,16 @@ mod tests {
             (
                 Status::Loading {
                     notice: String::new(),
+                    downloading: true,
                 },
                 Visibility::Show,
+            ),
+            (
+                Status::Loading {
+                    notice: String::new(),
+                    downloading: false,
+                },
+                Visibility::Hide,
             ),
         ];
         for (status, expected) in statuses {

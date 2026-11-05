@@ -490,6 +490,14 @@ impl TransducerSource {
         Self { store, choice }
     }
 
+    /// Whether loading needs no download: a model folder, or a catalog model already on disk.
+    pub async fn is_cached(&self) -> bool {
+        match &self.choice {
+            SpeechChoice::Catalog(catalog) => self.store.is_cached(&catalog.assets()).await,
+            SpeechChoice::Folder(_) => true,
+        }
+    }
+
     async fn files(&self) -> Result<TransducerFiles, RecognizerError> {
         let plain = |error: &dyn std::fmt::Display| RecognizerError::said(error.to_string());
         match &self.choice {

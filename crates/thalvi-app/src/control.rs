@@ -164,6 +164,7 @@ mod tests {
         assert_eq!(state(), "error");
         sender.send_replace(Status::Loading {
             notice: "private path".to_owned(),
+            downloading: false,
         });
         assert_eq!(state(), "loading");
         sender.send_replace(Status::Listening);
