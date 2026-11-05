@@ -2949,20 +2949,16 @@ async fn releasing_the_key_pastes_what_was_said_without_a_countdown_or_enter() {
         (
             &[(1000, Partial("hello never mind"))],
             1200,
-            CaptureOutcome::Cancelled {
-                dictated: Some("hello".to_owned()),
-            },
-            Cue::Cancelled,
+            accepted(CaptureRoute::Paste, "hello never mind"),
+            Cue::Accepted,
             1700,
         ),
         (
             &[(800, Final("first line")), (1250, Final("never mind"))],
             1200,
-            CaptureOutcome::Cancelled {
-                dictated: Some("first line".to_owned()),
-            },
-            Cue::Cancelled,
-            1250,
+            accepted(CaptureRoute::Paste, "first line never mind"),
+            Cue::Accepted,
+            1700,
         ),
         // The shortest hold that dictates is MIN_HOLD, 300 ms.
         (
@@ -3065,7 +3061,7 @@ async fn a_hold_with_no_speech_or_under_the_minimum_pastes_nothing_and_says_why(
 }
 
 #[tokio::test(start_paused = true)]
-async fn saying_never_mind_during_a_hold_cancels_it_and_the_release_does_nothing_more() {
+async fn cancelling_a_hold_from_outside_ends_it_cancelled_and_the_release_does_nothing_more() {
     LocalSet::new()
         .run_until(async {
             let (mut rig, mut engine, mut frames) = Rig::new("{}");
@@ -3081,14 +3077,25 @@ async fn saying_never_mind_during_a_hold_cancels_it_and_the_release_does_nothing
             rig.hold().await;
             rig.say(800, Say::Final("draft words")).await;
             rig.say(1000, Say::Final("never mind")).await;
-            rig.at(1500).await;
+            assert!(
+                !task.is_finished(),
+                "never mind is dictated text during a hold"
+            );
+            assert_eq!(
+                rig.state(),
+                EngineState::Capturing {
+                    committed: "draft words never mind".to_owned(),
+                    partial: None
+                }
+            );
+            rig.handle.cancel();
+            settle().await;
             rig.release(2000).await;
             let (outcome, kept_listening) = finished(task).await;
-            // The history keeps what was dictated before the phrase, as after a wake word.
             assert_eq!(
                 outcome,
                 CaptureOutcome::Cancelled {
-                    dictated: Some("draft words".to_owned())
+                    dictated: Some("draft words never mind".to_owned())
                 }
             );
             assert!(
@@ -3096,49 +3103,78 @@ async fn saying_never_mind_during_a_hold_cancels_it_and_the_release_does_nothing
                 "neither the release nor the held key started a capture"
             );
             assert_eq!(rig.started(Cue::Accepted).len(), 0);
+            assert_eq!(rig.started(Cue::Provisional).len(), 0);
             assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
         })
         .await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_spoken_ending_during_a_hold_decides_it_as_it_does_after_a_wake_word() {
-    // (words with the ending, the route and the words delivered)
-    let cases = [
-        ("hello paste that", CaptureRoute::Paste, "hello"),
-        ("run it submit", CaptureRoute::Submit, "run it"),
+async fn spoken_endings_are_text_during_a_hold_and_act_after_the_wake_word() {
+    const CUSTOM: &str = r#"{"endings": {"paste": "paste", "send it": "submit",
+        "make it so": "task", "drop last": "scratch", "forget it": "cancel"}}"#;
+    // (config, what is said, what the same words do after the wake word; a hold
+    // always pastes everything that was said)
+    let cases: [(&str, &str, CaptureOutcome); 6] = [
+        (
+            "{}",
+            "fix the bug never mind",
+            CaptureOutcome::Cancelled {
+                dictated: Some("fix the bug".to_owned()),
+            },
+        ),
+        (
+            "{}",
+            "run the tests do that",
+            accepted(CaptureRoute::Task, "run the tests"),
+        ),
+        (
+            "{}",
+            "send the note submit",
+            accepted(CaptureRoute::Submit, "send the note"),
+        ),
+        (
+            "{}",
+            "keep this paste that",
+            accepted(CaptureRoute::Paste, "keep this"),
+        ),
+        (
+            CUSTOM,
+            "fix the bug forget it",
+            CaptureOutcome::Cancelled {
+                dictated: Some("fix the bug".to_owned()),
+            },
+        ),
+        (
+            CUSTOM,
+            "run the tests make it so",
+            accepted(CaptureRoute::Task, "run the tests"),
+        ),
     ];
     LocalSet::new()
         .run_until(async {
-            for (said, route, text) in cases {
-                let mut accepted_at = Vec::new();
-                for release in [None, Some(1100)] {
-                    let (mut rig, engine, frames) = Rig::new(SLOW_PASTE);
-                    let task = hold_task(engine, frames);
-                    rig.hold().await;
-                    rig.feed_until(1000, Kind::Quiet).await;
-                    rig.finals(said).await;
-                    if let Some(release) = release {
-                        rig.release(release).await;
-                    }
-                    rig.feed_until(4000, Kind::Quiet).await;
-                    assert_eq!(
-                        finished(task).await,
-                        accepted(route, text),
-                        "{said} {release:?}"
-                    );
-                    let started = rig.started(Cue::Accepted);
-                    assert_eq!(started.len(), 1, "{said} {release:?}");
-                    accepted_at.push(started[0]);
-                }
-                assert!(
-                    accepted_at[0] >= 3500,
-                    "{said}: the ending waits out its quiet pause, not the release"
-                );
+            for (config, said, wake_outcome) in cases {
+                let (mut rig, engine, frames) = Rig::new(config);
+                let task = hold_task(engine, frames);
+                rig.hold().await;
+                rig.say(1000, Say::Final(said)).await;
+                rig.release(1200).await;
+                rig.at(1700).await;
+                assert_eq!(rig.started(Cue::Accepted), [1700], "hold: {said}");
+                assert_eq!(rig.started(Cue::Provisional).len(), 0, "hold: {said}");
                 assert_eq!(
-                    accepted_at[0], accepted_at[1],
-                    "{said}: the release changes nothing"
+                    finished(task).await,
+                    accepted(CaptureRoute::Paste, said),
+                    "hold: {said}"
                 );
+
+                let (mut rig, engine, frames) = Rig::new(config);
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals(said).await;
+                rig.feed_until(4000, Kind::Quiet).await;
+                assert_eq!(finished(task).await, wake_outcome, "wake word: {said}");
             }
         })
         .await;
@@ -3304,33 +3340,6 @@ async fn a_hold_sends_only_the_audio_that_comes_after_its_start_cue() {
             assert_eq!(
                 finished(task).await,
                 CaptureOutcome::Cancelled { dictated: None }
-            );
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn speech_that_cancels_an_ending_after_the_release_goes_on_as_a_dictation_by_wake_word() {
-    LocalSet::new()
-        .run_until(async {
-            let (mut rig, engine, frames) = Rig::new(SLOW_PASTE);
-            let task = hold_task(engine, frames);
-            rig.hold().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("hello paste that").await;
-            rig.release(1100).await;
-            rig.feed_until(1500, Kind::Voice).await;
-            rig.finals("world").await;
-            rig.feed_until(2500, Kind::Quiet).await;
-            assert!(
-                !task.is_finished(),
-                "the key is up but the dictation is not over"
-            );
-            rig.finals("again paste that").await;
-            rig.feed_until(6000, Kind::Quiet).await;
-            assert_eq!(
-                finished(task).await,
-                accepted(CaptureRoute::Paste, "hello paste that world again")
             );
         })
         .await;
@@ -3761,7 +3770,7 @@ async fn a_frame_published_after_pending_poll_but_before_release_is_not_lost() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_pending_spoken_ending_keeps_continuation_published_during_release() {
+async fn continuation_published_during_a_poll_reaches_the_recognizer_only_while_the_key_is_down() {
     LocalSet::new()
         .run_until(async {
             for release in [false, true] {
@@ -3789,11 +3798,15 @@ async fn a_pending_spoken_ending_keeps_continuation_published_during_release() {
                 arm.set(true);
                 waker.borrow().as_ref().unwrap().wake_by_ref();
                 settle().await;
-                let expected: Vec<Frame> = (20..23).map(voiced).collect();
+                let expected: Vec<Frame> = if release {
+                    Vec::new()
+                } else {
+                    (20..23).map(voiced).collect()
+                };
                 assert_eq!(
                     tags(&rig.sent()),
                     tags(&expected),
-                    "release={release}: all continuation reaches recognition"
+                    "release={release}: continuation reaches recognition only while the key is down"
                 );
                 task.abort();
                 let _ = task.await;
