@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Table-driven test of issue-refs.sh.
 set -euo pipefail
 
 script="$(dirname "$0")/issue-refs.sh"
@@ -21,6 +20,7 @@ check closes 'CLOSES #1, FiXeD: #2' '1 2'
 check closes 'Refs #4, prefixes #5' ''
 check closes 'Closes other/repo#5, closes notpellew/thalvi#6' 6
 check closes $'## Change\n\nFixes #8 and resolves #9.\n\nCloses #8.\n' '8 9'
+check closes $'`Closes #20`, <!-- Closes #21 -->\n```\nCloses #22\n```\nCloses #23' 23
 check closes 'Reverts NotPellew/Thalvi#12' ''
 check reverts 'Reverts NotPellew/Thalvi#12' 12
 check reverts 'Reverts #13' 13
