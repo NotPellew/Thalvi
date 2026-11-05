@@ -124,6 +124,9 @@ are committed.
   speech/qwentts.sh speech/nemotron-asr.sh`, then in `speech/asr` (Python pinned
   in `.python-version`, uv lockfile): `uv run --frozen ruff check`,
   `uv run --frozen ruff format --check`, `uv run --frozen pytest`.
+- Issue sync (`.github/scripts/`): `pipx run shellcheck-py==0.11.0.1
+  .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh`, then
+  `.github/scripts/issue-refs.test.sh`.
 
 ## Git and PRs
 
@@ -133,7 +136,9 @@ are committed.
 - Branches: `<type>/<slug>`, three hyphenated words or fewer.
 - The PR title becomes the merge commit's subject. The body states the
   problem, then the fix. Say `Closes #N` when the PR resolves an issue,
-  `Refs #N` when it only touches one.
+  `Refs #N` when it only touches one. While PRs target `development`, the
+  Issues workflow closes those issues when the PR merges there, and reopens
+  them when a merged `Reverts #N` PR takes it back out.
 - Use `.github/pull_request_template.md` for every PR body, including PRs
   created through CLI tools; preserve its headings and remove instructional
   comments.

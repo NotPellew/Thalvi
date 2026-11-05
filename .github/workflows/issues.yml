@@ -1,0 +1,61 @@
+name: Issues
+
+# pull_request_target, so PRs from forks also get a token that can write
+# issues. It runs this file from the base branch and never checks out PR code.
+on:
+  pull_request_target:
+    types: [closed]
+    branches: [development]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  sync:
+    name: sync
+    if: github.event.pull_request.merged
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      # gh issue close and reopen skip an issue already in that state without
+      # commenting, but act on PRs too.
+      - name: close the issues this PR closes, reopen those a PR it reverts closed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          status=0
+          refs() { .github/scripts/issue-refs.sh "$1" "$GH_REPO"; }
+          issue() {
+            local action=$1 number=$2 pr
+            shift 2
+            pr=$(gh api "repos/$GH_REPO/issues/$number" --jq '.pull_request != null') &&
+              if [[ $pr == false ]]; then gh issue "$action" "$number" "$@"; fi
+          }
+          closes=$(refs closes <<< "$BODY")
+          for number in $closes; do
+            issue close "$number" --reason completed --comment "Fixed by #$PR, merged into \`development\`. If #$PR is taken out of \`development\` before it reaches \`main\`, reopen this issue." ||
+              { echo "::error::could not close #$number"; status=1; }
+          done
+          reverts=$(refs reverts <<< "$BODY")
+          for reverted in $reverts; do
+            if ! reverted_body=$(gh pr view "$reverted" --json body --jq .body); then
+              echo "::error::could not read reverted PR #$reverted"
+              status=1
+              continue
+            fi
+            closes=$(refs closes <<< "$reverted_body")
+            for number in $closes; do
+              issue reopen "$number" --comment "Reopened by #$PR, which reverted #$reverted out of \`development\`." ||
+                { echo "::error::could not reopen #$number"; status=1; }
+            done
+          done
+          exit "$status"
