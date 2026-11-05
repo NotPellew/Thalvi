@@ -782,25 +782,9 @@ where
                     self.latency_line(summary);
                 }
             }
-            if let Some(event) = wake.event {
-                let level = self.wake_peak();
-                if level < WAKE_FLOOR_PEAK {
-                    if !self.refused {
-                        self.refused = true;
-                        let head = match event {
-                            WakeEvent::Capture => "capture",
-                            WakeEvent::Conversation => "conversation",
-                            WakeEvent::Ambiguous => "ambiguous",
-                        };
-                        let mut fields = scores(&wake);
-                        fields["level"] = json!(level);
-                        fields["floor"] = json!(WAKE_FLOOR_PEAK);
-                        self.recorder.metric(Event::WakeRefused, head, None, fields);
-                    }
-                    continue;
-                }
+            if self.refuse_quiet(&wake) {
+                continue;
             }
-            self.refused = false;
             if wake.event == Some(WakeEvent::Ambiguous) {
                 if !self.ambiguous {
                     (self.notice)("Wake was ambiguous; still listening.");
@@ -878,6 +862,29 @@ where
             self.wake_clip.pop_front();
         }
         self.wake_clip.push_back(*frame);
+    }
+
+    /// Whether `wake` is too quiet to be speech and is dropped, recording the first frame of each
+    /// run of refused wakes.
+    fn refuse_quiet(&mut self, wake: &WakeFrame) -> bool {
+        let level = self.wake_peak();
+        let Some(event) = wake.event.filter(|_| level < WAKE_FLOOR_PEAK) else {
+            self.refused = false;
+            return false;
+        };
+        if !self.refused {
+            self.refused = true;
+            let head = match event {
+                WakeEvent::Capture => "capture",
+                WakeEvent::Conversation => "conversation",
+                WakeEvent::Ambiguous => "ambiguous",
+            };
+            let mut fields = scores(wake);
+            fields["level"] = json!(level);
+            fields["floor"] = json!(WAKE_FLOOR_PEAK);
+            self.recorder.metric(Event::WakeRefused, head, None, fields);
+        }
+        true
     }
 
     /// The largest sample magnitude over the last [`WAKE_FLOOR_FRAMES`] frames.

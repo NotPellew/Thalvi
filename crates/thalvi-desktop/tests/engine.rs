@@ -2055,12 +2055,12 @@ async fn a_wake_needs_a_sample_peak_of_1500_within_the_last_16_frames() {
             // (name, event, peak of the frame k frames before the wake frame (0 = the wake
             // frame), the peak elsewhere, the peak the refusal records or None for a wake)
             type Case = (&'static str, WakeEvent, usize, i16, i16, Option<u16>);
-            let cases: [Case; 8] = [
+            let cases: [Case; 7] = [
                 ("faint", WakeEvent::Capture, 0, 1_499, 0, Some(1_499)),
                 ("at the floor", WakeEvent::Capture, 0, 1_500, 0, None),
                 (
-                    "negative faint",
-                    WakeEvent::Capture,
+                    "negative faint conversation",
+                    WakeEvent::Conversation,
                     0,
                     -1_499,
                     0,
@@ -2073,14 +2073,6 @@ async fn a_wake_needs_a_sample_peak_of_1500_within_the_last_16_frames() {
                     -1_500,
                     0,
                     None,
-                ),
-                (
-                    "faint conversation",
-                    WakeEvent::Conversation,
-                    0,
-                    1_499,
-                    0,
-                    Some(1_499),
                 ),
                 (
                     "faint ambiguous",
@@ -2140,11 +2132,7 @@ async fn a_wake_needs_a_sample_peak_of_1500_within_the_last_16_frames() {
                         assert_eq!(lines[0]["floor"], json!(1_500), "{name}");
                         assert_eq!(lines[0]["capture"], json!(0.9), "{name}");
                         assert_eq!(lines[0]["conversation"], json!(0.123), "{name}");
-                        let head = match event {
-                            WakeEvent::Capture => "capture",
-                            WakeEvent::Conversation => "conversation",
-                            WakeEvent::Ambiguous => "ambiguous",
-                        };
+                        let head = format!("{event:?}").to_lowercase();
                         assert_eq!(lines[0]["outcome"], head, "{name}");
                     }
                 }
