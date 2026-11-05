@@ -121,7 +121,9 @@ are committed.
   `npm run build`.
 - Speech servers (`compose.yaml`, `speech/`): `docker compose --profile kokoro
   --profile vllm-omni config -q`, `pipx run shellcheck-py==0.11.0.1
-  speech/qwentts.sh`.
+  speech/qwentts.sh speech/nemotron-asr.sh`, then in `speech/asr` (Python pinned
+  in `.python-version`, uv lockfile): `uv run --frozen ruff check`,
+  `uv run --frozen ruff format --check`, `uv run --frozen pytest`.
 
 ## Git and PRs
 
