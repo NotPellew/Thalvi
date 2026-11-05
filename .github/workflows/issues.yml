@@ -1,7 +1,7 @@
 name: Issues
 
-# push, not pull_request_target, which GitHub always runs from the default
-# branch, main, where this file doesn't exist.
+# push, because pull_request_target always runs the default branch's copy of
+# this file.
 on:
   push:
     branches: [development]
