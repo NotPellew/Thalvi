@@ -47,6 +47,8 @@ pub enum Event {
     WakeInference,
     /// A wake head's score rose near its threshold and fell back without crossing it.
     WakeNearMiss,
+    /// A head crossed its threshold but the last 1.28 s peaked below the wake level floor.
+    WakeRefused,
     /// A wake that led to no delivery: the dictation's folder and why.
     WakeNothing,
     WakeReset,
@@ -84,6 +86,7 @@ impl Event {
             Self::WakeLoad => "desktop_wake_load",
             Self::WakeInference => "desktop_wake_inference",
             Self::WakeNearMiss => "desktop_wake_near_miss",
+            Self::WakeRefused => "desktop_wake_refused",
             Self::WakeNothing => "desktop_wake_nothing",
             Self::WakeReset => "desktop_wake_reset",
             Self::TranscriptionReady => "desktop_transcription_ready",
@@ -648,6 +651,7 @@ mod tests {
             (Event::WakeLoad, "desktop_wake_load"),
             (Event::WakeInference, "desktop_wake_inference"),
             (Event::WakeNearMiss, "desktop_wake_near_miss"),
+            (Event::WakeRefused, "desktop_wake_refused"),
             (Event::WakeNothing, "desktop_wake_nothing"),
             (Event::WakeReset, "desktop_wake_reset"),
             (Event::TranscriptionReady, "desktop_transcription_ready"),
