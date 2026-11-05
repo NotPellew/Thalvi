@@ -12,7 +12,7 @@ asr:
     fused_batch_size: -1
     greedy:
       use_cuda_graph_decoder: true
-      enable_per_stream_biasing: false
+      enable_per_stream_biasing: true  # Each connection may bring its own word list.
       preserve_frame_confidence: false
       max_symbols: 10
       ngram_lm_model: null

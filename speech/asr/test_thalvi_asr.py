@@ -8,7 +8,19 @@ import pytest
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 
-from thalvi_asr import INPUT_RATE, MODEL_RATE, STEP_SAMPLES, Resampler, Server, Step, Turns, handshake_error
+from thalvi_asr import (
+    INPUT_RATE,
+    MAX_PHRASE_CHARS,
+    MAX_PHRASES,
+    MODEL_RATE,
+    STEP_SAMPLES,
+    Resampler,
+    Server,
+    Step,
+    Turns,
+    handshake_error,
+    phrases_error,
+)
 
 HELLO = {
     "authorization": {"accessToken": "Bearer x"},
@@ -22,8 +34,9 @@ WAIT_S = 5
 
 
 class FakeStream:
-    def __init__(self, steps: list[Step]) -> None:
+    def __init__(self, steps: list[Step], phrases: tuple[str, ...]) -> None:
         self.steps = steps
+        self.phrases = phrases
         self.calls: list[tuple[int, bool]] = []
 
     def step(self, samples: np.ndarray, last: bool) -> Step:
@@ -37,8 +50,8 @@ class FakeModel:
         self.streams: list[FakeStream] = []
         self.steps = steps
 
-    def open(self) -> FakeStream:
-        self.streams.append(FakeStream(self.steps))
+    def open(self, phrases: tuple[str, ...]) -> FakeStream:
+        self.streams.append(FakeStream(self.steps, phrases))
         return self.streams[-1]
 
 
@@ -169,3 +182,54 @@ def test_half_a_sample_is_refused_in_plain_words():
     assert asyncio.run(session(FakeModel([]), script)) == [
         {"type": "error", "message": "Audio must be whole 16-bit samples."}
     ]
+
+
+@pytest.mark.parametrize(
+    ("phrases", "error"),
+    [
+        (["Cybrex2", " Thalvi "], None),
+        ([], None),
+        ("Cybrex2", "The word list must be a list of text."),
+        ([1], "The word list must be a list of text."),
+        (["x"] * (MAX_PHRASES + 1), f"The word list can hold at most {MAX_PHRASES} entries."),
+        (["  "], f"Each word list entry must be 1 to {MAX_PHRASE_CHARS} characters."),
+        (["x" * (MAX_PHRASE_CHARS + 1)], f"Each word list entry must be 1 to {MAX_PHRASE_CHARS} characters."),
+    ],
+)
+def test_a_word_list_is_checked_before_use(phrases, error):
+    assert phrases_error(phrases) == error
+
+
+def test_a_word_list_sent_before_the_audio_reaches_the_stream():
+    model = FakeModel([])
+
+    async def script(socket):
+        await socket.send(json.dumps(HELLO))
+        hello = json.loads(await socket.recv())
+        await socket.send(json.dumps({"type": "phrases", "phrases": [" Cybrex2 ", "Thalvi"]}))
+        await socket.send(ONE_STEP)
+        await socket.send(json.dumps({"type": "endStream"}))
+        await received(socket)
+        return hello
+
+    assert asyncio.run(session(model, script))["phraseBoosting"] is True
+    assert model.streams[0].phrases == ("Cybrex2", "Thalvi")
+
+
+@pytest.mark.parametrize(
+    ("before", "phrases", "message"),
+    [
+        (ONE_STEP, ["Cybrex2"], "Send the word list before any audio."),
+        (None, "Cybrex2", "The word list must be a list of text."),
+    ],
+)
+def test_a_late_or_bad_word_list_is_refused_in_plain_words(before, phrases, message):
+    async def script(socket):
+        await socket.send(json.dumps(HELLO))
+        await socket.recv()
+        if before:
+            await socket.send(before)
+        await socket.send(json.dumps({"type": "phrases", "phrases": phrases}))
+        return [event for event in await received(socket) if event["type"] == "error"]
+
+    assert asyncio.run(session(FakeModel([]), script)) == [{"type": "error", "message": message}]

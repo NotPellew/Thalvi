@@ -24,6 +24,8 @@ MODEL_RATE = 16_000
 # The model takes audio in steps of its chunk size (0.16 s).
 STEP_SAMPLES = 2_560
 HANDSHAKE_TIMEOUT_S = 10.0
+MAX_PHRASES = 100
+MAX_PHRASE_CHARS = 40
 
 
 @dataclass(frozen=True)
@@ -41,7 +43,9 @@ class Stream(Protocol):
 
 
 class Model(Protocol):
-    def open(self) -> Stream: ...
+    def open(self, phrases: tuple[str, ...]) -> Stream:
+        """Starts a stream that favours `phrases` while decoding."""
+        ...
 
 
 class Resampler:
@@ -115,6 +119,17 @@ def handshake_error(init: object) -> str | None:
     return None
 
 
+def phrases_error(phrases: object) -> str | None:
+    """Why a word list can't be used, in plain words; None when it can."""
+    if not isinstance(phrases, list) or not all(isinstance(phrase, str) for phrase in phrases):
+        return "The word list must be a list of text."
+    if len(phrases) > MAX_PHRASES:
+        return f"The word list can hold at most {MAX_PHRASES} entries."
+    if any(not phrase.strip() or len(phrase.strip()) > MAX_PHRASE_CHARS for phrase in phrases):
+        return f"Each word list entry must be 1 to {MAX_PHRASE_CHARS} characters."
+    return None
+
+
 @dataclass
 class Session:
     """One connection's audio, from 24 kHz chunks to steps of the model's stream."""
@@ -155,6 +170,9 @@ class Server:
         self.model = model
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr-model")
 
+    async def _open(self, phrases: tuple[str, ...]) -> Stream:
+        return await asyncio.get_running_loop().run_in_executor(self.worker, self.model.open, phrases)
+
     async def _run(self, session: Session, samples: np.ndarray, last: bool) -> list[dict]:
         return await asyncio.get_running_loop().run_in_executor(self.worker, session.run, samples, last)
 
@@ -168,8 +186,9 @@ class Server:
         if error := handshake_error(init):
             await self._fail(socket, error)
             return
-        session = Session(await asyncio.get_running_loop().run_in_executor(self.worker, self.model.open))
-        await socket.send(json.dumps({"sessionId": str(uuid.uuid4())}))
+        await socket.send(json.dumps({"sessionId": str(uuid.uuid4()), "phraseBoosting": True}))
+        phrases: tuple[str, ...] = ()
+        session: Session | None = None
         ended, outcome = False, "closed"
         try:
             async for message in socket:
@@ -178,12 +197,25 @@ class Server:
                         await self._fail(socket, "Audio must be whole 16-bit samples.")
                         outcome = "bad_audio"
                         break
+                    # The stream starts with the first audio so a word list sent before it applies.
+                    if session is None:
+                        session = Session(await self._open(phrases))
                     for samples in session.chunks(message):
                         for event in await self._run(session, samples, last=False):
                             await socket.send(json.dumps(event))
-                elif json.loads(message).get("type") == "endStream":
-                    for event in await self._run(session, session.tail(), last=True):
-                        await socket.send(json.dumps(event))
+                    continue
+                command = json.loads(message)
+                if command.get("type") == "phrases":
+                    error = "Send the word list before any audio." if session else phrases_error(command.get("phrases"))
+                    if error:
+                        await self._fail(socket, error)
+                        outcome = "bad_phrases"
+                        break
+                    phrases = tuple(phrase.strip() for phrase in command["phrases"])
+                elif command.get("type") == "endStream":
+                    if session:
+                        for event in await self._run(session, session.tail(), last=True):
+                            await socket.send(json.dumps(event))
                     ended, outcome = True, "ended"
                     break
         except ConnectionClosed:
@@ -193,9 +225,9 @@ class Server:
             outcome = "error"
             await self._fail(socket, "Speech recognition failed on the recognizer.")
         finally:
-            if not ended:
+            if session and not ended:
                 await self._run(session, session.tail(), last=True)
-            self._log(session, outcome, connected)
+            self._log(session, outcome, connected, len(phrases))
         await socket.close()
 
     async def _fail(self, socket: ServerConnection, message: str) -> None:
@@ -206,13 +238,15 @@ class Server:
             pass
 
     @staticmethod
-    def _log(session: Session, outcome: str, connected: float) -> None:
-        steps = np.array(session.step_ms or [0.0])
+    def _log(session: Session | None, outcome: str, connected: float, phrases: int) -> None:
+        step_ms = session.step_ms if session else []
+        steps = np.array(step_ms or [0.0])
         log.info(
-            "session outcome=%s audio_ms=%d steps=%d step_p50_ms=%.1f step_p95_ms=%.1f total_ms=%d",
+            "session outcome=%s phrases=%d audio_ms=%d steps=%d step_p50_ms=%.1f step_p95_ms=%.1f total_ms=%d",
             outcome,
-            session.received * 1000 // INPUT_RATE,
-            len(session.step_ms),
+            phrases,
+            session.received * 1000 // INPUT_RATE if session else 0,
+            len(step_ms),
             float(np.percentile(steps, 50)),
             float(np.percentile(steps, 95)),
             (time.perf_counter() - connected) * 1000,

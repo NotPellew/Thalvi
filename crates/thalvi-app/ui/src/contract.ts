@@ -76,6 +76,8 @@ export interface Settings {
     /** A catalog name or a model folder; only with the local engine, and its default when absent. */
     model?: string;
     secondary?: SecondarySettings | null;
+    /** Spellings recognition favours; absent when empty. */
+    phrases?: string[];
   };
   apps: Record<string, AppSettings>;
   scripts: ScriptSettings[];
@@ -189,6 +191,10 @@ export interface Backend {
   onSpeechModelProgress(listener: (progress: SpeechModelProgress) => void): void;
   /** Opens the model's page in the browser. */
   openSpeechModelSource(name: string): Promise<void>;
+  /** Whether the recognizer behind `server` boosts a word list; rejects with the plain reason it can't tell. */
+  wordListSupport(server: string): Promise<boolean>;
+  /** Saves the stored word list on the server; rejects with the plain reason it could not. */
+  shareWordList(): Promise<void>;
   appVersion(): Promise<string>;
 }
 

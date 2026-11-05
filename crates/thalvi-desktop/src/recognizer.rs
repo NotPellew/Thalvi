@@ -221,6 +221,16 @@ impl ServerUrl {
     fn transcription(&self) -> String {
         format!("{}/transcription", self.0)
     }
+
+    /// The server's HTTP route at `path`, which starts with `/`.
+    #[must_use]
+    pub fn http(&self, path: &str) -> String {
+        let root = self
+            .0
+            .strip_prefix("ws")
+            .map_or_else(|| self.0.clone(), |rest| format!("http{rest}"));
+        format!("{root}{path}")
+    }
 }
 
 impl std::fmt::Display for ServerUrl {

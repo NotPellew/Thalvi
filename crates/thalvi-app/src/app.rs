@@ -316,6 +316,8 @@ fn start() -> Result<(), String> {
             commands::list_speech_models,
             commands::download_speech_model,
             commands::open_speech_model_source,
+            commands::word_list_support,
+            commands::share_word_list,
             commands::get_history,
             commands::delete_history_entry,
             commands::clear_history,

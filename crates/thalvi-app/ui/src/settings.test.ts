@@ -98,7 +98,7 @@ describe("pages", () => {
         title: "Speech",
         groups: {
           Server: ["server address"],
-          Dictation: ["recognize speech", "speech model"],
+          Dictation: ["recognize speech", "speech model", "word list"],
           "Second transcription": ["second-pass transcription", "endpoint address", "model", "api", "api key"],
         },
       },
@@ -359,6 +359,109 @@ describe("a custom speech model folder", () => {
     button("Save").click();
     expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
     expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the word list", () => {
+  async function openWith(engine: "server" | "local", support: () => Promise<boolean>, phrases?: string[]) {
+    const stub = stubBackend({ ...SETTINGS, stt: { engine, secondary: null, ...(phrases ? { phrases } : {}) } });
+    stub.backend.wordListSupport.mockImplementation(support);
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("speech");
+    return stub;
+  }
+
+  function box(): HTMLInputElement {
+    return rowOf("Word list").querySelector('input[aria-label="New word"]') as HTMLInputElement;
+  }
+
+  function chips(): string[] {
+    return Array.from(rowOf("Word list").querySelectorAll(".chip > span")).map((chip) => chip.textContent);
+  }
+
+  function add(word: string, by: "plus" | "enter" = "plus"): void {
+    type(box(), word);
+    if (by === "enter") box().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    else (rowOf("Word list").querySelector('button[aria-label="Add the word"]') as HTMLButtonElement).click();
+  }
+
+  function offered(): boolean {
+    const found = rowOf("Word list");
+    return !found.hidden && !found.classList.contains("off");
+  }
+
+  it.each([
+    ["the local engine", "local", () => Promise.resolve(true), { shown: false, disabled: false, problem: "" }],
+    ["a recognizer without boosting", "server", () => Promise.resolve(false), { shown: false, disabled: false, problem: "" }],
+    ["a recognizer that boosts", "server", () => Promise.resolve(true), { shown: true, disabled: false, problem: "" }],
+    [
+      "a server that can't tell",
+      "server",
+      () => Promise.reject(new Error("Thalvi could not reach the server at ws://127.0.0.1:8080 to ask about a word list.")),
+      {
+        shown: true,
+        disabled: true,
+        problem: "Thalvi could not reach the server at ws://127.0.0.1:8080 to ask about a word list.",
+      },
+    ],
+  ] as const)("is offered for %s only when it can be used", async (_name, engine, support, expected) => {
+    const stub = await openWith(engine, support);
+    expect(stub.backend.wordListSupport).toHaveBeenCalledTimes(engine === "server" ? 1 : 0);
+    expect(offered()).toBe(expected.shown);
+    expect(box().disabled).toBe(expected.disabled);
+    const said = Array.from(rowOf("Word list").querySelectorAll(".note")).map((note) => note.textContent).join("");
+    expect(said).toBe(expected.problem);
+  });
+
+  it("adds a typed word by + or Enter, refuses a blank or repeated one, and shares the list once per change", async () => {
+    const stub = await openWith("server", () => Promise.resolve(true));
+    add("  Cybrex2 ");
+    add("Thalvi", "enter");
+    expect(chips()).toEqual(["Cybrex2", "Thalvi"]);
+    expect(box().value).toBe("");
+    const problem = (): string => Array.from(rowOf("Word list").querySelectorAll(".note")).map((note) => note.textContent).join("");
+    add("  ");
+    expect(problem()).toBe("Type the word to add first.");
+    add("Cybrex2");
+    expect(problem()).toBe("Cybrex2 is already in the list.");
+    expect(chips()).toEqual(["Cybrex2", "Thalvi"]);
+    button("Save").click();
+    await settle();
+    expect(sent(stub).stt.phrases).toEqual(["Cybrex2", "Thalvi"]);
+    expect(stub.backend.shareWordList).toHaveBeenCalledTimes(1);
+    button("Save").click();
+    await settle();
+    expect(stub.backend.shareWordList).toHaveBeenCalledTimes(1);
+  });
+
+  it("says when the server could not take the list, and the save stands", async () => {
+    const stub = await openWith("server", () => Promise.resolve(true));
+    stub.backend.shareWordList.mockRejectedValue("The word list is saved here, but Thalvi could not reach the server.");
+    add("Cybrex2");
+    button("Save").click();
+    await settle();
+    expect(root.querySelector(".err")?.textContent).toBe("The word list is saved here, but Thalvi could not reach the server.");
+    expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
+    expect(root.querySelector(".msg")?.textContent).not.toBe("Unsaved changes");
+  });
+
+  it("shows a saved list as chips and removes a word", async () => {
+    const stub = await openWith("server", () => Promise.resolve(true), ["Cybrex2", "Thalvi"]);
+    expect(chips()).toEqual(["Cybrex2", "Thalvi"]);
+    (rowOf("Word list").querySelector('button[aria-label="Remove Cybrex2"]') as HTMLButtonElement).click();
+    expect(chips()).toEqual(["Thalvi"]);
+    button("Save").click();
+    await settle();
+    expect(sent(stub).stt.phrases).toEqual(["Thalvi"]);
+  });
+
+  it("asks again when the engine switches to the server", async () => {
+    const stub = await openWith("local", () => Promise.resolve(true));
+    choose(control("Recognize speech", "select"), "server");
+    await settle();
+    expect(stub.backend.wordListSupport).toHaveBeenCalledWith(SETTINGS.server);
+    expect(offered()).toBe(true);
   });
 });
 

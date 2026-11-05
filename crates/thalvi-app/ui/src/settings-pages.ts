@@ -230,6 +230,69 @@ function endingsTable({ draft, controls }: PageContext): HTMLElement {
   return el("div", { class: "stack wide" }, list, el("div", { class: "trow add" }, phrase.node, action.node, add), problem);
 }
 
+/** The word list as chips with a remove button each, and one box whose + (or Enter) adds its word. */
+function wordListTable(draft: Settings, controls: Controls): { node: HTMLElement; enable: (on: boolean) => void } {
+  const chips = el("div", { class: "chips" });
+  const problem = note();
+  const entry = controls.text("", () => undefined, { label: "New word", placeholder: "Add a name or term" });
+  const input = entry.field as HTMLInputElement;
+  let enabled = true;
+
+  function render(): void {
+    const words = draft.stt.phrases ?? [];
+    chips.replaceChildren(
+      ...words.map((word) => {
+        const remove = button("×", () => {
+          draft.stt.phrases = (draft.stt.phrases ?? []).filter((kept) => kept !== word);
+          controls.touched();
+          render();
+        }, "quiet");
+        remove.setAttribute("aria-label", `Remove ${word}`);
+        remove.disabled = !enabled;
+        return el("span", { class: "badge chip" }, el("span", {}, word), remove);
+      }),
+    );
+  }
+
+  function addWord(): void {
+    const word = input.value.trim();
+    const words = draft.stt.phrases ?? [];
+    if (word === "") {
+      say(problem, "Type the word to add first.");
+      return;
+    }
+    if (words.includes(word)) {
+      say(problem, `${word} is already in the list.`);
+      return;
+    }
+    say(problem, "");
+    draft.stt.phrases = [...words, word];
+    input.value = "";
+    controls.touched();
+    render();
+    input.focus();
+  }
+
+  const add = button("+", addWord);
+  add.setAttribute("aria-label", "Add the word");
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addWord();
+    }
+  });
+  render();
+  return {
+    node: el("div", { class: "stack wide" }, chips, el("div", { class: "trow add" }, entry.node, add), problem),
+    enable: (on) => {
+      enabled = on;
+      input.disabled = !on;
+      add.disabled = !on;
+      render();
+    },
+  };
+}
+
 function capture(context: PageContext): HTMLElement[] {
   const { draft, controls } = context;
   const pause = (key: "paste" | "submit" | "task", label: string): HTMLElement =>
@@ -337,6 +400,7 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
   const engine = controls.select(ENGINES, draft.stt.engine, (value) => {
     draft.stt.engine = value;
     syncModel();
+    checkWordList();
   });
   const catalog = new Map<string, ModelCard>();
   const listed: string[] = [];
@@ -479,6 +543,38 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
   const server = controls.text(draft.server, (value) => {
     draft.server = value;
   }, { placeholder: "ws://127.0.0.1:8080" });
+  server.field.addEventListener("change", checkWordList);
+
+  const words = wordListTable(draft, controls);
+  const wordProblem = note();
+  const wordRow = row(
+    "Word list",
+    "Names and terms to spell your way, added one at a time. Recognition through the server favours them, in dictation and conversations.",
+    words.node,
+  );
+  wordRow.querySelector(".ctl")?.append(wordProblem);
+  let asked = 0;
+  function checkWordList(): void {
+    const ask = (asked += 1);
+    wordRow.classList.add("off");
+    say(wordProblem, "");
+    if (draft.stt.engine !== "server") return;
+    backend
+      .wordListSupport(draft.server)
+      .then((supported) => {
+        if (ask !== asked) return;
+        wordRow.classList.toggle("off", !supported);
+        words.enable(true);
+      })
+      .catch((error: unknown) => {
+        if (ask !== asked) return;
+        wordRow.classList.remove("off");
+        words.enable(false);
+        say(wordProblem, errorText(error));
+      });
+  }
+  checkWordList();
+
   return [
     group("Server"),
     row("Server address", "Where Thalvi sends speech for recognition.", server),
@@ -489,6 +585,7 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
       `For recognition on this computer. Pick a model, downloading it first or on first use, or point to your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.`,
       speechModelField,
     ),
+    wordRow,
     group("Second transcription"),
     row("Second-pass transcription", "Transcribes each accepted capture again on the endpoint below. Off keeps the endpoint and key.", toggle),
     row("Endpoint address", "Where the second transcription is sent.", url),

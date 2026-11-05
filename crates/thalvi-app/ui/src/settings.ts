@@ -55,7 +55,8 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       for (const row of rows) {
         const match = query === "" || (row.dataset["label"] ?? "").includes(query);
         row.hidden = !match;
-        if (match) shown += 1;
+        // A row its page can't offer right now hides by its class and doesn't count as found.
+        if (match && !row.classList.contains("off")) shown += 1;
       }
       for (const heading of page.node.querySelectorAll<HTMLElement>("[data-group]")) heading.hidden = query !== "";
       page.node.hidden = query === "" ? page.id !== current : shown === 0;
@@ -186,10 +187,16 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     revert.disabled = true;
     const pending = checks.map((check) => check()).filter((check) => check !== null);
     const sent = pending.length === 0 ? backend.saveSettings(sending) : Promise.all(pending).then(() => backend.saveSettings(sending));
+    const listBefore = baseline === "" ? undefined : (JSON.parse(baseline) as Settings).stt.phrases;
     sent
       .then(() => {
         baseline = JSON.stringify(sending);
         saved = true;
+        if (JSON.stringify(listBefore ?? []) === JSON.stringify(sending.stt.phrases ?? [])) return undefined;
+        // The server keeps its own copy for dictation and conversations; a miss is said, the save stands.
+        return backend.shareWordList().catch((error: unknown) => {
+          saveFailure = errorText(error);
+        });
       })
       .catch((error: unknown) => {
         saved = false;

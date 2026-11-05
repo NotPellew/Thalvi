@@ -202,6 +202,12 @@ STT_MODEL=nemotron-labs-unified-asr-0.6b
 STT_API_KEY=
 ```
 
+With it, Settings → Speech shows a **Word list**: names and terms, one per
+line, whose spelling recognition should favour (such as "Cybrex2"). Saving
+sends the list to the server, which keeps it and uses it for dictation and
+conversations. Meta's recognizer doesn't support it, so the field is hidden
+then.
+
 ### Voices
 
 `TTS_VOICES` lists the voices the app offers, comma-separated; `TTS_VOICE` is
