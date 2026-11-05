@@ -4,7 +4,8 @@ asr:
   model_name: null
   device: cuda
   device_id: 0
-  compute_dtype: float16  # The RTX 2080 has no bfloat16.
+  # fp16 overflows to NaN when speech follows seconds of digital silence (issue #220); the RTX 2080 has no bfloat16.
+  compute_dtype: float32
   use_amp: false
   decoding:
     strategy: greedy_batch

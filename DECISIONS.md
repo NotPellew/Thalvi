@@ -34,6 +34,10 @@ areas your change touches. Editing rules are in
   0.6B (NeMo, buffered, 0.56 s lookahead, language detected) behind `STT_URL`. Why: no server change;
   5.8–6.6% word errors on the developer's takes (Meta-free, en/de/es), fits next to TTS on an 8 GB
   RTX 2080. Rejected: Voxtral 4B Realtime (too big), Nemotron 3.5 streaming (15%), Qwen3-ASR (2 s chunks).
+- **The self-hosted recognizer computes in fp32.** Why: in fp16 its encoder overflows to NaN, decoded as `⁇`,
+  when speech follows seconds of digital silence (#220); fp32 takes 1.25 GB more VRAM (7.7 of 8 GB beside TTS)
+  and about 2 ms more per step on the RTX 2080. Rejected: bfloat16 (Turing has none), filling silence with
+  noise (rescued one stretch of two), restarting streams.
 - **The word list is a recognition hint, kept on the server.** Settings' list goes to the server,
   which gives it to recognizers that announce `phraseBoosting` (dictation and conversations). Why: NeMo
   boosting fixed "Cybrex2" with no new errors; text replacement can't fix what was misheard. Rejected:

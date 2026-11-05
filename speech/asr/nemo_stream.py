@@ -27,17 +27,16 @@ BOOST = 1.0
 LANGUAGE_TAG = re.compile(r"\s*<[a-z]{2}(-[A-Z]{2})?>")
 
 
-def _load_half(model_name: str, map_location: torch.device) -> ASRModel:
-    # The GPU is shared with Thalvi's TTS: NeMo's loader puts fp32 weights on it first and runs out of memory.
-    model = ASRModel.restore_from(model_name, map_location=torch.device("cpu"))
-    return model.to(torch.float16).to(map_location).eval()
+def _load_on_cpu(model_name: str, map_location: torch.device) -> ASRModel:
+    # The GPU is shared with Thalvi's TTS: NeMo's loader keeps the checkpoint on it beside the model and runs out.
+    return ASRModel.restore_from(model_name, map_location=torch.device("cpu")).to(map_location).eval()
 
 
 class NemoModel:
     """The loaded model; each `open` starts an independent stream on the shared pipeline."""
 
     def __init__(self, model_path: str, endpoint_ms: int) -> None:
-        ASRInferenceWrapper.load_model = staticmethod(_load_half)
+        ASRInferenceWrapper.load_model = staticmethod(_load_on_cpu)
         cfg = OmegaConf.load(CONFIG)
         cfg.asr.model_name = model_path
         cfg.endpointing.stop_history_eou = endpoint_ms
