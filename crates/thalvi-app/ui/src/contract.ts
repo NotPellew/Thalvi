@@ -130,6 +130,16 @@ export interface SpeechModelInfo {
   cached: boolean;
 }
 
+/** A wake head Thalvi can download, as the Rust catalog describes it. */
+export interface WakeModelInfo {
+  name: string;
+  title: string;
+  /** Bytes to download. */
+  size: number;
+  /** The file is on disk at its pinned size. */
+  cached: boolean;
+}
+
 /** One step of a speech model download; `message` is the plain reason, only with `failed`. */
 export interface SpeechModelProgress {
   name: string;
@@ -185,6 +195,13 @@ export interface Backend {
   copyLoginLine(): Promise<void>;
   /** Resolves when the folder holds a speech model; rejects with the plain reason it does not. */
   validateSpeechModelFolder(path: string): Promise<void>;
+  listWakeModels(): Promise<WakeModelInfo[]>;
+  /** Resolves when both wake choices can be used and differ; rejects with the plain reason they cannot. */
+  validateWakeModels(capture: string, conversation: string): Promise<void>;
+  /** Resolves when the catalog wake head is on disk and verified; rejects with the plain reason it is not. */
+  downloadWakeModel(name: string): Promise<void>;
+  /** The `.onnx` file the user picked, or null when they cancelled. */
+  pickWakeModelFile(): Promise<string | null>;
   listSpeechModels(): Promise<SpeechModelInfo[]>;
   /** Resolves when the model is on disk and verified; rejects with the plain reason it is not. */
   downloadSpeechModel(name: string): Promise<void>;
