@@ -129,16 +129,16 @@ impl Overlay {
     pub fn apply(&self, app: &AppHandle, visibility: Visibility) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         match visibility {
-            Visibility::Show => set_visible(app, true),
-            Visibility::Hide => set_visible(app, false),
+            Visibility::Show => set_visible(app, true, generation),
+            Visibility::Hide => set_visible(app, false, generation),
             Visibility::ShowFor(delay) => {
-                set_visible(app, true);
+                set_visible(app, true, generation);
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(delay).await;
                     let overlay = app.state::<crate::app::AppState>();
                     if overlay.overlay.generation.load(Ordering::SeqCst) == generation {
-                        set_visible(&app, false);
+                        set_visible(&app, false, generation);
                     }
                 });
             }
@@ -146,21 +146,135 @@ impl Overlay {
     }
 }
 
-fn set_visible(app: &AppHandle, visible: bool) {
-    if let Some(window) = app.get_webview_window(LABEL) {
-        let _ = if visible {
-            window.show()
-        } else {
-            window.hide()
-        };
+fn set_visible(app: &AppHandle, visible: bool, generation: u64) {
+    if let Some(window) = app.get_webview_window(LABEL)
+        && let Err(error) = change_visibility(&window, visible, || {
+            app.state::<crate::app::AppState>()
+                .overlay
+                .generation
+                .load(Ordering::SeqCst)
+                == generation
+        })
+    {
+        eprintln!("The status overlay could not be shown or hidden: {error}");
     }
+}
+
+trait OverlayWindow {
+    fn is_visible(&self) -> Result<bool, String>;
+    fn place(&self) -> Result<(), String>;
+    fn set_visible(&self, visible: bool) -> Result<(), String>;
+}
+
+impl OverlayWindow for WebviewWindow {
+    fn is_visible(&self) -> Result<bool, String> {
+        self.is_visible().map_err(|error| error.to_string())
+    }
+
+    fn place(&self) -> Result<(), String> {
+        let app = self.app_handle();
+        replace(app, &app.state::<crate::app::AppState>().host())
+    }
+
+    fn set_visible(&self, visible: bool) -> Result<(), String> {
+        if visible { self.show() } else { self.hide() }.map_err(|error| error.to_string())
+    }
+}
+
+fn change_visibility(
+    window: &impl OverlayWindow,
+    visible: bool,
+    still_current: impl Fn() -> bool,
+) -> Result<(), String> {
+    if visible && !window.is_visible()? {
+        window.place()?;
+    }
+    if still_current() {
+        window.set_visible(visible)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use thalvi_desktop::capture::CaptureRoute;
 
     use super::*;
+
+    #[derive(Default)]
+    struct Window {
+        visible: Cell<bool>,
+        placed: Cell<bool>,
+        preparations: Cell<usize>,
+        fail_placement: bool,
+    }
+
+    impl OverlayWindow for Window {
+        fn is_visible(&self) -> Result<bool, String> {
+            Ok(self.visible.get())
+        }
+
+        fn place(&self) -> Result<(), String> {
+            if self.fail_placement {
+                return Err("The desktop is unavailable.".to_owned());
+            }
+            self.placed.set(true);
+            self.preparations.set(self.preparations.get() + 1);
+            Ok(())
+        }
+
+        fn set_visible(&self, visible: bool) -> Result<(), String> {
+            if visible {
+                assert!(
+                    self.placed.get(),
+                    "the overlay mapped without a placement rule"
+                );
+            }
+            self.visible.set(visible);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn each_remap_restores_placement_but_visible_status_updates_do_not() {
+        let window = Window::default();
+        for capture in 1..=3 {
+            change_visibility(&window, true, || true).unwrap();
+            assert!(window.visible.get());
+            assert_eq!(window.preparations.get(), capture);
+            change_visibility(&window, true, || true).unwrap();
+            assert_eq!(window.preparations.get(), capture);
+            change_visibility(&window, false, || true).unwrap();
+            window.placed.set(false); // A compositor config reload discards the rule.
+        }
+    }
+
+    #[test]
+    fn a_failed_placement_keeps_the_overlay_hidden() {
+        let window = Window {
+            fail_placement: true,
+            ..Window::default()
+        };
+        assert_eq!(
+            change_visibility(&window, true, || true),
+            Err("The desktop is unavailable.".to_owned())
+        );
+        assert!(!window.visible.get());
+        change_visibility(&window, false, || true).unwrap();
+    }
+
+    #[test]
+    fn a_hide_that_overtakes_placement_does_not_let_the_overlay_reappear() {
+        let window = Window::default();
+        change_visibility(&window, true, || {
+            assert!(window.placed.get());
+            false
+        })
+        .unwrap();
+        assert!(!window.visible.get());
+    }
 
     #[test]
     fn the_frame_is_centred_and_hangs_below_the_panel() {
