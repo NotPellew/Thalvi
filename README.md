@@ -175,6 +175,33 @@ TTS_BASE_URL=http://127.0.0.1:8011/v1
 TTS_VOICE=af_heart
 ```
 
+**Speech recognition on your own GPU** replaces Meta's recognizer for
+dictation through the server and for conversations. It runs NVIDIA's
+[Nemotron unified ASR 0.6B](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b)
+(OpenMDW licence) live with about 0.56 s of lookahead, finds the language
+itself (English, German, Spanish and 22 more European languages) and
+punctuates. On an RTX 2080 it uses about 1.6 GB of VRAM next to qwentts.cpp
+and takes about 75 ms for each 0.16 s of audio. Run it from a checkout on the GPU
+machine:
+
+```sh
+speech/nemotron-asr.sh
+systemctl --user enable --now thalvi-asr
+```
+
+It needs `uv`, `curl` and an NVIDIA driver, and downloads about 2.5 GB of
+weights plus NeMo. `SPEECH_DIR`, `HOST`, `PORT` (default `8012`) and
+`ENDPOINT_MS` (silence that ends a stretch of speech, default 600) set where it
+lives, listens and how it cuts. It has no authentication, so keep `HOST` at
+`127.0.0.1` or a private address such as the machine's tailnet IP. It prints
+the `.env` lines:
+
+```sh
+STT_URL=ws://127.0.0.1:8012
+STT_MODEL=nemotron-labs-unified-asr-0.6b
+STT_API_KEY=
+```
+
 ### Voices
 
 `TTS_VOICES` lists the voices the app offers, comma-separated; `TTS_VOICE` is

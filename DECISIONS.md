@@ -30,6 +30,10 @@ areas your change touches. Editing rules are in
   Streaming 0.6B (int8 ONNX) on `ort` behind the recognizer interface. Why: offline; 6.0% word
   errors on 57 clips, 0.8 s p95 partial lag on 4 cores. Rejected: Moonshine (7.4%, p95 2.6 s on
   the Windows PC), Zipformer (28%), hosting it behind the server.
+- **Self-hosted recognition speaks Meta's ASR protocol.** `speech/asr` serves Nemotron unified ASR
+  0.6B (NeMo, buffered, 0.56 s lookahead, language detected) behind `STT_URL`. Why: no server change;
+  5.8–6.6% word errors on the developer's takes (Meta-free, en/de/es), fits next to TTS on an 8 GB
+  RTX 2080. Rejected: Voxtral 4B Realtime (too big), Nemotron 3.5 streaming (15%), Qwen3-ASR (2 s chunks).
 - **Self-hosted; parts swap by endpoint.** Config sets each part's address on a
   standard protocol (Chat Completions, OpenAI speech, MCP); Meta's realtime ASR
   and Qwen3-TTS's framed PCM stream are the custom adapters. Why: any provider

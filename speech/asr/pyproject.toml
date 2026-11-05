@@ -1,0 +1,27 @@
+[project]
+name = "thalvi-asr"
+version = "0.1.0"
+description = "Thalvi's self-hosted live speech recognizer"
+requires-python = "==3.12.*"
+dependencies = ["numpy>=2", "websockets>=17"]
+
+[project.optional-dependencies]
+# The model runtime, pinned to the commit the recognizer was measured with (issue #212).
+nemo = ["nemo_toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech.git@979cc6c6a3ba7a07195b441b3854b918d08bd2c2"]
+
+[dependency-groups]
+dev = ["pytest>=9", "ruff>=0.15"]
+
+[tool.uv]
+package = false
+# The recognizer runs on Linux with an NVIDIA GPU; CI tests on Linux too.
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
