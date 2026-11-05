@@ -375,6 +375,7 @@ mod tests {
             (
                 Status::Loading {
                     notice: "Loading the speech model.".to_owned(),
+                    downloading: false,
                 },
                 Icon::Working,
                 "Thalvi: starting",

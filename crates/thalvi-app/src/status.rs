@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde::Serialize;
 use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 use thalvi_desktop::engine::EngineState;
+use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::report::{UserError, causes};
+use thalvi_desktop::transducer::TransducerSource;
 
 pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not ready yet.";
 
@@ -58,6 +60,9 @@ pub enum Status {
     /// The speech model is being fetched or loaded; the wake word already works.
     Loading {
         notice: String,
+        /// Files are being downloaded; only then does the overlay say so.
+        #[serde(skip)]
+        downloading: bool,
     },
 }
 
@@ -112,6 +117,31 @@ impl LastError {
     }
 }
 
+/// What the speech model needs before it is ready.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpeechLoad {
+    FromDisk,
+    Download,
+}
+
+impl SpeechLoad {
+    pub async fn of(local: &LocalRecognizer<TransducerSource>) -> Self {
+        if local.source().is_cached().await {
+            Self::FromDisk
+        } else {
+            Self::Download
+        }
+    }
+
+    #[must_use]
+    pub fn notice(self) -> &'static str {
+        match self {
+            Self::FromDisk => "Loading the speech model.",
+            Self::Download => "Loading the speech model. The first time it downloads about 650 MB.",
+        }
+    }
+}
+
 /// What the runner reports besides the engine's own state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -137,24 +167,26 @@ pub struct View {
     /// The window bound at the latest wake.
     pub target: Option<String>,
     pub pauses: EndingPauses,
-    /// What is being loaded, while the speech model loads.
-    pub loading: Option<String>,
+    /// What the speech model needs, while it loads.
+    pub loading: Option<SpeechLoad>,
 }
 
 impl View {
     #[must_use]
     pub fn status(&self) -> Status {
         let target = self.target.clone();
-        if let (Some(notice), EngineState::Listening, Mode::Idle | Mode::Done { .. }) =
-            (&self.loading, &self.engine, &self.mode)
+        if let (Some(load), EngineState::Listening, Mode::Idle | Mode::Done { .. }) =
+            (self.loading, &self.engine, &self.mode)
         {
             return Status::Loading {
-                notice: notice.clone(),
+                notice: load.notice().to_owned(),
+                downloading: load == SpeechLoad::Download,
             };
         }
         match (&self.mode, &self.engine) {
             (Mode::Starting, _) => Status::Loading {
                 notice: STARTING_NOTICE.to_owned(),
+                downloading: false,
             },
             (Mode::Paused, _) => Status::Paused,
             (Mode::Delivering(route), _) => Status::Working {
@@ -303,6 +335,7 @@ mod tests {
                 EngineState::Listening,
                 Status::Loading {
                     notice: STARTING_NOTICE.to_owned(),
+                    downloading: false,
                 },
             ),
             (Mode::Paused, capturing(), Status::Paused),
@@ -360,7 +393,7 @@ mod tests {
     fn loading_the_speech_model_shows_until_a_capture_starts_a_failure_or_a_pause() {
         let loading = |mode, engine| {
             let mut view = view(mode, engine);
-            view.loading = Some("Loading the speech model.".to_owned());
+            view.loading = Some(SpeechLoad::FromDisk);
             view.status()
         };
         let notice = || "Loading the speech model.".to_owned();
@@ -373,7 +406,10 @@ mod tests {
         ] {
             assert_eq!(
                 loading(mode, EngineState::Listening),
-                Status::Loading { notice: notice() }
+                Status::Loading {
+                    notice: notice(),
+                    downloading: false
+                }
             );
         }
         assert_eq!(
@@ -464,6 +500,7 @@ mod tests {
             (
                 Status::Loading {
                     notice: "Wait.".to_owned(),
+                    downloading: true,
                 },
                 json!({"state": "loading", "notice": "Wait."}),
             ),

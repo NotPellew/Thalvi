@@ -61,6 +61,11 @@ impl<S: ModelSource> LocalRecognizer<S> {
         }
     }
 
+    #[must_use]
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
     /// Fetches and loads the model now instead of at the first dictation; later calls are free.
     ///
     /// # Errors
