@@ -363,8 +363,8 @@ describe("a custom speech model folder", () => {
 });
 
 describe("the word list", () => {
-  async function openWith(engine: "server" | "local", support: () => Promise<boolean>) {
-    const stub = stubBackend({ ...SETTINGS, stt: { engine, secondary: null } });
+  async function openWith(engine: "server" | "local", support: () => Promise<boolean>, phrases?: string[]) {
+    const stub = stubBackend({ ...SETTINGS, stt: { engine, secondary: null, ...(phrases ? { phrases } : {}) } });
     stub.backend.wordListSupport.mockImplementation(support);
     mountSettings(root, stub.backend);
     await settle();
@@ -372,8 +372,12 @@ describe("the word list", () => {
     return stub;
   }
 
-  function area(): HTMLTextAreaElement {
-    return rowOf("Word list").querySelector("textarea") as HTMLTextAreaElement;
+  function boxes(): HTMLInputElement[] {
+    return Array.from(rowOf("Word list").querySelectorAll<HTMLInputElement>("input"));
+  }
+
+  function addBox(): void {
+    (rowOf("Word list").querySelector('button[aria-label="Add a word"]') as HTMLButtonElement).click();
   }
 
   function offered(): boolean {
@@ -399,14 +403,18 @@ describe("the word list", () => {
     const stub = await openWith(engine, support);
     expect(stub.backend.wordListSupport).toHaveBeenCalledTimes(engine === "server" ? 1 : 0);
     expect(offered()).toBe(expected.shown);
-    expect(area().disabled).toBe(expected.disabled);
+    expect(boxes()[0]?.disabled).toBe(expected.disabled);
     expect(rowOf("Word list").querySelector(".note")?.textContent).toBe(expected.problem);
   });
 
-  it("saves one entry per line and shares the list with the server once per change", async () => {
+  it("saves one word per box, skips blank boxes and shares the list with the server once per change", async () => {
     const stub = await openWith("server", () => Promise.resolve(true));
-    area().value = "  Cybrex2 \n\nThalvi";
-    area().dispatchEvent(new Event("input", { bubbles: true }));
+    expect(boxes()).toHaveLength(1);
+    type(boxes()[0] as HTMLInputElement, "  Cybrex2 ");
+    addBox();
+    expect(document.activeElement).toBe(boxes()[1]);
+    type(boxes()[1] as HTMLInputElement, "Thalvi");
+    addBox();
     button("Save").click();
     await settle();
     expect(sent(stub).stt.phrases).toEqual(["Cybrex2", "Thalvi"]);
@@ -419,13 +427,22 @@ describe("the word list", () => {
   it("says when the server could not take the list, and the save stands", async () => {
     const stub = await openWith("server", () => Promise.resolve(true));
     stub.backend.shareWordList.mockRejectedValue("The word list is saved here, but Thalvi could not reach the server.");
-    area().value = "Cybrex2";
-    area().dispatchEvent(new Event("input", { bubbles: true }));
+    type(boxes()[0] as HTMLInputElement, "Cybrex2");
     button("Save").click();
     await settle();
     expect(root.querySelector(".err")?.textContent).toBe("The word list is saved here, but Thalvi could not reach the server.");
     expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
     expect(root.querySelector(".msg")?.textContent).not.toBe("Unsaved changes");
+  });
+
+  it("shows a saved list one box per word and removes a word", async () => {
+    const stub = await openWith("server", () => Promise.resolve(true), ["Cybrex2", "Thalvi"]);
+    expect(boxes().map((box) => box.value)).toEqual(["Cybrex2", "Thalvi"]);
+    (rowOf("Word list").querySelector('button[aria-label="Remove word 1"]') as HTMLButtonElement).click();
+    expect(boxes().map((box) => box.value)).toEqual(["Thalvi"]);
+    button("Save").click();
+    await settle();
+    expect(sent(stub).stt.phrases).toEqual(["Thalvi"]);
   });
 
   it("asks again when the engine switches to the server", async () => {

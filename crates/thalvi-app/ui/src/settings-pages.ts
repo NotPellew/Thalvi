@@ -230,6 +230,55 @@ function endingsTable({ draft, controls }: PageContext): HTMLElement {
   return el("div", { class: "stack wide" }, list, el("div", { class: "trow add" }, phrase.node, action.node, add), problem);
 }
 
+/** One box per word list entry, a Remove beside each and + for another; blank boxes are not saved. */
+function wordListTable(draft: Settings, controls: Controls): { node: HTMLElement; enable: (on: boolean) => void } {
+  const entries = [...(draft.stt.phrases ?? [])];
+  if (entries.length === 0) entries.push("");
+  const list = el("div", { class: "table" });
+  let enabled = true;
+
+  function store(): void {
+    draft.stt.phrases = entries.map((entry) => entry.trim()).filter((entry) => entry !== "");
+  }
+
+  function render(focusLast = false): void {
+    list.replaceChildren(
+      ...entries.map((entry, index) => {
+        const box = controls.text(entry, (value) => {
+          entries[index] = value;
+          store();
+        }, { label: `Word ${String(index + 1)}`, placeholder: "Name or term" });
+        const remove = button("Remove", () => {
+          entries.splice(index, 1);
+          if (entries.length === 0) entries.push("");
+          store();
+          controls.touched();
+          render();
+        }, "quiet");
+        remove.setAttribute("aria-label", `Remove word ${String(index + 1)}`);
+        (box.field as HTMLInputElement).disabled = !enabled;
+        remove.disabled = !enabled;
+        return el("div", { class: "trow" }, box.node, remove);
+      }),
+    );
+    if (focusLast) (list.lastElementChild?.querySelector("input") as HTMLInputElement | null)?.focus();
+  }
+  render();
+  const add = button("+", () => {
+    entries.push("");
+    render(true);
+  });
+  add.setAttribute("aria-label", "Add a word");
+  return {
+    node: el("div", { class: "stack wide" }, list, el("div", { class: "trow add" }, add)),
+    enable: (on) => {
+      enabled = on;
+      add.disabled = !on;
+      render();
+    },
+  };
+}
+
 function capture(context: PageContext): HTMLElement[] {
   const { draft, controls } = context;
   const pause = (key: "paste" | "submit" | "task", label: string): HTMLElement =>
@@ -482,15 +531,12 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
   }, { placeholder: "ws://127.0.0.1:8080" });
   server.field.addEventListener("change", checkWordList);
 
-  const words = controls.lines(draft.stt.phrases ?? [], (values) => {
-    draft.stt.phrases = values;
-  });
-  const wordArea = words.field as HTMLTextAreaElement;
+  const words = wordListTable(draft, controls);
   const wordProblem = note();
   const wordRow = row(
     "Word list",
-    "One word or name per line. Recognition through the server favours these spellings, in dictation and conversations.",
-    words,
+    "Names and terms, one per box. Recognition through the server favours these spellings, in dictation and conversations.",
+    words.node,
   );
   wordRow.querySelector(".ctl")?.append(wordProblem);
   let asked = 0;
@@ -504,12 +550,12 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
       .then((supported) => {
         if (ask !== asked) return;
         wordRow.classList.toggle("off", !supported);
-        wordArea.disabled = false;
+        words.enable(true);
       })
       .catch((error: unknown) => {
         if (ask !== asked) return;
         wordRow.classList.remove("off");
-        wordArea.disabled = true;
+        words.enable(false);
         say(wordProblem, errorText(error));
       });
   }
