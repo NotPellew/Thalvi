@@ -138,3 +138,12 @@ jobs:
         working-directory: speech/asr
       - run: uv run --frozen pytest
         working-directory: speech/asr
+
+  issues:
+    name: issues
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: pipx run shellcheck-py==0.11.0.1 .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh
+      - run: .github/scripts/issue-refs.test.sh

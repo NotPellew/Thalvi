@@ -124,6 +124,9 @@ are committed.
   speech/qwentts.sh speech/nemotron-asr.sh`, then in `speech/asr` (Python pinned
   in `.python-version`, uv lockfile): `uv run --frozen ruff check`,
   `uv run --frozen ruff format --check`, `uv run --frozen pytest`.
+- Issue sync (`.github/scripts/`): `pipx run shellcheck-py==0.11.0.1
+  .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh`, then
+  `.github/scripts/issue-refs.test.sh`.
 
 ## Git and PRs
 
