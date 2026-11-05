@@ -3,6 +3,8 @@
 Talk to your coding agents instead of typing to them. Say "Hey Thalvi" in any
 window, say the whole thing, then decide: paste it, send it, or drop it.
 
+Built with Muse Spark Open.
+
 Typing a good prompt is a chore, so prompts end up short and leave out what the
 agent needs. Speaking takes that barrier away, most of all for long prompts. You
 can correct yourself as you go and look at something else while you talk, and
@@ -71,6 +73,13 @@ reading its transcript: the turn's audio, padded by 300 ms on each side, goes
 as an OpenAI `input_audio` WAV part, so the model must accept those. Captions,
 the saved conversation and earlier turns still use the transcript, and typed
 turns are always text.
+
+For a model that hears speech itself,
+[Glimmer projector v3](https://github.com/NotPellew/Thalvi/releases/tag/glimmer-projector-v3)
+is an experimental audio projector for Muse Glimmer 30B, with its training code
+on the
+[`feat/glimmer-adapter`](https://github.com/NotPellew/Thalvi/tree/feat/glimmer-adapter)
+branch. It is not part of the app.
 
 ### Conversations
 
@@ -377,4 +386,5 @@ workers. Commits made with an agent carry its `Co-Authored-By` trailer.
 
 ## License
 
-[Apache License 2.0](LICENSE).
+[Apache License 2.0](LICENSE). The Glimmer projector weights are released
+separately under the Muse Model License, attached to their release.
