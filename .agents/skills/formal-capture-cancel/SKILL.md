@@ -15,9 +15,11 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `edbeca9e587acc338edbd31517ea1951a251c443`. The recorded file hashes
+Sync commit: `933b3c9ed0ceea58ce5e5c3bf7a05821f18e60eb`. The recorded file hashes
 match the committed capture fixes. The model was updated from those changes
-before it was rerun.
+before it was rerun. Later changes to the listed files (the quiet wake floor in
+`engine.rs`, the upsampling filter in `recognizer.rs`) touch none of the mapped
+functions, so the model is unchanged and only the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
