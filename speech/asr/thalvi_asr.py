@@ -73,6 +73,13 @@ class Resampler:
         return out
 
 
+def spoken(text: str) -> str:
+    """`text` trimmed, or nothing when it holds no word: punctuation alone is no speech to start a turn."""
+    text = text.strip()
+    # ⁇ is how a final renders the unknown token, a misheard word that must stay visible.
+    return text if any(char.isalnum() or char == "\u2047" for char in text) else ""
+
+
 @dataclass
 class Turns:
     """Turns step results into the protocol's speechStart, transcript, speechEnd and speechComplete events."""
@@ -84,12 +91,12 @@ class Turns:
 
     def take(self, step: Step, processed_ms: int) -> list[dict]:
         events: list[dict] = []
-        partial = step.partial.strip()
-        if step.final.strip():
+        partial, final = spoken(step.partial), spoken(step.final)
+        if final:
             # A final can arrive in the same step its first words do.
             self._start(events, processed_ms)
             events.append({"type": "speechEnd", "turnId": self._id(), "audioProcessedMs": processed_ms})
-            events.append({"type": "speechComplete", "turnId": self._id(), "transcript": step.final.strip()})
+            events.append({"type": "speechComplete", "turnId": self._id(), "transcript": final})
             self.turn += 1
             self.speaking = False
             self.shown = ""

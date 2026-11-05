@@ -96,6 +96,19 @@ def test_a_stretch_starts_once_shows_growing_text_and_ends_with_its_final():
     assert events[0]["audioProcessedMs"] == 160
 
 
+@pytest.mark.parametrize(
+    ("step", "events"),
+    [
+        (Step(".", ""), []),
+        (Step("", " ."), []),
+        (Step(". Never", ""), ["speechStart", "transcript"]),
+        (Step("", "\u2047"), ["speechStart", "speechEnd", "speechComplete"]),
+    ],
+)
+def test_punctuation_alone_is_no_speech_but_an_unknown_word_is(step, events):
+    assert [e["type"] for e in Turns().take(step, 160)] == events
+
+
 def test_a_final_with_no_partial_before_it_still_starts_its_stretch():
     events = Turns().take(Step("", "Yes."), 320)
     assert [e["type"] for e in events] == ["speechStart", "speechEnd", "speechComplete"]
