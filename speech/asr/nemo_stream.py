@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import itertools
-import re
 from pathlib import Path
 
 import numpy as np
@@ -17,14 +16,13 @@ from nemo.collections.asr.parts.context_biasing.biasing_multi_model import Biasi
 from nemo.collections.asr.parts.context_biasing.boosting_graph_batched import BoostingTreeModelConfig
 from omegaconf import OmegaConf
 
-from thalvi_asr import STEP_SAMPLES, Step
+from thalvi_asr import STEP_SAMPLES, Step, clean
 
 CONFIG = Path(__file__).with_name("pipeline.yaml")
 # Left context, chunk and right context in 80 ms encoder frames: 5.6 s, 0.16 s, 0.40 s, as in pipeline.yaml.
 ATTENTION = [70, 2, 5]
 # The weight that turned "CyberX2" into a listed "Cybrex2" without changing ordinary takes (issue #214).
 BOOST = 1.0
-LANGUAGE_TAG = re.compile(r"\s*<[a-z]{2}(-[A-Z]{2})?>")
 
 
 def _load_half(model_name: str, map_location: torch.device) -> ASRModel:
@@ -85,6 +83,4 @@ class NemoStream:
         )
         self.first = False
         out = self.model.pipeline.transcribe_step([frame])[0]
-        return Step(
-            partial=LANGUAGE_TAG.sub("", out.partial_transcript), final=LANGUAGE_TAG.sub("", out.final_transcript)
-        )
+        return Step(partial=clean(out.partial_transcript), final=clean(out.final_transcript))

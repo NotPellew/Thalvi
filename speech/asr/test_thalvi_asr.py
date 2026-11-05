@@ -18,6 +18,7 @@ from thalvi_asr import (
     Server,
     Step,
     Turns,
+    clean,
     handshake_error,
     phrases_error,
 )
@@ -94,6 +95,13 @@ def test_a_stretch_starts_once_shows_growing_text_and_ends_with_its_final():
         ("transcript", "Next", "turn-1"),
     ]
     assert events[0]["audioProcessedMs"] == 160
+
+
+def test_punctuation_alone_is_no_speech():
+    turns = Turns()
+    assert turns.take(Step(".", ""), 160) == []
+    assert turns.take(Step("", " ."), 320) == []
+    assert [e["type"] for e in turns.take(Step(". Never", ""), 480)] == ["speechStart", "transcript"]
 
 
 def test_a_final_with_no_partial_before_it_still_starts_its_stretch():
@@ -233,3 +241,16 @@ def test_a_late_or_bad_word_list_is_refused_in_plain_words(before, phrases, mess
         return [event for event in await received(socket) if event["type"] == "error"]
 
     assert asyncio.run(session(FakeModel([]), script)) == [{"type": "error", "message": message}]
+
+
+@pytest.mark.parametrize(
+    ("said", "text"),
+    [
+        (" Hello there. <en-US>", "Hello there."),
+        ("\u2047  \u2047  \u2047", ""),
+        (" Paste \u2047  that", "Paste that"),
+        ("<unk><unk> Never", "Never"),
+    ],
+)
+def test_language_tags_and_unknown_tokens_are_not_text(said, text):
+    assert clean(said) == text

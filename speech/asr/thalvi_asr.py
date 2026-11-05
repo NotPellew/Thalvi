@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,17 @@ STEP_SAMPLES = 2_560
 HANDSHAKE_TIMEOUT_S = 10.0
 MAX_PHRASES = 100
 MAX_PHRASE_CHARS = 40
+
+
+LANGUAGE_TAG = re.compile(r"\s*<[a-z]{2}(-[A-Z]{2})?>")
+# The unknown token reads <unk> in partials and ⁇ in finals; the model can repeat it in bursts on a
+# non-speech sound.
+UNKNOWN = re.compile(r"\s*(?:\u2047|<unk>)\s*")
+
+
+def clean(text: str) -> str:
+    """The model's text without language tags or unknown tokens, neither of which is something said."""
+    return UNKNOWN.sub(" ", LANGUAGE_TAG.sub("", text)).strip()
 
 
 @dataclass(frozen=True)
@@ -73,6 +85,12 @@ class Resampler:
         return out
 
 
+def spoken(text: str) -> str:
+    """`text` trimmed, or nothing when it holds no word: punctuation alone is no speech to start a turn."""
+    text = text.strip()
+    return text if any(char.isalnum() for char in text) else ""
+
+
 @dataclass
 class Turns:
     """Turns step results into the protocol's speechStart, transcript, speechEnd and speechComplete events."""
@@ -84,12 +102,12 @@ class Turns:
 
     def take(self, step: Step, processed_ms: int) -> list[dict]:
         events: list[dict] = []
-        partial = step.partial.strip()
-        if step.final.strip():
+        partial, final = spoken(step.partial), spoken(step.final)
+        if final:
             # A final can arrive in the same step its first words do.
             self._start(events, processed_ms)
             events.append({"type": "speechEnd", "turnId": self._id(), "audioProcessedMs": processed_ms})
-            events.append({"type": "speechComplete", "turnId": self._id(), "transcript": step.final.strip()})
+            events.append({"type": "speechComplete", "turnId": self._id(), "transcript": final})
             self.turn += 1
             self.speaking = False
             self.shown = ""
