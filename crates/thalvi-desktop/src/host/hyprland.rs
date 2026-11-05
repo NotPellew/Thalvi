@@ -369,22 +369,44 @@ impl<R: CommandRunner> Host for Hyprland<R> {
     fn prepare_overlay(&self, width: f64, height: f64) -> Result<f64, HostError> {
         let monitors: Vec<Monitor> = serde_json::from_str(&self.json("monitors")?)
             .map_err(|_| HostError::NothingTyped(INVALID_MONITOR_LIST.to_owned()))?;
-        // The window opens on the focused monitor. A rule added later wins over earlier ones, and
-        // Hyprland applies `size` and `move` each time the window maps, so a hidden overlay appears
-        // at its new size and place; a client cannot resize its own floating window afterwards.
         let top = monitors
             .iter()
             .find(|monitor| monitor.focused)
             .or(monitors.first())
             .map_or(0, |monitor| monitor.reserved[1].max(0));
-        let rule = format!(
-            "match:title ^({OVERLAY_TITLE})$, float on, pin on, no_initial_focus on, no_focus on, \
-             size {width} {height}, move ((monitor_w*0.5)-({width}*0.5)) {top}, border_size 0, \
-             no_shadow on, no_anim on, no_blur on"
-        );
-        self.run
-            .run("hyprctl", &["keyword", "windowrule", &rule], None)
+        // Named rules can be restored after a config reload without accumulating one per capture.
+        let rules = [
+            ("match:title", format!("^({OVERLAY_TITLE})$")),
+            ("float", "on".to_owned()),
+            ("pin", "on".to_owned()),
+            ("no_initial_focus", "on".to_owned()),
+            ("no_focus", "on".to_owned()),
+            ("size", format!("{width} {height}")),
+            ("move", format!("((monitor_w*0.5)-({width}*0.5)) {top}")),
+            ("border_size", "0".to_owned()),
+            ("no_shadow", "on".to_owned()),
+            ("no_anim", "on".to_owned()),
+            ("no_blur", "on".to_owned()),
+        ];
+        let batch = rules
+            .iter()
+            .map(|(name, value)| format!("keyword windowrule[thalvi-overlay]:{name} {value}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let response = self
+            .run
+            .run("hyprctl", &["--batch", &batch], None)
             .map_err(|error| tool(&error))?;
+        let replies: Vec<_> = response
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if replies.len() != rules.len() || replies.iter().any(|reply| *reply != "ok") {
+            return Err(HostError::NothingTyped(
+                "The desktop could not prepare the status overlay.".to_owned(),
+            ));
+        }
         Ok(f64::from(i32::try_from(top).unwrap_or(0)))
     }
 }
@@ -858,7 +880,7 @@ mod tests {
                 Ok(if argv.iter().any(|arg| arg == "monitors") {
                     monitors.clone()
                 } else {
-                    "ok".to_owned()
+                    "ok\n\n".repeat(11)
                 })
             });
             assert_eq!(
@@ -871,10 +893,18 @@ mod tests {
                 [
                     "hyprctl -j monitors".to_owned(),
                     format!(
-                        "hyprctl keyword windowrule match:title ^(Thalvi overlay)$, float on, \
-                         pin on, no_initial_focus on, no_focus on, \
-                         size 460 200, move ((monitor_w*0.5)-(460*0.5)) {top}, border_size 0, \
-                         no_shadow on, no_anim on, no_blur on"
+                        "hyprctl --batch \
+                         keyword windowrule[thalvi-overlay]:match:title ^(Thalvi overlay)$; \
+                         keyword windowrule[thalvi-overlay]:float on; \
+                         keyword windowrule[thalvi-overlay]:pin on; \
+                         keyword windowrule[thalvi-overlay]:no_initial_focus on; \
+                         keyword windowrule[thalvi-overlay]:no_focus on; \
+                         keyword windowrule[thalvi-overlay]:size 460 200; \
+                         keyword windowrule[thalvi-overlay]:move ((monitor_w*0.5)-(460*0.5)) {top}; \
+                         keyword windowrule[thalvi-overlay]:border_size 0; \
+                         keyword windowrule[thalvi-overlay]:no_shadow on; \
+                         keyword windowrule[thalvi-overlay]:no_anim on; \
+                         keyword windowrule[thalvi-overlay]:no_blur on"
                     )
                 ],
                 "{name}"
@@ -895,6 +925,26 @@ mod tests {
                 "Desktop tool hyprctl is not installed.".to_owned()
             ))
         );
+
+        for reply in [
+            String::new(),
+            "ok\n".repeat(10),
+            format!("{}invalid field\n", "ok\n".repeat(10)),
+        ] {
+            let rejected = host(move |argv, _| {
+                Ok(if argv.iter().any(|arg| arg == "monitors") {
+                    "[]".to_owned()
+                } else {
+                    reply.clone()
+                })
+            });
+            assert_eq!(
+                rejected.prepare_overlay(460.0, 200.0),
+                Err(HostError::NothingTyped(
+                    "The desktop could not prepare the status overlay.".to_owned()
+                ))
+            );
+        }
     }
 
     #[test]

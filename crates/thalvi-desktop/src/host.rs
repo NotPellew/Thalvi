@@ -214,7 +214,7 @@ pub trait Host: Send + Sync {
     /// Makes the window titled [`OVERLAY_TITLE`] float, `width` by `height` logical pixels, at the
     /// top centre of the screen area windows may use, above other windows, without ever taking
     /// focus; returns that area's top in logical pixels, below any panel. Call before the window
-    /// first appears and again to re-place it after its size changed.
+    /// first appears and before each remap, since compositor config reloads can discard the rules.
     ///
     /// # Errors
     /// Why the desktop could not be told; the overlay must then stay hidden.
