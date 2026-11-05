@@ -91,6 +91,8 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     downloadSpeechModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     onSpeechModelProgress: vi.fn((listener: (progress: SpeechModelProgress) => void) => speechListeners.push(listener)),
     openSpeechModelSource: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
+    wordListSupport: vi.fn<(server: string) => Promise<boolean>>(() => Promise.resolve(false)),
+    shareWordList: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     appVersion: vi.fn(() => Promise.resolve("1.2.3")),
   } satisfies Backend;
   return {

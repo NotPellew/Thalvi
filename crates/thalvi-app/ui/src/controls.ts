@@ -120,7 +120,18 @@ export function createControls(changed: () => void) {
     return { node: input, field: input };
   }
 
-  return { text, number, slider, toggle, select, touched: changed };
+  /** One entry per line; blank lines are dropped. */
+  function lines(values: readonly string[], set: (values: string[]) => void): Field {
+    const area = el("textarea", { id: uid("f"), rows: "4", spellcheck: "false" });
+    area.value = values.join("\n");
+    area.addEventListener("input", () => {
+      set(area.value.split("\n").map((line) => line.trim()).filter((line) => line !== ""));
+      changed();
+    });
+    return { node: area, field: area };
+  }
+
+  return { text, number, slider, toggle, select, lines, touched: changed };
 }
 
 export type Controls = ReturnType<typeof createControls>;

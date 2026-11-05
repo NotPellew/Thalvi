@@ -64,6 +64,8 @@ export function tauriBackend(): Backend {
       });
     },
     openSpeechModelSource: (name) => invoke<undefined>("open_speech_model_source", { name }),
+    wordListSupport: (server) => invoke<boolean>("word_list_support", { server }),
+    shareWordList: () => invoke<undefined>("share_word_list"),
     appVersion: getVersion,
   };
 }

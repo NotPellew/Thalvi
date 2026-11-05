@@ -91,3 +91,4 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
 .model progress { flex: 1; min-width: 4em; accent-color: var(--neon); }
 .own { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
 .model a { color: var(--neon); }
+.row.off { display: none; }

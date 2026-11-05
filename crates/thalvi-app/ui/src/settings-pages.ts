@@ -337,6 +337,7 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
   const engine = controls.select(ENGINES, draft.stt.engine, (value) => {
     draft.stt.engine = value;
     syncModel();
+    checkWordList();
   });
   const catalog = new Map<string, ModelCard>();
   const listed: string[] = [];
@@ -479,6 +480,41 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
   const server = controls.text(draft.server, (value) => {
     draft.server = value;
   }, { placeholder: "ws://127.0.0.1:8080" });
+  server.field.addEventListener("change", checkWordList);
+
+  const words = controls.lines(draft.stt.phrases ?? [], (values) => {
+    draft.stt.phrases = values;
+  });
+  const wordArea = words.field as HTMLTextAreaElement;
+  const wordProblem = note();
+  const wordRow = row(
+    "Word list",
+    "One word or name per line. Recognition through the server favours these spellings, in dictation and conversations.",
+    words,
+  );
+  wordRow.querySelector(".ctl")?.append(wordProblem);
+  let asked = 0;
+  function checkWordList(): void {
+    const ask = (asked += 1);
+    wordRow.classList.add("off");
+    say(wordProblem, "");
+    if (draft.stt.engine !== "server") return;
+    backend
+      .wordListSupport(draft.server)
+      .then((supported) => {
+        if (ask !== asked) return;
+        wordRow.classList.toggle("off", !supported);
+        wordArea.disabled = false;
+      })
+      .catch((error: unknown) => {
+        if (ask !== asked) return;
+        wordRow.classList.remove("off");
+        wordArea.disabled = true;
+        say(wordProblem, errorText(error));
+      });
+  }
+  checkWordList();
+
   return [
     group("Server"),
     row("Server address", "Where Thalvi sends speech for recognition.", server),
@@ -489,6 +525,7 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
       `For recognition on this computer. Pick a model, downloading it first or on first use, or point to your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.`,
       speechModelField,
     ),
+    wordRow,
     group("Second transcription"),
     row("Second-pass transcription", "Transcribes each accepted capture again on the endpoint below. Off keeps the endpoint and key.", toggle),
     row("Endpoint address", "Where the second transcription is sent.", url),

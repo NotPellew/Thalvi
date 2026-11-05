@@ -240,6 +240,8 @@ export function fakeBackend(params: URLSearchParams): Backend {
       }),
     onSpeechModelProgress: (listener) => speechListeners.push(listener),
     openSpeechModelSource: () => Promise.resolve(),
+    wordListSupport: () => Promise.resolve(true),
+    shareWordList: () => Promise.resolve(),
     appVersion: () => Promise.resolve("0.1.0 (fake)"),
   };
 }
