@@ -53,9 +53,16 @@ const CONTINUATION_FRAMES: u8 = 3;
 /// The shortest hold of the dictation key that dictates; a shorter one is a slip of the finger.
 pub const MIN_HOLD: Duration = Duration::from_millis(300);
 
-/// How long after the key is released the recognizer may still return the last words before the
-/// capture ends without them.
-const RELEASE_TAIL: Duration = Duration::from_millis(500);
+/// Silence sent at release, 800 ms: enough for the recognizer to finish the last word and
+/// reach its endpoint, so a final comes without waiting for real audio.
+const RELEASE_SILENCE_FRAMES: usize = 10;
+
+/// How long after the release the engine waits for that final before pasting what has arrived.
+/// Measured on the server recognizer, the last word was in the text by 200 ms in every run.
+const RELEASE_LIMIT: Duration = Duration::from_millis(250);
+
+static RELEASE_SILENCE: [Frame; RELEASE_SILENCE_FRAMES] =
+    [[0i16; FRAME_SAMPLES]; RELEASE_SILENCE_FRAMES];
 
 /// Frames in one wake level window, 2 s.
 const LEVEL_WINDOW: u64 = 25;
@@ -491,7 +498,7 @@ impl<S> Live<S> {
     /// When a released hold stops waiting for words.
     fn tail(&self) -> Option<Instant> {
         match self.release {
-            Release::Tail(at) => Some(at + RELEASE_TAIL),
+            Release::Tail(at) => Some(at + RELEASE_LIMIT),
             _ => None,
         }
     }
@@ -1223,9 +1230,10 @@ where
             }
         }
         if let (Some(at), Some(held)) = (released, held) {
-            // The key came up while connecting: the recognizer has what was said, and the last
-            // words get the tail from now.
             self.held_for = Some(at.duration_since(held.at));
+            if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+                return (stop.into(), Instant::now());
+            }
             live.release = Release::Tail(Instant::now());
         }
         let mut key_open = true;
@@ -1264,7 +1272,10 @@ where
                     if has_words(&text) {
                         live.last_words = Instant::now();
                     }
-                    self.on_final(live, &text)
+                    let done = self.on_final(live, &text);
+                    done.or_else(|| {
+                        matches!(live.release, Release::Tail(_)).then(|| self.finish_hold(live))
+                    })
                 }
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),
                 Step::Frame(Ok(queued)) => self.on_frame(live, &queued).await.err().map(Done::from),
@@ -1281,7 +1292,7 @@ where
                 Step::Tail => Some(self.finish_hold(live)),
                 Step::Key(open) => {
                     key_open = open;
-                    self.on_key(live, held)
+                    self.on_key(live, held, frames).await
                 }
             };
             if let Some(done) = done {
@@ -1292,7 +1303,12 @@ where
 
     /// The dictation key changed during a capture: its release ends a hold, and a press during a
     /// dictation by wake word is refused.
-    fn on_key(&mut self, live: &mut Live<R::Session>, held: Option<&Held>) -> Option<Done> {
+    async fn on_key(
+        &mut self,
+        live: &mut Live<R::Session>,
+        held: Option<&Held>,
+        frames: &mut impl FrameSource,
+    ) -> Option<Done> {
         let Some(held) = held else {
             let pressed = u64::from(self.key.take().is_some()) + self.key.take_lost();
             if pressed > 0 {
@@ -1301,22 +1317,39 @@ where
             return None;
         };
         if self.key.is_over(held.press) && matches!(live.release, Release::Down) {
-            return self.on_release(live, held);
+            return self.on_release(live, held, frames).await;
         }
         None
     }
 
-    /// The key came up: a slip of the finger ends the capture; otherwise the last words get
-    /// [`RELEASE_TAIL`] to arrive, and no recognizer signals that nothing more is coming, so
-    /// the whole tail is waited out.
-    fn on_release(&mut self, live: &mut Live<R::Session>, held: &Held) -> Option<Done> {
+    /// The key came up: a slip of the finger ends the capture; otherwise pre-release audio is
+    /// drained, silence frames are sent at once to trigger the final, and the engine waits for
+    /// that final bounded by [`RELEASE_LIMIT`].
+    async fn on_release(
+        &mut self,
+        live: &mut Live<R::Session>,
+        held: &Held,
+        frames: &mut impl FrameSource,
+    ) -> Option<Done> {
         let now = Instant::now();
         self.held_for = Some(now.duration_since(held.at));
         if now.duration_since(held.at) < MIN_HOLD {
             self.hold_end = Some("too_short");
             return Some(Done::Failed(CaptureError::HoldTooShort));
         }
-        live.release = Release::Tail(now);
+        let mut queued = Vec::new();
+        if let Err(error) = take_queued_before(frames, &held.release, &mut queued) {
+            return Some(Done::Failed(error.into()));
+        }
+        for frame in &queued {
+            if let Err(stop) = self.on_frame(live, frame).await {
+                return Some(Done::from(stop));
+            }
+        }
+        if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+            return Some(Done::from(stop));
+        }
+        live.release = Release::Tail(Instant::now());
         None
     }
 
@@ -1479,9 +1512,18 @@ where
         }
     }
 
-    /// Sends `frames`, giving up when the user cancels or a capture limit passes while the
-    /// recognizer is not taking audio.
+    /// Sends `frames` and keeps them as what the user said.
     async fn send(&mut self, live: &mut Live<R::Session>, frames: &[Frame]) -> Result<(), Stop> {
+        self.feed(live, frames).await?;
+        if live.keep_sent {
+            live.sent.extend_from_slice(frames);
+        }
+        Ok(())
+    }
+
+    /// Sends `frames` to the recognizer only, giving up when the user cancels or a capture limit
+    /// passes while the recognizer is not taking audio.
+    async fn feed(&mut self, live: &mut Live<R::Session>, frames: &[Frame]) -> Result<(), Stop> {
         let limits = self.limits;
         for frame in frames {
             tokio::select! {
@@ -1494,9 +1536,6 @@ where
                 () = tokio::time::sleep_until(live.started + limits.max()) => {
                     return Err(Stop::Failed(CaptureError::TooLong(limits.max())));
                 }
-            }
-            if live.keep_sent {
-                live.sent.push(*frame);
             }
         }
         Ok(())

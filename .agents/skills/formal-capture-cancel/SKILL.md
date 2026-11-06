@@ -15,12 +15,13 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `501d6dd65152153daf55b4665168f8ee006538b1`. The recorded file hashes
+Sync commit: `f2c8ed275101a6f4a0b9d6fa76bd12e920902952`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
 added in `engine.rs`, and the upsampling filter and word list changed in
-`recognizer.rs`. None of these touch the mapped functions' cancellation
+`recognizer.rs`; a released hold now sends silence through the same
+cancel-first send before it waits for the final. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
