@@ -1,5 +1,5 @@
 {
-  "sync_commit": "933b3c9ed0ceea58ce5e5c3bf7a05821f18e60eb",
+  "sync_commit": "501d6dd65152153daf55b4665168f8ee006538b1",
   "files": {
     "crates/thalvi-app/src/runner.rs": {
       "sha256": "1a000549bb6cdf8719ad388d074d5c5472854a0039383546a4453fe7b2c23c83",
@@ -12,7 +12,7 @@
       ]
     },
     "crates/thalvi-desktop/src/engine.rs": {
-      "sha256": "e1a4ec23b4c30247bf6ac8f9c116e68799943b9e090d8b1c4f796110be3ec723",
+      "sha256": "6d98929218a1722fa6bfeb3322d0a570277aed17c0026de34f552d456b072d26",
       "functions": [
         "EngineHandle::cancel",
         "Engine::capture",
