@@ -38,10 +38,13 @@ areas your change touches. Editing rules are in
   when speech follows seconds of digital silence (#220); fp32 takes 1.25 GB more VRAM (7.7 of 8 GB beside TTS)
   and about 2 ms more per step on the RTX 2080. Rejected: bfloat16 (Turing has none), filling silence with
   noise (rescued one stretch of two), restarting streams.
-- **The word list is a recognition hint, kept on the server.** Settings' list goes to the server,
-  which gives it to recognizers that announce `phraseBoosting` (dictation and conversations). Why: NeMo
-  boosting fixed "Cybrex2" with no new errors; text replacement can't fix what was misheard. Rejected:
-  on-device boosting by a flat logit bonus (no fix, stray tokens in silence), sending it to Meta.
+- **The word list is a recognition hint, used locally and on the server.** Settings' list goes to the
+  server, which gives it to recognizers that announce `phraseBoosting` (dictation and conversations), and
+  to local dictation. Why: NeMo boosting fixed "Cybrex2" with no new errors; text replacement can't fix
+  what was misheard. Rejected: a flat logit bonus (no fix, stray tokens in silence), sending it to Meta.
+- **Local boosting fuses NeMo's phrase tree into the greedy search at alpha 2.** Why: "Cybrex2", digit
+  and all, in 8 of 8 dictations, no new errors on 48 takes with a two-entry list, about 1 ms more per
+  step. Rejected: a beam of 4 (0 of 8 at alpha 1, twice the step time), NeMo's alpha 1 (0 of 8).
 - **Self-hosted; parts swap by endpoint.** Config sets each part's address on a
   standard protocol (Chat Completions, OpenAI speech, MCP); Meta's realtime ASR
   and Qwen3-TTS's framed PCM stream are the custom adapters. Why: any provider
