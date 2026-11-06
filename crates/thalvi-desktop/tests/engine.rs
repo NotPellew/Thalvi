@@ -52,6 +52,18 @@ fn quiet(id: usize) -> Frame {
     frame
 }
 
+/// A frame numbered like [`quiet`] with one sample of `peak`.
+fn peaking(id: usize, peak: i16) -> Frame {
+    let mut frame = quiet(id);
+    frame[1] = peak;
+    frame
+}
+
+/// A frame loud enough for a wake on it to count.
+fn audible(id: usize) -> Frame {
+    peaking(id, 1_500)
+}
+
 /// A 140 Hz buzz with harmonics and a slow swell, standing in for a voice.
 fn voiced(id: usize) -> Frame {
     std::array::from_fn(|i| {
@@ -198,7 +210,7 @@ impl Rig {
     /// The wake word is heard at the current time.
     async fn wake_word(&self) {
         self.wake.fire(WakeEvent::Capture);
-        self.feed.send(quiet(0));
+        self.feed.send(audible(0));
         settle().await;
     }
 
@@ -1398,27 +1410,27 @@ async fn wake_words_are_reported_and_an_ambiguous_one_only_once() {
             });
             for _ in 0..25 {
                 rig.wake.fire(WakeEvent::Ambiguous);
-                rig.feed.send(quiet(1));
+                rig.feed.send(audible(1));
                 settle().await;
             }
             assert_eq!(rig.notices(), ["Wake was ambiguous; still listening."]);
             assert!(!task.is_finished());
-            rig.feed.send(quiet(2));
+            rig.feed.send(audible(2));
             settle().await;
             rig.wake.fire(WakeEvent::Ambiguous);
-            rig.feed.send(quiet(3));
+            rig.feed.send(audible(3));
             settle().await;
             assert_eq!(rig.notices().len(), 2, "a quiet frame re-arms the notice");
 
             rig.wake.fire(WakeEvent::Conversation);
-            rig.feed.send(quiet(4));
+            rig.feed.send(audible(4));
             settle().await;
             assert!(
                 rig.gate.is_enabled(),
                 "a conversation wake leaves the microphone on"
             );
             rig.wake.fire(WakeEvent::Capture);
-            rig.feed.send(quiet(5));
+            rig.feed.send(audible(5));
             let (first, second) = finished(task).await;
             assert_eq!(
                 (first, second),
@@ -1444,7 +1456,7 @@ async fn listening_stops_with_a_plain_error_when_the_microphone_or_the_wake_mode
                     tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
                 if wake_fails {
                     rig.wake.fail();
-                    rig.feed.send(quiet(1));
+                    rig.feed.send(audible(1));
                 } else {
                     rig.feed.fail(AudioError::DeviceLost);
                 }
@@ -1964,7 +1976,7 @@ fn wake_clips(root: &std::path::Path) -> Vec<(String, Vec<i16>)> {
 /// Sends frames tagged `from..=to`, none of them a wake.
 async fn hear(rig: &Rig, from: usize, to: usize) {
     for id in from..=to {
-        rig.feed.send(quiet(id));
+        rig.feed.send(audible(id));
         settle().await;
     }
 }
@@ -2032,6 +2044,105 @@ async fn a_near_miss_is_one_line_per_episode_with_its_peak_and_a_crossing_is_non
                     .all(|line| line["outcome"] == "summary"),
                 "no line per frame"
             );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wake_needs_a_sample_peak_of_1500_within_the_last_16_frames() {
+    LocalSet::new()
+        .run_until(async {
+            // (name, event, peak of the frame k frames before the wake frame (0 = the wake
+            // frame), the peak elsewhere, the peak the refusal records or None for a wake)
+            type Case = (&'static str, WakeEvent, usize, i16, i16, Option<u16>);
+            let cases: [Case; 7] = [
+                ("faint", WakeEvent::Capture, 0, 1_499, 0, Some(1_499)),
+                ("at the floor", WakeEvent::Capture, 0, 1_500, 0, None),
+                (
+                    "negative faint conversation",
+                    WakeEvent::Conversation,
+                    0,
+                    -1_499,
+                    0,
+                    Some(1_499),
+                ),
+                (
+                    "negative at the floor",
+                    WakeEvent::Capture,
+                    0,
+                    -1_500,
+                    0,
+                    None,
+                ),
+                (
+                    "faint ambiguous",
+                    WakeEvent::Ambiguous,
+                    0,
+                    1_499,
+                    0,
+                    Some(1_499),
+                ),
+                (
+                    "loud 15 frames back",
+                    WakeEvent::Capture,
+                    15,
+                    20_000,
+                    100,
+                    None,
+                ),
+                (
+                    "loud 16 frames back",
+                    WakeEvent::Capture,
+                    16,
+                    20_000,
+                    100,
+                    Some(100),
+                ),
+            ];
+            for (name, event, back, peak, elsewhere, refused) in cases {
+                let dir = record_dir("wake-floor");
+                let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+                let (rig, engine, frames) = Rig::recording("{}", recorder);
+                let task = listen_task(engine, frames, 1);
+                rig.wake.score(0.9, 0.1234);
+                for id in 0..=20 {
+                    let loud = 20 - id == back;
+                    rig.feed
+                        .send(peaking(id, if loud { peak } else { elsewhere }));
+                    if id == 20 {
+                        rig.wake.fire(event);
+                    }
+                    settle().await;
+                }
+                match refused {
+                    None => assert!(finished(task).await.len() == 1, "{name}: the wake counts"),
+                    Some(level) => {
+                        assert!(!task.is_finished(), "{name}: the wake is refused");
+                        assert!(rig.gate.is_enabled(), "{name}: the capture never began");
+                        rig.wake.fire(event);
+                        rig.feed.send(peaking(21, elsewhere));
+                        settle().await;
+                        assert!(!task.is_finished(), "{name}: still refused");
+                        rig.wake.fire(WakeEvent::Conversation);
+                        rig.feed.send(audible(22));
+                        finished(task).await;
+                        let lines = wake_lines(&dir, "desktop_wake_refused");
+                        assert_eq!(lines.len(), 1, "{name}: one line for the run of frames");
+                        assert_eq!(lines[0]["level"], json!(level), "{name}");
+                        assert_eq!(lines[0]["floor"], json!(1_500), "{name}");
+                        assert_eq!(lines[0]["capture"], json!(0.9), "{name}");
+                        assert_eq!(lines[0]["conversation"], json!(0.123), "{name}");
+                        let head = format!("{event:?}").to_lowercase();
+                        assert_eq!(lines[0]["outcome"], head, "{name}");
+                    }
+                }
+                if refused.is_none() {
+                    assert!(
+                        wake_lines(&dir, "desktop_wake_refused").is_empty(),
+                        "{name}: a wake is no refusal"
+                    );
+                }
+            }
         })
         .await;
 }

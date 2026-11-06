@@ -1,7 +1,7 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
-import type { AudioStatus, Backend, Draft, HistoryEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, WakeModelInfo } from "./contract.ts";
 import type { Clock } from "./overlay.ts";
 
 export const SETTINGS: Settings = {
@@ -30,6 +30,12 @@ export const SETTINGS: Settings = {
   hold_key: "Alt+KeyZ",
   history: { enabled: true, limit: 200 },
 };
+
+export const WAKE_MODELS_INFO: WakeModelInfo[] = [
+  { name: "hey_thalvi", title: "Hey Thalvi", size: 395_406, cached: true },
+  { name: "hey_mycroft", title: "Hey Mycroft", size: 857_691, cached: false },
+  { name: "hey_jarvis", title: "Hey Jarvis", size: 1_271_370, cached: false },
+];
 
 export const NEMOTRON: SpeechModelInfo = {
   name: "nemotron_160ms",
@@ -87,6 +93,18 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     setMenuEntry: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
     copyLoginLine: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     validateSpeechModelFolder: vi.fn<(path: string) => Promise<void>>(() => Promise.resolve()),
+    listWakeModels: vi.fn<() => Promise<WakeModelInfo[]>>(() => Promise.resolve(structuredClone(WAKE_MODELS_INFO))),
+    validateWakeModels: vi.fn<(capture: string, conversation: string) => Promise<void>>((capture, conversation) => {
+      if (capture === conversation) return Promise.reject(new Error("The capture and conversation wake models must be different."));
+      for (const model of [capture, conversation]) {
+        if (!WAKE_MODELS_INFO.some((info) => info.name === model) && (model.includes("bad") || model.includes("missing") || !model.endsWith(".onnx"))) {
+          return Promise.reject(new Error(`The wake model ${model} could not be loaded: not a wake model.`));
+        }
+      }
+      return Promise.resolve();
+    }),
+    downloadWakeModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
+    pickWakeModelFile: vi.fn<() => Promise<string | null>>(() => Promise.resolve("/models/custom.onnx")),
     listSpeechModels: vi.fn<() => Promise<SpeechModelInfo[]>>(() => Promise.resolve([{ ...NEMOTRON }])),
     downloadSpeechModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     onSpeechModelProgress: vi.fn((listener: (progress: SpeechModelProgress) => void) => speechListeners.push(listener)),

@@ -15,14 +15,11 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `6e712244e5cf41488b96e21c633f15f565cca3df`. The recorded file hashes
-match the covered files at that commit. It made holds ignore spoken endings:
-`Engine::capture`, `Engine::conclude` and `Engine::reconcile` keep their
-cancellation behaviour (a hold's secondary transcript is now agreed as plain
-text, and cancellation is still polled first), so the model below is unchanged.
-The `recognizer.rs` hash also moved with it: since the previous sync its
-upsampler and word-list code changed, while `RecognizerSession` and
-`ServerSession::close` did not.
+Sync commit: `933b3c9ed0ceea58ce5e5c3bf7a05821f18e60eb`. The recorded file hashes
+match the committed capture fixes. The model was updated from those changes
+before it was rerun. Later changes to the listed files (the quiet wake floor in
+`engine.rs`, the upsampling filter in `recognizer.rs`) touch none of the mapped
+functions, so the model is unchanged and only the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

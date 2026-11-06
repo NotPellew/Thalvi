@@ -17,12 +17,14 @@ use thalvi_desktop::history::{Entry, HistoryError, Store as History};
 use thalvi_desktop::host::{Desktop, Host, WebUrl};
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{
-    CatalogSpeech, ModelError, ModelStore, SpeechModelInfo, SpeechProgress,
+    CatalogHead, CatalogSpeech, ModelError, ModelStore, SpeechModelInfo, SpeechProgress,
+    WakeModelInfo,
 };
 use thalvi_desktop::phrases;
 use thalvi_desktop::recognizer::ServerUrl;
 use thalvi_desktop::report::{Report, System};
 use thalvi_desktop::transducer::check_folder;
+use thalvi_desktop::wake::validate_wake_models;
 
 use crate::app::AppState;
 use crate::menu_entry;
@@ -170,6 +172,51 @@ pub async fn validate_speech_model_folder(path: String) -> Result<(), String> {
     })
     .await
     .map_err(|error| format!("The folder could not be checked: {error}"))?
+}
+
+/// The catalog wake heads and whether each is downloaded.
+#[tauri::command]
+pub async fn list_wake_models() -> Result<Vec<WakeModelInfo>, String> {
+    let store = ModelStore::per_user().map_err(|error| error.to_string())?;
+    Ok(store.wake_models().await)
+}
+
+/// Checks both chosen wake models the way listening will use them, before they are saved.
+///
+/// # Errors
+/// The plain reason a choice cannot be used.
+#[tauri::command]
+pub async fn validate_wake_model_choices(
+    capture: String,
+    conversation: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        validate_wake_models(&capture, &conversation).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("The wake models could not be checked: {error}"))?
+}
+
+/// Downloads one catalog wake head, so its badge can show it ready before first use.
+///
+/// # Errors
+/// The plain reason the download failed.
+#[tauri::command]
+pub async fn download_wake_model(name: String, state: State<'_, AppState>) -> Result<(), String> {
+    let head = CatalogHead::named(&name)
+        .ok_or_else(|| format!("{name} is not a wake model Thalvi can download."))?;
+    let store = ModelStore::per_user().map_err(|error| error.to_string())?;
+    let recorder =
+        Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
+    let started = Instant::now();
+    let result = store.fetch(&head.asset()).await;
+    recorder.metric(
+        Event::WakeLoad,
+        if result.is_ok() { "ok" } else { "error" },
+        Some(started.elapsed()),
+        json!({"model": head.name(), "source": "settings_download"}),
+    );
+    result.map(|_| ()).map_err(|error| error.to_string())
 }
 
 /// The catalog speech models and whether each is downloaded.

@@ -3,7 +3,8 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AudioStatus, Backend, Draft, HistoryEntry, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
+import { open } from "@tauri-apps/plugin-dialog";
+import type { AudioStatus, Backend, Draft, HistoryEntry, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, WakeModelInfo } from "./contract.ts";
 
 export function tauriBackend(): Backend {
   return {
@@ -56,6 +57,17 @@ export function tauriBackend(): Backend {
     setMenuEntry: (on) => invoke<undefined>("set_menu_entry", { on }),
     copyLoginLine: () => invoke<undefined>("copy_login_line"),
     validateSpeechModelFolder: (path) => invoke<undefined>("validate_speech_model_folder", { path }),
+    listWakeModels: () => invoke<WakeModelInfo[]>("list_wake_models"),
+    validateWakeModels: (capture, conversation) => invoke<undefined>("validate_wake_model_choices", { capture, conversation }),
+    downloadWakeModel: (name) => invoke<undefined>("download_wake_model", { name }),
+    pickWakeModelFile: async () => {
+      const picked = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Wake model", extensions: ["onnx"] }],
+      });
+      return typeof picked === "string" ? picked : null;
+    },
     listSpeechModels: () => invoke<SpeechModelInfo[]>("list_speech_models"),
     downloadSpeechModel: (name) => invoke<undefined>("download_speech_model", { name }),
     onSpeechModelProgress: (listener) => {

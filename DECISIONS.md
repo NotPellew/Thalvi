@@ -68,8 +68,8 @@ areas your change touches. Editing rules are in
   Rejected: persisting drafts, replacing edits, Paste into the bound window, retrying a partial delivery by itself.
 - **Desktop recordings by wake.** `recordings/` holds only recordings: `metrics.jsonl` and a
   `<date>/<time>/` folder per wake (`wake.wav`, `speech.wav`, `text.txt`). Wake metrics: near misses
-  (score from 0.15), wakes that deliver nothing, one summary a minute (scoring latency, seconds
-  with sound and quiet, switches between them). Why: one dictation in one place;
+  (score from 0.15), wakes refused as too quiet, wakes that deliver nothing, one summary a minute
+  (scoring latency, seconds with sound and quiet, switches between them). Why: one dictation in one place;
   95% of old lines were per frame. Rejected: day files linked by timestamp, a line per frame
   or per sound/quiet switch.
 - **Hands-free turns.** The recognizer runs in endpointing mode, and the user
@@ -86,6 +86,10 @@ areas your change touches. Editing rules are in
 - **Wake context.** Both trained heads use 16 embedding frames. Why: this
   supports first-frame inference with upstream startup and reset history.
   Rejected: accepting longer contexts that need additional warm-up history.
+- **Quiet wake floor.** A wake whose last 1.28 s (the head's 16 frames) peaked below 1,500 as a
+  sample magnitude starts nothing and is recorded as `desktop_wake_refused`. Why: heads score speech
+  alike at any volume; real wakes peaked at 2,073 or more, faint false wakes at 1,152 or less, RMS never separated.
+  Rejected: RMS, a floor per microphone (revisit if a quieter one appears), the last few frames.
 - **ONNX Runtime from ort's prebuilt static binaries.** The build downloads a pinned
   ONNX Runtime and links it in, the same on Linux and Windows. Why: one way to
   provide it, nothing to ship or find at run time. Rejected: loading a system

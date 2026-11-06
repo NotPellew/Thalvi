@@ -31,10 +31,7 @@ use thalvi_desktop::wake::WakeEngine;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
-use crate::status::{Failure, Mode, STARTING_NOTICE, Status, View};
-
-/// What the user sees while the speech model downloads or loads.
-const LOADING_NOTICE: &str = "Loading the speech model. The first time it downloads about 650 MB.";
+use crate::status::{Failure, Mode, STARTING_NOTICE, SpeechLoad, Status, View};
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -91,6 +88,7 @@ impl EngineLink {
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
             notice: STARTING_NOTICE.to_owned(),
+            downloading: false,
         });
         let (level_tx, level) = watch::channel(0.0);
         let (audio_tx, audio) = watch::channel(AudioStatus {
@@ -241,8 +239,8 @@ impl Publisher {
         self.update(|view| view.mode = mode);
     }
 
-    fn loading(&self, notice: Option<&str>) {
-        self.update(|view| view.loading = notice.map(str::to_owned));
+    fn loading(&self, load: Option<SpeechLoad>) {
+        self.update(|view| view.loading = load);
     }
 
     fn notice_sink(self: &Rc<Self>) -> Box<dyn Fn(&str)> {
@@ -408,7 +406,7 @@ impl Runner {
         match self.build(&config).await {
             Ok(session) => {
                 self.session = Some(session);
-                self.load_speech_model();
+                self.load_speech_model().await;
                 self.open_microphone().await;
             }
             Err(failure) => {
@@ -420,7 +418,7 @@ impl Runner {
 
     /// Fetches and loads the speech model in the background, and shows that until it is ready.
     /// A failure is a notice; the app keeps listening and dictation tries again.
-    fn load_speech_model(&mut self) {
+    async fn load_speech_model(&mut self) {
         if let Some(loading) = self.loading.take() {
             loading.abort();
         }
@@ -432,8 +430,9 @@ impl Runner {
             self.publisher.loading(None);
             return;
         };
-        println!("{LOADING_NOTICE}");
-        self.publisher.loading(Some(LOADING_NOTICE));
+        let load = SpeechLoad::of(&local).await;
+        println!("{}", load.notice());
+        self.publisher.loading(Some(load));
         let publisher = Rc::clone(&self.publisher);
         self.loading = Some(tokio::task::spawn_local(async move {
             let loaded = local.load().await;
@@ -771,7 +770,7 @@ impl Runner {
                     .update(|view| view.pauses = config.ending_pause);
                 self.take_history(&config);
                 self.config = config;
-                self.load_speech_model();
+                self.load_speech_model().await;
                 self.open_microphone().await;
             }
             Err(failure) => {
@@ -1203,7 +1202,12 @@ mod tests {
     use std::cell::Cell;
     use std::time::Duration;
 
+    use thalvi_desktop::models::CatalogSpeech;
+    use thalvi_desktop::transducer::SpeechChoice;
+
     use super::*;
+    use crate::overlay::Visibility;
+    use crate::tray::title;
 
     #[test]
     fn stopped_is_not_reported_until_background_writes_finish() {
@@ -1229,6 +1233,62 @@ mod tests {
             "quit acknowledged a pending write"
         );
         status.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_overlay_stays_hidden_while_a_model_on_disk_loads_and_shows_only_a_download() {
+        let catalog = CatalogSpeech::Nemotron160ms;
+        let cases = [
+            ("downloaded", true, false, false),
+            ("not downloaded", false, false, true),
+            ("model folder", false, true, false),
+        ];
+        for (case, on_disk, folder, overlay) in cases {
+            let dir = std::env::temp_dir().join(format!(
+                "thalvi-load-{}-{}",
+                case.replace(' ', "-"),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            if on_disk {
+                let assets = catalog.assets();
+                for asset in [assets.encoder, assets.decoder, assets.joiner, assets.tokens] {
+                    std::fs::File::create(dir.join(asset.file_name))
+                        .unwrap()
+                        .set_len(asset.size)
+                        .unwrap();
+                }
+            }
+            let choice = if folder {
+                SpeechChoice::Folder(dir.clone())
+            } else {
+                SpeechChoice::Catalog(catalog)
+            };
+            let source = TransducerSource::new(ModelStore::in_dir(&dir), choice);
+            let local = LocalRecognizer::new(source, "test", Recorder::disabled().metrics());
+            let (out, status) = watch::channel(Status::Paused);
+            let publisher = Publisher::new(out, EndingPauses::default());
+            let shown = || Visibility::of(&status.borrow(), true) == Visibility::Show;
+
+            publisher.mode(Mode::Starting);
+            assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}");
+            assert!(!shown(), "{case}: starting the engine");
+            publisher.loading(Some(SpeechLoad::of(&local).await));
+            publisher.mode(Mode::Idle);
+            assert_eq!(shown(), overlay, "{case}: loading the model");
+            assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}");
+            assert_eq!(
+                matches!(&*status.borrow(), Status::Loading { notice, .. } if notice.contains("650 MB")),
+                overlay,
+                "{case}: the download notice"
+            );
+
+            publisher.loading(None);
+            assert!(!shown(), "{case}: loaded");
+            assert_eq!(title(&status.borrow()), "Thalvi: listening", "{case}");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     #[tokio::test(start_paused = true)]

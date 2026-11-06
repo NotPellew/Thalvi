@@ -174,7 +174,7 @@ describe("save", () => {
     goTo("capture");
     type(control("Quiet before paste", "input"), "1.5");
     type(control("Threshold (dictation)", "input"), "0.8");
-    type(control("Wake model (conversation)", "input"), "hey_jarvis");
+    choose(control("Wake model (conversation)", "select"), "hey_jarvis");
     goTo("feedback");
     flip(control("Show the draft", "input"));
     flip(control("Wake sound", "input"));
@@ -276,6 +276,95 @@ describe("tables", () => {
     type(root.querySelector<HTMLInputElement>('input[aria-label="New app name"]') as HTMLInputElement, "slack");
     button("Add app").click();
     expect(root.querySelector(".note[role=alert]:not([hidden])")?.textContent).toBe("An app named slack already exists.");
+  });
+});
+
+describe("the wake word picker", () => {
+  async function openCapture(settings: Settings = SETTINGS) {
+    const stub = await open(settings);
+    goTo("capture");
+    return stub;
+  }
+  const badge = (label: string): string => rowOf(label).querySelector(".badge")?.textContent ?? "";
+  const problem = (label: string): string =>
+    rowOf(label).querySelector<HTMLElement>(".note:not([hidden])")?.textContent ?? "";
+
+  it("shows each catalog phrase with whether it is ready or not downloaded", async () => {
+    const stub = await openCapture();
+    expect(badge("Wake model (dictation)")).toBe("Ready");
+    expect(badge("Wake model (conversation)")).toBe("Not downloaded");
+    const dictation = control("Wake model (dictation)", "select");
+    expect(Array.from(dictation.options).map((option) => option.textContent)).toEqual([
+      "Hey Thalvi — Ready",
+      "Hey Mycroft — Not downloaded",
+      "Hey Jarvis — Not downloaded",
+      "Custom model…",
+    ]);
+    let finish = (): void => { throw new Error("download has not started"); };
+    stub.backend.downloadWakeModel.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    within(rowOf("Wake model (conversation)"), "Download").click();
+    expect(badge("Wake model (conversation)")).toBe("Downloading…");
+    finish();
+    await settle();
+    expect(stub.backend.downloadWakeModel).toHaveBeenCalledWith("hey_mycroft");
+    expect(badge("Wake model (conversation)")).toBe("Ready");
+  });
+
+  it("prevents choosing the other wake word's phrase", async () => {
+    await openCapture();
+    const dictation = control("Wake model (dictation)", "select");
+    const conversation = control("Wake model (conversation)", "select");
+    expect(dictation.querySelector<HTMLOptionElement>('option[value="hey_mycroft"]')?.disabled).toBe(true);
+    expect(conversation.querySelector<HTMLOptionElement>('option[value="hey_thalvi"]')?.disabled).toBe(true);
+    expect(dictation.querySelector<HTMLOptionElement>('option[value="hey_thalvi"]')?.disabled).toBe(false);
+  });
+
+  it("shows the picked custom file name and saves its path", async () => {
+    const stub = await openCapture();
+    choose(control("Wake model (dictation)", "select"), "__custom");
+    within(rowOf("Wake model (dictation)"), "Browse…").click();
+    await settle();
+    expect(stub.backend.pickWakeModelFile).toHaveBeenCalledTimes(1);
+    expect(rowOf("Wake model (dictation)").textContent).toContain("custom.onnx");
+    button("Save").click();
+    await settle();
+    expect(stub.backend.validateWakeModels).toHaveBeenCalledWith("/models/custom.onnx", "hey_mycroft");
+    expect(sent(stub).wake.capture.model).toBe("/models/custom.onnx");
+  });
+
+  it("shows an invalid custom file at once and does not save it", async () => {
+    const stub = await openCapture();
+    stub.backend.pickWakeModelFile.mockResolvedValue("/models/bad.onnx");
+    choose(control("Wake model (dictation)", "select"), "__custom");
+    within(rowOf("Wake model (dictation)"), "Browse…").click();
+    await settle();
+    expect(problem("Wake model (dictation)")).toBe("The wake model /models/bad.onnx could not be loaded: not a wake model.");
+    button("Save").click();
+    await settle();
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    expect(root.querySelector(".err")?.textContent).toBe("The wake model /models/bad.onnx could not be loaded: not a wake model.");
+  });
+
+  it("does not save the same custom file for both wake words", async () => {
+    const stub = await openCapture();
+    for (const label of ["Wake model (dictation)", "Wake model (conversation)"] as const) {
+      choose(control(label, "select"), "__custom");
+      within(rowOf(label), "Browse…").click();
+      await settle();
+    }
+    expect(problem("Wake model (conversation)")).toBe("The capture and conversation wake models must be different.");
+    button("Save").click();
+    await settle();
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("shows a saved custom file by name when Settings opens", async () => {
+    await openCapture({
+      ...SETTINGS,
+      wake: { capture: { model: "/models/mine.onnx", threshold: 0.5 }, conversation: { model: "hey_mycroft", threshold: 0.5 } },
+    });
+    expect(control("Wake model (dictation)", "select").value).toBe("__custom");
+    expect(rowOf("Wake model (dictation)").textContent).toContain("mine.onnx");
   });
 });
 

@@ -86,6 +86,22 @@ impl CatalogHead {
         }
     }
 
+    /// The phrase as shown to the user.
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::HeyThalvi => "Hey Thalvi",
+            Self::HeyMycroft => "Hey Mycroft",
+            Self::HeyJarvis => "Hey Jarvis",
+        }
+    }
+
+    /// The catalog head called `name` in config.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|head| head.name() == name)
+    }
+
     /// The download that provides this head.
     #[must_use]
     pub fn asset(self) -> Asset<'static> {
@@ -113,6 +129,17 @@ impl CatalogHead {
             },
         }
     }
+}
+
+/// What the settings window shows of a catalog wake head.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WakeModelInfo {
+    pub name: &'static str,
+    pub title: &'static str,
+    /// Bytes to download.
+    pub size: u64,
+    /// The file is on disk at its pinned size.
+    pub cached: bool,
 }
 
 /// A speech model that ships in the catalog and is chosen by name.
@@ -438,6 +465,30 @@ impl ModelStore {
         true
     }
 
+    /// Whether one pinned file is on disk at its pinned size. Cheap, for showing download
+    /// state; [`fetch`](Self::fetch) still verifies its checksum before it is used.
+    pub async fn is_asset_cached(&self, asset: &Asset<'_>) -> bool {
+        match tokio::fs::metadata(self.dir.join(asset.file_name)).await {
+            Ok(meta) => meta.len() == asset.size,
+            Err(_) => false,
+        }
+    }
+
+    /// The catalog wake heads with whether each is already downloaded.
+    pub async fn wake_models(&self) -> Vec<WakeModelInfo> {
+        let mut models = Vec::new();
+        for head in CatalogHead::ALL {
+            let asset = head.asset();
+            models.push(WakeModelInfo {
+                name: head.name(),
+                title: head.title(),
+                size: asset.size,
+                cached: self.is_asset_cached(&asset).await,
+            });
+        }
+        models
+    }
+
     /// The catalog models with whether each is already downloaded.
     pub async fn speech_models(&self) -> Vec<SpeechModelInfo> {
         let mut models = Vec::new();
@@ -603,4 +654,37 @@ fn hex(digest: &[u8]) -> String {
         let _ = write!(out, "{byte:02x}");
         out
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn wake_models_report_each_catalog_head_and_whether_it_is_cached() {
+        let dir = std::env::temp_dir().join(format!("thalvi-wake-models-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let store = ModelStore::in_dir(dir.clone());
+        let asset = CatalogHead::HeyThalvi.asset();
+        std::fs::write(
+            dir.join(asset.file_name),
+            vec![0; usize::try_from(asset.size).expect("size fits")],
+        )
+        .expect("cached head at pinned size");
+        let models = store.wake_models().await;
+        let cached: Vec<(&str, &str, bool)> = models
+            .iter()
+            .map(|model| (model.name, model.title, model.cached))
+            .collect();
+        assert_eq!(
+            cached,
+            [
+                ("hey_thalvi", "Hey Thalvi", true),
+                ("hey_mycroft", "Hey Mycroft", false),
+                ("hey_jarvis", "Hey Jarvis", false),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
