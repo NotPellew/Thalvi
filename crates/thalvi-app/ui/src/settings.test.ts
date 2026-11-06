@@ -481,7 +481,7 @@ describe("the word list", () => {
   }
 
   it.each([
-    ["the local engine", "local", () => Promise.resolve(true), { shown: false, disabled: false, problem: "" }],
+    ["the local engine", "local", () => Promise.reject(new Error("unreachable")), { shown: true, disabled: false, problem: "" }],
     ["a recognizer without boosting", "server", () => Promise.resolve(false), { shown: false, disabled: false, problem: "" }],
     ["a recognizer that boosts", "server", () => Promise.resolve(true), { shown: true, disabled: false, problem: "" }],
     [
@@ -543,6 +543,16 @@ describe("the word list", () => {
     button("Save").click();
     await settle();
     expect(sent(stub).stt.phrases).toEqual(["Thalvi"]);
+  });
+
+  it("is offered without asking the server once the engine switches to this computer", async () => {
+    const stub = await openWith("server", () => Promise.reject(new Error("Thalvi could not reach the server.")));
+    choose(control("Recognize speech", "select"), "local");
+    await settle();
+    expect(stub.backend.wordListSupport).toHaveBeenCalledTimes(1);
+    expect(offered()).toBe(true);
+    expect(box().disabled).toBe(false);
+    expect(Array.from(rowOf("Word list").querySelectorAll(".note")).map((note) => note.textContent).join("")).toBe("");
   });
 
   it("asks again when the engine switches to the server", async () => {

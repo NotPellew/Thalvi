@@ -697,7 +697,7 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
   const wordProblem = note();
   const wordRow = row(
     "Word list",
-    "Names and terms to spell your way, added one at a time. Recognition through the server favours them, in dictation and conversations.",
+    "Names and terms to spell your way, added one at a time. Recognition on this computer favours them, and so does a server that supports it, in dictation and conversations.",
     words.node,
   );
   wordRow.querySelector(".ctl")?.append(wordProblem);
@@ -706,7 +706,11 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
     const ask = (asked += 1);
     wordRow.classList.add("off");
     say(wordProblem, "");
-    if (draft.stt.engine !== "server") return;
+    if (draft.stt.engine === "local") {
+      wordRow.classList.remove("off");
+      words.enable(true);
+      return;
+    }
     backend
       .wordListSupport(draft.server)
       .then((supported) => {
