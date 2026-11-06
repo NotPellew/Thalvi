@@ -3029,47 +3029,42 @@ async fn releasing_the_key_pastes_what_was_said_without_a_countdown_or_enter() {
             1200,
             accepted(CaptureRoute::Paste, "hello world"),
             Cue::Accepted,
-            1700,
+            1450,
         ),
         (
             &[(1000, Partial("hello world")), (1250, Final("hello world"))],
             1200,
             accepted(CaptureRoute::Paste, "hello world"),
             Cue::Accepted,
-            1700,
+            1250,
         ),
-        // Every final that comes within the tail is kept, not only the first.
         (
-            &[
-                (800, Final("first line")),
-                (1250, Final("second line")),
-                (1400, Final("third line")),
-            ],
+            &[(800, Final("first line")), (1250, Final("second line"))],
             1200,
-            accepted(CaptureRoute::Paste, "first line second line third line"),
+            accepted(CaptureRoute::Paste, "first line second line"),
             Cue::Accepted,
-            1700,
+            1250,
         ),
         (
             &[(800, Final("first line")), (1000, Partial("second line"))],
             1200,
             accepted(CaptureRoute::Paste, "first line second line"),
             Cue::Accepted,
-            1700,
+            1450,
         ),
         (
             &[(1000, Partial("hello never mind"))],
             1200,
             accepted(CaptureRoute::Paste, "hello never mind"),
             Cue::Accepted,
-            1700,
+            1450,
         ),
         (
             &[(800, Final("first line")), (1250, Final("never mind"))],
             1200,
             accepted(CaptureRoute::Paste, "first line never mind"),
             Cue::Accepted,
-            1700,
+            1250,
         ),
         // The shortest hold that dictates is MIN_HOLD, 300 ms.
         (
@@ -3270,8 +3265,8 @@ async fn spoken_endings_are_text_during_a_hold_and_act_after_the_wake_word() {
                 rig.hold().await;
                 rig.say(1000, Say::Final(said)).await;
                 rig.release(1200).await;
-                rig.at(1700).await;
-                assert_eq!(rig.started(Cue::Accepted), [1700], "hold: {said}");
+                rig.at(1450).await;
+                assert_eq!(rig.started(Cue::Accepted), [1450], "hold: {said}");
                 assert_eq!(rig.started(Cue::Provisional).len(), 0, "hold: {said}");
                 assert_eq!(
                     finished(task).await,
@@ -3311,7 +3306,7 @@ async fn key_auto_repeat_during_a_hold_starts_nothing_and_a_press_during_a_wake_
             );
             assert!(matches!(rig.state(), EngineState::Capturing { .. }));
             rig.release(1200).await;
-            rig.at(1700).await;
+            rig.at(1450).await;
             assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "hello"));
             assert_eq!(rig.started(Cue::Wake).len(), 1, "no second capture started");
 
@@ -3365,14 +3360,24 @@ async fn holds_record_their_start_end_and_how_the_key_decided() {
     LocalSet::new()
         .run_until(async {
             let dir = record_dir("hold");
-            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let recorder = Recorder::in_dir(AUDIO_AND_METRICS, &dir).unwrap();
             let (mut rig, engine, frames) = Rig::recording("{}", recorder);
             let task = hold_task(engine, frames);
             rig.hold().await;
+            rig.feed_until(960, Kind::Voice).await;
             rig.say(1000, Say::Partial("hello")).await;
+            let spoken = rig.sent().len();
             rig.release(1200).await;
-            rig.at(1700).await;
+            assert!(rig.sent().len() > spoken, "the release sends silence");
+            rig.at(1450).await;
             assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "hello"));
+            assert_eq!(
+                std::fs::metadata(dictation_dirs(&dir).pop().unwrap().join("speech.wav"))
+                    .unwrap()
+                    .len(),
+                44 + 2560 * u64::try_from(spoken).unwrap(),
+                "the silence sent at the release is not recorded as speech"
+            );
             let lines = read_lines(&dir.join("metrics.jsonl"));
             let seen = events(&lines);
             for expected in [
@@ -3468,10 +3473,10 @@ async fn nothing_spoken_after_the_release_reaches_the_recognizer_but_the_words_a
             rig.release(1200).await;
             let before = rig.sent().len();
             // An aside: the recognizer must never hear it.
-            rig.feed_until(1600, Kind::Voice).await;
+            rig.feed_until(1400, Kind::Voice).await;
             assert_eq!(rig.sent().len(), before, "audio after the release was sent");
             rig.finals("hello there").await;
-            rig.at(1700).await;
+            rig.at(1450).await;
             assert_eq!(
                 finished(task).await,
                 accepted(CaptureRoute::Paste, "hello there")
@@ -3546,9 +3551,11 @@ async fn a_hold_released_before_the_recognizer_connects_still_sends_its_speech_w
                 assert!(!task.is_finished(), "{label}: waiting for the connection");
                 rig.server.ready();
                 settle().await;
+                let mut expected_sent = spoken.clone();
+                expected_sent.extend(std::iter::repeat_n(0, 10));
                 assert_eq!(
                     tags(&rig.sent()),
-                    spoken,
+                    expected_sent,
                     "{label}: the buffered speech arrived"
                 );
                 rig.partial("hello world").await;
@@ -3635,14 +3642,17 @@ async fn a_hold_sends_what_was_queued_before_its_release_and_nothing_queued_afte
                     }
                     settle().await;
                     let queued: Vec<Frame> = (3..8).map(|id| before.frame(id)).collect();
-                    let expected = if sent { tags(&queued) } else { vec![] };
+                    let mut expected = if sent { tags(&queued) } else { vec![] };
+                    if sent {
+                        expected.extend(std::iter::repeat_n(0, 10));
+                    }
                     assert_eq!(tags(&rig.sent()), expected, "{label}: frames sent");
                     if pasted {
                         rig.partial("hello world").await;
                     }
                     rig.at(1500).await;
                     let (outcome, ignored) = finished(task).await;
-                    let expected = if pasted {
+                    let expected_outcome = if pasted {
                         accepted(CaptureRoute::Paste, "hello world")
                     } else {
                         CaptureOutcome::Failed {
@@ -3650,10 +3660,10 @@ async fn a_hold_sends_what_was_queued_before_its_release_and_nothing_queued_afte
                             recoverable_text: None,
                         }
                     };
-                    assert_eq!(outcome, expected, "{label}");
+                    assert_eq!(outcome, expected_outcome, "{label}");
                     assert_eq!(
                         tags(&rig.sent()),
-                        if sent { tags(&queued) } else { vec![] },
+                        expected,
                         "{label}: frames sent by the end"
                     );
                     let refused: Vec<Refusal> = if tap {
@@ -3867,7 +3877,7 @@ async fn a_frame_published_after_pending_poll_but_before_release_is_not_lost() {
             settle().await;
             assert_eq!(
                 rig.sent().len(),
-                5,
+                15,
                 "pre-release frames arrived between the pending audio poll and the release poll"
             );
             rig.partial("hello world").await;
@@ -3922,6 +3932,93 @@ async fn continuation_published_during_a_poll_reaches_the_recognizer_only_while_
                 task.abort();
                 let _ = task.await;
             }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_release_triggers_a_silence_flush_and_pastes_as_soon_as_the_final_arrives() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.say(1000, Say::Partial("hello world")).await;
+            rig.release(1200).await;
+            let sent = rig.sent();
+            assert_eq!(
+                tags(&sent[sent.len() - 10..]),
+                vec![0; 10],
+                "a release flushes silence frames at once"
+            );
+            assert!(!task.is_finished(), "waiting for the final result");
+            rig.say(1250, Say::Final("hello world")).await;
+            rig.at(1250).await;
+            assert_eq!(
+                rig.started(Cue::Accepted),
+                [1250],
+                "the arrival of the final pastes at once without waiting the limit"
+            );
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "hello world")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_with_no_final_within_the_limit_pastes_what_is_there_at_the_limit() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.say(1000, Say::Partial("partial text")).await;
+            rig.release(1200).await;
+            rig.at(1449).await;
+            assert!(
+                !task.is_finished(),
+                "at 1449 ms the limit has not yet expired"
+            );
+            assert!(
+                rig.started(Cue::Accepted).is_empty(),
+                "no paste before the limit"
+            );
+            rig.at(1450).await;
+            assert_eq!(
+                rig.started(Cue::Accepted),
+                [1450],
+                "pastes at the 250 ms limit"
+            );
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "partial text")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_during_the_post_release_wait_cancels_at_once_and_delivers_nothing() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.say(1000, Say::Final("hello")).await;
+            rig.release(1200).await;
+            rig.at(1250).await;
+            rig.handle.cancel();
+            settle().await;
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("hello".to_owned())
+                }
+            );
+            assert_eq!(rig.started(Cue::Accepted).len(), 0);
+            assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
         })
         .await;
 }
