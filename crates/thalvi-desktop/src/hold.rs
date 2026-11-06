@@ -2,9 +2,11 @@
 
 use std::fmt;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use crate::frame::Order;
 use crate::host::Modifier;
@@ -178,7 +180,14 @@ pub struct KeyState {
     pub down: bool,
     /// The latest press's release.
     pub release: Cutoff,
+    /// When the key came up while already up: a release that overtook its press.
+    early_release: Option<Instant>,
 }
+
+/// How long after a release that overtook its press that press still counts as released. The
+/// Hyprland binds start one process per press and release, and on a quick tap the release's
+/// process can reach the app first.
+const OVERTAKEN_PRESS: Duration = Duration::from_secs(1);
 
 /// Where in the [`Order`] of queued frames one press of the key was first released. The first
 /// release stays however many presses follow, and every clone sees it.
@@ -356,20 +365,31 @@ impl HoldInput {
         (Self(Arc::new(sender)), receiver)
     }
 
-    /// The key went down or up; a repeat of the state it is in changes nothing, so key
-    /// auto-repeat starts nothing extra.
+    /// The key went down or up; a repeated press changes nothing, so key auto-repeat starts
+    /// nothing extra. A release while up is the next press's, which it overtook.
     pub fn set(&self, down: bool) {
         self.0.send_if_modified(|state| {
             if state.down == down {
+                if !down {
+                    state.early_release = Some(Instant::now());
+                }
                 return false;
             }
-            state.down = down;
             if down {
                 state.presses += 1;
                 state.release = Cutoff::default();
+                let overtaken = state
+                    .early_release
+                    .take()
+                    .is_some_and(|at| at.elapsed() < OVERTAKEN_PRESS);
+                if overtaken {
+                    state.release.release();
+                    return true;
+                }
             } else {
                 state.release.release();
             }
+            state.down = down;
             true
         });
     }
@@ -964,7 +984,6 @@ mod tests {
         input.set(true);
         assert_eq!(seen(), (1, true));
         input.set(false);
-        input.set(false);
         assert_eq!(seen(), (1, false));
         input.set(true);
         assert_eq!(seen(), (2, true));
@@ -1001,6 +1020,29 @@ mod tests {
         presses.skip();
         assert!(presses.take().is_none());
         assert_eq!(presses.take_lost(), 0, "a press dealt with is not lost");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_press_that_arrives_after_its_own_release_opens_nothing() {
+        // (time between the release and the press, whether the press is still down)
+        for (gap, down) in [
+            (Duration::ZERO, false),
+            (Duration::from_millis(999), false),
+            (OVERTAKEN_PRESS, true),
+        ] {
+            let (input, state) = HoldInput::new();
+            let mut presses = Presses::new(state);
+            input.set(false);
+            tokio::time::advance(gap).await;
+            input.set(true);
+            let taken = presses.take();
+            assert_eq!(taken.is_some(), down, "{gap:?}");
+            assert_eq!(presses.take_lost(), u64::from(!down), "{gap:?}");
+            if !down {
+                input.set(true);
+                assert!(presses.take().is_some(), "{gap:?}: the next press opens");
+            }
+        }
     }
 
     #[test]
