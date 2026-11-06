@@ -337,8 +337,10 @@ current capture and closes the microphone.
 
 Hold a key, speak, and let go: the text is pasted into the window focused when
 you pressed, without the pause countdown and without Enter. A hold shorter than
-a third of a second, or with no words, pastes nothing and says so. Saying "never
-mind" cancels it; any other spoken ending works as after the wake word.
+a third of a second, or with no words, pastes nothing and says so. No spoken
+phrase ends or cancels a hold: words such as "never mind" are dictated as text.
+To abandon a hold, use the `cancel` command: the tray's **Cancel**, or a key
+bound to `thalvi-desktop cancel` (the Hyprland examples bind SUPER+Escape).
 
 - **Hyprland:** F9, with no modifier. Add the `hold-start` and `hold-end` binds
   from `hyprland-binds.conf`. Hyprland types any modifier you still hold into the

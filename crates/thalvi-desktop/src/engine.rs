@@ -473,26 +473,25 @@ enum Release {
     Down,
     /// The key came up at this instant; the last words may still arrive.
     Tail(Instant),
-    /// Nothing more comes of the key: the capture is not a hold, or a spoken ending decided it.
+    /// Nothing more comes of the key: the capture is not a hold.
     Over,
 }
 
 impl<S> Live<S> {
     /// Whether a frame queued at `order` came after the key went up and is not the hold's to
-    /// send: a spoken ending already pending keeps the capture open for it.
+    /// send.
     fn after_release(&self, order: Order) -> bool {
-        self.text.pending().is_none()
-            && !matches!(self.release, Release::Over)
+        !matches!(self.release, Release::Over)
             && self
                 .cutoff
                 .as_ref()
                 .is_some_and(|cutoff| cutoff.precedes(order))
     }
 
-    /// When a released hold stops waiting for words; none while a spoken ending is pending.
+    /// When a released hold stops waiting for words.
     fn tail(&self) -> Option<Instant> {
         match self.release {
-            Release::Tail(at) if self.text.pending().is_none() => Some(at + RELEASE_TAIL),
+            Release::Tail(at) => Some(at + RELEASE_TAIL),
             _ => None,
         }
     }
@@ -930,8 +929,8 @@ where
 
     /// Plays the wake cue while the recognizer connects, then takes the user's dictation until
     /// they end it, cancel it, or something fails. After [`WakeTrigger::Hold`] releasing the key
-    /// ends it, pasting what was said at once; a spoken ending still decides it as it does after
-    /// a wake word.
+    /// ends it, pasting what was said at once; no spoken phrase is an ending during a hold, so
+    /// only [`EngineHandle::cancel`] cancels one.
     ///
     /// Call after [`listen`](Self::listen) returned [`WakeTrigger::Capture`] or
     /// [`WakeTrigger::Hold`]. Cancellation through [`EngineHandle::cancel`] applies to this call
@@ -1088,6 +1087,16 @@ where
         }
     }
 
+    /// The transcript a capture accumulates: during a hold every word is text, while a wake
+    /// word's capture honours the spoken endings.
+    fn capture_session(&self, held: bool) -> CaptureSession {
+        if held {
+            CaptureSession::without_endings()
+        } else {
+            CaptureSession::new(self.endings.clone(), self.pauses)
+        }
+    }
+
     /// Plays the wake cue while the recognizer connects, then returns the open recognition, the
     /// frames that arrived after the cue while it was still connecting, and when the hold's key
     /// came up in the meantime, if speech was already waiting.
@@ -1179,7 +1188,7 @@ where
         let live = Live {
             session,
             dictation: woke.dictation.clone(),
-            text: CaptureSession::new(self.endings.clone(), self.pauses),
+            text: self.capture_session(held.is_some()),
             partial: None,
             sent: Vec::new(),
             keep_sent: self.secondary.as_ref().is_some_and(SecondaryStt::enabled)
@@ -1255,9 +1264,7 @@ where
                     if has_words(&text) {
                         live.last_words = Instant::now();
                     }
-                    let done = self.on_final(live, &text);
-                    Self::after_final(live);
-                    done
+                    self.on_final(live, &text)
                 }
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),
                 Step::Frame(Ok(queued)) => self.on_frame(live, &queued).await.err().map(Done::from),
@@ -1271,7 +1278,7 @@ where
                 Step::Silent => Some(Done::Failed(CaptureError::MicStopped)),
                 Step::Idle => Some(Done::Failed(CaptureError::NoEnding(self.limits.idle()))),
                 Step::TooLong => Some(Done::Failed(CaptureError::TooLong(self.limits.max()))),
-                Step::Tail => self.finish_hold(live),
+                Step::Tail => Some(self.finish_hold(live)),
                 Step::Key(open) => {
                     key_open = open;
                     self.on_key(live, held)
@@ -1299,16 +1306,12 @@ where
         None
     }
 
-    /// The key came up: a spoken ending already pending keeps deciding the capture; a slip of the
-    /// finger ends it; otherwise the last words get [`RELEASE_TAIL`] to arrive, and no recognizer
-    /// signals that nothing more is coming, so the whole tail is waited out.
+    /// The key came up: a slip of the finger ends the capture; otherwise the last words get
+    /// [`RELEASE_TAIL`] to arrive, and no recognizer signals that nothing more is coming, so
+    /// the whole tail is waited out.
     fn on_release(&mut self, live: &mut Live<R::Session>, held: &Held) -> Option<Done> {
         let now = Instant::now();
         self.held_for = Some(now.duration_since(held.at));
-        if live.text.pending().is_some() {
-            live.release = Release::Over;
-            return None;
-        }
         if now.duration_since(held.at) < MIN_HOLD {
             self.hold_end = Some("too_short");
             return Some(Done::Failed(CaptureError::HoldTooShort));
@@ -1317,35 +1320,23 @@ where
         None
     }
 
-    /// After a final transcript: a spoken ending heard in the last words decides the capture as
-    /// it does after a wake word. Every other final just joins the text; the tail is the wait.
-    fn after_final(live: &mut Live<R::Session>) {
-        if matches!(live.release, Release::Tail(_)) && live.text.pending().is_some() {
-            live.release = Release::Over;
-        }
-    }
-
     /// Ends a released hold: what was said, with the words still being recognized, is pasted.
-    fn finish_hold(&mut self, live: &mut Live<R::Session>) -> Option<Done> {
-        if let Some(partial) = live.partial.take().filter(|text| has_words(text)) {
-            if let Some(done) = self.on_final(live, &partial) {
-                return Some(done);
-            }
-            if live.text.pending().is_some() {
-                live.release = Release::Over;
-                return None;
-            }
+    fn finish_hold(&mut self, live: &mut Live<R::Session>) -> Done {
+        if let Some(partial) = live.partial.take().filter(|text| has_words(text))
+            && let Some(done) = self.on_final(live, &partial)
+        {
+            return done;
         }
         let text = live.text.text();
         if !has_words(&text) {
             self.hold_end = Some("empty");
-            return Some(Done::Failed(CaptureError::NothingHeard));
+            return Done::Failed(CaptureError::NothingHeard);
         }
         self.hold_end = Some("released");
-        Some(Done::Accepted(CaptureRequest {
+        Done::Accepted(CaptureRequest {
             route: CaptureRoute::Paste,
             text,
-        }))
+        })
     }
 
     /// Says that `count` presses of the dictation key started nothing, and why.
@@ -1519,15 +1510,16 @@ where
         live: Option<Live<R::Session>>,
         dictation: &Dictation,
     ) -> CaptureOutcome {
-        let (session, sent, scratched, recoverable_text) = match live {
+        let (session, sent, scratched, recoverable_text, has_endings) = match live {
             // Dropping the rest stops any cue still playing.
             Some(live) => (
                 Some(live.session),
                 live.sent,
                 live.text.scratched(),
                 recoverable(&live.text),
+                live.text.has_endings(),
             ),
-            None => (None, Vec::new(), false, None),
+            None => (None, Vec::new(), false, None, true),
         };
         if !sent.is_empty() {
             self.recorder
@@ -1558,7 +1550,8 @@ where
             Done::Accepted(request) => {
                 self.gate.set_enabled(false);
                 if self.end_with(Cue::Accepted, decided, session, true).await {
-                    self.reconcile(request, &sent, scratched, dictation).await
+                    self.reconcile(request, &sent, scratched, has_endings, dictation)
+                        .await
                 } else {
                     CaptureOutcome::cancelled_with(request.text)
                 }
@@ -1604,6 +1597,7 @@ where
         request: CaptureRequest,
         sent: &[Frame],
         scratched: bool,
+        has_endings: bool,
         dictation: &Dictation,
     ) -> CaptureOutcome {
         let Some(settings) = self
@@ -1634,7 +1628,7 @@ where
             Some(Ok(raw)) => {
                 self.recorder
                     .text(dictation, format!("second transcription: {raw}"));
-                match self.agreed(&raw, request.route) {
+                match self.agreed(&raw, request.route, has_endings) {
                     Some(text) => ("ok", Some(text)),
                     None => ("error", None),
                 }
@@ -1662,7 +1656,15 @@ where
     }
 
     /// The secondary transcript without its ending phrase, when it ends the way the user did.
-    fn agreed(&self, raw: &str, route: CaptureRoute) -> Option<String> {
+    /// A capture without endings (a hold) agrees with the whole transcript as dictated text.
+    fn agreed(&self, raw: &str, route: CaptureRoute, has_endings: bool) -> Option<String> {
+        if !has_endings {
+            let mut parser = CaptureSession::without_endings();
+            return match parser.on_final(raw, Instant::now(), false) {
+                Ok(_) => Some(parser.text()).filter(|text| !text.is_empty()),
+                Err(_) => None,
+            };
+        }
         let mut parser = CaptureSession::new(self.endings.clone(), self.pauses);
         let mut text = match parser.on_final(raw, Instant::now(), false).ok()? {
             FinalStep::Armed(pending) if pending.route == route => pending.text,

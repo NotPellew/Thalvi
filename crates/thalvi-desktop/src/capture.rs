@@ -364,7 +364,7 @@ pub struct CaptureFullError;
 /// Pure and synchronous; the caller supplies every instant.
 #[derive(Clone, Debug)]
 pub struct CaptureSession {
-    endings: Endings,
+    endings: Option<Endings>,
     pauses: EndingPauses,
     pieces: Vec<String>,
     scratched: bool,
@@ -375,12 +375,31 @@ impl CaptureSession {
     #[must_use]
     pub fn new(endings: Endings, pauses: EndingPauses) -> Self {
         Self {
-            endings,
+            endings: Some(endings),
             pauses,
             pieces: Vec::new(),
             scratched: false,
             pending: None,
         }
+    }
+
+    /// A capture opened by holding the dictation key: no spoken phrase is an ending, so
+    /// every word is dictated text.
+    #[must_use]
+    pub fn without_endings() -> Self {
+        Self {
+            endings: None,
+            pauses: EndingPauses::default(),
+            pieces: Vec::new(),
+            scratched: false,
+            pending: None,
+        }
+    }
+
+    /// Whether spoken phrases can end or edit this capture.
+    #[must_use]
+    pub fn has_endings(&self) -> bool {
+        self.endings.is_some()
     }
 
     /// Everything captured so far; an armed ending's phrase is still in it until delivery.
@@ -440,7 +459,11 @@ impl CaptureSession {
             .collect::<Vec<_>>()
             .join(" ");
         let cancelled_pending = self.pending.is_some();
-        match self.endings.find(&combined) {
+        let ending = self
+            .endings
+            .as_ref()
+            .and_then(|endings| endings.find(&combined));
+        match ending {
             Some((Ending::Cancel, before)) => {
                 self.pieces.clear();
                 self.pending = None;
@@ -1136,6 +1159,36 @@ mod tests {
         );
         assert_eq!(session.pending(), None);
         assert_eq!(session.text(), "first piece");
+    }
+
+    #[test]
+    fn a_session_without_endings_keeps_every_ending_phrase_as_text() {
+        for phrase in [
+            "paste that",
+            "finish dictation",
+            "submit",
+            "do that",
+            "scratch that",
+            "never mind",
+        ] {
+            let mut session = CaptureSession::without_endings();
+            let said = format!("fix the bug {phrase}");
+            assert_eq!(
+                session.on_final(&said, Instant::now(), false),
+                Ok(FinalStep::Continue {
+                    cancelled_pending: false
+                }),
+                "{phrase}"
+            );
+            assert_eq!(session.text(), said, "{phrase}");
+            assert_eq!(session.pending(), None, "{phrase}");
+            assert!(!session.scratched(), "{phrase}");
+            assert_eq!(
+                session.poll_ready(Instant::now() + Duration::from_secs(100)),
+                None,
+                "{phrase}"
+            );
+        }
     }
 
     #[test]
