@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::local::{SpeechModel, SpeechStream};
 use thalvi_desktop::models::{Asset, ModelKind, ModelStore};
+use thalvi_desktop::phrases::WordList;
 use thalvi_desktop::recognizer::RecognizerEvent;
 use thalvi_desktop::transducer::{Transducer, TransducerFiles};
 
@@ -43,12 +44,15 @@ async fn clip_frames() -> Vec<Frame> {
 #[ignore = "needs the speech model files in THALVI_SPEECH_MODEL"]
 async fn the_clip_is_recognized_in_full_as_partials_that_grow_and_a_final() {
     let dir = PathBuf::from(std::env::var("THALVI_SPEECH_MODEL").expect("THALVI_SPEECH_MODEL"));
-    let model = Transducer::load(&TransducerFiles {
-        encoder: dir.join("encoder.int8.onnx"),
-        decoder: dir.join("decoder.int8.onnx"),
-        joiner: dir.join("joiner.int8.onnx"),
-        tokens: dir.join("tokens.txt"),
-    })
+    let model = Transducer::load(
+        &TransducerFiles {
+            encoder: dir.join("encoder.int8.onnx"),
+            decoder: dir.join("decoder.int8.onnx"),
+            joiner: dir.join("joiner.int8.onnx"),
+            tokens: dir.join("tokens.txt"),
+        },
+        &WordList::default(),
+    )
     .expect("model loads");
     let mut stream = model.stream();
     let mut events = Vec::new();

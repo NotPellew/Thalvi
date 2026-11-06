@@ -7,9 +7,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use ort::session::Session;
 use ort::value::Tensor;
 
+use crate::boosting::{Joiner, PhraseTree, TreeState, greedy};
 use crate::fbank::{LogMel, MEL_BINS, MelFrame};
 use crate::local::{ModelSource, SpeechModel};
 use crate::models::{CatalogSpeech, ModelStore};
+use crate::phrases::WordList;
 use crate::recognizer::RecognizerError;
 use crate::runtime;
 use crate::segments::{FrameDecoder, Segments};
@@ -18,8 +20,6 @@ use crate::segments::{FrameDecoder, Segments};
 const ENDPOINT_MS: usize = 600;
 /// One feature frame is 10 ms.
 const FRAME_MS: usize = 10;
-/// The most tokens one encoder frame may emit.
-const MAX_TOKENS_PER_FRAME: usize = 10;
 
 /// The files of one exported model.
 #[derive(Clone, Debug)]
@@ -139,6 +139,7 @@ pub struct Transducer {
     sessions: Arc<Mutex<Sessions>>,
     shape: Arc<Shape>,
     tokens: Arc<Vec<String>>,
+    phrases: Arc<PhraseTree>,
 }
 
 fn open(path: &Path, threads: usize) -> Result<Session, TransducerError> {
@@ -167,7 +168,7 @@ impl Transducer {
     /// # Errors
     /// Fails when a file cannot be read, is not a streaming `NeMo` transducer, or has features other
     /// than 128 mel bins.
-    pub fn load(files: &TransducerFiles) -> Result<Self, TransducerError> {
+    pub fn load(files: &TransducerFiles, phrases: &WordList) -> Result<Self, TransducerError> {
         let threads = std::thread::available_parallelism().map_or(2, |n| n.get().min(4));
         let encoder = open(&files.encoder, threads)?;
         let decoder = open(&files.decoder, 1)?;
@@ -215,6 +216,7 @@ impl Transducer {
                 &"its tokens do not match the encoder",
             ));
         }
+        let phrases = PhraseTree::new(phrases, &tokens[..shape.blank]);
         Ok(Self {
             sessions: Arc::new(Mutex::new(Sessions {
                 encoder,
@@ -223,6 +225,7 @@ impl Transducer {
             })),
             shape: Arc::new(shape),
             tokens: Arc::new(tokens),
+            phrases: Arc::new(phrases),
         })
     }
 }
@@ -236,6 +239,7 @@ impl SpeechModel for Transducer {
         let decoder = TransducerStream {
             sessions: Arc::clone(&self.sessions),
             carried: Carried::empty(&shape),
+            phrases: Arc::clone(&self.phrases),
             shape,
             mel: LogMel::new(),
             features: VecDeque::new(),
@@ -268,6 +272,8 @@ struct Carried {
     encoder: EncoderCache,
     /// `None` until the next decode, then the predictor primed with the blank token.
     predictor: Option<Predictor>,
+    /// Where the text so far stands in the word list.
+    phrases: TreeState,
 }
 
 impl Carried {
@@ -275,6 +281,7 @@ impl Carried {
         Self {
             encoder: EncoderCache::empty(shape),
             predictor: None,
+            phrases: TreeState::default(),
         }
     }
 
@@ -282,11 +289,12 @@ impl Carried {
     /// words after a pause are lost.
     fn next_segment(&mut self) {
         self.predictor = None;
+        self.phrases = TreeState::default();
     }
 }
 
 /// The predictor's output for the last token and its recurrent state.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct Predictor {
     output: Vec<f32>,
     states: [Vec<f32>; 2],
@@ -297,6 +305,7 @@ struct Predictor {
 pub struct TransducerStream {
     sessions: Arc<Mutex<Sessions>>,
     shape: Arc<Shape>,
+    phrases: Arc<PhraseTree>,
     mel: LogMel,
     features: VecDeque<MelFrame>,
     carried: Carried,
@@ -358,81 +367,95 @@ impl TransducerStream {
         Ok((encoded, frames))
     }
 
-    fn run_predictor(
-        &self,
-        sessions: &mut Sessions,
-        token: usize,
-        states: [Vec<f32>; 2],
-    ) -> Result<Predictor, RecognizerError> {
-        let (hidden, layers) = (self.shape.hidden, self.shape.layers);
-        let [first, second] = states;
-        let inputs = ort::inputs![
-            Tensor::from_array((dims(&[1, 1]), vec![i32::try_from(token).unwrap_or(0)]))
-                .map_err(failed)?,
-            Tensor::from_array((dims(&[1]), vec![1_i32])).map_err(failed)?,
-            Tensor::from_array((dims(&[layers, 1, hidden]), first)).map_err(failed)?,
-            Tensor::from_array((dims(&[layers, 1, hidden]), second)).map_err(failed)?,
-        ];
-        let outputs = sessions.decoder.run(inputs).map_err(failed)?;
-        let take = |index: usize| -> Result<Vec<f32>, RecognizerError> {
-            let (_, values) = outputs[index].try_extract_tensor::<f32>().map_err(failed)?;
-            Ok(values.to_vec())
-        };
-        Ok(Predictor {
-            output: take(0)?,
-            states: [take(2)?, take(3)?],
-        })
-    }
-
-    /// Greedy search over one chunk's encoder frames, as sherpa-onnx does.
+    /// Greedy search over one chunk's encoder frames, as sherpa-onnx does, favouring the word list.
     fn decode(
         &mut self,
         sessions: &mut Sessions,
         encoded: &[f32],
         frames: usize,
     ) -> Result<Vec<Vec<usize>>, RecognizerError> {
-        let dim = self.shape.encoder_dim;
-        let blank = self.shape.blank;
-        let mut predictor = if let Some(predictor) = self.carried.predictor.take() {
+        let predictor = if let Some(predictor) = self.carried.predictor.take() {
             predictor
         } else {
             let zeros = || vec![0.0; self.shape.layers * self.shape.hidden];
-            self.run_predictor(sessions, blank, [zeros(), zeros()])?
+            run_predictor(sessions, &self.shape, self.shape.blank, [zeros(), zeros()])?
         };
-        let mut emitted = Vec::with_capacity(frames);
-        for t in 0..frames {
-            let mut tokens = Vec::new();
-            let frame: Vec<f32> = (0..dim).map(|c| encoded[c * frames + t]).collect();
-            for _ in 0..MAX_TOKENS_PER_FRAME {
-                let inputs = ort::inputs![
-                    Tensor::from_array((dims(&[1, dim, 1]), frame.clone())).map_err(failed)?,
-                    Tensor::from_array((
-                        dims(&[1, self.shape.hidden, 1]),
-                        predictor.output.clone()
-                    ))
-                    .map_err(failed)?,
-                ];
-                let best = {
-                    let outputs = sessions.joiner.run(inputs).map_err(failed)?;
-                    let (_, logits) = outputs[0].try_extract_tensor::<f32>().map_err(failed)?;
-                    logits
-                        .iter()
-                        .enumerate()
-                        .fold((0, f32::NEG_INFINITY), |best, (id, value)| {
-                            if *value > best.1 { (id, *value) } else { best }
-                        })
-                        .0
-                };
-                if best == blank {
-                    break;
-                }
-                tokens.push(best);
-                predictor = self.run_predictor(sessions, best, predictor.states)?;
-            }
-            emitted.push(tokens);
-        }
-        self.carried.predictor = Some(predictor);
+        let mut joiner = OnnxJoiner {
+            sessions,
+            shape: &self.shape,
+            encoded,
+            frames,
+            predictor,
+        };
+        let emitted = greedy(
+            &mut joiner,
+            &self.phrases,
+            &mut self.carried.phrases,
+            frames,
+        )?;
+        self.carried.predictor = Some(joiner.predictor);
         Ok(emitted)
+    }
+}
+
+fn run_predictor(
+    sessions: &mut Sessions,
+    shape: &Shape,
+    token: usize,
+    states: [Vec<f32>; 2],
+) -> Result<Predictor, RecognizerError> {
+    let (hidden, layers) = (shape.hidden, shape.layers);
+    let [first, second] = states;
+    let inputs = ort::inputs![
+        Tensor::from_array((dims(&[1, 1]), vec![i32::try_from(token).unwrap_or(0)]))
+            .map_err(failed)?,
+        Tensor::from_array((dims(&[1]), vec![1_i32])).map_err(failed)?,
+        Tensor::from_array((dims(&[layers, 1, hidden]), first)).map_err(failed)?,
+        Tensor::from_array((dims(&[layers, 1, hidden]), second)).map_err(failed)?,
+    ];
+    let outputs = sessions.decoder.run(inputs).map_err(failed)?;
+    let take = |index: usize| -> Result<Vec<f32>, RecognizerError> {
+        let (_, values) = outputs[index].try_extract_tensor::<f32>().map_err(failed)?;
+        Ok(values.to_vec())
+    };
+    Ok(Predictor {
+        output: take(0)?,
+        states: [take(2)?, take(3)?],
+    })
+}
+
+/// The ONNX joiner and predictor over one chunk's encoder output.
+struct OnnxJoiner<'a> {
+    sessions: &'a mut Sessions,
+    shape: &'a Shape,
+    encoded: &'a [f32],
+    frames: usize,
+    predictor: Predictor,
+}
+
+impl Joiner for OnnxJoiner<'_> {
+    fn logits(&mut self, frame: usize) -> Result<Vec<f32>, RecognizerError> {
+        let dim = self.shape.encoder_dim;
+        let column: Vec<f32> = (0..dim)
+            .map(|c| self.encoded[c * self.frames + frame])
+            .collect();
+        let inputs = ort::inputs![
+            Tensor::from_array((dims(&[1, dim, 1]), column)).map_err(failed)?,
+            Tensor::from_array((
+                dims(&[1, self.shape.hidden, 1]),
+                self.predictor.output.clone()
+            ))
+            .map_err(failed)?,
+        ];
+        let outputs = self.sessions.joiner.run(inputs).map_err(failed)?;
+        let (_, logits) = outputs[0].try_extract_tensor::<f32>().map_err(failed)?;
+        Ok(logits.to_vec())
+    }
+
+    fn advance(&mut self, token: usize) -> Result<(), RecognizerError> {
+        let states = std::mem::take(&mut self.predictor.states);
+        self.predictor = run_predictor(self.sessions, self.shape, token, states)?;
+        Ok(())
     }
 }
 
@@ -482,12 +505,17 @@ impl SpeechChoice {
 pub struct TransducerSource {
     store: ModelStore,
     choice: SpeechChoice,
+    phrases: WordList,
 }
 
 impl TransducerSource {
     #[must_use]
-    pub fn new(store: ModelStore, choice: SpeechChoice) -> Self {
-        Self { store, choice }
+    pub fn new(store: ModelStore, choice: SpeechChoice, phrases: &WordList) -> Self {
+        Self {
+            store,
+            choice,
+            phrases: phrases.clone(),
+        }
     }
 
     /// Whether loading needs no download: a model folder, or a catalog model already on disk.
@@ -536,7 +564,8 @@ impl ModelSource for TransducerSource {
 
     async fn load(&self) -> Result<Transducer, RecognizerError> {
         let files = self.files().await?;
-        tokio::task::spawn_blocking(move || Transducer::load(&files))
+        let phrases = self.phrases.clone();
+        tokio::task::spawn_blocking(move || Transducer::load(&files, &phrases))
             .await
             .map_err(|_| RecognizerError::said("The speech model could not be loaded."))?
             .map_err(|error| RecognizerError::said(error.to_string()))
@@ -713,6 +742,7 @@ mod tests {
                 output: vec![0.5],
                 states: [vec![0.1], vec![0.2]],
             }),
+            phrases: TreeState::default(),
         };
         carried.next_segment();
         assert!(carried.predictor.is_none());
