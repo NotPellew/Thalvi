@@ -7,6 +7,7 @@ use crate::frame::Frame;
 use crate::local::{LocalRecognizer, LocalSession};
 use crate::metrics::Metrics;
 use crate::models::ModelStore;
+use crate::phrases::WordList;
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, ServerRecognizer,
     ServerSession, ServerUrl,
@@ -34,11 +35,12 @@ impl Chosen {
         server: &ServerUrl,
         store: ModelStore,
         metrics: Metrics,
+        phrases: &WordList,
     ) -> Self {
         match engine {
             SttEngine::Server => Self::Server(ServerRecognizer::new(server.clone())),
             SttEngine::Local(choice) => Self::Local(Arc::new(LocalRecognizer::new(
-                TransducerSource::new(store, choice.clone()),
+                TransducerSource::new(store, choice.clone(), phrases),
                 choice.label(),
                 metrics,
             ))),

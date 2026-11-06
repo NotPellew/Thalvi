@@ -1,6 +1,7 @@
 //! Thalvi desktop app: wake, capture, cues and delivery into the focused window.
 
 pub mod audio;
+pub mod boosting;
 pub mod capture;
 pub mod chosen;
 pub mod config;

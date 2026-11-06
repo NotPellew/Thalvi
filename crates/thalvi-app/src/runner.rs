@@ -475,7 +475,13 @@ impl Runner {
         let wake = wake.map_err(|error| Failure::of(&error))?;
         let gate = InputGate::default();
         let metrics = recorder.metrics();
-        let recognizer = Chosen::new(&config.stt.engine, &config.server, store, metrics.clone());
+        let recognizer = Chosen::new(
+            &config.stt.engine,
+            &config.server,
+            store,
+            metrics.clone(),
+            &config.stt.phrases,
+        );
         let local = recognizer.local();
         let (engine, handle) = Engine::new(
             Parts {
@@ -1203,6 +1209,7 @@ mod tests {
     use std::time::Duration;
 
     use thalvi_desktop::models::CatalogSpeech;
+    use thalvi_desktop::phrases::WordList;
     use thalvi_desktop::transducer::SpeechChoice;
 
     use super::*;
@@ -1265,7 +1272,8 @@ mod tests {
             } else {
                 SpeechChoice::Catalog(catalog)
             };
-            let source = TransducerSource::new(ModelStore::in_dir(&dir), choice);
+            let source =
+                TransducerSource::new(ModelStore::in_dir(&dir), choice, &WordList::default());
             let local = LocalRecognizer::new(source, "test", Recorder::disabled().metrics());
             let (out, status) = watch::channel(Status::Paused);
             let publisher = Publisher::new(out, EndingPauses::default());

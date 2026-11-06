@@ -206,7 +206,8 @@ With it, Settings → Speech shows a **Word list**: names and terms, one per
 line, whose spelling recognition should favour (such as "Cybrex2"). Saving
 sends the list to the server, which keeps it and uses it for dictation and
 conversations. Meta's recognizer doesn't support it, so the field is hidden
-then.
+then. Dictation on this computer always uses the list, so the field shows
+whenever speech is recognized there.
 
 ### Voices
 
