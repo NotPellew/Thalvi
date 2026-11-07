@@ -9,6 +9,7 @@ data/
 .DS_Store
 .venv/
 __pycache__/
+mutants.out*/
 
 # Model weights and checkpoints
 *.safetensors

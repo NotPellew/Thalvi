@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+# `LLM_API_KEY= LLM_REASONING_EFFORT=` in the verify script sets an empty key.
+[[allowlists]]
+targetRules = ["generic-api-key"]
+regexes = ['''^LLM_REASONING_EFFORT=$''']
