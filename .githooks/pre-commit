@@ -1,0 +1,8 @@
+#!/bin/sh
+# Refuses a commit whose staged changes hold a secret. Without gitleaks it warns
+# and lets the commit through; CI scans the history either way.
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks is not installed, so staged changes were not scanned for secrets" >&2
+  exit 0
+fi
+exec gitleaks git --staged --redact --no-banner --verbose --log-level warn .

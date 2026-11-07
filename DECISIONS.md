@@ -213,3 +213,15 @@ areas your change touches. Editing rules are in
 - **Commit checks run on `pull_request`.** They need only read access, and
   changes to them take effect in the PR that makes them. Rejected:
   `pull_request_target`, which runs the base branch's workflow definition.
+- **Releases wait for approval.** `publish` runs in a `release` environment only the developer can approve.
+  Why: agent tokens can push tags, and a tag builds and publishes to users. Rejected: a tag ruleset (the token
+  acts as the developer, so any bypass for the developer also lets agents through).
+- **Dependency and secret gates.** cargo-deny checks advisories, licences and sources; gitleaks scans
+  history in CI and staged changes in a hook. Why: nothing else watched Rust advisories, the binaries link
+  every crate, and on a public repo a pushed secret has leaked. Rejected: bans (nothing to ban), flagging
+  unmaintained transitive crates (no upgrade exists), a hook that refuses when gitleaks is missing.
+- **Mutation testing advises on the diff.** cargo-mutants reports survivors in a PR's changed Rust as
+  annotations, on Linux. Why: agents write code and tests, and it found real gaps, but it can't tell those from
+  equivalent mutants. Rejected: a required gate, whole-workspace runs (3,197 mutants, about 18 hours on a CI runner), Windows runs.
+- **Property tests only where event order is the rule.** Today only the hold hook. Why: it found what tables
+  missed there; on streaming and capture code it found nothing tables wouldn't. Rejected: properties everywhere.

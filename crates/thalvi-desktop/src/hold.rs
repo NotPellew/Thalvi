@@ -634,6 +634,8 @@ impl HoldHook {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::{Just, Strategy};
+
     use super::*;
 
     #[test]
@@ -679,11 +681,22 @@ mod tests {
     const ALT: u16 = 0xA4;
     const RIGHT_ALT: u16 = 0xA5;
     const SHIFT: u16 = 0xA0;
+    const RIGHT_SHIFT: u16 = 0xA1;
     const CTRL: u16 = 0xA2;
+    const RIGHT_CTRL: u16 = 0xA3;
     const WIN: u16 = 0x5B;
+    const RIGHT_WIN: u16 = 0x5C;
     const Z: u16 = 0x5A;
     const X: u16 = 0x58;
     const F9: u16 = 0x78;
+    /// A hold key with the keys that can start, prolong or spoil it: picking from every key would
+    /// rarely put down an exact chord.
+    const KEYS_OF_A_HOLD: [(&str, &[u16]); 4] = [
+        ("F9", &[F9, ALT, Z]),
+        ("Alt+KeyZ", &[ALT, RIGHT_ALT, SHIFT, Z, X]),
+        ("Ctrl+Alt+KeyZ", &[CTRL, RIGHT_CTRL, ALT, Z]),
+        ("Shift+Win+KeyX", &[SHIFT, RIGHT_SHIFT, WIN, RIGHT_WIN, X]),
+    ];
 
     fn scan_of(vk: u16) -> u16 {
         match vk {
@@ -1068,5 +1081,56 @@ mod tests {
         assert_eq!(presses.take_lost(), 0, "nothing was passed over yet");
         assert!(presses.take().is_none());
         assert_eq!(presses.take_lost(), 1, "the tap is counted once");
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn any_key_order_leaves_one_hold_at_a_time_and_the_program_with_balanced_keys(
+            (key, steps) in proptest::sample::select(&KEYS_OF_A_HOLD[..]).prop_flat_map(|(key, keys)| {
+                let step = (proptest::sample::select(keys), proptest::bool::ANY);
+                (Just(key), proptest::collection::vec(step, 0..40))
+            }),
+            windows_lags in proptest::bool::ANY,
+        ) {
+            let mut hook = HoldHook::new(HoldKey::parse(key).unwrap());
+            let mut keyboard = std::collections::BTreeSet::new();
+            let mut program = std::collections::BTreeSet::new();
+            let mut holding = false;
+            let mut left_down = std::collections::BTreeSet::new();
+            let mut events = Vec::new();
+            for (vk, repeats) in steps {
+                let is_down = left_down.contains(&vk);
+                if !repeats && is_down {
+                    left_down.remove(&vk);
+                    events.push((vk, false));
+                } else if !repeats || is_down {
+                    left_down.insert(vk);
+                    events.push((vk, true));
+                }
+            }
+            events.extend(left_down.into_iter().map(|vk| (vk, false)));
+            for (vk, down) in events {
+                let before = keyboard.clone();
+                if down {
+                    keyboard.insert(vk);
+                } else {
+                    keyboard.remove(&vk);
+                }
+                let seen = if windows_lags { &before } else { &keyboard };
+                let decision = hook.on_event(event(vk, down), |vk| seen.contains(&vk));
+                if let Some(change) = decision.change {
+                    proptest::prop_assert_ne!(change, holding, "a hold starts and ends in turn");
+                    holding = change;
+                }
+                if decision.verdict == Verdict::Swallow {
+                    proptest::prop_assert!(!program.contains(&vk), "the program saw {vk:#x} go down, so it sees it go up");
+                } else if down {
+                    program.insert(vk);
+                } else {
+                    proptest::prop_assert!(program.remove(&vk), "the program never saw {vk:#x} go down");
+                }
+            }
+            proptest::prop_assert!(!holding, "every key is up, so the hold is over");
+        }
     }
 }

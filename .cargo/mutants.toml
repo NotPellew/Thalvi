@@ -1,0 +1,7 @@
+# Compiled only on Windows, or run only with speech model files CI doesn't have: survivors here say nothing.
+exclude_globs = [
+    "crates/thalvi-desktop/src/host/windows.rs",
+    "crates/thalvi-desktop/src/host/windows/**",
+    "crates/thalvi-app/src/menu_entry/windows.rs",
+]
+exclude_re = ["approval::", "OnnxJoiner", "TransducerStream::decode", "run_predictor"]
