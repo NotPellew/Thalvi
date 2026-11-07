@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::Path;
 
-use super::gnome::{Clipboard, Gnome};
+use super::gnome::{self, Clipboard, Gnome};
 use super::hyprland::{Hyprland, Window};
 use super::{App, Delivered, HoldSource, Host, HostError, StateServer, TypedText, WebUrl, state};
 use crate::hold::HoldKey;
@@ -82,7 +82,54 @@ impl fmt::Display for Target {
     }
 }
 
+/// Where Thalvi cannot use `XWayland` on GNOME, and so cannot open a window.
+fn no_xwayland() -> HostError {
+    HostError::Unsupported(
+        "Thalvi opens its windows through XWayland on GNOME and could not reach it. Install XWayland (on Ubuntu, the xwayland package) and log in again, then start Thalvi."
+            .to_owned(),
+    )
+}
+
+/// On GNOME, GTK runs on the X11 backend, since Mutter hands a Wayland window focus when it
+/// appears and takes no placement from it; `init` then proves `XWayland` answers.
+fn prepare_toolkit_for(
+    session: Option<Session>,
+    allow_backends: impl FnOnce(&str),
+    init: impl FnOnce() -> bool,
+) -> Result<(), HostError> {
+    match session {
+        Some(Session::Gnome) => {
+            allow_backends("x11");
+            init().then_some(()).ok_or_else(no_xwayland)
+        }
+        Some(Session::Hyprland) | None => Ok(()),
+    }
+}
+
 impl Desktop {
+    /// Chooses GTK's windowing backend for this desktop. Call before anything starts GTK,
+    /// including [`Self::show_error`]; a desktop Thalvi does not support is reported by
+    /// [`Self::detect`] instead.
+    ///
+    /// # Errors
+    /// [`HostError::Unsupported`] when GNOME's `XWayland` cannot be reached.
+    pub fn prepare_toolkit() -> Result<(), HostError> {
+        prepare_toolkit_for(
+            Session::detect().ok(),
+            gtk::gdk::set_allowed_backends,
+            || gtk::init().is_ok(),
+        )
+    }
+
+    /// Settles a window's platform hints before it first appears, so it never takes focus.
+    pub fn settle_overlay_window(&self, window: &gtk::ApplicationWindow) {
+        match self {
+            // Hyprland's window rules from `prepare_overlay` do this.
+            Self::Hyprland(_) => {}
+            Self::Gnome(_) => gnome::keep_unfocused(window),
+        }
+    }
+
     /// # Errors
     /// [`HostError::Unsupported`] naming this desktop unless it is Hyprland or GNOME Wayland.
     pub fn detect() -> Result<Self, HostError> {
@@ -277,6 +324,29 @@ mod tests {
                 expected,
                 "{signature:?} {desktop:?} {session_type:?}"
             );
+        }
+    }
+
+    #[test]
+    fn only_gnome_runs_gtk_on_x11_and_a_missing_xwayland_is_a_plain_error() {
+        // (session, whether XWayland answers, backends allowed, result)
+        for (session, xwayland, allowed, ok) in [
+            (Some(Session::Gnome), true, Some("x11"), true),
+            (Some(Session::Gnome), false, Some("x11"), false),
+            (Some(Session::Hyprland), false, None, true),
+            (None, false, None, true),
+        ] {
+            let mut chosen = None;
+            let result = prepare_toolkit_for(
+                session,
+                |backends| chosen = Some(backends.to_owned()),
+                || xwayland,
+            );
+            assert_eq!(chosen.as_deref(), allowed, "{session:?}");
+            assert_eq!(result.is_ok(), ok, "{session:?} {xwayland}");
+            if !ok {
+                assert_eq!(result, Err(no_xwayland()));
+            }
         }
     }
 

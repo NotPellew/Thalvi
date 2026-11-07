@@ -1,9 +1,14 @@
-//! GNOME Wayland host: the clipboard and `gio`, since Mutter shows apps no focused window and takes no typed keys.
+//! GNOME Wayland host: the app's own X11 GTK clipboard and `gio`, since Mutter shows apps no focused window and takes no typed keys.
+
+mod toolkit;
+
+pub use self::toolkit::keep_unfocused;
+use self::toolkit::{Gtk, Toolkit};
 
 use std::fmt;
 use std::path::Path;
 
-use super::command::{CommandRunner, SystemRunner, tool, wl_copy};
+use super::command::{CommandRunner, SystemRunner, tool};
 use super::{App, Delivered, HoldSource, Host, HostError, TypedText, WebUrl};
 use crate::hold::HoldKey;
 
@@ -18,13 +23,17 @@ impl fmt::Display for Clipboard {
 }
 
 /// The GNOME Wayland desktop.
-pub struct Gnome<R = SystemRunner> {
+pub struct Gnome<R = SystemRunner, T = Gtk> {
     run: R,
+    toolkit: T,
 }
 
 impl Gnome {
     pub(super) fn system() -> Self {
-        Self { run: SystemRunner }
+        Self {
+            run: SystemRunner,
+            toolkit: Gtk,
+        }
     }
 
     /// GNOME cannot tell an app when a key is let go, so a held key cannot dictate.
@@ -45,7 +54,7 @@ impl Gnome {
     }
 }
 
-impl<R: CommandRunner> Gnome<R> {
+impl<R: CommandRunner, T: Toolkit> Gnome<R, T> {
     fn gio_open(&self, what: &str) -> Result<(), HostError> {
         self.run
             .run("gio", &["open", what], None)
@@ -54,7 +63,7 @@ impl<R: CommandRunner> Gnome<R> {
     }
 }
 
-impl<R: CommandRunner> Host for Gnome<R> {
+impl<R: CommandRunner, T: Toolkit> Host for Gnome<R, T> {
     type Target = Clipboard;
 
     // The overlay is an ordinary window here, and a click on it only focuses it.
@@ -82,11 +91,17 @@ impl<R: CommandRunner> Host for Gnome<R> {
                     .to_owned(),
             ));
         }
-        wl_copy(&self.run, text.as_str()).map(|()| Delivered::OnClipboard)
+        self.toolkit
+            .set_clipboard(text.as_str())
+            .map(|()| Delivered::OnClipboard)
     }
 
     fn copy(&self, text: &str) -> Result<(), HostError> {
-        wl_copy(&self.run, text)
+        // An empty copy would clear the clipboard instead of keeping anything.
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.toolkit.set_clipboard(text)
     }
 
     fn focus_app(&self, _app: &App) -> Result<Clipboard, HostError> {
@@ -103,25 +118,59 @@ impl<R: CommandRunner> Host for Gnome<R> {
         self.gio_open(&path.to_string_lossy())
     }
 
-    // Wayland apps cannot place their windows, so Mutter chooses where the overlay goes.
+    // The app runs on the X11 backend here, where a window can be placed below the panel.
     fn prepare_overlay(&self, _width: f64, _height: f64) -> Result<f64, HostError> {
-        Ok(0.0)
+        self.toolkit.work_area_top()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Mutex;
 
     use super::super::command::{CommandError, fakes::FakeRunner};
     use super::*;
 
-    fn host(
+    /// A clipboard that keeps what it is given, or refuses it, and a fixed work area.
+    #[derive(Default)]
+    struct FakeToolkit {
+        clipboard: Mutex<Vec<String>>,
+        refuse: Option<HostError>,
+    }
+
+    impl Toolkit for FakeToolkit {
+        fn set_clipboard(&self, text: &str) -> Result<(), HostError> {
+            if let Some(error) = &self.refuse {
+                return Err(error.clone());
+            }
+            self.clipboard.lock().unwrap().push(text.to_owned());
+            Ok(())
+        }
+
+        fn work_area_top(&self) -> Result<f64, HostError> {
+            Ok(32.0)
+        }
+    }
+
+    fn host_with(
+        toolkit: FakeToolkit,
         reply: impl Fn(&[String], Option<&str>) -> Result<String, CommandError> + Send + Sync + 'static,
-    ) -> Gnome<FakeRunner> {
+    ) -> Gnome<FakeRunner, FakeToolkit> {
         Gnome {
             run: FakeRunner::new(reply),
+            toolkit,
         }
+    }
+
+    fn host(
+        reply: impl Fn(&[String], Option<&str>) -> Result<String, CommandError> + Send + Sync + 'static,
+    ) -> Gnome<FakeRunner, FakeToolkit> {
+        host_with(FakeToolkit::default(), reply)
+    }
+
+    fn clipboard(host: &Gnome<FakeRunner, FakeToolkit>) -> Vec<String> {
+        host.toolkit.clipboard.lock().unwrap().clone()
     }
 
     fn typed(text: &str) -> TypedText {
@@ -139,23 +188,41 @@ mod tests {
                 Ok(Delivered::OnClipboard)
             );
         }
+        assert_eq!(clipboard(&host), ["café 👋 --help", "café 👋 --help"]);
         assert_eq!(
             host.run.commands(),
-            [
-                "wl-copy --type text/plain;charset=utf-8 <café 👋 --help>",
-                "wl-copy --type text/plain;charset=utf-8 <café 👋 --help>",
-            ]
+            Vec::<String>::new(),
+            "no tool runs: no wl-copy, no key, no focus"
         );
     }
 
     #[test]
+    fn copying_sets_the_clipboard_and_empty_text_leaves_it_alone() {
+        let host = host(|_, _| Ok(String::new()));
+        host.copy("kept").unwrap();
+        host.copy("").unwrap();
+        assert_eq!(clipboard(&host), ["kept"]);
+    }
+
+    #[test]
+    fn the_overlay_goes_below_the_panel_at_the_work_areas_top() {
+        let host = host(|_, _| Ok(String::new()));
+        assert_eq!(host.prepare_overlay(460.0, 200.0), Ok(32.0));
+    }
+
+    #[test]
     fn a_clipboard_that_cannot_be_set_or_text_that_is_empty_is_a_typed_reason() {
-        let missing = host(|_, _| Err(CommandError::NotInstalled("wl-copy".to_owned())));
+        let refused = HostError::NothingTyped("The clipboard did not answer.".to_owned());
+        let refusing = host_with(
+            FakeToolkit {
+                refuse: Some(refused.clone()),
+                ..FakeToolkit::default()
+            },
+            |_, _| Ok(String::new()),
+        );
         assert_eq!(
-            missing.deliver(&Clipboard, &typed("hi"), false),
-            Err(HostError::Unsupported(
-                "Desktop tool wl-copy is not installed.".to_owned()
-            ))
+            refusing.deliver(&Clipboard, &typed("hi"), false),
+            Err(refused)
         );
         let nothing = host(|_, _| Ok(String::new()));
         assert_eq!(
@@ -165,7 +232,7 @@ mod tests {
                     .to_owned()
             ))
         );
-        assert_eq!(nothing.run.commands(), Vec::<String>::new());
+        assert_eq!(clipboard(&nothing), Vec::<String>::new());
     }
 
     #[test]

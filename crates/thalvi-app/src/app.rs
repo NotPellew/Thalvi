@@ -319,6 +319,9 @@ fn start() -> Result<(), String> {
             (command, config)
         }
     };
+    // GTK's backend is fixed when it starts, which the builder below does.
+    #[cfg(target_os = "linux")]
+    Desktop::prepare_toolkit().map_err(|error| error.to_string())?;
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             act(app, relaunch_command(&args));
