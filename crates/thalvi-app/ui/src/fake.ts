@@ -3,6 +3,34 @@
 import type { AudioStatus, Backend, Draft, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status, WakeModelInfo } from "./contract.ts";
 import { LOOKS } from "./look.ts";
 
+const UNIFIED_LANGUAGES = [
+  "Bulgarian",
+  "Croatian",
+  "Czech",
+  "Danish",
+  "Dutch",
+  "English",
+  "Estonian",
+  "Finnish",
+  "French",
+  "German",
+  "Greek",
+  "Hungarian",
+  "Italian",
+  "Latvian",
+  "Lithuanian",
+  "Maltese",
+  "Polish",
+  "Portuguese",
+  "Romanian",
+  "Russian",
+  "Slovak",
+  "Slovenian",
+  "Spanish",
+  "Swedish",
+  "Ukrainian",
+];
+
 const SETTINGS: Settings = {
   server: "ws://127.0.0.1:8080",
   wake: {
@@ -84,10 +112,22 @@ export function fakeBackend(params: URLSearchParams): Backend {
   const speechModels: SpeechModelInfo[] = [
     {
       name: "nemotron_160ms",
-      title: "Nemotron Speech Streaming 0.6B",
-      description: "NVIDIA's English streaming recognizer, int8, answering every 160 ms. Runs on the CPU.",
+      title: "Nemotron Streaming",
+      description: "From NVIDIA: the lightest on the CPU, and text appears soonest. Mostly without punctuation. The default.",
       size: 661_919_416,
       source: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25",
+      license: "NVIDIA Open Model License",
+      languages: ["English"],
+      cached: false,
+    },
+    {
+      name: "unified_160ms",
+      title: "Nemotron Unified",
+      description: "From NVIDIA: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it needs a fast CPU and text appears about half a second later. Exported by Thalvi.",
+      size: 646_518_349,
+      source: "https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b",
+      license: "OpenMDW-1.1",
+      languages: UNIFIED_LANGUAGES,
       cached: false,
     },
   ];

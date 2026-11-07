@@ -269,12 +269,32 @@ because its config is broken, a message box names the problem and the file.
 
 By default the app streams your speech to the server's `/transcription` at
 `ws://127.0.0.1:8080` (Settings → Speech → Server address). To dictate without
-the server or a network, choose **On this computer** under Speech. The first
-use downloads about 650 MB; after that it works offline. Its text comes mostly
-without punctuation. Settings shows whether the model is downloaded and can
-download it, or you can point to your own model folder and check it before
-saving. The model is NVIDIA Nemotron Speech Streaming under the
+the server or a network, choose **On this computer** under Speech and pick a
+language (it only narrows the list of models) and a model. The first use of a model downloads it (about 650 MB);
+after that it works offline. A model you pick applies from the next capture, and
+a capture already running keeps the model it started with. Settings shows each
+model's size, license and languages in full, whether it is downloaded, and can download
+it, or you can point to your own model folder and check it before saving.
+Word errors below are on LibriSpeech (120 clips) and on 48 of the developer's
+own takes, int8 on the CPU, language detected automatically. The unified model
+also made 8.38% on German and 7.09% on Spanish (80 Multilingual LibriSpeech clips
+each).
+
+| Drop-down entry (config name) | Model | Languages | LibriSpeech | Developer's takes | Notes |
+|---|---|---|---|---|---|
+| Nemotron Streaming (`nemotron_160ms`, default) | Nemotron Speech Streaming 0.6B | English | 3.46% | 7.14% | Lightest on the CPU; text appears soonest. Mostly without punctuation. |
+| Nemotron Unified (`unified_160ms`) | Nemotron Unified ASR 0.6B | 25 European languages | 3.03% | 6.35% | Punctuation and capitals. Re-reads the last 6 s every 160 ms: about 70 ms of work per step on 4 cores of a Ryzen, so it needs a fast CPU, and text appears about 0.5 s later. Our own export, under OpenMDW-1.1. |
+
+Nemotron Speech Streaming at 80 ms and 560 ms (3.62% and 3.46% on LibriSpeech)
+are left out because they offer no real choice over 160 ms; either works as your
+own model folder. Parakeet TDT 0.6B v3 (3.19% on LibriSpeech, 11.41% on German,
+6.92% on Spanish) was rejected because it gives no live partials, and Nemotron
+3.5 multilingual because it made 15% word errors on the takes. Nemotron Speech
+Streaming is under the
 [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/).
+The unified model is NVIDIA's
+[Nemotron unified ASR](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b)
+under OpenMDW-1.1, exported to ONNX by Thalvi.
 
 **Second-pass transcription** (Settings → Speech, off by default) sends each
 accepted capture again to the endpoint you set there. Turning it off keeps the

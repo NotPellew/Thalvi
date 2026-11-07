@@ -37,12 +37,53 @@ export const WAKE_MODELS_INFO: WakeModelInfo[] = [
   { name: "hey_jarvis", title: "Hey Jarvis", size: 1_271_370, cached: false },
 ];
 
+const UNIFIED_LANGUAGES = [
+  "Bulgarian",
+  "Croatian",
+  "Czech",
+  "Danish",
+  "Dutch",
+  "English",
+  "Estonian",
+  "Finnish",
+  "French",
+  "German",
+  "Greek",
+  "Hungarian",
+  "Italian",
+  "Latvian",
+  "Lithuanian",
+  "Maltese",
+  "Polish",
+  "Portuguese",
+  "Romanian",
+  "Russian",
+  "Slovak",
+  "Slovenian",
+  "Spanish",
+  "Swedish",
+  "Ukrainian",
+];
+
 export const NEMOTRON: SpeechModelInfo = {
   name: "nemotron_160ms",
-  title: "Nemotron Speech Streaming 0.6B",
-  description: "NVIDIA's English streaming recognizer, int8, answering every 160 ms. Runs on the CPU.",
+  title: "Nemotron Streaming",
+  description: "NVIDIA's Nemotron Speech Streaming.",
   size: 661_919_416,
   source: "https://huggingface.co/example/nemotron",
+  license: "NVIDIA Open Model License",
+  languages: ["English"],
+  cached: false,
+};
+
+export const UNIFIED: SpeechModelInfo = {
+  name: "unified_160ms",
+  title: "Nemotron Unified",
+  description: "NVIDIA's Nemotron Unified ASR.",
+  size: 646_518_349,
+  source: "https://huggingface.co/example/unified",
+  license: "OpenMDW-1.1",
+  languages: UNIFIED_LANGUAGES,
   cached: false,
 };
 
@@ -105,7 +146,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     }),
     downloadWakeModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     pickWakeModelFile: vi.fn<() => Promise<string | null>>(() => Promise.resolve("/models/custom.onnx")),
-    listSpeechModels: vi.fn<() => Promise<SpeechModelInfo[]>>(() => Promise.resolve([{ ...NEMOTRON }])),
+    listSpeechModels: vi.fn<() => Promise<SpeechModelInfo[]>>(() => Promise.resolve([{ ...NEMOTRON }, { ...UNIFIED }])),
     downloadSpeechModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     onSpeechModelProgress: vi.fn((listener: (progress: SpeechModelProgress) => void) => speechListeners.push(listener)),
     openSpeechModelSource: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),

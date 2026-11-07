@@ -1,8 +1,9 @@
-//! Owns the `NeMo`-style log-mel features of the local speech model, computed incrementally from 16 kHz samples.
+//! Owns the log-mel features of the local speech models: incremental ones matching sherpa-onnx, and whole-buffer ones matching `NeMo`.
 //!
-//! Matches kaldi-native-fbank as sherpa-onnx configures it for `NeMo` transducers: 25 ms Hann
-//! windows every 10 ms centred on their frame (reflected at the start), 0.97 pre-emphasis, a
-//! 512-point power spectrum and 128 Slaney mel bins up to 8 kHz.
+//! [`LogMel`] matches kaldi-native-fbank as sherpa-onnx configures it for `NeMo` transducers: 25 ms
+//! Hann windows every 10 ms centred on their frame (reflected at the start), 0.97 pre-emphasis, a
+//! 512-point power spectrum and 128 Slaney mel bins up to 8 kHz. [`WindowMel`] matches `NeMo`'s own
+//! preprocessor, which the buffered model was trained with.
 
 use std::f32::consts::PI;
 use std::sync::Arc;
@@ -17,6 +18,13 @@ const SPECTRUM: usize = FFT_SIZE / 2 + 1;
 const PRE_EMPHASIS: f32 = 0.97;
 const MAX_HZ: f32 = 8_000.0;
 const SAMPLE_RATE: f32 = 16_000.0;
+/// Added before the logarithm by `NeMo`'s preprocessor, so digital silence has a finite feature.
+const NEMO_LOG_GUARD: f32 = 5.960_464_5e-8;
+/// Added to the standard deviation when `NeMo` normalizes each mel bin.
+const NEMO_STD_GUARD: f32 = 1e-5;
+
+/// Samples between the starts of two feature frames.
+pub const HOP: usize = SHIFT;
 
 /// One frame of log-mel features.
 pub type MelFrame = [f32; MEL_BINS];
@@ -124,9 +132,53 @@ impl Fft {
 
 /// What every stream computes with, built once.
 struct Tables {
-    window: [f32; WINDOW],
+    /// Hann window with period `WINDOW`, as kaldi has it.
+    periodic: [f32; WINDOW],
+    /// Hann window from 0 to 0 over `WINDOW` samples, as `NeMo` has it.
+    symmetric: [f32; WINDOW],
     filters: Vec<Filter>,
     fft: Fft,
+}
+
+impl Tables {
+    #[expect(clippy::cast_precision_loss, reason = "indices are far below 2^24")]
+    fn new() -> Arc<Self> {
+        let hann = |period: usize| {
+            std::array::from_fn(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / period as f32).cos())
+        };
+        Arc::new(Self {
+            periodic: hann(WINDOW),
+            symmetric: hann(WINDOW - 1),
+            filters: filters(),
+            fft: Fft::new(),
+        })
+    }
+
+    /// The mel energies of a pre-emphasized `wave` under `window`, through `log`.
+    fn mel(
+        &self,
+        wave: &[f32; WINDOW],
+        window: &[f32; WINDOW],
+        log: impl Fn(f32) -> f32,
+    ) -> MelFrame {
+        let mut re = [0.0; FFT_SIZE];
+        let mut im = [0.0; FFT_SIZE];
+        for (i, (value, weight)) in wave.iter().zip(window).enumerate() {
+            re[i] = value * weight;
+        }
+        self.fft.run(&mut re, &mut im);
+        let power: [f32; SPECTRUM] = std::array::from_fn(|i| re[i] * re[i] + im[i] * im[i]);
+        std::array::from_fn(|bin| {
+            let filter = &self.filters[bin];
+            let energy: f32 = filter
+                .weights
+                .iter()
+                .zip(&power[filter.first..])
+                .map(|(weight, power)| weight * power)
+                .sum();
+            log(energy)
+        })
+    }
 }
 
 /// Turns a stream of samples into log-mel frames as soon as each frame's window is complete.
@@ -147,16 +199,9 @@ impl Default for LogMel {
 
 impl LogMel {
     #[must_use]
-    #[expect(clippy::cast_precision_loss, reason = "indices are far below 2^24")]
     pub fn new() -> Self {
-        let window =
-            std::array::from_fn(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / WINDOW as f32).cos());
         Self {
-            tables: Arc::new(Tables {
-                window,
-                filters: filters(),
-                fft: Fft::new(),
-            }),
+            tables: Tables::new(),
             samples: Vec::new(),
             offset: 0,
             frames: 0,
@@ -201,23 +246,97 @@ impl LogMel {
             wave[i] -= PRE_EMPHASIS * wave[i - 1];
         }
         wave[0] -= PRE_EMPHASIS * wave[0];
-        let mut re = [0.0; FFT_SIZE];
-        let mut im = [0.0; FFT_SIZE];
-        for (i, (value, weight)) in wave.iter().zip(&self.tables.window).enumerate() {
-            re[i] = value * weight;
-        }
-        self.tables.fft.run(&mut re, &mut im);
-        let power: [f32; SPECTRUM] = std::array::from_fn(|i| re[i] * re[i] + im[i] * im[i]);
-        std::array::from_fn(|bin| {
-            let filter = &self.tables.filters[bin];
-            let energy: f32 = filter
-                .weights
-                .iter()
-                .zip(&power[filter.first..])
-                .map(|(weight, power)| weight * power)
-                .sum();
+        self.tables.mel(&wave, &self.tables.periodic, |energy| {
             energy.max(f32::EPSILON).ln()
         })
+    }
+}
+
+/// Features of a whole buffer of speech, recomputed from its first sample each time.
+#[derive(Clone)]
+pub struct WindowMel {
+    tables: Arc<Tables>,
+}
+
+impl Default for WindowMel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WindowMel {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            tables: Tables::new(),
+        }
+    }
+
+    /// The features `NeMo`'s preprocessor makes of `speech` followed by silence: one frame per
+    /// [`HOP`] samples, each mel bin normalized over those frames alone.
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_wrap,
+        clippy::cast_precision_loss,
+        reason = "positions and counts stay far below 2^24"
+    )]
+    pub fn features(&self, speech: &[f32]) -> Vec<MelFrame> {
+        let emphasized: Vec<f32> = speech
+            .iter()
+            .enumerate()
+            .map(|(at, value)| {
+                value
+                    - if at == 0 {
+                        0.0
+                    } else {
+                        speech[at - 1] * PRE_EMPHASIS
+                    }
+            })
+            .collect();
+        let at = |index: isize| -> f32 {
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| emphasized.get(index))
+                .copied()
+                .unwrap_or(0.0)
+        };
+        let count = speech.len() / HOP;
+        let mut frames: Vec<MelFrame> = (0..count)
+            .map(|number| {
+                let start = (number * HOP) as isize - (WINDOW / 2) as isize;
+                let wave: [f32; WINDOW] = std::array::from_fn(|i| at(start + i as isize));
+                self.tables.mel(&wave, &self.tables.symmetric, |energy| {
+                    (energy + NEMO_LOG_GUARD).ln()
+                })
+            })
+            .collect();
+        if frames.is_empty() {
+            return frames;
+        }
+        for bin in 0..MEL_BINS {
+            // Centred on the first frame so that a constant bin has exactly no deviation.
+            let reference = frames[0][bin];
+            let mean = reference
+                + frames
+                    .iter()
+                    .map(|frame| frame[bin] - reference)
+                    .sum::<f32>()
+                    / count as f32;
+            let variance = if count > 1 {
+                frames
+                    .iter()
+                    .map(|frame| (frame[bin] - mean).powi(2))
+                    .sum::<f32>()
+                    / (count - 1) as f32
+            } else {
+                0.0
+            };
+            let deviation = variance.sqrt() + NEMO_STD_GUARD;
+            for frame in &mut frames {
+                frame[bin] = (frame[bin] - mean) / deviation;
+            }
+        }
+        frames
     }
 }
 
@@ -290,5 +409,72 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn whole_buffer_features_match_nemo_and_are_normalized_over_the_speech_alone() {
+        // Expected values come from `NeMo`'s FilterbankFeatures with the unified model's
+        // preprocessor settings, given this noise followed by silence in a longer buffer.
+        let expected: [(usize, [f32; 6], f32, f32); 4] = [
+            (
+                0,
+                [0.123, -0.1164, -0.0739, -0.5342, -0.8301, -1.6341],
+                -109.075,
+                -2.1645,
+            ),
+            (
+                1,
+                [-0.3904, -0.7264, -0.5874, -0.2659, -0.2386, -0.3639],
+                -6.863,
+                -0.9049,
+            ),
+            (
+                10,
+                [-0.0101, -0.8095, -1.4228, -0.4722, 0.259, 0.5591],
+                -24.866,
+                -0.9676,
+            ),
+            (
+                24,
+                [1.3464, 1.2346, 0.9802, 0.2305, 0.4131, 0.8246],
+                30.787,
+                0.2888,
+            ),
+        ];
+        let frames = WindowMel::new().features(&noise(4000));
+        assert_eq!(frames.len(), 25);
+        for (number, head, sum, last) in expected {
+            let frame = &frames[number];
+            for (got, want) in frame.iter().zip(head) {
+                assert!((got - want).abs() < 2e-3, "frame {number}: {got} vs {want}");
+            }
+            assert!(
+                (frame.iter().sum::<f32>() - sum).abs() < 0.2,
+                "frame {number} sum"
+            );
+            assert!(
+                (frame[MEL_BINS - 1] - last).abs() < 2e-3,
+                "frame {number} last bin"
+            );
+        }
+        for bin in 0..MEL_BINS {
+            let mean = frames.iter().map(|frame| frame[bin]).sum::<f32>() / 25.0;
+            let spread = frames
+                .iter()
+                .map(|frame| (frame[bin] - mean).powi(2))
+                .sum::<f32>()
+                / 24.0;
+            assert!(
+                mean.abs() < 1e-3 && (spread - 1.0).abs() < 1e-2,
+                "bin {bin}"
+            );
+        }
+    }
+
+    #[test]
+    fn digital_silence_has_no_features_to_amplify() {
+        let frames = WindowMel::new().features(&[0.0; 3200]);
+        assert_eq!(frames.len(), 20);
+        assert!(frames.iter().flatten().all(|value| *value == 0.0));
     }
 }

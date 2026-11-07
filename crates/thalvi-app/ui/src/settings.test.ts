@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Draft, HistoryEntry, Settings } from "./contract.ts";
 import { mountSettings, SAVED_TEXT } from "./settings.ts";
-import { NEMOTRON, SETTINGS, settle, stubBackend } from "./testing.ts";
+import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED } from "./testing.ts";
 
 let root: HTMLElement;
 
@@ -54,12 +54,6 @@ function button(name: string): HTMLButtonElement {
   return found;
 }
 
-function radio(title: string): HTMLButtonElement {
-  const found = Array.from(root.querySelectorAll<HTMLButtonElement>("[role=radio]")).find((candidate) => candidate.textContent === title);
-  if (!found) throw new Error(`no model ${title}`);
-  return found;
-}
-
 function within(parent: HTMLElement, name: string): HTMLButtonElement {
   const found = Array.from(parent.querySelectorAll("button")).find((candidate) => candidate.textContent === name);
   if (!found) throw new Error(`no button ${name}`);
@@ -98,7 +92,7 @@ describe("pages", () => {
         title: "Speech",
         groups: {
           Server: ["server address"],
-          Dictation: ["recognize speech", "speech model", "word list"],
+          Dictation: ["recognize speech", "language", "speech model", "word list"],
           "Second transcription": ["second-pass transcription", "endpoint address", "model", "api", "api key"],
         },
       },
@@ -617,7 +611,7 @@ describe("where speech is recognized", () => {
     await open({ ...SETTINGS, stt: { engine: "local", model: "nemotron_160ms", secondary: null } });
     goTo("speech");
     expect(control("Recognize speech", "select").value).toBe("local");
-    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("true");
+    expect(control("Speech model", "select").value).toBe("nemotron_160ms");
     expect(control("Speech model", "input").value).toBe("");
   });
 });
@@ -629,7 +623,7 @@ describe("the speech model catalog", () => {
     return stub;
   }
   const card = (): HTMLElement => {
-    const found = rowOf("Speech model").querySelector<HTMLElement>(".model");
+    const found = rowOf("Speech model").querySelector<HTMLElement>(".model:not([hidden])");
     if (!found) throw new Error("no model card");
     return found;
   };
@@ -637,11 +631,108 @@ describe("the speech model catalog", () => {
   const alert = (): string | undefined => card().querySelector(".note:not([hidden])")?.textContent ?? undefined;
   const download = (): HTMLButtonElement => within(card(), "Download");
   const meter = (): HTMLProgressElement => card().querySelector("progress") as HTMLProgressElement;
+  const picker = (): HTMLSelectElement => control("Speech model", "select");
+  const languages = (): HTMLSelectElement => control("Language", "select");
+  const listed = (select: HTMLSelectElement): (string | null)[][] =>
+    Array.from(select.options).map((option) => [option.value, option.textContent]);
+  const OWN = ["__folder", "Your own model folder"];
+  const STREAMING = [NEMOTRON.name, "Nemotron Streaming (English, 662 MB)"];
+  const UNIFIED_OPTION = [UNIFIED.name, "Nemotron Unified (25 languages, 647 MB)"];
 
-  it("lists the model with its description, size, state and source", async () => {
+  it("offers each model and an own folder in labelled drop-downs, with the default picked", async () => {
     await openCatalog();
-    expect(rowOf("Speech model").querySelectorAll(".model")).toHaveLength(1);
-    expect(card().textContent).toContain("NVIDIA's English streaming recognizer");
+    expect(languages().getAttribute("aria-label")).toBe("Language");
+    expect(rowOf("Language").querySelector("label")?.getAttribute("for")).toBe(languages().id);
+    expect(picker().getAttribute("aria-label")).toBe("Speech model");
+    expect(rowOf("Speech model").querySelector("label")?.getAttribute("for")).toBe(picker().id);
+    expect(listed(picker())).toEqual([STREAMING, UNIFIED_OPTION, OWN]);
+    expect(picker().value).toBe("nemotron_160ms");
+    expect(languages().value).toBe("");
+  });
+
+  it("lists All languages first, then every language of the catalog sorted", async () => {
+    const stub = stubBackend({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    stub.backend.listSpeechModels.mockResolvedValueOnce([
+      { ...UNIFIED, languages: ["Spanish", "Dutch", "English"] },
+      { ...NEMOTRON, languages: ["English", "Czech"] },
+    ]);
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("speech");
+    expect(listed(languages())).toEqual([
+      ["", "All languages"],
+      ["Czech", "Czech"],
+      ["Dutch", "Dutch"],
+      ["English", "English"],
+      ["Spanish", "Spanish"],
+    ]);
+  });
+
+  it("shows only the models of the chosen language, and always the own folder", async () => {
+    await openCatalog();
+    choose(languages(), "Dutch");
+    expect(listed(picker())).toEqual([UNIFIED_OPTION, OWN]);
+    choose(languages(), "English");
+    expect(listed(picker())).toEqual([STREAMING, UNIFIED_OPTION, OWN]);
+    choose(languages(), "");
+    expect(listed(picker())).toEqual([STREAMING, UNIFIED_OPTION, OWN]);
+  });
+
+  it("moves the selection to the first model of a language the selected one lacks, unsaved until Save", async () => {
+    const stub = await openCatalog();
+    expect(root.querySelector(".msg")?.textContent).toBe("");
+    choose(languages(), "Dutch");
+    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
+    expect(picker().value).toBe("unified_160ms");
+    expect(text(".facts")).toContain("OpenMDW-1.1");
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    button("Save").click();
+    await settle();
+    expect(sent(stub).stt).toEqual({ engine: "local", model: "unified_160ms", secondary: null });
+    expect(JSON.stringify(sent(stub))).not.toContain("Dutch");
+  });
+
+  it("keeps the selection when All languages or a language it supports is picked", async () => {
+    const stub = await openCatalog({ ...SETTINGS, stt: { engine: "local", model: "unified_160ms", secondary: null } });
+    choose(languages(), "");
+    expect(picker().value).toBe("unified_160ms");
+    choose(languages(), "English");
+    expect(picker().value).toBe("unified_160ms");
+    choose(languages(), "Dutch");
+    choose(languages(), "");
+    expect(picker().value).toBe("unified_160ms");
+    button("Save").click();
+    await settle();
+    expect(sent(stub).stt).toEqual({ engine: "local", model: "unified_160ms", secondary: null });
+  });
+
+  it("leaves the own folder selected when the language changes", async () => {
+    await openCatalog({ ...SETTINGS, stt: { engine: "local", model: "/models/mine", secondary: null } });
+    choose(languages(), "Dutch");
+    expect(picker().value).toBe("__folder");
+    expect(control("Speech model", "input").value).toBe("/models/mine");
+  });
+
+  it("keeps the own folder usable with only All languages when the list fails to load", async () => {
+    const stub = stubBackend({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    stub.backend.listSpeechModels.mockRejectedValueOnce("Thalvi could not find a folder to keep its models in.");
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("speech");
+    expect(listed(languages())).toEqual([["", "All languages"]]);
+    expect(listed(picker())).toEqual([OWN]);
+    choose(picker(), "__folder");
+    type(control("Speech model", "input"), "/models/mine");
+    button("Save").click();
+    await settle();
+    expect(sent(stub).stt.model).toBe("/models/mine");
+  });
+
+  it("shows the picked model's description, size, license, languages, state and source", async () => {
+    await openCatalog();
+    expect(rowOf("Speech model").querySelectorAll(".model:not([hidden])")).toHaveLength(1);
+    expect(card().textContent).toContain(NEMOTRON.description);
+    expect(text(".facts")).toBe("License: NVIDIA Open Model License. Languages: English.");
     expect(text(".unit")).toBe("662 MB");
     expect(text(".badge")).toBe("Not downloaded");
     expect(card().querySelector("a")?.getAttribute("href")).toBe(NEMOTRON.source);
@@ -742,23 +833,51 @@ describe("the speech model catalog", () => {
     );
   });
 
-  it("saves the selected model as stt.model and leaves the own-folder box empty", async () => {
+  it("switches the card and saves the model picked in the drop-down as stt.model", async () => {
     const stub = await openCatalog();
     type(control("Speech model", "input"), "/models/mine");
-    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("false");
+    expect(picker().value).toBe("__folder");
 
-    radio("Nemotron Speech Streaming 0.6B").click();
-    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("true");
+    choose(picker(), "unified_160ms");
     expect(control("Speech model", "input").value).toBe("");
+    expect(text(".facts")).toBe(
+      `License: OpenMDW-1.1. Languages: ${UNIFIED.languages.join(", ")}. The language is detected automatically.`,
+    );
+    expect(text(".unit")).toBe("647 MB");
     button("Save").click();
     await settle();
     expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
-    expect(sent(stub).stt).toEqual({ engine: "local", model: "nemotron_160ms", secondary: null });
+    expect(sent(stub).stt).toEqual({ engine: "local", model: "unified_160ms", secondary: null });
   });
 
-  it("selects the default model when none is saved", async () => {
-    await openCatalog();
-    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("true");
+  it("keeps showing the download of a model while another one is picked", async () => {
+    const stub = await openCatalog();
+    stub.speechProgress({ name: "unified_160ms", percent: 40, status: "downloading", message: null });
+    expect(rowOf("Speech model").querySelector(".badge")?.textContent).toBe("Not downloaded");
+    choose(picker(), "unified_160ms");
+    expect(text("[role=status]")).toBe("Downloading… 40%");
+    expect(meter().value).toBe(40);
+  });
+
+  it("shows a saved model, and a saved folder as the own-folder entry", async () => {
+    await openCatalog({ ...SETTINGS, stt: { engine: "local", model: "unified_160ms", secondary: null } });
+    expect(picker().value).toBe("unified_160ms");
+    expect(text(".facts")).toContain("OpenMDW-1.1");
+    root.innerHTML = "";
+    await openCatalog({ ...SETTINGS, stt: { engine: "local", model: "/models/mine", secondary: null } });
+    expect(picker().value).toBe("__folder");
+    expect(control("Speech model", "input").value).toBe("/models/mine");
+    expect(rowOf("Speech model").querySelector(".model:not([hidden])")).toBeNull();
+  });
+
+  it("does not save the own-folder entry without a path", async () => {
+    const stub = await openCatalog();
+    choose(picker(), "__folder");
+    button("Save").click();
+    await settle();
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    expect(rowOf("Speech model").querySelector(".own .note:not([hidden])")?.textContent).toBe("Type the folder path first.");
+    expect(root.querySelector(".err")?.textContent).toBe("Type the folder path of your own speech model first.");
   });
 });
 

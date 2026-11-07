@@ -405,24 +405,74 @@ async fn a_speech_model_is_cached_only_when_every_file_has_its_pinned_size() {
 }
 
 #[tokio::test]
-async fn the_catalog_lists_each_model_with_its_size_source_and_whether_it_is_downloaded() {
+async fn the_catalog_lists_each_model_with_its_size_license_languages_source_and_whether_it_is_downloaded()
+ {
     let models = ModelStore::in_dir(dir("catalog")).speech_models().await;
 
-    let [model] = models.as_slice() else {
-        panic!("one catalog model, got {models:?}");
-    };
-    assert_eq!(model.name, "nemotron_160ms");
-    assert_eq!(model.size, 661_919_416);
+    let listed: Vec<_> = models
+        .iter()
+        .map(|model| {
+            (
+                model.name,
+                model.title,
+                model.size,
+                model.license,
+                model.languages.len(),
+                model.source,
+            )
+        })
+        .collect();
     assert_eq!(
-        model.source,
-        "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25"
+        listed,
+        [
+            (
+                "nemotron_160ms",
+                "Nemotron Streaming",
+                661_919_416,
+                "NVIDIA Open Model License",
+                1,
+                "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25"
+            ),
+            (
+                "unified_160ms",
+                "Nemotron Unified",
+                646_518_349,
+                "OpenMDW-1.1",
+                25,
+                "https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b"
+            ),
+        ]
     );
-    assert!(!model.cached);
-    assert_eq!(
-        CatalogSpeech::named(model.name),
-        Some(CatalogSpeech::Nemotron160ms)
-    );
+    assert!(models.iter().all(|model| !model.cached));
+    let unified = &models[1].languages;
+    assert!(unified.is_sorted() && unified.contains(&"English") && unified.contains(&"Ukrainian"));
+    assert_eq!(models[0].languages, ["English"]);
+    for model in &models {
+        assert!(CatalogSpeech::named(model.name).is_some(), "{}", model.name);
+    }
     assert_eq!(CatalogSpeech::named("elsewhere"), None);
+}
+
+#[test]
+fn catalog_models_keep_their_files_apart_and_pinned() {
+    let mut names = Vec::new();
+    for model in CatalogSpeech::ALL {
+        let assets = model.assets();
+        for asset in [assets.encoder, assets.decoder, assets.joiner, assets.tokens] {
+            assert!(
+                asset.file_name.starts_with(model.name()),
+                "{}",
+                asset.file_name
+            );
+            assert!(asset.url.starts_with("https://"), "{}", asset.url);
+            assert_eq!(asset.sha256.len(), 64, "{}", asset.file_name);
+            names.push(asset.file_name);
+        }
+    }
+    let count = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), count);
 }
 
 #[tokio::test]

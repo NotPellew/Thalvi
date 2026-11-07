@@ -754,6 +754,7 @@ mod tests {
     fn an_ending_delivers_the_capture_only_after_the_whole_pause() {
         for (ending, route, pause) in [
             ("paste that", CaptureRoute::Paste, 700),
+            ("Paste that.", CaptureRoute::Paste, 700),
             ("SUBMIT!", CaptureRoute::Submit, 2500),
             ("do that.", CaptureRoute::Task, 2500),
         ] {
@@ -1193,14 +1194,17 @@ mod tests {
 
     #[test]
     fn never_mind_discards_the_capture_and_any_armed_ending() {
-        let mut session = session();
-        feed(&mut session, &["Draft words", "hello submit"]);
-        assert_eq!(
-            feed(&mut session, &["never mind"]),
-            cancelled("Draft words hello submit")
-        );
-        assert_eq!(session.pending(), None);
-        assert_eq!(session.text(), "");
+        for spoken in ["never mind", "Never mind."] {
+            let mut session = session();
+            feed(&mut session, &["Draft words", "hello submit"]);
+            assert_eq!(
+                feed(&mut session, &[spoken]),
+                cancelled("Draft words hello submit"),
+                "{spoken}"
+            );
+            assert_eq!(session.pending(), None);
+            assert_eq!(session.text(), "");
+        }
     }
 
     #[test]

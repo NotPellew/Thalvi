@@ -1,4 +1,4 @@
-//! Owns the streaming `NeMo` transducer (cache-aware encoder, LSTM predictor, joiner) on ONNX Runtime, as exported by sherpa-onnx.
+//! Owns the `NeMo` transducers (LSTM predictor, joiner and a cache-aware or buffered encoder) on ONNX Runtime, and the model choice.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -8,7 +8,7 @@ use ort::session::Session;
 use ort::value::Tensor;
 
 use crate::boosting::{Joiner, PhraseTree, TreeState, greedy};
-use crate::fbank::{LogMel, MEL_BINS, MelFrame};
+use crate::fbank::{HOP, LogMel, MEL_BINS, MelFrame, WindowMel};
 use crate::local::{ModelSource, SpeechModel};
 use crate::models::{CatalogSpeech, ModelStore};
 use crate::phrases::WordList;
@@ -20,6 +20,10 @@ use crate::segments::{FrameDecoder, Segments};
 const ENDPOINT_MS: usize = 600;
 /// One feature frame is 10 ms.
 const FRAME_MS: usize = 10;
+/// Silence that the look-ahead appends for a buffered model: its end-of-audio step brings out the rest.
+const BUFFERED_LOOKAHEAD: usize = 4_400;
+/// Silence after a cache-aware window that lets its last frame's tail through.
+const WINDOW_TAIL: usize = 400;
 
 /// The files of one exported model.
 #[derive(Clone, Debug)]
@@ -113,19 +117,67 @@ fn unsupported(path: &Path, reason: &impl ToString) -> TransducerError {
     }
 }
 
-/// Sizes the encoder reports about itself.
+/// Sizes every transducer reports about itself.
 struct Shape {
-    /// Feature frames per encoder call.
-    window: usize,
-    /// Feature frames the next call moves on by.
-    shift: usize,
     subsampling: usize,
-    channel: [usize; 3],
-    time: [usize; 3],
     hidden: usize,
     layers: usize,
     encoder_dim: usize,
     blank: usize,
+}
+
+/// Sizes of the cache-aware encoder.
+struct CacheShape {
+    /// Feature frames per encoder call.
+    window: usize,
+    /// Feature frames the next call moves on by.
+    shift: usize,
+    channel: [usize; 3],
+    time: [usize; 3],
+}
+
+/// Sizes of the buffered encoder, which reads the same window again at every step.
+struct BufferedShape {
+    mel: WindowMel,
+    /// Feature frames per encoder call.
+    window: usize,
+    /// Samples the window moves on by at each step.
+    step: usize,
+    /// Samples in a full window.
+    capacity: usize,
+    /// Encoded frames per call.
+    frames: usize,
+    /// The first encoded frame decoded at each step: the newest ones wait for their look-ahead.
+    begin: usize,
+    /// Encoded frames decoded at each step.
+    decoded: usize,
+    /// Steps of digital silence after which the window no longer holds anything said before.
+    flush_steps: usize,
+    /// What the encoder makes of a window of digital silence, which fills the frames before the first audio.
+    silence: Vec<f32>,
+}
+
+enum Layout {
+    CacheAware(Arc<CacheShape>),
+    /// With the language prompt, which is always the model's own detection.
+    Buffered(Arc<BufferedShape>, i64),
+}
+
+/// How an encoder takes its input; told apart by what it declares.
+#[derive(Debug, PartialEq, Eq)]
+enum EncoderKind {
+    CacheAware,
+    Buffered,
+}
+
+impl EncoderKind {
+    fn of(inputs: &[&str]) -> Option<Self> {
+        match inputs {
+            [_, _, _, _, _] => Some(Self::CacheAware),
+            ["features", "length", "prompt_index"] => Some(Self::Buffered),
+            _ => None,
+        }
+    }
 }
 
 struct Sessions {
@@ -138,6 +190,7 @@ struct Sessions {
 pub struct Transducer {
     sessions: Arc<Mutex<Sessions>>,
     shape: Arc<Shape>,
+    layout: Layout,
     tokens: Arc<Vec<String>>,
     phrases: Arc<PhraseTree>,
 }
@@ -170,18 +223,28 @@ impl Transducer {
     /// than 128 mel bins.
     pub fn load(files: &TransducerFiles, phrases: &WordList) -> Result<Self, TransducerError> {
         let threads = std::thread::available_parallelism().map_or(2, |n| n.get().min(4));
-        let encoder = open(&files.encoder, threads)?;
-        let decoder = open(&files.decoder, 1)?;
-        let joiner = open(&files.joiner, 1)?;
+        let mut sessions = Sessions {
+            encoder: open(&files.encoder, threads)?,
+            decoder: open(&files.decoder, 1)?,
+            joiner: open(&files.joiner, 1)?,
+        };
         let path = &files.encoder;
-        let count = |key| number(&encoder, path, key);
-        if count("feat_dim")? != MEL_BINS {
+        let count = |sessions: &Sessions, key| number(&sessions.encoder, path, key);
+        if count(&sessions, "feat_dim")? != MEL_BINS {
             return Err(unsupported(path, &format!("it needs {MEL_BINS} mel bins")));
         }
-        if encoder.inputs().len() != 5 || decoder.inputs().len() != 4 || joiner.inputs().len() != 2
-        {
+        let names: Vec<&str> = sessions
+            .encoder
+            .inputs()
+            .iter()
+            .map(ort::value::Outlet::name)
+            .collect();
+        let kind = EncoderKind::of(&names).filter(|_| {
+            sessions.decoder.inputs().len() == 4 && sessions.joiner.inputs().len() == 2
+        });
+        let Some(kind) = kind else {
             return Err(unsupported(path, &"it is not a streaming NeMo transducer"));
-        }
+        };
         let tokens: Vec<String> = std::fs::read_to_string(&files.tokens)
             .map_err(|error| load_error(&files.tokens, &error))?
             .lines()
@@ -191,60 +254,173 @@ impl Transducer {
                     .to_owned()
             })
             .collect();
-        let shape = Shape {
-            window: count("window_size")?,
-            shift: count("chunk_shift")?,
-            subsampling: count("subsampling_factor")?,
-            channel: [
-                count("cache_last_channel_dim1")?,
-                count("cache_last_channel_dim2")?,
-                count("cache_last_channel_dim3")?,
-            ],
-            time: [
-                count("cache_last_time_dim1")?,
-                count("cache_last_time_dim2")?,
-                count("cache_last_time_dim3")?,
-            ],
-            hidden: count("pred_hidden")?,
-            layers: count("pred_rnn_layers")?,
-            encoder_dim: count("cache_last_channel_dim3")?,
-            blank: count("vocab_size")?,
+        let mut shape = Shape {
+            subsampling: count(&sessions, "subsampling_factor")?,
+            hidden: count(&sessions, "pred_hidden")?,
+            layers: count(&sessions, "pred_rnn_layers")?,
+            encoder_dim: 0,
+            blank: count(&sessions, "vocab_size")?,
         };
-        if tokens.len() != shape.blank + 1 || shape.shift > shape.window || shape.subsampling == 0 {
-            return Err(unsupported(
-                &files.tokens,
-                &"its tokens do not match the encoder",
-            ));
+        let mismatch = || unsupported(&files.tokens, &"its tokens do not match the encoder");
+        if tokens.len() != shape.blank + 1 || shape.subsampling == 0 {
+            return Err(mismatch());
         }
+        let layout = match kind {
+            EncoderKind::CacheAware => {
+                let cache = CacheShape {
+                    window: count(&sessions, "window_size")?,
+                    shift: count(&sessions, "chunk_shift")?,
+                    channel: [
+                        count(&sessions, "cache_last_channel_dim1")?,
+                        count(&sessions, "cache_last_channel_dim2")?,
+                        count(&sessions, "cache_last_channel_dim3")?,
+                    ],
+                    time: [
+                        count(&sessions, "cache_last_time_dim1")?,
+                        count(&sessions, "cache_last_time_dim2")?,
+                        count(&sessions, "cache_last_time_dim3")?,
+                    ],
+                };
+                if cache.shift > cache.window {
+                    return Err(mismatch());
+                }
+                shape.encoder_dim = cache.channel[2];
+                Layout::CacheAware(Arc::new(cache))
+            }
+            EncoderKind::Buffered => {
+                let meta = [
+                    count(&sessions, "window_size")?,
+                    count(&sessions, "chunk_shift")?,
+                    count(&sessions, "right_context")?,
+                    count(&sessions, "prompt_auto")?,
+                ];
+                let (buffered, prompt) = buffered_shape(&mut sessions, &shape, path, meta)?;
+                shape.encoder_dim = buffered.silence.len() / buffered.frames;
+                Layout::Buffered(Arc::new(buffered), prompt)
+            }
+        };
         let phrases = PhraseTree::new(phrases, &tokens[..shape.blank]);
         Ok(Self {
-            sessions: Arc::new(Mutex::new(Sessions {
-                encoder,
-                decoder,
-                joiner,
-            })),
+            sessions: Arc::new(Mutex::new(sessions)),
             shape: Arc::new(shape),
+            layout,
             tokens: Arc::new(tokens),
             phrases: Arc::new(phrases),
         })
     }
 }
 
-impl SpeechModel for Transducer {
-    type Stream = Segments<TransducerStream>;
+/// Reads a buffered encoder's sizes and runs it once on digital silence.
+fn buffered_shape(
+    sessions: &mut Sessions,
+    shape: &Shape,
+    path: &Path,
+    [window, shift, right, prompt]: [usize; 4],
+) -> Result<(BufferedShape, i64), TransducerError> {
+    let prompt = i64::try_from(prompt).unwrap_or(0);
+    let sub = shape.subsampling;
+    if shift == 0 || shift % sub != 0 || right % sub != 0 || window < shift + right {
+        return Err(unsupported(path, &"its window does not fit its chunks"));
+    }
+    let quiet = encode_window(
+        sessions,
+        window,
+        prompt,
+        vec![0.0; MEL_BINS * window],
+        window,
+    )
+    .map_err(|error| load_error(path, &error))?;
+    let frames = quiet.stride;
+    let decoded = shift / sub;
+    let behind = decoded + right / sub + 1;
+    if frames < behind || quiet.values.len() % frames != 0 {
+        return Err(unsupported(path, &"its window does not fit its chunks"));
+    }
+    Ok((
+        BufferedShape {
+            mel: WindowMel::new(),
+            window,
+            step: shift * HOP,
+            capacity: window * HOP,
+            frames,
+            begin: frames - behind,
+            decoded,
+            flush_steps: (window - shift - right) / shift,
+            silence: quiet.values,
+        },
+        prompt,
+    ))
+}
 
-    fn stream(&self) -> Segments<TransducerStream> {
+impl SpeechModel for Transducer {
+    type Stream = Segments<ModelStream>;
+
+    fn stream(&self) -> Segments<ModelStream> {
         let shape = Arc::clone(&self.shape);
         let endpoint_blanks = ENDPOINT_MS.div_ceil(shape.subsampling * FRAME_MS);
-        let decoder = TransducerStream {
-            sessions: Arc::clone(&self.sessions),
-            carried: Carried::empty(&shape),
-            phrases: Arc::clone(&self.phrases),
-            shape,
-            mel: LogMel::new(),
-            features: VecDeque::new(),
+        let sessions = Arc::clone(&self.sessions);
+        let phrases = Arc::clone(&self.phrases);
+        let decoder = match &self.layout {
+            Layout::CacheAware(cache) => ModelStream::CacheAware(TransducerStream {
+                sessions,
+                carried: Carried::empty(cache),
+                phrases,
+                shape,
+                cache: Arc::clone(cache),
+                mel: LogMel::new(),
+                features: VecDeque::new(),
+            }),
+            Layout::Buffered(buffered, prompt) => {
+                let backend = OnnxBackend {
+                    sessions,
+                    shape,
+                    phrases,
+                    window: buffered.window,
+                    prompt: *prompt,
+                };
+                ModelStream::Buffered(Buffered::new(backend, Arc::clone(buffered)))
+            }
         };
-        Segments::new(decoder, Arc::clone(&self.tokens), endpoint_blanks)
+        let lookahead = match &self.layout {
+            Layout::CacheAware(cache) => cache.window * HOP + WINDOW_TAIL,
+            Layout::Buffered(..) => BUFFERED_LOOKAHEAD,
+        };
+        Segments::new(
+            decoder,
+            Arc::clone(&self.tokens),
+            endpoint_blanks,
+            lookahead,
+        )
+    }
+}
+
+/// One recognition on a [`Transducer`], of whichever kind its encoder is.
+#[derive(Clone)]
+pub enum ModelStream {
+    CacheAware(TransducerStream),
+    Buffered(Buffered<OnnxBackend>),
+}
+
+impl FrameDecoder for ModelStream {
+    fn push(&mut self, samples: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        match self {
+            Self::CacheAware(stream) => stream.push(samples),
+            Self::Buffered(stream) => stream.push(samples),
+        }
+    }
+
+    fn lookahead(&self, silence: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        match self {
+            Self::CacheAware(stream) => stream.lookahead(silence),
+            Self::Buffered(stream) => stream.lookahead(silence),
+        }
+    }
+
+    fn next_segment(&mut self) {
+        match self {
+            Self::CacheAware(stream) => stream.next_segment(),
+            Self::Buffered(stream) => stream.next_segment(),
+        }
     }
 }
 
@@ -257,7 +433,7 @@ struct EncoderCache {
 }
 
 impl EncoderCache {
-    fn empty(shape: &Shape) -> Self {
+    fn empty(shape: &CacheShape) -> Self {
         Self {
             channel: vec![0.0; shape.channel.iter().product()],
             time: vec![0.0; shape.time.iter().product()],
@@ -277,7 +453,7 @@ struct Carried {
 }
 
 impl Carried {
-    fn empty(shape: &Shape) -> Self {
+    fn empty(shape: &CacheShape) -> Self {
         Self {
             encoder: EncoderCache::empty(shape),
             predictor: None,
@@ -305,6 +481,7 @@ struct Predictor {
 pub struct TransducerStream {
     sessions: Arc<Mutex<Sessions>>,
     shape: Arc<Shape>,
+    cache: Arc<CacheShape>,
     phrases: Arc<PhraseTree>,
     mel: LogMel,
     features: VecDeque<MelFrame>,
@@ -325,16 +502,16 @@ impl TransducerStream {
         &mut self,
         sessions: &mut Sessions,
     ) -> Result<(Vec<f32>, usize), RecognizerError> {
-        let window = self.shape.window;
+        let window = self.cache.window;
         let mut audio = vec![0.0_f32; MEL_BINS * window];
         for (t, frame) in self.features.iter().take(window).enumerate() {
             for (m, value) in frame.iter().enumerate() {
                 audio[m * window + t] = *value;
             }
         }
-        self.features.drain(..self.shape.shift);
-        let [c0, c1, c2] = self.shape.channel;
-        let [t0, t1, t2] = self.shape.time;
+        self.features.drain(..self.cache.shift);
+        let [c0, c1, c2] = self.cache.channel;
+        let [t0, t1, t2] = self.cache.time;
         let inputs = ort::inputs![
             Tensor::from_array((dims(&[1, MEL_BINS, window]), audio)).map_err(failed)?,
             Tensor::from_array((dims(&[1]), vec![i64::try_from(window).unwrap_or(i64::MAX)]))
@@ -367,35 +544,69 @@ impl TransducerStream {
         Ok((encoded, frames))
     }
 
-    /// Greedy search over one chunk's encoder frames, as sherpa-onnx does, favouring the word list.
     fn decode(
         &mut self,
         sessions: &mut Sessions,
         encoded: &[f32],
         frames: usize,
     ) -> Result<Vec<Vec<usize>>, RecognizerError> {
-        let predictor = if let Some(predictor) = self.carried.predictor.take() {
-            predictor
-        } else {
-            let zeros = || vec![0.0; self.shape.layers * self.shape.hidden];
-            run_predictor(sessions, &self.shape, self.shape.blank, [zeros(), zeros()])?
-        };
-        let mut joiner = OnnxJoiner {
+        decode(
             sessions,
-            shape: &self.shape,
-            encoded,
-            frames,
-            predictor,
-        };
-        let emitted = greedy(
-            &mut joiner,
+            &self.shape,
             &self.phrases,
-            &mut self.carried.phrases,
-            frames,
-        )?;
-        self.carried.predictor = Some(joiner.predictor);
-        Ok(emitted)
+            &mut Decoding {
+                predictor: &mut self.carried.predictor,
+                phrases: &mut self.carried.phrases,
+            },
+            Encoded {
+                values: encoded,
+                stride: frames,
+            },
+            0..frames,
+        )
     }
+}
+
+/// What the greedy search carries from one call to the next.
+pub struct Decoding<'a> {
+    /// `None` until the next decode, then the predictor primed with the blank token.
+    predictor: &'a mut Option<Predictor>,
+    /// Where the text so far stands in the word list.
+    phrases: &'a mut TreeState,
+}
+
+/// Encoder output, `stride` frames to a channel.
+#[derive(Clone, Copy)]
+struct Encoded<'a> {
+    values: &'a [f32],
+    stride: usize,
+}
+
+/// Greedy search over encoder frames `range`, as sherpa-onnx does, favouring the word list.
+fn decode(
+    sessions: &mut Sessions,
+    shape: &Shape,
+    tree: &PhraseTree,
+    carried: &mut Decoding<'_>,
+    encoded: Encoded<'_>,
+    range: std::ops::Range<usize>,
+) -> Result<Vec<Vec<usize>>, RecognizerError> {
+    let predictor = if let Some(predictor) = carried.predictor.take() {
+        predictor
+    } else {
+        let zeros = || vec![0.0; shape.layers * shape.hidden];
+        run_predictor(sessions, shape, shape.blank, [zeros(), zeros()])?
+    };
+    let mut joiner = OnnxJoiner {
+        sessions,
+        shape,
+        encoded,
+        first: range.start,
+        predictor,
+    };
+    let emitted = greedy(&mut joiner, tree, carried.phrases, range.len())?;
+    *carried.predictor = Some(joiner.predictor);
+    Ok(emitted)
 }
 
 fn run_predictor(
@@ -428,8 +639,9 @@ fn run_predictor(
 struct OnnxJoiner<'a> {
     sessions: &'a mut Sessions,
     shape: &'a Shape,
-    encoded: &'a [f32],
-    frames: usize,
+    encoded: Encoded<'a>,
+    /// The encoder frame that [`Joiner::logits`] calls frame 0.
+    first: usize,
     predictor: Predictor,
 }
 
@@ -437,7 +649,7 @@ impl Joiner for OnnxJoiner<'_> {
     fn logits(&mut self, frame: usize) -> Result<Vec<f32>, RecognizerError> {
         let dim = self.shape.encoder_dim;
         let column: Vec<f32> = (0..dim)
-            .map(|c| self.encoded[c * self.frames + frame])
+            .map(|c| self.encoded.values[c * self.encoded.stride + self.first + frame])
             .collect();
         let inputs = ort::inputs![
             Tensor::from_array((dims(&[1, dim, 1]), column)).map_err(failed)?,
@@ -466,7 +678,7 @@ impl FrameDecoder for TransducerStream {
         self.features.extend(mel);
         let sessions = Arc::clone(&self.sessions);
         let mut emitted = Vec::new();
-        while self.features.len() >= self.shape.window {
+        while self.features.len() >= self.cache.window {
             let mut sessions = sessions.lock().unwrap_or_else(PoisonError::into_inner);
             let (encoded, frames) = self.run_encoder(&mut sessions)?;
             emitted.extend(self.decode(&mut sessions, &encoded, frames)?);
@@ -480,6 +692,227 @@ impl FrameDecoder for TransducerStream {
 
     fn next_segment(&mut self) {
         self.carried.next_segment();
+    }
+}
+
+/// What a buffered encoder made of one window.
+pub struct Encoding {
+    values: Vec<f32>,
+    /// Frames to a channel in `values`.
+    stride: usize,
+    /// Frames, at the start of each channel, that come from speech.
+    count: usize,
+}
+
+/// Runs the buffered encoder on `features` (mel bin major, `window` frames), `valid` of them speech.
+fn encode_window(
+    sessions: &mut Sessions,
+    window: usize,
+    prompt: i64,
+    features: Vec<f32>,
+    valid: usize,
+) -> Result<Encoding, RecognizerError> {
+    let inputs = ort::inputs![
+        Tensor::from_array((dims(&[1, MEL_BINS, window]), features)).map_err(failed)?,
+        Tensor::from_array((dims(&[1]), vec![i64::try_from(valid).unwrap_or(i64::MAX)]))
+            .map_err(failed)?,
+        Tensor::from_array((dims(&[1]), vec![prompt])).map_err(failed)?,
+    ];
+    let outputs = sessions.encoder.run(inputs).map_err(failed)?;
+    let (shape, values) = outputs[0].try_extract_tensor::<f32>().map_err(failed)?;
+    let stride = shape
+        .get(2)
+        .and_then(|n| usize::try_from(*n).ok())
+        .ok_or_else(|| failed("the encoder returned an unexpected shape"))?;
+    let (_, length) = outputs[1].try_extract_tensor::<i64>().map_err(failed)?;
+    let count = length
+        .first()
+        .and_then(|n| usize::try_from(*n).ok())
+        .unwrap_or(0)
+        .min(stride);
+    Ok(Encoding {
+        values: values.to_vec(),
+        stride,
+        count,
+    })
+}
+
+/// The two things a buffered stream needs from the model; ONNX Runtime provides them, and tests a script.
+pub trait Backend: Clone + Send + 'static {
+    /// # Errors
+    /// Fails when the model cannot continue.
+    fn encode(&mut self, features: Vec<f32>, valid: usize) -> Result<Encoding, RecognizerError>;
+
+    /// The tokens of encoder frames `range` of `encoded`, `stride` frames to a channel.
+    ///
+    /// # Errors
+    /// Fails when the model cannot continue.
+    fn decode(
+        &mut self,
+        encoded: &[f32],
+        stride: usize,
+        range: std::ops::Range<usize>,
+        carried: &mut Decoding<'_>,
+    ) -> Result<Vec<Vec<usize>>, RecognizerError>;
+}
+
+/// The buffered model on ONNX Runtime.
+#[derive(Clone)]
+pub struct OnnxBackend {
+    sessions: Arc<Mutex<Sessions>>,
+    shape: Arc<Shape>,
+    phrases: Arc<PhraseTree>,
+    window: usize,
+    prompt: i64,
+}
+
+impl Backend for OnnxBackend {
+    fn encode(&mut self, features: Vec<f32>, valid: usize) -> Result<Encoding, RecognizerError> {
+        let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
+        encode_window(&mut sessions, self.window, self.prompt, features, valid)
+    }
+
+    fn decode(
+        &mut self,
+        encoded: &[f32],
+        stride: usize,
+        range: std::ops::Range<usize>,
+        carried: &mut Decoding<'_>,
+    ) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
+        decode(
+            &mut sessions,
+            &self.shape,
+            &self.phrases,
+            carried,
+            Encoded {
+                values: encoded,
+                stride,
+            },
+            range,
+        )
+    }
+}
+
+/// One recognition on a buffered encoder: every step it hears the last few seconds again and
+/// decodes only the frames that now have their look-ahead.
+#[derive(Clone)]
+pub struct Buffered<B> {
+    backend: B,
+    shape: Arc<BufferedShape>,
+    /// The last window of audio taken in; the newest sample is last.
+    audio: Vec<f32>,
+    /// Samples received that do not make a whole step yet.
+    waiting: Vec<f32>,
+    predictor: Option<Predictor>,
+    tree: TreeState,
+    /// Steps in a row whose new samples were all exactly zero.
+    silent_steps: usize,
+    /// A stretch of speech ended since the predictor was last made fresh.
+    stretch_ended: bool,
+}
+
+impl<B: Backend> Buffered<B> {
+    fn new(backend: B, shape: Arc<BufferedShape>) -> Self {
+        Self {
+            backend,
+            shape,
+            audio: Vec::new(),
+            waiting: Vec::new(),
+            predictor: None,
+            tree: TreeState::default(),
+            silent_steps: 0,
+            stretch_ended: false,
+        }
+    }
+
+    /// Takes in `chunk`, hears the window and decodes encoder frames `from` to `to`.
+    fn step(
+        &mut self,
+        chunk: &[f32],
+        from: usize,
+        to: usize,
+    ) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        let shape = Arc::clone(&self.shape);
+        self.audio.extend_from_slice(chunk);
+        let excess = self.audio.len().saturating_sub(shape.capacity);
+        self.audio.drain(..excess);
+        let mel = shape.mel.features(&self.audio);
+        let valid = mel.len().min(shape.window);
+        let mut features = vec![0.0; MEL_BINS * shape.window];
+        for (t, frame) in mel.iter().take(valid).enumerate() {
+            for (m, value) in frame.iter().enumerate() {
+                features[m * shape.window + t] = *value;
+            }
+        }
+        let heard = self.backend.encode(features, valid)?;
+        let mut full = shape.silence.clone();
+        let count = heard.count.min(shape.frames);
+        let channels = shape.silence.len() / shape.frames;
+        for c in 0..channels {
+            let target = c * shape.frames + shape.frames - count;
+            let source = c * heard.stride;
+            full[target..target + count].copy_from_slice(&heard.values[source..source + count]);
+        }
+        let emitted = self.backend.decode(
+            &full,
+            shape.frames,
+            from..to,
+            &mut Decoding {
+                predictor: &mut self.predictor,
+                phrases: &mut self.tree,
+            },
+        )?;
+        self.silent_steps = if chunk.iter().any(|sample| *sample != 0.0) {
+            0
+        } else {
+            self.silent_steps + 1
+        };
+        Ok(emitted)
+    }
+
+    /// Hears what is left over at the end of the audio, decoding every frame down to the newest.
+    fn finish(&mut self) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        if self.audio.is_empty() && self.waiting.is_empty() {
+            return Ok(Vec::new());
+        }
+        let chunk = std::mem::take(&mut self.waiting);
+        let shape = Arc::clone(&self.shape);
+        // Without new samples the last step already decoded its first frames.
+        let from = shape.begin + if chunk.is_empty() { shape.decoded } else { 0 };
+        self.step(&chunk, from, shape.frames)
+    }
+}
+
+impl<B: Backend> FrameDecoder for Buffered<B> {
+    fn push(&mut self, samples: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        self.waiting.extend_from_slice(samples);
+        let shape = Arc::clone(&self.shape);
+        let mut emitted = Vec::new();
+        while self.waiting.len() >= shape.step {
+            let chunk: Vec<f32> = self.waiting.drain(..shape.step).collect();
+            emitted.extend(self.step(&chunk, shape.begin, shape.begin + shape.decoded)?);
+            // Long digital silence has pushed everything said before out of the window, and a
+            // predictor that still remembers it loses the first words of the next stretch.
+            if self.stretch_ended && self.silent_steps >= shape.flush_steps {
+                self.predictor = None;
+                self.silent_steps = 0;
+                self.stretch_ended = false;
+            }
+        }
+        Ok(emitted)
+    }
+
+    fn lookahead(&self, silence: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        let mut ahead = self.clone();
+        let mut found = ahead.push(silence)?;
+        found.extend(ahead.finish()?);
+        Ok(found)
+    }
+
+    fn next_segment(&mut self) {
+        self.tree = TreeState::default();
+        self.stretch_ended = true;
     }
 }
 
@@ -749,5 +1182,273 @@ mod tests {
         assert_eq!(carried.encoder.channel, [1.0, 2.0]);
         assert_eq!(carried.encoder.time, [3.0]);
         assert_eq!(carried.encoder.length, 7);
+    }
+
+    /// A buffered encoder that records what it was given and answers like the real one in shape.
+    #[derive(Clone, Default)]
+    struct Fake {
+        seen: Arc<Mutex<Seen>>,
+    }
+
+    #[derive(Default)]
+    struct Seen {
+        /// Per encode: speech frames given, and the first mel bin over the whole window.
+        encodes: Vec<(usize, Vec<f32>)>,
+        decodes: Vec<Decode>,
+    }
+
+    struct Decode {
+        range: std::ops::Range<usize>,
+        /// The predictor had to start afresh.
+        fresh: bool,
+        /// The first channel of the 77 encoder frames.
+        channel: Vec<f32>,
+    }
+
+    const FRAMES: usize = 77;
+    const SPEECH: f32 = 7.0;
+    const SILENCE: f32 = -1.0;
+
+    impl Backend for Fake {
+        fn encode(
+            &mut self,
+            features: Vec<f32>,
+            valid: usize,
+        ) -> Result<Encoding, RecognizerError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .encodes
+                .push((valid, features[..616].to_vec()));
+            Ok(Encoding {
+                values: vec![SPEECH; 2 * FRAMES],
+                stride: FRAMES,
+                count: valid.div_ceil(8),
+            })
+        }
+
+        fn decode(
+            &mut self,
+            encoded: &[f32],
+            stride: usize,
+            range: std::ops::Range<usize>,
+            carried: &mut Decoding<'_>,
+        ) -> Result<Vec<Vec<usize>>, RecognizerError> {
+            assert_eq!(stride, FRAMES);
+            self.seen.lock().unwrap().decodes.push(Decode {
+                range: range.clone(),
+                fresh: carried.predictor.is_none(),
+                channel: encoded[..FRAMES].to_vec(),
+            });
+            *carried.predictor = Some(Predictor::default());
+            Ok(range.map(|frame| vec![frame]).collect())
+        }
+    }
+
+    fn buffered() -> (Buffered<Fake>, Arc<Mutex<Seen>>) {
+        let shape = BufferedShape {
+            mel: WindowMel::new(),
+            window: 616,
+            step: 2_560,
+            capacity: 98_560,
+            frames: FRAMES,
+            begin: 69,
+            decoded: 2,
+            flush_steps: 35,
+            silence: vec![SILENCE; 2 * FRAMES],
+        };
+        let fake = Fake::default();
+        let seen = Arc::clone(&fake.seen);
+        (Buffered::new(fake, Arc::new(shape)), seen)
+    }
+
+    /// Sound that is never exactly zero.
+    fn sound(len: usize, from: usize) -> Vec<f32> {
+        (from..from + len)
+            .map(|i| f32::from(u8::try_from(i * 37 % 200).unwrap_or(0) + 1) / 1_000.0)
+            .collect()
+    }
+
+    const STEP: usize = 2_560;
+
+    #[test]
+    fn a_window_not_yet_full_is_heard_on_its_own_and_sits_at_the_end_of_the_silence_before_it() {
+        let (mut stream, seen) = buffered();
+        let mut emitted = Vec::new();
+        for step in 1..=3 {
+            emitted.extend(stream.push(&sound(STEP, step * STEP)).unwrap());
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(emitted, [[69], [70], [69], [70], [69], [70]]);
+        for (step, (encode, decode)) in seen.encodes.iter().zip(&seen.decodes).enumerate() {
+            let valid = (step + 1) * 16;
+            assert_eq!(encode.0, valid);
+            let (speech, quiet) = encode.1.split_at(valid);
+            assert!(quiet.iter().all(|value| *value == 0.0), "step {step}");
+            let count = |n: usize| f32::from(u16::try_from(n).unwrap());
+            let mean = speech.iter().sum::<f32>() / count(valid);
+            let spread = speech.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / count(valid - 1);
+            assert!(
+                mean.abs() < 1e-3 && (spread - 1.0).abs() < 1e-2,
+                "step {step}"
+            );
+            let heard = valid / 8;
+            assert_eq!(decode.range, 69..71);
+            assert!(
+                decode.channel[..FRAMES - heard]
+                    .iter()
+                    .all(|v| *v == SILENCE)
+            );
+            assert!(
+                decode.channel[FRAMES - heard..]
+                    .iter()
+                    .all(|v| *v == SPEECH)
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_window_holds_the_last_six_seconds_and_moves_on_by_one_step() {
+        let (mut stream, seen) = buffered();
+        let audio = sound(41 * STEP + 1_280, 0);
+        let mut at = 0;
+        while at + 1_280 <= audio.len() {
+            stream.push(&audio[at..at + 1_280]).unwrap();
+            at += 1_280;
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.encodes.len(),
+            41,
+            "a step for every 2560 samples, none for the 1280 left"
+        );
+        let (valid, row) = seen.encodes.last().unwrap();
+        assert_eq!(*valid, 616);
+        let window = &audio[41 * STEP - 98_560..41 * STEP];
+        let expected: Vec<f32> = WindowMel::new()
+            .features(window)
+            .iter()
+            .map(|frame| frame[0])
+            .collect();
+        assert_eq!(row, &expected);
+    }
+
+    #[test]
+    fn the_end_of_audio_decodes_down_to_the_newest_frame_and_leaves_the_stream_alone() {
+        let (mut stream, seen) = buffered();
+        stream.push(&sound(STEP + 1_280, 0)).unwrap();
+        let ahead = stream.lookahead(&vec![0.0; 4_400]).unwrap();
+        // 1280 waiting + 4400 silence: two whole steps, then 560 samples for the end.
+        let frames =
+            |range: std::ops::Range<usize>| -> Vec<Vec<usize>> { range.map(|f| vec![f]).collect() };
+        let expected: Vec<Vec<usize>> = [frames(69..71), frames(69..71), frames(69..77)].concat();
+        assert_eq!(ahead, expected);
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.encodes.len(), 4);
+        }
+        stream.push(&sound(1_280, 9)).unwrap();
+        let seen = seen.lock().unwrap();
+        let (valid, _) = seen.encodes.last().unwrap();
+        assert_eq!(*valid, 32, "the look-ahead did not move the stream");
+    }
+
+    #[test]
+    fn the_end_of_audio_on_a_whole_step_decodes_only_what_that_step_has_not() {
+        let (mut stream, _) = buffered();
+        stream.push(&sound(STEP, 0)).unwrap();
+        assert_eq!(
+            stream.lookahead(&[]).unwrap(),
+            (71..77).map(|f| vec![f]).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            buffered().0.lookahead(&[]).unwrap(),
+            Vec::<Vec<usize>>::new()
+        );
+    }
+
+    #[test]
+    fn the_predictor_survives_stretches_and_starts_afresh_only_after_a_final_and_5_6_s_of_digital_silence()
+     {
+        // S: a step of sound, `.`: a step of digital silence, `,`: silence but for one sample.
+        // The `|` marks a final. The steps whose decode started with a fresh predictor are listed.
+        let cases: [(&str, &str, &[usize]); 6] = [
+            ("kept across a final", "S|S", &[0]),
+            (
+                "not before 35 silent steps",
+                "S|...................................",
+                &[0],
+            ),
+            (
+                "after 35 silent steps",
+                "S|....................................",
+                &[0, 36],
+            ),
+            (
+                "not without a final",
+                ".....................................",
+                &[0],
+            ),
+            (
+                "sound restarts the count",
+                "S|..................................,..................................",
+                &[0],
+            ),
+            (
+                "not after the reset until another final",
+                "S|....................................|...",
+                &[0, 36],
+            ),
+        ];
+        for (name, script, fresh) in cases {
+            let (mut stream, seen) = buffered();
+            for (at, mark) in script.chars().enumerate() {
+                let mut chunk = vec![0.0; STEP];
+                match mark {
+                    'S' => chunk = sound(STEP, at),
+                    ',' => chunk[7] = 1e-6,
+                    '|' => {
+                        stream.next_segment();
+                        continue;
+                    }
+                    _ => {}
+                }
+                stream.push(&chunk).unwrap();
+            }
+            let seen = seen.lock().unwrap();
+            let got: Vec<usize> = seen
+                .decodes
+                .iter()
+                .enumerate()
+                .filter_map(|(step, decode)| decode.fresh.then_some(step))
+                .collect();
+            assert_eq!(got, fresh, "{name}");
+        }
+    }
+
+    #[test]
+    fn an_encoder_is_told_by_what_it_declares() {
+        let cases: [(&[&str], Option<EncoderKind>); 5] = [
+            (
+                &[
+                    "audio_signal",
+                    "length",
+                    "cache_last_channel",
+                    "cache_last_time",
+                    "cache_last_channel_len",
+                ],
+                Some(EncoderKind::CacheAware),
+            ),
+            (
+                &["features", "length", "prompt_index"],
+                Some(EncoderKind::Buffered),
+            ),
+            (&["features", "length"], None),
+            (&["features", "length", "language"], None),
+            (&[], None),
+        ];
+        for (inputs, kind) in cases {
+            assert_eq!(EncoderKind::of(inputs), kind, "{inputs:?}");
+        }
     }
 }
