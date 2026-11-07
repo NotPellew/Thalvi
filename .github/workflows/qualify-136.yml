@@ -52,6 +52,10 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: windows-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        user: [thalviqa, thalvi qa]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,10 +74,10 @@ jobs:
         shell: pwsh
         run: |
           $installer = (Get-ChildItem installer -Filter *-setup.exe | Select-Object -First 1).FullName
-          .github/qualify-136/orchestrate.ps1 -Installer $installer -OutDir qa
+          .github/qualify-136/orchestrate.ps1 -Installer $installer -OutDir qa -User '${{ matrix.user }}'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: windows-login
+          name: windows-login-${{ strategy.job-index }}
           path: qa
           retention-days: 7

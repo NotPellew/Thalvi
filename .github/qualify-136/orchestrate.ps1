@@ -1,10 +1,10 @@
 # Runs as the runner's admin: creates a throwaway user, logs it in and out through loopback RDP,
 # and runs in-session.ps1 steps inside that user's own desktop session.
-param([Parameter(Mandatory)][string]$Installer, [Parameter(Mandatory)][string]$OutDir)
+param([Parameter(Mandatory)][string]$Installer, [Parameter(Mandatory)][string]$OutDir, [Parameter(Mandatory)][string]$User)
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $OutDir = (Resolve-Path $OutDir).Path
-$user = 'thalviqa'
+$user = $User
 $qa = 'C:\qa'
 $shared = "$qa\out"
 New-Item -ItemType Directory -Force $shared | Out-Null
@@ -60,7 +60,7 @@ function Session-Explorer {
 }
 
 $script:logons = 0
-function Logon {
+function Sign-In {
   $script:logons++
   $n = $script:logons
   Log "L${n}: connecting"
@@ -79,9 +79,9 @@ function Logon {
   throw "L${n}: $user never got a desktop"
 }
 
-function Logoff([int]$Session) {
+function Sign-Out([int]$Session) {
   Log "L$($script:logons): logging off session $Session"
-  logoff $Session
+  logoff.exe $Session
   $deadline = (Get-Date).AddSeconds(120)
   while ((Get-Date) -lt $deadline) {
     if (-not (Session-Explorer) -and -not (quser 2>$null | Select-String $user)) {
@@ -120,32 +120,32 @@ $failed = $null
 $script:failures = @()
 try {
   # L1: install, start by hand, turn the login switch on.
-  $s = Logon
+  $s = Sign-In
   In-Session 'install'
-  Logoff $s
+  Sign-Out $s
 
   # L2: the Run entry should start one tray instance with --login, no Settings, no focus.
-  $s = Logon
+  $s = Sign-In
   In-Session 'observe-started'
   In-Session 'approved-off'
-  Logoff $s
+  Sign-Out $s
 
   # L3: Task Manager's toggle is off, so nothing starts; a manual start must not override it.
-  $s = Logon
+  $s = Sign-In
   In-Session 'observe-absent'
   In-Session 'manual-respects-approved'
-  Logoff $s
+  Sign-Out $s
 
   # L4: the switch is off, so nothing starts. Then turn it on again and uninstall.
-  $s = Logon
+  $s = Sign-In
   In-Session 'observe-absent'
   In-Session 'uninstall'
-  Logoff $s
+  Sign-Out $s
 
   # L5: after uninstalling, nothing starts and nothing complains.
-  $s = Logon
+  $s = Sign-In
   In-Session 'observe-absent'
-  Logoff $s
+  Sign-Out $s
 } catch {
   $failed = $_
   Log "FAILED: $_"
