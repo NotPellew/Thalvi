@@ -88,3 +88,36 @@ async fn the_word_list_is_sent_to_the_server_and_a_refusal_is_shown_as_the_serve
         .expect_err("unreachable");
     assert!(error.starts_with("The word list is saved here, but Thalvi could not reach"));
 }
+
+#[tokio::test]
+async fn a_reachable_server_reports_unsupported_word_lists_and_bad_replies_as_such() {
+    let metrics = Recorder::disabled().metrics();
+    let client = reqwest::Client::new();
+    let list = WordList::new(vec!["Thalvi".to_owned()]).expect("list");
+    for (status, reply, expected) in [
+        (
+            404,
+            Value::Null,
+            "doesn't support a word list yet; it may need updating",
+        ),
+        (503, Value::Null, "HTTP 503"),
+        (
+            200,
+            json!({"boosting": "yes"}),
+            "response Thalvi could not read",
+        ),
+    ] {
+        let (server, _) = serve(status, reply).await;
+        let error = server_boosts(&client, &server, &metrics)
+            .await
+            .expect_err("unavailable word list");
+        assert!(error.contains(expected), "{status}: {error}");
+        assert!(!error.contains("could not reach"), "{status}: {error}");
+        if status == 404 {
+            let error = share(&client, &server, &list, &metrics)
+                .await
+                .expect_err("unsupported word list");
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+}

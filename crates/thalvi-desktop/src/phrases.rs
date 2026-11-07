@@ -86,6 +86,10 @@ struct ServerError {
     error: String,
 }
 
+fn unsupported(server: &ServerUrl) -> String {
+    format!("The server at {server} doesn't support a word list yet; it may need updating.")
+}
+
 /// Whether the server's recognizer boosts a word list; `Ok(false)` covers Meta's recognizer.
 ///
 /// # Errors
@@ -105,23 +109,34 @@ pub async fn server_boosts(
         response.error_for_status()?.json::<ServerList>().await
     }
     .await;
-    metrics.metric(
-        Event::WordList,
-        if result.is_ok() { "ok" } else { "error" },
-        Some(started.elapsed()),
-        json!({"call": "check"}),
-    );
-    match result {
+    let result = match result {
         Ok(ServerList {
             boosting: Some(boosting),
         }) => Ok(boosting),
         Ok(ServerList { boosting: None }) => Err(format!(
             "The server at {server} could not reach its speech recognizer to ask about a word list."
         )),
-        Err(_) => Err(format!(
-            "Thalvi could not reach the server at {server} to ask about a word list."
-        )),
-    }
+        Err(error) => Err(match error.status() {
+            Some(reqwest::StatusCode::NOT_FOUND) => unsupported(server),
+            Some(status) => format!(
+                "The server at {server} answered HTTP {} when Thalvi asked about a word list.",
+                status.as_u16()
+            ),
+            None if error.is_decode() => {
+                format!("The server at {server} sent a word list response Thalvi could not read.")
+            }
+            None => {
+                format!("Thalvi could not reach the server at {server} to ask about a word list.")
+            }
+        }),
+    };
+    metrics.metric(
+        Event::WordList,
+        if result.is_ok() { "ok" } else { "error" },
+        Some(started.elapsed()),
+        json!({"call": "check"}),
+    );
+    result
 }
 
 /// Saves `list` on the server, which gives it to its recognizer for dictation and conversations.
@@ -143,6 +158,9 @@ pub async fn share(
         .await;
     let refused = match result {
         Ok(response) if response.status().is_success() => None,
+        Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
+            Some(unsupported(server))
+        }
         Ok(response) => Some(response.json::<ServerError>().await.map_or_else(
             |_| "The server refused the word list.".to_owned(),
             |body| body.error,
