@@ -127,8 +127,8 @@ export interface SpeechModelInfo {
   /** The model's page. */
   source: string;
   license: string;
-  /** The languages it recognizes, in words. */
-  languages: string;
+  /** The languages it recognizes. */
+  languages: string[];
   /** Every file is on disk and matches its checksum. */
   cached: boolean;
 }

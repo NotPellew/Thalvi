@@ -414,9 +414,10 @@ async fn the_catalog_lists_each_model_with_its_size_license_languages_source_and
         .map(|model| {
             (
                 model.name,
+                model.title,
                 model.size,
                 model.license,
-                model.languages,
+                model.languages.len(),
                 model.source,
             )
         })
@@ -426,21 +427,26 @@ async fn the_catalog_lists_each_model_with_its_size_license_languages_source_and
         [
             (
                 "nemotron_160ms",
+                "Nemotron Streaming",
                 661_919_416,
                 "NVIDIA Open Model License",
-                "English",
+                1,
                 "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25"
             ),
             (
                 "unified_160ms",
+                "Nemotron Unified",
                 646_518_349,
                 "OpenMDW-1.1",
-                "25 European languages, detected automatically",
+                25,
                 "https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b"
             ),
         ]
     );
     assert!(models.iter().all(|model| !model.cached));
+    let unified = &models[1].languages;
+    assert!(unified.is_sorted() && unified.contains(&"English") && unified.contains(&"Ukrainian"));
+    assert_eq!(models[0].languages, ["English"]);
     for model in &models {
         assert!(CatalogSpeech::named(model.name).is_some(), "{}", model.name);
     }

@@ -531,7 +531,11 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
       { class: "model" },
       el("div", { class: "trow" }, el("span", { class: "unit" }, formatSize(info.size)), badge),
       el("small", {}, info.description),
-      el("small", { class: "facts" }, `License: ${info.license}. Languages: ${info.languages}.`),
+      el(
+        "small",
+        { class: "facts" },
+        `License: ${info.license}. Languages: ${info.languages.join(", ")}.${info.languages.length > 1 ? " The language is detected automatically." : ""}`,
+      ),
       el("div", { class: "trow" }, source, download, meter, status),
       problem,
     ),
@@ -541,6 +545,13 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
 
 /** The picker's entry for a folder the user points to. */
 const OWN_FOLDER = "__folder";
+/** The language filter's entry that lists every model. */
+const ALL_LANGUAGES = "";
+
+function modelOption(info: SpeechModelInfo): HTMLOptionElement {
+  const languages = info.languages.length === 1 ? info.languages.join("") : `${String(info.languages.length)} languages`;
+  return el("option", { value: info.name }, `${info.title} (${languages}, ${formatSize(info.size)})`);
+}
 
 function speech({ draft, controls, backend, checks, live }: PageContext): HTMLElement[] {
   const engine = controls.select(ENGINES, draft.stt.engine, (value) => {
@@ -549,9 +560,11 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
     checkWordList();
   });
   const catalog = new Map<string, ModelCard>();
-  const listed: string[] = [];
+  const listed: SpeechModelInfo[] = [];
+  // Only narrows the model list; it is not saved and does not reach recognition.
+  let language = ALL_LANGUAGES;
   let chosen = draft.stt.model ?? "";
-  const isCatalog = (name: string): boolean => name === SPEECH_MODEL || listed.includes(name);
+  const isCatalog = (name: string): boolean => name === SPEECH_MODEL || listed.some((info) => info.name === name);
   // Like the config, a name with a path separator is a folder. The entry stays picked while its path is still empty.
   let ownFolderPicked = /[\\/]/.test(chosen);
   const speechModel = controls.text(
@@ -565,9 +578,10 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
   );
   const modelInput = speechModel.field as HTMLInputElement;
   const folderResult = el("p", { class: "note", role: "status", hidden: true });
+  const languagePicker = el("select", { id: uid("f"), "aria-label": "Language" });
+  languagePicker.append(el("option", { value: ALL_LANGUAGES }, "All languages"));
   const modelPicker = el("select", { id: uid("f"), "aria-label": "Speech model" });
-  const loading = el("option", { value: "", disabled: true }, "Loading models…");
-  modelPicker.append(loading);
+  modelPicker.append(el("option", { value: "", disabled: true }, "Loading models…"));
   const modelList = el("div", { class: "models" });
   const listProblem = note();
   const ownFolder = el(
@@ -580,6 +594,16 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
     catalog.get(event.name)?.progress(event);
   };
 
+  const inLanguage = (info: SpeechModelInfo): boolean => language === ALL_LANGUAGES || info.languages.includes(language);
+
+  function listModels(): void {
+    modelPicker.replaceChildren(
+      ...listed.filter(inLanguage).map(modelOption),
+      el("option", { value: OWN_FOLDER }, "Your own model folder"),
+    );
+    showSelection();
+  }
+
   function showSelection(): void {
     const active = chosen === "" ? SPEECH_MODEL : chosen;
     const own = ownFolderPicked;
@@ -587,6 +611,19 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
     for (const [name, card] of catalog) card.node.hidden = own || name !== active;
     ownFolder.dataset["active"] = String(own);
   }
+
+  languagePicker.addEventListener("change", () => {
+    language = languagePicker.value;
+    const active = chosen === "" ? SPEECH_MODEL : chosen;
+    const current = listed.find((info) => info.name === active);
+    const first = listed.find(inLanguage);
+    if (!ownFolderPicked && first && !(current && inLanguage(current))) {
+      chosen = first.name;
+      syncModel();
+      controls.touched();
+    }
+    listModels();
+  });
 
   modelPicker.addEventListener("change", () => {
     if (modelPicker.value === OWN_FOLDER) {
@@ -604,21 +641,18 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
 
   backend.listSpeechModels().then(
     (models) => {
-      loading.remove();
       for (const info of models) {
-        listed.push(info.name);
-        modelPicker.append(el("option", { value: info.name }, info.title));
+        listed.push(info);
         const card = modelCard(info, backend);
         catalog.set(info.name, card);
         modelList.append(card.node);
       }
-      modelPicker.append(el("option", { value: OWN_FOLDER }, "Your own model folder"));
-      showSelection();
+      const spoken = new Set(models.flatMap((info) => info.languages));
+      languagePicker.append(...Array.from(spoken).sort((a, b) => a.localeCompare(b)).map((name) => el("option", { value: name }, name)));
+      listModels();
     },
     (error: unknown) => {
-      loading.remove();
-      modelPicker.append(el("option", { value: OWN_FOLDER }, "Your own model folder"));
-      showSelection();
+      listModels();
       say(listProblem, errorText(error));
     },
   );
@@ -753,6 +787,7 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
     row("Server address", "Where Thalvi sends speech for recognition.", server),
     group("Dictation"),
     row("Recognize speech", "Where your dictation is turned into text. Conversation mode always uses the server.", engine),
+    row("Language", "Narrows the list of models below. It does not change what is recognized.", { node: languagePicker, field: languagePicker }),
     row(
       "Speech model",
       `For recognition on this computer. Pick a model; it downloads on first use, or with its Download button. A model you pick applies from the next capture. Or point to your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.`,

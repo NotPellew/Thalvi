@@ -37,25 +37,53 @@ export const WAKE_MODELS_INFO: WakeModelInfo[] = [
   { name: "hey_jarvis", title: "Hey Jarvis", size: 1_271_370, cached: false },
 ];
 
+const UNIFIED_LANGUAGES = [
+  "Bulgarian",
+  "Croatian",
+  "Czech",
+  "Danish",
+  "Dutch",
+  "English",
+  "Estonian",
+  "Finnish",
+  "French",
+  "German",
+  "Greek",
+  "Hungarian",
+  "Italian",
+  "Latvian",
+  "Lithuanian",
+  "Maltese",
+  "Polish",
+  "Portuguese",
+  "Romanian",
+  "Russian",
+  "Slovak",
+  "Slovenian",
+  "Spanish",
+  "Swedish",
+  "Ukrainian",
+];
+
 export const NEMOTRON: SpeechModelInfo = {
   name: "nemotron_160ms",
-  title: "English only",
+  title: "Nemotron Streaming",
   description: "NVIDIA's Nemotron Speech Streaming.",
   size: 661_919_416,
   source: "https://huggingface.co/example/nemotron",
   license: "NVIDIA Open Model License",
-  languages: "English",
+  languages: ["English"],
   cached: false,
 };
 
 export const UNIFIED: SpeechModelInfo = {
   name: "unified_160ms",
-  title: "Multilingual",
+  title: "Nemotron Unified",
   description: "NVIDIA's Nemotron Unified ASR.",
   size: 646_518_349,
   source: "https://huggingface.co/example/unified",
   license: "OpenMDW-1.1",
-  languages: "25 European languages, detected automatically",
+  languages: UNIFIED_LANGUAGES,
   cached: false,
 };
 

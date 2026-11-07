@@ -181,8 +181,8 @@ pub struct SpeechModelInfo {
     /// The model's page, for reading about it.
     pub source: &'static str,
     pub license: &'static str,
-    /// The languages it recognizes, in words.
-    pub languages: &'static str,
+    /// The languages it recognizes.
+    pub languages: &'static [&'static str],
     /// Every file is on disk and matches its checksum.
     pub cached: bool,
 }
@@ -215,6 +215,35 @@ macro_rules! speech_assets {
     };
 }
 
+/// The languages on NVIDIA's card for the unified model.
+const UNIFIED_LANGUAGES: [&str; 25] = [
+    "Bulgarian",
+    "Croatian",
+    "Czech",
+    "Danish",
+    "Dutch",
+    "English",
+    "Estonian",
+    "Finnish",
+    "French",
+    "German",
+    "Greek",
+    "Hungarian",
+    "Italian",
+    "Latvian",
+    "Lithuanian",
+    "Maltese",
+    "Polish",
+    "Portuguese",
+    "Romanian",
+    "Russian",
+    "Slovak",
+    "Slovenian",
+    "Spanish",
+    "Swedish",
+    "Ukrainian",
+];
+
 impl CatalogSpeech {
     pub const ALL: [Self; 2] = [Self::Nemotron160ms, Self::Unified160ms];
 
@@ -227,8 +256,8 @@ impl CatalogSpeech {
     #[must_use]
     pub fn title(self) -> &'static str {
         match self {
-            Self::Nemotron160ms => "English only",
-            Self::Unified160ms => "Multilingual",
+            Self::Nemotron160ms => "Nemotron Streaming",
+            Self::Unified160ms => "Nemotron Unified",
         }
     }
 
@@ -236,10 +265,10 @@ impl CatalogSpeech {
     pub fn description(self) -> &'static str {
         match self {
             Self::Nemotron160ms => {
-                "NVIDIA's Nemotron Speech Streaming: the lightest on the CPU, and text appears soonest. Mostly without punctuation. The default."
+                "From NVIDIA: the lightest on the CPU, and text appears soonest. Mostly without punctuation. The default."
             }
             Self::Unified160ms => {
-                "NVIDIA's Nemotron Unified ASR: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it needs a fast CPU and text appears about half a second later. Exported by Thalvi."
+                "From NVIDIA: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it needs a fast CPU and text appears about half a second later. Exported by Thalvi."
             }
         }
     }
@@ -255,10 +284,10 @@ impl CatalogSpeech {
 
     /// The languages it recognizes.
     #[must_use]
-    pub fn languages(self) -> &'static str {
+    pub fn languages(self) -> &'static [&'static str] {
         match self {
-            Self::Nemotron160ms => "English",
-            Self::Unified160ms => "25 European languages, detected automatically",
+            Self::Nemotron160ms => &["English"],
+            Self::Unified160ms => &UNIFIED_LANGUAGES,
         }
     }
 
