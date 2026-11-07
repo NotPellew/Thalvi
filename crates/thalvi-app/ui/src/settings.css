@@ -52,6 +52,9 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .table, .cards { display: flex; flex-direction: column; gap: 6px; }
 .trow { display: flex; align-items: center; gap: 8px; }
 .trow .phrase { flex: 1; white-space: nowrap; font: 13px var(--mono); }
+.trow.pick, .trow.file { flex-wrap: wrap; }
+.trow.pick select { max-width: 100%; }
+.trow.file .unit:last-child { flex: 1 1 8em; overflow-wrap: anywhere; }
 .trow.add { justify-content: flex-end; }
 .trow.add input { flex: 1; max-width: 16em; }
 .trow.add.word-add { justify-content: flex-start; }
@@ -99,3 +102,12 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
 .chip { display: inline-flex; align-items: center; gap: 2px; font: 13px var(--mono); }
 #settings[data-look] main .chip > button { height: auto; padding: 0 2px 0 6px; border: 0; background: none; box-shadow: none; font: 13px var(--mono); text-transform: none; }
 #settings[data-look] main .chip > button:hover { color: var(--neon); background: none; }
+
+@media (max-width: 560px) {
+  nav { width: 120px; padding: 14px 4px; }
+  .pages { padding: 14px 10px; }
+  .bar { padding-inline: 10px; }
+  .row { flex-direction: column; align-items: stretch; gap: 8px; }
+  .what { max-width: none; }
+  .ctl { flex: none; justify-content: flex-start; }
+}

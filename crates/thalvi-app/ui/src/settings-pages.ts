@@ -265,7 +265,7 @@ function wakeHeads(context: PageContext): HTMLElement[] {
         },
       );
     });
-    const customRow = el("div", { class: "trow" }, el("span", { class: "unit" }, "Custom model"), browse, chosenFile);
+    const customRow = el("div", { class: "trow file" }, el("span", { class: "unit" }, "Custom model"), browse, chosenFile);
     state.render = () => {
       const other = heads.find((candidate) => candidate.key !== key);
       picker.replaceChildren(
@@ -310,7 +310,7 @@ function wakeHeads(context: PageContext): HTMLElement[] {
     });
     heads.push(state);
     const field: Field = {
-      node: el("div", { class: "stack wide" }, el("div", { class: "trow" }, picker, badge, download), customRow, problem),
+      node: el("div", { class: "stack wide" }, el("div", { class: "trow pick" }, picker, badge, download), customRow, problem),
       field: picker,
     };
     return [
