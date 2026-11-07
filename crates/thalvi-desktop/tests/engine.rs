@@ -3336,6 +3336,74 @@ async fn key_auto_repeat_during_a_hold_starts_nothing_and_a_press_during_a_wake_
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_interrupted_listener_keeps_a_hold_or_reports_a_tap_before_it_resumes() {
+    for (tapped, stopped, resumed) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, true, true),
+        (true, true, true),
+    ] {
+        let (rig, mut engine, mut frames) = Rig::new("{}");
+        let mut first = Box::pin(engine.listen(&mut frames));
+        tokio::select! {
+            biased;
+            result = &mut first => panic!("listener ended: {result:?}"),
+            () = std::future::ready(()) => {}
+        }
+        assert_eq!(rig.wake.resets(), 1);
+        drop(first);
+        rig.key.set(true);
+        if tapped {
+            rig.key.set(false);
+        }
+        if stopped {
+            let mut presses = engine.stop_listening();
+            assert_eq!(
+                u64::from(presses.take().is_some()) + presses.take_lost(),
+                1,
+                "closing the microphone hands its pending press to the caller"
+            );
+            if resumed {
+                engine.resume_listening(presses);
+            }
+        }
+        let result = tokio::time::timeout(ms(5), engine.listen(&mut frames)).await;
+        if tapped || stopped {
+            assert!(result.is_err(), "a released tap must not capture");
+            assert_eq!(
+                engine.take_ignored(),
+                if stopped {
+                    vec![]
+                } else {
+                    vec![Refusal::TooQuick]
+                }
+            );
+            if !tapped {
+                rig.key.set(false);
+            }
+            rig.key.set(true);
+            assert_eq!(
+                tokio::time::timeout(ms(5), engine.listen(&mut frames))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                WakeTrigger::Hold,
+                "the next fresh press still captures"
+            );
+        } else {
+            assert_eq!(
+                result.unwrap().unwrap(),
+                WakeTrigger::Hold,
+                "HANDOFF_PRESS_SILENTLY_DROPPED"
+            );
+            assert_eq!(engine.take_ignored(), []);
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_key_already_down_when_listening_starts_waits_for_its_next_press() {
     LocalSet::new()
         .run_until(async {

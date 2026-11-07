@@ -380,6 +380,12 @@ pub struct Parts<R, W, C> {
     pub notice: Box<dyn Fn(&str)>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListenState {
+    Stopped,
+    Active,
+}
+
 /// Wake listening and capture, owning everything they share.
 pub struct Engine<R, W, C> {
     recognizer: R,
@@ -413,6 +419,7 @@ pub struct Engine<R, W, C> {
     /// The latest frames scored while listening.
     wake_clip: VecDeque<Frame>,
     key: Presses,
+    listening: ListenState,
     /// The hold that opened the next capture.
     held: Option<Held>,
     /// How the latest hold ended, when the key decided it.
@@ -669,6 +676,7 @@ where
             woke: None,
             wake_clip: VecDeque::new(),
             key: Presses::new(parts.hold),
+            listening: ListenState::Stopped,
             held: None,
             hold_end: None,
             held_for: None,
@@ -700,8 +708,26 @@ where
         self.recorder.finish().await;
     }
 
+    /// Ends listening and hands its unhandled presses to the caller. The next listener ignores
+    /// an already-held key.
+    pub fn stop_listening(&mut self) -> Presses {
+        let mut presses = self.key.clone();
+        if self.listening == ListenState::Stopped {
+            presses.skip();
+        }
+        self.listening = ListenState::Stopped;
+        presses
+    }
+
+    /// Resumes after the caller has accounted for presses while the microphone was closed.
+    pub fn resume_listening(&mut self, presses: Presses) {
+        self.key = presses;
+        self.listening = ListenState::Active;
+    }
+
     /// Scores microphone frames until a wake word is heard or the dictation key goes down. A key
     /// already down when listening starts counts for nothing until it is released and pressed again.
+    /// Dropping this future preserves pending presses until listening resumes or `stop_listening`.
     ///
     /// On [`WakeTrigger::Capture`] the microphone gate is already off, so nothing said before
     /// the wake cue reaches the capture; call [`capture`](Self::capture) next.
@@ -713,7 +739,10 @@ where
         frames: &mut impl FrameSource,
     ) -> Result<WakeTrigger, ListenError> {
         self.set_state(EngineState::Listening);
-        self.key.skip();
+        if self.listening == ListenState::Stopped {
+            self.key.skip();
+        }
+        self.listening = ListenState::Active;
         // A capture the caller abandoned before it began leaves its start behind; the next one is
         // not that hold or that wake.
         self.held = None;
@@ -727,6 +756,7 @@ where
         let mut misses = NearMisses::new(self.thresholds.0, self.thresholds.1);
         let mut latency = Latency::default();
         let heard = self.scan(frames, &mut misses, &mut latency).await;
+        self.listening = ListenState::Stopped;
         if let Some(summary) = latency.finish() {
             self.latency_line(summary);
         }
