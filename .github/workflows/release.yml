@@ -87,6 +87,7 @@ jobs:
     needs: [gate, package]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: release
     permissions:
       contents: write
     steps:
