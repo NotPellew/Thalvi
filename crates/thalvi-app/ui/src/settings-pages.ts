@@ -47,6 +47,8 @@ export interface PageContext {
     status: (status: Status) => void;
     /** The page with this id was opened. */
     opened: (id: string) => void;
+    /** The app's state changed, so what a page shows from disk may be out of date. */
+    refresh: () => void;
   };
   /** Checks a page adds that must pass before Save sends; each returns null when it has nothing to check. */
   checks: (() => Promise<void> | null)[];
@@ -181,7 +183,7 @@ interface WakeHead {
 
 /** Both wake pickers: catalog phrases with download badges, or a custom `.onnx` file. */
 function wakeHeads(context: PageContext): HTMLElement[] {
-  const { draft, controls, backend, checks } = context;
+  const { draft, controls, backend, checks, live } = context;
   const infos = new Map<string, WakeModelInfo>();
   const downloading = new Set<string>();
   const heads: WakeHead[] = [];
@@ -327,15 +329,19 @@ function wakeHeads(context: PageContext): HTMLElement[] {
   }
 
   const nodes = [...head("capture", "Dictation wake word"), ...head("conversation", "Conversation wake word")];
-  backend.listWakeModels().then(
-    (models) => {
-      for (const info of models) infos.set(info.name, info);
-      for (const state of heads) state.render();
-    },
-    (error: unknown) => {
-      for (const state of heads) state.sayProblem(errorText(error));
-    },
-  );
+  function refresh(): void {
+    backend.listWakeModels().then(
+      (models) => {
+        for (const info of models) infos.set(info.name, info);
+        for (const state of heads) state.render();
+      },
+      (error: unknown) => {
+        for (const state of heads) state.sayProblem(errorText(error));
+      },
+    );
+  }
+  live.refresh = refresh;
+  refresh();
   for (const state of heads) state.render();
   return nodes;
 }
