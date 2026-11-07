@@ -53,7 +53,10 @@ Set-ItemProperty $policy ConcatenateDefaults_AllowSaved 1 -Type DWord
 Set-ItemProperty $policy ConcatenateDefaults_AllowSavedNTLMOnly 1 -Type DWord
 New-Item -Force 'HKCU:\Software\Microsoft\Terminal Server Client' | Out-Null
 Set-ItemProperty 'HKCU:\Software\Microsoft\Terminal Server Client' AuthenticationLevelOverride 0 -Type DWord
-cmdkey /generic:TERMSRV/127.0.0.2 "/user:$env:COMPUTERNAME\$user" "/pass:$password" | Out-Null
+# cmd.exe passes the quoted user name to cmdkey as it is; PowerShell splits or re-quotes a name with a space.
+Set-Content "$qa\savecred.cmd" "@cmdkey /generic:TERMSRV/127.0.0.2 /user:`"$env:COMPUTERNAME\$user`" /pass:$password"
+& cmd.exe /c "$qa\savecred.cmd" | Out-Null
+Remove-Item "$qa\savecred.cmd"
 cmdkey /list:TERMSRV/127.0.0.2 | Where-Object { $_ -match 'User' } | ForEach-Object { Log "saved credential: $($_.Trim())" }
 
 function Session-Explorer {
