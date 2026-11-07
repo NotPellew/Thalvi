@@ -57,6 +57,7 @@ pub enum Status {
         headline: &'static str,
         /// The technical causes behind `notice`, outermost first, for the error report.
         causes: Vec<String>,
+        kind: FailureKind,
     },
     /// A model is being fetched or loaded. For the speech model the wake word already works.
     Loading {
@@ -67,12 +68,23 @@ pub enum Status {
     },
 }
 
+/// What a failure stopped, which decides what the overlay's label may claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FailureKind {
+    /// A capture's text was not delivered to its destination.
+    Delivery,
+    /// Anything else: a model, the microphone, a refused key press.
+    Other,
+}
+
 /// What went wrong: the notice for the user and the technical causes for the error report.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Failure {
     pub notice: String,
     pub headline: &'static str,
     pub causes: Vec<String>,
+    pub kind: FailureKind,
 }
 
 impl Failure {
@@ -83,6 +95,7 @@ impl Failure {
             notice: error.to_string(),
             headline: error.headline(),
             causes: causes(error),
+            kind: FailureKind::Other,
         }
     }
 }
@@ -99,12 +112,14 @@ impl LastError {
             notice,
             headline,
             causes,
+            kind,
         } = status
         {
             *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(Failure {
                 notice: notice.clone(),
                 headline,
                 causes: causes.clone(),
+                kind: *kind,
             });
         }
     }
@@ -210,6 +225,7 @@ impl View {
                 notice: failure.notice.clone(),
                 headline: failure.headline,
                 causes: failure.causes.clone(),
+                kind: failure.kind,
             },
             (Mode::Idle | Mode::Done { .. } | Mode::Failed(_), engine) => match engine {
                 EngineState::Listening => Status::Listening,
@@ -332,6 +348,7 @@ mod tests {
             notice: "Delivered.".to_owned(),
         };
         let failed = Mode::Failed(Failure {
+            kind: FailureKind::Other,
             notice: "The microphone is off.".to_owned(),
             headline: "Failed",
             causes: Vec::new(),
@@ -383,6 +400,7 @@ mod tests {
                 failed.clone(),
                 EngineState::Listening,
                 Status::Failed {
+                    kind: FailureKind::Other,
                     notice: "The microphone is off.".to_owned(),
                     headline: "Failed",
                     causes: Vec::new(),
@@ -430,6 +448,7 @@ mod tests {
         assert_eq!(
             loading(
                 Mode::Failed(Failure {
+                    kind: FailureKind::Other,
                     notice: "The microphone is off.".to_owned(),
                     headline: "Failed",
                     causes: vec!["open failed".to_owned()],
@@ -437,6 +456,7 @@ mod tests {
                 EngineState::Listening
             ),
             Status::Failed {
+                kind: FailureKind::Other,
                 notice: "The microphone is off.".to_owned(),
                 headline: "Failed",
                 causes: vec!["open failed".to_owned()],
@@ -506,11 +526,12 @@ mod tests {
             ),
             (
                 Status::Failed {
+                    kind: FailureKind::Other,
                     notice: "No.".to_owned(),
                     headline: "No",
                     causes: vec!["connection refused (os error 111)".to_owned()],
                 },
-                json!({"state": "failed", "notice": "No.", "headline": "No", "causes": ["connection refused (os error 111)"]}),
+                json!({"state": "failed", "notice": "No.", "headline": "No", "causes": ["connection refused (os error 111)"], "kind": "other"}),
             ),
             (
                 Status::Loading {
@@ -528,6 +549,7 @@ mod tests {
     #[test]
     fn the_last_error_outlives_the_failure_until_a_newer_one_replaces_it() {
         let failed = |notice: &str| Status::Failed {
+            kind: FailureKind::Other,
             notice: notice.to_owned(),
             headline: "Failed",
             causes: vec![format!("cause of {notice}")],
@@ -564,6 +586,7 @@ mod tests {
         assert_eq!(
             Failure::of(&error),
             Failure {
+                kind: FailureKind::Other,
                 notice: error.to_string(),
                 headline: "Can't reach speech server — Settings",
                 causes: vec!["connection refused (os error 111)".to_owned()],

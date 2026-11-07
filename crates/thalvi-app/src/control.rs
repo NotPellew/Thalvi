@@ -105,6 +105,7 @@ pub fn bar_json(reply: Result<Option<String>, HostError>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::status::FailureKind;
     use serde_json::{Value, json};
 
     use super::*;
@@ -157,6 +158,7 @@ mod tests {
         });
         assert_eq!(state(), "capturing");
         sender.send_replace(Status::Failed {
+            kind: FailureKind::Other,
             notice: "http://user:key@host".to_owned(),
             headline: "Failed",
             causes: Vec::new(),
@@ -176,6 +178,7 @@ mod tests {
     #[test]
     fn copy_error_is_offered_from_the_first_failure_on_and_the_bar_ignores_it() {
         let failed = Status::Failed {
+            kind: FailureKind::Other,
             notice: "No.".to_owned(),
             headline: "No",
             causes: Vec::new(),
