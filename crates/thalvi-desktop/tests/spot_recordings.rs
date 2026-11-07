@@ -31,6 +31,8 @@ use thalvi_desktop::transducer::{SpeechChoice, Transducer, TransducerSource};
 const RELEASE_FRAMES: usize = 10;
 /// A hit this close to the end of a recording, or nearer, is where an ending is said.
 const TAIL: u64 = 4 * SAMPLE_RATE as u64;
+/// How long the engine lets a recheck run: a live final that carries the ending in this time ends it.
+const RECHECK_LIMIT: u64 = 5 * SAMPLE_RATE as u64;
 const THRESHOLDS: [f32; 3] = [0.25, 0.30, 0.35];
 
 fn store() -> ModelStore {
@@ -236,6 +238,10 @@ enum Redo {
     Nothing,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about one recheck, each a line of the report"
+)]
 struct Recheck {
     redo: Redo,
     /// No final covered the phrase, so the recheck started after the release silence.
@@ -243,6 +249,10 @@ struct Recheck {
     tail: bool,
     /// The user said the same ending literally later in the capture.
     said_again: bool,
+    /// The live transcript carried the ending itself while the recheck would still have run.
+    agreed_late: bool,
+    /// Where the recheck started, in samples of the recording.
+    at: u64,
     millis: f64,
     audio_seconds: f64,
 }
@@ -428,6 +438,8 @@ impl<'a, M: SpeechModel> Replay<'a, M> {
                 backstop,
                 tail: open.end + TAIL >= self.samples,
                 said_again: false,
+                agreed_late: false,
+                at: (index as u64 + 1) * FRAME_SAMPLES as u64,
                 millis,
                 audio_seconds: seconds(audio.len() as u64 * FRAME_SAMPLES as u64),
             },
@@ -443,10 +455,14 @@ impl<'a, M: SpeechModel> Replay<'a, M> {
             .rechecks
             .into_iter()
             .map(|(mut check, ending, later_from)| {
-                check.said_again = finals
+                let mut later = finals
                     .iter()
                     .skip(later_from)
-                    .any(|done| done.ending == Some(ending));
+                    .filter(|done| done.ending == Some(ending));
+                let first = later.next();
+                check.said_again = first.is_some();
+                check.agreed_late =
+                    first.is_some_and(|done| done.arrived <= check.at + RECHECK_LIMIT);
                 check
             })
             .collect();
@@ -592,10 +608,19 @@ fn print_rechecks(rechecks: &[Recheck], agreed: u32, other: u32) {
         all.len()
     );
     println!("all disputed: {}", describe(&all));
-    let subsets: [(&str, Keep); 4] = [
+    let subsets: [(&str, Keep); 7] = [
+        ("live transcript agreed late", |check| check.agreed_late),
+        ("not agreed late (the transcript never had it)", |check| {
+            !check.agreed_late
+        }),
+        ("not agreed late, in the tail", |check| {
+            !check.agreed_late && check.tail
+        }),
+        ("not agreed late, said again by the user", |check| {
+            !check.agreed_late && check.said_again
+        }),
         ("tail", |check| check.tail),
         ("said again later", |check| check.said_again),
-        ("tail or said again", |check| check.tail || check.said_again),
         ("backstop", |check| check.backstop),
     ];
     for (name, keep) in subsets {
