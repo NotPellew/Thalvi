@@ -115,4 +115,11 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
   .card { grid-template-columns: minmax(0, 1fr); }
   .card button { grid-column: 1; }
   .mini input, .mini select { width: 100%; box-sizing: border-box; }
+  .looks { flex-wrap: wrap; }
+}
+
+@media (max-width: 360px) {
+  .pages { padding-inline: 6px; }
+  #settings[data-look] .pages .grp { padding-inline: 8px; }
+  #settings[data-look] .pages select { padding-left: 6px; font: 11px system-ui; }
 }
