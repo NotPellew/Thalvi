@@ -22,7 +22,12 @@ plain text, and cancellation is still polled first), the quiet wake floor was
 added in `engine.rs`, the upsampling filter and word list changed in
 `recognizer.rs`, and `runner.rs` hands the word list to the local recognizer;
 a released hold now sends silence through the same cancel-first send before it
-waits for the final. None of these touch the mapped functions' cancellation
+waits for the final, and `Runner::apply` now counts hold presses that land
+during a rebuild and refuses them afterwards (`Runner::rebuild` is its former
+body). A dropped listener now keeps its hold cursor until it resumes; closing
+the microphone explicitly ends that listening interval and hands its pending
+press cursor to Apply. Apply returns that cursor to the live engine after
+reporting unavailable presses, so the next listener cannot skip a newer press. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
@@ -117,6 +122,13 @@ output and `delivered=true`. Now it observes Accepted output with `ended=true`,
 no host call, and one cancelled history entry and draft carrying the text.
 The second replay gates the same shutdown without Cancel, presses and releases
 the hold key while close is pending, and checks one refusal and successful delivery.
+The settings replay extracts `Runner::apply` and `refuse_unheard` byte for byte,
+gates a fake rebuild, and checks one refusal for a tap or held press just before
+Apply or during the rebuild, through both
+success and failure. It also replays identical and retune-only Apply handoffs with the real engine,
+accepting a held press or reporting a completed tap. It checks the Apply wiring,
+not model loading or native input.
+The replay respects an existing `TMPDIR` and `CARGO_TARGET_DIR` for managed jobs.
 
 ## Read a result
 

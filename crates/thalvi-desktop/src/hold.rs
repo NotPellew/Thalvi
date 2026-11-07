@@ -214,6 +214,7 @@ pub struct Press {
 }
 
 /// Follows the key so each press is acted on or refused once, however late it is looked at.
+#[derive(Clone)]
 pub struct Presses {
     state: watch::Receiver<KeyState>,
     seen: u64,

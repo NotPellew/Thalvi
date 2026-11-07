@@ -280,6 +280,7 @@ impl Session {
     }
 
     fn close_microphone(&mut self) {
+        self.engine.stop_listening();
         self.frames = None;
         if let Some(microphone) = &mut self.microphone {
             microphone.pause();
@@ -623,16 +624,7 @@ impl Runner {
                 }
                 Next::Key => {
                     let pressed = pressed(&mut self.key);
-                    if pressed > 0 {
-                        self.refuse_press(
-                            if self.paused {
-                                Refusal::Paused
-                            } else {
-                                Refusal::MicrophoneClosed
-                            },
-                            pressed,
-                        );
-                    }
+                    self.refuse_unheard(pressed);
                     Flow::Continue
                 }
             };
@@ -674,6 +666,18 @@ impl Runner {
                 self.reopen_failures = Some(0);
                 Flow::Continue
             }
+        }
+    }
+
+    /// Refuses `count` presses of the hold key that came while no engine was listening.
+    fn refuse_unheard(&self, count: u64) {
+        if count > 0 {
+            let refusal = if self.paused {
+                Refusal::Paused
+            } else {
+                Refusal::MicrophoneClosed
+            };
+            self.refuse_press(refusal, count);
         }
     }
 
@@ -766,6 +770,25 @@ impl Runner {
             self.config = config;
             return;
         }
+        let mut presses = if let Some(session) = self.session.as_mut() {
+            session.engine.stop_listening()
+        } else {
+            let mut presses = Presses::new(self.key_state.clone());
+            presses.skip();
+            presses
+        };
+        self.rebuild(config).await;
+        let count = pressed(&mut presses);
+        if let Some(session) = self.session.as_mut()
+            && session.frames.is_some()
+        {
+            session.engine.resume_listening(presses);
+        }
+        self.refuse_unheard(count);
+    }
+
+    /// Closes the microphone and replaces the engine by one built from `config`.
+    async fn rebuild(&mut self, config: DesktopConfig) {
         self.close_microphone();
         match self.build(&config).await {
             Ok(session) => {
@@ -1523,6 +1546,77 @@ mod tests {
         .await;
         assert_eq!(outcome, "delivered");
         assert_eq!(refused.get(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_press_refused_after_a_rebuild_does_not_dictate_later_but_a_fresh_press_does() {
+        use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeFrames, FakeWake};
+        use thalvi_desktop::recognizer::FakeRecognizer;
+
+        LocalSet::new()
+            .run_until(async {
+                let (out, _status) = watch::channel(Status::Listening);
+                let publisher = Publisher::new(out, EndingPauses::default());
+                let gate = InputGate::default();
+                let (mut frames, _feed) = FakeFrames::new(&gate);
+                let (wake, wake_control) = FakeWake::new();
+                let (cues, _cue_control) = FakeCuePlayer::new();
+                let (recognizer, _server) = FakeRecognizer::new();
+                let (input, hold) = HoldInput::new();
+                let key = hold.clone();
+                let (mut engine, _) = Engine::new(
+                    Parts {
+                        recognizer,
+                        wake,
+                        cues,
+                        gate,
+                        hold,
+                        http: reqwest::Client::new(),
+                        notice: publisher.notice_sink(),
+                    },
+                    &DesktopConfig::from_json_str("{}").unwrap(),
+                    Recorder::disabled(),
+                );
+
+                let mut presses = Presses::new(key);
+                presses.skip();
+                input.set(true);
+                assert_eq!(
+                    pressed(&mut presses),
+                    1,
+                    "the press during the rebuild is refused"
+                );
+                engine.resume_listening(presses);
+
+                let listening =
+                    tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while wake_control.resets() == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                for _ in 0..10 {
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    !listening.is_finished(),
+                    "the refused press must not start a dictation"
+                );
+
+                input.set(false);
+                input.set(true);
+                let trigger = tokio::time::timeout(Duration::from_secs(5), listening)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    matches!(trigger, Ok(WakeTrigger::Hold)),
+                    "a fresh press dictates"
+                );
+            })
+            .await;
     }
 
     #[tokio::test(start_paused = true)]
