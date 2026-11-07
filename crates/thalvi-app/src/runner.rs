@@ -260,6 +260,17 @@ impl Publisher {
         self.update(|view| view.mode = mode);
     }
 
+    /// Shows how a capture ended. Text left on the clipboard names no window: the notice says
+    /// where it is, and a window name would read as pasted or sent there.
+    fn ended(&self, mode: Mode, on_clipboard: bool) {
+        self.update(|view| {
+            view.mode = mode;
+            if on_clipboard {
+                view.target = None;
+            }
+        });
+    }
+
     fn loading(&self, load: Option<SpeechLoad>) {
         self.update(|view| view.loading = load);
     }
@@ -926,8 +937,11 @@ impl Runner {
             // Nothing is delivered after a quit; what was dictated is already kept.
             return Flow::Quit;
         }
+        let on_clipboard = finished
+            .as_ref()
+            .is_some_and(|finished| finished.on_clipboard);
         self.publisher
-            .mode(told(delivered(finished, route), &ignored));
+            .ended(told(delivered(finished, route), &ignored), on_clipboard);
         if requests.listening_off {
             self.pause();
         }
@@ -1321,6 +1335,31 @@ mod tests {
             assert!(
                 matches!(&*status.borrow(), Status::Failed { headline: shown, .. } if *shown == headline),
                 "{refusal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_left_on_the_clipboard_is_confirmed_without_naming_a_window() {
+        for (on_clipboard, target) in [(true, None), (false, Some("kitty"))] {
+            let (out, status) = watch::channel(Status::Paused);
+            let publisher = Publisher::new(out, EndingPauses::default());
+            publisher.update(|view| view.target = Some("kitty".to_owned()));
+            publisher.ended(
+                Mode::Done {
+                    route: CaptureRoute::Paste,
+                    notice: "Copied — press Ctrl+V to paste".to_owned(),
+                },
+                on_clipboard,
+            );
+            assert_eq!(
+                *status.borrow(),
+                Status::Done {
+                    target: target.map(str::to_owned),
+                    route: CaptureRoute::Paste,
+                    notice: "Copied — press Ctrl+V to paste".to_owned(),
+                },
+                "{on_clipboard}"
             );
         }
     }
@@ -1932,7 +1971,10 @@ mod tests {
 
     impl Host for TestHost {
         type Target = String;
-        const OVERLAY_TAKES_CLICKS: bool = false;
+
+        fn overlay_takes_clicks(&self) -> bool {
+            false
+        }
 
         fn capture_target(&self) -> Result<String, thalvi_desktop::host::HostError> {
             Ok("Editor".to_owned())
@@ -1943,9 +1985,9 @@ mod tests {
             _: &String,
             _: &thalvi_desktop::host::TypedText,
             _: bool,
-        ) -> Result<(), thalvi_desktop::host::HostError> {
+        ) -> Result<thalvi_desktop::host::Delivered, thalvi_desktop::host::HostError> {
             self.called("deliver");
-            Ok(())
+            Ok(thalvi_desktop::host::Delivered::InWindow)
         }
 
         fn copy(&self, _: &str) -> Result<(), thalvi_desktop::host::HostError> {
@@ -2131,6 +2173,7 @@ mod tests {
         let finished = |delivered| Finished {
             delivered,
             maybe_partial: false,
+            on_clipboard: false,
             notice: "Done.".to_owned(),
             headline: "Done",
             causes: Vec::new(),

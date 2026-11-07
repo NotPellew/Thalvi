@@ -1,16 +1,13 @@
 //! Hyprland host: hyprctl, wtype and wl-copy.
 
-mod command;
-mod state;
-
 use std::fmt;
 use std::path::Path;
 
 use serde::Deserialize;
 
-use self::command::{CommandError, CommandRunner, SystemRunner};
+use super::command::{CommandError, CommandRunner, SystemRunner, tool, wl_copy};
 use super::{
-    App, HoldSource, Host, HostError, Modifier, OVERLAY_TITLE, Shortcut, StateServer, TypedText,
+    App, Delivered, HoldSource, Host, HostError, Modifier, OVERLAY_TITLE, Shortcut, TypedText,
     WebUrl,
 };
 use crate::hold::HoldKey;
@@ -35,25 +32,8 @@ pub struct Hyprland<R = SystemRunner> {
 }
 
 impl Hyprland {
-    /// # Errors
-    /// [`HostError::Unsupported`] naming this desktop unless Hyprland is running.
-    pub fn detect() -> Result<Self, HostError> {
-        detect_in(
-            std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok().as_deref(),
-            std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
-        )
-        .map(|()| Self { run: SystemRunner })
-    }
-
-    /// Answers each query on the user's private runtime folder with `state()` until the guard is
-    /// dropped.
-    ///
-    /// # Errors
-    /// [`HostError::Unsupported`] when no private folder is available or another app answers.
-    pub fn serve_state(
-        state: impl Fn() -> String + Send + 'static,
-    ) -> Result<StateServer, HostError> {
-        state::serve(state)
+    pub(super) fn system() -> Self {
+        Self { run: SystemRunner }
     }
 
     /// The compositor reports the key, through the binds in `hyprland.conf` that run the
@@ -73,53 +53,6 @@ impl Hyprland {
             "On Hyprland the hold key is a bind in hyprland.conf: see integrations/hyprland/hyprland-binds.conf.",
         ))
     }
-
-    /// The running app's state line; `None` when no app answers.
-    ///
-    /// # Errors
-    /// [`HostError::Unsupported`] when the answer could not be asked or read.
-    pub fn query_state() -> Result<Option<String>, HostError> {
-        state::query()
-    }
-
-    /// Shows `message` in an error box titled `title` and waits until it is closed. Needs no
-    /// detected desktop, so a failure to detect one can be shown. Does nothing without a display.
-    pub fn show_error(title: &str, message: &str) {
-        use gtk::prelude::Cast;
-
-        if gtk::init().is_err() {
-            return;
-        }
-        let dialog = gtk::MessageDialog::new(
-            None::<&gtk::Window>,
-            gtk::DialogFlags::MODAL,
-            gtk::MessageType::Error,
-            gtk::ButtonsType::Ok,
-            message,
-        );
-        gtk::prelude::GtkWindowExt::set_title(&dialog, title);
-        // So the user can copy the message, such as a path, out of the box.
-        if let Ok(area) =
-            gtk::prelude::MessageDialogExt::message_area(&dialog).downcast::<gtk::Container>()
-        {
-            for child in gtk::prelude::ContainerExt::children(&area) {
-                if let Ok(label) = child.downcast::<gtk::Label>() {
-                    gtk::prelude::LabelExt::set_selectable(&label, true);
-                }
-            }
-        }
-        gtk::prelude::DialogExt::run(&dialog);
-    }
-}
-
-fn detect_in(signature: Option<&str>, desktop: Option<&str>) -> Result<(), HostError> {
-    if signature.is_some_and(|signature| !signature.is_empty()) {
-        return Ok(());
-    }
-    let name = desktop.filter(|name| !name.is_empty()).unwrap_or("unknown");
-    Err(HostError::Unsupported(format!(
-        "Thalvi supports Hyprland and Windows for now; this desktop is {name}."
-    )))
 }
 
 /// The default browsers Thalvi can ask for a new tab, by `.desktop` file, and their commands.
@@ -176,16 +109,6 @@ struct Monitor {
     focused: bool,
     /// Space panels reserve, in logical pixels, in the order left, top, right, bottom.
     reserved: [i64; 4],
-}
-
-/// A tool failure before any input was sent: a missing tool means this desktop lacks it.
-fn tool(error: &CommandError) -> HostError {
-    match error {
-        CommandError::NotInstalled(_) => HostError::Unsupported(error.to_string()),
-        CommandError::TimedOut(_) | CommandError::Failed { .. } => {
-            HostError::NothingTyped(error.to_string())
-        }
-    }
 }
 
 /// States on a failure that nothing reached a window.
@@ -272,13 +195,20 @@ impl<R: CommandRunner> Host for Hyprland<R> {
     type Target = Window;
 
     // Hyprland routes no pointer input to a `no_focus` window, and the overlay must stay one.
-    const OVERLAY_TAKES_CLICKS: bool = false;
+    fn overlay_takes_clicks(&self) -> bool {
+        false
+    }
 
     fn capture_target(&self) -> Result<Window, HostError> {
         self.active()
     }
 
-    fn deliver(&self, target: &Window, text: &TypedText, enter: bool) -> Result<(), HostError> {
+    fn deliver(
+        &self,
+        target: &Window,
+        text: &TypedText,
+        enter: bool,
+    ) -> Result<Delivered, HostError> {
         self.focus(target).map_err(nothing_typed)?;
         let mut args = vec!["-"];
         if enter {
@@ -287,7 +217,7 @@ impl<R: CommandRunner> Host for Hyprland<R> {
         }
         self.run
             .run("wtype", &args, Some(text.as_str()))
-            .map(|_| ())
+            .map(|_| Delivered::InWindow)
             .map_err(|error| match error {
                 CommandError::NotInstalled(_) => nothing_typed(tool(&error)),
                 CommandError::TimedOut(_) | CommandError::Failed { .. } => HostError::MaybePartial(
@@ -298,18 +228,7 @@ impl<R: CommandRunner> Host for Hyprland<R> {
     }
 
     fn copy(&self, text: &str) -> Result<(), HostError> {
-        // An empty copy would clear the clipboard instead of keeping anything.
-        if text.is_empty() {
-            return Ok(());
-        }
-        self.run
-            .run(
-                "wl-copy",
-                &["--type", "text/plain;charset=utf-8"],
-                Some(text),
-            )
-            .map(|_| ())
-            .map_err(|error| tool(&error))
+        wl_copy(&self.run, text)
     }
 
     fn focus_app(&self, app: &App) -> Result<Window, HostError> {
@@ -423,58 +342,19 @@ mod tests {
 
     use std::sync::Mutex;
 
+    use super::super::command::fakes::FakeRunner;
     use super::*;
-
-    type Reply = Box<dyn Fn(&[String], Option<&str>) -> Result<String, CommandError> + Send + Sync>;
-
-    /// Records every command and answers with `reply`.
-    struct FakeRunner {
-        calls: Mutex<Vec<(Vec<String>, Option<String>)>>,
-        reply: Reply,
-    }
-
-    impl CommandRunner for FakeRunner {
-        fn run(
-            &self,
-            program: &str,
-            args: &[&str],
-            stdin: Option<&str>,
-        ) -> Result<String, CommandError> {
-            let command: Vec<String> = std::iter::once(program)
-                .chain(args.iter().copied())
-                .map(str::to_owned)
-                .collect();
-            let reply = (self.reply)(&command, stdin);
-            self.calls
-                .lock()
-                .unwrap()
-                .push((command, stdin.map(str::to_owned)));
-            reply
-        }
-    }
 
     fn host(
         reply: impl Fn(&[String], Option<&str>) -> Result<String, CommandError> + Send + Sync + 'static,
     ) -> Hyprland<FakeRunner> {
         Hyprland {
-            run: FakeRunner {
-                calls: Mutex::default(),
-                reply: Box::new(reply),
-            },
+            run: FakeRunner::new(reply),
         }
     }
 
     fn commands(host: &Hyprland<FakeRunner>) -> Vec<String> {
-        host.run
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(argv, stdin)| match stdin {
-                Some(stdin) => format!("{} <{stdin}>", argv.join(" ")),
-                None => argv.join(" "),
-            })
-            .collect()
+        host.run.commands()
     }
 
     fn row(address: &str, pid: i64, class: &str, history: i64) -> String {
@@ -522,39 +402,6 @@ mod tests {
 
     fn typed(text: &str) -> TypedText {
         TypedText::new(text).unwrap()
-    }
-
-    #[test]
-    fn only_a_hyprland_session_is_detected_and_other_desktops_are_named() {
-        for (signature, desktop, expected) in [
-            (Some("abc"), None, Ok(())),
-            (Some("abc"), Some("GNOME"), Ok(())),
-            (
-                None,
-                Some("GNOME"),
-                Err("Thalvi supports Hyprland and Windows for now; this desktop is GNOME."),
-            ),
-            (
-                Some(""),
-                Some("KDE"),
-                Err("Thalvi supports Hyprland and Windows for now; this desktop is KDE."),
-            ),
-            (
-                None,
-                None,
-                Err("Thalvi supports Hyprland and Windows for now; this desktop is unknown."),
-            ),
-        ] {
-            let result = detect_in(signature, desktop);
-            match expected {
-                Ok(()) => assert_eq!(result, Ok(()), "{signature:?} {desktop:?}"),
-                Err(message) => assert_eq!(
-                    result,
-                    Err(HostError::Unsupported(message.to_owned())),
-                    "{signature:?} {desktop:?}"
-                ),
-            }
-        }
     }
 
     #[test]
@@ -645,7 +492,7 @@ mod tests {
             );
             assert_eq!(
                 host.deliver(&window("0x2", 2, "terminal"), &typed(text), enter),
-                Ok(())
+                Ok(Delivered::InWindow)
             );
             assert_eq!(
                 commands(&host),

@@ -1,7 +1,15 @@
 //! The desktop host interface: bind the window a capture starts in, type into it, and run desktop actions.
 
 #[cfg(target_os = "linux")]
+mod command;
+#[cfg(target_os = "linux")]
+mod gnome;
+#[cfg(target_os = "linux")]
 mod hyprland;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+mod state;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -15,10 +23,19 @@ pub const OVERLAY_TITLE: &str = "Thalvi overlay";
 
 /// The host for the desktop Thalvi runs on.
 #[cfg(target_os = "linux")]
-pub type Desktop = hyprland::Hyprland;
+pub use linux::Desktop;
 /// The host for the desktop Thalvi runs on.
 #[cfg(target_os = "windows")]
 pub type Desktop = windows::Windows;
+
+/// Where `deliver` left the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivered {
+    /// Typed into the target window.
+    InWindow,
+    /// Put on the clipboard for the user to paste; the desktop lets nothing type for them.
+    OnClipboard,
+}
 
 /// Why a host action did not complete. The text is the plain notice shown to the user.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -166,7 +183,7 @@ pub trait Host: Send + Sync {
     type Target: Clone + PartialEq + fmt::Debug + fmt::Display + Send + 'static;
 
     /// Whether a click on the overlay reaches it; where it does not, the overlay shows no buttons.
-    const OVERLAY_TAKES_CLICKS: bool;
+    fn overlay_takes_clicks(&self) -> bool;
 
     /// Binds the focused window.
     ///
@@ -175,7 +192,8 @@ pub trait Host: Send + Sync {
     fn capture_target(&self) -> Result<Self::Target, HostError>;
 
     /// Types `text` into `target`, then Enter when `enter`, only if `target` is still the window
-    /// that will receive the input.
+    /// that will receive the input; a desktop that cannot type puts `text` on the clipboard instead
+    /// and presses nothing.
     ///
     /// # Errors
     /// [`HostError::NothingTyped`] when the target closed, lost focus or refuses input;
@@ -185,7 +203,7 @@ pub trait Host: Send + Sync {
         target: &Self::Target,
         text: &TypedText,
         enter: bool,
-    ) -> Result<(), HostError>;
+    ) -> Result<Delivered, HostError>;
 
     /// Puts `text` on the clipboard.
     ///
