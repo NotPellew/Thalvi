@@ -52,9 +52,7 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .table, .cards { display: flex; flex-direction: column; gap: 6px; }
 .trow { display: flex; align-items: center; gap: 8px; }
 .trow .phrase { flex: 1; white-space: nowrap; font: 13px var(--mono); }
-.trow.pick, .trow.file { flex-wrap: wrap; }
-.trow.pick select { max-width: 100%; }
-.trow.file .unit:last-child { flex: 1 1 8em; overflow-wrap: anywhere; }
+.trow.file .unit:last-child { overflow-wrap: anywhere; }
 .trow.add { justify-content: flex-end; }
 .trow.add input { flex: 1; max-width: 16em; }
 .trow.add.word-add { justify-content: flex-start; }
@@ -105,6 +103,7 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
 
 @media (max-width: 560px) {
   .app { flex-direction: column; }
+  main { min-height: 0; }
   .app > nav, #settings[data-look] .app > nav { width: auto; max-height: 40%; padding: 8px 10px; border-right: 0; border-bottom: 1px solid var(--line); }
   .items { flex-direction: row; flex-wrap: wrap; }
   .pages { padding: 14px 10px; }
@@ -116,6 +115,9 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
   .card button { grid-column: 1; }
   .mini input, .mini select { width: 100%; box-sizing: border-box; }
   .looks { flex-wrap: wrap; }
+  .trow.pick, .trow.file { flex-wrap: wrap; }
+  .trow.pick select { max-width: 100%; }
+  .trow.file .unit:last-child { flex: 1 1 8em; }
 }
 
 @media (max-width: 360px) {
