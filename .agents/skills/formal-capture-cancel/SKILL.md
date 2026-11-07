@@ -15,13 +15,14 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `f2c8ed275101a6f4a0b9d6fa76bd12e920902952`. The recorded file hashes
+Sync commit: `95a7815062d919f0e1197d642b4d86fcddef365b`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
 added in `engine.rs`, the upsampling filter and word list changed in
 `recognizer.rs`, and `runner.rs` hands the word list to the local recognizer and
-notifies followers of every refused press. A released hold sends silence through
+notifies followers of every refused press, and `load_wake` publishes a wake model
+download while `Runner::build` loads the wake engine. A released hold sends silence through
 the same cancel-first send before it waits for the final. `Runner::apply` now
 accounts for presses during a rebuild and refuses them afterwards; its former
 body is `Runner::rebuild`. A dropped listener keeps its hold cursor until it
