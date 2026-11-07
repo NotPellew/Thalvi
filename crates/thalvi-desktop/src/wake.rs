@@ -895,22 +895,43 @@ mod tests {
         let thalvi = CatalogHead::HeyThalvi.asset();
         let mycroft = CatalogHead::HeyMycroft.asset();
         let jarvis = CatalogHead::HeyJarvis.asset();
-        let files = r#"{"capture":{"model":"/a/mine.onnx"},"conversation":{"model":"/a/yours.onnx"}}"#;
+        let files =
+            r#"{"capture":{"model":"/a/mine.onnx"},"conversation":{"model":"/a/yours.onnx"}}"#;
         // (case, config, files on disk, downloads)
         let cases = [
             ("nothing on disk", "{}", vec![], true),
-            ("every file", "{}", vec![mel, embedding, thalvi, mycroft], false),
-            ("no melspectrogram", "{}", vec![embedding, thalvi, mycroft], true),
+            (
+                "every file",
+                "{}",
+                vec![mel, embedding, thalvi, mycroft],
+                false,
+            ),
+            (
+                "no melspectrogram",
+                "{}",
+                vec![embedding, thalvi, mycroft],
+                true,
+            ),
             ("no embedding", "{}", vec![mel, thalvi, mycroft], true),
             ("no capture head", "{}", vec![mel, embedding, mycroft], true),
-            ("no conversation head", "{}", vec![mel, embedding, thalvi], true),
+            (
+                "no conversation head",
+                "{}",
+                vec![mel, embedding, thalvi],
+                true,
+            ),
             (
                 "a head not chosen is not needed",
                 r#"{"capture":{"model":"hey_jarvis"}}"#,
                 vec![mel, embedding, jarvis, mycroft],
                 false,
             ),
-            ("local heads and the features", files, vec![mel, embedding], false),
+            (
+                "local heads and the features",
+                files,
+                vec![mel, embedding],
+                false,
+            ),
             ("local heads, no features", files, vec![], true),
             (
                 "a local head and a missing catalog head",

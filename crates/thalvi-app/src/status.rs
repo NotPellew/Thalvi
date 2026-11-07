@@ -10,6 +10,7 @@ use thalvi_desktop::report::{UserError, causes};
 use thalvi_desktop::transducer::TransducerSource;
 
 pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not ready yet.";
+pub const WAKE_DOWNLOAD_NOTICE: &str = "Downloading the wake word model.";
 
 /// The status event's payload; its JSON form is the contract with the TypeScript UI.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -57,7 +58,7 @@ pub enum Status {
         /// The technical causes behind `notice`, outermost first, for the error report.
         causes: Vec<String>,
     },
-    /// The speech model is being fetched or loaded; the wake word already works.
+    /// A model is being fetched or loaded. For the speech model the wake word already works.
     Loading {
         notice: String,
         /// Files are being downloaded; only then does the overlay say so.
@@ -169,12 +170,23 @@ pub struct View {
     pub pauses: EndingPauses,
     /// What the speech model needs, while it loads.
     pub loading: Option<SpeechLoad>,
+    /// A wake word model is being downloaded.
+    pub wake_download: bool,
 }
 
 impl View {
     #[must_use]
     pub fn status(&self) -> Status {
         let target = self.target.clone();
+        if self.wake_download
+            && matches!(self.engine, EngineState::Listening)
+            && matches!(self.mode, Mode::Starting | Mode::Idle | Mode::Done { .. })
+        {
+            return Status::Loading {
+                notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
+                downloading: true,
+            };
+        }
         if let (Some(load), EngineState::Listening, Mode::Idle | Mode::Done { .. }) =
             (self.loading, &self.engine, &self.mode)
         {
@@ -248,6 +260,7 @@ mod tests {
             target: Some("kitty".to_owned()),
             pauses: EndingPauses::default(),
             loading: None,
+            wake_download: false,
         }
     }
 
@@ -437,6 +450,48 @@ mod tests {
                 target: Some(kitty())
             }
         );
+    }
+
+    #[test]
+    fn a_wake_download_shows_until_a_failure_a_pause_or_a_capture() {
+        let download = Status::Loading {
+            notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
+            downloading: true,
+        };
+        let failed = Mode::Failed(Failure {
+            notice: "The microphone is off.".to_owned(),
+            headline: "Failed",
+            causes: Vec::new(),
+        });
+        let done = Mode::Done {
+            route: CaptureRoute::Paste,
+            notice: String::new(),
+        };
+        let cases = [
+            (
+                Mode::Starting,
+                EngineState::Listening,
+                true,
+                Some(&download),
+            ),
+            (Mode::Idle, EngineState::Listening, true, Some(&download)),
+            (done, EngineState::Listening, true, Some(&download)),
+            (Mode::Paused, EngineState::Listening, true, None),
+            (failed, EngineState::Listening, true, None),
+            (Mode::Idle, EngineState::StartingCapture, true, None),
+            (Mode::Idle, EngineState::Listening, false, None),
+        ];
+        for (mode, engine, wake_download, expected) in cases {
+            let label = format!("{mode:?} {engine:?} {wake_download}");
+            let mut view = view(mode, engine);
+            view.wake_download = wake_download;
+            view.loading = Some(SpeechLoad::Download);
+            let status = view.status();
+            match expected {
+                Some(expected) => assert_eq!(&status, expected, "{label}"),
+                None => assert_ne!(&status, &download, "{label}"),
+            }
+        }
     }
 
     fn capturing() -> EngineState {
