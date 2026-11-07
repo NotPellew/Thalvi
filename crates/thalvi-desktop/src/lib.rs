@@ -4,6 +4,7 @@ pub mod audio;
 pub mod boosting;
 pub mod capture;
 pub mod chosen;
+pub mod claim;
 pub mod config;
 pub mod cues;
 pub mod delivery;
