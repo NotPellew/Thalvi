@@ -23,7 +23,7 @@ use crate::capture::{
     CaptureFullError, CaptureLimits, CaptureRequest, CaptureRoute, CaptureSession, EndingPauses,
     Endings, FinalStep, QuietWindow, has_words,
 };
-use crate::config::DesktopConfig;
+use crate::config::{DesktopConfig, Script};
 use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues};
 use crate::frame::{FRAME_SAMPLES, Frame, Order, Queued};
 use crate::hold::{Cutoff, KeyState, Press, Presses, Refusal};
@@ -396,6 +396,7 @@ pub struct Engine<R, W, C> {
     vad: VadDetector,
     endings: Endings,
     pauses: EndingPauses,
+    scripts: Vec<Script>,
     limits: CaptureLimits,
     secondary: Option<SecondaryStt>,
     speech: SpeechSource,
@@ -655,6 +656,7 @@ where
             vad: VadDetector::new(),
             endings: config.endings.clone(),
             pauses: config.ending_pause,
+            scripts: config.scripts.clone(),
             limits: config.capture_limits,
             secondary: config.stt.secondary.clone(),
             speech: config.speech_source(),
@@ -1130,7 +1132,7 @@ where
         if held {
             CaptureSession::without_endings()
         } else {
-            CaptureSession::new(self.endings.clone(), self.pauses)
+            CaptureSession::new(self.endings.clone(), self.pauses, self.scripts.clone())
         }
     }
 
@@ -1451,10 +1453,11 @@ where
                     live.speech_run = 0;
                 }
                 live.last_audio = now;
-                self.ending_state(if pending.window == QuietWindow::WaitingForQuiet {
-                    "waiting_for_quiet"
-                } else {
-                    "pending"
+                self.ending_state(match (pending.window, pending.without_ending) {
+                    (QuietWindow::WaitingForQuiet, false) => "waiting_for_quiet",
+                    (QuietWindow::WaitingForQuiet, true) => "waiting_for_quiet_without_ending",
+                    (QuietWindow::CountingDown { .. }, false) => "pending",
+                    (QuietWindow::CountingDown { .. }, true) => "pending_without_ending",
                 });
                 self.queue_cue(live, Cue::Provisional);
             }
@@ -1466,8 +1469,13 @@ where
     fn on_quiet(&self, live: &mut Live<R::Session>) -> Option<Done> {
         let now = Instant::now();
         let since = live.text.quiet_since();
+        let without_ending = live.text.pending().is_some_and(|p| p.without_ending);
         let request = live.text.poll_ready(now)?;
-        self.ending_state("accepted");
+        self.ending_state(if without_ending {
+            "accepted_without_ending"
+        } else {
+            "accepted"
+        });
         if let Some(since) = since {
             self.recorder.metric(
                 Event::EndingPause,
@@ -1734,7 +1742,7 @@ where
                 Err(_) => None,
             };
         }
-        let mut parser = CaptureSession::new(self.endings.clone(), self.pauses);
+        let mut parser = CaptureSession::new(self.endings.clone(), self.pauses, Vec::new());
         let mut text = match parser.on_final(raw, Instant::now(), false).ok()? {
             FinalStep::Armed(pending) if pending.route == route => pending.text,
             FinalStep::Continue { .. } if !parser.scratched() => {
@@ -1744,7 +1752,7 @@ where
         };
         // A second pass can hear the spoken ending twice ("Yes. Submit. Submit."); every trailing copy is the ending.
         loop {
-            let mut parser = CaptureSession::new(self.endings.clone(), self.pauses);
+            let mut parser = CaptureSession::new(self.endings.clone(), self.pauses, Vec::new());
             match parser.on_final(&text, Instant::now(), false) {
                 Ok(FinalStep::Armed(pending)) if pending.route == route => text = pending.text,
                 _ => break,
