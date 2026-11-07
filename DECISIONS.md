@@ -26,10 +26,10 @@ areas your change touches. Editing rules are in
   and settings window; the overlay hangs from the top of the usable screen area, one 460 × 200 size
   for all looks. Why: the developer chose gunmetal, the others stay as options; resizing re-centres it
   on Hyprland. Rejected: dropping the neon pill, y = 0 (a bar covers it), a window size per look.
-- **Local recognition in the desktop app.** `stt.engine: local` runs Nemotron Speech
-  Streaming 0.6B (int8 ONNX) on `ort` behind the recognizer interface. Why: offline; 6.0% word
-  errors on 57 clips, 0.8 s p95 partial lag on 4 cores. Rejected: Moonshine (7.4%, p95 2.6 s on
-  the Windows PC), Zipformer (28%), hosting it behind the server.
+- **Local recognition in the desktop app.** `stt.engine: local` runs a catalog model on `ort`, picked in Settings: English only
+  (Nemotron Speech Streaming 0.6B, 160 ms, default) or Multilingual (Nemotron Unified ASR 0.6B, buffered window). Why: offline; word errors on
+  LibriSpeech and the developer's takes 3.46/7.14% and 3.03/6.35%, Multilingual also 8.38% German, 7.09% Spanish. Rejected: Moonshine (7.4%), Zipformer
+  (28%), Parakeet v3 (no live partials), Nemotron 3.5 (15%), the 80 and 560 ms exports (no real choice; 3.62 and 3.46% on LibriSpeech).
 - **Self-hosted recognition speaks Meta's ASR protocol.** `speech/asr` serves Nemotron unified ASR
   0.6B (NeMo, buffered, 0.56 s lookahead, language detected) behind `STT_URL`. Why: no server change;
   5.8–6.6% word errors on the developer's takes (Meta-free, en/de/es), fits next to TTS on an 8 GB
