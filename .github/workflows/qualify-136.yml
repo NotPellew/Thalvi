@@ -1,0 +1,79 @@
+name: qualify-136
+
+# Branch-only qualification for #136: builds both packages like release.yml, then runs the
+# Windows login and uninstall checks with a throwaway user signed in through loopback RDP.
+on:
+  push:
+    branches: [test/qualify-install-login]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    if: ${{ !contains(github.event.head_commit.message, 'reuse-run:') }}
+    name: package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bundle: appimage
+            files: target/release/bundle/appimage/*.AppImage
+          - os: windows-latest
+            bundle: nsis
+            files: target/release/bundle/nsis/*-setup.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, respects rust-toolchain.toml
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/thalvi-app/ui/package-lock.json
+      - run: npm ci --prefix crates/thalvi-app/ui
+      - run: npm run build --prefix crates/thalvi-app/ui
+      - run: npm exec --prefix ui -- tauri build --bundles ${{ matrix.bundle }} -- --locked
+        working-directory: crates/thalvi-app
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.bundle }}
+          path: ${{ matrix.files }}
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-login:
+    needs: package
+    if: ${{ !cancelled() }}
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/qualify-136
+      - name: get the installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          $id = if ($env:MESSAGE -match 'reuse-run: (\d+)') { $Matches[1] } else { '${{ github.run_id }}' }
+          gh run download $id --repo $env:GITHUB_REPOSITORY --name nsis --dir installer
+          Get-ChildItem installer
+      - name: log in and out as a throwaway user
+        shell: pwsh
+        run: |
+          $installer = (Get-ChildItem installer -Filter *-setup.exe | Select-Object -First 1).FullName
+          .github/qualify-136/orchestrate.ps1 -Installer $installer -OutDir qa
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: windows-login
+          path: qa
+          retention-days: 7
