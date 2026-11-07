@@ -67,8 +67,7 @@ try {
   Wait-Until { (Get-Content $log -Raw -ErrorAction SilentlyContinue) -match 'Transcribing through' } 'the app to finish starting'
   Get-Content $log
 
-  'Windows before opening Settings:'
-  [Windows]::Of($app.Id)
+  Wait-Until { [Windows]::Of($app.Id) -contains 'hidden Thalvi settings' } 'the app to create its Settings window' 30
   $second = Start-Process $exe -PassThru -Wait
   "A second launch exited with $($second.ExitCode)."
   Wait-Until { [Windows]::Of($app.Id) -contains 'visible Thalvi settings' } 'the Settings window' 20
