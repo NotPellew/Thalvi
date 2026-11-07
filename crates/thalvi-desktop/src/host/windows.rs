@@ -190,6 +190,10 @@ impl<A: Win32> Host for Windows<A> {
         true
     }
 
+    fn copies_only(&self) -> bool {
+        false
+    }
+
     fn capture_target(&self) -> Result<Target, HostError> {
         let window = self.api.foreground().ok_or_else(|| {
             nothing_typed("No window is in front, so Thalvi has nowhere to type.")

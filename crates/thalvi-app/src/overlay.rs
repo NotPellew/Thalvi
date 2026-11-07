@@ -323,6 +323,7 @@ mod tests {
                     text: String::new(),
                     waiting_for_quiet: false,
                     pause_ms: 700,
+                    copies: false,
                 },
                 Visibility::Show,
             ),

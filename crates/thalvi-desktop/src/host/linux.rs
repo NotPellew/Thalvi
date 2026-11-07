@@ -10,13 +10,15 @@ use crate::hold::HoldKey;
 
 /// The desktop session Thalvi runs in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Session {
+pub enum Session {
     Hyprland,
     Gnome,
 }
 
 impl Session {
-    fn detect() -> Result<Self, HostError> {
+    /// # Errors
+    /// [`HostError::Unsupported`] naming this desktop unless it is Hyprland or GNOME Wayland.
+    pub fn detect() -> Result<Self, HostError> {
         let var = |name| std::env::var(name).ok();
         Self::of(
             var("HYPRLAND_INSTANCE_SIGNATURE").as_deref(),
@@ -166,6 +168,13 @@ impl Host for Desktop {
         match self {
             Self::Hyprland(host) => host.overlay_takes_clicks(),
             Self::Gnome(host) => host.overlay_takes_clicks(),
+        }
+    }
+
+    fn copies_only(&self) -> bool {
+        match self {
+            Self::Hyprland(host) => host.copies_only(),
+            Self::Gnome(host) => host.copies_only(),
         }
     }
 

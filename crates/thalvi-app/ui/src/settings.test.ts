@@ -1054,6 +1054,17 @@ describe("live controls", () => {
     );
   });
 
+  it("says why there is no hold key where the desktop gives the app no way to see it, and shows no row elsewhere", async () => {
+    const stub = stubBackend();
+    stub.backend.getHoldKeyUnavailable.mockResolvedValue("GNOME Wayland does not tell Thalvi when a key is let go.");
+    mountSettings(root, stub.backend);
+    await settle();
+    const hold = rowOf("Hold a key to dictate");
+    expect(hold.querySelector("input")).toBeNull();
+    expect(hold.textContent).toContain("GNOME Wayland does not tell Thalvi when a key is let go.");
+    expect(hold.closest("section")?.dataset["page"]).toBe("capture");
+  });
+
   it("shows the line for hyprland.conf instead of a switch and copies it", async () => {
     const stub = stubBackend();
     const line = "exec-once = /home/me/Thalvi.AppImage --login";

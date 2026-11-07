@@ -417,6 +417,12 @@ pub fn discard_draft(state: State<'_, AppState>) {
     state.drafts.discard();
 }
 
+/// Why this desktop offers no hold key, or `None` where it does.
+#[tauri::command]
+pub fn get_hold_key_unavailable(state: State<'_, AppState>) -> Option<&'static str> {
+    state.hold_key_unavailable()
+}
+
 #[tauri::command]
 pub fn get_start_at_login(
     app: AppHandle,

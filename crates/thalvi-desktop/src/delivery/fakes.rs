@@ -78,6 +78,10 @@ impl Host for FakeHost {
         true
     }
 
+    fn copies_only(&self) -> bool {
+        self.clipboard_only
+    }
+
     fn capture_target(&self) -> Result<FakeWindow, HostError> {
         self.record("capture_target", "capture_target".to_owned())?;
         Ok(FakeWindow("the editor"))

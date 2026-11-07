@@ -54,8 +54,8 @@ describe("the overlay in the holo and gunmetal looks", () => {
   const pending = (
     waitingForQuiet: boolean,
     pauseMs = 2500,
-    wording: { route: Route; target: string | null; text: string } = { route: "submit", target: "Slack", text: "Call me back" },
-  ): Status => ({ state: "pending", ...wording, waitingForQuiet, pauseMs });
+    wording: { route: Route; target: string | null; text: string; copies?: boolean } = { route: "submit", target: "Slack", text: "Call me back" },
+  ): Status => ({ state: "pending", copies: false, ...wording, waitingForQuiet, pauseMs });
 
   it("wears the look from the settings and follows a change at the next idle moment", async () => {
     const { emit, saved, backend } = await mount("gunmetal");
@@ -90,6 +90,24 @@ describe("the overlay in the holo and gunmetal looks", () => {
     },
     { name: "waiting for quiet", status: pending(true), tone: "quiet", label: "", tag: false, line: "Call me back", message: "" },
     { name: "countdown", status: pending(false), tone: "pending", label: "SEND TO SLACK IN 3 s", tag: true, line: "Call me back", message: "" },
+    {
+      name: "paste and submit countdown on a desktop that only copies",
+      status: pending(false, 2500, { route: "submit", target: null, text: "Call me back", copies: true }),
+      tone: "pending",
+      label: "COPY IN 3 s",
+      tag: true,
+      line: "Call me back",
+      message: "",
+    },
+    {
+      name: "a task countdown on a desktop that only copies",
+      status: pending(false, 2500, { route: "task", target: "Firefox", text: "open the calendar", copies: true }),
+      tone: "pending",
+      label: "TASK IN 3 s",
+      tag: true,
+      line: "open the calendar",
+      message: "",
+    },
     {
       name: "paste countdown without a target",
       status: pending(false, 700, { route: "paste", target: null, text: "Call me back" }),

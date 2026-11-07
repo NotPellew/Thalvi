@@ -50,9 +50,6 @@ pub struct Finished {
     pub delivered: bool,
     /// Typing stopped partway, so some of the text may be in the window; never with `delivered`.
     pub maybe_partial: bool,
-    /// No window received the text: it waits on the clipboard for the user to paste, as the
-    /// notice says. Only with `delivered`.
-    pub on_clipboard: bool,
     /// Says what happened and where the dictated text went.
     pub notice: String,
     /// `notice` as one short line for the overlay.
@@ -70,7 +67,6 @@ impl Finished {
         Self {
             delivered: true,
             maybe_partial: false,
-            on_clipboard: false,
             notice,
             headline: "Delivered",
             causes: Vec::new(),
@@ -82,7 +78,6 @@ impl Finished {
         Self {
             delivered: false,
             maybe_partial: false,
-            on_clipboard: false,
             notice,
             headline,
             causes: Vec::new(),
@@ -110,6 +105,12 @@ where
     #[cfg(test)]
     pub(crate) fn host(&self) -> &H {
         &self.host
+    }
+
+    /// Whether the desktop can only put dictation on the clipboard, never type it.
+    #[must_use]
+    pub fn copies_only(&self) -> bool {
+        self.host.copies_only()
     }
 
     /// Binds the window that has focus now; call at the wake, before the capture starts.
@@ -188,17 +189,14 @@ where
                 }
                 Finished::delivered("Delivered.".to_owned())
             }
-            Ok(Delivered::OnClipboard) => Finished {
-                on_clipboard: true,
-                ..Finished::delivered(
-                    if enter {
-                        "Copied — press Ctrl+V then Enter"
-                    } else {
-                        "Copied — press Ctrl+V to paste"
-                    }
-                    .to_owned(),
-                )
-            },
+            Ok(Delivered::OnClipboard) => Finished::delivered(
+                if enter {
+                    "Copied — press Ctrl+V then Enter"
+                } else {
+                    "Copied — press Ctrl+V to paste"
+                }
+                .to_owned(),
+            ),
             Err(error) => Finished {
                 maybe_partial: matches!(error, HostError::MaybePartial(_)),
                 ..self.keep(recorder, text, &error).await
@@ -497,7 +495,7 @@ mod tests {
             )
             .await;
             let finished = finished.unwrap();
-            assert!(finished.delivered && finished.on_clipboard, "{route:?}");
+            assert!(finished.delivered, "{route:?}");
             assert_eq!(finished.notice, notice, "{route:?}");
             assert_eq!(
                 seen,

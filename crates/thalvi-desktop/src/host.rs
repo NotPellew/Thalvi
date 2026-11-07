@@ -23,7 +23,7 @@ pub const OVERLAY_TITLE: &str = "Thalvi overlay";
 
 /// The host for the desktop Thalvi runs on.
 #[cfg(target_os = "linux")]
-pub use linux::Desktop;
+pub use linux::{Desktop, Session};
 /// The host for the desktop Thalvi runs on.
 #[cfg(target_os = "windows")]
 pub type Desktop = windows::Windows;
@@ -144,6 +144,9 @@ pub enum HoldSource {
     /// The compositor reports the key through binds in its own config, as `reason` says: not a
     /// failure, and nothing for the app to watch.
     Binds(&'static str),
+    /// The desktop gives the app no way to see the key, as `reason` says: not a failure, since
+    /// the user did nothing wrong, but the key does nothing and Settings says why.
+    Unavailable(&'static str),
 }
 
 /// A key held while the last key of a [`Shortcut`] is pressed.
@@ -184,6 +187,10 @@ pub trait Host: Send + Sync {
 
     /// Whether a click on the overlay reaches it; where it does not, the overlay shows no buttons.
     fn overlay_takes_clicks(&self) -> bool;
+
+    /// Whether this desktop can only put dictation on the clipboard, never type it, so the
+    /// target names no window and the user pastes it themselves.
+    fn copies_only(&self) -> bool;
 
     /// Binds the focused window.
     ///

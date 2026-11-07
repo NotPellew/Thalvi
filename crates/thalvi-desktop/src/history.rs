@@ -425,7 +425,6 @@ mod tests {
         Finished {
             delivered,
             maybe_partial: false,
-            on_clipboard: false,
             notice: String::new(),
             headline: "",
             causes: Vec::new(),

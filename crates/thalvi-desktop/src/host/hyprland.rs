@@ -199,6 +199,10 @@ impl<R: CommandRunner> Host for Hyprland<R> {
         false
     }
 
+    fn copies_only(&self) -> bool {
+        false
+    }
+
     fn capture_target(&self) -> Result<Window, HostError> {
         self.active()
     }

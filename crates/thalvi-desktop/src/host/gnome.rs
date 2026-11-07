@@ -30,13 +30,17 @@ impl Gnome {
     /// GNOME cannot tell an app when a key is let go, so a held key cannot dictate.
     ///
     /// # Errors
-    /// Always [`HostError::Unsupported`].
+    /// Never fails.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as the other hosts, whose hook can fail"
+    )]
     pub fn watch_hold_key(
         _key: &HoldKey,
         _on_change: impl Fn(bool) + Send + 'static,
     ) -> Result<HoldSource, HostError> {
-        Err(HostError::Unsupported(
-            "GNOME Wayland does not tell Thalvi when a key is let go, so holding a key to dictate is unavailable.".to_owned(),
+        Ok(HoldSource::Unavailable(
+            "GNOME Wayland does not tell Thalvi when a key is let go, so holding a key to dictate is unavailable. The wake word still works.",
         ))
     }
 }
@@ -55,6 +59,10 @@ impl<R: CommandRunner> Host for Gnome<R> {
 
     // The overlay is an ordinary window here, and a click on it only focuses it.
     fn overlay_takes_clicks(&self) -> bool {
+        true
+    }
+
+    fn copies_only(&self) -> bool {
         true
     }
 
@@ -203,8 +211,8 @@ mod tests {
     }
 
     #[test]
-    fn the_hold_key_is_refused_because_gnome_reports_no_release() {
-        let result = Gnome::watch_hold_key(&HoldKey::default(), |_| {});
-        assert!(matches!(result, Err(HostError::Unsupported(reason)) if reason.contains("let go")));
+    fn the_hold_key_is_no_failure_on_gnome_but_says_why_it_does_nothing() {
+        let source = Gnome::watch_hold_key(&HoldKey::default(), |_| {});
+        assert!(matches!(source, Ok(HoldSource::Unavailable(reason)) if reason.contains("let go")));
     }
 }
