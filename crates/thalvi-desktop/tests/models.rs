@@ -11,7 +11,8 @@ use std::time::{Duration, SystemTime};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::http::StatusCode;
+use axum::http::header::USER_AGENT;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
 use sha2::{Digest, Sha256};
 use thalvi_desktop::models::{
@@ -33,6 +34,16 @@ fn sha256(bytes: &[u8]) -> String {
 async fn serve() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let app = Router::new()
         .route("/good.onnx", get(|| async { GOOD }))
+        .route(
+            "/needs-agent.onnx",
+            get(|headers: HeaderMap| async move {
+                if headers.contains_key(USER_AGENT) {
+                    Ok(GOOD)
+                } else {
+                    Err(StatusCode::FORBIDDEN)
+                }
+            }),
+        )
         .route("/other.onnx", get(|| async { "something else entirely" }))
         .route("/gone.onnx", get(|| async { StatusCode::NOT_FOUND }))
         .route(
@@ -104,6 +115,25 @@ async fn a_missing_file_is_downloaded_once_and_then_served_from_disk() {
     server.abort();
     let _ = server.await;
     assert_eq!(store.fetch(&asset).await.expect("cached"), path);
+}
+
+#[tokio::test]
+async fn a_download_names_the_client_for_hosts_that_refuse_anonymous_ones() {
+    let (address, _server) = serve().await;
+    let url = format!("http://{address}/needs-agent.onnx");
+    let sha = sha256(GOOD);
+    let asset = Asset {
+        kind: ModelKind::Spotter,
+        file_name: "needs-agent.onnx",
+        url: &url,
+        size: GOOD.len() as u64,
+        sha256: &sha,
+    };
+    let path = ModelStore::in_dir(dir("agent"))
+        .fetch(&asset)
+        .await
+        .expect("downloads");
+    assert_eq!(fs::read(path).expect("saved"), GOOD);
 }
 
 #[tokio::test]

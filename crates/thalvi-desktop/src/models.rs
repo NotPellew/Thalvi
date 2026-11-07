@@ -552,6 +552,7 @@ impl ModelStore {
             DOWNLOADS.fetch_add(1, Ordering::Relaxed)
         )));
         let mut response = reqwest::Client::builder()
+            .user_agent(concat!("thalvi/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
             .timeout(DOWNLOAD_BASE + Duration::from_secs(asset.size / SLOWEST_BYTES_PER_SECOND))
             .build()
