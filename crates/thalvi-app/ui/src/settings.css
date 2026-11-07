@@ -104,7 +104,9 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
 #settings[data-look] main .chip > button:hover { color: var(--neon); background: none; }
 
 @media (max-width: 560px) {
-  nav { width: 120px; padding: 14px 4px; }
+  .app { flex-direction: column; }
+  .app > nav, #settings[data-look] .app > nav { width: auto; max-height: 40%; padding: 8px 10px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .items { flex-direction: row; flex-wrap: wrap; }
   .pages { padding: 14px 10px; }
   .bar { padding-inline: 10px; }
   .row { flex-direction: column; align-items: stretch; gap: 8px; }
