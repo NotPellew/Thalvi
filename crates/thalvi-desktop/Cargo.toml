@@ -34,4 +34,5 @@ windows.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+proptest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
