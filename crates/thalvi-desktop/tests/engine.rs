@@ -9,11 +9,12 @@ use std::time::Duration;
 
 use serde_json::json;
 use thalvi_desktop::audio::{AudioError, InputGate};
-use thalvi_desktop::capture::{CaptureRequest, CaptureRoute};
+use thalvi_desktop::capture::{CaptureRequest, CaptureRoute, Ending};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::cues::{Cue, CueTiming};
 use thalvi_desktop::engine::fakes::{
-    CueControl, CueLog, FakeCuePlayer, FakeFrames, FakeWake, FrameFeed, WakeControl,
+    CueControl, CueLog, FakeCuePlayer, FakeFrames, FakeSpotter, FakeWake, FrameFeed,
+    SpotterControl, WakeControl,
 };
 use thalvi_desktop::engine::{
     CaptureError, CaptureOutcome, Engine, EngineHandle, EngineState, ListenError, Parts,
@@ -26,6 +27,7 @@ use thalvi_desktop::recognizer::{
     FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, ServerUrl,
     SpeechSource,
 };
+use thalvi_desktop::spotter::KeywordSpotter;
 use thalvi_desktop::vad::VadDetector;
 use thalvi_desktop::wake::WakeEvent;
 use tokio::task::{JoinHandle, LocalSet};
@@ -132,6 +134,25 @@ impl Rig {
     }
 
     fn recording(config: &str, recorder: Recorder) -> (Self, TestEngine, FakeFrames) {
+        let (rig, engine, frames) = Self::build(config, recorder, None);
+        (rig, engine, frames)
+    }
+
+    /// A rig whose engine also has an ending spotter that hears what the test scripts.
+    fn spotting(
+        config: &str,
+        recorder: Recorder,
+    ) -> (Self, SpotterControl, TestEngine, FakeFrames) {
+        let (spotter, control) = FakeSpotter::new();
+        let (rig, engine, frames) = Self::build(config, recorder, Some(spotter));
+        (rig, control, engine, frames)
+    }
+
+    fn build(
+        config: &str,
+        recorder: Recorder,
+        spotter: Option<FakeSpotter>,
+    ) -> (Self, TestEngine, FakeFrames) {
         let config = DesktopConfig::from_json_str(config).unwrap();
         let gate = InputGate::default();
         let (frames, feed) = FakeFrames::new(&gate);
@@ -150,6 +171,7 @@ impl Rig {
                 http: reqwest::Client::new(),
                 hold,
                 notice: Box::new(move |notice| sink.borrow_mut().push(notice.to_owned())),
+                spotter: spotter.map(|spotter| Box::new(spotter) as Box<dyn KeywordSpotter>),
             },
             &config,
             recorder,
@@ -4087,6 +4109,307 @@ async fn cancelling_during_the_post_release_wait_cancels_at_once_and_delivers_no
             );
             assert_eq!(rig.started(Cue::Accepted).len(), 0);
             assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
+        })
+        .await;
+}
+
+/// The ending phrase the fake spotter hears, from the frame numbered 9, which the engine sends
+/// 880 ms after the wake word; the phrase ends two frames earlier, at 7 frames of audio.
+const HEARD_AT_FRAME: u64 = 9;
+
+fn hearing(config: &str) -> (Rig, SpotterControl, TestEngine, FakeFrames) {
+    let (rig, spot, engine, frames) = Rig::spotting(config, Recorder::disabled());
+    spot.hear(HEARD_AT_FRAME, "paste that", Ending::Paste);
+    (rig, spot, engine, frames)
+}
+
+fn told(notices: &[String]) -> usize {
+    notices
+        .iter()
+        .filter(|notice| notice.starts_with("Heard"))
+        .count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_heard_ending_the_transcript_lacks_is_told_once_after_the_quiet_interval_and_changes_nothing()
+ {
+    use Act::{Audio, Final};
+    use Kind::{Quiet, Voice};
+    // (what happens after the spotter hears the phrase, when the notice comes)
+    let cases: [(&str, Vec<Act>, u64); 2] = [
+        (
+            "quiet after the final",
+            vec![
+                Audio(1000, Quiet),
+                Final(1000, "Write the report tomorrow haste that"),
+            ],
+            1000 + 700,
+        ),
+        (
+            // The detector keeps judging speech for two frames after the voice stops.
+            "speech after the final restarts the interval at the first quiet frame",
+            vec![
+                Audio(1000, Voice),
+                Final(1000, "Write the report tomorrow haste that"),
+                Audio(1600, Voice),
+            ],
+            1840 + 700,
+        ),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for (name, script, notice_at) in cases {
+                let dir = record_dir("disputed");
+                let recorder = Recorder::in_dir(
+                    RecordKinds {
+                        metrics: true,
+                        text: false,
+                        audio: false,
+                    },
+                    &dir,
+                )
+                .unwrap();
+                let (mut rig, spot, engine, frames) = Rig::spotting("{}", recorder);
+                spot.hear(HEARD_AT_FRAME, "paste that", Ending::Paste);
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(920, Quiet).await;
+                assert_eq!(spot.received(), HEARD_AT_FRAME, "{name}");
+                rig.play(&script).await;
+                rig.feed_until(notice_at - 1, Quiet).await;
+                assert_eq!(
+                    (told(&rig.notices()), rig.started(Cue::Cancelled).len()),
+                    (0, 0),
+                    "{name}: early"
+                );
+                rig.at(notice_at).await;
+                let notices = rig.notices();
+                assert_eq!(told(&notices), 1, "{name}: {notices:?}");
+                assert!(
+                    notices[0].contains("\u{201c}paste that\u{201d}")
+                        && !notices[0].contains("haste")
+                        && !notices[0].contains("report"),
+                    "{name}: names the ending, quotes no dictated words: {}",
+                    notices[0]
+                );
+                assert_eq!(rig.started(Cue::Cancelled), [notice_at], "{name}");
+                assert_eq!(rig.started(Cue::Provisional).len(), 0, "{name}");
+                rig.feed_until(notice_at + 800, Quiet).await;
+                assert!(!task.is_finished(), "{name}: the capture goes on");
+                assert_eq!(told(&rig.notices()), 1, "{name}: told once");
+                // Saying it again delivers everything: nothing was cut at the heard phrase.
+                let again = notice_at + 800;
+                rig.finals("Paste that.").await;
+                rig.feed_until(again + 700, Quiet).await;
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Paste, "Write the report tomorrow haste that"),
+                    "{name}"
+                );
+                let metrics = read_lines(&dir.join("metrics.jsonl"));
+                let hit = metrics
+                    .iter()
+                    .find(|line| line["event"] == "desktop_ending_spotter" && line["call"] == "hit")
+                    .unwrap_or_else(|| panic!("{name}: no hit line in {metrics:?}"));
+                assert_eq!(
+                    (hit["outcome"].as_str(), hit["ending"].as_str()),
+                    (Some("notified"), Some("paste")),
+                    "{name}"
+                );
+                assert!(
+                    metrics
+                        .iter()
+                        .any(|line| line["event"] == "desktop_ending_spotter"
+                            && line["call"] == "capture"
+                            && line["frames"].as_u64().is_some_and(|frames| frames > 9)
+                            && line["hits"] == 1),
+                    "{name}: capture summary"
+                );
+                let written = std::fs::read_to_string(dir.join("metrics.jsonl")).unwrap();
+                assert!(
+                    !written.contains("haste") && !written.contains("report"),
+                    "{name}: no words in metrics"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_heard_ending_is_never_told_when_the_transcript_carries_it_or_the_user_speaks_on() {
+    use Act::{Audio, Final, Partial};
+    use Kind::{Quiet, Voice};
+    /// How the capture ends once the script has run.
+    enum End {
+        Delivers(CaptureRoute, &'static str, u64),
+        Cancelled(&'static str),
+    }
+    let cases: [(&str, Vec<Act>, End, &[u64]); 6] = [
+        (
+            "a late final carries the ending: late agreement",
+            vec![
+                Audio(1000, Quiet),
+                Audio(1900, Quiet),
+                Final(1900, "Write the report paste that"),
+            ],
+            End::Delivers(CaptureRoute::Paste, "Write the report", 1900 + 700),
+            &[1900],
+        ),
+        (
+            "the final came before the spotter: both signals deliver once",
+            vec![
+                Audio(800, Quiet),
+                Final(800, "Write the report paste that"),
+                Audio(1000, Quiet),
+            ],
+            End::Delivers(CaptureRoute::Paste, "Write the report", 800 + 700),
+            &[800],
+        ),
+        (
+            "the transcript says another ending: it wins",
+            vec![Audio(1000, Quiet), Final(1000, "Write the report submit")],
+            End::Delivers(CaptureRoute::Submit, "Write the report", 1000 + 2500),
+            &[1000],
+        ),
+        (
+            "words follow the disputed final",
+            vec![
+                Audio(1000, Quiet),
+                Final(1000, "Write the report tomorrow haste that"),
+                Audio(1200, Voice),
+                Partial(1200, "and then"),
+                Audio(3000, Quiet),
+            ],
+            End::Cancelled("Write the report tomorrow haste that"),
+            &[],
+        ),
+        (
+            "a final with words follows the disputed one",
+            vec![
+                Audio(1000, Quiet),
+                Final(1000, "Write the report tomorrow haste that"),
+                Audio(1300, Quiet),
+                Final(1300, "and one more thing"),
+                Audio(3000, Quiet),
+            ],
+            End::Cancelled("Write the report tomorrow haste that and one more thing"),
+            &[],
+        ),
+        (
+            "nothing but artifacts follows the heard phrase",
+            vec![
+                Audio(1000, Quiet),
+                Final(1000, "[noise]"),
+                Audio(1500, Quiet),
+            ],
+            End::Cancelled(""),
+            &[],
+        ),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for (name, script, end, provisional) in cases {
+                let (mut rig, _spot, engine, frames) = hearing("{}");
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.play(&script).await;
+                let outcome = match end {
+                    End::Delivers(route, text, at) => {
+                        rig.feed_until(at, Quiet).await;
+                        accepted(route, text)
+                    }
+                    End::Cancelled(text) => {
+                        rig.handle.cancel();
+                        settle().await;
+                        CaptureOutcome::Cancelled {
+                            dictated: (!text.is_empty()).then(|| text.to_owned()),
+                        }
+                    }
+                };
+                assert_eq!(finished(task).await, outcome, "{name}");
+                assert_eq!(told(&rig.notices()), 0, "{name}: {:?}", rig.notices());
+                assert_eq!(rig.started(Cue::Cancelled).len(), 0, "{name}");
+                assert_eq!(rig.started(Cue::Provisional), provisional, "{name}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_gives_the_spotter_no_frames_and_the_capture_runs_as_before() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, spot, engine, frames) = Rig::spotting("{}", Recorder::disabled());
+            spot.hear(HEARD_AT_FRAME, "paste that", Ending::Paste);
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.say(1000, Say::Final("write the report tomorrow haste that"))
+                .await;
+            rig.release(1200).await;
+            rig.at(1450).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "write the report tomorrow haste that")
+            );
+            assert_eq!((spot.received(), spot.resets()), (0, 0));
+            assert_eq!(told(&rig.notices()), 0);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_while_a_dispute_waits_for_quiet_cancels_and_tells_nothing() {
+    use Act::{Audio, Final};
+    use Kind::Quiet;
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, _spot, engine, frames) = hearing("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.play(&[
+                Audio(1000, Quiet),
+                Final(1000, "Write the report tomorrow haste that"),
+                Audio(1300, Quiet),
+            ])
+            .await;
+            rig.handle.cancel();
+            settle().await;
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("Write the report tomorrow haste that".to_owned())
+                }
+            );
+            rig.at(5000).await;
+            assert_eq!(
+                (told(&rig.notices()), rig.started(Cue::Cancelled).len()),
+                (0, 0)
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_spotter_that_fails_mid_capture_is_one_notice_and_the_transcript_ending_still_delivers() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, spot, engine, frames) = Rig::spotting("{}", Recorder::disabled());
+            spot.fail_at(5);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello paste that").await;
+            rig.feed_until(1700, Kind::Quiet).await;
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "Hello"));
+            let notices = rig.notices();
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            assert!(
+                notices[0].starts_with("Ending phrase detection stopped:")
+                    && notices[0].ends_with("Endings still work from the transcript."),
+                "{}",
+                notices[0]
+            );
+            assert_eq!(spot.received(), 5, "no frame reaches a failed spotter");
         })
         .await;
 }
