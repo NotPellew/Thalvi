@@ -8,9 +8,6 @@ use crate::recognizer::{RecognizerError, RecognizerEvent};
 
 const PCM_SCALE: f32 = 32768.0;
 
-/// Silence appended to look ahead of the audio received: a 25-frame window plus the last frame's tail.
-const LOOKAHEAD_SAMPLES: usize = 4_400;
-
 /// Blank frames to wait for tokens that the look-ahead found before ending the stretch anyway.
 const HOLD_FRAMES: usize = 4;
 
@@ -40,6 +37,8 @@ pub struct Segments<D> {
     pieces: Arc<Vec<String>>,
     /// Blank encoder frames after the last token that end a stretch of speech.
     endpoint_blanks: usize,
+    /// Samples of silence that the look-ahead appends.
+    lookahead_samples: usize,
     spoken: Vec<usize>,
     trailing_blanks: usize,
     /// The look-ahead was done in the current silence.
@@ -48,12 +47,20 @@ pub struct Segments<D> {
 }
 
 impl<D: FrameDecoder> Segments<D> {
+    /// `lookahead_samples` is the silence to look ahead by, enough for the model to bring out
+    /// the words it has already heard.
     #[must_use]
-    pub fn new(decoder: D, pieces: Arc<Vec<String>>, endpoint_blanks: usize) -> Self {
+    pub fn new(
+        decoder: D,
+        pieces: Arc<Vec<String>>,
+        endpoint_blanks: usize,
+        lookahead_samples: usize,
+    ) -> Self {
         Self {
             decoder,
             pieces,
             endpoint_blanks,
+            lookahead_samples,
             spoken: Vec::new(),
             trailing_blanks: 0,
             looked_ahead: false,
@@ -83,7 +90,7 @@ impl<D: FrameDecoder> Segments<D> {
             return Ok(self.trailing_blanks >= self.endpoint_blanks + HOLD_FRAMES);
         }
         self.looked_ahead = true;
-        let pending = self.decoder.lookahead(&vec![0.0; LOOKAHEAD_SAMPLES])?;
+        let pending = self.decoder.lookahead(&vec![0.0; self.lookahead_samples])?;
         Ok(pending.iter().all(Vec::is_empty))
     }
 

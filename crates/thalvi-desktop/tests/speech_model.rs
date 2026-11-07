@@ -76,3 +76,52 @@ async fn the_clip_is_recognized_in_full_as_partials_that_grow_and_a_final() {
         "After early nightfall".to_owned()
     )));
 }
+
+const SENTENCE: &str = "after early nightfall the yellow lamps would light up here and there the squalid quarter of the brothels";
+
+fn unified() -> Transducer {
+    let dir = PathBuf::from(std::env::var("THALVI_UNIFIED_MODEL").expect("THALVI_UNIFIED_MODEL"));
+    Transducer::load(&TransducerFiles::in_folder(&dir), &WordList::default()).expect("model loads")
+}
+
+/// What the finals say, without capitals and punctuation.
+fn spoken(frames: &[Frame]) -> Vec<String> {
+    let mut stream = unified().stream();
+    let mut finals = Vec::new();
+    for frame in frames {
+        for event in stream.accept(frame).expect("frame is recognized") {
+            if let RecognizerEvent::Final(text) = event {
+                finals.push(
+                    text.to_lowercase()
+                        .chars()
+                        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+                        .collect::<String>()
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+            }
+        }
+    }
+    finals
+}
+
+#[tokio::test]
+#[ignore = "needs the unified model files in THALVI_UNIFIED_MODEL"]
+async fn the_unified_model_recognizes_the_clip() {
+    assert_eq!(spoken(&clip_frames().await), [SENTENCE]);
+}
+
+#[tokio::test]
+#[ignore = "needs the unified model files in THALVI_UNIFIED_MODEL"]
+async fn the_unified_model_recovers_a_clip_after_thirty_seconds_of_digital_silence() {
+    let clip = clip_frames().await;
+    let silence = std::iter::repeat_n([0; FRAME_SAMPLES], 30 * 16_000 / FRAME_SAMPLES);
+    let frames: Vec<Frame> = clip
+        .iter()
+        .copied()
+        .chain(silence)
+        .chain(clip.iter().copied())
+        .collect();
+    assert_eq!(spoken(&frames), [SENTENCE, SENTENCE]);
+}
