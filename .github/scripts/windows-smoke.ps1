@@ -20,6 +20,35 @@ function Wait-Until([scriptblock]$Done, [string]$What, [int]$Seconds = 60) {
   throw "timed out waiting for $What"
 }
 
+Add-Type @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class Windows {
+  delegate bool Visit(IntPtr window, IntPtr data);
+  [DllImport("user32.dll")] static extern bool EnumWindows(Visit visit, IntPtr data);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder text, int size);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+  public static List<string> Of(uint wanted) {
+    var found = new List<string>();
+    EnumWindows((window, data) => {
+      uint process;
+      GetWindowThreadProcessId(window, out process);
+      if (process == wanted) {
+        var text = new StringBuilder(256);
+        GetWindowText(window, text, 256);
+        found.Add((IsWindowVisible(window) ? "visible " : "hidden ") + text);
+      }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+}
+'@
+
 function Save-Screen([string]$Name) {
   Add-Type -AssemblyName System.Windows.Forms, System.Drawing
   $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -38,13 +67,18 @@ try {
   Wait-Until { (Get-Content $log -Raw -ErrorAction SilentlyContinue) -match 'Transcribing through' } 'the app to finish starting'
   Get-Content $log
 
-  Start-Process $exe
-  Wait-Until { Get-Process thalvi-desktop -ErrorAction SilentlyContinue | Where-Object MainWindowTitle -eq 'Thalvi settings' } 'the Settings window'
+  'Windows before opening Settings:'
+  [Windows]::Of($app.Id)
+  $second = Start-Process $exe -PassThru -Wait
+  "A second launch exited with $($second.ExitCode)."
+  Wait-Until { [Windows]::Of($app.Id) -contains 'visible Thalvi settings' } 'the Settings window' 20
   Start-Sleep -Seconds 3
   Save-Screen 'settings'
   if ($app.HasExited) { throw "the app exited with $($app.ExitCode)" }
   'The app is running and its Settings window is open.'
 } finally {
+  'Windows at the end:'
+  [Windows]::Of($app.Id)
   Save-Screen 'final'
   if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force }
 }
