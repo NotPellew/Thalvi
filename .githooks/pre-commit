@@ -5,4 +5,4 @@ if ! command -v gitleaks >/dev/null 2>&1; then
   echo "pre-commit: gitleaks is not installed, so staged changes were not scanned for secrets" >&2
   exit 0
 fi
-exec gitleaks git --staged --redact --no-banner .
+exec gitleaks git --staged --redact --no-banner --verbose --log-level warn .
