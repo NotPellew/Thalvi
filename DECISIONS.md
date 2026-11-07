@@ -142,10 +142,10 @@ areas your change touches. Editing rules are in
   enabling opens the selected device and status names the open stream separately.
   Why: choosing a microphone must not start recording or redirect a capture.
   Rejected: applying a device change automatically after an active capture.
-- **Errors stay until dismissed or fixed.** No error clears on a timer. Each says what failed, why and which
-  setting to fix, plus a short headline the overlay shows; Copy (settings, tray, `copy-error`) puts a report
-  (causes, version, system, no secrets) on the clipboard through the host. Why: on Hyprland `no_focus` makes
-  the overlay click-through, so it only shows. Rejected: timeouts, a focusable overlay, the WebView clipboard.
+- **Errors stay in the tray and Settings, not on the overlay.** Each says what failed, why and which setting to fix; its short headline shows on the
+  overlay for 5 s, and again when it refuses a hold key press. Copy (settings, tray, `copy-error`) puts a report (causes, version, system, no secrets)
+  on the clipboard through the host. Why: on Hyprland `no_focus` makes the overlay click-through, so a headline that stayed covered the screen with no way
+  to close it. Rejected: keeping errors on the overlay, a focusable overlay, a duration per error, the WebView clipboard.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
   browser and app actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative

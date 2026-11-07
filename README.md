@@ -317,8 +317,9 @@ on Linux, `%LOCALAPPDATA%\thalvi` on Windows):
 
 ### Errors
 
-An error stays on the overlay until the next capture, in a short headline.
-Settings shows the full text with **Copy** and **Dismiss**. Copy, the tray's
+An error shows on the overlay for 5 seconds in a short headline, and again if
+it refuses a press of the hold key. The tray icon and Settings keep it until the
+next capture; Settings shows the full text with **Copy** and **Dismiss**. Copy, the tray's
 **Copy last error** and `thalvi-desktop copy-error` all copy the same report:
 the error, its technical cause, time, version, system and relevant settings,
 never API keys.
