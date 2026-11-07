@@ -32,7 +32,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::status::{
-    Failure, Mode, STARTING_NOTICE, SpeechLoad, Status, View, WAKE_DOWNLOAD_NOTICE,
+    Failure, FailureKind, Mode, STARTING_NOTICE, SpeechLoad, Status, View, WAKE_DOWNLOAD_NOTICE,
 };
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
@@ -270,6 +270,7 @@ impl Publisher {
     fn refused(&self, refusal: Refusal) {
         if refusal == Refusal::Paused || !self.failed() {
             self.mode(Mode::Failed(Failure {
+                kind: FailureKind::Other,
                 notice: refusal.notice().to_owned(),
                 headline: refusal.headline(),
                 causes: Vec::new(),
@@ -284,6 +285,7 @@ impl Publisher {
             println!("{notice}");
             if !publisher.failed() {
                 publisher.mode(Mode::Failed(Failure {
+                    kind: FailureKind::Other,
                     notice: notice.to_owned(),
                     headline: "Dictation notice",
                     causes: Vec::new(),
@@ -332,6 +334,7 @@ impl Session {
         })
         .await
         .map_err(|error| Failure {
+            kind: FailureKind::Other,
             notice: "The microphone's audio thread crashed. Restart Thalvi.".to_owned(),
             headline: "Microphone crashed — restart Thalvi",
             causes: vec![error.to_string()],
@@ -481,6 +484,7 @@ impl Runner {
                     && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
                 {
                     view.mode = Mode::Failed(Failure {
+                        kind: FailureKind::Other,
                         notice: format!("{error} Dictation will try again when you start it."),
                         headline: error.headline(),
                         causes: causes(&error),
@@ -1030,6 +1034,7 @@ fn told(mode: Mode, ignored: &[Refusal]) -> Mode {
             ..failure
         }),
         _ => Mode::Failed(Failure {
+            kind: FailureKind::Other,
             notice: extra,
             headline: first.headline(),
             causes: Vec::new(),
@@ -1053,6 +1058,7 @@ fn delivered(finished: Option<Finished>, route: Option<CaptureRoute>) -> Mode {
                 notice: finished.notice,
                 headline: finished.headline,
                 causes: finished.causes,
+                kind: FailureKind::Delivery,
             })
         }
         (None, _) => Mode::Idle,
@@ -1093,6 +1099,7 @@ fn report_refusal(recorder: &Recorder, refusal: Refusal, count: u64) {
 /// The failure that tells the user the hold key is not working.
 fn hold_failure(notice: String) -> Failure {
     Failure {
+        kind: FailureKind::Other,
         causes: vec![notice.clone()],
         notice,
         headline: "Hold key unavailable",
@@ -1385,6 +1392,7 @@ mod tests {
             CatalogHead::HeyMycroft.asset(),
         ];
         let failed = Mode::Failed(Failure {
+            kind: FailureKind::Other,
             notice: "Could not download the model.".to_owned(),
             headline: "Download failed",
             causes: Vec::new(),
@@ -2119,8 +2127,37 @@ mod tests {
     }
 
     #[test]
+    fn only_a_capture_that_was_not_delivered_fails_as_a_delivery() {
+        let finished = |delivered| Finished {
+            delivered,
+            maybe_partial: false,
+            notice: "Done.".to_owned(),
+            headline: "Done",
+            causes: Vec::new(),
+            task_target: None,
+        };
+        assert_eq!(
+            delivered(Some(finished(false)), Some(CaptureRoute::Paste)),
+            Mode::Failed(Failure {
+                notice: "Done.".to_owned(),
+                headline: "Done",
+                causes: Vec::new(),
+                kind: FailureKind::Delivery,
+            }),
+        );
+        assert_eq!(
+            delivered(Some(finished(true)), Some(CaptureRoute::Paste)),
+            Mode::Done {
+                route: CaptureRoute::Paste,
+                notice: "Done.".to_owned(),
+            },
+        );
+    }
+
+    #[test]
     fn presses_that_started_nothing_are_told_without_replacing_the_result() {
         let failure = |notice: &str| Failure {
+            kind: FailureKind::Other,
             notice: notice.to_owned(),
             headline: "Nothing was typed",
             causes: vec!["cause".to_owned()],
@@ -2152,6 +2189,7 @@ mod tests {
         assert_eq!(
             told(Mode::Failed(failure("It failed.")), &[Refusal::TooQuick]),
             Mode::Failed(Failure {
+                kind: FailureKind::Other,
                 notice: format!("It failed. {}", Refusal::TooQuick.notice()),
                 ..failure("")
             }),
@@ -2159,6 +2197,7 @@ mod tests {
         assert_eq!(
             told(Mode::Idle, &[Refusal::Capturing]),
             Mode::Failed(Failure {
+                kind: FailureKind::Other,
                 notice: Refusal::Capturing.notice().to_owned(),
                 headline: "Dictating — key ignored",
                 causes: Vec::new(),

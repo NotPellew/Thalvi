@@ -2,6 +2,9 @@
 
 export type Route = "paste" | "submit" | "task";
 
+/** What a failure stopped: only `delivery` means a capture's text did not reach its destination. */
+export type FailureKind = "delivery" | "other";
+
 export type Status =
   | { state: "paused" }
   | { state: "listening" }
@@ -17,7 +20,7 @@ export type Status =
     }
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
   | { state: "done"; target: string | null; route: Route; notice: string }
-  | { state: "failed"; notice: string; headline: string; causes: string[] } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report
+  | { state: "failed"; notice: string; headline: string; causes: string[]; kind: FailureKind } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report
   | { state: "loading"; notice: string }; // the speech model is being fetched or loaded
 
 export interface Level {

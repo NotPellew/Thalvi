@@ -286,6 +286,7 @@ impl Tray {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status::FailureKind;
 
     fn kitty() -> String {
         "kitty".to_owned()
@@ -365,6 +366,7 @@ mod tests {
             ),
             (
                 Status::Failed {
+                    kind: FailureKind::Other,
                     notice: "Your text follows: secret words".to_owned(),
                     headline: "Failed",
                     causes: Vec::new(),
@@ -455,6 +457,7 @@ mod tests {
             (working(false), false),
             (
                 Status::Failed {
+                    kind: FailureKind::Other,
                     notice: String::new(),
                     headline: "Failed",
                     causes: Vec::new(),

@@ -97,6 +97,7 @@
 #settings[data-look="holo"] .badge[data-on="true"] { color: rgb(var(--cy)); }
 #settings[data-look="holo"] :is(.card, .entry) { border-color: rgba(var(--steel), 0.4); background: rgba(var(--cy), 0.03); }
 #settings[data-look="holo"] .card legend { color: rgb(var(--cy)); }
+#settings[data-look="holo"] code.line { background: rgba(3, 9, 13, 0.85); border-color: rgba(var(--steel), 0.65); }
 #settings[data-look="holo"] .meter { background: rgba(var(--steel), 0.25); }
 #settings[data-look="holo"] .bar { border-top-color: rgba(var(--steel), 0.45); background: rgba(8, 20, 25, 0.6); }
 #settings[data-look="holo"] .lk { border-color: rgba(var(--steel), 0.45); color: #9fb8c6; }
@@ -137,6 +138,7 @@
 #settings[data-look="gunmetal"] .badge[data-on="true"] { color: rgb(var(--cy)); }
 #settings[data-look="gunmetal"] :is(.card, .entry) { border-color: #2a2b2e; border-radius: 2px; background: #0a0b0d; box-shadow: inset 0 1px 3px #000; }
 #settings[data-look="gunmetal"] .card legend { color: #cfe6ef; }
+#settings[data-look="gunmetal"] code.line { background: #05080b; border-color: #2a2b2e; }
 #settings[data-look="gunmetal"] .meter { background: #05090d; box-shadow: inset 0 1px 2px #000; }
 #settings[data-look="gunmetal"] .bar { border-top: 3px solid transparent; padding-top: 10px; background: linear-gradient(180deg, #121315, #0e0f11) padding-box, var(--edge); }
 #settings[data-look="gunmetal"] .lk { background: #101113; border-color: #3a3a3d; color: #b8bcc0; }
