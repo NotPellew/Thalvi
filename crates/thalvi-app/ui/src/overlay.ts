@@ -3,7 +3,7 @@
 import type { Backend, Look, Route, Status } from "./contract.ts";
 import { el } from "./dom.ts";
 import { applyLook } from "./look.ts";
-import { createModule, doneMessage } from "./module.ts";
+import { copiesText, createModule, doneMessage } from "./module.ts";
 
 /** Frame scheduling and time, injectable so tests drive the animation. */
 export interface Clock {
@@ -22,6 +22,10 @@ const BARS = 9;
 const FLAT = 4 / 22;
 const ENVELOPE = [0.45, 0.65, 0.82, 0.95, 1, 0.95, 0.82, 0.65, 0.45];
 const ROUTE_WORD: Record<Route, string> = { paste: "PASTE", submit: "SUBMIT", task: "TASK" };
+
+function actionWord(route: Route, copies: boolean): string {
+  return copiesText(route, copies) ? "COPY" : ROUTE_WORD[route];
+}
 
 type Tone = "live" | "quiet" | "pending" | "working" | "done" | "failed";
 
@@ -57,6 +61,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
   let countdownStart: number | null = null;
   let pauseMs = 0;
   let route: Route = "paste";
+  let copies = false;
   let looping = false;
   let flat = true;
   let look: Look = "gunmetal";
@@ -96,7 +101,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
     if (countdownStart === null) return;
     const left = Math.max(0, pauseMs - (now - countdownStart));
     countdownBar.style.transform = `scaleX(${(left / pauseMs).toFixed(3)})`;
-    label.textContent = `${ROUTE_WORD[route]} IN ${secondsLeft(left)} s`;
+    label.textContent = `${actionWord(route, copies)} IN ${secondsLeft(left)} s`;
     skin.countdown(left, pauseMs);
   }
 
@@ -158,6 +163,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
         ending.hidden = false;
         ending.textContent = next.route;
         route = next.route;
+        copies = next.copies;
         pauseMs = next.pauseMs;
         if (next.waitingForQuiet) {
           countdownStart = null;
@@ -166,7 +172,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
         } else {
           countdownStart = wasCounting && countdownStart !== null ? countdownStart : clock.now();
           countdown.dataset["running"] = "true";
-          pillView("pending", `${ROUTE_WORD[next.route]} IN ${secondsLeft(next.pauseMs)} s`, next.target);
+          pillView("pending", `${actionWord(next.route, next.copies)} IN ${secondsLeft(next.pauseMs)} s`, next.target);
         }
         break;
       }

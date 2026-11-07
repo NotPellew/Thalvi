@@ -12,7 +12,7 @@ use thalvi_desktop::delivery::Delivery;
 use thalvi_desktop::draft::Drafts;
 use thalvi_desktop::history;
 use thalvi_desktop::hold::HoldKey;
-use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, StateServer};
+use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, HostError, StateServer};
 use thalvi_desktop::models::SpeechDownloads;
 
 use crate::commands;
@@ -59,6 +59,7 @@ pub struct AppState {
     state_server: Mutex<Option<StateServer>>,
     /// Reports the hold key where the app sees the keyboard itself; empty elsewhere.
     hold_watch: Mutex<Option<HoldWatch>>,
+    hold_unavailable: Option<&'static str>,
 }
 
 impl AppState {
@@ -89,7 +90,7 @@ impl AppState {
                 None
             }
         };
-        let hold_watch = watch_hold_key(&config.hold_key, &link);
+        let held = watch_hold_key(&config.hold_key, &link);
         Ok(Self {
             link,
             store,
@@ -106,7 +107,8 @@ impl AppState {
             menu_problem: Mutex::new(None),
             config: Mutex::new(config),
             state_server: Mutex::new(state_server),
-            hold_watch: Mutex::new(hold_watch),
+            hold_watch: Mutex::new(held.watch),
+            hold_unavailable: held.unavailable,
         })
     }
 
@@ -116,6 +118,12 @@ impl AppState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Why this desktop offers no hold key; `None` where it does.
+    #[must_use]
+    pub fn hold_key_unavailable(&self) -> Option<&'static str> {
+        self.hold_unavailable
     }
 
     #[must_use]
@@ -213,28 +221,54 @@ impl AppState {
                 .unwrap_or_else(PoisonError::into_inner);
             // The old hook goes before the new one comes.
             *watch = None;
-            *watch = watch_hold_key(&config.hold_key, &self.link);
+            *watch = watch_hold_key(&config.hold_key, &self.link).watch;
         }
         self.link.send(Control::Apply(Box::new(config.clone())));
     }
 }
 
+/// What watching the hold key came to.
+#[derive(Default)]
+struct Held {
+    watch: Option<HoldWatch>,
+    /// Why this desktop offers no hold key, for Settings.
+    unavailable: Option<&'static str>,
+}
+
 /// Starts reporting `key` to the engine where the desktop lets the app see it. Where binds
-/// report it instead, that is only logged; where the desktop refuses, the user is told through
-/// the status, and the rest of the app goes on.
-fn watch_hold_key(key: &HoldKey, link: &EngineLink) -> Option<HoldWatch> {
+/// report it instead, that is only logged; where the desktop offers no hold key, Settings says
+/// so and nothing looks like an error; where the desktop refuses, the user is told through the
+/// status, and the rest of the app goes on.
+fn watch_hold_key(key: &HoldKey, link: &EngineLink) -> Held {
     let input = link.hold_input();
-    match Desktop::watch_hold_key(key, move |down| input.set(down)) {
-        Ok(HoldSource::Hook(watch)) => Some(watch),
+    held(
+        Desktop::watch_hold_key(key, move |down| input.set(down)),
+        |notice| link.send(Control::HoldKeyFailed(notice)),
+    )
+}
+
+fn held(source: Result<HoldSource, HostError>, tell_failure: impl FnOnce(String)) -> Held {
+    match source {
+        Ok(HoldSource::Hook(watch)) => Held {
+            watch: Some(watch),
+            unavailable: None,
+        },
         Ok(HoldSource::Binds(reason)) => {
             println!("{reason}");
-            None
+            Held::default()
+        }
+        Ok(HoldSource::Unavailable(reason)) => {
+            println!("{reason}");
+            Held {
+                watch: None,
+                unavailable: Some(reason),
+            }
         }
         Err(error) => {
-            link.send(Control::HoldKeyFailed(format!(
+            tell_failure(format!(
                 "{error} Dictating by holding a key does not work until Thalvi is restarted or another key is set; the wake word still works."
-            )));
-            None
+            ));
+            Held::default()
         }
     }
 }
@@ -285,6 +319,9 @@ fn start() -> Result<(), String> {
             (command, config)
         }
     };
+    // GTK's backend is fixed when it starts, which the builder below does.
+    #[cfg(target_os = "linux")]
+    Desktop::prepare_toolkit().map_err(|error| error.to_string())?;
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             act(app, relaunch_command(&args));
@@ -308,6 +345,7 @@ fn start() -> Result<(), String> {
             commands::copy_report,
             commands::list_microphones,
             commands::open_recordings,
+            commands::get_hold_key_unavailable,
             commands::get_start_at_login,
             commands::set_start_at_login,
             commands::copy_login_line,
@@ -533,5 +571,46 @@ pub fn on_menu(app: &AppHandle, id: &str) {
             });
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_refused_hold_key_is_told_as_a_failure() {
+        // (what the desktop said, failure told, watching, why unavailable)
+        type Case = (
+            Result<HoldSource, HostError>,
+            Option<&'static str>,
+            bool,
+            Option<&'static str>,
+        );
+        let cases: Vec<Case> = vec![
+            (Ok(HoldSource::Hook(HoldWatch::new(()))), None, true, None),
+            (Ok(HoldSource::Binds("In the config.")), None, false, None),
+            (
+                Ok(HoldSource::Unavailable("No release events.")),
+                None,
+                false,
+                Some("No release events."),
+            ),
+            (
+                Err(HostError::Unsupported("Hook refused.".to_owned())),
+                Some(
+                    "Hook refused. Dictating by holding a key does not work until Thalvi is restarted or another key is set; the wake word still works.",
+                ),
+                false,
+                None,
+            ),
+        ];
+        for (source, told, watching, unavailable) in cases {
+            let mut failure = None;
+            let held = held(source, |notice| failure = Some(notice));
+            assert_eq!(failure.as_deref(), told);
+            assert_eq!(held.watch.is_some(), watching);
+            assert_eq!(held.unavailable, unavailable);
+        }
     }
 }

@@ -33,15 +33,22 @@ function accents(): string {
 }
 
 /** What the label says while an ending counts down: the action, its target, and whole seconds rounded up. */
-export function countdownLabel(route: Route, target: string | null, ms: number): string {
+export function copiesText(route: Route, copies: boolean): boolean {
+  return copies && route !== "task";
+}
+
+export function countdownLabel(wording: { route: Route; target: string | null; copies: boolean }, ms: number): string {
+  const { route, target } = wording;
   const seconds = String(Math.max(1, Math.ceil(ms / 1000)));
   const named = target?.toUpperCase();
   const to = named === undefined ? null : named.length > MAX_TARGET ? `${named.slice(0, MAX_TARGET - 1)}…` : named;
-  const action = {
-    paste: to === null ? "PASTE" : `PASTE INTO ${to}`,
-    submit: to === null ? "SEND" : `SEND TO ${to}`,
-    task: "TASK",
-  }[route];
+  const action = copiesText(route, wording.copies)
+    ? "COPY"
+    : {
+        paste: to === null ? "PASTE" : `PASTE INTO ${to}`,
+        submit: to === null ? "SEND" : `SEND TO ${to}`,
+        task: "TASK",
+      }[route];
   return `${action} IN ${seconds} s`;
 }
 
@@ -90,7 +97,7 @@ export function createModule(onCancel: () => void): Module {
   let tone: Tone = "live";
   let drawing = false;
   let hasText = false;
-  let counting: { route: Route; target: string | null } | null = null;
+  let counting: { route: Route; target: string | null; copies: boolean } | null = null;
 
   function show(next: Tone, options: { label?: string; wave?: boolean; motion?: "sweep" | "drain" }): void {
     node.dataset["tone"] = next;
@@ -140,8 +147,8 @@ export function createModule(onCancel: () => void): Module {
         if (status.waitingForQuiet) {
           show("quiet", { wave: true });
         } else {
-          show("pending", { label: countdownLabel(status.route, status.target, status.pauseMs), motion: "drain" });
-          counting = { route: status.route, target: status.target };
+          show("pending", { label: countdownLabel(status, status.pauseMs), motion: "drain" });
+          counting = { route: status.route, target: status.target, copies: status.copies };
         }
         break;
       case "working":
@@ -168,7 +175,7 @@ export function createModule(onCancel: () => void): Module {
 
   function countdown(left: number, total: number): void {
     if (counting === null) return;
-    const words = countdownLabel(counting.route, counting.target, left);
+    const words = countdownLabel(counting, left);
     if (label.textContent !== words) label.textContent = words;
     strip.style.transform = `scaleX(${(left / total).toFixed(3)})`;
   }
