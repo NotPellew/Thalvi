@@ -112,4 +112,7 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
   .row { flex-direction: column; align-items: stretch; gap: 8px; }
   .what { max-width: none; }
   .ctl { flex: none; justify-content: flex-start; }
+  .card { grid-template-columns: minmax(0, 1fr); }
+  .card button { grid-column: 1; }
+  .mini input, .mini select { width: 100%; box-sizing: border-box; }
 }
