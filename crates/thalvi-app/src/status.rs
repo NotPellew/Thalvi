@@ -150,6 +150,8 @@ pub enum Mode {
     Idle,
     /// Models or the microphone are starting.
     Starting,
+    /// A wake word model is downloading.
+    WakeDownload,
     /// The microphone is closed.
     Paused,
     /// An accepted capture is being delivered.
@@ -170,23 +172,12 @@ pub struct View {
     pub pauses: EndingPauses,
     /// What the speech model needs, while it loads.
     pub loading: Option<SpeechLoad>,
-    /// A wake word model is being downloaded.
-    pub wake_download: bool,
 }
 
 impl View {
     #[must_use]
     pub fn status(&self) -> Status {
         let target = self.target.clone();
-        if self.wake_download
-            && matches!(self.engine, EngineState::Listening)
-            && matches!(self.mode, Mode::Starting | Mode::Idle | Mode::Done { .. })
-        {
-            return Status::Loading {
-                notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
-                downloading: true,
-            };
-        }
         if let (Some(load), EngineState::Listening, Mode::Idle | Mode::Done { .. }) =
             (self.loading, &self.engine, &self.mode)
         {
@@ -199,6 +190,10 @@ impl View {
             (Mode::Starting, _) => Status::Loading {
                 notice: STARTING_NOTICE.to_owned(),
                 downloading: false,
+            },
+            (Mode::WakeDownload, _) => Status::Loading {
+                notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
+                downloading: true,
             },
             (Mode::Paused, _) => Status::Paused,
             (Mode::Delivering(route), _) => Status::Working {
@@ -260,7 +255,6 @@ mod tests {
             target: Some("kitty".to_owned()),
             pauses: EndingPauses::default(),
             loading: None,
-            wake_download: false,
         }
     }
 
@@ -349,6 +343,14 @@ mod tests {
                 Status::Loading {
                     notice: STARTING_NOTICE.to_owned(),
                     downloading: false,
+                },
+            ),
+            (
+                Mode::WakeDownload,
+                EngineState::Listening,
+                Status::Loading {
+                    notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
+                    downloading: true,
                 },
             ),
             (Mode::Paused, capturing(), Status::Paused),
@@ -450,48 +452,6 @@ mod tests {
                 target: Some(kitty())
             }
         );
-    }
-
-    #[test]
-    fn a_wake_download_shows_until_a_failure_a_pause_or_a_capture() {
-        let download = Status::Loading {
-            notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
-            downloading: true,
-        };
-        let failed = Mode::Failed(Failure {
-            notice: "The microphone is off.".to_owned(),
-            headline: "Failed",
-            causes: Vec::new(),
-        });
-        let done = Mode::Done {
-            route: CaptureRoute::Paste,
-            notice: String::new(),
-        };
-        let cases = [
-            (
-                Mode::Starting,
-                EngineState::Listening,
-                true,
-                Some(&download),
-            ),
-            (Mode::Idle, EngineState::Listening, true, Some(&download)),
-            (done, EngineState::Listening, true, Some(&download)),
-            (Mode::Paused, EngineState::Listening, true, None),
-            (failed, EngineState::Listening, true, None),
-            (Mode::Idle, EngineState::StartingCapture, true, None),
-            (Mode::Idle, EngineState::Listening, false, None),
-        ];
-        for (mode, engine, wake_download, expected) in cases {
-            let label = format!("{mode:?} {engine:?} {wake_download}");
-            let mut view = view(mode, engine);
-            view.wake_download = wake_download;
-            view.loading = Some(SpeechLoad::Download);
-            let status = view.status();
-            match expected {
-                Some(expected) => assert_eq!(&status, expected, "{label}"),
-                None => assert_ne!(&status, &download, "{label}"),
-            }
-        }
     }
 
     fn capturing() -> EngineState {

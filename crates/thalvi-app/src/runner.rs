@@ -207,17 +207,14 @@ async fn load_wake<T>(
     load: impl Future<Output = T>,
 ) -> T {
     let downloads = WakeEngine::needs_download(config, store).await;
-    publisher.wake_download(downloads);
-    println!(
-        "{}",
-        if downloads {
-            WAKE_DOWNLOAD_NOTICE
-        } else {
-            "Loading the wake word models."
-        }
-    );
+    if !downloads {
+        println!("Loading the wake word models.");
+        return load.await;
+    }
+    println!("{WAKE_DOWNLOAD_NOTICE}");
+    publisher.mode(Mode::WakeDownload);
     let loaded = load.await;
-    publisher.wake_download(false);
+    publisher.mode(Mode::Starting);
     loaded
 }
 
@@ -237,7 +234,6 @@ impl Publisher {
                 target: None,
                 pauses,
                 loading: None,
-                wake_download: false,
             }),
             out,
         })
@@ -266,10 +262,6 @@ impl Publisher {
 
     fn loading(&self, load: Option<SpeechLoad>) {
         self.update(|view| view.loading = load);
-    }
-
-    fn wake_download(&self, downloading: bool) {
-        self.update(|view| view.wake_download = downloading);
     }
 
     /// Says why a press of the hold key started nothing. A refusal that only repeats an earlier
@@ -1392,8 +1384,15 @@ mod tests {
             CatalogHead::HeyThalvi.asset(),
             CatalogHead::HeyMycroft.asset(),
         ];
-        let cases = [("cached", cached.len(), false), ("missing one", 3, true)];
-        for (case, files, overlay) in cases {
+        let failed = Mode::Failed(Failure {
+            notice: "Could not download the model.".to_owned(),
+            headline: "Download failed",
+            causes: Vec::new(),
+        });
+        // A retry after a failed download starts from Paused (the tray) or Failed (Settings).
+        let starts = [Mode::Starting, Mode::Idle, Mode::Paused, failed];
+        for (case, files, downloads) in [("cached", cached.len(), false), ("missing one", 3, true)]
+        {
             let dir = std::env::temp_dir().join(format!(
                 "thalvi-wake-load-{}-{}",
                 case.replace(' ', "-"),
@@ -1408,35 +1407,43 @@ mod tests {
                     .unwrap();
             }
             let store = ModelStore::in_dir(&dir);
-            let (out, status) = watch::channel(Status::Paused);
-            let publisher = Publisher::new(out, EndingPauses::default());
-            publisher.mode(Mode::Starting);
-            let shown = || Visibility::of(&status.borrow(), true) == Visibility::Show;
+            for (start, load_fails) in starts.iter().flat_map(|mode| [(mode, false), (mode, true)])
+            {
+                let case = format!("{case}, from {start:?}, load fails: {load_fails}");
+                let (out, status) = watch::channel(Status::Paused);
+                let publisher = Publisher::new(out, EndingPauses::default());
+                publisher.mode(start.clone());
+                let before = status.borrow().clone();
+                let download = Status::Loading {
+                    notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
+                    downloading: true,
+                };
 
-            for failure in [false, true] {
-                let case = format!("{case}, load fails: {failure}");
                 let result = load_wake(&publisher, &config, &store, async {
-                    assert_eq!(shown(), overlay, "{case}: while loading");
-                    assert_eq!(
-                        matches!(&*status.borrow(), Status::Loading { notice, .. } if notice == WAKE_DOWNLOAD_NOTICE),
-                        overlay,
-                        "{case}: the download notice"
-                    );
-                    if failure { Err("no network") } else { Ok(()) }
+                    if downloads {
+                        assert_eq!(*status.borrow(), download, "{case}: while loading");
+                        assert_eq!(
+                            Visibility::of(&status.borrow(), true),
+                            Visibility::Show,
+                            "{case}: overlay while loading"
+                        );
+                    } else {
+                        assert_eq!(*status.borrow(), before, "{case}: nothing to announce");
+                    }
+                    if load_fails {
+                        Err("no network")
+                    } else {
+                        Ok(())
+                    }
                 })
                 .await;
-                assert_eq!(result.is_err(), failure, "{case}");
-                assert!(!shown(), "{case}: loaded");
-                assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}");
 
-                publisher.loading(Some(SpeechLoad::Download));
-                publisher.mode(Mode::Idle);
-                assert!(
-                    matches!(&*status.borrow(), Status::Loading { notice, downloading: true } if notice.contains("650 MB")),
-                    "{case}: the speech model's notice follows"
-                );
-                publisher.loading(None);
-                publisher.mode(Mode::Starting);
+                assert_eq!(result.is_err(), load_fails, "{case}");
+                if downloads {
+                    assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}: after");
+                } else {
+                    assert_eq!(*status.borrow(), before, "{case}: after");
+                }
             }
             std::fs::remove_dir_all(&dir).unwrap();
         }
