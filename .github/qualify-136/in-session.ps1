@@ -136,6 +136,31 @@ function Startup-Notes($Settings) {
   @(Named-Elements $Settings 'startup|log ?in|Start Thalvi' | ForEach-Object { $_.Current.Name } | Select-Object -Unique)
 }
 
+# Names on the taskbar and in the "Show hidden icons" flyout; Thalvi's tray icon is named "Thalvi: <state>".
+function Tray-Names([string]$Shot) {
+  $all = [System.Windows.Automation.Condition]::TrueCondition
+  $children = [System.Windows.Automation.TreeScope]::Children
+  $bar = $AE::RootElement.FindFirst($children, (New-Object System.Windows.Automation.PropertyCondition($AE::ClassNameProperty, 'Shell_TrayWnd')))
+  if (-not $bar) { Log 'no taskbar found'; return @() }
+  $names = @($bar.FindAll($Scope, $all) | ForEach-Object { $_.Current.Name } | Where-Object { $_ })
+  $chevron = $bar.FindAll($Scope, $all) | Where-Object { $_.Current.Name -match 'hidden icons' } | Select-Object -First 1
+  if ($chevron) {
+    $patterns = $chevron.GetSupportedPatterns()
+    if ($patterns -contains [System.Windows.Automation.InvokePattern]::Pattern) { $chevron.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke() }
+    else { $chevron.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Toggle() }
+    $deadline = (Get-Date).AddSeconds(5); $flyout = @()
+    while ((Get-Date) -lt $deadline -and -not $flyout.Count) {
+      Start-Sleep -Milliseconds 250
+      $flyout = @($AE::RootElement.FindAll($children, $all) | Where-Object { $_.Current.ClassName -match 'Overflow' } | ForEach-Object { $_.FindAll($Scope, $all) } | ForEach-Object { $_.Current.Name } | Where-Object { $_ })
+    }
+    Save-Screen $Shot
+    $names += $flyout
+    [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+  } else { Log 'no "Show hidden icons" button'; Save-Screen $Shot }
+  Log "tray names: $(($names | Select-Object -Unique) -join ' | ')"
+  @($names | Where-Object { $_ -match '^Thalvi' } | Select-Object -Unique)
+}
+
 function Observe-Started {
   # Every foreground change from this step's start, until 25 s after Thalvi first runs.
   $counts = @{}; $foregrounds = @{}; $timeline = New-Object System.Collections.Generic.List[string]
@@ -172,6 +197,8 @@ function Observe-Started {
   Log "Thalvi's windows: $($facts.windows -join ' | ')"
   Log "visible windows: $($facts.visible_windows -join ' | ')"
   Save-Screen 'after-login'
+  $facts.tray_icons = Tray-Names 'tray'
+  Check ($facts.tray_icons.Count -eq 1) 'exactly one Thalvi tray icon is shown'
   Check (($counts.Keys | Measure-Object -Maximum).Maximum -eq 1 -and (Thalvi-Processes).Count -eq 1) 'exactly one Thalvi instance runs'
   Check (@($facts.command_lines | Where-Object { $_ -match '--login' }).Count -eq 1) 'it was started with --login'
   Check (-not ($facts.windows -contains 'visible Thalvi settings')) 'Settings is not open'
@@ -225,6 +252,8 @@ try {
       Check ($facts.switch_initially -eq 'Off') 'the login switch starts off'
       Flip $switch 'On'
       Save-Screen 'switch-on'
+      $facts.tray_icons = Tray-Names 'tray'
+      Check ($facts.tray_icons.Count -eq 1) 'a manual start shows exactly one Thalvi tray icon'
       Record-Entries 'after_on'
       Check ($facts.run_after_on -match 'Programs\\Thalvi\\thalvi-desktop\.exe"? --login$') 'the switch wrote a Run entry for the installed exe with --login'
       $facts.notes = Startup-Notes $settings
