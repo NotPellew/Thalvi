@@ -90,15 +90,28 @@ fn no_xwayland() -> HostError {
     )
 }
 
+/// `GDK_BACKEND` overrides the allowed backends, so one that leaves out X11 is named instead.
+fn backend_excludes_x11(backend: &str) -> HostError {
+    HostError::Unsupported(format!(
+        "GDK_BACKEND={backend} keeps Thalvi off XWayland, which it needs on GNOME so its windows never take focus. Unset GDK_BACKEND for Thalvi, then start it."
+    ))
+}
+
 /// On GNOME, GTK runs on the X11 backend, since Mutter hands a Wayland window focus when it
 /// appears and takes no placement from it; `init` then proves `XWayland` answers.
 fn prepare_toolkit_for(
     session: Option<Session>,
+    backend: Option<&str>,
     allow_backends: impl FnOnce(&str),
     init: impl FnOnce() -> bool,
 ) -> Result<(), HostError> {
     match session {
         Some(Session::Gnome) => {
+            if let Some(backend) = backend.filter(|backend| {
+                !backend.is_empty() && !backend.split(',').any(|b| matches!(b.trim(), "x11" | "*"))
+            }) {
+                return Err(backend_excludes_x11(backend));
+            }
             allow_backends("x11");
             init().then_some(()).ok_or_else(no_xwayland)
         }
@@ -116,6 +129,7 @@ impl Desktop {
     pub fn prepare_toolkit() -> Result<(), HostError> {
         prepare_toolkit_for(
             Session::detect().ok(),
+            std::env::var("GDK_BACKEND").ok().as_deref(),
             gtk::gdk::set_allowed_backends,
             || gtk::init().is_ok(),
         )
@@ -329,24 +343,49 @@ mod tests {
 
     #[test]
     fn only_gnome_runs_gtk_on_x11_and_a_missing_xwayland_is_a_plain_error() {
-        // (session, whether XWayland answers, backends allowed, result)
-        for (session, xwayland, allowed, ok) in [
-            (Some(Session::Gnome), true, Some("x11"), true),
-            (Some(Session::Gnome), false, Some("x11"), false),
-            (Some(Session::Hyprland), false, None, true),
-            (None, false, None, true),
+        // (session, GDK_BACKEND, whether XWayland answers, backends allowed, result)
+        for (session, backend, xwayland, allowed, result) in [
+            (Some(Session::Gnome), None, true, Some("x11"), Ok(())),
+            (
+                Some(Session::Gnome),
+                Some("x11,wayland"),
+                true,
+                Some("x11"),
+                Ok(()),
+            ),
+            (Some(Session::Gnome), Some(""), true, Some("x11"), Ok(())),
+            (
+                Some(Session::Gnome),
+                None,
+                false,
+                Some("x11"),
+                Err(no_xwayland()),
+            ),
+            (
+                Some(Session::Gnome),
+                Some("wayland"),
+                true,
+                None,
+                Err(backend_excludes_x11("wayland")),
+            ),
+            (
+                Some(Session::Hyprland),
+                Some("wayland"),
+                false,
+                None,
+                Ok(()),
+            ),
+            (None, None, false, None, Ok(())),
         ] {
             let mut chosen = None;
-            let result = prepare_toolkit_for(
+            let outcome = prepare_toolkit_for(
                 session,
+                backend,
                 |backends| chosen = Some(backends.to_owned()),
                 || xwayland,
             );
-            assert_eq!(chosen.as_deref(), allowed, "{session:?}");
-            assert_eq!(result.is_ok(), ok, "{session:?} {xwayland}");
-            if !ok {
-                assert_eq!(result, Err(no_xwayland()));
-            }
+            assert_eq!(chosen.as_deref(), allowed, "{session:?} {backend:?}");
+            assert_eq!(outcome, result, "{session:?} {backend:?} {xwayland}");
         }
     }
 
