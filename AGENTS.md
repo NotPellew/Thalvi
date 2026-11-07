@@ -130,8 +130,14 @@ are committed.
 - Dependencies (`deny.toml`, cargo-deny 0.20.2): `cargo deny --workspace --locked
   check advisories licenses sources`.
 - Secrets (`.gitleaks.toml`, gitleaks 8.30.1): `gitleaks git --redact --no-banner
-  --log-opts=HEAD .` on the full history. With gitleaks on `PATH`, the pre-commit
-  hook scans what is staged.
+  --verbose --log-opts=HEAD .` on the full history. With gitleaks on `PATH`, the
+  pre-commit hook scans what is staged.
+
+One more check runs on PRs that change Rust but advises rather than gates:
+`cargo mutants --in-place --in-diff <diff>` (cargo-mutants 27.1.0,
+`.cargo/mutants.toml`). A surviving mutant is an annotation: add the missing test,
+or judge it equivalent. Locally, run it with no desktop session and a throwaway
+`HOME`, since it runs tests against deliberately broken code.
 
 ## Git and PRs
 
