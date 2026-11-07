@@ -137,16 +137,30 @@ function Startup-Notes($Settings) {
 }
 
 function Observe-Started {
-  $seen = Wait-Until { $p = Thalvi-Processes; if ($p.Count) { $p } } 'Thalvi to start at login' 120
-  $first = $seen[0]
-  Log "Thalvi started at $($first.StartTime.ToString('HH:mm:ss.fff')), pid $($first.Id)"
-  $counts = @{}; $foregrounds = @{}
-  $deadline = (Get-Date).AddSeconds(25)
+  # Every foreground change from this step's start, until 25 s after Thalvi first runs.
+  $counts = @{}; $foregrounds = @{}; $timeline = New-Object System.Collections.Generic.List[string]
+  $last = ''; $lastOverlay = ''; $first = $null; $deadline = (Get-Date).AddSeconds(120)
   while ((Get-Date) -lt $deadline) {
-    $counts[(Thalvi-Processes).Count] = 1
-    $foregrounds[(Foreground)] = 1
-    Start-Sleep -Milliseconds 200
+    $now = Get-Date -Format HH:mm:ss.fff
+    $fg = Foreground
+    if ($fg -ne $last) { $timeline.Add("$now foreground $fg"); $last = $fg }
+    $foregrounds[$fg] = 1
+    $running = Thalvi-Processes
+    if ($running.Count -and -not $first) {
+      $first = $running[0]
+      $timeline.Add("$now Thalvi running, pid $($first.Id), started $($first.StartTime.ToString('HH:mm:ss.fff'))")
+      $deadline = (Get-Date).AddSeconds(25)
+    }
+    if ($first) {
+      $counts[$running.Count] = 1
+      $overlay = (@(Windows-Of $first.Id) | Where-Object { $_ -match 'Thalvi overlay$' }) -join ''
+      if ($overlay -ne $lastOverlay) { $timeline.Add("$now overlay $overlay"); $lastOverlay = $overlay }
+    }
+    Start-Sleep -Milliseconds 100
   }
+  if (-not $first) { throw 'Thalvi did not start within 120 s of the step starting' }
+  $facts.timeline = @($timeline)
+  $timeline | ForEach-Object { Log "  $_" }
   $facts.instance_counts_seen = @($counts.Keys)
   $facts.foregrounds_seen = @($foregrounds.Keys)
   $facts.command_lines = Command-Lines
@@ -162,6 +176,7 @@ function Observe-Started {
   Check (@($facts.command_lines | Where-Object { $_ -match '--login' }).Count -eq 1) 'it was started with --login'
   Check (-not ($facts.windows -contains 'visible Thalvi settings')) 'Settings is not open'
   Check (-not ($foregrounds.Keys | Where-Object { $_ -match '^thalvi-desktop#' })) 'Thalvi never held the foreground'
+  $facts.foreground_at_end = Foreground
 }
 
 function Observe-Absent {

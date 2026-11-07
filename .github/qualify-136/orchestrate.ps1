@@ -53,7 +53,8 @@ Set-ItemProperty $policy ConcatenateDefaults_AllowSaved 1 -Type DWord
 Set-ItemProperty $policy ConcatenateDefaults_AllowSavedNTLMOnly 1 -Type DWord
 New-Item -Force 'HKCU:\Software\Microsoft\Terminal Server Client' | Out-Null
 Set-ItemProperty 'HKCU:\Software\Microsoft\Terminal Server Client' AuthenticationLevelOverride 0 -Type DWord
-cmdkey /generic:TERMSRV/127.0.0.2 /user:"$env:COMPUTERNAME\$user" /pass:$password | Out-Null
+cmdkey /generic:TERMSRV/127.0.0.2 "/user:$env:COMPUTERNAME\$user" "/pass:$password" | Out-Null
+cmdkey /list:TERMSRV/127.0.0.2 | Where-Object { $_ -match 'User' } | ForEach-Object { Log "saved credential: $($_.Trim())" }
 
 function Session-Explorer {
   Get-Process explorer -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { $_.UserName -like "*\$user" } | Select-Object -First 1
