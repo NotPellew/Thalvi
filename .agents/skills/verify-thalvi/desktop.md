@@ -69,12 +69,19 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
 | Tray actions | `$H ctl $R pause`, `resume`, `toggle`, `cancel`, `status` (the relaunch path the tray and key binds use) |
 | Open Settings | `$H ctl $R` with no argument |
 | Keys into the focused window | `$H sh $R wtype -k Tab` (also `-M shift -k Tab -m shift`, `-k Return`, `-k Down`, `-k Next` for Page Down) |
-| Window size | `$H hypr $R dispatch setfloating "class:^thalvi-desktop\$"`, then `$H hypr $R dispatch resizewindowpixel "exact 400 680,class:^thalvi-desktop\$"`; read it back with `$H hypr $R clients` |
+| Window size | `$H hypr $R dispatch setfloating "title:^Thalvi settings\$"`, then `$H hypr $R dispatch resizewindowpixel "exact 400 680,title:^Thalvi settings\$"`; repeat until `$H hypr $R clients` shows `size: 400,680` |
 | Screenshot | `$H shot $R name` (whole screen, `$R/out/name.png`); crop with Pillow, view with the image reader |
 | Frame burst | `$H burst $R name 100 0.15` writes `name-001.png...` and `name-times.txt` (time of each frame, same clock as the log) |
 | Download proxy | `scripts/throttle-proxy.py PORT 250000` slows a real download so the notice stays on screen; with rate `0` it answers 502 after 2 s |
 | Anything else inside | `$H sh $R <command>` |
 
+- `app-start` returns before the app is ready. Repeat `$H ctl $R status` under a
+  bounded loop until it answers, open Settings, then wait for its window in
+  `$H hypr $R clients` before sending keys.
+- The overlay and Settings share the window class `thalvi-desktop`, so a `class:`
+  selector can move the overlay instead. Select Settings by its title.
+- A screenshot right after a key can show the previous frame. Wait for the change
+  to appear before keeping it as evidence.
 - There is no pointer, so Settings is keyboard-driven. The first `Tab` focuses the
   search box, then the sidebar pages in order (Speech, Microphone, Capture,
   Feedback and appearance, Apps & tasks, History, App); `Return` opens the page.
@@ -82,7 +89,7 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   footer. Take a screenshot after each step to see where the focus ring is
   rather than counting: the footer's order is Copy, ×, Revert, Save, and a long
   page needs about ten `Shift+Tab` presses from the sidebar to reach Save.
-- In a narrow window the whole page scrolls: focus a sidebar page and press
+- A long page scrolls inside its own pane: focus a field in the page and press
   `Next` (Page Down) to scroll it, `Home` to return.
 - The overlay is a pill hanging at the top centre of the screen. Move the
   Settings window away from it (`movewindowpixel`) or float it small, and look at

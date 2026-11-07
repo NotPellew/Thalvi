@@ -167,7 +167,8 @@ EOF
 
 cmd_app_start() {
   local r=$1 bin=$2; shift 2
-  local config="" tag=$(date +%H%M%S)
+  local config="" tag
+  tag=$(date +%H%M%S)
   local -a envs=()
   while [ $# -gt 0 ]; do
     case $1 in
@@ -193,8 +194,7 @@ cmd_app_stop() {
   [ -s "$r/app.pid" ] || return 0
   local pid; pid=$(cat "$r/app.pid")
   kill "$pid" 2>/dev/null || true
-  local i
-  for i in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
   : > "$r/app.pid"
 }
 
@@ -204,8 +204,7 @@ cmd_down() {
   if [ -s "$r/compositor.pid" ]; then
     local pid; pid=$(cat "$r/compositor.pid")
     kill "$pid" 2>/dev/null || true
-    local i
-    for i in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
     : > "$r/compositor.pid"
   fi
   echo "down: $r (evidence stays in $r/out)"
