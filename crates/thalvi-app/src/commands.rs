@@ -14,7 +14,7 @@ use tauri::{AppHandle, Emitter, State};
 use thalvi_desktop::audio;
 use thalvi_desktop::draft::DraftView;
 use thalvi_desktop::history::{Entry, HistoryError, Store as History};
-use thalvi_desktop::host::{Desktop, Host, WebUrl};
+use thalvi_desktop::host::{Host, WebUrl};
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{
     CatalogHead, CatalogSpeech, ModelError, ModelStore, SpeechModelInfo, SpeechProgress,
@@ -41,8 +41,8 @@ pub fn get_status(state: State<'_, AppState>) -> Status {
 }
 
 #[tauri::command]
-pub fn overlay_takes_clicks() -> bool {
-    Desktop::OVERLAY_TAKES_CLICKS
+pub fn overlay_takes_clicks(state: State<'_, AppState>) -> bool {
+    state.host().overlay_takes_clicks()
 }
 
 #[tauri::command]
@@ -415,6 +415,12 @@ pub async fn copy_text(text: String, state: State<'_, AppState>) -> Result<(), S
 #[tauri::command]
 pub fn discard_draft(state: State<'_, AppState>) {
     state.drafts.discard();
+}
+
+/// Why this desktop offers no hold key, or `None` where it does.
+#[tauri::command]
+pub fn get_hold_key_unavailable(state: State<'_, AppState>) -> Option<&'static str> {
+    state.hold_key_unavailable()
 }
 
 #[tauri::command]

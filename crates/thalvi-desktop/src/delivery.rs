@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::capture::CaptureRoute;
 use crate::config::DesktopConfig;
 use crate::engine::{CaptureOutcome, EngineState};
-use crate::host::{Host, HostError, TypedText};
+use crate::host::{Delivered, Host, HostError, TypedText};
 use crate::metrics::{Event, Recorder};
 use crate::report::{UserError, causes};
 use crate::tasks::{self, Task};
@@ -107,6 +107,12 @@ where
         &self.host
     }
 
+    /// Whether the desktop can only put dictation on the clipboard, never type it.
+    #[must_use]
+    pub fn copies_only(&self) -> bool {
+        self.host.copies_only()
+    }
+
     /// Binds the window that has focus now; call at the wake, before the capture starts.
     pub async fn bind(&self, recorder: &Recorder) -> Bound<H::Target> {
         Bound(
@@ -173,7 +179,7 @@ where
             ))),
         };
         match result {
-            Ok(()) => {
+            Ok(Delivered::InWindow) => {
                 if !text.is_empty() {
                     // Best effort: the text already reached the window, and a failed call is recorded.
                     let owned = text.to_owned();
@@ -183,6 +189,14 @@ where
                 }
                 Finished::delivered("Delivered.".to_owned())
             }
+            Ok(Delivered::OnClipboard) => Finished::delivered(
+                if enter {
+                    "Copied — press Ctrl+V then Enter"
+                } else {
+                    "Copied — press Ctrl+V to paste"
+                }
+                .to_owned(),
+            ),
             Err(error) => Finished {
                 maybe_partial: matches!(error, HostError::MaybePartial(_)),
                 ..self.keep(recorder, text, &error).await
@@ -463,6 +477,59 @@ mod tests {
             want.extend_from_slice(expected);
             assert_eq!(seen, calls(&want), "{route:?} {text}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_desktop_that_only_copies_says_so_and_does_not_copy_twice() {
+        for (route, enter, notice) in [
+            (CaptureRoute::Paste, false, "Copied — press Ctrl+V to paste"),
+            (
+                CaptureRoute::Submit,
+                true,
+                "Copied — press Ctrl+V then Enter",
+            ),
+        ] {
+            let (finished, seen) = finish(
+                FakeHost::default().clipboard_only(),
+                accepted(route, "secret words"),
+            )
+            .await;
+            let finished = finished.unwrap();
+            assert!(finished.delivered, "{route:?}");
+            assert_eq!(finished.notice, notice, "{route:?}");
+            assert_eq!(
+                seen,
+                calls(&[
+                    "capture_target",
+                    &format!("deliver:the editor:\"secret words\":enter={enter}"),
+                ]),
+                "{route:?}: the host's delivery is the one copy"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_app_switch_a_desktop_cannot_make_leaves_the_text_on_the_clipboard() {
+        let (notice, seen) = run(
+            FakeHost::default().failing(
+                "focus_app",
+                HostError::Unsupported(
+                    "Switching apps is unavailable on GNOME Wayland.".to_owned(),
+                ),
+            ),
+            accepted(CaptureRoute::Task, "switch to editor"),
+        )
+        .await;
+        assert_eq!(
+            notice.as_deref(),
+            Some(
+                "Switching apps is unavailable on GNOME Wayland. Captured text is on the clipboard."
+            )
+        );
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("copy:\"switch to editor\"")
+        );
     }
 
     #[tokio::test]

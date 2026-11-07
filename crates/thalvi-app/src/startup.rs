@@ -4,6 +4,8 @@ use std::fmt;
 
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_autostart::ManagerExt;
+#[cfg(target_os = "linux")]
+use thalvi_desktop::host::Session;
 
 use crate::switch::{SwitchState, Unavailable};
 
@@ -65,7 +67,7 @@ impl<R: Runtime> Registration for AppHandle<R> {
     fn unavailable(&self) -> Option<Unavailable> {
         #[cfg(target_os = "linux")]
         {
-            hyprland::unavailable()
+            unavailable_on(Session::detect().ok(), hyprland::unavailable)
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -74,10 +76,22 @@ impl<R: Runtime> Registration for AppHandle<R> {
     }
 }
 
+/// GNOME runs XDG autostart entries itself, so its login switch is the plain OS entry; only
+/// Hyprland needs advice. `hyprland` is asked only on Hyprland.
+#[cfg(target_os = "linux")]
+fn unavailable_on(
+    session: Option<Session>,
+    hyprland: impl FnOnce() -> Option<Unavailable>,
+) -> Option<Unavailable> {
+    match session {
+        Some(Session::Hyprland) => hyprland(),
+        Some(Session::Gnome) | None => None,
+    }
+}
+
 /// Hyprland runs only the `exec-once` lines of `hyprland.conf`. A session manager such as uwsm
 /// runs XDG autostart entries by starting systemd's `xdg-desktop-autostart.target`; that target
-/// being up is what tells an entry will be read. Linux runs only on Hyprland, so reaching this
-/// code means the session is Hyprland.
+/// being up is what tells an entry will be read.
 #[cfg(target_os = "linux")]
 mod hyprland {
     use std::path::PathBuf;
@@ -377,6 +391,30 @@ mod tests {
         unavailable: Option<Unavailable>,
         enables: Cell<u32>,
         disables: Cell<u32>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_hyprland_gets_login_advice_and_gnome_keeps_the_plain_os_entry() {
+        let advice = || {
+            Some(Unavailable {
+                reason: "Hyprland advice".to_owned(),
+                line: None,
+            })
+        };
+        for (session, shown) in [
+            (Some(Session::Hyprland), true),
+            (Some(Session::Gnome), false),
+            (None, false),
+        ] {
+            let mut asked = false;
+            let result = unavailable_on(session, || {
+                asked = true;
+                advice()
+            });
+            assert_eq!(result.is_some(), shown, "{session:?}");
+            assert_eq!(asked, shown, "{session:?}: Hyprland alone is asked");
+        }
     }
 
     impl Registration for Fake {

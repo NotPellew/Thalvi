@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
-# Runs the real thalvi-desktop app inside a bwrap sandbox: Hyprland nested in a headless kwin_wayland.
-# Usage: thalvi-desktop-rig <command> ...; `thalvi-desktop-rig help` lists them.
+# Runs the real thalvi-desktop app inside a bwrap sandbox: Hyprland nested in a headless kwin_wayland,
+# or (up --gnome) a headless GNOME Shell. Usage: thalvi-desktop-rig <command> ...; `help` lists them.
+# shellcheck disable=SC2016  # scripts for the sandbox are single-quoted on purpose
 set -euo pipefail
 
 BASE=${THALVI_RIG_BASE:-/var/tmp/thalvi-rig}
 UID_NUM=$(id -u)
+GNOME_HELPER=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/thalvi-gnome-rig.py
 
 usage() {
   cat <<'EOF'
-up [--size WxH]            start the compositors; prints RUN_DIR=<R> last
+up [--size WxH] [--gnome]  start the compositors (or headless GNOME Shell); prints RUN_DIR=<R> last
 app-start R BIN [--config F] [--env K=V]... [--tag NAME]
                            start BIN (a thalvi-desktop binary) in its own sandbox; stdout/stderr go to R/out/app-NAME.log
 app-stop R                 stop the app started last (by recorded PID)
 ctl R ARGS...              run `thalvi-desktop ARGS` against the running app (pause, resume, toggle, status, cancel)
-hypr R ARGS...             hyprctl against the inner compositor
-shot R NAME                grim screenshot of the inner compositor to R/out/NAME.png
-burst R NAME N GAP         N screenshots NAME-001.png... GAP seconds apart (0.1 works); NAME-times.txt stamps each
+hypr R ARGS...             hyprctl against the inner compositor (not in --gnome runs)
+shot R NAME                screenshot of the inner compositor to R/out/NAME.png
+burst R NAME N GAP         N screenshots NAME-001.png... GAP seconds apart (0.1 works); NAME-times.txt stamps each (not in --gnome runs)
+say R WAV                  --gnome runs: play WAV into the microphone, in real time (queues behind earlier ones)
+gnome R ARGS...            --gnome runs: windows | focus | key NAME | type TEXT | clip | victim LOG (what holds focus, keys, clipboard)
 sh R CMD...                run any command in a sandbox joined to the same private dirs
 proof R                    write R/out/isolation.txt: what the sandbox cannot reach
 down R                     stop everything started by this run; evidence stays in R/out
@@ -51,6 +55,10 @@ sandbox_args() {
     --setenv ALSA_CONFIG_PATH /home/rig/alsa.conf --setenv WEBKIT_DISABLE_DMABUF_RENDERER 1 \
     --setenv DBUS_SESSION_BUS_ADDRESS "unix:path=/run/user/$UID_NUM/bus" \
     --setenv RUST_BACKTRACE 1
+  # GNOME needs a system bus for logind; the host's is the developer's session, so it is hidden and a private one is served.
+  if [ -e "$r/gnome" ]; then
+    printf '%s\0' --tmpfs /run/dbus --bind "$r/x11" /tmp/.X11-unix --ro-bind "$GNOME_HELPER" /tmp/thalvi-gnome-rig.py
+  fi
 }
 
 # Starts "$@" detached, with a holder shell as its parent: bwrap's --die-with-parent follows the
@@ -70,6 +78,15 @@ inner_sig() { cat "$1/inner.sig"; }
 # Environment that points a tool inside the sandbox at the inner compositor.
 inner_env() {
   local r=$1
+  if [ -e "$r/gnome" ]; then
+    # DISPLAY names the socket file: plain :0 would try the host's abstract socket first. The cookie is the run's own.
+    # No GDK_BACKEND, as in a real GNOME session: the app picks X11 itself there.
+    printf '%s\0' --setenv WAYLAND_DISPLAY "$(inner_display "$r")" \
+      --setenv XDG_CURRENT_DESKTOP GNOME --setenv XDG_SESSION_TYPE wayland --setenv PIPEWIRE_REMOTE rig-pipewire \
+      --setenv DISPLAY "unix:/tmp/.X11-unix/X$(cat "$r/x11.number")" \
+      --setenv XAUTHORITY "/run/user/$UID_NUM/$(cat "$r/x11.auth")"
+    return
+  fi
   printf '%s\0' --setenv WAYLAND_DISPLAY "$(inner_display "$r")" --setenv GDK_BACKEND wayland \
     --setenv HYPRLAND_INSTANCE_SIGNATURE "$(inner_sig "$r")" --setenv XDG_CURRENT_DESKTOP Hyprland
 }
@@ -82,16 +99,98 @@ run_inner() {
   bwrap "${args[@]}" "${extra[@]}" "$@"
 }
 
+# up --gnome: a headless GNOME Shell with a private session bus, a private system bus serving a stand-in logind,
+# a virtual keyboard (the seat has none otherwise) and a private PipeWire whose only devices are a microphone fed from
+# R/home/mic-queue and a speaker that discards.
+cmd_up_gnome() {
+  local r=$1 size=$2
+  touch "$r/gnome"
+  mkdir -p "$r/x11" "$r/home/mic-queue" "$r/home/.config/pipewire/pipewire.conf.d"
+  chmod 1777 "$r/x11"
+  # An ALSA file plugin or a null PCM is not clocked, so audio would run at CPU speed; PipeWire's graph is the clock.
+  cat > "$r/home/alsa.conf" <<'EOF'
+pcm_type.pipewire { lib "libasound_module_pcm_pipewire.so" }
+ctl_type.pipewire { lib "libasound_module_ctl_pipewire.so" }
+pcm.!default { type pipewire; capture_node "rig-mic"; playback_node "rig-speaker" }
+ctl.!default { type pipewire }
+EOF
+  cat > "$r/home/.config/pipewire/pipewire.conf.d/rig.conf" <<'EOF'
+context.modules = [
+  { name = libpipewire-module-pipe-tunnel
+    args = { tunnel.mode = source, pipe.filename = "/home/rig/mic.fifo", audio.format = S16LE, audio.rate = 16000
+             audio.channels = 1, audio.position = [ MONO ], node.name = rig-mic, node.description = "Rig microphone" } }
+]
+context.objects = [
+  { factory = adapter
+    args = { factory.name = support.null-audio-sink, node.name = rig-speaker, node.description = "Rig speaker"
+             media.class = Audio/Sink, audio.position = [ FL FR ], object.linked = true } }
+]
+EOF
+  cat > "$r/supervisor.sh" <<'EOF'
+#!/usr/bin/env bash
+set -u
+cd /home/rig
+RUN=/run/user/$(id -u)
+bus_config() {
+  cat > "/home/rig/dbus-$1.conf" <<CONF
+<busconfig><type>$1</type><listen>unix:path=$2</listen><auth>EXTERNAL</auth>
+<policy context="default"><allow send_destination="*" eavesdrop="true"/><allow eavesdrop="true"/><allow own="*"/></policy>
+<apparmor mode="disabled"/></busconfig>
+CONF
+}
+bus_config session "$RUN/bus"
+bus_config system /run/dbus/system_bus_socket
+dbus-daemon --config-file=/home/rig/dbus-session.conf --nofork --nopidfile > /tmp/out/dbus.log 2>&1 &
+dbus-daemon --config-file=/home/rig/dbus-system.conf --nofork --nopidfile > /tmp/out/dbus-system.log 2>&1 &
+for _ in $(seq 50); do [ -S /run/dbus/system_bus_socket ] && break; sleep 0.1; done
+DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket /tmp/thalvi-gnome-rig.py logind > /tmp/out/logind.log 2>&1 &
+export PIPEWIRE_CORE=rig-pipewire PIPEWIRE_REMOTE=rig-pipewire
+pipewire > /tmp/out/pipewire.log 2>&1 &
+for _ in $(seq 50); do [ -S "$RUN/rig-pipewire" ] && [ -p /home/rig/mic.fifo ] && break; sleep 0.1; done
+wireplumber > /tmp/out/wireplumber.log 2>&1 &
+/tmp/thalvi-gnome-rig.py mic /home/rig/mic.fifo /home/rig/mic-queue > /tmp/out/mic.log 2>&1 &
+# A keyfile settings backend is shared by every process; the shell would otherwise start in its overview.
+mkdir -p /home/rig/.config/glib-2.0/settings
+printf '[org/gnome/shell]\nstart-in-overview=false\n[org/gnome/desktop/interface]\nenable-animations=false\n' > /home/rig/.config/glib-2.0/settings/keyfile
+export XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_TYPE=wayland GSETTINGS_BACKEND=keyfile
+gnome-shell --headless --wayland --virtual-monitor "${RIG_W}x${RIG_H}" --wayland-display rig-gnome > /tmp/out/gnome-shell.log 2>&1 &
+for _ in $(seq 150); do grep -q 'GNOME Shell started' /tmp/out/gnome-shell.log && break; sleep 0.1; done
+grep -q 'GNOME Shell started' /tmp/out/gnome-shell.log || { echo "gnome-shell did not start" >> /tmp/out/supervisor.log; exit 1; }
+/tmp/thalvi-gnome-rig.py input > /tmp/out/input.log 2>&1 &
+for _ in $(seq 100); do [ -S "$RUN/rig-input.sock" ] && break; sleep 0.1; done
+[ -S "$RUN/rig-input.sock" ] || { echo "no virtual keyboard" >> /tmp/out/supervisor.log; exit 1; }
+sed -n 's/.*Using public X11 display :\([0-9]*\),.*/\1/p' /tmp/out/gnome-shell.log > /tmp/out/x11.number
+(cd "$RUN" && ls .mutter-Xwaylandauth.* | head -1) > /tmp/out/x11.auth
+echo rig-gnome > /tmp/out/inner.display
+echo ready >> /tmp/out/supervisor.log
+wait
+EOF
+  chmod +x "$r/supervisor.sh"
+  local -a args
+  mapfile -d '' args < <(sandbox_args "$r")
+  launch_held "$r/supervisor.out" "$r/compositor.pid" bwrap "${args[@]}" --setenv RIG_W "${size%x*}" --setenv RIG_H "${size#*x}" \
+    --bind "$r/supervisor.sh" /tmp/supervisor.sh /tmp/supervisor.sh
+  for _ in $(seq 300); do
+    [ -s "$r/out/inner.display" ] && break
+    kill -0 "$(cat "$r/compositor.pid")" 2>/dev/null || { cat "$r/supervisor.out" "$r/out"/*.log >&2; die "GNOME Shell exited early (see $r/out)"; }
+    sleep 0.1
+  done
+  [ -s "$r/out/inner.display" ] || { tail -5 "$r/out"/*.log >&2; die "GNOME Shell did not come up (see $r/out)"; }
+  cp "$r/out/inner.display" "$r/inner.display"; cp "$r/out/x11.number" "$r/x11.number"; cp "$r/out/x11.auth" "$r/x11.auth"
+  echo "RUN_DIR=$r"
+}
+
 cmd_up() {
-  local size=1920x1080
+  local size=1920x1080 gnome=0
   while [ $# -gt 0 ]; do
-    case $1 in --size) size=$2; shift 2 ;; *) die "up: unknown argument $1" ;; esac
+    case $1 in --size) size=$2; shift 2 ;; --gnome) gnome=1; shift ;; *) die "up: unknown argument $1" ;; esac
   done
   mkdir -p "$BASE"
   local r
   r=$(mktemp -d "$BASE/run-XXXXXX")
   mkdir -p "$r/rt" "$r/home/.config" "$r/home/.local/share" "$r/home/.cache" "$r/out"
   chmod 700 "$r/rt"
+  [ "$gnome" = 0 ] || { cmd_up_gnome "$r" "$size"; return; }
   printf 'pcm.!default { type null }\nctl.!default { type null }\n' > "$r/home/alsa.conf"
   cat > "$r/hypr.conf" <<EOF
 monitor=,${size}@60,0x0,1
@@ -218,17 +317,36 @@ cmd_proof() {
     echo "--- /dev/dri: $(ls /dev/dri | tr "\n" " ")"
     echo "--- /run/user entries (own private dir only):"; ls -A /run/user/*
     echo "--- real sockets that must be absent:"
-    for p in /run/user/'"$UID_NUM"'/pipewire-0 /run/user/'"$UID_NUM"'/pulse /run/user/'"$UID_NUM"'/discord-ipc-0 /run/user/'"$UID_NUM"'/gnupg /tmp/.X11-unix; do
+    for p in /run/user/'"$UID_NUM"'/pipewire-0 /run/user/'"$UID_NUM"'/pulse/native /run/user/'"$UID_NUM"'/discord-ipc-0 /run/user/'"$UID_NUM"'/gnupg $([ -e /tmp/thalvi-gnome-rig.py ] && echo /run/dbus/system_bus_socket || echo /tmp/.X11-unix); do
       [ -e "$p" ] && echo "PRESENT $p" || echo "absent  $p"
     done
-    echo "--- visible wayland sockets (must be the rig'"'"'s two): $(ls /run/user/*/ | grep "^wayland-[0-9]*$" | tr "\n" " ")"
+    echo "--- visible wayland sockets (must be the rig'"'"'s one or two): $(ls /run/user/*/ | grep -E "^(wayland-[0-9]+|rig-gnome)$" | tr "\n" " ")"
     echo "--- hypr instances visible: $(ls /run/user/*/hypr 2>&1 | tr "\n" " ")"
     echo "--- the developer'"'"'s home: $(ls -d '"$HOME"' 2>&1 | head -1); config, data and cache are the private ones under $HOME"
     echo "--- /home contents: $(ls /home | tr "\n" " ")"
     echo "--- env: DISPLAY=${DISPLAY:-unset} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset} PULSE_SERVER=${PULSE_SERVER:-unset} HOME=$HOME"
     echo "--- audio: $(cat "$ALSA_CONFIG_PATH" | tr "\n" ";")"
-    echo "--- abstract unix sockets share the host network namespace; X11 is off (no DISPLAY, xwayland disabled)"
+    if [ -e /tmp/thalvi-gnome-rig.py ]; then
+      echo "--- GNOME run: the system bus is the run'"'"'s own (the host'"'"'s, with the developer'"'"'s logind, is hidden); X sockets: $(ls /tmp/.X11-unix | tr "\n" " ")"
+      echo "--- X on the host'"'"'s abstract :0 without the run'"'"'s cookie: $(env -u XAUTHORITY DISPLAY=:0 timeout 5 xdpyinfo 2>&1 | head -1)"
+      echo "--- X on the run'"'"'s socket $DISPLAY with its cookie: $(timeout 5 xdpyinfo 2>&1 | grep -m1 "^name of display")"
+      echo "--- abstract unix sockets share the host network namespace; DISPLAY names the socket file so the host'"'"'s X is not tried"
+    else
+      echo "--- abstract unix sockets share the host network namespace; X11 is off (no DISPLAY, xwayland disabled)"
+    fi
   ' | tee "$r/out/isolation.txt"
+}
+
+not_gnome() { [ ! -e "$1/gnome" ] || die "$2 is for Hyprland runs; a --gnome run has no $2 (use gnome, shot, sh)"; }
+
+# Converts WAV to what the microphone feeder plays: 16 kHz mono signed 16-bit, queued in order.
+cmd_say() {
+  local r=$1 wav=$2
+  [ -e "$r/gnome" ] || die "say: this run is not --gnome"
+  [ -f "$wav" ] || die "say: no file $wav"
+  local name; name=$r/home/mic-queue/$(date +%s%N)
+  ffmpeg -loglevel error -y -i "$wav" -ar 16000 -ac 1 -f s16le "$name.tmp" || die "say: ffmpeg could not read $wav"
+  mv "$name.tmp" "$name.raw"
 }
 
 main() {
@@ -240,10 +358,16 @@ main() {
     down) cmd_down "$@" ;;
     proof) cmd_proof "$@" ;;
     ctl) local r=$1 bin; shift; bin=$(cat "$r/app.bin" 2>/dev/null || true); [ -n "$bin" ] || die "ctl: no app.bin (app-start records it)"; run_inner "$r" --ro-bind "$bin" /tmp/thalvi-desktop /tmp/thalvi-desktop "$@" ;;
-    hypr) local r=$1; shift; run_inner "$r" hyprctl "$@" ;;
-    shot) local r=$1; run_inner "$r" grim "/tmp/out/$2.png"; echo "$r/out/$2.png" ;;
+    hypr) local r=$1; shift; not_gnome "$r" hypr; run_inner "$r" hyprctl "$@" ;;
+    shot)
+      local r=$1
+      if [ -e "$r/gnome" ]; then run_inner "$r" /tmp/thalvi-gnome-rig.py shot "/tmp/out/$2.png" > /dev/null; else run_inner "$r" grim "/tmp/out/$2.png"; fi
+      echo "$r/out/$2.png" ;;
+    say) cmd_say "$@" ;;
+    gnome) local r=$1; shift; [ -e "$r/gnome" ] || die "gnome: this run is not --gnome"; run_inner "$r" /tmp/thalvi-gnome-rig.py "$@" ;;
     burst)
       local r=$1 name=$2 n=$3 gap=$4
+      not_gnome "$r" burst
       run_inner "$r" bash -c 'for i in $(seq -f %03g 1 "$2"); do echo "$1-$i $(date +%T.%3N)" >> /tmp/out/$1-times.txt; grim -l 1 /tmp/out/$1-$i.png; sleep "$3"; done' _ "$name" "$n" "$gap" ;;
     sh) local r=$1; shift; run_inner "$r" "$@" ;;
     help|-h|--help) usage ;;

@@ -25,13 +25,14 @@ function mount(settings = SETTINGS, clicks = true) {
 }
 
 const SENTENCE = "Call me back";
-const pending = (waitingForQuiet: boolean, pauseMs = 2500): Status => ({
+const pending = (waitingForQuiet: boolean, pauseMs = 2500, copies = false): Status => ({
   state: "pending",
   target: "Slack",
   route: "submit",
   text: SENTENCE,
   waitingForQuiet,
   pauseMs,
+  copies,
 });
 
 describe("each status", () => {
@@ -50,6 +51,7 @@ describe("each status", () => {
     { name: "pending, waiting for quiet", status: pending(true), hidden: false, label: "QUIET", target: "→ Slack", draft: true },
     { name: "pending, counting", status: pending(false), hidden: false, label: "SUBMIT IN 2 s", target: "→ Slack", draft: true },
     { name: "pending, short pause", status: pending(false, 700), hidden: false, label: "SUBMIT IN 1 s", target: "→ Slack", draft: true },
+    { name: "pending, copying", status: pending(false, 2500, true), hidden: false, label: "COPY IN 2 s", target: "→ Slack", draft: true },
     { name: "working", status: { state: "working", target: "Slack", route: "task", cancellable: false }, hidden: false, label: "WORKING", target: "→ Slack", draft: false },
     {
       name: "failed shows its headline, not the full notice",

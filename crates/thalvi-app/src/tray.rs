@@ -299,6 +299,7 @@ mod tests {
             text: "secret words".to_owned(),
             waiting_for_quiet: false,
             pause_ms,
+            copies: false,
         }
     }
 

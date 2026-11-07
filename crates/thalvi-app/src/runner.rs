@@ -232,6 +232,7 @@ impl Publisher {
                 mode: Mode::Starting,
                 engine: EngineState::Listening,
                 target: None,
+                copies: false,
                 pauses,
                 loading: None,
             }),
@@ -258,6 +259,16 @@ impl Publisher {
 
     fn mode(&self, mode: Mode) {
         self.update(|view| view.mode = mode);
+    }
+
+    /// A capture started at the wake: in `window` when one was bound, on a desktop that `copies`
+    /// the text to the clipboard or types it.
+    fn woke(&self, window: Option<String>, copies: bool) {
+        self.update(|view| {
+            view.copies = copies;
+            // The clipboard is no window to name; the label and the notice say what happens.
+            view.target = window.filter(|_| !copies);
+        });
     }
 
     fn loading(&self, load: Option<SpeechLoad>) {
@@ -854,7 +865,8 @@ impl Runner {
             };
             self.delivery.bind(session.engine.recorder()).await
         };
-        self.publisher.update(|view| view.target = bound.window());
+        self.publisher
+            .woke(bound.window(), self.delivery.copies_only());
         let mut requests = Requests::default();
         let (finished, route, ignored) = {
             let Self {
@@ -1321,6 +1333,32 @@ mod tests {
             assert!(
                 matches!(&*status.borrow(), Status::Failed { headline: shown, .. } if *shown == headline),
                 "{refusal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_desktop_that_only_copies_names_no_window_and_labels_the_countdown_a_copy() {
+        for (copies, target) in [(true, None), (false, Some("kitty"))] {
+            let (out, status) = watch::channel(Status::Paused);
+            let publisher = Publisher::new(out, EndingPauses::default());
+            publisher.mode(Mode::Idle);
+            publisher.update(|view| {
+                view.engine = EngineState::PendingEnding {
+                    route: CaptureRoute::Submit,
+                    text: "hi".to_owned(),
+                    waiting_for_quiet: false,
+                };
+            });
+            publisher.woke(Some("kitty".to_owned()), copies);
+            assert!(
+                matches!(
+                    &*status.borrow(),
+                    Status::Pending { target: shown, copies: counted, .. }
+                        if shown.as_deref() == target && *counted == copies
+                ),
+                "{copies}: {:?}",
+                *status.borrow()
             );
         }
     }
@@ -1932,7 +1970,14 @@ mod tests {
 
     impl Host for TestHost {
         type Target = String;
-        const OVERLAY_TAKES_CLICKS: bool = false;
+
+        fn copies_only(&self) -> bool {
+            false
+        }
+
+        fn overlay_takes_clicks(&self) -> bool {
+            false
+        }
 
         fn capture_target(&self) -> Result<String, thalvi_desktop::host::HostError> {
             Ok("Editor".to_owned())
@@ -1943,9 +1988,9 @@ mod tests {
             _: &String,
             _: &thalvi_desktop::host::TypedText,
             _: bool,
-        ) -> Result<(), thalvi_desktop::host::HostError> {
+        ) -> Result<thalvi_desktop::host::Delivered, thalvi_desktop::host::HostError> {
             self.called("deliver");
-            Ok(())
+            Ok(thalvi_desktop::host::Delivered::InWindow)
         }
 
         fn copy(&self, _: &str) -> Result<(), thalvi_desktop::host::HostError> {
