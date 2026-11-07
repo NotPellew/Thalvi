@@ -84,10 +84,22 @@ export function fakeBackend(params: URLSearchParams): Backend {
   const speechModels: SpeechModelInfo[] = [
     {
       name: "nemotron_160ms",
-      title: "Nemotron Speech Streaming 0.6B",
-      description: "NVIDIA's English streaming recognizer, int8, answering every 160 ms. Runs on the CPU.",
+      title: "English only",
+      description: "NVIDIA's Nemotron Speech Streaming: the lightest on the CPU, and text appears soonest. Mostly without punctuation. The default.",
       size: 661_919_416,
       source: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25",
+      license: "NVIDIA Open Model License",
+      languages: "English",
+      cached: false,
+    },
+    {
+      name: "unified_160ms",
+      title: "Multilingual",
+      description: "NVIDIA's Nemotron Unified ASR: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it needs a fast CPU and text appears about half a second later. Exported by Thalvi.",
+      size: 646_518_349,
+      source: "https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b",
+      license: "OpenMDW-1.1",
+      languages: "25 European languages, detected automatically",
       cached: false,
     },
   ];

@@ -476,13 +476,10 @@ interface ModelCard {
   node: HTMLElement;
   /** Shows a download step, from this card's button or any other start. */
   progress: (event: SpeechModelProgress) => void;
-  select: (on: boolean) => void;
 }
 
 /** One catalog speech model: what it is, whether it is downloaded, and how to get it. */
-function modelCard(info: SpeechModelInfo, backend: Backend, pick: () => void): ModelCard {
-  const picker = el("button", { type: "button", role: "radio", "aria-checked": "false", class: "pick" }, info.title);
-  picker.addEventListener("click", pick);
+function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
   const badge = el("span", { class: "badge" });
   const source = el("a", { href: info.source, target: "_blank", rel: "noreferrer" }, "Source");
   const meter = el("progress", { max: "100", value: "0", "aria-label": `Download of ${info.title}`, hidden: true });
@@ -532,17 +529,18 @@ function modelCard(info: SpeechModelInfo, backend: Backend, pick: () => void): M
     node: el(
       "div",
       { class: "model" },
-      el("div", { class: "trow" }, picker, el("span", { class: "unit" }, formatSize(info.size)), badge),
+      el("div", { class: "trow" }, el("span", { class: "unit" }, formatSize(info.size)), badge),
       el("small", {}, info.description),
+      el("small", { class: "facts" }, `License: ${info.license}. Languages: ${info.languages}.`),
       el("div", { class: "trow" }, source, download, meter, status),
       problem,
     ),
     progress: show,
-    select: (on) => {
-      picker.setAttribute("aria-checked", String(on));
-    },
   };
 }
+
+/** The picker's entry for a folder the user points to. */
+const OWN_FOLDER = "__folder";
 
 function speech({ draft, controls, backend, checks, live }: PageContext): HTMLElement[] {
   const engine = controls.select(ENGINES, draft.stt.engine, (value) => {
@@ -554,17 +552,23 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
   const listed: string[] = [];
   let chosen = draft.stt.model ?? "";
   const isCatalog = (name: string): boolean => name === SPEECH_MODEL || listed.includes(name);
+  // Like the config, a name with a path separator is a folder. The entry stays picked while its path is still empty.
+  let ownFolderPicked = /[\\/]/.test(chosen);
   const speechModel = controls.text(
-    isCatalog(chosen) ? "" : chosen,
+    ownFolderPicked ? chosen : "",
     (value) => {
       chosen = value.trim();
+      ownFolderPicked = chosen !== "";
       syncModel();
     },
     { placeholder: "/path/to/model-folder", label: "Your own model folder" },
   );
   const modelInput = speechModel.field as HTMLInputElement;
   const folderResult = el("p", { class: "note", role: "status", hidden: true });
-  const modelList = el("div", { class: "models", role: "radiogroup", "aria-label": "Speech models" });
+  const modelPicker = el("select", { id: uid("f"), "aria-label": "Speech model" });
+  const loading = el("option", { value: "", disabled: true }, "Loading models…");
+  modelPicker.append(loading);
+  const modelList = el("div", { class: "models" });
   const listProblem = note();
   const ownFolder = el(
     "div",
@@ -578,30 +582,43 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
 
   function showSelection(): void {
     const active = chosen === "" ? SPEECH_MODEL : chosen;
-    for (const [name, card] of catalog) card.select(name === active);
-    ownFolder.dataset["active"] = String(!isCatalog(active));
+    const own = ownFolderPicked;
+    modelPicker.value = own ? OWN_FOLDER : active;
+    for (const [name, card] of catalog) card.node.hidden = own || name !== active;
+    ownFolder.dataset["active"] = String(own);
   }
 
-  function pickModel(name: string): void {
-    chosen = name;
-    modelInput.value = "";
+  modelPicker.addEventListener("change", () => {
+    if (modelPicker.value === OWN_FOLDER) {
+      ownFolderPicked = true;
+      chosen = modelInput.value.trim();
+      modelInput.focus();
+    } else {
+      ownFolderPicked = false;
+      chosen = modelPicker.value;
+      modelInput.value = "";
+    }
     syncModel();
     controls.touched();
-  }
+  });
 
   backend.listSpeechModels().then(
     (models) => {
+      loading.remove();
       for (const info of models) {
         listed.push(info.name);
-        const card = modelCard(info, backend, () => {
-          pickModel(info.name);
-        });
+        modelPicker.append(el("option", { value: info.name }, info.title));
+        const card = modelCard(info, backend);
         catalog.set(info.name, card);
         modelList.append(card.node);
       }
+      modelPicker.append(el("option", { value: OWN_FOLDER }, "Your own model folder"));
       showSelection();
     },
     (error: unknown) => {
+      loading.remove();
+      modelPicker.append(el("option", { value: OWN_FOLDER }, "Your own model folder"));
+      showSelection();
       say(listProblem, errorText(error));
     },
   );
@@ -630,17 +647,21 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
   const checkButton = button("Check folder", () => {
     const path = modelInput.value.trim();
     if (path === "") showFolder("Type the folder path first.", false);
-    else if (path === SPEECH_MODEL) showFolder(`${SPEECH_MODEL} is downloaded on first use; there is no folder to check.`, false);
+    else if (isCatalog(path)) showFolder(`${path} is downloaded on first use; there is no folder to check.`, false);
     else checkFolder(path).catch(() => undefined);
   });
   checks.push(() => {
-    const path = draft.stt.model;
-    return draft.stt.engine === "local" && path !== undefined && !isCatalog(path) ? checkFolder(path) : null;
+    if (draft.stt.engine !== "local") return null;
+    if (ownFolderPicked && chosen === "") {
+      showFolder("Type the folder path first.", false);
+      return Promise.reject(new Error("Type the folder path of your own speech model first."));
+    }
+    return ownFolderPicked && !isCatalog(chosen) ? checkFolder(chosen) : null;
   });
   ownFolder.append(el("div", { class: "trow check" }, speechModel.node, checkButton), folderResult);
   const speechModelField: Field = {
-    node: el("div", { class: "stack wide" }, modelList, listProblem, ownFolder),
-    field: modelInput,
+    node: el("div", { class: "stack wide" }, modelPicker, modelList, listProblem, ownFolder),
+    field: modelPicker,
   };
 
   function syncModel(): void {
@@ -734,7 +755,7 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
     row("Recognize speech", "Where your dictation is turned into text. Conversation mode always uses the server.", engine),
     row(
       "Speech model",
-      `For recognition on this computer. Pick a model, downloading it first or on first use, or point to your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.`,
+      `For recognition on this computer. Pick a model; it downloads on first use, or with its Download button. A model you pick applies from the next capture. Or point to your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.`,
       speechModelField,
     ),
     wordRow,

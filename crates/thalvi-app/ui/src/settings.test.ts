@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Draft, HistoryEntry, Settings } from "./contract.ts";
 import { mountSettings, SAVED_TEXT } from "./settings.ts";
-import { NEMOTRON, SETTINGS, settle, stubBackend } from "./testing.ts";
+import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED } from "./testing.ts";
 
 let root: HTMLElement;
 
@@ -51,12 +51,6 @@ function flip(input: HTMLInputElement): void {
 function button(name: string): HTMLButtonElement {
   const found = Array.from(root.querySelectorAll("button")).find((candidate) => candidate.textContent === name);
   if (!found) throw new Error(`no button ${name}`);
-  return found;
-}
-
-function radio(title: string): HTMLButtonElement {
-  const found = Array.from(root.querySelectorAll<HTMLButtonElement>("[role=radio]")).find((candidate) => candidate.textContent === title);
-  if (!found) throw new Error(`no model ${title}`);
   return found;
 }
 
@@ -617,7 +611,7 @@ describe("where speech is recognized", () => {
     await open({ ...SETTINGS, stt: { engine: "local", model: "nemotron_160ms", secondary: null } });
     goTo("speech");
     expect(control("Recognize speech", "select").value).toBe("local");
-    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("true");
+    expect(control("Speech model", "select").value).toBe("nemotron_160ms");
     expect(control("Speech model", "input").value).toBe("");
   });
 });
@@ -629,7 +623,7 @@ describe("the speech model catalog", () => {
     return stub;
   }
   const card = (): HTMLElement => {
-    const found = rowOf("Speech model").querySelector<HTMLElement>(".model");
+    const found = rowOf("Speech model").querySelector<HTMLElement>(".model:not([hidden])");
     if (!found) throw new Error("no model card");
     return found;
   };
@@ -637,11 +631,25 @@ describe("the speech model catalog", () => {
   const alert = (): string | undefined => card().querySelector(".note:not([hidden])")?.textContent ?? undefined;
   const download = (): HTMLButtonElement => within(card(), "Download");
   const meter = (): HTMLProgressElement => card().querySelector("progress") as HTMLProgressElement;
+  const picker = (): HTMLSelectElement => control("Speech model", "select");
 
-  it("lists the model with its description, size, state and source", async () => {
+  it("offers each model and an own folder in a labelled drop-down, with the default picked", async () => {
     await openCatalog();
-    expect(rowOf("Speech model").querySelectorAll(".model")).toHaveLength(1);
-    expect(card().textContent).toContain("NVIDIA's English streaming recognizer");
+    expect(picker().getAttribute("aria-label")).toBe("Speech model");
+    expect(rowOf("Speech model").querySelector("label")?.getAttribute("for")).toBe(picker().id);
+    expect(Array.from(picker().options).map((option) => [option.value, option.textContent])).toEqual([
+      [NEMOTRON.name, NEMOTRON.title],
+      [UNIFIED.name, UNIFIED.title],
+      ["__folder", "Your own model folder"],
+    ]);
+    expect(picker().value).toBe("nemotron_160ms");
+  });
+
+  it("shows the picked model's description, size, license, languages, state and source", async () => {
+    await openCatalog();
+    expect(rowOf("Speech model").querySelectorAll(".model:not([hidden])")).toHaveLength(1);
+    expect(card().textContent).toContain("NVIDIA's Nemotron Speech Streaming");
+    expect(text(".facts")).toBe("License: NVIDIA Open Model License. Languages: English.");
     expect(text(".unit")).toBe("662 MB");
     expect(text(".badge")).toBe("Not downloaded");
     expect(card().querySelector("a")?.getAttribute("href")).toBe(NEMOTRON.source);
@@ -742,23 +750,49 @@ describe("the speech model catalog", () => {
     );
   });
 
-  it("saves the selected model as stt.model and leaves the own-folder box empty", async () => {
+  it("switches the card and saves the model picked in the drop-down as stt.model", async () => {
     const stub = await openCatalog();
     type(control("Speech model", "input"), "/models/mine");
-    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("false");
+    expect(picker().value).toBe("__folder");
 
-    radio("Nemotron Speech Streaming 0.6B").click();
-    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("true");
+    choose(picker(), "unified_160ms");
     expect(control("Speech model", "input").value).toBe("");
+    expect(text(".facts")).toBe("License: OpenMDW-1.1. Languages: 25 European languages, detected automatically.");
+    expect(text(".unit")).toBe("647 MB");
     button("Save").click();
     await settle();
     expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
-    expect(sent(stub).stt).toEqual({ engine: "local", model: "nemotron_160ms", secondary: null });
+    expect(sent(stub).stt).toEqual({ engine: "local", model: "unified_160ms", secondary: null });
   });
 
-  it("selects the default model when none is saved", async () => {
-    await openCatalog();
-    expect(radio("Nemotron Speech Streaming 0.6B").getAttribute("aria-checked")).toBe("true");
+  it("keeps showing the download of a model while another one is picked", async () => {
+    const stub = await openCatalog();
+    stub.speechProgress({ name: "unified_160ms", percent: 40, status: "downloading", message: null });
+    expect(rowOf("Speech model").querySelector(".badge")?.textContent).toBe("Not downloaded");
+    choose(picker(), "unified_160ms");
+    expect(text("[role=status]")).toBe("Downloading… 40%");
+    expect(meter().value).toBe(40);
+  });
+
+  it("shows a saved model, and a saved folder as the own-folder entry", async () => {
+    await openCatalog({ ...SETTINGS, stt: { engine: "local", model: "unified_160ms", secondary: null } });
+    expect(picker().value).toBe("unified_160ms");
+    expect(text(".facts")).toContain("OpenMDW-1.1");
+    root.innerHTML = "";
+    await openCatalog({ ...SETTINGS, stt: { engine: "local", model: "/models/mine", secondary: null } });
+    expect(picker().value).toBe("__folder");
+    expect(control("Speech model", "input").value).toBe("/models/mine");
+    expect(rowOf("Speech model").querySelector(".model:not([hidden])")).toBeNull();
+  });
+
+  it("does not save the own-folder entry without a path", async () => {
+    const stub = await openCatalog();
+    choose(picker(), "__folder");
+    button("Save").click();
+    await settle();
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    expect(rowOf("Speech model").querySelector(".own .note:not([hidden])")?.textContent).toBe("Type the folder path first.");
+    expect(root.querySelector(".err")?.textContent).toBe("Type the folder path of your own speech model first.");
   });
 });
 
