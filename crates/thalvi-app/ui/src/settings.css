@@ -119,7 +119,7 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
   .looks { flex-wrap: wrap; }
   .trow.pick, .trow.file { flex-wrap: wrap; }
   .trow.pick select { max-width: 100%; }
-  .trow.file .unit:last-child { flex: 1 1 8em; }
+  .trow.file .unit:last-child { flex-basis: 100%; }
   .table .trow:not(.add) { flex-wrap: wrap; }
   .table .trow:not(.add) .phrase { flex-basis: 100%; }
   .table .trow:not(.add) select { flex: 1; }
