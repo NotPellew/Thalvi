@@ -213,6 +213,9 @@ areas your change touches. Editing rules are in
 - **Commit checks run on `pull_request`.** They need only read access, and
   changes to them take effect in the PR that makes them. Rejected:
   `pull_request_target`, which runs the base branch's workflow definition.
+- **Releases wait for approval.** `publish` runs in a `release` environment only the developer can approve.
+  Why: agent tokens can push tags, and a tag builds and publishes to users. Rejected: a tag ruleset (the token
+  acts as the developer, so any bypass for the developer also lets agents through).
 - **Dependency and secret gates.** cargo-deny checks advisories, licences and sources; gitleaks scans
   history in CI and staged changes in a hook. Why: nothing else watched Rust advisories, the binaries link
   every crate, and on a public repo a pushed secret has leaked. Rejected: bans (nothing to ban), flagging
