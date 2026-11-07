@@ -321,6 +321,15 @@ describe("the wake word picker", () => {
     ]);
   });
 
+  it("leaves the wake pickers alone when a state change finds nothing new on disk", async () => {
+    const stub = await openCapture();
+    const option = control("Wake model (dictation)", "select").options[0];
+    stub.emit({ state: "loading", notice: "Loading." });
+    await settle();
+    expect(stub.backend.listWakeModels.mock.calls.length).toBeGreaterThan(1);
+    expect(control("Wake model (dictation)", "select").options[0]).toBe(option);
+  });
+
   it("prevents choosing the other wake word's phrase", async () => {
     await openCapture();
     const dictation = control("Wake model (dictation)", "select");

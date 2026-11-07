@@ -332,8 +332,10 @@ function wakeHeads(context: PageContext): HTMLElement[] {
   function refresh(): void {
     backend.listWakeModels().then(
       (models) => {
+        const changed = models.some((info) => infos.get(info.name)?.cached !== info.cached);
         for (const info of models) infos.set(info.name, info);
-        for (const state of heads) state.render();
+        // Rebuilding the options would disturb a dropdown the user has open.
+        if (changed) for (const state of heads) state.render();
       },
       (error: unknown) => {
         for (const state of heads) state.sayProblem(errorText(error));
