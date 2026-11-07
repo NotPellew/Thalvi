@@ -52,6 +52,7 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .table, .cards { display: flex; flex-direction: column; gap: 6px; }
 .trow { display: flex; align-items: center; gap: 8px; }
 .trow .phrase { flex: 1; white-space: nowrap; font: 13px var(--mono); }
+.trow.file .unit:last-child { overflow-wrap: anywhere; }
 .trow.add { justify-content: flex-end; }
 .trow.add input { flex: 1; max-width: 16em; }
 .trow.add.word-add { justify-content: flex-start; }
@@ -99,3 +100,33 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
 .chip { display: inline-flex; align-items: center; gap: 2px; font: 13px var(--mono); }
 #settings[data-look] main .chip > button { height: auto; padding: 0 2px 0 6px; border: 0; background: none; box-shadow: none; font: 13px var(--mono); text-transform: none; }
 #settings[data-look] main .chip > button:hover { color: var(--neon); background: none; }
+
+@media (max-width: 560px) {
+  .app { flex-direction: column; }
+  main { min-height: 0; }
+  .app > nav, #settings[data-look] .app > nav { width: auto; max-height: 40%; padding: 8px 10px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .items { flex-direction: row; flex-wrap: wrap; }
+  .pages { padding: 14px 10px; }
+  .bar { flex-wrap: wrap; padding-inline: 10px; }
+  .msg:empty { display: none; }
+  .bar .msg, #settings[data-look] .bar .err { flex: 1 0 100%; max-height: 6.5em; overflow-y: auto; overflow-wrap: anywhere; text-align: left; }
+  .row { flex-direction: column; align-items: stretch; gap: 8px; }
+  .what { max-width: none; }
+  .ctl { flex: none; justify-content: flex-start; }
+  .card { grid-template-columns: minmax(0, 1fr); }
+  .card button { grid-column: 1; }
+  .mini input, .mini select { width: 100%; box-sizing: border-box; }
+  .looks { flex-wrap: wrap; }
+  .trow.pick, .trow.file { flex-wrap: wrap; }
+  .trow.pick select { max-width: 100%; }
+  .trow.file .unit:last-child { flex-basis: 100%; }
+  .table .trow:not(.add) { flex-wrap: wrap; }
+  .table .trow:not(.add) .phrase { flex-basis: 100%; }
+  .table .trow:not(.add) select { flex: 1; }
+}
+
+@media (max-width: 360px) {
+  .pages { padding-inline: 6px; }
+  #settings[data-look] .pages .grp { padding-inline: 8px; }
+  #settings[data-look] .pages select { padding-left: 6px; font: 11px system-ui; }
+}
