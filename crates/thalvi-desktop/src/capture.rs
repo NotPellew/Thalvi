@@ -136,6 +136,13 @@ impl Default for Endings {
 }
 
 impl Endings {
+    /// Every phrase with its ending, longest phrase first.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, Ending)> {
+        self.0
+            .iter()
+            .map(|(phrase, ending)| (phrase.as_str(), *ending))
+    }
+
     /// Longest first, so "please submit" wins over "submit".
     fn longest_first(mut entries: Vec<(String, Ending)>) -> Self {
         entries.sort_by_key(|(phrase, _)| (Reverse(phrase.chars().count()), phrase.clone()));

@@ -23,6 +23,7 @@ pub mod report;
 pub mod runtime;
 pub mod secondary;
 pub mod segments;
+pub mod spotter;
 pub mod tasks;
 pub mod transducer;
 pub mod vad;
