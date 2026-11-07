@@ -243,6 +243,20 @@ impl Publisher {
         self.update(|view| view.loading = load);
     }
 
+    /// Says why a press of the hold key started nothing. A refusal that only repeats an earlier
+    /// failure does not hide it, and followers hear of it even when the status is unchanged, so
+    /// an overlay that has hidden the failure shows it again.
+    fn refused(&self, refusal: Refusal) {
+        if refusal == Refusal::Paused || !self.failed() {
+            self.mode(Mode::Failed(Failure {
+                notice: refusal.notice().to_owned(),
+                headline: refusal.headline(),
+                causes: Vec::new(),
+            }));
+        }
+        self.out.send_modify(|_| {});
+    }
+
     fn notice_sink(self: &Rc<Self>) -> Box<dyn Fn(&str)> {
         let publisher = Rc::clone(self);
         Box::new(move |notice| {
@@ -681,21 +695,14 @@ impl Runner {
         }
     }
 
-    /// Says that `count` presses of the hold key started nothing, and why. A refusal that only
-    /// repeats an earlier failure does not hide it.
+    /// Says that `count` presses of the hold key started nothing, and why.
     fn refuse_press(&self, refusal: Refusal, count: u64) {
         if let Some(session) = &self.session {
             report_refusal(session.engine.recorder(), refusal, count);
         } else {
             println!("{}", refusal.notice());
         }
-        if refusal == Refusal::Paused || !self.publisher.failed() {
-            self.publisher.mode(Mode::Failed(Failure {
-                notice: refusal.notice().to_owned(),
-                headline: refusal.headline(),
-                causes: Vec::new(),
-            }));
-        }
+        self.publisher.refused(refusal);
     }
 
     /// Acts on a control message while nothing is being captured.
@@ -1263,6 +1270,26 @@ mod tests {
             "quit acknowledged a pending write"
         );
         status.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn a_refused_press_tells_followers_even_when_the_failure_is_already_the_status() {
+        let (out, mut status) = watch::channel(Status::Paused);
+        let publisher = Publisher::new(out, EndingPauses::default());
+        let cases = [
+            (Refusal::Paused, "Paused — key ignored"),
+            (Refusal::Paused, "Paused — key ignored"),
+            (Refusal::MicrophoneClosed, "Paused — key ignored"),
+        ];
+        for (refusal, headline) in cases {
+            status.borrow_and_update();
+            publisher.refused(refusal);
+            assert!(status.has_changed().unwrap(), "{refusal:?}");
+            assert!(
+                matches!(&*status.borrow(), Status::Failed { headline: shown, .. } if *shown == headline),
+                "{refusal:?}"
+            );
+        }
     }
 
     #[tokio::test]

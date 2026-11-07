@@ -20,14 +20,14 @@ match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
 added in `engine.rs`, the upsampling filter and word list changed in
-`recognizer.rs`, and `runner.rs` hands the word list to the local recognizer;
-a released hold now sends silence through the same cancel-first send before it
-waits for the final, and `Runner::apply` now counts hold presses that land
-during a rebuild and refuses them afterwards (`Runner::rebuild` is its former
-body). A dropped listener now keeps its hold cursor until it resumes; closing
-the microphone explicitly ends that listening interval and hands its pending
-press cursor to Apply. Apply returns that cursor to the live engine after
-reporting unavailable presses, so the next listener cannot skip a newer press. None of these touch the mapped functions' cancellation
+`recognizer.rs`, and `runner.rs` hands the word list to the local recognizer and
+notifies followers of every refused press. A released hold sends silence through
+the same cancel-first send before it waits for the final. `Runner::apply` now
+accounts for presses during a rebuild and refuses them afterwards; its former
+body is `Runner::rebuild`. A dropped listener keeps its hold cursor until it
+resumes. Closing the microphone ends that interval and hands pending presses to
+Apply, which returns the accounted cursor to the live engine so a newer press
+cannot be skipped. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only

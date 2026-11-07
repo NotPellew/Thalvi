@@ -402,11 +402,17 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
     let _ = state.tray.set(tray);
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
+        let current = status.borrow_and_update().clone();
+        show(&handle, &current);
         loop {
-            let current = status.borrow_and_update().clone();
-            show(&handle, &current);
             let changed = tokio::select! {
-                changed = status.changed() => changed,
+                changed = status.changed() => {
+                    if changed.is_ok() {
+                        let current = status.borrow_and_update().clone();
+                        show(&handle, &current);
+                    }
+                    changed
+                }
                 changed = audio.changed() => {
                     if changed.is_ok() {
                         let current = audio.borrow_and_update().clone();

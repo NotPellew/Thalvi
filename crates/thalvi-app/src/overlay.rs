@@ -51,6 +51,9 @@ impl Frame {
 /// How long a delivery's confirmation stays on screen.
 const DONE_FOR: Duration = Duration::from_secs(1);
 
+/// How long a failure's headline stays on screen; the tray and Settings keep the failure.
+const FAILED_FOR: Duration = Duration::from_secs(5);
+
 /// What the overlay window does when the status changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Visibility {
@@ -61,8 +64,8 @@ pub enum Visibility {
 }
 
 impl Visibility {
-    /// Shown from the wake word until the delivery has been confirmed, and a failure stays until
-    /// the next capture starts or `dismiss_error` hides it; never when `enabled` is off.
+    /// Shown from the wake word until the delivery has been confirmed, and briefly for a failure,
+    /// which `dismiss_error` can hide sooner; never when `enabled` is off.
     #[must_use]
     pub fn of(status: &Status, enabled: bool) -> Self {
         if !enabled {
@@ -80,9 +83,9 @@ impl Visibility {
             | Status::Working { .. }
             | Status::Loading {
                 downloading: true, ..
-            }
-            | Status::Failed { .. } => Self::Show,
+            } => Self::Show,
             Status::Done { .. } => Self::ShowFor(DONE_FOR),
+            Status::Failed { .. } => Self::ShowFor(FAILED_FOR),
         }
     }
 }
@@ -292,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn the_overlay_shows_from_the_wake_word_and_hides_after_the_confirmation_but_keeps_a_failure() {
+    fn the_overlay_shows_from_the_wake_word_and_hides_after_a_confirmation_or_a_failure() {
         let target = Some("kitty".to_owned());
         let statuses = [
             (Status::Paused, Visibility::Hide),
@@ -343,7 +346,7 @@ mod tests {
                     headline: "Failed",
                     causes: Vec::new(),
                 },
-                Visibility::Show,
+                Visibility::ShowFor(Duration::from_secs(5)),
             ),
             (
                 Status::Loading {
