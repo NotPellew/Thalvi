@@ -129,6 +129,9 @@ are committed.
   `.github/scripts/issue-refs.test.sh`.
 - Dependencies (`deny.toml`, cargo-deny 0.20.2): `cargo deny --workspace --locked
   check advisories licenses sources`.
+- Secrets (`.gitleaks.toml`, gitleaks 8.30.1): `gitleaks git --redact --no-banner
+  --log-opts=HEAD .` on the full history. With gitleaks on `PATH`, the pre-commit
+  hook scans what is staged.
 
 ## Git and PRs
 
