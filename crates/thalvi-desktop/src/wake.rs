@@ -288,6 +288,23 @@ pub struct WakeEngine {
 }
 
 impl WakeEngine {
+    /// Whether [`load`](Self::load) would download a file: any pinned file it fetches that is
+    /// not on disk. A head given as a local path never downloads.
+    pub async fn needs_download(config: &WakeConfig, store: &ModelStore) -> bool {
+        let heads = [config.capture(), config.conversation()]
+            .into_iter()
+            .filter_map(head_asset);
+        for asset in [models::MELSPECTROGRAM, models::EMBEDDING]
+            .into_iter()
+            .chain(heads)
+        {
+            if !store.is_asset_cached(&asset).await {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Fetches any missing model files through `store`, then loads and validates them.
     ///
     /// # Errors
@@ -404,6 +421,14 @@ fn seed_noise() -> Vec<f32> {
             f32::from(u16::from_be_bytes([high, low]) % 2000) - 1000.0
         })
         .collect()
+}
+
+/// The download a head needs, if it is a catalog head.
+fn head_asset(head: &HeadConfig) -> Option<models::Asset<'static>> {
+    match &head.model {
+        HeadModel::Catalog(catalog) => Some(catalog.asset()),
+        HeadModel::File(_) => None,
+    }
 }
 
 async fn head_path(head: &HeadConfig, store: &ModelStore) -> Result<PathBuf, WakeError> {
@@ -861,5 +886,80 @@ mod tests {
             assert!(error.contains(message), "{json}: {error}");
         }
         assert!(read(r#"{"capture":{"model":"hey_thalvi","threshold":1.0}}"#).is_ok());
+    }
+
+    #[tokio::test]
+    async fn loading_downloads_only_when_a_pinned_file_is_missing() {
+        let mel = models::MELSPECTROGRAM;
+        let embedding = models::EMBEDDING;
+        let thalvi = CatalogHead::HeyThalvi.asset();
+        let mycroft = CatalogHead::HeyMycroft.asset();
+        let jarvis = CatalogHead::HeyJarvis.asset();
+        let files =
+            r#"{"capture":{"model":"/a/mine.onnx"},"conversation":{"model":"/a/yours.onnx"}}"#;
+        // (case, config, files on disk, downloads)
+        let cases = [
+            ("nothing on disk", "{}", vec![], true),
+            (
+                "every file",
+                "{}",
+                vec![mel, embedding, thalvi, mycroft],
+                false,
+            ),
+            (
+                "no melspectrogram",
+                "{}",
+                vec![embedding, thalvi, mycroft],
+                true,
+            ),
+            ("no embedding", "{}", vec![mel, thalvi, mycroft], true),
+            ("no capture head", "{}", vec![mel, embedding, mycroft], true),
+            (
+                "no conversation head",
+                "{}",
+                vec![mel, embedding, thalvi],
+                true,
+            ),
+            (
+                "a head not chosen is not needed",
+                r#"{"capture":{"model":"hey_jarvis"}}"#,
+                vec![mel, embedding, jarvis, mycroft],
+                false,
+            ),
+            (
+                "local heads and the features",
+                files,
+                vec![mel, embedding],
+                false,
+            ),
+            ("local heads, no features", files, vec![], true),
+            (
+                "a local head and a missing catalog head",
+                r#"{"capture":{"model":"/a/mine.onnx"}}"#,
+                vec![mel, embedding],
+                true,
+            ),
+        ];
+        for (case, config, on_disk, downloads) in cases {
+            let dir = std::env::temp_dir().join(format!(
+                "thalvi-wake-download-{}-{}",
+                case.replace(' ', "-"),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            for asset in on_disk {
+                std::fs::File::create(dir.join(asset.file_name))
+                    .and_then(|file| file.set_len(asset.size))
+                    .expect("file at pinned size");
+            }
+            let config = read(config).expect("valid config");
+            assert_eq!(
+                WakeEngine::needs_download(&config, &ModelStore::in_dir(&dir)).await,
+                downloads,
+                "{case}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

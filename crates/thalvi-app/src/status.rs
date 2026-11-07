@@ -10,6 +10,7 @@ use thalvi_desktop::report::{UserError, causes};
 use thalvi_desktop::transducer::TransducerSource;
 
 pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not ready yet.";
+pub const WAKE_DOWNLOAD_NOTICE: &str = "Downloading the wake word model.";
 
 /// The status event's payload; its JSON form is the contract with the TypeScript UI.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -57,7 +58,7 @@ pub enum Status {
         /// The technical causes behind `notice`, outermost first, for the error report.
         causes: Vec<String>,
     },
-    /// The speech model is being fetched or loaded; the wake word already works.
+    /// A model is being fetched or loaded. For the speech model the wake word already works.
     Loading {
         notice: String,
         /// Files are being downloaded; only then does the overlay say so.
@@ -149,6 +150,8 @@ pub enum Mode {
     Idle,
     /// Models or the microphone are starting.
     Starting,
+    /// A wake word model is downloading.
+    WakeDownload,
     /// The microphone is closed.
     Paused,
     /// An accepted capture is being delivered.
@@ -187,6 +190,10 @@ impl View {
             (Mode::Starting, _) => Status::Loading {
                 notice: STARTING_NOTICE.to_owned(),
                 downloading: false,
+            },
+            (Mode::WakeDownload, _) => Status::Loading {
+                notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
+                downloading: true,
             },
             (Mode::Paused, _) => Status::Paused,
             (Mode::Delivering(route), _) => Status::Working {
@@ -336,6 +343,14 @@ mod tests {
                 Status::Loading {
                     notice: STARTING_NOTICE.to_owned(),
                     downloading: false,
+                },
+            ),
+            (
+                Mode::WakeDownload,
+                EngineState::Listening,
+                Status::Loading {
+                    notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
+                    downloading: true,
                 },
             ),
             (Mode::Paused, capturing(), Status::Paused),

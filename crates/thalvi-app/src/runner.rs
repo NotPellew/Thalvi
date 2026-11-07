@@ -27,11 +27,13 @@ use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::ModelStore;
 use thalvi_desktop::report::{UserError, causes};
 use thalvi_desktop::transducer::TransducerSource;
-use thalvi_desktop::wake::WakeEngine;
+use thalvi_desktop::wake::{WakeConfig, WakeEngine};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
-use crate::status::{Failure, Mode, STARTING_NOTICE, SpeechLoad, Status, View};
+use crate::status::{
+    Failure, Mode, STARTING_NOTICE, SpeechLoad, Status, View, WAKE_DOWNLOAD_NOTICE,
+};
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -195,6 +197,25 @@ impl EngineLink {
 fn finish_runtime(runtime: tokio::runtime::Runtime, stopped: &std_mpsc::Sender<()>) {
     drop(runtime);
     let _ = stopped.send(());
+}
+
+/// Loads the wake models, with the status saying so while a file downloads.
+async fn load_wake<T>(
+    publisher: &Publisher,
+    config: &WakeConfig,
+    store: &ModelStore,
+    load: impl Future<Output = T>,
+) -> T {
+    let downloads = WakeEngine::needs_download(config, store).await;
+    if !downloads {
+        println!("Loading the wake word models.");
+        return load.await;
+    }
+    println!("{WAKE_DOWNLOAD_NOTICE}");
+    publisher.mode(Mode::WakeDownload);
+    let loaded = load.await;
+    publisher.mode(Mode::Starting);
+    loaded
 }
 
 /// Derives the status from the view and publishes it when it changes.
@@ -478,9 +499,14 @@ impl Runner {
         let recorder =
             Recorder::per_user(config.recordings).map_err(|error| Failure::of(&error))?;
         let store = ModelStore::per_user().map_err(|error| Failure::of(&error))?;
-        println!("Loading the wake word models.");
         let started = Instant::now();
-        let wake = WakeEngine::load(&config.wake, &store).await;
+        let wake = load_wake(
+            &self.publisher,
+            &config.wake,
+            &store,
+            WakeEngine::load(&config.wake, &store),
+        )
+        .await;
         recorder.metric(
             Event::WakeLoad,
             if wake.is_ok() { "ok" } else { "error" },
@@ -1238,7 +1264,7 @@ mod tests {
     use std::cell::Cell;
     use std::time::Duration;
 
-    use thalvi_desktop::models::CatalogSpeech;
+    use thalvi_desktop::models::{self, CatalogHead, CatalogSpeech};
     use thalvi_desktop::phrases::WordList;
     use thalvi_desktop::transducer::SpeechChoice;
 
@@ -1345,6 +1371,80 @@ mod tests {
             publisher.loading(None);
             assert!(!shown(), "{case}: loaded");
             assert_eq!(title(&status.borrow()), "Thalvi: listening", "{case}");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn the_overlay_shows_a_wake_download_only_while_a_missing_file_downloads() {
+        let config = WakeConfig::default();
+        let cached = [
+            models::MELSPECTROGRAM,
+            models::EMBEDDING,
+            CatalogHead::HeyThalvi.asset(),
+            CatalogHead::HeyMycroft.asset(),
+        ];
+        let failed = Mode::Failed(Failure {
+            notice: "Could not download the model.".to_owned(),
+            headline: "Download failed",
+            causes: Vec::new(),
+        });
+        // A retry after a failed download starts from Paused (the tray) or Failed (Settings).
+        let starts = [Mode::Starting, Mode::Idle, Mode::Paused, failed];
+        for (case, files, downloads) in [("cached", cached.len(), false), ("missing one", 3, true)]
+        {
+            let dir = std::env::temp_dir().join(format!(
+                "thalvi-wake-load-{}-{}",
+                case.replace(' ', "-"),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            for asset in &cached[..files] {
+                std::fs::File::create(dir.join(asset.file_name))
+                    .unwrap()
+                    .set_len(asset.size)
+                    .unwrap();
+            }
+            let store = ModelStore::in_dir(&dir);
+            for (start, load_fails) in starts.iter().flat_map(|mode| [(mode, false), (mode, true)])
+            {
+                let case = format!("{case}, from {start:?}, load fails: {load_fails}");
+                let (out, status) = watch::channel(Status::Paused);
+                let publisher = Publisher::new(out, EndingPauses::default());
+                publisher.mode(start.clone());
+                let before = status.borrow().clone();
+                let download = Status::Loading {
+                    notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
+                    downloading: true,
+                };
+
+                let result = load_wake(&publisher, &config, &store, async {
+                    if downloads {
+                        assert_eq!(*status.borrow(), download, "{case}: while loading");
+                        assert_eq!(
+                            Visibility::of(&status.borrow(), true),
+                            Visibility::Show,
+                            "{case}: overlay while loading"
+                        );
+                    } else {
+                        assert_eq!(*status.borrow(), before, "{case}: nothing to announce");
+                    }
+                    if load_fails {
+                        Err("no network")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await;
+
+                assert_eq!(result.is_err(), load_fails, "{case}");
+                if downloads {
+                    assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}: after");
+                } else {
+                    assert_eq!(*status.borrow(), before, "{case}: after");
+                }
+            }
             std::fs::remove_dir_all(&dir).unwrap();
         }
     }
