@@ -12,7 +12,11 @@ icacls $qa /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
 Copy-Item $Installer "$qa\thalvi-setup.exe"
 Copy-Item (Join-Path $PSScriptRoot 'in-session.ps1') "$qa\in-session.ps1"
 
-function Log([string]$Text) { "$(Get-Date -Format HH:mm:ss.fff) $Text" | Tee-Object -FilePath "$OutDir\orchestrate.log" -Append }
+function Log([string]$Text) {
+  $line = "$(Get-Date -Format HH:mm:ss.fff) $Text"
+  Write-Host $line
+  Add-Content "$OutDir\orchestrate.log" $line
+}
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 function Save-Console([string]$Name) {

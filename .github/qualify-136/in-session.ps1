@@ -120,7 +120,7 @@ function Named-Elements($Root, [string]$Pattern) {
   @($all | Where-Object { $_.Current.Name -match $Pattern })
 }
 function Login-Switch($Settings) {
-  $app = Wait-Until { Named-Elements $Settings '^App' | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button } | Select-Object -First 1 } 'the App page button' 30
+  $app = Wait-Until { Named-Elements $Settings '^App$' | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button } | Select-Object -First 1 } 'the App page button' 30
   $app.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   Wait-Until {
     Named-Elements $Settings '^Start Thalvi when I log in$' | Where-Object { $_.GetSupportedPatterns() -contains [System.Windows.Automation.TogglePattern]::Pattern } | Select-Object -First 1
@@ -196,6 +196,8 @@ try {
       Log "uninstall entry: $($facts.uninstall_entry)"
       Log "Start menu: $($facts.start_menu -join ', ')"
       Check ($facts.start_menu.Count -ge 1) 'the install added a Start menu entry'
+      $facts.desktop_shortcut = @(Get-ChildItem ([Environment]::GetFolderPath('Desktop')) -Filter 'Thalvi*.lnk' | ForEach-Object { $_.FullName })
+      Log "desktop shortcut: $($facts.desktop_shortcut -join ', ')"
 
       $config = Join-Path $env:APPDATA 'thalvi\desktop.json'
       New-Item -ItemType Directory -Force (Split-Path $config) | Out-Null
@@ -263,6 +265,7 @@ try {
       $facts.still_running = (Thalvi-Processes).Count
       $facts.program_dir_after = @(Get-ChildItem (Split-Path $exe) -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
       $facts.start_menu_after = @(Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs" -Recurse -Filter 'Thalvi*.lnk' | ForEach-Object { $_.FullName })
+      $facts.desktop_shortcut_after = @(Get-ChildItem ([Environment]::GetFolderPath('Desktop')) -Filter 'Thalvi*.lnk' | ForEach-Object { $_.FullName })
       $facts.uninstall_entry_after = Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Thalvi'
       $facts.data_after = @(Get-ChildItem $data -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($data.Length) })
       $facts.config_after = Test-Path (Join-Path $env:APPDATA 'thalvi\desktop.json')
@@ -272,6 +275,7 @@ try {
       Log "data after:  $($facts.data_after -join ', ')"
       Check (-not (Test-Path $exe)) 'the uninstall removed the app'
       Check ($facts.start_menu_after.Count -eq 0) 'the uninstall removed the Start menu entry'
+      Check ($facts.desktop_shortcut_after.Count -eq 0) 'the uninstall removed the desktop shortcut'
       Check (-not $facts.uninstall_entry_after) 'the uninstall removed its Apps entry'
       Check ($null -eq $facts.run_after_uninstall) 'the uninstall removed the Run entry'
       Check ($null -eq $facts.approved_after_uninstall) 'the uninstall removed the StartupApproved value'
