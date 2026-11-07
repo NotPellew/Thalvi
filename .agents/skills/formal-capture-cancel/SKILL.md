@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `f557ebf0006b2102e23c23424f2acca3df97574b`. The recorded file hashes
+Sync commit: `16fce81cab7a60657fc7e09eb305f03bb73b3a74`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -30,6 +30,8 @@ resumes. Closing the microphone ends that interval and hands pending presses to
 Apply, which returns the accounted cursor to the live engine so a newer press
 cannot be skipped. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
+A wake capture whose whole text is a task now arms the task ending itself; it
+reaches `Engine::conclude` through the same `Done::Accepted`, so that is unchanged too.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
