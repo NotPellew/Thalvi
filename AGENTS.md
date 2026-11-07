@@ -127,6 +127,8 @@ are committed.
 - Issue sync (`.github/scripts/`): `pipx run shellcheck-py==0.11.0.1
   .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh`, then
   `.github/scripts/issue-refs.test.sh`.
+- Dependencies (`deny.toml`, cargo-deny 0.20.2): `cargo deny --workspace --locked
+  check advisories licenses sources`.
 
 ## Git and PRs
 
