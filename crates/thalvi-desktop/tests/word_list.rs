@@ -113,7 +113,7 @@ async fn a_reachable_server_reports_unsupported_word_lists_and_bad_replies_as_su
             .expect_err("unavailable word list");
         assert!(error.contains(expected), "{status}: {error}");
         assert!(!error.contains("could not reach"), "{status}: {error}");
-        if status == 404 {
+        if status != 200 {
             let error = share(&client, &server, &list, &metrics)
                 .await
                 .expect_err("unsupported word list");

@@ -161,10 +161,18 @@ pub async fn share(
         Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
             Some(unsupported(server))
         }
-        Ok(response) => Some(response.json::<ServerError>().await.map_or_else(
-            |_| "The server refused the word list.".to_owned(),
-            |body| body.error,
-        )),
+        Ok(response) => {
+            let status = response.status();
+            Some(response.json::<ServerError>().await.map_or_else(
+                |_| {
+                    format!(
+                        "The server at {server} answered HTTP {} when Thalvi tried to save the word list.",
+                        status.as_u16()
+                    )
+                },
+                |body| body.error,
+            ))
+        }
         Err(_) => Some(format!(
             "The word list is saved here, but Thalvi could not reach the server at {server} to use it there."
         )),
