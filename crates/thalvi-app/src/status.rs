@@ -11,6 +11,7 @@ use thalvi_desktop::transducer::TransducerSource;
 
 pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not ready yet.";
 pub const WAKE_DOWNLOAD_NOTICE: &str = "Downloading the wake word model.";
+pub const SPOTTER_DOWNLOAD_NOTICE: &str = "Downloading the ending phrase model.";
 
 /// The status event's payload; its JSON form is the contract with the TypeScript UI.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -169,6 +170,8 @@ pub enum Mode {
     Starting,
     /// A wake word model is downloading.
     WakeDownload,
+    /// The ending phrase model is downloading.
+    SpotterDownload,
     /// The microphone is closed.
     Paused,
     /// An accepted capture is being delivered.
@@ -212,6 +215,10 @@ impl View {
             },
             (Mode::WakeDownload, _) => Status::Loading {
                 notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
+                downloading: true,
+            },
+            (Mode::SpotterDownload, _) => Status::Loading {
+                notice: SPOTTER_DOWNLOAD_NOTICE.to_owned(),
                 downloading: true,
             },
             (Mode::Paused, _) => Status::Paused,
@@ -375,6 +382,14 @@ mod tests {
                 EngineState::Listening,
                 Status::Loading {
                     notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
+                    downloading: true,
+                },
+            ),
+            (
+                Mode::SpotterDownload,
+                EngineState::Listening,
+                Status::Loading {
+                    notice: SPOTTER_DOWNLOAD_NOTICE.to_owned(),
                     downloading: true,
                 },
             ),

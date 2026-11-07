@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use thalvi_desktop::audio::{Frames, InputGate, Microphone};
-use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
+use thalvi_desktop::capture::{CaptureRoute, EndingPauses, Endings};
 use thalvi_desktop::chosen::Chosen;
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::{Bound, Delivery, Finished};
@@ -24,15 +24,17 @@ use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{Desktop, Host};
 use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
-use thalvi_desktop::models::ModelStore;
+use thalvi_desktop::models::{self, ModelStore};
 use thalvi_desktop::report::{UserError, causes};
+use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
 use thalvi_desktop::transducer::TransducerSource;
 use thalvi_desktop::wake::{WakeConfig, WakeEngine};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::status::{
-    Failure, FailureKind, Mode, STARTING_NOTICE, SpeechLoad, Status, View, WAKE_DOWNLOAD_NOTICE,
+    Failure, FailureKind, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, SpeechLoad, Status, View,
+    WAKE_DOWNLOAD_NOTICE,
 };
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
@@ -216,6 +218,66 @@ async fn load_wake<T>(
     let loaded = load.await;
     publisher.mode(Mode::Starting);
     loaded
+}
+
+/// Loads the ending spotter next to the wake models. It only double-checks the transcript, so a
+/// failure is a notice and dictation goes on without it.
+async fn load_spotter(
+    publisher: &Rc<Publisher>,
+    endings: &Endings,
+    store: &ModelStore,
+    recorder: &Recorder,
+) -> Option<Box<dyn KeywordSpotter>> {
+    let started = Instant::now();
+    let mut downloads = false;
+    for asset in [
+        models::SPOTTER.encoder,
+        models::SPOTTER.decoder,
+        models::SPOTTER.joiner,
+        models::SPOTTER.pieces,
+    ] {
+        downloads |= !store.is_asset_cached(&asset).await;
+    }
+    if downloads {
+        println!("{SPOTTER_DOWNLOAD_NOTICE}");
+        publisher.mode(Mode::SpotterDownload);
+    }
+    let loaded = OnnxSpotter::load(endings, store).await;
+    if downloads {
+        publisher.mode(Mode::Starting);
+    }
+    spotter_loaded(
+        loaded.map(|spotter| Box::new(spotter) as Box<dyn KeywordSpotter>),
+        started.elapsed(),
+        downloads,
+        endings.entries().count(),
+        &*publisher.notice_sink(),
+        recorder,
+    )
+}
+
+/// Records how the spotter loaded and tells the user when it did not.
+fn spotter_loaded(
+    loaded: Result<Box<dyn KeywordSpotter>, SpotterError>,
+    took: Duration,
+    downloaded: bool,
+    phrases: usize,
+    notice: &dyn Fn(&str),
+    recorder: &Recorder,
+) -> Option<Box<dyn KeywordSpotter>> {
+    recorder.metric(
+        Event::EndingSpotter,
+        if loaded.is_ok() { "ok" } else { "error" },
+        Some(took),
+        json!({"call": "load", "phrases": phrases, "downloaded": downloaded}),
+    );
+    match loaded {
+        Ok(spotter) => Some(spotter),
+        Err(error) => {
+            notice(&format!("{error} Endings still work from the transcript."));
+            None
+        }
+    }
 }
 
 /// Derives the status from the view and publishes it when it changes.
@@ -515,13 +577,15 @@ impl Runner {
             Recorder::per_user(config.recordings).map_err(|error| Failure::of(&error))?;
         let store = ModelStore::per_user().map_err(|error| Failure::of(&error))?;
         let started = Instant::now();
-        let wake = load_wake(
-            &self.publisher,
-            &config.wake,
-            &store,
-            WakeEngine::load(&config.wake, &store),
-        )
-        .await;
+        let (wake, spotter) = tokio::join!(
+            load_wake(
+                &self.publisher,
+                &config.wake,
+                &store,
+                WakeEngine::load(&config.wake, &store),
+            ),
+            load_spotter(&self.publisher, &config.endings, &store, &recorder),
+        );
         recorder.metric(
             Event::WakeLoad,
             if wake.is_ok() { "ok" } else { "error" },
@@ -548,6 +612,7 @@ impl Runner {
                 http: self.http.clone(),
                 hold: self.key_state.clone(),
                 notice: self.publisher.notice_sink(),
+                spotter,
             },
             config,
             recorder,
@@ -1514,6 +1579,7 @@ mod tests {
                 recognizer, wake, cues, gate, hold,
                 http: reqwest::Client::new(),
                 notice: publisher.notice_sink(),
+                spotter: None,
             }, &DesktopConfig::from_json_str("{}").unwrap(), Recorder::disabled());
             let listening = tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -1746,6 +1812,7 @@ mod tests {
                         hold,
                         http: reqwest::Client::new(),
                         notice: publisher.notice_sink(),
+                        spotter: None,
                     },
                     &DesktopConfig::from_json_str("{}").unwrap(),
                     Recorder::disabled(),
@@ -2472,5 +2539,43 @@ mod tests {
         drop(state_tx);
         drop(engine_level_tx);
         following.await.unwrap();
+    }
+    #[test]
+    fn a_spotter_that_cannot_load_is_one_notice_naming_the_phrase_and_dictation_goes_on() {
+        use thalvi_desktop::engine::fakes::FakeSpotter;
+        use thalvi_desktop::spotter::Unspeakable;
+
+        let told = RefCell::new(Vec::new());
+        let notice = |text: &str| told.borrow_mut().push(text.to_owned());
+        let loaded = |result| {
+            spotter_loaded(
+                result,
+                Duration::ZERO,
+                false,
+                6,
+                &notice,
+                &Recorder::disabled(),
+            )
+        };
+
+        let unhearable = SpotterError::Phrases(vec![Unspeakable {
+            phrase: "f\u{fc}ge ein".to_owned(),
+            characters: "\u{dc}".to_owned(),
+        }]);
+        assert!(loaded(Err(unhearable)).is_none());
+        let seen = told.borrow().clone();
+        let [only] = &seen[..] else {
+            panic!("expected one notice, got {seen:?}");
+        };
+        assert!(
+            only.contains("\"f\u{fc}ge ein\"")
+                && only.ends_with("Endings still work from the transcript."),
+            "{only}"
+        );
+
+        told.borrow_mut().clear();
+        let (spotter, _control) = FakeSpotter::new();
+        assert!(loaded(Ok(Box::new(spotter))).is_some());
+        assert!(told.borrow().is_empty());
     }
 }
