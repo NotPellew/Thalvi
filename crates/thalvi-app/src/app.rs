@@ -23,7 +23,7 @@ use crate::overlay::{self, Overlay, Visibility};
 use crate::runner::{Control, EngineLink};
 use crate::settings::Store;
 use crate::startup::{self, APP_NAME, LOGIN_ARG, Registration};
-use crate::status::{LastError, Status};
+use crate::status::{FailureKind, LastError, Status};
 use crate::tray::{self, CopyItem, Tray};
 
 const SETTINGS: &str = "settings";
@@ -426,6 +426,7 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
             };
             if changed.is_err() {
                 let failed = Status::Failed {
+                    kind: FailureKind::Other,
                     notice: "Thalvi stopped unexpectedly. Restart it.".to_owned(),
                     headline: "Thalvi stopped — restart it",
                     causes: Vec::new(),

@@ -210,6 +210,8 @@ mod tests {
 
     use thalvi_desktop::capture::CaptureRoute;
 
+    use crate::status::FailureKind;
+
     use super::*;
 
     #[derive(Default)]
@@ -342,6 +344,7 @@ mod tests {
             ),
             (
                 Status::Failed {
+                    kind: FailureKind::Other,
                     notice: String::new(),
                     headline: "Failed",
                     causes: Vec::new(),

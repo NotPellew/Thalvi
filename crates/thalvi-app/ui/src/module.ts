@@ -161,7 +161,7 @@ export function createModule(onCancel: () => void): Module {
         lines(true, () => {
           ticker.notice(status.headline);
         });
-        show("failed", { label: "NOT SENT" });
+        show("failed", { label: status.kind === "delivery" ? "NOT SENT" : "FAILED" });
         break;
     }
   }
