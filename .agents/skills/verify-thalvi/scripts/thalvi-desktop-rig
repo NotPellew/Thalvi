@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# Runs the real thalvi-desktop app inside a bwrap sandbox: Hyprland nested in a headless kwin_wayland.
+# Usage: thalvi-desktop-rig <command> ...; `thalvi-desktop-rig help` lists them.
+set -euo pipefail
+
+BASE=${THALVI_RIG_BASE:-/var/tmp/thalvi-rig}
+UID_NUM=$(id -u)
+
+usage() {
+  cat <<'EOF'
+up [--size WxH]            start the compositors; prints RUN_DIR=<R> last
+app-start R BIN [--config F] [--env K=V]... [--tag NAME]
+                           start BIN (a thalvi-desktop binary) in its own sandbox; stdout/stderr go to R/out/app-NAME.log
+app-stop R                 stop the app started last (by recorded PID)
+ctl R ARGS...              run `thalvi-desktop ARGS` against the running app (pause, resume, toggle, status, cancel)
+hypr R ARGS...             hyprctl against the inner compositor
+shot R NAME                grim screenshot of the inner compositor to R/out/NAME.png
+burst R NAME N GAP         N screenshots NAME-001.png... GAP seconds apart (0.1 works); NAME-times.txt stamps each
+sh R CMD...                run any command in a sandbox joined to the same private dirs
+proof R                    write R/out/isolation.txt: what the sandbox cannot reach
+down R                     stop everything started by this run; evidence stays in R/out
+EOF
+}
+
+die() { echo "thalvi-desktop-rig: $*" >&2; exit 1; }
+
+# The first render node that is not NVIDIA's: Mesa's EGL works in the sandbox, NVIDIA's needs its device nodes.
+render_node() {
+  local n
+  for n in /sys/class/drm/renderD*; do
+    [ "$(cat "$n/device/vendor")" = 0x10de ] || { echo "/dev/dri/$(basename "$n")"; return; }
+  done
+  die "no non-NVIDIA render node under /sys/class/drm"
+}
+
+# bwrap arguments shared by every process of a run. The host is read-only; /home, /tmp, /run/user
+# and /dev are replaced, so the developer's config, cache, models, sockets and sound devices are absent.
+sandbox_args() {
+  local r=$1
+  printf '%s\0' --unshare-pid --unshare-ipc --die-with-parent --new-session --clearenv \
+    --ro-bind / / --tmpfs /home --tmpfs /tmp --tmpfs /run/user --dev /dev --proc /proc \
+    --dev-bind "$(render_node)" "$(render_node)" \
+    --setenv __EGL_VENDOR_LIBRARY_FILENAMES /usr/share/glvnd/egl_vendor.d/50_mesa.json \
+    --setenv WLR_RENDER_DRM_DEVICE "$(render_node)" \
+    --dir "/run/user/$UID_NUM" --bind "$r/rt" "/run/user/$UID_NUM" \
+    --dir /home/rig --bind "$r/home" /home/rig --bind "$r/out" /tmp/out \
+    --setenv HOME /home/rig --setenv USER rig --setenv PATH /usr/local/bin:/usr/bin:/bin \
+    --setenv XDG_RUNTIME_DIR "/run/user/$UID_NUM" --setenv XDG_CONFIG_HOME /home/rig/.config \
+    --setenv XDG_DATA_HOME /home/rig/.local/share --setenv XDG_CACHE_HOME /home/rig/.cache \
+    --setenv XDG_STATE_HOME /home/rig/.local/state --setenv LANG C.UTF-8 \
+    --setenv ALSA_CONFIG_PATH /home/rig/alsa.conf --setenv WEBKIT_DISABLE_DMABUF_RENDERER 1 \
+    --setenv DBUS_SESSION_BUS_ADDRESS "unix:path=/run/user/$UID_NUM/bus" \
+    --setenv RUST_BACKTRACE 1
+}
+
+# Starts "$@" detached, with a holder shell as its parent: bwrap's --die-with-parent follows the
+# process that started it, so the holder (whose PID is written to $2) keeps the sandbox alive and
+# killing it takes everything inside down. Output goes to $1, each line stamped with the time it arrived.
+launch_held() {
+  local log=$1 pidfile=$2; shift 2
+  LOG=$log setsid bash -c 'exec > >(while IFS= read -r line; do printf "%s %s\n" "$(date +%T.%3N)" "$line"; done > "$LOG") 2>&1; "$@"; echo "[exited $?]"' _ "$@" > /dev/null 2>&1 &
+  echo $! > "$pidfile"
+}
+
+# The sockets in the run's private runtime dir: the outer (kwin) and inner (Hyprland) displays.
+outer_display() { cat "$1/outer.display"; }
+inner_display() { cat "$1/inner.display"; }
+inner_sig() { cat "$1/inner.sig"; }
+
+# Environment that points a tool inside the sandbox at the inner compositor.
+inner_env() {
+  local r=$1
+  printf '%s\0' --setenv WAYLAND_DISPLAY "$(inner_display "$r")" --setenv GDK_BACKEND wayland \
+    --setenv HYPRLAND_INSTANCE_SIGNATURE "$(inner_sig "$r")" --setenv XDG_CURRENT_DESKTOP Hyprland
+}
+
+run_inner() {
+  local r=$1; shift
+  local -a args extra
+  mapfile -d '' args < <(sandbox_args "$r")
+  mapfile -d '' extra < <(inner_env "$r")
+  bwrap "${args[@]}" "${extra[@]}" "$@"
+}
+
+cmd_up() {
+  local size=1920x1080
+  while [ $# -gt 0 ]; do
+    case $1 in --size) size=$2; shift 2 ;; *) die "up: unknown argument $1" ;; esac
+  done
+  mkdir -p "$BASE"
+  local r
+  r=$(mktemp -d "$BASE/run-XXXXXX")
+  mkdir -p "$r/rt" "$r/home/.config" "$r/home/.local/share" "$r/home/.cache" "$r/out"
+  chmod 700 "$r/rt"
+  printf 'pcm.!default { type null }\nctl.!default { type null }\n' > "$r/home/alsa.conf"
+  cat > "$r/hypr.conf" <<EOF
+monitor=,${size}@60,0x0,1
+misc {
+  disable_hyprland_logo = true
+  disable_splash_rendering = true
+  disable_hyprland_guiutils_check = true
+  force_default_wallpaper = 0
+  background_color = 0x59616f
+}
+xwayland {
+  enabled = false
+}
+ecosystem {
+  no_update_news = true
+  no_donation_nag = true
+}
+input {
+  follow_mouse = 0
+}
+animations {
+  enabled = false
+}
+EOF
+  # The supervisor runs inside the sandbox: private bus, outer kwin, inner Hyprland, then waits.
+  cat > "$r/supervisor.sh" <<'EOF'
+#!/usr/bin/env bash
+set -u
+cd /home/rig
+RUN=/run/user/$(id -u)
+# AppArmor mediation fails inside the sandbox ("Failed to query AppArmor policy"), so the bus runs without it.
+cat > /home/rig/dbus.conf <<CONF
+<busconfig><type>session</type><listen>unix:path=$RUN/bus</listen><auth>EXTERNAL</auth>
+<policy context="default"><allow send_destination="*" eavesdrop="true"/><allow eavesdrop="true"/><allow own="*"/></policy>
+<apparmor mode="disabled"/></busconfig>
+CONF
+dbus-daemon --config-file=/home/rig/dbus.conf --nofork --nopidfile > /tmp/out/dbus.log 2>&1 &
+kwin_wayland --virtual --no-lockscreen --no-global-shortcuts --width "$RIG_W" --height "$RIG_H" --socket rig-outer > /tmp/out/kwin.log 2>&1 &
+outer=rig-outer
+for _ in $(seq 100); do [ -S "$RUN/$outer" ] && break; sleep 0.1; done
+[ -S "$RUN/$outer" ] || { echo "kwin made no display" >> /tmp/out/supervisor.log; exit 1; }
+echo "$outer" > /tmp/out/outer.display
+unset HYPRLAND_INSTANCE_SIGNATURE
+WAYLAND_DISPLAY=$outer Hyprland --i-am-really-stupid --config /home/rig/hypr.conf > /tmp/out/hyprland.log 2>&1 &
+for _ in $(seq 150); do
+  sig=$(ls "$RUN/hypr" 2>/dev/null | head -1 || true)
+  inner=$(cd "$RUN" && ls wayland-* 2>/dev/null | grep -v '\.lock$' | head -1 || true)
+  [ -n "$sig" ] && [ -n "$inner" ] && [ -S "$RUN/hypr/$sig/.socket.sock" ] && break
+  sleep 0.1
+done
+[ -n "${sig:-}" ] && [ -n "${inner:-}" ] || { echo "Hyprland did not come up" >> /tmp/out/supervisor.log; exit 1; }
+echo "$sig" > /tmp/out/inner.sig
+echo "$inner" > /tmp/out/inner.display
+echo ready >> /tmp/out/supervisor.log
+wait
+EOF
+  chmod +x "$r/supervisor.sh"
+  local -a args
+  mapfile -d '' args < <(sandbox_args "$r")
+  launch_held "$r/supervisor.out" "$r/compositor.pid" bwrap "${args[@]}" --setenv RIG_W "${size%x*}" --setenv RIG_H "${size#*x}" --bind "$r/hypr.conf" /home/rig/hypr.conf \
+    --bind "$r/supervisor.sh" /tmp/supervisor.sh /tmp/supervisor.sh
+  local i
+  for i in $(seq 200); do
+    [ -s "$r/out/inner.display" ] && break
+    kill -0 "$(cat "$r/compositor.pid")" 2>/dev/null || { cat "$r/supervisor.out" "$r/out"/*.log >&2; die "compositors exited early (see $r/out)"; }
+    sleep 0.1
+  done
+  [ -s "$r/out/inner.display" ] || { tail -5 "$r/out"/*.log >&2; die "compositors did not come up (see $r/out)"; }
+  cp "$r/out/outer.display" "$r/outer.display"; cp "$r/out/inner.display" "$r/inner.display"; cp "$r/out/inner.sig" "$r/inner.sig"
+  run_inner "$r" hyprctl monitors | head -3
+  echo "RUN_DIR=$r"
+}
+
+cmd_app_start() {
+  local r=$1 bin=$2; shift 2
+  local config="" tag=$(date +%H%M%S)
+  local -a envs=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --config) config=$2; shift 2 ;;
+      --env) envs+=(--setenv "${2%%=*}" "${2#*=}"); shift 2 ;;
+      --tag) tag=$2; shift 2 ;;
+      *) die "app-start: unknown argument $1" ;;
+    esac
+  done
+  [ -x "$bin" ] || die "no executable $bin"
+  [ -z "$config" ] || { mkdir -p "$r/home/.config/thalvi"; cp "$config" "$r/home/.config/thalvi/desktop.json"; }
+  local -a args extra
+  mapfile -d '' args < <(sandbox_args "$r")
+  mapfile -d '' extra < <(inner_env "$r")
+  launch_held "$r/out/app-$tag.log" "$r/app.pid" bwrap "${args[@]}" "${extra[@]}" "${envs[@]}" \
+    --ro-bind "$bin" /tmp/thalvi-desktop /tmp/thalvi-desktop
+  echo "$bin" > "$r/app.bin"
+  echo "APP_LOG=$r/out/app-$tag.log"
+}
+
+cmd_app_stop() {
+  local r=$1
+  [ -s "$r/app.pid" ] || return 0
+  local pid; pid=$(cat "$r/app.pid")
+  kill "$pid" 2>/dev/null || true
+  local i
+  for i in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  : > "$r/app.pid"
+}
+
+cmd_down() {
+  local r=$1
+  cmd_app_stop "$r"
+  if [ -s "$r/compositor.pid" ]; then
+    local pid; pid=$(cat "$r/compositor.pid")
+    kill "$pid" 2>/dev/null || true
+    local i
+    for i in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    : > "$r/compositor.pid"
+  fi
+  echo "down: $r (evidence stays in $r/out)"
+}
+
+cmd_proof() {
+  local r=$1
+  run_inner "$r" bash -c '
+    echo "pid namespace: $(readlink /proc/self/ns/pid) here, '"$(readlink /proc/self/ns/pid)"' on the host; this shell is pid $$ and sees $(ls /proc | grep -c "^[0-9]") processes"
+    echo "host pid 1 comm: $(cat /proc/1/comm) (a sandbox sees bwrap or its child, not systemd)"
+    echo "--- /dev/snd: $(ls /dev/snd 2>&1 | head -1)"
+    echo "--- /dev/dri: $(ls /dev/dri | tr "\n" " ")"
+    echo "--- /run/user entries (own private dir only):"; ls -A /run/user/*
+    echo "--- real sockets that must be absent:"
+    for p in /run/user/'"$UID_NUM"'/pipewire-0 /run/user/'"$UID_NUM"'/pulse /run/user/'"$UID_NUM"'/discord-ipc-0 /run/user/'"$UID_NUM"'/gnupg /tmp/.X11-unix; do
+      [ -e "$p" ] && echo "PRESENT $p" || echo "absent  $p"
+    done
+    echo "--- visible wayland sockets (must be the rig'"'"'s two): $(ls /run/user/*/ | grep "^wayland-[0-9]*$" | tr "\n" " ")"
+    echo "--- hypr instances visible: $(ls /run/user/*/hypr 2>&1 | tr "\n" " ")"
+    echo "--- the developer'"'"'s home: $(ls -d '"$HOME"' 2>&1 | head -1); config, data and cache are the private ones under $HOME"
+    echo "--- /home contents: $(ls /home | tr "\n" " ")"
+    echo "--- env: DISPLAY=${DISPLAY:-unset} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset} PULSE_SERVER=${PULSE_SERVER:-unset} HOME=$HOME"
+    echo "--- audio: $(cat "$ALSA_CONFIG_PATH" | tr "\n" ";")"
+    echo "--- abstract unix sockets share the host network namespace; X11 is off (no DISPLAY, xwayland disabled)"
+  ' | tee "$r/out/isolation.txt"
+}
+
+main() {
+  local cmd=${1:-help}; shift || true
+  case $cmd in
+    up) cmd_up "$@" ;;
+    app-start) cmd_app_start "$@" ;;
+    app-stop) cmd_app_stop "$@" ;;
+    down) cmd_down "$@" ;;
+    proof) cmd_proof "$@" ;;
+    ctl) local r=$1 bin; shift; bin=$(cat "$r/app.bin" 2>/dev/null || true); [ -n "$bin" ] || die "ctl: no app.bin (app-start records it)"; run_inner "$r" --ro-bind "$bin" /tmp/thalvi-desktop /tmp/thalvi-desktop "$@" ;;
+    hypr) local r=$1; shift; run_inner "$r" hyprctl "$@" ;;
+    shot) local r=$1; run_inner "$r" grim "/tmp/out/$2.png"; echo "$r/out/$2.png" ;;
+    burst)
+      local r=$1 name=$2 n=$3 gap=$4
+      run_inner "$r" bash -c 'for i in $(seq -f %03g 1 "$2"); do echo "$1-$i $(date +%T.%3N)" >> /tmp/out/$1-times.txt; grim -l 1 /tmp/out/$1-$i.png; sleep "$3"; done' _ "$name" "$n" "$gap" ;;
+    sh) local r=$1; shift; run_inner "$r" "$@" ;;
+    help|-h|--help) usage ;;
+    *) usage >&2; exit 2 ;;
+  esac
+}
+
+main "$@"
