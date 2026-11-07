@@ -17,6 +17,8 @@ export type Status =
       text: string;
       waitingForQuiet: boolean;
       pauseMs: number;
+      /** The desktop can only copy dictation to the clipboard, so a paste or submit ending is a copy. */
+      copies: boolean;
     }
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
   | { state: "done"; target: string | null; route: Route; notice: string }
@@ -191,6 +193,8 @@ export interface Backend {
   discardDraft(): Promise<void>;
   /** The tray asked for the settings page with this id. */
   onOpenPage(listener: (page: string) => void): void;
+  /** Why this desktop offers no hold key to dictate with, or null where it does. */
+  getHoldKeyUnavailable(): Promise<string | null>;
   /** Whether the OS starts Thalvi at login, read from the OS, and why Thalvi could not put its entry back on start. */
   getStartAtLogin(): Promise<SwitchState>;
   /** Adds or removes the startup entry; rejects unless the OS then holds it as asked. */

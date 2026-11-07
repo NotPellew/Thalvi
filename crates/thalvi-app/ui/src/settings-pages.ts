@@ -32,6 +32,8 @@ export interface PageContext {
   microphones: string[] | { error: string };
   /** The microphone actually open when the pages were built. */
   audio: AudioStatus;
+  /** Why this desktop offers no hold key, or null where it does. */
+  holdKeyUnavailable: string | null;
   /** Whether the OS starts Thalvi at login, or why that could not be read. */
   startAtLogin: SwitchRead;
   /** Whether Thalvi is in the app menu, or why that could not be read. */
@@ -459,6 +461,15 @@ function wordListTable(draft: Settings, controls: Controls): { node: HTMLElement
   };
 }
 
+/** The hold key has no setting here; the group appears only where the desktop gives the app no way to see it. */
+function holdKey({ holdKeyUnavailable }: PageContext): HTMLElement[] {
+  if (holdKeyUnavailable === null) return [];
+  return [
+    group("Hold key"),
+    row("Hold a key to dictate", null, unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null })),
+  ];
+}
+
 function capture(context: PageContext): HTMLElement[] {
   const { draft, controls } = context;
   const pause = (key: "paste" | "submit" | "task", label: string): HTMLElement =>
@@ -471,6 +482,7 @@ function capture(context: PageContext): HTMLElement[] {
     );
   return [
     ...wakeHeads(context),
+    ...holdKey(context),
     group("Endings"),
     row("Ending phrases", "Say one to finish a capture. Every action needs at least one phrase.", endingsTable(context)),
     group("Quiet before acting"),

@@ -128,6 +128,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     copyText: vi.fn<(text: string) => Promise<void>>(() => Promise.resolve()),
     discardDraft: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     onOpenPage: vi.fn((listener: (page: string) => void) => pageListeners.push(listener)),
+    getHoldKeyUnavailable: vi.fn<() => Promise<string | null>>(() => Promise.resolve(null)),
     getStartAtLogin: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),
     setStartAtLogin: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
     getMenuEntry: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),

@@ -70,22 +70,22 @@ function script(): Status[] {
     { state: "capturing", target: slack, committed: "", partial: words.slice(0, 3).join(" ") },
     { state: "capturing", target: slack, committed: words.slice(0, 7).join(" "), partial: words.slice(7, 10).join(" ") },
     { state: "capturing", target: slack, committed: SENTENCE.repeat(3), partial: "and bring the" },
-    { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: true, pauseMs: 2500 },
-    { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: false, pauseMs: 2500 },
+    { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: true, pauseMs: 2500, copies: false },
+    { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: false, pauseMs: 2500, copies: false },
     { state: "working", target: slack, route: "submit", cancellable: false },
     { state: "done", target: slack, route: "submit", notice: "Sent" },
     { state: "paused" },
     { state: "listening" },
     { state: "starting", target: slack },
     { state: "capturing", target: slack, committed: "Remind me to call", partial: null },
-    { state: "pending", target: slack, route: "paste", text: "Remind me to call", waitingForQuiet: false, pauseMs: 700 },
+    { state: "pending", target: slack, route: "paste", text: "Remind me to call", waitingForQuiet: false, pauseMs: 700, copies: false },
     { state: "done", target: slack, route: "paste", notice: "Pasted" },
     { state: "starting", target: null },
     { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:8080 (connection refused). Start the Thalvi server, or fix Settings → Speech → Server address.", headline: "Can't reach speech server — Settings", causes: [], kind: "other" },
     { state: "loading", notice: "Loading the speech model." },
     { state: "starting", target: "Firefox" },
     { state: "capturing", target: "Firefox", committed: "", partial: null },
-    { state: "pending", target: "Firefox", route: "task", text: "open the calendar", waitingForQuiet: false, pauseMs: 2500 },
+    { state: "pending", target: "Firefox", route: "task", text: "open the calendar", waitingForQuiet: false, pauseMs: 2500, copies: false },
     { state: "working", target: "Firefox", route: "task", cancellable: true },
     { state: "done", target: "Firefox", route: "task", notice: "Opened the calendar" },
   ];
@@ -238,6 +238,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
       return Promise.resolve();
     },
     onOpenPage: () => undefined,
+    getHoldKeyUnavailable: () => Promise.resolve(null),
     getStartAtLogin: () =>
       Promise.resolve(
         hyprland
