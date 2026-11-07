@@ -5,7 +5,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
-SHELLCHECK=(pipx run shellcheck-py==0.11.0.1)
+SHELLCHECK=(pipx run --spec shellcheck-py==0.11.0.1 shellcheck)
 components=(server desktop-windows web desktop-ui speech issue-sync)
 
 step() {
