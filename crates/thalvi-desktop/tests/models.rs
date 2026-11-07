@@ -15,8 +15,8 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use sha2::{Digest, Sha256};
 use thalvi_desktop::models::{
-    Asset, CatalogSpeech, ModelError, ModelKind, ModelStore, SpeechAssets, SpeechDownloads,
-    SpeechProgress,
+    Asset, CatalogSpeech, ModelError, ModelKind, ModelStore, SPOTTER, SpeechAssets,
+    SpeechDownloads, SpeechProgress,
 };
 
 const GOOD: &[u8] = b"pretend this is a model";
@@ -468,6 +468,32 @@ fn catalog_models_keep_their_files_apart_and_pinned() {
             assert_eq!(asset.sha256.len(), 64, "{}", asset.file_name);
             names.push(asset.file_name);
         }
+    }
+    let count = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), count);
+}
+
+#[test]
+fn the_ending_phrase_model_files_are_pinned_and_apart_from_the_other_models() {
+    let assets = [
+        SPOTTER.encoder,
+        SPOTTER.decoder,
+        SPOTTER.joiner,
+        SPOTTER.pieces,
+    ];
+    let mut names: Vec<&str> = assets.iter().map(|asset| asset.file_name).collect();
+    for asset in assets {
+        assert_eq!(asset.kind, ModelKind::Spotter, "{}", asset.file_name);
+        assert!(asset.url.starts_with("https://"), "{}", asset.url);
+        assert_eq!(asset.sha256.len(), 64, "{}", asset.file_name);
+    }
+    for model in CatalogSpeech::ALL {
+        let speech = model.assets();
+        names.extend(
+            [speech.encoder, speech.decoder, speech.joiner, speech.tokens].map(|a| a.file_name),
+        );
     }
     let count = names.len();
     names.sort_unstable();
