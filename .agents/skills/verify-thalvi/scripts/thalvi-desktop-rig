@@ -153,8 +153,7 @@ EOF
   mapfile -d '' args < <(sandbox_args "$r")
   launch_held "$r/supervisor.out" "$r/compositor.pid" bwrap "${args[@]}" --setenv RIG_W "${size%x*}" --setenv RIG_H "${size#*x}" --bind "$r/hypr.conf" /home/rig/hypr.conf \
     --bind "$r/supervisor.sh" /tmp/supervisor.sh /tmp/supervisor.sh
-  local i
-  for i in $(seq 200); do
+  for _ in $(seq 200); do
     [ -s "$r/out/inner.display" ] && break
     kill -0 "$(cat "$r/compositor.pid")" 2>/dev/null || { cat "$r/supervisor.out" "$r/out"/*.log >&2; die "compositors exited early (see $r/out)"; }
     sleep 0.1
