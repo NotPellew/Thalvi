@@ -1410,6 +1410,7 @@ mod tests {
             let store = ModelStore::in_dir(&dir);
             let (out, status) = watch::channel(Status::Paused);
             let publisher = Publisher::new(out, EndingPauses::default());
+            publisher.mode(Mode::Starting);
             let shown = || Visibility::of(&status.borrow(), true) == Visibility::Show;
 
             for failure in [false, true] {
