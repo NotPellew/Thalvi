@@ -20,12 +20,6 @@ function Wait-Until([scriptblock]$Done, [string]$What, [int]$Seconds = 60) {
   throw "timed out waiting for $What"
 }
 
-function Get-Status {
-  $file = Join-Path $OutDir 'status.json'
-  Start-Process $exe -ArgumentList 'status' -Wait -NoNewWindow -RedirectStandardOutput $file
-  Get-Content $file -Raw
-}
-
 function Save-Screen([string]$Name) {
   Add-Type -AssemblyName System.Windows.Forms, System.Drawing
   $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -40,8 +34,9 @@ function Save-Screen([string]$Name) {
 $app = Start-Process $exe -PassThru `
   -RedirectStandardOutput (Join-Path $OutDir 'app.log') -RedirectStandardError (Join-Path $OutDir 'app.err')
 try {
-  Wait-Until { (Get-Status) -match '"class"' -and (Get-Status) -notmatch 'unavailable' } 'the app to answer status'
-  "status: $(Get-Status)"
+  $log = Join-Path $OutDir 'app.log'
+  Wait-Until { (Get-Content $log -Raw -ErrorAction SilentlyContinue) -match 'Transcribing through' } 'the app to finish starting'
+  Get-Content $log
 
   Start-Process $exe
   Wait-Until { Get-Process thalvi-desktop -ErrorAction SilentlyContinue | Where-Object MainWindowTitle -eq 'Thalvi settings' } 'the Settings window'
