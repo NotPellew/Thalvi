@@ -115,7 +115,9 @@ are committed.
 - Rust desktop on Windows (`windows-latest`): build the desktop UI the same
   way, then `cargo fmt --all -- --check`, `cargo lint`,
   `cargo test -p thalvi-desktop -p thalvi-app --locked`, then the same
-  `tauri build` with `--bundles nsis`.
+  `tauri build` with `--bundles nsis`. CI then runs
+  `.github/scripts/windows-smoke.ps1` on that installer: it installs and starts
+  the app and opens Settings, and uploads screenshots.
 - Desktop UI (`crates/thalvi-app/ui/`): `npm ci`, `npm run typecheck`,
   `npm run lint`, `npm test`, `npm run build`.
 - Web (`web/`): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`,
