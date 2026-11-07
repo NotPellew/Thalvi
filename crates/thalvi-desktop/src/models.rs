@@ -146,6 +146,7 @@ pub struct WakeModelInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogSpeech {
     Nemotron160ms,
+    Unified160ms,
 }
 
 /// A catalog model's files, which a model folder must also contain under these names.
@@ -179,12 +180,43 @@ pub struct SpeechModelInfo {
     pub size: u64,
     /// The model's page, for reading about it.
     pub source: &'static str,
+    pub license: &'static str,
+    /// The languages it recognizes, in words.
+    pub languages: &'static str,
     /// Every file is on disk and matches its checksum.
     pub cached: bool,
 }
 
+/// One file of a catalog speech model, stored under `<model>.<file>`.
+macro_rules! speech_file {
+    ($model:literal, $base:literal, $file:literal, $size:expr, $sha256:literal) => {
+        Asset {
+            kind: ModelKind::Speech,
+            file_name: concat!($model, ".", $file),
+            url: concat!($base, $file),
+            size: $size,
+            sha256: $sha256,
+        }
+    };
+}
+
+/// The four files of a catalog speech model, each with its size and checksum.
+macro_rules! speech_assets {
+    ($model:literal, $base:literal, $encoder:tt, $decoder:tt, $joiner:tt, $tokens:tt) => {
+        SpeechAssets {
+            encoder: speech_assets!(@file $model, $base, "encoder.int8.onnx", $encoder),
+            decoder: speech_assets!(@file $model, $base, "decoder.int8.onnx", $decoder),
+            joiner: speech_assets!(@file $model, $base, "joiner.int8.onnx", $joiner),
+            tokens: speech_assets!(@file $model, $base, "tokens.txt", $tokens),
+        }
+    };
+    (@file $model:literal, $base:literal, $file:literal, ($size:expr, $sha256:literal)) => {
+        speech_file!($model, $base, $file, $size, $sha256)
+    };
+}
+
 impl CatalogSpeech {
-    pub const ALL: [Self; 1] = [Self::Nemotron160ms];
+    pub const ALL: [Self; 2] = [Self::Nemotron160ms, Self::Unified160ms];
 
     /// The catalog model called `name` in config.
     #[must_use]
@@ -195,7 +227,8 @@ impl CatalogSpeech {
     #[must_use]
     pub fn title(self) -> &'static str {
         match self {
-            Self::Nemotron160ms => "Nemotron Speech Streaming 0.6B",
+            Self::Nemotron160ms => "English only",
+            Self::Unified160ms => "Multilingual",
         }
     }
 
@@ -203,18 +236,40 @@ impl CatalogSpeech {
     pub fn description(self) -> &'static str {
         match self {
             Self::Nemotron160ms => {
-                "NVIDIA's English streaming recognizer, int8, answering every 160 ms. Runs on the CPU."
+                "NVIDIA's Nemotron Speech Streaming: the lightest on the CPU, and text appears soonest. Mostly without punctuation. The default."
+            }
+            Self::Unified160ms => {
+                "NVIDIA's Nemotron Unified ASR: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it needs a fast CPU and text appears about half a second later. Exported by Thalvi."
             }
         }
     }
 
-    /// The Hugging Face page of the repository the files come from.
+    /// The model's license.
+    #[must_use]
+    pub fn license(self) -> &'static str {
+        match self {
+            Self::Nemotron160ms => "NVIDIA Open Model License",
+            Self::Unified160ms => "OpenMDW-1.1",
+        }
+    }
+
+    /// The languages it recognizes.
+    #[must_use]
+    pub fn languages(self) -> &'static str {
+        match self {
+            Self::Nemotron160ms => "English",
+            Self::Unified160ms => "25 European languages, detected automatically",
+        }
+    }
+
+    /// The page of the model the files come from.
     #[must_use]
     pub fn source(self) -> &'static str {
         match self {
             Self::Nemotron160ms => {
                 "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25"
             }
+            Self::Unified160ms => "https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b",
         }
     }
 
@@ -223,44 +278,57 @@ impl CatalogSpeech {
     pub fn name(self) -> &'static str {
         match self {
             Self::Nemotron160ms => "nemotron_160ms",
+            Self::Unified160ms => "unified_160ms",
         }
     }
 
-    /// The downloads that provide this model: NVIDIA's Nemotron Speech Streaming 0.6B (NVIDIA
-    /// Open Model License) as exported to int8 ONNX for sherpa-onnx, pinned by repository commit.
+    /// The downloads that provide this model, each pinned by size and checksum. The Nemotron
+    /// Speech Streaming ones (NVIDIA Open Model License) are sherpa-onnx's int8 exports, pinned by
+    /// repository commit; Nemotron Unified ASR (OpenMDW-1.1) is Thalvi's own export, which is not
+    /// published anywhere else.
     #[must_use]
     pub fn assets(self) -> SpeechAssets<'static> {
         match self {
-            Self::Nemotron160ms => SpeechAssets {
-                encoder: Asset {
-                    kind: ModelKind::Speech,
-                    file_name: "nemotron_160ms.encoder.int8.onnx",
-                    url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25/resolve/237e551abd7a411ef92d3595454d9f6ab5fe7d6c/encoder.int8.onnx",
-                    size: 652_916_849,
-                    sha256: "71111f61b18e1e65e01e369434a5c0434868d2f44892742ae54240600c681209",
-                },
-                decoder: Asset {
-                    kind: ModelKind::Speech,
-                    file_name: "nemotron_160ms.decoder.int8.onnx",
-                    url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25/resolve/237e551abd7a411ef92d3595454d9f6ab5fe7d6c/decoder.int8.onnx",
-                    size: 7_257_753,
-                    sha256: "0be9702c2f427a2b6bb241d298e0d3836a558de1f5b9fd3018f1cce6e2b3fa98",
-                },
-                joiner: Asset {
-                    kind: ModelKind::Speech,
-                    file_name: "nemotron_160ms.joiner.int8.onnx",
-                    url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25/resolve/237e551abd7a411ef92d3595454d9f6ab5fe7d6c/joiner.int8.onnx",
-                    size: 1_735_862,
-                    sha256: "a35eac38a22ebceb04d230ed7afe0d68f446ba6914a036b97f14fece95967e23",
-                },
-                tokens: Asset {
-                    kind: ModelKind::Speech,
-                    file_name: "nemotron_160ms.tokens.txt",
-                    url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25/resolve/237e551abd7a411ef92d3595454d9f6ab5fe7d6c/tokens.txt",
-                    size: 8_952,
-                    sha256: "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff",
-                },
-            },
+            Self::Nemotron160ms => speech_assets!(
+                "nemotron_160ms",
+                "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25/resolve/237e551abd7a411ef92d3595454d9f6ab5fe7d6c/",
+                (
+                    652_916_849,
+                    "71111f61b18e1e65e01e369434a5c0434868d2f44892742ae54240600c681209"
+                ),
+                (
+                    7_257_753,
+                    "0be9702c2f427a2b6bb241d298e0d3836a558de1f5b9fd3018f1cce6e2b3fa98"
+                ),
+                (
+                    1_735_862,
+                    "a35eac38a22ebceb04d230ed7afe0d68f446ba6914a036b97f14fece95967e23"
+                ),
+                (
+                    8_952,
+                    "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff"
+                )
+            ),
+            Self::Unified160ms => speech_assets!(
+                "unified_160ms",
+                "https://github.com/NotPellew/Thalvi/releases/download/speech-models-v1/",
+                (
+                    633_538_635,
+                    "d7a9da717484351960be90cb26190aadb7de9b4fbfc8cf614eed2dc6381002e6"
+                ),
+                (
+                    9_223_194,
+                    "18753da5ca260c9252106d9bb9574ff7d14273d7b064daf74ab90fd6db785b32"
+                ),
+                (
+                    3_713_592,
+                    "bd9c00dc2d16fab355b4bfc49e0462138771e883dddf9b3bb515684c8fafacfc"
+                ),
+                (
+                    42_928,
+                    "94139a0b2134fd40664ca72260026fa8a073336bb2f062239c8ecde2c8031763"
+                )
+            ),
         }
     }
 }
@@ -500,6 +568,8 @@ impl ModelStore {
                 description: model.description(),
                 size: assets.size(),
                 source: model.source(),
+                license: model.license(),
+                languages: model.languages(),
                 cached: self.is_cached(&assets).await,
             });
         }

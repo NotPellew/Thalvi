@@ -790,6 +790,10 @@ mod tests {
                 SttEngine::Local(SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms)),
             ),
             (
+                r#"{"stt": {"engine": "local", "model": "unified_160ms"}}"#,
+                SttEngine::Local(SpeechChoice::Catalog(CatalogSpeech::Unified160ms)),
+            ),
+            (
                 r#"{"stt": {"engine": "local", "model": "/models/mine"}}"#,
                 SttEngine::Local(SpeechChoice::Folder("/models/mine".into())),
             ),
@@ -1088,7 +1092,7 @@ mod tests {
             ),
             (
                 r#"{"stt": {"engine": "local", "model": "whisper"}}"#,
-                "Unknown speech model \"whisper\". Use nemotron_160ms or the path of a folder",
+                "Unknown speech model \"whisper\". Use nemotron_160ms, unified_160ms or the path of a folder",
             ),
             (r#"{"stt": {"engine": "cloud"}}"#, "unknown variant `cloud`"),
         ] {
