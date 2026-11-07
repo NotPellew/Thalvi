@@ -1,16 +1,17 @@
 ---
 name: verify-thalvi
-description: Launch and drive Thalvi's web client (typed and spoken conversation, conversation list, history search, voice picker) against local fake endpoints, or a self-hosted model and speech engine, and capture evidence. Use to confirm a server or web change works the way a user would see it, beyond the unit tests.
+description: Launch and drive Thalvi's web client (typed and spoken conversation, conversation list, history search, voice picker) against local fake endpoints, or a self-hosted model and speech engine, or the real desktop app in a sandboxed nested Hyprland (overlay, Settings window, downloads), and capture evidence. Use to confirm a server, web or desktop change works the way a user would see it, beyond the unit tests.
 ---
 
 # Verify Thalvi
 
 Thalvi's main surface is the web client the Rust server serves at `/`. A user
 types or talks in it, hears spoken replies, and manages saved conversations.
-The other surfaces are not driven here. The desktop app (`crates/thalvi-app`,
-wake words, dictation into other windows) needs the Rust and desktop UI gates
-plus real use on each claimed desktop, as AGENTS.md requires. These web recipes
-establish no native desktop behavior. The `measure` binary has CLI tests in
+The desktop app (`crates/thalvi-app`) is driven by [desktop.md](desktop.md): the
+real app in a sandboxed nested Hyprland, for its overlay, Settings window,
+downloads and tray commands. It still needs the Rust and desktop UI gates plus
+real use on each claimed desktop, as AGENTS.md requires, and the web recipes
+below establish no native desktop behavior. The `measure` binary has CLI tests in
 `crates/thalvi-server/tests/measure_bin.rs`; it is not driven here.
 
 A run has one of two modes. Neither reaches a paid service or needs a key.
@@ -319,3 +320,8 @@ and `curl` on `PATH`.
 - `.agents/skills/verify-thalvi/scripts/local_endpoints.py`:
   `resolve <repo>` picks and checks the
   `--local` settings; `check <env file>` probes them.
+- `.agents/skills/verify-thalvi/scripts/thalvi-desktop-rig`: the sandboxed
+  desktop run (`up`, `app-start`, `ctl`, `shot`, `burst`, `proof`, `down`); needs
+  `bwrap`, `kwin_wayland`, `Hyprland`, `grim` and `wtype`. See `desktop.md`.
+- `.agents/skills/verify-thalvi/scripts/throttle-proxy.py`: a local proxy that
+  slows or delays-fails a download for `desktop.md` checks.
