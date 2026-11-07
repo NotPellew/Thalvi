@@ -44,6 +44,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     speechModel: () => undefined,
     status: () => undefined,
     opened: () => undefined,
+    refresh: () => undefined,
   };
 
   function applyView(): void {
@@ -84,7 +85,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       : saved && failure.textContent === "" ? SAVED_TEXT : "";
   }
 
+  let lastState: Status["state"] | null = null;
+
   function showStatus(status: Status): void {
+    // A download or retry finishes behind this long-lived window, so what lives on disk is read again when the app's state changes.
+    if (lastState !== null && status.state !== lastState) live.refresh();
+    lastState = status.state;
     runtimeFailure = status.state === "failed" ? status.notice : "";
     runtimeCauses = status.state === "failed" ? status.causes : [];
     live.status(status);

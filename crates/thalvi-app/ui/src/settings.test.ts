@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Draft, HistoryEntry, Settings } from "./contract.ts";
 import { mountSettings, SAVED_TEXT } from "./settings.ts";
-import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED } from "./testing.ts";
+import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO } from "./testing.ts";
 
 let root: HTMLElement;
 
@@ -302,6 +302,32 @@ describe("the wake word picker", () => {
     await settle();
     expect(stub.backend.downloadWakeModel).toHaveBeenCalledWith("hey_mycroft");
     expect(badge("Wake model (conversation)")).toBe("Ready");
+  });
+
+  it("shows models a retry downloaded while the window stayed open, and still flags the rest", async () => {
+    const stub = await openCapture();
+    expect(badge("Wake model (conversation)")).toBe("Not downloaded");
+    stub.backend.listWakeModels.mockResolvedValueOnce(
+      WAKE_MODELS_INFO.map((info) => ({ ...info, cached: info.name !== "hey_jarvis" })),
+    );
+    stub.emit({ state: "loading", notice: "Downloading the wake word model." });
+    await settle();
+    expect(badge("Wake model (conversation)")).toBe("Ready");
+    expect(Array.from(control("Wake model (dictation)", "select").options).map((option) => option.textContent)).toEqual([
+      "Hey Thalvi — Ready",
+      "Hey Mycroft — Ready",
+      "Hey Jarvis — Not downloaded",
+      "Custom model…",
+    ]);
+  });
+
+  it("leaves the wake pickers alone when a state change finds nothing new on disk", async () => {
+    const stub = await openCapture();
+    const option = control("Wake model (dictation)", "select").options[0];
+    stub.emit({ state: "loading", notice: "Loading." });
+    await settle();
+    expect(stub.backend.listWakeModels.mock.calls.length).toBeGreaterThan(1);
+    expect(control("Wake model (dictation)", "select").options[0]).toBe(option);
   });
 
   it("prevents choosing the other wake word's phrase", async () => {
