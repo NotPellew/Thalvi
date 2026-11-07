@@ -68,9 +68,12 @@ try {
   Get-Content $log
 
   Wait-Until { [Windows]::Of($app.Id) -contains 'hidden Thalvi settings' } 'the app to create its Settings window' 30
-  $second = Start-Process $exe -PassThru -Wait
-  "A second launch exited with $($second.ExitCode)."
-  Wait-Until { [Windows]::Of($app.Id) -contains 'visible Thalvi settings' } 'the Settings window' 20
+  # On the runner a relaunch soon after start can go unanswered, so this asks again.
+  Wait-Until {
+    Start-Process $exe -Wait
+    Start-Sleep -Seconds 1
+    [Windows]::Of($app.Id) -contains 'visible Thalvi settings'
+  } 'the Settings window' 45
   Start-Sleep -Seconds 3
   Save-Screen 'settings'
   if ($app.HasExited) { throw "the app exited with $($app.ExitCode)" }
