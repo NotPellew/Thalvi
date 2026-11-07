@@ -54,6 +54,7 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .trow .phrase { flex: 1; white-space: nowrap; font: 13px var(--mono); }
 .trow.add { justify-content: flex-end; }
 .trow.add input { flex: 1; max-width: 16em; }
+.trow.add.word-add { justify-content: flex-start; }
 .trow.check input { flex: 1; }
 .card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
 .card legend { font: 700 12px var(--mono); color: var(--neon); padding: 0 6px; }

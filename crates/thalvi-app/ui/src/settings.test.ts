@@ -562,6 +562,27 @@ describe("the word list", () => {
     expect(stub.backend.wordListSupport).toHaveBeenCalledWith(SETTINGS.server);
     expect(offered()).toBe(true);
   });
+
+  it("keeps chips, the add box and messages in one column inside the word list controls", async () => {
+    await openWith(
+      "server",
+      () => Promise.reject(new Error("Thalvi could not reach the server at ws://127.0.0.1:8080 to ask about a word list.")),
+      ["Cybrex2"],
+    );
+    const found = rowOf("Word list");
+    const ctl = found.querySelector(".ctl") as HTMLElement;
+    const stack = ctl.firstElementChild as HTMLElement;
+    expect(Array.from(ctl.children)).toEqual([stack]);
+    const chipsEl = stack.querySelector(".chips");
+    const addRow = stack.querySelector(".trow.add");
+    const notes = Array.from(stack.querySelectorAll(":scope > .note"));
+    expect(chips()).toEqual(["Cybrex2"]);
+    expect(Array.from(stack.children)).toEqual([chipsEl, addRow, ...notes]);
+    expect(notes.map((note) => note.textContent).join("")).toContain("could not reach the server");
+    expect(addRow?.classList.contains("word-add")).toBe(true);
+    goTo("capture");
+    expect(rowOf("Ending phrases").querySelector(".trow.add")?.classList.contains("word-add")).toBe(false);
+  });
 });
 
 describe("where speech is recognized", () => {

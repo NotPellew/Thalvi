@@ -434,7 +434,7 @@ function wordListTable(draft: Settings, controls: Controls): { node: HTMLElement
   });
   render();
   return {
-    node: el("div", { class: "stack wide" }, chips, el("div", { class: "trow add" }, entry.node, add), problem),
+    node: el("div", { class: "stack wide" }, chips, el("div", { class: "trow add word-add" }, entry.node, add), problem),
     enable: (on) => {
       enabled = on;
       input.disabled = !on;
@@ -700,7 +700,7 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
     "Names and terms to spell your way, added one at a time. Recognition on this computer favours them, and so does a server that supports it, in dictation and conversations.",
     words.node,
   );
-  wordRow.querySelector(".ctl")?.append(wordProblem);
+  words.node.append(wordProblem);
   let asked = 0;
   function checkWordList(): void {
     const ask = (asked += 1);
