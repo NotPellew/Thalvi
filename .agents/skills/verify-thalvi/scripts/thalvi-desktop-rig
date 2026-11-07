@@ -80,7 +80,8 @@ inner_env() {
   local r=$1
   if [ -e "$r/gnome" ]; then
     # DISPLAY names the socket file: plain :0 would try the host's abstract socket first. The cookie is the run's own.
-    printf '%s\0' --setenv WAYLAND_DISPLAY "$(inner_display "$r")" --setenv GDK_BACKEND wayland \
+    # No GDK_BACKEND, as in a real GNOME session: the app picks X11 itself there.
+    printf '%s\0' --setenv WAYLAND_DISPLAY "$(inner_display "$r")" \
       --setenv XDG_CURRENT_DESKTOP GNOME --setenv XDG_SESSION_TYPE wayland --setenv PIPEWIRE_REMOTE rig-pipewire \
       --setenv DISPLAY "unix:/tmp/.X11-unix/X$(cat "$r/x11.number")" \
       --setenv XAUTHORITY "/run/user/$UID_NUM/$(cat "$r/x11.auth")"
