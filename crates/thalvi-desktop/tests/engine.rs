@@ -989,9 +989,9 @@ async fn a_whole_capture_command_runs_after_the_task_pause_and_an_explicit_endin
             3500,
         ),
         (
-            &[(1000, "Open Google.com.")],
+            &[(1000, "Open Google dot com.")],
             CaptureRoute::Task,
-            "Open Google.com.",
+            "Open Google dot com.",
             &[1000],
             3500,
         ),
