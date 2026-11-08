@@ -274,10 +274,14 @@ describe("save", () => {
       expect(root.querySelector(".msg")?.textContent).toBe("");
     });
 
-    it.each(["revert", "save"] as const)("keeps unsaved edits and says so until the user chooses to %s", async (action) => {
+    it.each([
+      ["revert", "Quiet before paste"],
+      ["save", "Quiet before paste"],
+      ["revert", "Threshold (dictation)"],
+    ] as const)("keeps unsaved edits and says so until the user chooses to %s (edit of %s)", async (action, edited) => {
       const stub = await openChanged();
       goTo("capture");
-      type(control("Quiet before paste", "input"), "1.5");
+      type(control(edited, "input"), edited === "Threshold (dictation)" ? "0.8" : "1.5");
       goTo("speech");
       stub.changedElsewhere();
       await settle();
