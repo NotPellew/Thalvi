@@ -381,6 +381,7 @@ fn create_windows(app: &AppHandle) -> tauri::Result<()> {
             .title("Thalvi settings")
             .inner_size(780.0, 680.0)
             .visible(false)
+            .focused(false)
             .build()?;
     let window = settings.clone();
     settings.on_window_event(move |event| {
