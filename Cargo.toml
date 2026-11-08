@@ -32,6 +32,7 @@ ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "
 proptest = { version = "1.12", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 rtrb = "0.4"
+rustix = { version = "1", default-features = false, features = ["std", "net", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -52,9 +53,13 @@ webrtc-vad = "0.4"
 windows-registry = "0.6"
 windows = { version = "0.62", features = [
     "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
     "Win32_System_DataExchange",
+    "Win32_System_IO",
     "Win32_System_Memory",
     "Win32_System_Ole",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",

@@ -545,7 +545,9 @@ fn wav(pcm: &[i16]) -> Vec<u8> {
     bytes
 }
 
-pub(crate) fn now_ms() -> u64 {
+/// Milliseconds since the Unix epoch, as `ts_ms` in the log.
+#[must_use]
+pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| {
@@ -554,7 +556,7 @@ pub(crate) fn now_ms() -> u64 {
 }
 
 /// How far back [`summarize`] looks.
-pub const SUMMARY_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+pub const SUMMARY_WINDOW: Duration = Duration::from_hours(24);
 
 /// The delays and outcomes of one stage of a dictation.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -568,27 +570,34 @@ pub struct StageSummary {
     pub p95_ms: Option<f64>,
 }
 
-/// What `metrics.jsonl` says about the dictations of a recent window.
+/// The stages of a dictation, each with its delays and outcomes.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
-pub struct Summary {
+pub struct Stages {
     /// Opening the recognizer.
     pub connect: StageSummary,
     /// The first speech to the first words.
     pub partial_lag: StageSummary,
     /// The last speech to a final result.
+    #[serde(rename = "final")]
     pub final_lag: StageSummary,
     /// Typing or copying the text.
     pub delivery: StageSummary,
+}
+
+/// What `metrics.jsonl` says about the dictations of a recent window.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Summary {
+    pub stages: Stages,
     /// How the captures ended.
     pub captures: BTreeMap<String, usize>,
 }
 
-/// Summarizes the metrics in `dir` written within `window` before `now_ms`.
+/// Summarizes the metrics in `dir` written within `window` before now.
 ///
 /// Lines that are not metrics are skipped, so a damaged log still gives what can be read.
 #[must_use]
-pub fn summarize(dir: &Path, now_ms: u64, window: Duration) -> Summary {
-    let since = now_ms.saturating_sub(u64::try_from(window.as_millis()).unwrap_or(u64::MAX));
+pub fn summarize(dir: &Path, window: Duration) -> Summary {
+    let since = now_ms().saturating_sub(u64::try_from(window.as_millis()).unwrap_or(u64::MAX));
     let path = dir.join("metrics.jsonl");
     let mut summary = Summary::default();
     let mut times: [Vec<f64>; 4] = Default::default();
@@ -609,13 +618,13 @@ pub fn summarize(dir: &Path, now_ms: u64, window: Duration) -> Summary {
                     *summary.captures.entry(outcome).or_default() += 1;
                     continue;
                 }
-                Some("desktop_transcription_ready") => (&mut summary.connect, 0),
-                Some("desktop_partial_lag") => (&mut summary.partial_lag, 1),
-                Some("desktop_final_lag") => (&mut summary.final_lag, 2),
+                Some("desktop_transcription_ready") => (&mut summary.stages.connect, 0),
+                Some("desktop_partial_lag") => (&mut summary.stages.partial_lag, 1),
+                Some("desktop_final_lag") => (&mut summary.stages.final_lag, 2),
                 Some("desktop_host_call")
                     if matches!(line["call"].as_str(), Some("deliver" | "copy")) =>
                 {
-                    (&mut summary.delivery, 3)
+                    (&mut summary.stages.delivery, 3)
                 }
                 _ => continue,
             };
@@ -627,10 +636,10 @@ pub fn summarize(dir: &Path, now_ms: u64, window: Duration) -> Summary {
         }
     }
     for (stage, mut took) in [
-        &mut summary.connect,
-        &mut summary.partial_lag,
-        &mut summary.final_lag,
-        &mut summary.delivery,
+        &mut summary.stages.connect,
+        &mut summary.stages.partial_lag,
+        &mut summary.stages.final_lag,
+        &mut summary.stages.delivery,
     ]
     .into_iter()
     .zip(times)
@@ -1043,7 +1052,7 @@ mod tests {
     fn the_summary_gives_percentiles_per_stage_and_counts_outcomes_within_the_window() {
         let dir = TempDir::new("summary");
         std::fs::create_dir_all(dir.root()).unwrap();
-        let now = 10_000_000_000_u64;
+        let now = now_ms();
         let hour = 3_600_000_u64;
         let line = |at: u64, event: &str, outcome: &str, took: Option<f64>, call: Option<&str>| {
             let mut line = json!({"ts_ms": at, "event": event, "outcome": outcome});
@@ -1110,29 +1119,35 @@ mod tests {
         }
         std::fs::write(dir.root().join("metrics.jsonl"), lines.join("\n")).unwrap();
 
-        let summary = summarize(&dir.root(), now, SUMMARY_WINDOW);
+        let summary = summarize(&dir.root(), SUMMARY_WINDOW);
         // 19 ok connects of 10..190 and one error of 900: 20 values, p50 is the 10th, p95 the 19th.
-        assert_eq!(summary.connect.count, 20);
+        assert_eq!(summary.stages.connect.count, 20);
         assert_eq!(
-            summary.connect.outcomes,
+            summary.stages.connect.outcomes,
             BTreeMap::from([("error".to_owned(), 1), ("ok".to_owned(), 19)])
         );
         assert_eq!(
-            (summary.connect.p50_ms, summary.connect.p95_ms),
+            (summary.stages.connect.p50_ms, summary.stages.connect.p95_ms),
             (Some(100.0), Some(190.0))
         );
         assert_eq!(
-            (summary.partial_lag.p50_ms, summary.partial_lag.p95_ms),
+            (
+                summary.stages.partial_lag.p50_ms,
+                summary.stages.partial_lag.p95_ms
+            ),
             (Some(300.0), Some(300.0))
         );
-        assert_eq!(summary.final_lag.p50_ms, Some(400.0));
-        assert_eq!(summary.delivery.count, 1, "only the delivering host call");
-        assert_eq!(summary.delivery.p95_ms, Some(30.0));
+        assert_eq!(summary.stages.final_lag.p50_ms, Some(400.0));
+        assert_eq!(
+            summary.stages.delivery.count, 1,
+            "only the delivering host call"
+        );
+        assert_eq!(summary.stages.delivery.p95_ms, Some(30.0));
         assert_eq!(
             summary.captures,
             BTreeMap::from([("cancelled".to_owned(), 1), ("ok".to_owned(), 2)])
         );
-        let quiet = summarize(&dir.0, now, SUMMARY_WINDOW);
+        let quiet = summarize(&dir.0, SUMMARY_WINDOW);
         assert_eq!(quiet, Summary::default(), "no log, nothing to say");
     }
 }

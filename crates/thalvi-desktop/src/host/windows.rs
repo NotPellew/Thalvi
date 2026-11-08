@@ -1,12 +1,15 @@
 //! Windows host: window identity, `SendInput` typing and the clipboard, over a small Win32 seam.
 
+mod pipe;
 mod win32;
 
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use super::{
-    App, Delivered, HoldSource, Host, HostError, Modifier, StateServer, TypedText, WebUrl,
+    App, Delivered, HoldSource, Host, HostError, Modifier, RequestServer, TypedText, WebUrl,
 };
 use crate::hold::HoldKey;
 pub use win32::Real;
@@ -90,12 +93,15 @@ impl Windows {
         Self::new(Real)
     }
 
+    /// Answers each request on a named pipe only the current user may open, and never over the
+    /// network, with `handler(line)` until the guard is dropped.
+    ///
     /// # Errors
-    /// Always [`HostError::Unsupported`]: Windows has no private channel for it yet.
-    pub fn serve_state(
-        _state: impl Fn() -> String + Send + 'static,
-    ) -> Result<StateServer, HostError> {
-        Err(no_state())
+    /// [`HostError::Unsupported`] when the pipe cannot be made or another app serves it.
+    pub fn serve_requests(
+        handler: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> Result<RequestServer, HostError> {
+        pipe::serve(Arc::new(handler))
     }
 
     /// Reports each press and release of `key` to `on_change` until the guard is dropped, and keeps
@@ -110,10 +116,12 @@ impl Windows {
         win32::watch_hold_key(key.clone(), Box::new(on_change)).map(HoldSource::Hook)
     }
 
+    /// The running app's reply to `request`, waiting up to `timeout`; `None` when no app answers.
+    ///
     /// # Errors
-    /// Always [`HostError::Unsupported`], as for [`Self::serve_state`].
-    pub fn query_state() -> Result<Option<String>, HostError> {
-        Err(no_state())
+    /// [`HostError::Unsupported`] when the answer could not be asked or read.
+    pub fn send_request(request: &str, timeout: Duration) -> Result<Option<String>, HostError> {
+        pipe::ask(request, timeout)
     }
 
     /// Shows `message` in an error box titled `title` and waits until it is closed. Needs no
@@ -121,12 +129,6 @@ impl Windows {
     pub fn show_error(title: &str, message: &str) {
         win32::message_box(title, message);
     }
-}
-
-fn no_state() -> HostError {
-    HostError::Unsupported(
-        "Sharing the status with a status bar is not available on Windows yet.".to_owned(),
-    )
 }
 
 impl<A: Win32> Windows<A> {
