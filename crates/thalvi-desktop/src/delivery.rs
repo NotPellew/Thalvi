@@ -148,7 +148,11 @@ where
                 .await,
             ),
             CaptureOutcome::Accepted(request) => Some(match request.route {
-                CaptureRoute::Paste => self.type_in(recorder, bound, &request.text, false).await,
+                // The engine writes a Write request out and hands on a Paste; one that arrives
+                // unwritten is pasted as recognized, never invented.
+                CaptureRoute::Paste | CaptureRoute::Write => {
+                    self.type_in(recorder, bound, &request.text, false).await
+                }
                 CaptureRoute::Submit => self.type_in(recorder, bound, &request.text, true).await,
                 CaptureRoute::Task => self.run_task(recorder, config, &request.text).await,
             }),
@@ -355,6 +359,22 @@ mod tests {
     async fn run(host: FakeHost, outcome: CaptureOutcome) -> (Option<String>, Vec<String>) {
         let (finished, calls) = finish(host, outcome).await;
         (finished.map(|finished| finished.notice), calls)
+    }
+
+    #[tokio::test]
+    async fn a_failed_writing_types_nothing_and_leaves_the_users_own_words_on_the_clipboard() {
+        let failed = CaptureOutcome::Failed {
+            error: CaptureError::Writing(crate::writing::WritingError::Timeout),
+            recoverable_text: Some("tell Anna I'm late".to_owned()),
+        };
+        let (finished, calls) = finish(FakeHost::default(), failed).await;
+        let finished = finished.unwrap();
+        assert!(!finished.delivered);
+        assert_eq!(
+            finished.notice,
+            "The writing model took longer than 15 seconds. Nothing was typed. Captured text is on the clipboard."
+        );
+        assert_eq!(calls, ["capture_target", "copy:\"tell Anna I'm late\""]);
     }
 
     #[tokio::test]

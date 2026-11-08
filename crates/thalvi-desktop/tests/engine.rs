@@ -28,6 +28,7 @@ use thalvi_desktop::recognizer::{
 };
 use thalvi_desktop::vad::VadDetector;
 use thalvi_desktop::wake::WakeEvent;
+use thalvi_desktop::writing::WritingError;
 use tokio::task::{JoinHandle, LocalSet};
 
 type TestEngine = Engine<FakeRecognizer, FakeWake, FakeCuePlayer>;
@@ -3218,7 +3219,7 @@ async fn cancelling_a_hold_from_outside_ends_it_cancelled_and_the_release_does_n
 
 #[tokio::test(start_paused = true)]
 async fn spoken_endings_are_text_during_a_hold_and_act_after_the_wake_word() {
-    const CUSTOM: &str = r#"{"endings": {"paste": "paste", "send it": "submit",
+    const CUSTOM: &str = r#"{"endings": {"paste": "paste", "write it": "write", "send it": "submit",
         "make it so": "task", "drop last": "scratch", "forget it": "cancel"}}"#;
     // (config, what is said, what the same words do after the wake word; a hold
     // always pastes everything that was said)
@@ -4088,6 +4089,550 @@ async fn cancelling_during_the_post_release_wait_cancels_at_once_and_delivers_no
             );
             assert_eq!(rig.started(Cue::Accepted).len(), 0);
             assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
+        })
+        .await;
+}
+
+// ---- Writing a dictation out through the chat endpoint ----
+
+/// What the fake chat endpoint does with a request.
+#[derive(Clone, Copy)]
+enum Chat {
+    /// Streams what the test pushes through the [`ChatFeed`].
+    Live,
+    Status(u16),
+    /// Takes the request and never answers.
+    Stall,
+    /// Answers with this event stream and ends it.
+    Stream(&'static str),
+}
+
+/// Pushes streamed answer text to the fake chat endpoint's client.
+struct ChatFeed(tokio::sync::mpsc::UnboundedSender<Vec<u8>>);
+
+impl ChatFeed {
+    fn text(&self, piece: &str) {
+        let event = json!({"choices": [{"delta": {"content": piece}}]});
+        self.0
+            .send(format!("data: {event}\n\n").into_bytes())
+            .unwrap();
+    }
+
+    fn finish(self) {
+        self.0.send(b"data: [DONE]\n\n".to_vec()).unwrap();
+    }
+}
+
+/// What the fake chat endpoint was asked.
+struct Asked {
+    path: String,
+    authorization: Option<String>,
+    body: serde_json::Value,
+}
+
+async fn chat(
+    reply: Chat,
+) -> (
+    String,
+    tokio::sync::mpsc::UnboundedReceiver<Asked>,
+    ChatFeed,
+) {
+    use std::sync::{Arc, Mutex};
+
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::extract::Request;
+    use axum::http::{StatusCode, header};
+    use axum::response::{IntoResponse, Response};
+
+    let (asked_tx, asked) = tokio::sync::mpsc::unbounded_channel();
+    let (feed_tx, feed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let feed_rx = Arc::new(Mutex::new(Some(feed_rx)));
+    let app = Router::new().fallback(move |request: Request| {
+        let asked_tx = asked_tx.clone();
+        let feed_rx = Arc::clone(&feed_rx);
+        async move {
+            let path = request.uri().path().to_owned();
+            let authorization = request
+                .headers()
+                .get(header::AUTHORIZATION)
+                .map(|value| value.to_str().unwrap().to_owned());
+            let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+            let _ = asked_tx.send(Asked {
+                path,
+                authorization,
+                body: serde_json::from_slice(&body).unwrap(),
+            });
+            let events = |body: Body| -> Response {
+                Response::builder()
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(body)
+                    .unwrap()
+            };
+            match reply {
+                Chat::Live => {
+                    let rx = feed_rx.lock().unwrap().take().unwrap();
+                    events(Body::from_stream(futures_util::stream::unfold(
+                        rx,
+                        |mut rx| async move {
+                            rx.recv()
+                                .await
+                                .map(|chunk| (Ok::<_, std::convert::Infallible>(chunk), rx))
+                        },
+                    )))
+                }
+                Chat::Status(code) => StatusCode::from_u16(code).unwrap().into_response(),
+                Chat::Stall => std::future::pending().await,
+                Chat::Stream(text) => events(Body::from(text)),
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (url, asked, ChatFeed(feed_tx))
+}
+
+fn with_writing(url: &str) -> String {
+    format!(
+        r#"{{"ending_pause": {{"paste": 2.5}}, "writing": {{"url": "{url}", "model": "m", "api_key": "k"}}}}"#
+    )
+}
+
+const WORDS: &str = "tell Anna I'm late";
+
+/// The two ways to ask for a dictation to be written out.
+#[derive(Clone, Copy, Debug)]
+enum Ask {
+    /// The spoken ending "write that out" in a wake-word capture.
+    Ending,
+    /// Holding the write key.
+    Key,
+}
+
+impl Rig {
+    async fn press_write(&self) {
+        settle().await;
+        self.key.set_write(true);
+        settle().await;
+    }
+
+    async fn release_write(&self, at: u64) {
+        self.at(at).await;
+        self.key.set_write(false);
+        settle().await;
+    }
+
+    /// Waits, for a few seconds of the paused clock, until the engine is in `expected`.
+    async fn state_is(&self, expected: EngineState) {
+        let mut state = self.handle.state();
+        let reached = tokio::time::timeout(
+            Duration::from_secs(5),
+            state.wait_for(|state| *state == expected),
+        )
+        .await;
+        assert!(
+            reached.is_ok(),
+            "the state never became {expected:?}; it is {:?}",
+            self.state()
+        );
+    }
+}
+
+impl Ask {
+    fn start(self, engine: TestEngine, frames: FakeFrames) -> JoinHandle<CaptureOutcome> {
+        match self {
+            Self::Ending => capture_task(engine, frames),
+            Self::Key => hold_task(engine, frames),
+        }
+    }
+
+    /// Says `words` and asks for them to be written out, up to the moment the engine hands them
+    /// to the writing model.
+    async fn say(self, rig: &mut Rig, words: &str) {
+        match self {
+            Self::Ending => {
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals(&format!("{words} write that out")).await;
+                rig.feed_until(3499, Kind::Quiet).await;
+                // The pause is over at 3500 and the accepted cue ends 100 ms later.
+                rig.at(3600).await;
+            }
+            Self::Key => {
+                rig.press_write().await;
+                rig.server.ready();
+                settle().await;
+                rig.at(230).await;
+                rig.feed_until(1000, Kind::Voice).await;
+                rig.partial(words).await;
+                rig.release_write(1200).await;
+                rig.feed_until(1250, Kind::Voice).await;
+                rig.finals(words).await;
+                rig.at(1350).await;
+            }
+        }
+    }
+}
+
+fn writing_failed(error: WritingError, words: &str) -> CaptureOutcome {
+    CaptureOutcome::Failed {
+        error: CaptureError::Writing(error),
+        recoverable_text: Some(words.to_owned()),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_written_text_streams_into_the_state_and_is_pasted_when_the_stream_ends() {
+    LocalSet::new()
+        .run_until(async {
+            for ask in [Ask::Ending, Ask::Key] {
+                let (url, mut asked, feed) = chat(Chat::Live).await;
+                let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
+                let task = ask.start(engine, frames);
+                ask.say(&mut rig, WORDS).await;
+                assert!(asked.recv().await.is_some(), "{ask:?}");
+                let writing = |text: &str| EngineState::Writing {
+                    text: text.to_owned(),
+                };
+                rig.state_is(writing("")).await;
+                feed.text("Hi Anna,");
+                rig.state_is(writing("Hi Anna,")).await;
+                feed.text(" I'm late, sorry.\n");
+                rig.state_is(writing("Hi Anna, I'm late, sorry.\n")).await;
+                assert!(!task.is_finished(), "{ask:?}: nothing is pasted mid-stream");
+                feed.finish();
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Paste, "Hi Anna, I'm late, sorry."),
+                    "{ask:?}"
+                );
+                assert_eq!(rig.notices(), Vec::<String>::new(), "{ask:?}");
+                assert_eq!(rig.state(), EngineState::Listening, "{ask:?}");
+                assert!(rig.gate.is_enabled(), "{ask:?}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_the_spoken_words_are_sent_with_the_language_instruction() {
+    LocalSet::new()
+        .run_until(async {
+            for (ask, words, key) in [
+                (Ask::Ending, WORDS, "k"),
+                // Every word of a hold is text, even the words of an ending.
+                (Ask::Key, "ok never mind write that out", "k"),
+                (Ask::Ending, WORDS, ""),
+            ] {
+                let (url, mut asked, _feed) = chat(Chat::Stream("data: [DONE]\n\n")).await;
+                let config = with_writing(&url)
+                    .replace(r#""api_key": "k""#, &format!(r#""api_key": "{key}""#));
+                let (mut rig, engine, frames) = Rig::new(&config);
+                let task = ask.start(engine, frames);
+                ask.say(&mut rig, words).await;
+                let asked = asked.recv().await.unwrap();
+                finished(task).await;
+                let label = format!("{ask:?} {words:?}");
+                assert_eq!(asked.path, "/v1/chat/completions", "{label}");
+                assert_eq!(
+                    asked.authorization,
+                    (!key.is_empty()).then(|| format!("Bearer {key}")),
+                    "{label}"
+                );
+                let body = asked.body.as_object().unwrap();
+                let mut keys: Vec<&str> = body.keys().map(String::as_str).collect();
+                keys.sort_unstable();
+                assert_eq!(keys, ["messages", "model", "stream"], "{label}");
+                assert_eq!(body["model"], "m", "{label}");
+                assert_eq!(body["stream"], true, "{label}");
+                let messages = body["messages"].as_array().unwrap();
+                assert_eq!(messages.len(), 2, "{label}");
+                assert_eq!(messages[0]["role"], "system", "{label}");
+                let prompt = messages[0]["content"].as_str().unwrap();
+                for instruction in ["language they spoke", "Add no facts", "text only"] {
+                    assert!(prompt.contains(instruction), "{label}: {prompt}");
+                }
+                assert_eq!(
+                    messages[1],
+                    json!({"role": "user", "content": words}),
+                    "{label}"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn nothing_is_written_unless_it_is_asked_for() {
+    LocalSet::new()
+        .run_until(async {
+            // (how it is dictated, the words as recognized, what is pasted)
+            for (name, expected) in [
+                ("paste ending", accepted(CaptureRoute::Paste, WORDS)),
+                (
+                    "hold key",
+                    accepted(CaptureRoute::Paste, "tell Anna I'm late write that out"),
+                ),
+                (
+                    "write ending without words",
+                    accepted(CaptureRoute::Paste, ""),
+                ),
+            ] {
+                let (url, mut asked, _feed) = chat(Chat::Live).await;
+                let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
+                let task = if name == "hold key" {
+                    let task = hold_task(engine, frames);
+                    rig.hold().await;
+                    rig.say(1000, Say::Partial("tell Anna I'm late write that out"))
+                        .await;
+                    rig.release(1200).await;
+                    rig.say(1250, Say::Final("tell Anna I'm late write that out"))
+                        .await;
+                    task
+                } else {
+                    let task = capture_task(engine, frames);
+                    rig.open().await;
+                    rig.feed_until(1000, Kind::Quiet).await;
+                    let said = if name == "paste ending" {
+                        format!("{WORDS} paste that")
+                    } else {
+                        "write that out".to_owned()
+                    };
+                    rig.finals(&said).await;
+                    rig.feed_until(3500, Kind::Quiet).await;
+                    task
+                };
+                rig.at(4000).await;
+                assert_eq!(finished(task).await, expected, "{name}");
+                assert!(asked.try_recv().is_err(), "{name}: no request was made");
+                assert!(
+                    !matches!(rig.state(), EngineState::Writing { .. }),
+                    "{name}"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_writing_call_that_gives_no_text_pastes_nothing_and_keeps_the_words() {
+    use WritingError::{BadResponse, Empty, NotSetUp, Status, Unreachable};
+
+    LocalSet::new()
+        .run_until(async {
+            let refused = {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                format!("http://{}/v1", listener.local_addr().unwrap())
+            };
+            // (name, endpoint, the reason, whether a request reached the endpoint)
+            let cases = [
+                ("no endpoint is set up", None, NotSetUp, false),
+                ("the endpoint is down", Some((refused, Chat::Live)), Unreachable, false),
+                ("it answers with an error status", Some((String::new(), Chat::Status(500))), Status(500), true),
+                (
+                    "it returns nothing",
+                    Some((String::new(), Chat::Stream("data: [DONE]\n\n"))),
+                    Empty,
+                    true,
+                ),
+                (
+                    "it returns only blanks",
+                    Some((
+                        String::new(),
+                        Chat::Stream("data: {\"choices\":[{\"delta\":{\"content\":\" \\n\"}}]}\n\ndata: [DONE]\n\n"),
+                    )),
+                    Empty,
+                    true,
+                ),
+                (
+                    "it sends what is not a chat reply",
+                    Some((String::new(), Chat::Stream("data: nonsense\n\n"))),
+                    BadResponse,
+                    true,
+                ),
+            ];
+            for (name, endpoint, reason, reached) in cases {
+                let (config, mut asked) = match endpoint {
+                    None => (r#"{"ending_pause": {"paste": 2.5}}"#.to_owned(), None),
+                    Some((url, reply)) if url.is_empty() => {
+                        let (url, asked, _feed) = chat(reply).await;
+                        (with_writing(&url), Some(asked))
+                    }
+                    Some((url, _)) => (with_writing(&url), None),
+                };
+                let (mut rig, engine, frames) = Rig::new(&config);
+                let task = capture_task(engine, frames);
+                Ask::Ending.say(&mut rig, WORDS).await;
+                assert_eq!(
+                    finished(task).await,
+                    writing_failed(reason, WORDS),
+                    "{name}"
+                );
+                if let Some(asked) = asked.as_mut() {
+                    assert_eq!(asked.try_recv().is_ok(), reached, "{name}");
+                }
+                assert_eq!(rig.state(), EngineState::Listening, "{name}");
+                assert!(rig.gate.is_enabled(), "{name}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_user_is_told_in_plain_words_where_to_set_up_writing() {
+    let error = CaptureError::Writing(WritingError::NotSetUp);
+    assert_eq!(
+        error.to_string(),
+        "No writing model is set up. Add one under Settings → Speech → Writing. Nothing was typed."
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn writing_that_takes_longer_than_fifteen_seconds_pastes_none_of_what_arrived() {
+    LocalSet::new()
+        .run_until(async {
+            for (name, stream_first) in [("no reply at all", false), ("a reply that stops", true)] {
+                let reply = if stream_first {
+                    Chat::Live
+                } else {
+                    Chat::Stall
+                };
+                let (url, mut asked, feed) = chat(reply).await;
+                let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
+                let task = capture_task(engine, frames);
+                Ask::Ending.say(&mut rig, WORDS).await;
+                assert!(asked.recv().await.is_some(), "{name}");
+                let began = rig.now();
+                if stream_first {
+                    feed.text("Hi Anna");
+                    rig.state_is(EngineState::Writing {
+                        text: "Hi Anna".to_owned(),
+                    })
+                    .await;
+                }
+                rig.at(began + 14_999).await;
+                assert!(!task.is_finished(), "{name}: still within the 15 s");
+                rig.at(began + 15_000).await;
+                assert_eq!(
+                    finished(task).await,
+                    writing_failed(WritingError::Timeout, WORDS),
+                    "{name}"
+                );
+                assert_eq!(rig.state(), EngineState::Listening, "{name}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_before_the_paste_drops_the_written_text() {
+    LocalSet::new()
+        .run_until(async {
+            for ask in [Ask::Ending, Ask::Key] {
+                for streaming in [false, true] {
+                    let label = format!("{ask:?}, streaming {streaming}");
+                    let (url, mut asked, feed) =
+                        chat(if streaming { Chat::Live } else { Chat::Stall }).await;
+                    let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
+                    let task = ask.start(engine, frames);
+                    ask.say(&mut rig, WORDS).await;
+                    assert!(asked.recv().await.is_some(), "{label}");
+                    if streaming {
+                        feed.text("Hi Anna, I am");
+                        rig.state_is(EngineState::Writing {
+                            text: "Hi Anna, I am".to_owned(),
+                        })
+                        .await;
+                    }
+                    rig.handle.cancel();
+                    assert_eq!(
+                        finished(task).await,
+                        CaptureOutcome::Cancelled {
+                            dictated: Some(WORDS.to_owned())
+                        },
+                        "{label}"
+                    );
+                    assert_eq!(rig.state(), EngineState::Listening, "{label}");
+                    assert_eq!(rig.notices(), Vec::<String>::new(), "{label}");
+                }
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_writing_call_records_its_time_to_first_text_total_time_and_outcome() {
+    LocalSet::new()
+        .run_until(async {
+            let all = RecordKinds {
+                metrics: true,
+                text: false,
+                audio: false,
+            };
+            // (the reply, the outcome recorded, whether a first text arrived)
+            let cases = [
+                (Some(Chat::Live), "ok", true),
+                (Some(Chat::Status(503)), "status", false),
+                (None, "not_set_up", false),
+            ];
+            for (index, (reply, outcome, first)) in cases.into_iter().enumerate() {
+                let dir = record_dir(&format!("writing-{index}"));
+                let (config, feed) = match reply {
+                    Some(reply) => {
+                        let (url, mut asked, feed) = chat(reply).await;
+                        tokio::task::spawn_local(
+                            async move { while asked.recv().await.is_some() {} },
+                        );
+                        (with_writing(&url), Some(feed))
+                    }
+                    None => (r#"{"ending_pause": {"paste": 2.5}}"#.to_owned(), None),
+                };
+                let recorder = Recorder::in_dir(all, &dir).unwrap();
+                let (mut rig, engine, frames) = Rig::recording(&config, recorder);
+                let task = capture_task(engine, frames);
+                Ask::Ending.say(&mut rig, WORDS).await;
+                if let Some(feed) = feed.filter(|_| first) {
+                    feed.text("Hi Anna.");
+                    rig.state_is(EngineState::Writing {
+                        text: "Hi Anna.".to_owned(),
+                    })
+                    .await;
+                    rig.at(rig.now() + 400).await;
+                    feed.finish();
+                }
+                finished(task).await;
+                let lines = read_lines(&dir.join("metrics.jsonl"));
+                let calls: Vec<_> = lines
+                    .iter()
+                    .filter(|line| line["event"] == "desktop_writing")
+                    .collect();
+                assert_eq!(calls.len(), 1, "{outcome}: {lines:?}");
+                let call = calls[0];
+                assert_eq!(call["outcome"], outcome);
+                if outcome == "not_set_up" {
+                    assert!(call.get("model").is_none(), "{call}");
+                    continue;
+                }
+                assert_eq!(call["model"], "m", "{call}");
+                assert_eq!(call["first_token_ms"].is_f64(), first, "{call}");
+                if first {
+                    let total = call["duration_ms"].as_f64().unwrap();
+                    assert!(
+                        (call["first_token_ms"].as_f64().unwrap() - 0.0).abs() < 50.0,
+                        "{call}"
+                    );
+                    assert!((total - 400.0).abs() < 50.0, "{call}");
+                }
+                for words in [WORDS, "Hi Anna"] {
+                    assert!(
+                        !call.to_string().contains(words),
+                        "{call}: no text in metrics"
+                    );
+                }
+            }
         })
         .await;
 }

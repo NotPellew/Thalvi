@@ -182,7 +182,9 @@ mod tests {
                 "scripts",
                 "server",
                 "stt",
-                "wake"
+                "wake",
+                "write_key",
+                "writing"
             ]
         );
         assert_eq!(
@@ -275,6 +277,27 @@ mod tests {
         assert_eq!(reloaded, saved);
         assert_eq!(shown["stt"]["engine"], json!("local"));
         assert_eq!(shown["stt"]["model"], json!("/models/mine"));
+    }
+
+    #[test]
+    fn a_writing_endpoint_is_checked_when_saved_and_comes_back_with_its_key() {
+        let (store, dir) = store("writing");
+        let mut settings = settings_json(&store_defaults()).unwrap();
+        settings["writing"] = json!({"url": "ftp://x", "model": "m", "api_key": "k"});
+        let refused = store.save(settings.clone(), &store_defaults()).unwrap_err();
+        let written_when_refused = store.path.exists();
+        settings["writing"] =
+            json!({"url": "http://127.0.0.1:8000/v1/", "model": "m", "api_key": "k"});
+        store.save(settings, &store_defaults()).unwrap();
+        let shown = settings_json(&store.load().unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(refused.starts_with("writing.url must be"), "{refused}");
+        assert!(!written_when_refused);
+        assert_eq!(
+            shown["writing"],
+            json!({"url": "http://127.0.0.1:8000/v1", "model": "m", "api_key": "k"})
+        );
     }
 
     #[cfg(unix)]

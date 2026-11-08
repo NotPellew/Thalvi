@@ -8,7 +8,7 @@ use std::path::Path;
 use super::{
     App, Delivered, HoldSource, Host, HostError, Modifier, StateServer, TypedText, WebUrl,
 };
-use crate::hold::HoldKey;
+use crate::hold::{HoldKey, HoldKind};
 pub use win32::Real;
 
 /// A window handle as a plain number, so targets stay `Send`.
@@ -98,16 +98,16 @@ impl Windows {
         Err(no_state())
     }
 
-    /// Reports each press and release of `key` to `on_change` until the guard is dropped, and keeps
-    /// the key from the focused app. `on_change` runs inside the keyboard hook: it must not block.
+    /// Reports each press and release of `keys` to `on_change` until the guard is dropped, and
+    /// keeps them from the focused app. `on_change` runs inside the keyboard hook: it must not block.
     ///
     /// # Errors
     /// [`HostError::Unsupported`] when Windows refuses the keyboard hook.
-    pub fn watch_hold_key(
-        key: &HoldKey,
-        on_change: impl Fn(bool) + Send + 'static,
+    pub fn watch_hold_keys(
+        keys: &[(HoldKind, HoldKey)],
+        on_change: impl Fn(HoldKind, bool) + Send + 'static,
     ) -> Result<HoldSource, HostError> {
-        win32::watch_hold_key(key.clone(), Box::new(on_change)).map(HoldSource::Hook)
+        win32::watch_hold_keys(keys.to_vec(), Box::new(on_change)).map(HoldSource::Hook)
     }
 
     /// # Errors

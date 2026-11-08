@@ -16,6 +16,7 @@ use thalvi_desktop::recognizer::{
 use thalvi_desktop::report::{MAX_HEADLINE_CHARS, UserError};
 use thalvi_desktop::tasks::NotConfigured;
 use thalvi_desktop::wake::WakeError;
+use thalvi_desktop::writing::WritingError;
 
 type Cases = Vec<(Box<dyn UserError>, &'static str)>;
 
@@ -106,6 +107,26 @@ fn recognition() -> Cases {
             "Capture full — finish or cancel",
         ),
     ]
+}
+
+fn writing() -> Cases {
+    [
+        (WritingError::NotSetUp, "Writing not set up — Settings"),
+        (WritingError::Timeout, "Writing took too long"),
+        (WritingError::Unreachable, "Writing model unreachable"),
+        (WritingError::Status(500), "Writing model failed"),
+        (WritingError::BadResponse, "Writing reply unreadable"),
+        (WritingError::Empty, "Writing returned no text"),
+    ]
+    .into_iter()
+    .flat_map(|(error, headline)| {
+        let cases: Cases = vec![
+            (Box::new(error), headline),
+            (Box::new(CaptureError::Writing(error)), headline),
+        ];
+        cases
+    })
+    .collect()
 }
 
 fn microphone() -> Cases {
@@ -245,6 +266,7 @@ fn everything_else() -> Cases {
 fn each_error_kind_has_a_headline_that_fits_the_overlay() {
     let cases = recognition()
         .into_iter()
+        .chain(writing())
         .chain(microphone())
         .chain(everything_else());
     for (error, headline) in cases {

@@ -41,6 +41,11 @@ pub enum Status {
         /// The action is a copy to the clipboard, whatever the route.
         copies: bool,
     },
+    /// The writing model is putting the dictation into proper text; `text` is what has come in so far.
+    Writing {
+        target: Option<String>,
+        text: String,
+    },
     /// A second transcription or the delivery is running.
     Working {
         target: Option<String>,
@@ -257,6 +262,10 @@ impl View {
                     route: *route,
                     cancellable: true,
                 },
+                EngineState::Writing { text } => Status::Writing {
+                    target,
+                    text: text.clone(),
+                },
             },
         }
     }
@@ -330,6 +339,26 @@ mod tests {
                     waiting_for_quiet: false,
                     pause_ms: 700,
                     copies: false,
+                },
+            ),
+            (
+                pending(CaptureRoute::Write, false),
+                Status::Pending {
+                    target: Some(kitty()),
+                    route: CaptureRoute::Write,
+                    text: "hello".to_owned(),
+                    waiting_for_quiet: false,
+                    pause_ms: 700,
+                    copies: false,
+                },
+            ),
+            (
+                EngineState::Writing {
+                    text: "Hello, ".to_owned(),
+                },
+                Status::Writing {
+                    target: Some(kitty()),
+                    text: "Hello, ".to_owned(),
                 },
             ),
             (

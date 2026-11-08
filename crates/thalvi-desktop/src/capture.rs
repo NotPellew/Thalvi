@@ -17,9 +17,10 @@ const ARTIFACT_BODY_MAX: usize = 32;
 /// The most artifacts that may follow an ending phrase.
 const ENDING_ARTIFACTS_MAX: usize = 2;
 
-const DEFAULT_ENDINGS: [(&str, Ending); 6] = [
+const DEFAULT_ENDINGS: [(&str, Ending); 7] = [
     ("paste that", Ending::Paste),
     ("finish dictation", Ending::Paste),
+    ("write that out", Ending::Write),
     ("submit", Ending::Submit),
     ("do that", Ending::Task),
     ("scratch that", Ending::Scratch),
@@ -31,6 +32,8 @@ const DEFAULT_ENDINGS: [(&str, Ending); 6] = [
 #[serde(rename_all = "snake_case")]
 pub enum Ending {
     Paste,
+    /// Paste the words as proper text, written out by the writing model.
+    Write,
     Submit,
     Task,
     Scratch,
@@ -38,8 +41,9 @@ pub enum Ending {
 }
 
 impl Ending {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Paste,
+        Self::Write,
         Self::Submit,
         Self::Task,
         Self::Scratch,
@@ -52,6 +56,8 @@ impl Ending {
 #[serde(rename_all = "snake_case")]
 pub enum CaptureRoute {
     Paste,
+    /// Paste the words as proper text; the engine writes them out and delivers a paste.
+    Write,
     Submit,
     Task,
 }
@@ -62,6 +68,7 @@ impl CaptureRoute {
     pub fn name(self) -> &'static str {
         match self {
             Self::Paste => "paste",
+            Self::Write => "write",
             Self::Submit => "submit",
             Self::Task => "task",
         }
@@ -75,7 +82,7 @@ pub enum EndingsError {
     Empty,
     #[error("Ending phrases must be distinct.")]
     Duplicate,
-    #[error("Configure paste, submit, task, scratch, and cancel endings.")]
+    #[error("Configure paste, write, submit, task, scratch, and cancel endings.")]
     Incomplete,
 }
 
@@ -227,7 +234,7 @@ impl EndingPauses {
     #[must_use]
     pub fn get(self, route: CaptureRoute) -> Duration {
         match route {
-            CaptureRoute::Paste => self.paste,
+            CaptureRoute::Paste | CaptureRoute::Write => self.paste,
             CaptureRoute::Submit => self.submit,
             CaptureRoute::Task => self.task,
         }
@@ -483,6 +490,9 @@ impl CaptureSession {
             }
             Some((Ending::Paste, before)) => {
                 self.arm(CaptureRoute::Paste, before, text, now, speech)
+            }
+            Some((Ending::Write, before)) => {
+                self.arm(CaptureRoute::Write, before, text, now, speech)
             }
             Some((Ending::Submit, before)) => {
                 self.arm(CaptureRoute::Submit, before, text, now, speech)
@@ -755,6 +765,7 @@ mod tests {
         for (ending, route, pause) in [
             ("paste that", CaptureRoute::Paste, 700),
             ("Paste that.", CaptureRoute::Paste, 700),
+            ("write that out", CaptureRoute::Write, 700),
             ("SUBMIT!", CaptureRoute::Submit, 2500),
             ("do that.", CaptureRoute::Task, 2500),
         ] {
@@ -1075,6 +1086,7 @@ mod tests {
             ("  Send   THIS ", Ending::Submit),
             ("so send this", Ending::Paste),
             ("paste", Ending::Paste),
+            ("write it", Ending::Write),
             ("do it", Ending::Task),
             ("scratch", Ending::Scratch),
             ("cancel", Ending::Cancel),
@@ -1255,6 +1267,7 @@ mod tests {
     fn endings_reject_empty_duplicate_and_incomplete_sets() {
         let complete = [
             ("paste", Ending::Paste),
+            ("write", Ending::Write),
             ("send", Ending::Submit),
             ("do it", Ending::Task),
             ("scratch", Ending::Scratch),
@@ -1268,7 +1281,13 @@ mod tests {
         assert!(endings(&complete).is_ok());
         assert_eq!(with(("   ", Ending::Paste)), Err(EndingsError::Empty));
         assert_eq!(with(("Do  IT", Ending::Task)), Err(EndingsError::Duplicate));
-        assert_eq!(endings(&complete[..4]), Err(EndingsError::Incomplete));
+        assert_eq!(endings(&complete[..5]), Err(EndingsError::Incomplete));
+        let without_write: Vec<_> = complete
+            .iter()
+            .copied()
+            .filter(|(_, ending)| *ending != Ending::Write)
+            .collect();
+        assert_eq!(endings(&without_write), Err(EndingsError::Incomplete));
         assert_eq!(Endings::default(), endings(&DEFAULT_ENDINGS).unwrap());
     }
 
@@ -1295,16 +1314,23 @@ mod tests {
         ] {
             let result = serde_json::from_str::<EndingPauses>(json);
             match (result, expected) {
-                (Ok(pauses), Ok(expected)) => assert_eq!(
-                    [
-                        CaptureRoute::Paste,
-                        CaptureRoute::Submit,
-                        CaptureRoute::Task
-                    ]
-                    .map(|route| pauses.get(route)),
-                    expected,
-                    "{json}"
-                ),
+                (Ok(pauses), Ok(expected)) => {
+                    assert_eq!(
+                        pauses.get(CaptureRoute::Write),
+                        pauses.get(CaptureRoute::Paste),
+                        "{json}: writing waits as long as a paste"
+                    );
+                    assert_eq!(
+                        [
+                            CaptureRoute::Paste,
+                            CaptureRoute::Submit,
+                            CaptureRoute::Task
+                        ]
+                        .map(|route| pauses.get(route)),
+                        expected,
+                        "{json}"
+                    );
+                }
                 (Err(error), Err(expected)) => {
                     assert!(error.to_string().contains(expected), "{json}: {error}");
                 }

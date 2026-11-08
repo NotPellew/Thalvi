@@ -54,6 +54,8 @@ pub enum Event {
     WakeReset,
     TranscriptionReady,
     SecondaryStt,
+    /// One call to the writing model: time to the first text and in all, and how it ended.
+    Writing,
     /// Fetching and loading the local speech model.
     SpeechLoad,
     /// Downloading a catalog speech model from the settings window.
@@ -91,6 +93,7 @@ impl Event {
             Self::WakeReset => "desktop_wake_reset",
             Self::TranscriptionReady => "desktop_transcription_ready",
             Self::SecondaryStt => "desktop_secondary_stt",
+            Self::Writing => "desktop_writing",
             Self::SpeechLoad => "desktop_speech_load",
             Self::SpeechDownload => "desktop_speech_download",
             Self::WordList => "desktop_word_list",

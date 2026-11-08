@@ -10,7 +10,7 @@ use std::path::Path;
 
 use super::command::{CommandRunner, SystemRunner, tool};
 use super::{App, Delivered, HoldSource, Host, HostError, TypedText, WebUrl};
-use crate::hold::HoldKey;
+use crate::hold::{HoldKey, HoldKind};
 
 /// Where GNOME dictation goes: there is no window to bind, so the text waits on the clipboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,12 +44,12 @@ impl Gnome {
         clippy::unnecessary_wraps,
         reason = "the same signature as the other hosts, whose hook can fail"
     )]
-    pub fn watch_hold_key(
-        _key: &HoldKey,
-        _on_change: impl Fn(bool) + Send + 'static,
+    pub fn watch_hold_keys(
+        _keys: &[(HoldKind, HoldKey)],
+        _on_change: impl Fn(HoldKind, bool) + Send + 'static,
     ) -> Result<HoldSource, HostError> {
         Ok(HoldSource::Unavailable(
-            "GNOME Wayland does not tell Thalvi when a key is let go, so holding a key to dictate is unavailable. The wake word still works.",
+            "GNOME Wayland does not tell Thalvi when a key is let go, so holding a key to dictate or write is unavailable. The wake word still works.",
         ))
     }
 }
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn the_hold_key_is_no_failure_on_gnome_but_says_why_it_does_nothing() {
-        let source = Gnome::watch_hold_key(&HoldKey::default(), |_| {});
+        let source = Gnome::watch_hold_keys(&[(HoldKind::Dictate, HoldKey::default())], |_, _| {});
         assert!(matches!(source, Ok(HoldSource::Unavailable(reason)) if reason.contains("let go")));
     }
 }

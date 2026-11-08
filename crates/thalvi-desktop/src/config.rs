@@ -17,6 +17,7 @@ use crate::recognizer::{ServerUrl, SpeechSource};
 use crate::secondary::SecondaryStt;
 use crate::transducer::SpeechChoice;
 use crate::wake::WakeConfig;
+use crate::writing::Writing;
 
 /// Why the desktop config could not be used. Messages are shown to the user as written.
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +71,10 @@ pub struct DesktopConfig {
     pub show_in_menu: bool,
     /// The key held to dictate; where it is bound depends on the desktop.
     pub hold_key: HoldKey,
+    /// The key held to dictate and have the words written out as proper text; bound like `hold_key`.
+    pub write_key: HoldKey,
+    /// The chat endpoint that writes dictation out; without one, asking for it says where to set it up.
+    pub writing: Option<Writing>,
 }
 
 #[derive(Deserialize)]
@@ -109,6 +114,10 @@ struct RawDesktopConfig {
     show_in_menu: bool,
     #[serde(default)]
     hold_key: HoldKey,
+    #[serde(default = "HoldKey::write_default")]
+    write_key: HoldKey,
+    #[serde(default)]
+    writing: Option<Writing>,
 }
 
 impl DesktopConfig {
@@ -189,6 +198,9 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
             .microphone
             .map(|name| nonempty(&name, "microphone"))
             .transpose()?;
+        if raw.write_key == raw.hold_key {
+            return Err("The write key must differ from the hold key.".to_owned());
+        }
         Ok(Self {
             server: raw.server,
             wake: raw.wake,
@@ -207,6 +219,8 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
             start_at_login: raw.start_at_login,
             show_in_menu: raw.show_in_menu,
             hold_key: raw.hold_key,
+            write_key: raw.write_key,
+            writing: raw.writing,
         })
     }
 }
@@ -508,6 +522,8 @@ struct FileForm<'a> {
     start_at_login: bool,
     show_in_menu: bool,
     hold_key: &'a HoldKey,
+    write_key: &'a HoldKey,
+    writing: &'a Option<Writing>,
 }
 
 #[derive(Serialize)]
@@ -598,6 +614,8 @@ impl Serialize for DesktopConfig {
             start_at_login: self.start_at_login,
             show_in_menu: self.show_in_menu,
             hold_key: &self.hold_key,
+            write_key: &self.write_key,
+            writing: &self.writing,
         }
         .serialize(serializer)
     }
@@ -700,6 +718,63 @@ mod tests {
         assert!(!config.start_at_login);
         assert!(!config.show_in_menu);
         assert_eq!(config.hold_key, HoldKey::default());
+        assert_eq!(config.write_key, HoldKey::write_default());
+        assert_eq!(config.writing, None);
+    }
+
+    #[test]
+    fn the_write_key_is_checked_once_and_must_differ_from_the_hold_key() {
+        let key = |json: &str| parse(json).map(|config| config.write_key.to_string());
+        assert_eq!(key(r#"{"write_key": "Ctrl+KeyY"}"#).unwrap(), "Ctrl+KeyY");
+        let error = key(r#"{"write_key": "KeyX"}"#).unwrap_err().to_string();
+        assert!(error.contains("needs a modifier"), "{error}");
+        for json in [
+            r#"{"write_key": "Alt+KeyZ"}"#,
+            r#"{"hold_key": "Alt+KeyX"}"#,
+            r#"{"hold_key": "F9", "write_key": "F9"}"#,
+        ] {
+            let error = key(json).unwrap_err().to_string();
+            assert!(
+                error.contains("must differ from the hold key"),
+                "{json}: {error}"
+            );
+        }
+        assert_eq!(
+            key(r#"{"hold_key": "Alt+KeyX", "write_key": "Alt+KeyZ"}"#).unwrap(),
+            "Alt+KeyZ",
+            "the keys may swap places"
+        );
+    }
+
+    #[test]
+    fn the_writing_endpoint_is_absent_by_default_and_refused_when_it_cannot_be_used() {
+        let writing = |json: &str| parse(json).map(|config| config.writing);
+        assert_eq!(writing(r#"{"writing": null}"#).unwrap(), None);
+        let endpoint = writing(r#"{"writing": {"url": "http://127.0.0.1:9/v1/", "model": " m "}}"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(endpoint.model(), "m");
+        for (json, expected) in [
+            (
+                r#"{"writing": {"url": "ftp://x", "model": "m"}}"#,
+                "writing.url must be",
+            ),
+            (
+                r#"{"writing": {"url": "http://x", "model": " "}}"#,
+                "writing.model must be",
+            ),
+            (
+                r#"{"writing": {"url": "http://x"}}"#,
+                "missing field `model`",
+            ),
+            (
+                r#"{"writing": {"url": "http://x", "model": "m", "tone": 1}}"#,
+                "unknown field `tone`",
+            ),
+        ] {
+            let error = writing(json).unwrap_err().to_string();
+            assert!(error.contains(expected), "{json}: {error}");
+        }
     }
 
     #[test]
@@ -834,7 +909,7 @@ mod tests {
                 "ending_pause": {"paste": 1, "submit": 3},
                 "capture_limits": {"idle": 90},
                 "endings": {
-                    "Send It": "submit", "paste": "paste", "do it": "task",
+                    "Send It": "submit", "paste": "paste", "write it": "write", "do it": "task",
                     "scratch": "scratch", "cancel": "cancel"
                 },
                 "recordings": {"metrics": true, "audio": true}
@@ -893,6 +968,7 @@ mod tests {
             Endings::try_from(BTreeMap::from([
                 ("send it".to_owned(), Ending::Submit),
                 ("paste".to_owned(), Ending::Paste),
+                ("write it".to_owned(), Ending::Write),
                 ("do it".to_owned(), Ending::Task),
                 ("scratch".to_owned(), Ending::Scratch),
                 ("cancel".to_owned(), Ending::Cancel),
@@ -1103,7 +1179,7 @@ mod tests {
 
     #[test]
     fn invalid_settings_are_rejected_in_plain_words() {
-        let valid_endings = r#""paste": "paste", "send": "submit", "do it": "task",
+        let valid_endings = r#""paste": "paste", "write": "write", "send": "submit", "do it": "task",
             "scratch": "scratch", "cancel": "cancel""#;
         for (json, expected) in [
             (r#"{"discord": {}}"#.to_owned(), "unknown field `discord`"),
@@ -1175,7 +1251,7 @@ mod tests {
             ),
             (
                 r#"{"endings": {"enter": "submit"}}"#.to_owned(),
-                "Configure paste, submit, task, scratch, and cancel",
+                "Configure paste, write, submit, task, scratch, and cancel",
             ),
             (
                 format!(r#"{{"endings": {{{valid_endings}, "Do  It": "task"}}}}"#),
@@ -1373,7 +1449,7 @@ mod tests {
             "cues": {"wake": false, "error": false},
             "ending_pause": {"paste": 1, "submit": 3, "task": 2.5},
             "capture_limits": {"idle": 90, "max": 120},
-            "endings": {"Send It": "submit", "paste": "paste", "do it": "task",
+            "endings": {"Send It": "submit", "paste": "paste", "write it": "write", "do it": "task",
                         "scratch": "scratch", "cancel": "cancel"},
             "apps": {"editor": {"classes": ["Code"], "executables": ["Code.exe"],
                                 "input_keys": ["ctrl", "Shift", "p"]},
@@ -1392,7 +1468,9 @@ mod tests {
             "history": {"enabled": false, "limit": 50},
             "start_at_login": true,
             "show_in_menu": true,
-            "hold_key": "Ctrl+Shift+F9"
+            "hold_key": "Ctrl+Shift+F9",
+            "write_key": "Ctrl+F10",
+            "writing": {"url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k"}
         }"#;
         for json in ["{}", full] {
             let config = parse(json).unwrap();
