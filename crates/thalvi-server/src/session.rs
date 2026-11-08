@@ -1381,7 +1381,7 @@ async fn handle_reply_event(
             send_task_step(sink, &step).await;
         }
         ReplyEvent::Failed(message) => {
-            tracing::warn!(%message, "reply failed");
+            tracing::warn!("reply failed");
             if let Some(active) = reply.take() {
                 record_assistant_history(history, &active, false);
                 emit_reply_record(&turn_log.recorder, &active, "failed", Some(&message));
