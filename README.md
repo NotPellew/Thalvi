@@ -302,17 +302,22 @@ each).
 |---|---|---|---|---|---|
 | Nemotron Streaming (`nemotron_160ms`, default) | Nemotron Speech Streaming 0.6B | English | 3.46% | 7.14% | Lightest on the CPU; text appears soonest. Mostly without punctuation. |
 | Nemotron Unified (`unified_160ms`) | Nemotron Unified ASR 0.6B | 25 European languages | 3.03% | 6.35% | Punctuation and capitals. Re-reads the last 6 s every 160 ms: about 70 ms of work per step on 4 cores of a Ryzen, so it needs a fast CPU, and text appears about 0.5 s later. Our own export, under OpenMDW-1.1. |
+| Parakeet TDT (`parakeet_tdt_v3`) | Parakeet TDT 0.6B v3 | 25 European languages | 2.33%* | 4.76%* | Punctuation and capitals. Light on the CPU: about a seventh of real time on 4 cores, against about one for Unified. Not a streaming model: it re-reads the last 2.6 s every 640 ms, so words may change while you speak, and the text is final about a second after you pause. Under CC BY 4.0. |
 
 Nemotron Speech Streaming at 80 ms and 560 ms (3.62% and 3.46% on LibriSpeech)
 are left out because they offer no real choice over 160 ms; either works as your
-own model folder. Parakeet TDT 0.6B v3 (3.19% on LibriSpeech, 11.41% on German,
-6.92% on Spanish) was rejected because it gives no live partials, and Nemotron
-3.5 multilingual because it made 15% word errors on the takes. Nemotron Speech
+own model folder. \*Parakeet was measured on 60 of those LibriSpeech clips and 24
+of the takes, where Unified made 2.25% and 4.76%; on 40 clips each it made 12.44% on
+German (Unified 8.32%), 7.95% on Spanish (6.91%) and 9.28% on a German and an
+English speaker joined (12.32%). Nemotron
+3.5 multilingual was rejected because it made 15% word errors on the takes. Nemotron Speech
 Streaming is under the
 [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/).
 The unified model is NVIDIA's
 [Nemotron unified ASR](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b)
-under OpenMDW-1.1, exported to ONNX by Thalvi.
+under OpenMDW-1.1, exported to ONNX by Thalvi. Parakeet is NVIDIA's
+[Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), in sherpa-onnx's int8 export.
 
 **Second-pass transcription** (Settings → Speech → Second pass, none ticked by
 default) sends each accepted capture again to every ticked OpenAI-style or Meta

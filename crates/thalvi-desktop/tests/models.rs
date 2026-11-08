@@ -484,12 +484,28 @@ async fn the_catalog_lists_each_model_with_its_size_license_languages_source_and
                 25,
                 "https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b"
             ),
+            (
+                "parakeet_tdt_v3",
+                "Parakeet TDT",
+                670_576_784,
+                "CC BY 4.0",
+                25,
+                "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3"
+            ),
         ]
     );
     assert!(models.iter().all(|model| !model.cached));
     let unified = &models[1].languages;
     assert!(unified.is_sorted() && unified.contains(&"English") && unified.contains(&"Ukrainian"));
     assert_eq!(models[0].languages, ["English"]);
+    let mut descriptions: Vec<_> = models.iter().map(|model| model.description).collect();
+    descriptions.sort_unstable();
+    descriptions.dedup();
+    assert_eq!(
+        descriptions.len(),
+        models.len(),
+        "each card says its own trade-off"
+    );
     for model in &models {
         assert!(CatalogSpeech::named(model.name).is_some(), "{}", model.name);
     }
