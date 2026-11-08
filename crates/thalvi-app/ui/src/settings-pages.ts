@@ -67,6 +67,7 @@ export interface Page {
 
 const ENDINGS: readonly (readonly [Ending, string])[] = [
   ["paste", "Paste"],
+  ["write", "Write out, then paste"],
   ["submit", "Paste and Enter"],
   ["task", "Run task"],
   ["scratch", "Scratch the draft"],
@@ -107,7 +108,7 @@ const DRAFT_OUTCOMES: Record<DraftOutcome, string> = {
   maybePartial: "Typing stopped partway: some of this text may already be in the window. Check it there, or use Copy text.",
 };
 /** While one of these runs the status changes with every word; the draft is read again once it ends. */
-const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "working"];
+const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "working"];
 const WHEN = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 export function row(label: string, hint: string | null, control: Field | HTMLElement): HTMLElement {
@@ -467,6 +468,7 @@ function holdKey({ holdKeyUnavailable }: PageContext): HTMLElement[] {
   return [
     group("Hold key"),
     row("Hold a key to dictate", null, unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null })),
+    row("Hold a key to write", null, unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null })),
   ];
 }
 
@@ -770,6 +772,19 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
           };
   }
   syncEnabled();
+
+  const writing = draft.writing;
+  const writingUrl = controls.text(writing?.url ?? "", syncWriting, { placeholder: "http://127.0.0.1:8000/v1" });
+  const writingModel = controls.text(writing?.model ?? "", syncWriting);
+  const writingKey = controls.text(writing?.api_key ?? "", syncWriting, { type: "password" });
+  const writingInputs = [writingUrl, writingModel, writingKey].map((field) => field.field as HTMLInputElement);
+
+  function syncWriting(): void {
+    const [urlInput, modelInput, keyInput] = writingInputs;
+    draft.writing = writingInputs.every((input) => input.value.trim() === "")
+      ? null
+      : { url: urlInput?.value ?? "", model: modelInput?.value ?? "", api_key: keyInput?.value ?? "" };
+  }
   const server = controls.text(draft.server, (value) => {
     draft.server = value;
   }, { placeholder: "ws://127.0.0.1:8080" });
@@ -827,6 +842,14 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
     row("Model", null, model),
     row("API", "Which transcription API the endpoint speaks.", api),
     row("API key", "Stored in the desktop config file.", key),
+    group("Writing"),
+    row(
+      "Writing endpoint address",
+      "A chat completions endpoint that writes a dictation out as proper text when you say “write that out” or hold the write key. Only the words you said are sent. Saving never calls it.",
+      writingUrl,
+    ),
+    row("Writing model", "The model the endpoint should use.", writingModel),
+    row("Writing API key", "Stored in the desktop config file; leave empty for a local endpoint.", writingKey),
   ];
 }
 

@@ -15,6 +15,7 @@ export const SETTINGS: Settings = {
   capture_limits: { idle: 60, max: 300 },
   endings: {
     "paste that": "paste",
+    "write that out": "write",
     submit: "submit",
     "do that": "task",
     "scratch that": "scratch",
@@ -28,6 +29,8 @@ export const SETTINGS: Settings = {
   look: "neon",
   recordings: { metrics: true, text: false, audio: false },
   hold_key: "Alt+KeyZ",
+  write_key: "Alt+KeyX",
+  writing: null,
   history: { enabled: true, limit: 200 },
 };
 

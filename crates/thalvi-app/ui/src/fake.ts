@@ -42,6 +42,7 @@ const SETTINGS: Settings = {
   capture_limits: { idle: 60, max: 300 },
   endings: {
     "paste that": "paste",
+    "write that out": "write",
     "finish dictation": "paste",
     submit: "submit",
     "do that": "task",
@@ -56,6 +57,8 @@ const SETTINGS: Settings = {
   look: "gunmetal",
   recordings: { metrics: true, text: false, audio: false },
   hold_key: "Alt+KeyZ",
+  write_key: "Alt+KeyX",
+  writing: null,
   history: { enabled: true, limit: 200 },
 };
 

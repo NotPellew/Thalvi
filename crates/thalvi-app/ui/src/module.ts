@@ -46,6 +46,7 @@ export function countdownLabel(wording: { route: Route; target: string | null; c
     ? "COPY"
     : {
         paste: to === null ? "PASTE" : `PASTE INTO ${to}`,
+        write: to === null ? "WRITE" : `WRITE FOR ${to}`,
         submit: to === null ? "SEND" : `SEND TO ${to}`,
         task: "TASK",
       }[route];
@@ -55,7 +56,7 @@ export function countdownLabel(wording: { route: Route; target: string | null; c
 /** What the slot says once a delivery finished. */
 export function doneMessage(route: Route, target: string | null, notice: string): string {
   if (target === null || route === "task") return `✓ ${notice}`;
-  return `✓ ${route === "paste" ? "Pasted into" : "Sent to"} ${target}. ${notice}`;
+  return `✓ ${route === "paste" || route === "write" ? "Pasted into" : "Sent to"} ${target}. ${notice}`;
 }
 
 export interface Module {
@@ -150,6 +151,12 @@ export function createModule(onCancel: () => void): Module {
           show("pending", { label: countdownLabel(status, status.pauseMs), motion: "drain" });
           counting = { route: status.route, target: status.target, copies: status.copies };
         }
+        break;
+      case "writing":
+        lines(options.showDraft, () => {
+          ticker.words(status.text, "", true);
+        });
+        show("working", { label: "WRITING…", motion: "sweep" });
         break;
       case "working":
         show("working", { label: "WORKING", motion: "sweep" });

@@ -94,6 +94,7 @@ describe("pages", () => {
           Server: ["server address"],
           Dictation: ["recognize speech", "language", "speech model", "word list"],
           "Second transcription": ["second-pass transcription", "endpoint address", "model", "api", "api key"],
+          Writing: ["writing endpoint address", "writing model", "writing api key"],
         },
       },
       {
@@ -242,7 +243,14 @@ describe("tables", () => {
     root.querySelector<HTMLElement>('button[aria-label="Remove “never mind”"]')?.click();
     button("Save").click();
     const expected = structuredClone(SETTINGS);
-    expected.endings = { "paste that": "paste", submit: "submit", "do that": "task", "scratch that": "scratch", "send it": "submit" };
+    expected.endings = {
+      "paste that": "paste",
+      "write that out": "write",
+      submit: "submit",
+      "do that": "task",
+      "scratch that": "scratch",
+      "send it": "submit",
+    };
     expect(sent(stub).endings).toEqual(expected.endings);
   });
 
@@ -962,6 +970,42 @@ describe("second transcription", () => {
   });
 });
 
+describe("writing", () => {
+  const endpoint = { url: "http://127.0.0.1:8000/v1", model: "glimmer", api_key: "k" };
+
+  it("saves the endpoint with its key masked, without calling it", async () => {
+    const stub = await open();
+    goTo("speech");
+    expect(sent_writing_fields()).toEqual(["", "", ""]);
+    type(control("Writing endpoint address", "input"), endpoint.url);
+    type(control("Writing model", "input"), endpoint.model);
+    type(control("Writing API key", "input"), endpoint.api_key);
+    expect(control("Writing API key", "input").type).toBe("password");
+    const calls = () => Object.entries(stub.backend).map(([name, call]) => [name, call.mock.calls.length]);
+    const before = calls();
+    button("Save").click();
+    await settle();
+    expect(sent(stub).writing).toEqual(endpoint);
+    const grew = calls()
+      .filter(([, count], index) => count !== before[index]?.[1])
+      .map(([name]) => name);
+    expect(grew).toEqual(["saveSettings"]);
+  });
+
+  it("shows a saved endpoint and saves nothing for one that was cleared", async () => {
+    const stub = await open({ ...SETTINGS, writing: endpoint });
+    goTo("speech");
+    expect(sent_writing_fields()).toEqual([endpoint.url, endpoint.model, endpoint.api_key]);
+    for (const label of ["Writing endpoint address", "Writing model", "Writing API key"]) type(control(label, "input"), "");
+    button("Save").click();
+    expect(sent(stub).writing).toBeNull();
+  });
+
+  function sent_writing_fields(): string[] {
+    return ["Writing endpoint address", "Writing model", "Writing API key"].map((label) => control(label, "input").value);
+  }
+});
+
 describe("search", () => {
   it("shows matching rows from every page and nothing else", async () => {
     await open();
@@ -1076,6 +1120,9 @@ describe("live controls", () => {
     expect(hold.querySelector("input")).toBeNull();
     expect(hold.textContent).toContain("GNOME Wayland does not tell Thalvi when a key is let go.");
     expect(hold.closest("section")?.dataset["page"]).toBe("capture");
+    const write = rowOf("Hold a key to write");
+    expect(write.querySelector("input")).toBeNull();
+    expect(write.textContent).toContain("GNOME Wayland does not tell Thalvi when a key is let go.");
   });
 
   it("shows the line for hyprland.conf instead of a switch and copies it", async () => {

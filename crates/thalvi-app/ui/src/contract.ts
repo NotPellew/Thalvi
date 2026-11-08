@@ -1,6 +1,6 @@
 // The Rust app <-> UI contract; mirrors crates/thalvi-app/src/status.rs and the desktop config.
 
-export type Route = "paste" | "submit" | "task";
+export type Route = "paste" | "write" | "submit" | "task";
 
 /** What a failure stopped: only `delivery` means a capture's text did not reach its destination. */
 export type FailureKind = "delivery" | "other";
@@ -20,6 +20,7 @@ export type Status =
       /** The desktop can only copy dictation to the clipboard, so a paste or submit ending is a copy. */
       copies: boolean;
     }
+  | { state: "writing"; target: string | null; text: string } // the writing model is at work; text is what has come in so far; cancellable until the paste
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
   | { state: "done"; target: string | null; route: Route; notice: string }
   | { state: "failed"; notice: string; headline: string; causes: string[]; kind: FailureKind } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report
@@ -36,7 +37,7 @@ export interface AudioStatus {
   paused: boolean;
 }
 
-export type Ending = "paste" | "submit" | "task" | "scratch" | "cancel";
+export type Ending = "paste" | "write" | "submit" | "task" | "scratch" | "cancel";
 export type ScriptActionKind = "open_url" | "focus_app" | "discord_message";
 export type SecondaryApi = "openai" | "meta";
 export type SttEngine = "server" | "local";
@@ -52,6 +53,12 @@ export interface SecondarySettings {
   url: string;
   model: string;
   api: SecondaryApi;
+  api_key: string;
+}
+
+export interface WritingSettings {
+  url: string;
+  model: string;
   api_key: string;
 }
 
@@ -92,6 +99,10 @@ export interface Settings {
   recordings: { metrics: boolean; text: boolean; audio: boolean };
   /** The key held to dictate, such as `Alt+KeyZ`; only Windows reads it. */
   hold_key: string;
+  /** The key held to dictate and have the words written out, such as `Alt+KeyX`; only Windows reads it. */
+  write_key: string;
+  /** The chat endpoint that writes dictation out; null until one is set up. */
+  writing: WritingSettings | null;
   /** Whether finished captures are kept on this computer, and how many. */
   history: { enabled: boolean; limit: number };
 }
