@@ -116,6 +116,9 @@ areas your change touches. Editing rules are in
   default, each settable from 0 to 5 s; recognized speech cancels the pending ending, local speech
   pauses the countdown, submit confirms its target, and a whole-text command waits the task pause.
   Why: paste is undoable; submit and tasks reach others. Rejected: one fixed pause, a second spoken yes.
+- **A keyword spotter only warns about missed endings.** sherpa-onnx's 3.3M keyword model listens beside the recognizer; when the covering final lacks an ending it heard and the user then stays quiet for that ending's pause, the cancelled cue plays and a notice names the phrase. Nothing is cut, retried or acted on.
+  Why: spotted times run 0.2–0.5 s late and finals carry no word times; a recheck by the same recognizer rescued 0 of 12 disputed hits in 62.8 min; the quiet gate keeps false alarms (16 in that time) silent.
+  Rejected: cutting at the spotted time, a recheck, acting on the spotter alone, judging on a short timer (24 of 36 finals came late), quoting dictated words.
 - **Check, then type.** Delivery re-verifies the bound window just before injecting
   input, which goes to whatever window is focused; a switch in those milliseconds
   can misdirect it. Why: neither Hyprland nor Windows can address input to one window.

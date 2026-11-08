@@ -715,6 +715,7 @@ mod tests {
                     target: Some("kitty".to_owned()),
                     committed: String::new(),
                     partial: None,
+                    notice: None,
                 }),
                 (false, Status::Capturing { .. }) => self.set_status(Status::Working {
                     target: None,
@@ -846,6 +847,7 @@ mod tests {
             target: Some("kitty".to_owned()),
             committed: "my password is".to_owned(),
             partial: Some("hunter2".to_owned()),
+            notice: None,
         }
     }
 

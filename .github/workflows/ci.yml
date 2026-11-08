@@ -27,6 +27,7 @@ jobs:
         with:
           path: target/tmp/models
           key: wake-models-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
+          enableCrossOsArchive: true
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -55,6 +56,7 @@ jobs:
         with:
           path: target/tmp/models
           key: wake-models-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
+          enableCrossOsArchive: true
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version

@@ -9,7 +9,14 @@ export type Status =
   | { state: "paused" }
   | { state: "listening" }
   | { state: "starting"; target: string | null }
-  | { state: "capturing"; target: string | null; committed: string; partial: string | null }
+  | {
+      state: "capturing";
+      target: string | null;
+      committed: string;
+      partial: string | null;
+      /** Something to tell the user while the capture goes on; it holds no dictated words and goes with the next words. */
+      notice: string | null;
+    }
   | {
       state: "pending";
       target: string | null;

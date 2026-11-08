@@ -1883,7 +1883,7 @@ describe("last dictation", () => {
     const stub = await openDraft();
     const calls = stub.backend.getDraft.mock.calls.length;
     for (const state of [
-      { state: "capturing", target: "foot", committed: "", partial: null },
+      { state: "capturing", target: "foot", committed: "", partial: null, notice: null },
       { state: "working", target: "foot", route: "paste", cancellable: false },
     ] as const) stub.emit(state);
     await settle();

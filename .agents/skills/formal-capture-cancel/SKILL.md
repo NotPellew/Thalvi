@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `cb7007419cf3ada15adea927ec63b3c0ec1e5551`. The recorded file hashes
+Sync commit: `68d7e14a3084b737abdfd797bea6044984990907`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -43,6 +43,17 @@ A wake capture whose whole text is a task now arms the task ending itself; it
 reaches `Engine::conclude` through the same `Done::Accepted`, so that is unchanged too.
 The offline-model fix (#272) added a `RecognizerError::Model` variant, raised while the
 local model's files are fetched and so before any `RecognizerSession` exists.
+The ending spotter adds synchronous bookkeeping in `conclude` before the cue and
+recognizer release, and a `drive` branch that only plays a cue and shows a notice.
+`Runner::build` joins the spotter load with the wake load; capture notices are set
+synchronously. These changes preserve the mapped await boundaries, control drains
+and delivery admission, so the cancellation model is unchanged.
+The spotter loader now accepts its load future, like the wake loader, so tests
+exercise download status and both load outcomes. The future is still awaited at
+the same pre-capture boundary; the mapped cancellation functions are unchanged.
+`SpotStats::record` now owns the same synchronous capture-summary metric calculation,
+so exact durations and the zero-frame case can be tested. `close_spotting` still
+records it before the ending cue; all mapped functions remain byte-for-byte unchanged.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

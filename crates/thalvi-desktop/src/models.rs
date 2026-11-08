@@ -25,6 +25,7 @@ static DOWNLOADS: AtomicU64 = AtomicU64::new(0);
 pub enum ModelKind {
     Wake,
     Speech,
+    Spotter,
 }
 
 impl ModelKind {
@@ -32,6 +33,7 @@ impl ModelKind {
         match self {
             Self::Wake => "wake model",
             Self::Speech => "speech model",
+            Self::Spotter => "ending phrase model",
         }
     }
 }
@@ -62,6 +64,50 @@ pub const EMBEDDING: Asset<'static> = Asset {
     url: "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx",
     size: 1_326_578,
     sha256: "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f",
+};
+
+/// The files of the ending phrase spotter: sherpa-onnx's streaming Zipformer keyword model trained
+/// on `GigaSpeech` (Apache-2.0), 2024-01-01. Each file is byte-identical to its member of the
+/// official `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2` and is fetched from the
+/// model author's `ModelScope` repository, which holds them apart from test audio.
+#[derive(Debug, Clone, Copy)]
+pub struct SpotterAssets<'a> {
+    pub encoder: Asset<'a>,
+    pub decoder: Asset<'a>,
+    pub joiner: Asset<'a>,
+    /// The `SentencePiece` model whose piece numbers are the model's token numbers.
+    pub pieces: Asset<'a>,
+}
+
+pub const SPOTTER: SpotterAssets<'static> = SpotterAssets {
+    encoder: Asset {
+        kind: ModelKind::Spotter,
+        file_name: "kws_gigaspeech_3m.encoder.int8.onnx",
+        url: "https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/resolve/master/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+        size: 4_807_159,
+        sha256: "1e721676515bcd42a186979733981213c66c80db680e1cc582dfedf3be76e678",
+    },
+    decoder: Asset {
+        kind: ModelKind::Spotter,
+        file_name: "kws_gigaspeech_3m.decoder.onnx",
+        url: "https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/resolve/master/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+        size: 1_063_189,
+        sha256: "f61ebd3eed3773a44d088d53dfae92dbb6aec4839f4dcaee2d402414741663a3",
+    },
+    joiner: Asset {
+        kind: ModelKind::Spotter,
+        file_name: "kws_gigaspeech_3m.joiner.int8.onnx",
+        url: "https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/resolve/master/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+        size: 163_380,
+        sha256: "eae9da0c7e1e6c6a3f4cc42d167899c388f6c6701b94cb96320e4f55df79624c",
+    },
+    pieces: Asset {
+        kind: ModelKind::Spotter,
+        file_name: "kws_gigaspeech_3m.bpe.model",
+        url: "https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/resolve/master/bpe.model",
+        size: 244_837,
+        sha256: "c8a2a0129c4ab8e463164c142f82d25649661b122c8cd0b7aab5c9e80b90ad24",
+    },
 };
 
 /// A wake head that ships in the catalog and is chosen by name.
@@ -518,6 +564,7 @@ impl ModelStore {
             DOWNLOADS.fetch_add(1, Ordering::Relaxed)
         )));
         let mut response = reqwest::Client::builder()
+            .user_agent(concat!("thalvi/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
             .timeout(DOWNLOAD_BASE + Duration::from_secs(asset.size / SLOWEST_BYTES_PER_SECOND))
             .build()

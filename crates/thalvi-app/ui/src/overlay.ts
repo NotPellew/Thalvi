@@ -135,7 +135,9 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
     status = next;
     root.hidden = next.state === "paused" || next.state === "listening";
     root.dataset["state"] = next.state;
-    const drafting = showDraft && (next.state === "capturing" || next.state === "pending");
+    const noticing = next.state === "capturing" && next.notice !== null;
+    const drafting = noticing || (showDraft && (next.state === "capturing" || next.state === "pending"));
+    text.dataset["notice"] = String(noticing);
     draft.hidden = !drafting;
     ending.hidden = true;
     caret.hidden = true;
@@ -152,9 +154,9 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
         break;
       case "capturing":
         pillView("live", "LISTENING", next.target);
-        committed.textContent = next.committed;
-        partial.textContent = next.partial ?? "";
-        caret.hidden = false;
+        committed.textContent = next.notice ?? next.committed;
+        partial.textContent = next.notice === null ? (next.partial ?? "") : "";
+        caret.hidden = noticing;
         break;
       case "pending": {
         const wasCounting = previous.state === "pending" && !previous.waitingForQuiet;

@@ -335,6 +335,7 @@ mod tests {
                     target: target.clone(),
                     committed: String::new(),
                     partial: None,
+                    notice: None,
                 },
                 Visibility::Show,
             ),

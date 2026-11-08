@@ -11,6 +11,7 @@ use thalvi_desktop::transducer::TransducerSource;
 
 pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not ready yet.";
 pub const WAKE_DOWNLOAD_NOTICE: &str = "Downloading the wake word model.";
+pub const SPOTTER_DOWNLOAD_NOTICE: &str = "Downloading the ending phrase model.";
 
 /// The status event's payload; its JSON form is the contract with the TypeScript UI.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -30,6 +31,8 @@ pub enum Status {
         target: Option<String>,
         committed: String,
         partial: Option<String>,
+        /// What the user should know while the capture goes on; none holds dictated words.
+        notice: Option<String>,
     },
     Pending {
         target: Option<String>,
@@ -169,6 +172,8 @@ pub enum Mode {
     Starting,
     /// A wake word model is downloading.
     WakeDownload,
+    /// The ending phrase model is downloading.
+    SpotterDownload,
     /// The microphone is closed.
     Paused,
     /// An accepted capture is being delivered.
@@ -214,6 +219,10 @@ impl View {
                 notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
                 downloading: true,
             },
+            (Mode::SpotterDownload, _) => Status::Loading {
+                notice: SPOTTER_DOWNLOAD_NOTICE.to_owned(),
+                downloading: true,
+            },
             (Mode::Paused, _) => Status::Paused,
             (Mode::Delivering(route), _) => Status::Working {
                 target,
@@ -234,10 +243,15 @@ impl View {
             (Mode::Idle | Mode::Done { .. } | Mode::Failed(_), engine) => match engine {
                 EngineState::Listening => Status::Listening,
                 EngineState::StartingCapture => Status::Starting { target },
-                EngineState::Capturing { committed, partial } => Status::Capturing {
+                EngineState::Capturing {
+                    committed,
+                    partial,
+                    notice,
+                } => Status::Capturing {
                     target,
                     committed: committed.clone(),
                     partial: partial.clone(),
+                    notice: notice.clone(),
                 },
                 EngineState::PendingEnding {
                     route,
@@ -310,6 +324,20 @@ mod tests {
                     target: Some(kitty()),
                     committed: "hello".to_owned(),
                     partial: Some("wor".to_owned()),
+                    notice: None,
+                },
+            ),
+            (
+                EngineState::Capturing {
+                    committed: "hello".to_owned(),
+                    partial: None,
+                    notice: Some("Heard \u{201c}paste that\u{201d}.".to_owned()),
+                },
+                Status::Capturing {
+                    target: Some(kitty()),
+                    committed: "hello".to_owned(),
+                    partial: None,
+                    notice: Some("Heard \u{201c}paste that\u{201d}.".to_owned()),
                 },
             ),
             (
@@ -380,6 +408,14 @@ mod tests {
                     downloading: true,
                 },
             ),
+            (
+                Mode::SpotterDownload,
+                EngineState::Listening,
+                Status::Loading {
+                    notice: SPOTTER_DOWNLOAD_NOTICE.to_owned(),
+                    downloading: true,
+                },
+            ),
             (Mode::Paused, capturing(), Status::Paused),
             (
                 Mode::Delivering(CaptureRoute::Submit),
@@ -423,6 +459,7 @@ mod tests {
                     target: Some(kitty()),
                     committed: "hello".to_owned(),
                     partial: Some("wor".to_owned()),
+                    notice: None,
                 },
             ),
         ];
@@ -488,6 +525,7 @@ mod tests {
         EngineState::Capturing {
             committed: "hello".to_owned(),
             partial: Some("wor".to_owned()),
+            notice: None,
         }
     }
 
@@ -504,8 +542,18 @@ mod tests {
                     target: Some(kitty()),
                     committed: "a".to_owned(),
                     partial: None,
+                    notice: None,
                 },
-                json!({"state": "capturing", "target": "kitty", "committed": "a", "partial": null}),
+                json!({"state": "capturing", "target": "kitty", "committed": "a", "partial": null, "notice": null}),
+            ),
+            (
+                Status::Capturing {
+                    target: None,
+                    committed: "a".to_owned(),
+                    partial: None,
+                    notice: Some("Say it again.".to_owned()),
+                },
+                json!({"state": "capturing", "target": null, "committed": "a", "partial": null, "notice": "Say it again."}),
             ),
             (
                 Status::Pending {

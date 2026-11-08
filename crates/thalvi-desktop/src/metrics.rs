@@ -71,6 +71,8 @@ pub enum Event {
     Cue,
     EndingState,
     EndingPause,
+    /// The ending spotter: loading it (`load`), one capture's work (`capture`), or a heard ending's fate (`hit`).
+    EndingSpotter,
     EndCue,
     CaptureFlow,
     /// The dictation key went down: it started a capture, or was refused and why.
@@ -106,6 +108,7 @@ impl Event {
             Self::Cue => "desktop_cue",
             Self::EndingState => "desktop_ending_state",
             Self::EndingPause => "desktop_ending_pause",
+            Self::EndingSpotter => "desktop_ending_spotter",
             Self::EndCue => "desktop_end_cue",
             Self::CaptureFlow => "desktop_capture_flow",
             Self::HoldStart => "desktop_hold_start",
@@ -775,6 +778,7 @@ mod tests {
             (Event::Cue, "desktop_cue"),
             (Event::EndingState, "desktop_ending_state"),
             (Event::EndingPause, "desktop_ending_pause"),
+            (Event::EndingSpotter, "desktop_ending_spotter"),
             (Event::EndCue, "desktop_end_cue"),
             (Event::CaptureFlow, "desktop_capture_flow"),
             (Event::HoldStart, "desktop_hold_start"),
