@@ -111,6 +111,17 @@ impl TryFrom<BTreeMap<String, Ending>> for Endings {
             }
             entries.push((phrase, ending));
         }
+        // A set saved before the write ending existed gets its default phrase, if that is free.
+        let write_phrase = DEFAULT_ENDINGS
+            .iter()
+            .find_map(|(phrase, ending)| (*ending == Ending::Write).then_some(*phrase));
+        if let Some(write_phrase) = write_phrase
+            && entries
+                .iter()
+                .all(|(phrase, ending)| *ending != Ending::Write && phrase != write_phrase)
+        {
+            entries.push((write_phrase.to_owned(), Ending::Write));
+        }
         if Ending::ALL
             .iter()
             .any(|ending| entries.iter().all(|(_, known)| known != ending))
@@ -1287,7 +1298,12 @@ mod tests {
             .copied()
             .filter(|(_, ending)| *ending != Ending::Write)
             .collect();
-        assert_eq!(endings(&without_write), Err(EndingsError::Incomplete));
+        let mut filled = without_write.clone();
+        filled.push(("write that out", Ending::Write));
+        assert_eq!(endings(&without_write), endings(&filled));
+        let mut taken = without_write.clone();
+        taken.push(("write that out", Ending::Paste));
+        assert_eq!(endings(&taken), Err(EndingsError::Incomplete));
         assert_eq!(Endings::default(), endings(&DEFAULT_ENDINGS).unwrap());
     }
 
