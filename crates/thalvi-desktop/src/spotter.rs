@@ -1028,6 +1028,56 @@ mod tests {
         assert_eq!(walk(&[1, 1, 2, 3]), (6.0, Some((0, 3))));
     }
 
+    #[test]
+    fn overlapping_phrases_keep_their_suffix_matches_and_scores_after_a_wrong_turn() {
+        let cases = [
+            (vec![vec![1, 2, 3], vec![2, 4]], vec![1, 2, 4], 4.0, (1, 2)),
+            (
+                vec![vec![1, 2, 3, 4], vec![2, 3]],
+                vec![1, 2, 3],
+                5.0,
+                (1, 2),
+            ),
+            (
+                vec![vec![1, 2, 3, 5], vec![2, 3, 4], vec![3, 5]],
+                vec![1, 2, 3, 5],
+                10.0,
+                (0, 4),
+            ),
+        ];
+        for (phrases, tokens, expected_score, expected_match) in cases {
+            let graph = Graph::new(&phrases);
+            let mut state = ROOT;
+            let mut score = 0.0;
+            for token in tokens {
+                let (gained, next) = graph.step(state, token);
+                score += gained;
+                state = next;
+            }
+            assert_eq!(
+                (score, graph.matched(state)),
+                (expected_score, Some(expected_match)),
+                "{phrases:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn merged_paths_add_probability_even_when_one_is_much_less_likely() {
+        for (left, right, expected) in [
+            (0.25_f64.ln(), 0.5_f64.ln(), 0.75_f64.ln()),
+            (-1000.0, 0.0, 0.0),
+            (0.0, -1000.0, 0.0),
+            (0.0, 0.0, std::f64::consts::LN_2),
+        ] {
+            let merged = log_add(left, right);
+            assert!(
+                (merged - expected).abs() < 1e-12,
+                "{left}, {right}: {merged}"
+            );
+        }
+    }
+
     fn varint(mut value: usize) -> Vec<u8> {
         let mut out = Vec::new();
         loop {
@@ -1315,6 +1365,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn encoder_chunks_must_be_nonzero_whole_steps_that_fit_the_window() {
+        let (files, vocab) = network_fixture().await;
+        let network = Network::load(&files, vocab).unwrap();
+        let oversized = (network.window / SUBSAMPLING + 1) * SUBSAMPLING;
+        let dir =
+            std::env::temp_dir().join(format!("thalvi-spotter-chunks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for shift in [0, 1, oversized] {
+            let encoder = dir.join(format!("encoder-{shift}.onnx"));
+            std::fs::write(
+                &encoder,
+                model_metadata(
+                    &std::fs::read(&files.encoder).unwrap(),
+                    "decode_chunk_len",
+                    &shift.to_string(),
+                ),
+            )
+            .unwrap();
+            let candidate = Files {
+                encoder,
+                decoder: files.decoder.clone(),
+                joiner: files.joiner.clone(),
+            };
+            match Network::load(&candidate, vocab) {
+                Err(SpotterError::Unsupported { reason, .. }) => assert!(
+                    reason.contains("chunk length does not fit its window"),
+                    "{shift}: {reason}"
+                ),
+                Err(error) => panic!("{shift}: wrong refusal: {error}"),
+                Ok(_) => panic!("invalid chunk length {shift} was accepted"),
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn the_network_normalizes_scores_and_refuses_inconsistent_models_before_capture() {
         let (files, vocab) = network_fixture().await;
         let mut network = Network::load(&files, vocab).unwrap();
@@ -1441,6 +1527,12 @@ mod tests {
         assert_eq!(pieces.unknown, Some(0));
         // "▁AB": ▁A + B = -11 beats ▁ + AB = -12 and ▁ + A + B = -12.
         assert_eq!(pieces.encode("ab"), Ok(vec![5, 3]));
+        let mut extended = bytes(-6.0);
+        extended.extend(varint(999 << 3 | 1));
+        extended.extend(0.5_f64.to_le_bytes());
+        assert_eq!(read_pieces(&extended).unwrap().encode("ab"), Ok(vec![5, 3]));
+        assert!(read_pieces(&extended[..extended.len() - 1]).is_err());
+
         let tied = read_pieces(&bytes(-7.0)).expect("a unigram model");
         assert_eq!(
             tied.encode("ab"),
