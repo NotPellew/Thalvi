@@ -12,6 +12,10 @@ const PCM_SCALE: f32 = 32768.0;
 /// Blank frames to wait for tokens that the look-ahead found before ending the stretch anyway.
 const HOLD_FRAMES: usize = 4;
 
+/// Quiet audio kept once a whole-stretch decode finds no words: room noise must not grow the
+/// stretch, while a quiet word the VAD missed still has its start.
+const WORDLESS_TAIL: usize = 16 * 1280;
+
 fn text(tokens: &[usize], pieces: &[String]) -> String {
     tokens
         .iter()
@@ -196,6 +200,10 @@ impl<D: SnapshotDecoder> Revising<D> {
             self.shown.clear();
             self.decoder.next_segment();
             return Ok(vec![RecognizerEvent::Final(current)]);
+        }
+        if finish && current.is_empty() && self.audio.len() > WORDLESS_TAIL {
+            self.audio.drain(..self.audio.len() - WORDLESS_TAIL);
+            self.decoder.next_segment();
         }
         if current == self.shown {
             return Ok(Vec::new());
@@ -412,4 +420,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn room_noise_without_words_keeps_only_a_bounded_tail() {
+        let mut snapshots = vec![(true, 8, vec![]), (true, 16, vec![])];
+        snapshots.extend(std::iter::repeat_n((true, 24, vec![]), 4));
+        snapshots.extend([(false, 24, vec![(23, 1)]), (true, 32, vec![(23, 1)])]);
+        let (events, stream) = run("qqqqqqS.", snapshots);
+        assert_eq!(
+            events,
+            [
+                RecognizerEvent::Partial("one".into()),
+                RecognizerEvent::Final("one".into()),
+            ]
+        );
+        assert!(stream.decoder.script.is_empty());
+        assert_eq!(stream.decoder.resets, 5, "each trim restarts the decoding");
+    }
 }
