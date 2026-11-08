@@ -29,7 +29,12 @@ body is `Runner::rebuild`. A dropped listener keeps its hold cursor until it
 resumes. Closing the microphone ends that interval and hands pending presses to
 Apply, which returns the accounted cursor to the live engine so a newer press
 cannot be skipped. None of these touch the mapped functions' cancellation
-behaviour, so the model is unchanged and only the hashes moved.
+behaviour, so the model is unchanged and only the hashes moved. The ending spotter and the GNOME
+host moved them again: `conclude` first settles the spotter's bookkeeping (synchronous, no await,
+before the cue and the recognizer release), `drive` gained a select branch that only plays a cue and
+shows a notice, `Runner::build` joins the spotter load with the wake load, and `Delivery::finish`
+maps a host's `Delivered` result to its notice. No await boundary, control drain or admission of
+an accepted result changed, so the model is unchanged and only the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
