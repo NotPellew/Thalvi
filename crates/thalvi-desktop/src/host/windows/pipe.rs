@@ -492,8 +492,9 @@ mod tests {
         unsafe { ConvertSidToStringSidW(found, &raw mut text) }.unwrap();
         // SAFETY: on success `text` is a NUL-terminated string allocated by Windows.
         let resolved = unsafe { text.to_string() }.unwrap();
-        // SAFETY: both were allocated with LocalAlloc and are not used again.
+        // SAFETY: the string was allocated with LocalAlloc and is not used again.
         let _ = unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
+        // SAFETY: the SID was allocated with LocalAlloc and is not used again.
         let _ = unsafe { LocalFree(Some(HLOCAL(found.0))) };
         assert_eq!(
             resolved, sid,
