@@ -498,6 +498,14 @@ async fn the_catalog_lists_each_model_with_its_size_license_languages_source_and
     let unified = &models[1].languages;
     assert!(unified.is_sorted() && unified.contains(&"English") && unified.contains(&"Ukrainian"));
     assert_eq!(models[0].languages, ["English"]);
+    let mut descriptions: Vec<_> = models.iter().map(|model| model.description).collect();
+    descriptions.sort_unstable();
+    descriptions.dedup();
+    assert_eq!(
+        descriptions.len(),
+        models.len(),
+        "each card says its own trade-off"
+    );
     for model in &models {
         assert!(CatalogSpeech::named(model.name).is_some(), "{}", model.name);
     }
