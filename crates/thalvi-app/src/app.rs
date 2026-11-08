@@ -35,6 +35,9 @@ const SETTINGS: &str = "settings";
 const HISTORY_PAGE: &str = "history";
 const OPEN_PAGE_EVENT: &str = "thalvi://open-page";
 
+/// Sent when an agent changes what the open settings window shows; the window's own saves never send it.
+const CHANGED_ELSEWHERE_EVENT: &str = "thalvi://settings-elsewhere";
+
 /// What the commands and the tray menu reach.
 pub struct AppState {
     pub link: EngineLink,
@@ -587,7 +590,9 @@ impl Running for Live {
     }
 
     fn save(&self, settings: serde_json::Value) -> Result<DesktopConfig, String> {
-        commands::save(&self.0, &self.0.state::<AppState>(), settings)
+        let config = commands::save(&self.0, &self.0.state::<AppState>(), settings)?;
+        let _ = self.0.emit(CHANGED_ELSEWHERE_EVENT, ());
+        Ok(config)
     }
 
     async fn share_word_list(&self) -> Result<(), String> {
@@ -602,7 +607,9 @@ impl Running for Live {
             Switch::ShowInMenu => menu_entry::set(&menu_entry::System::from_env(), on, || {
                 state.remember_menu_entry(on)
             }),
-        }
+        }?;
+        let _ = self.0.emit(CHANGED_ELSEWHERE_EVENT, ());
+        Ok(())
     }
 
     fn recordings(&self) -> Result<std::path::PathBuf, String> {

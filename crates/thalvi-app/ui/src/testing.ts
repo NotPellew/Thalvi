@@ -92,6 +92,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
   const levelListeners: ((level: number) => void)[] = [];
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
   const savedListeners: (() => void)[] = [];
+  const elsewhereListeners: (() => void)[] = [];
   const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
   const pageListeners: ((page: string) => void)[] = [];
   let audioState: AudioStatus = {
@@ -110,6 +111,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     getAudio: vi.fn(() => Promise.resolve(structuredClone(audioState))),
     onAudio: vi.fn((listener: (audio: AudioStatus) => void) => audioListeners.push(listener)),
     onSettingsSaved: vi.fn((listener: () => void) => savedListeners.push(listener)),
+    onSettingsChangedElsewhere: vi.fn((listener: () => void) => elsewhereListeners.push(listener)),
     getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
     saveSettings: vi.fn<(settings: Settings) => Promise<void>>(() => Promise.resolve()),
     setListening: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
@@ -181,6 +183,9 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     },
     saved: () => {
       for (const listener of savedListeners) listener();
+    },
+    changedElsewhere: () => {
+      for (const listener of elsewhereListeners) listener();
     },
   };
 }

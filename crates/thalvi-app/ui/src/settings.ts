@@ -7,6 +7,8 @@ import { el } from "./dom.ts";
 import { applyLook } from "./look.ts";
 import { buildPages, type Page, type PageContext, type SwitchRead } from "./settings-pages.ts";
 
+export const ELSEWHERE_TEXT = "Changed outside this window — Revert loads the saved settings";
+
 export const SAVED_TEXT = "Saved — applies after the current capture; the saved microphone is not active until it opens";
 
 export function mountSettings(root: HTMLElement, backend: Backend): void {
@@ -36,6 +38,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   let saveFailure = "";
   let saving = false;
   let saved = false;
+  let changedElsewhere = false;
   let audio: AudioStatus = { selected: null, active: null, paused: false };
   const live: PageContext["live"] = {
     level: () => undefined,
@@ -81,7 +84,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     copy.hidden = shownFailure === "";
     dismiss.hidden = shownFailure === "";
     const dirty = draft !== null && JSON.stringify(draft) !== baseline;
-    message.textContent = saving ? "Saving…" : dirty ? "Unsaved changes"
+    message.textContent = saving ? "Saving…" : changedElsewhere ? ELSEWHERE_TEXT : dirty ? "Unsaved changes"
       : copyNote !== "" ? copyNote
       : saved && failure.textContent === "" ? SAVED_TEXT : "";
   }
@@ -108,6 +111,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   async function load(): Promise<void> {
     saveFailure = "";
     saved = false;
+    changedElsewhere = false;
     feedback();
     let loaded: Settings;
     try {
@@ -167,6 +171,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       baseline = JSON.stringify(next);
       if (draft !== null) change(draft);
       saved = true;
+      changedElsewhere = false;
     } catch (error) {
       saveFailure = errorText(error);
       throw error;
@@ -231,6 +236,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       .then(() => {
         baseline = JSON.stringify(sending);
         saved = true;
+        changedElsewhere = false;
         live.saved();
         if (JSON.stringify(listBefore ?? []) === JSON.stringify(sending.stt.phrases ?? [])) return undefined;
         // The server keeps its own copy for dictation and conversations; a miss is said, the save stands.
@@ -258,6 +264,11 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     live.speechModel(progress);
   });
   backend.onOpenPage(open);
+  backend.onSettingsChangedElsewhere(() => {
+    if (!saving && draft !== null && JSON.stringify(draft) === baseline) void load();
+    else changedElsewhere = true;
+    feedback();
+  });
   backend.onStatus(showStatus);
   backend.getStatus().then(showStatus).catch((error: unknown) => {
     runtimeFailure = errorText(error);

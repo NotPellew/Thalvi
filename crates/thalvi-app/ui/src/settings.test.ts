@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry } from "./contract.ts";
-import { mountSettings, SAVED_TEXT } from "./settings.ts";
+import { ELSEWHERE_TEXT, mountSettings, SAVED_TEXT } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO } from "./testing.ts";
 
 let root: HTMLElement;
@@ -250,6 +250,50 @@ describe("save", () => {
     expect(stub.backend.getSettings).toHaveBeenCalledTimes(2);
     expect(root.querySelector(".trow.server")?.textContent).toContain("ws://127.0.0.1:8080");
     expect(root.querySelector(".msg")?.textContent).toBe("");
+  });
+
+  describe("when an agent changes the saved settings behind an open window", () => {
+    async function openChanged() {
+      const stub = await open(several());
+      const changed = several();
+      changed.stt.entries = changed.stt.entries.map((entry) => ({ ...entry, active: entry.id === "cybrex2" }));
+      stub.backend.getSettings.mockImplementation(() => Promise.resolve(structuredClone(changed)));
+      goTo("speech");
+      return stub;
+    }
+    const activeNames = (): (string | null)[] =>
+      Array.from(root.querySelectorAll(".trow.server")).filter((row) => row.textContent.includes("Active")).map((row) => row.querySelector(".phrase")?.textContent ?? null);
+
+    it("loads the new settings and stays on the current page when nothing is unsaved", async () => {
+      const stub = await openChanged();
+      expect(activeNames()).toEqual(["Thalvi server"]);
+      stub.changedElsewhere();
+      await settle();
+      expect(activeNames()).toEqual(["Cybrex2"]);
+      expect(root.querySelector('nav [aria-current="page"]')?.getAttribute("data-page")).toBe("speech");
+      expect(root.querySelector(".msg")?.textContent).toBe("");
+    });
+
+    it.each(["revert", "save"] as const)("keeps unsaved edits and says so until the user chooses to %s", async (action) => {
+      const stub = await openChanged();
+      goTo("capture");
+      type(control("Quiet before paste", "input"), "1.5");
+      goTo("speech");
+      stub.changedElsewhere();
+      await settle();
+      expect(activeNames()).toEqual(["Thalvi server"]);
+      expect(stub.backend.getSettings).toHaveBeenCalledTimes(1);
+      expect(root.querySelector(".msg")?.textContent).toBe(ELSEWHERE_TEXT);
+      button(action === "revert" ? "Revert" : "Save").click();
+      await settle();
+      if (action === "revert") {
+        expect(activeNames()).toEqual(["Cybrex2"]);
+      } else {
+        expect(activeNames()).toEqual(["Thalvi server"]);
+        expect(sent(stub).stt.entries.find((entry) => entry.active)?.id).toBe(SERVER.id);
+      }
+      expect(root.querySelector(".msg")?.textContent).toBe(action === "revert" ? "" : SAVED_TEXT);
+    });
   });
 
   it.each(["edit", "apply failure"] as const)("keeps a later %s visible when an in-flight save completes", async (event) => {
