@@ -56,6 +56,7 @@ jobs:
       fail-fast: false
       matrix:
         user: [thalviqa]
+        installer: ['42427343337', '42427903768']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -67,7 +68,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          $id = if ($env:MESSAGE -match 'reuse-run: (\d+)') { $Matches[1] } else { '${{ github.run_id }}' }
+          $id = if ('${{ matrix.installer }}') { '${{ matrix.installer }}' } elseif ($env:MESSAGE -match 'reuse-run: (\d+)') { $Matches[1] } else { '${{ github.run_id }}' }
           gh run download $id --repo $env:GITHUB_REPOSITORY --name nsis --dir installer
           Get-ChildItem installer
       - name: log in and out as a throwaway user

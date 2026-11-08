@@ -113,6 +113,12 @@ function Settings-Element([int]$ProcessId) {
     while ((Get-Date) -lt $until -and -not (Settings-Window $ProcessId)) { Start-Sleep -Milliseconds 250 }
     Settings-Window $ProcessId
   } 'the Settings window' 45
+  # Opening Settings by hand must bring it to the front, unlike a login start.
+  $until = (Get-Date).AddSeconds(3)
+  while ((Get-Date) -lt $until -and (Foreground) -notmatch "^thalvi-desktop#$ProcessId 'Thalvi settings'$") { Start-Sleep -Milliseconds 100 }
+  $script:settingsForeground = Foreground
+  Log "foreground after opening Settings: $script:settingsForeground"
+  Check ($script:settingsForeground -match "^thalvi-desktop#$ProcessId 'Thalvi settings'$") 'opening Settings by hand brings it to the foreground'
   $AE::FromHandle($window)
 }
 function Named-Elements($Root, [string]$Pattern) {
@@ -142,7 +148,7 @@ function Tray-Names([string]$Shot) {
   $children = [System.Windows.Automation.TreeScope]::Children
   $bar = $AE::RootElement.FindFirst($children, (New-Object System.Windows.Automation.PropertyCondition($AE::ClassNameProperty, 'Shell_TrayWnd')))
   if (-not $bar) { Log 'no taskbar found'; return @() }
-  $names = @($bar.FindAll($Scope, $all) | ForEach-Object { $_.Current.Name } | Where-Object { $_ })
+  $names = @()
   $chevron = $bar.FindAll($Scope, $all) | Where-Object { $_.Current.Name -match 'hidden icons' } | Select-Object -First 1
   if ($chevron) {
     $patterns = $chevron.GetSupportedPatterns()
@@ -151,14 +157,17 @@ function Tray-Names([string]$Shot) {
     $deadline = (Get-Date).AddSeconds(5); $flyout = @()
     while ((Get-Date) -lt $deadline -and -not $flyout.Count) {
       Start-Sleep -Milliseconds 250
-      $flyout = @($AE::RootElement.FindAll($children, $all) | Where-Object { $_.Current.ClassName -match 'Overflow' } | ForEach-Object { $_.FindAll($Scope, $all) } | ForEach-Object { $_.Current.Name } | Where-Object { $_ })
+      $flyout = @($AE::RootElement.FindAll($children, $all) | Where-Object { $_.Current.ClassName -ne 'Shell_TrayWnd' -and $_.Current.Name -notmatch '^Thalvi settings$' } | ForEach-Object {
+        $top = $_
+        $top.FindAll($Scope, $all) | Where-Object { $_.Current.Name -match '^Thalvi: ' } | ForEach-Object { "$($_.Current.Name) [in $($top.Current.ClassName)]" }
+      })
     }
     Save-Screen $Shot
     $names += $flyout
     [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
   } else { Log 'no "Show hidden icons" button'; Save-Screen $Shot }
   Log "tray names: $(($names | Select-Object -Unique) -join ' | ')"
-  @($names | Where-Object { $_ -match '^Thalvi' } | Select-Object -Unique)
+  ,@($names | Where-Object { $_ -match '^Thalvi: ' } | Select-Object -Unique)
 }
 
 function Observe-Started {
