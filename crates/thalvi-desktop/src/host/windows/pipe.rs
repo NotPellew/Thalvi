@@ -444,8 +444,11 @@ fn ask_at(instance: &str, request: &str, timeout: Duration) -> Result<Option<Str
 
 #[cfg(test)]
 mod tests {
-    use ::windows::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
-    use ::windows::Win32::Security::DACL_SECURITY_INFORMATION;
+    use ::windows::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertStringSidToSidW,
+    };
+    use ::windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSID};
+    use ::windows::core::HSTRING;
 
     use super::*;
 
@@ -475,10 +478,26 @@ mod tests {
         let sddl = unsafe { text.to_string() }.unwrap();
         // SAFETY: the string was allocated with LocalAlloc and is not used again.
         let _ = unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
+        // Windows may write a well-known account as an alias such as `LA`, so the one trustee is resolved.
+        let trustee = sddl
+            .strip_prefix("D:P(A;;GA;;;")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .filter(|trustee| !trustee.contains('('))
+            .unwrap_or_else(|| panic!("protected, with one entry allowing all access: {sddl}"));
+        let mut found = PSID::default();
+        // SAFETY: `trustee` is a SID string, and `found` receives a SID that is freed below.
+        unsafe { ConvertStringSidToSidW(&HSTRING::from(trustee), &raw mut found) }.unwrap();
+        let mut text = PWSTR::null();
+        // SAFETY: `found` is a valid SID, and `text` receives a string that is freed below.
+        unsafe { ConvertSidToStringSidW(found, &raw mut text) }.unwrap();
+        // SAFETY: on success `text` is a NUL-terminated string allocated by Windows.
+        let resolved = unsafe { text.to_string() }.unwrap();
+        // SAFETY: both were allocated with LocalAlloc and are not used again.
+        let _ = unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
+        let _ = unsafe { LocalFree(Some(HLOCAL(found.0))) };
         assert_eq!(
-            sddl,
-            format!("D:P(A;;GA;;;{sid})"),
-            "protected, with one entry for the user and none for anyone else"
+            resolved, sid,
+            "the one entry is for the user and none for anyone else"
         );
         assert!(
             pipe_name(&sid, "").starts_with(r"\\.\pipe\"),
