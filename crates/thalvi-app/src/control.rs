@@ -155,6 +155,7 @@ mod tests {
             target: Some("kitty".to_owned()),
             committed: "my password is".to_owned(),
             partial: Some("hunter2".to_owned()),
+            notice: None,
         });
         assert_eq!(state(), "capturing");
         sender.send_replace(Status::Failed {

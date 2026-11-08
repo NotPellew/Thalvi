@@ -191,6 +191,9 @@ pub enum EngineState {
     Capturing {
         committed: String,
         partial: Option<String>,
+        /// Something the user should know that did not stop the capture; it stays until the next
+        /// words are heard, and holds none of what was said.
+        notice: Option<String>,
     },
     PendingEnding {
         route: CaptureRoute,
@@ -382,6 +385,8 @@ pub struct Parts<R, W, C> {
     pub notice: Box<dyn Fn(&str)>,
     /// Listens for the ending phrases beside the recognizer; none when it could not be loaded.
     pub spotter: Option<Box<dyn KeywordSpotter>>,
+    /// Why there is no spotter, for the first capture to tell the user once.
+    pub spotter_off: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -407,6 +412,7 @@ pub struct Engine<R, W, C> {
     recorder: Recorder,
     notice: Box<dyn Fn(&str)>,
     spotter: Option<Box<dyn KeywordSpotter>>,
+    spotter_off: Option<String>,
     state: watch::Sender<EngineState>,
     level: watch::Sender<f32>,
     /// Keeps the cancel channel open so waiting on it never ends.
@@ -486,6 +492,8 @@ struct Live<S> {
     /// What the ending spotter's hits mean; none when it does not listen to this capture.
     watch: Option<Watch>,
     spot: SpotStats,
+    /// Shown with the capture until the next words are heard.
+    notice: Option<String>,
 }
 
 /// What the ending spotter did during one capture.
@@ -681,6 +689,7 @@ where
             recorder,
             notice: parts.notice,
             spotter: parts.spotter,
+            spotter_off: parts.spotter_off,
             state,
             level,
             _cancel_tx: cancel_tx,
@@ -1096,6 +1105,7 @@ where
             None => EngineState::Capturing {
                 committed: live.text.text(),
                 partial: live.partial.clone(),
+                notice: live.notice.clone(),
             },
         });
     }
@@ -1279,6 +1289,7 @@ where
             cutoff: held.map(|held| held.release.clone()),
             watch: Self::watch_for(&mut self.spotter, self.pauses, held.is_some()),
             spot: SpotStats::default(),
+            notice: held.is_none().then(|| self.spotter_off.take()).flatten(),
         };
         self.publish(&live);
         Ok((live, backlog, released))
@@ -1466,6 +1477,9 @@ where
     }
 
     fn on_partial(&self, live: &mut Live<R::Session>, text: String) {
+        if has_words(&text) {
+            live.notice = None;
+        }
         if has_words(&text)
             && let Some(done) = live
                 .watch
@@ -1486,6 +1500,9 @@ where
         self.recorder
             .text(&live.dictation, format!("heard: {text}"));
         live.partial = None;
+        if has_words(text) {
+            live.notice = None;
+        }
         let now = Instant::now();
         let before = live.watch.is_some().then(|| live.text.clone());
         let step = live.text.on_final(text, now, live.speech);
@@ -1660,9 +1677,10 @@ where
                 None,
                 json!({"call": "capture"}),
             );
-            (self.notice)(&format!(
+            live.notice = Some(format!(
                 "Ending phrase detection stopped: {error} Endings still work from the transcript."
             ));
+            self.publish(live);
         }
     }
 
@@ -1682,7 +1700,7 @@ where
     }
 
     /// The quiet interval of a disputed ending passed: tells the user, once, that the transcript
-    /// did not take it. Nothing in the capture changes.
+    /// did not take it, on the overlay until the next words. Nothing in the capture changes.
     fn on_disputed(&self, live: &mut Live<R::Session>) {
         let Some((notice, done)) = live
             .watch
@@ -1691,10 +1709,11 @@ where
         else {
             return;
         };
-        (self.notice)(&format!(
+        live.notice = Some(format!(
             "Heard \u{201c}{}\u{201d}, but the transcript did not end with it. Nothing was removed; say the ending again.",
             notice.phrase
         ));
+        self.publish(live);
         self.queue_cue(live, Cue::Cancelled);
         self.spot_resolved(&done);
     }

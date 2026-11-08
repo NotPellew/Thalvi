@@ -221,13 +221,13 @@ async fn load_wake<T>(
 }
 
 /// Loads the ending spotter next to the wake models. It only double-checks the transcript, so a
-/// failure is a notice and dictation goes on without it.
+/// failure is a notice, shown with the first capture, and dictation goes on without it.
 async fn load_spotter(
-    publisher: &Rc<Publisher>,
+    publisher: &Publisher,
     endings: &Endings,
     store: &ModelStore,
     recorder: &Recorder,
-) -> Option<Box<dyn KeywordSpotter>> {
+) -> (Option<Box<dyn KeywordSpotter>>, Option<String>) {
     let started = Instant::now();
     let mut downloads = false;
     for asset in [
@@ -251,20 +251,18 @@ async fn load_spotter(
         started.elapsed(),
         downloads,
         endings.entries().count(),
-        &*publisher.notice_sink(),
         recorder,
     )
 }
 
-/// Records how the spotter loaded and tells the user when it did not.
+/// Records how the spotter loaded; when it did not, the notice for the user.
 fn spotter_loaded(
     loaded: Result<Box<dyn KeywordSpotter>, SpotterError>,
     took: Duration,
     downloaded: bool,
     phrases: usize,
-    notice: &dyn Fn(&str),
     recorder: &Recorder,
-) -> Option<Box<dyn KeywordSpotter>> {
+) -> (Option<Box<dyn KeywordSpotter>>, Option<String>) {
     recorder.metric(
         Event::EndingSpotter,
         if loaded.is_ok() { "ok" } else { "error" },
@@ -272,10 +270,11 @@ fn spotter_loaded(
         json!({"call": "load", "phrases": phrases, "downloaded": downloaded}),
     );
     match loaded {
-        Ok(spotter) => Some(spotter),
+        Ok(spotter) => (Some(spotter), None),
         Err(error) => {
-            notice(&format!("{error} Endings still work from the transcript."));
-            None
+            let notice = format!("{error} Endings still work from the transcript.");
+            println!("{notice}");
+            (None, Some(notice))
         }
     }
 }
@@ -577,7 +576,7 @@ impl Runner {
             Recorder::per_user(config.recordings).map_err(|error| Failure::of(&error))?;
         let store = ModelStore::per_user().map_err(|error| Failure::of(&error))?;
         let started = Instant::now();
-        let (wake, spotter) = tokio::join!(
+        let (wake, (spotter, spotter_off)) = tokio::join!(
             load_wake(
                 &self.publisher,
                 &config.wake,
@@ -613,6 +612,7 @@ impl Runner {
                 hold: self.key_state.clone(),
                 notice: self.publisher.notice_sink(),
                 spotter,
+                spotter_off,
             },
             config,
             recorder,
@@ -1329,6 +1329,9 @@ async fn follow(
                     break;
                 }
                 let engine = state.borrow_and_update().clone();
+                if let EngineState::Capturing { notice: Some(notice), .. } = &engine {
+                    println!("{notice}");
+                }
                 publisher.update(|view| view.engine = engine);
             }
             changed = level.changed() => {
@@ -1580,6 +1583,7 @@ mod tests {
                 http: reqwest::Client::new(),
                 notice: publisher.notice_sink(),
                 spotter: None,
+                spotter_off: None,
             }, &DesktopConfig::from_json_str("{}").unwrap(), Recorder::disabled());
             let listening = tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -1595,6 +1599,7 @@ mod tests {
             publisher.mode(Mode::Idle);
             publisher.update(|view| view.engine = EngineState::Capturing {
                 committed: "keep speaking".to_owned(), partial: None,
+                notice: None,
             });
             publisher.notice_sink()(Refusal::Capturing.notice());
             assert!(matches!(&*status.borrow(), Status::Capturing { committed, .. } if committed == "keep speaking"));
@@ -1813,6 +1818,7 @@ mod tests {
                         http: reqwest::Client::new(),
                         notice: publisher.notice_sink(),
                         spotter: None,
+                        spotter_off: None,
                     },
                     &DesktopConfig::from_json_str("{}").unwrap(),
                     Recorder::disabled(),
@@ -2541,41 +2547,28 @@ mod tests {
         following.await.unwrap();
     }
     #[test]
-    fn a_spotter_that_cannot_load_is_one_notice_naming_the_phrase_and_dictation_goes_on() {
+    fn a_spotter_that_cannot_load_leaves_a_notice_naming_the_phrase_and_dictation_goes_on() {
         use thalvi_desktop::engine::fakes::FakeSpotter;
         use thalvi_desktop::spotter::Unspeakable;
 
-        let told = RefCell::new(Vec::new());
-        let notice = |text: &str| told.borrow_mut().push(text.to_owned());
-        let loaded = |result| {
-            spotter_loaded(
-                result,
-                Duration::ZERO,
-                false,
-                6,
-                &notice,
-                &Recorder::disabled(),
-            )
-        };
+        let loaded =
+            |result| spotter_loaded(result, Duration::ZERO, false, 6, &Recorder::disabled());
 
         let unhearable = SpotterError::Phrases(vec![Unspeakable {
             phrase: "f\u{fc}ge ein".to_owned(),
             characters: "\u{dc}".to_owned(),
         }]);
-        assert!(loaded(Err(unhearable)).is_none());
-        let seen = told.borrow().clone();
-        let [only] = &seen[..] else {
-            panic!("expected one notice, got {seen:?}");
-        };
+        let (spotter, notice) = loaded(Err(unhearable));
+        assert!(spotter.is_none());
+        let notice = notice.unwrap();
         assert!(
-            only.contains("\"f\u{fc}ge ein\"")
-                && only.ends_with("Endings still work from the transcript."),
-            "{only}"
+            notice.contains("\"f\u{fc}ge ein\"")
+                && notice.ends_with("Endings still work from the transcript."),
+            "{notice}"
         );
 
-        told.borrow_mut().clear();
-        let (spotter, _control) = FakeSpotter::new();
-        assert!(loaded(Ok(Box::new(spotter))).is_some());
-        assert!(told.borrow().is_empty());
+        let (fake, _control) = FakeSpotter::new();
+        let (spotter, notice) = loaded(Ok(Box::new(fake)));
+        assert!(spotter.is_some() && notice.is_none());
     }
 }

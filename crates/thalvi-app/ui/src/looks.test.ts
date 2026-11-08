@@ -61,7 +61,7 @@ describe("the overlay in the holo and gunmetal looks", () => {
     const { emit, saved, backend } = await mount("gunmetal");
     expect(root.dataset["look"]).toBe("gunmetal");
 
-    emit({ state: "capturing", target: null, committed: "x", partial: null });
+    emit({ state: "capturing", target: null, committed: "x", partial: null, notice: null });
     backend.getSettings.mockResolvedValue({ ...SETTINGS, look: "holo" });
     saved();
     await settle();
@@ -81,11 +81,20 @@ describe("the overlay in the holo and gunmetal looks", () => {
     { name: "starting", status: { state: "starting", target: "Slack" }, tone: "live", label: "", tag: false, line: "", message: "" },
     {
       name: "speaking",
-      status: { state: "capturing", target: null, committed: "Hello", partial: "wor" },
+      status: { state: "capturing", target: null, committed: "Hello", partial: "wor", notice: null },
       tone: "live",
       label: "",
       tag: false,
       line: "Hello wor",
+      message: "",
+    },
+    {
+      name: "speaking with a notice the user should read",
+      status: { state: "capturing", target: null, committed: "Hello", partial: null, notice: "Say the ending again." },
+      tone: "live",
+      label: "",
+      tag: false,
+      line: "Say the ending again.",
       message: "",
     },
     { name: "waiting for quiet", status: pending(true), tone: "quiet", label: "", tag: false, line: "Call me back", message: "" },
@@ -210,12 +219,12 @@ describe("the overlay in the holo and gunmetal looks", () => {
     try {
       const { emit } = await mount();
       const run = () => pick(module(), ".run");
-      emit({ state: "capturing", target: null, committed: "a long line of words", partial: null });
+      emit({ state: "capturing", target: null, committed: "a long line of words", partial: null, notice: null });
       expect(pick(module(), ".tick").classList.contains("over")).toBe(true);
       expect(run().style.transform).toBe("translateX(-200px)");
 
       wide = 120;
-      emit({ state: "capturing", target: null, committed: "short", partial: null });
+      emit({ state: "capturing", target: null, committed: "short", partial: null, notice: null });
       expect(pick(module(), ".tick").classList.contains("over")).toBe(false);
       expect(run().style.transform).toBe("translateX(0px)");
 
@@ -236,7 +245,7 @@ describe("the overlay in the holo and gunmetal looks", () => {
 
   it("hides the dictated words with overlay.draft off but still tells a failure", async () => {
     const { emit } = await mount("holo", { ...SETTINGS, overlay: { show: true, draft: false } });
-    emit({ state: "capturing", target: "Slack", committed: "secret", partial: null });
+    emit({ state: "capturing", target: "Slack", committed: "secret", partial: null, notice: null });
     expect(line()).toBe("");
     expect(module().dataset["text"]).toBe("false");
     emit({ state: "failed", notice: "Server unreachable.", headline: "Server unreachable.", causes: [], kind: "other" });
@@ -251,7 +260,7 @@ describe("the overlay in the holo and gunmetal looks", () => {
       emit(status);
       return !cancel().hidden;
     };
-    expect(shown({ state: "capturing", target: null, committed: "", partial: null })).toBe(true);
+    expect(shown({ state: "capturing", target: null, committed: "", partial: null, notice: null })).toBe(true);
     cancel().click();
     expect(backend.cancelCapture).toHaveBeenCalledOnce();
     expect(shown({ state: "working", target: "Slack", route: "task", cancellable: true })).toBe(true);
@@ -268,7 +277,7 @@ describe("the overlay in the holo and gunmetal looks", () => {
 
     it("is drawn on every frame while the voice is live, and rarely once it has settled", async () => {
       const { emit, level, clock } = await mount();
-      emit({ state: "capturing", target: null, committed: "", partial: null });
+      emit({ state: "capturing", target: null, committed: "", partial: null, notice: null });
       level(0.8);
       expect(run(clock, 1000)).toBeGreaterThan(55);
 
@@ -279,13 +288,13 @@ describe("the overlay in the holo and gunmetal looks", () => {
 
     it("is not drawn in the neon look, behind a label, or while the overlay is idle", async () => {
       const neon = await mount("neon");
-      neon.emit({ state: "capturing", target: null, committed: "", partial: null });
+      neon.emit({ state: "capturing", target: null, committed: "", partial: null, notice: null });
       expect(run(neon.clock, 500)).toBe(0);
 
       document.body.innerHTML = '<div id="overlay"></div>';
       root = pick(document.body, "#overlay");
       const { emit, level, clock } = await mount("gunmetal");
-      emit({ state: "capturing", target: null, committed: "", partial: null });
+      emit({ state: "capturing", target: null, committed: "", partial: null, notice: null });
       level(0.8);
       expect(run(clock, 200)).toBeGreaterThan(0);
       emit(pending(false));
