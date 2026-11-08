@@ -1,4 +1,4 @@
-//! The ending spotter on recorded speech: false alarms and recall per ending, and how often hearing a disputed ending again rescues it.
+//! The ending spotter on recorded speech: false alarms and recall per ending, and how many notices the engine's rules would give.
 //!
 //! Needs `THALVI_RECORDINGS_DIR`, a folder tree of 16 kHz mono 16-bit WAVs. Where a folder has a
 //! `speech.wav` with a `text.txt` beside it (the desktop's own recordings), the `heard:` lines say
@@ -6,8 +6,9 @@
 //! counts as a candidate false alarm. `THALVI_SPOT_MODELS` is where the models are downloaded to
 //! (default: the test target's `models`), `THALVI_SPOT_OUT` a file for the places of spotter-only
 //! hits, and `THALVI_SPOT_LIMIT` caps the number of recordings. Setting `THALVI_SPEECH_MODEL` to a
-//! catalog name or a model folder adds phase B: the local recognizer's finals decide which hits the
-//! transcript disputes, and each is transcribed again from the last final before the hit.
+//! catalog name or a model folder adds the second half: the local recognizer's finals and partials
+//! go through the engine's own `claim::Watch` with the same voice activity detector, giving each hit's
+//! outcome, the notices per hour and how late the covering final comes after the phrase.
 //!
 //! Prints counts and durations only, never texts. Run with `--release --ignored --nocapture`.
 
@@ -16,9 +17,12 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use thalvi_desktop::capture::{CaptureSession, Ending, EndingPauses, Endings, FinalStep};
+use thalvi_desktop::capture::{
+    CaptureSession, Ending, EndingPauses, Endings, FinalStep, has_words,
+};
+use thalvi_desktop::claim::{Effect, Outcome, Resolution, Watch};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
 use thalvi_desktop::local::{ModelSource, SpeechModel, SpeechStream};
 use thalvi_desktop::models::{CatalogSpeech, ModelStore};
@@ -26,13 +30,13 @@ use thalvi_desktop::phrases::WordList;
 use thalvi_desktop::recognizer::RecognizerEvent;
 use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterHit};
 use thalvi_desktop::transducer::{SpeechChoice, Transducer, TransducerSource};
+use thalvi_desktop::vad::VadDetector;
+use tokio::time::Instant;
 
-/// The 800 ms of silence after a capture that lets the recognizer finish and endpoint.
-const RELEASE_FRAMES: usize = 10;
+/// Silence after each recording, 3.6 s: long enough for the recognizer to endpoint and for a late final.
+const TAIL_FRAMES: usize = 45;
 /// A hit this close to the end of a recording, or nearer, is where an ending is said.
 const TAIL: u64 = 4 * SAMPLE_RATE as u64;
-/// How long the engine lets a recheck run: a live final that carries the ending in this time ends it.
-const RECHECK_LIMIT: u64 = 5 * SAMPLE_RATE as u64;
 const THRESHOLDS: [f32; 3] = [0.25, 0.30, 0.35];
 
 fn store() -> ModelStore {
@@ -108,7 +112,7 @@ fn read_wav(path: &Path) -> Result<Vec<i16>, String> {
 fn frames_of(samples: &[i16]) -> Vec<Frame> {
     let mut padded = samples.to_vec();
     padded.resize(
-        samples.len().div_ceil(FRAME_SAMPLES) * FRAME_SAMPLES + RELEASE_FRAMES * FRAME_SAMPLES,
+        samples.len().div_ceil(FRAME_SAMPLES) * FRAME_SAMPLES + TAIL_FRAMES * FRAME_SAMPLES,
         0,
     );
     padded.as_chunks::<FRAME_SAMPLES>().0.to_vec()
@@ -172,7 +176,7 @@ fn literal_phrases(endings: &Endings, finals: &[String]) -> Vec<String> {
     let mut found = Vec::new();
     for text in finals {
         let before = capture.clone();
-        let step = capture.on_final(text, tokio::time::Instant::now(), false);
+        let step = capture.on_final(text, Instant::now(), false);
         if let Some((phrase, _)) = literal(endings, &before, text, &step) {
             found.push(phrase.to_owned());
         }
@@ -223,251 +227,86 @@ fn at_least(values: &[f32]) -> String {
         .join("/")
 }
 
-/// One recheck: a disputed hit and what hearing its audio again gave.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Redo {
-    /// The new transcript ends with the hit's ending.
-    Rescued,
-    /// The new transcript says the same words again, with no ending.
-    Repeated,
-    /// The new transcript ends with a different ending.
-    OtherEnding,
-    /// The new transcript has different words and no ending.
-    OtherWords,
-    /// The recognizer gave nothing to apply.
-    Nothing,
-}
-
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent facts about one recheck, each a line of the report"
-)]
-struct Recheck {
-    redo: Redo,
-    /// No final covered the phrase, so the recheck started after the release silence.
-    backstop: bool,
-    tail: bool,
-    /// The user said the same ending literally later in the capture.
-    said_again: bool,
-    /// The live transcript carried the ending itself while the recheck would still have run.
-    agreed_late: bool,
-    /// Where the recheck started, in samples of the recording.
-    at: u64,
-    millis: f64,
-    audio_seconds: f64,
-}
-
-/// A hit waiting for the final that covers it.
-struct Claim {
-    ending: Ending,
-    end: u64,
-    /// How many finals had arrived by the first token of the phrase.
-    anchor: usize,
-}
-
-struct Final {
-    arrived: u64,
-    text: String,
-    ending: Option<Ending>,
-}
-
-/// The claim rules of the engine, applied to one recording as it streams through a speech model.
-struct Replay<'a, M: SpeechModel> {
-    model: &'a M,
-    endings: &'a Endings,
+/// The engine's handling of hits, run on one recording as it streams through a speech model.
+struct Mirror<'a, M: SpeechModel> {
     frames: &'a [Frame],
-    samples: u64,
     stream: M::Stream,
-    live: CaptureSession,
-    /// The capture after each final, so `sessions[n]` is the state with `n` finals applied.
-    sessions: Vec<CaptureSession>,
-    finals: Vec<Final>,
-    claim: Option<Claim>,
-    /// Each recheck with the ending it was for and the index of the first final after the disputed ones.
-    rechecks: Vec<(Recheck, Ending, usize)>,
-    agreed: u32,
-    conflicts: u32,
+    capture: CaptureSession,
+    watch: Watch,
+    vad: VadDetector,
+    start: Instant,
+    outcomes: Vec<(Resolution, usize)>,
+    /// The frame each notice came at.
+    notices: Vec<usize>,
 }
 
-fn normalized(texts: impl Iterator<Item = String>) -> Vec<String> {
-    words(&texts.collect::<Vec<_>>().join(" "))
-}
-
-fn now() -> tokio::time::Instant {
-    tokio::time::Instant::now()
-}
-
-impl<'a, M: SpeechModel> Replay<'a, M> {
-    fn new(model: &'a M, endings: &'a Endings, frames: &'a [Frame], samples: u64) -> Self {
+impl<'a, M: SpeechModel> Mirror<'a, M> {
+    fn new(model: &M, frames: &'a [Frame]) -> Self {
         Self {
-            model,
-            endings,
             frames,
-            samples,
             stream: model.stream(),
-            live: session(),
-            sessions: vec![session()],
-            finals: Vec::new(),
-            claim: None,
-            rechecks: Vec::new(),
-            agreed: 0,
-            conflicts: 0,
+            capture: session(),
+            watch: Watch::new(EndingPauses::default()),
+            vad: VadDetector::new(),
+            start: now(),
+            outcomes: Vec::new(),
+            notices: Vec::new(),
         }
     }
 
-    /// Takes frame `index` into the recognizer, then the spotter's hit on it, if any.
+    /// One frame: sent to the recognizer and the spotter, then what the recognizer made of it.
     fn frame(&mut self, index: usize, hit: Option<&SpotterHit>) {
-        let sent = (index as u64 + 1) * FRAME_SAMPLES as u64;
-        for event in self
-            .stream
-            .accept(&self.frames[index])
-            .expect("frame is recognized")
-        {
-            if let RecognizerEvent::Final(text) = event {
-                let before = self.live.clone();
-                let step = self.live.on_final(&text, now(), false);
-                self.finals.push(Final {
-                    arrived: sent,
-                    ending: literal(self.endings, &before, &text, &step).map(|(_, ending)| ending),
-                    text,
-                });
-                self.sessions.push(self.live.clone());
-            }
+        let at = self.start + Duration::from_millis(80 * (index as u64 + 1));
+        let frame = &self.frames[index];
+        let speech = self.vad.speech(
+            frame,
+            self.capture.pending().is_some() || self.watch.disputed(),
+        );
+        if speech {
+            self.watch.speaking();
+        } else {
+            self.watch.quiet_frame(at);
         }
+        self.watch.sent(1, at, speech);
         if let Some(hit) = hit {
-            self.hear(hit);
+            self.outcomes
+                .extend(self.watch.hit(hit, at, speech).map(|done| (done, index)));
         }
-        self.settle(index, sent);
-    }
-
-    fn hear(&mut self, hit: &SpotterHit) {
-        match &mut self.claim {
-            Some(open) => {
-                open.ending = hit.ending;
-                open.end = hit.end_sample;
-            }
-            None => {
-                self.claim = Some(Claim {
-                    ending: hit.ending,
-                    end: hit.end_sample,
-                    anchor: self
-                        .finals
-                        .iter()
-                        .take_while(|done| done.arrived <= hit.start_sample)
-                        .count(),
-                });
-            }
-        }
-    }
-
-    /// Judges the open claim by the first final that covers it and changed the capture.
-    fn settle(&mut self, index: usize, sent: u64) {
-        let Some(open) = &self.claim else { return };
-        let covering = self
-            .finals
-            .iter()
-            .enumerate()
-            .skip(open.anchor)
-            .filter(|(_, done)| done.arrived >= open.end)
-            .find(|(at, done)| {
-                done.ending.is_some() || self.sessions[at + 1].text() != self.sessions[*at].text()
-            })
-            .map(|(at, _)| at);
-        let backstop =
-            covering.is_none() && sent >= open.end + (RELEASE_FRAMES * FRAME_SAMPLES) as u64;
-        match covering.map(|at| self.finals[at].ending) {
-            Some(Some(ending)) if ending == open.ending => {
-                self.agreed += 1;
-                self.claim = None;
-            }
-            Some(Some(_)) => {
-                self.conflicts += 1;
-                self.claim = None;
-            }
-            None if !backstop => {}
-            Some(None) | None => self.recheck(index, covering, backstop),
-        }
-    }
-
-    /// Transcribes the audio since the anchor again, in a fresh stream, and applies the result.
-    fn recheck(&mut self, index: usize, covering: Option<usize>, backstop: bool) {
-        let open = self.claim.take().expect("a claim is open");
-        let anchor_sample = open
-            .anchor
-            .checked_sub(1)
-            .map_or(0, |last| self.finals[last].arrived);
-        let first = usize::try_from(anchor_sample / FRAME_SAMPLES as u64).expect("fits");
-        let mut audio: Vec<Frame> = self.frames[first..=index].to_vec();
-        audio.extend(std::iter::repeat_n([0; FRAME_SAMPLES], RELEASE_FRAMES));
-        let started = Instant::now();
-        let mut stream = self.model.stream();
-        let mut again = Vec::new();
-        for frame in &audio {
-            for event in stream.accept(frame).expect("frame is recognized") {
-                if let RecognizerEvent::Final(text) = event {
-                    again.push(text);
+        for event in self.stream.accept(frame).expect("frame is recognized") {
+            match event {
+                RecognizerEvent::Partial(text) if has_words(&text) => {
+                    self.outcomes
+                        .extend(self.watch.words(at).map(|done| (done, index)));
+                }
+                RecognizerEvent::Partial(_) => {}
+                RecognizerEvent::Final(text) => {
+                    let before = self.capture.clone();
+                    let step = self.capture.on_final(&text, at, speech);
+                    let effect = Effect::of(&before, &self.capture, &step);
+                    self.outcomes.extend(
+                        self.watch
+                            .final_arrived(effect, at, speech)
+                            .map(|done| (done, index)),
+                    );
                 }
             }
         }
-        let millis = started.elapsed().as_secs_f64() * 1000.0;
-        let mut redone = self.sessions[open.anchor].clone();
-        let mut said = None;
-        for text in &again {
-            let before = redone.clone();
-            let step = redone.on_final(text, now(), false);
-            if let Some((_, ending)) = literal(self.endings, &before, text, &step) {
-                said = Some(ending);
-            }
+        if let Some((_, done)) = self.watch.notice(at) {
+            self.notices.push(index);
+            self.outcomes.push((done, index));
         }
-        let later_from = covering.map_or(self.finals.len(), |at| at + 1);
-        let disputed = normalized(
-            self.finals[open.anchor..later_from]
-                .iter()
-                .map(|done| done.text.clone()),
-        );
-        let redo = match said {
-            Some(ending) if ending == open.ending => Redo::Rescued,
-            Some(_) => Redo::OtherEnding,
-            None if again.is_empty() => Redo::Nothing,
-            None if normalized(again.into_iter()) == disputed => Redo::Repeated,
-            None => Redo::OtherWords,
-        };
-        self.rechecks.push((
-            Recheck {
-                redo,
-                backstop,
-                tail: open.end + TAIL >= self.samples,
-                said_again: false,
-                agreed_late: false,
-                at: (index as u64 + 1) * FRAME_SAMPLES as u64,
-                millis,
-                audio_seconds: seconds(audio.len() as u64 * FRAME_SAMPLES as u64),
-            },
-            open.ending,
-            later_from,
-        ));
     }
 
-    /// The rechecks, each told whether the capture's later finals said its ending literally.
-    fn finish(self) -> (Vec<Recheck>, u32, u32) {
-        let finals = self.finals;
-        let rechecks = self
-            .rechecks
-            .into_iter()
-            .map(|(mut check, ending, later_from)| {
-                let mut later = finals
-                    .iter()
-                    .skip(later_from)
-                    .filter(|done| done.ending == Some(ending));
-                let first = later.next();
-                check.said_again = first.is_some();
-                check.agreed_late =
-                    first.is_some_and(|done| done.arrived <= check.at + RECHECK_LIMIT);
-                check
-            })
-            .collect();
-        (rechecks, self.agreed, self.conflicts)
+    fn finish(mut self) -> (Vec<(Resolution, usize)>, Vec<usize>) {
+        let at = self.start + Duration::from_millis(80 * self.frames.len() as u64);
+        self.outcomes
+            .extend(self.watch.finish(at).map(|done| (done, self.frames.len())));
+        (self.outcomes, self.notices)
     }
+}
+
+fn now() -> Instant {
+    Instant::now()
 }
 
 fn seconds(samples: u64) -> f64 {
@@ -475,17 +314,55 @@ fn seconds(samples: u64) -> f64 {
         / f64::from(SAMPLE_RATE)
 }
 
-fn describe(redos: &[&Recheck]) -> String {
-    let count = |wanted: Redo| redos.iter().filter(|check| check.redo == wanted).count();
-    format!(
-        "rechecks {}  rescued {}  repeated {}  other ending {}  other words {}  nothing {}",
-        redos.len(),
-        count(Redo::Rescued),
-        count(Redo::Repeated),
-        count(Redo::OtherEnding),
-        count(Redo::OtherWords),
-        count(Redo::Nothing),
-    )
+/// What the engine's logic did over all recordings.
+#[derive(Default)]
+struct Judged {
+    outcomes: BTreeMap<&'static str, u32>,
+    /// Milliseconds from a heard phrase's end to the final that covered it.
+    covering: Vec<f64>,
+    /// Notices at or before the end of the audio, and only in the silence added after it.
+    notices: u32,
+    notices_in_tail: u32,
+}
+
+impl Judged {
+    fn add(&mut self, outcomes: &[(Resolution, usize)], notices: &[usize], real_frames: usize) {
+        for (done, _) in outcomes {
+            *self.outcomes.entry(done.outcome.name()).or_default() += 1;
+            if matches!(done.outcome, Outcome::Agreed | Outcome::AgreedLate) {
+                self.covering.extend(
+                    done.covering_after
+                        .map(|after| after.as_secs_f64() * 1000.0),
+                );
+            }
+        }
+        for at in notices {
+            if *at < real_frames {
+                self.notices += 1;
+            } else {
+                self.notices_in_tail += 1;
+            }
+        }
+    }
+
+    fn print(&self, hours: f64) {
+        println!("hits by outcome: {:?}", self.outcomes);
+        println!(
+            "notices: {} within the recording ({:.1}/h), {} only in the silence added after it",
+            self.notices,
+            f64::from(self.notices) / hours,
+            self.notices_in_tail,
+        );
+        let mut delays = self.covering.clone();
+        println!(
+            "covering final after the phrase ended, for agreed hits: n {}  min {:.0}  median {:.0}  p90 {:.0}  max {:.0} ms",
+            delays.len(),
+            percentile(&mut delays, 0).unwrap_or(0.0),
+            percentile(&mut delays, 50).unwrap_or(0.0),
+            percentile(&mut delays, 90).unwrap_or(0.0),
+            percentile(&mut delays, 100).unwrap_or(0.0),
+        );
+    }
 }
 
 /// What the spotter did over all recordings.
@@ -598,44 +475,6 @@ impl Scores {
     }
 }
 
-/// Which rechecks a line of the report is about.
-type Keep = fn(&Recheck) -> bool;
-
-fn print_rechecks(rechecks: &[Recheck], agreed: u32, other: u32) {
-    let all: Vec<&Recheck> = rechecks.iter().collect();
-    println!(
-        "phase B hits judged: agreed {agreed}  other ending {other}  disputed {}",
-        all.len()
-    );
-    println!("all disputed: {}", describe(&all));
-    let subsets: [(&str, Keep); 7] = [
-        ("live transcript agreed late", |check| check.agreed_late),
-        ("not agreed late (the transcript never had it)", |check| {
-            !check.agreed_late
-        }),
-        ("not agreed late, in the tail", |check| {
-            !check.agreed_late && check.tail
-        }),
-        ("not agreed late, said again by the user", |check| {
-            !check.agreed_late && check.said_again
-        }),
-        ("tail", |check| check.tail),
-        ("said again later", |check| check.said_again),
-        ("backstop", |check| check.backstop),
-    ];
-    for (name, keep) in subsets {
-        let subset: Vec<&Recheck> = rechecks.iter().filter(|check| keep(check)).collect();
-        println!("{name}: {}", describe(&subset));
-    }
-    let mut millis: Vec<f64> = rechecks.iter().map(|check| check.millis).collect();
-    let audio: f64 = rechecks.iter().map(|check| check.audio_seconds).sum();
-    println!(
-        "recheck compute: median {:.0} ms  max {:.0} ms  audio {audio:.0} s in total",
-        percentile(&mut millis, 50).unwrap_or(0.0),
-        percentile(&mut millis, 100).unwrap_or(0.0),
-    );
-}
-
 async fn speech_model(store: &ModelStore) -> Option<Transducer> {
     let choice = std::env::var("THALVI_SPEECH_MODEL").ok()?;
     let choice = CatalogSpeech::named(&choice).map_or_else(
@@ -648,7 +487,7 @@ async fn speech_model(store: &ModelStore) -> Option<Transducer> {
 
 #[tokio::test]
 #[ignore = "needs recordings in THALVI_RECORDINGS_DIR and network for the model files"]
-async fn false_alarms_recall_and_rechecks_on_recordings() {
+async fn false_alarms_recall_and_notices_on_recordings() {
     let root =
         PathBuf::from(std::env::var("THALVI_RECORDINGS_DIR").expect("THALVI_RECORDINGS_DIR"));
     let limit = std::env::var("THALVI_SPOT_LIMIT")
@@ -665,8 +504,7 @@ async fn false_alarms_recall_and_rechecks_on_recordings() {
     let model = speech_model(&store).await;
 
     let mut scores = Scores::default();
-    let mut rechecks: Vec<Recheck> = Vec::new();
-    let (mut agreed, mut other) = (0, 0);
+    let mut judged = Judged::default();
     for path in recordings(&root).into_iter().take(limit) {
         let Ok(samples) = read_wav(&path) else {
             scores.skipped += 1;
@@ -692,21 +530,19 @@ async fn false_alarms_recall_and_rechecks_on_recordings() {
         let said = heard(&path).map(|finals| literal_phrases(&endings, &finals));
         scores.with_text += u32::from(said.is_some());
         scores.count(&endings, &label, length, &hits, said.as_deref());
-        if let (Some(model), Some(_)) = (&model, &said) {
-            let mut replay = Replay::new(model, &endings, &frames, length);
+        if let Some(model) = &model {
+            let mut mirror = Mirror::<Transducer>::new(model, &frames);
             for index in 0..frames.len() {
                 let hit = hits.iter().find(|(at, _)| *at == index).map(|(_, hit)| hit);
-                replay.frame(index, hit);
+                mirror.frame(index, hit);
             }
-            let (found, agreeing, conflicting) = replay.finish();
-            rechecks.extend(found);
-            agreed += agreeing;
-            other += conflicting;
+            let (outcomes, notices) = mirror.finish();
+            judged.add(&outcomes, &notices, samples.len().div_ceil(FRAME_SAMPLES));
         }
     }
     scores.print(spotter_load);
     if model.is_some() {
-        print_rechecks(&rechecks, agreed, other);
+        judged.print(seconds(scores.samples) / 3600.0);
     }
     if let Ok(out) = std::env::var("THALVI_SPOT_OUT") {
         std::fs::write(out, scores.places).expect("places are written");
