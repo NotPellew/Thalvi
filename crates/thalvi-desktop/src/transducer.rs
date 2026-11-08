@@ -9,12 +9,14 @@ use ort::value::Tensor;
 
 use crate::boosting::{Joiner, PhraseTree, TreeState, greedy};
 use crate::fbank::{HOP, LogMel, MEL_BINS, MelFrame, WindowMel};
-use crate::local::{ModelSource, SpeechModel};
+use crate::frame::Frame;
+use crate::local::{ModelSource, SpeechModel, SpeechStream};
 use crate::models::{CatalogSpeech, ModelStore};
 use crate::phrases::WordList;
-use crate::recognizer::RecognizerError;
+use crate::recognizer::{RecognizerError, RecognizerEvent};
 use crate::runtime;
-use crate::segments::{FrameDecoder, Segments};
+use crate::segments::{FrameDecoder, Revising, Segments, SnapshotDecoder};
+use crate::tdt::{DURATIONS, tdt_greedy};
 
 /// Silence after speech that ends a stretch of it, as a `Final`.
 const ENDPOINT_MS: usize = 600;
@@ -124,6 +126,7 @@ struct Shape {
     layers: usize,
     encoder_dim: usize,
     blank: usize,
+    tdt: bool,
 }
 
 /// Sizes of the cache-aware encoder.
@@ -161,6 +164,7 @@ enum Layout {
     CacheAware(Arc<CacheShape>),
     /// With the language prompt, which is always the model's own detection.
     Buffered(Arc<BufferedShape>, i64),
+    Tdt,
 }
 
 /// How an encoder takes its input; told apart by what it declares.
@@ -168,6 +172,7 @@ enum Layout {
 enum EncoderKind {
     CacheAware,
     Buffered,
+    Tdt,
 }
 
 impl EncoderKind {
@@ -175,9 +180,28 @@ impl EncoderKind {
         match inputs {
             [_, _, _, _, _] => Some(Self::CacheAware),
             ["features", "length", "prompt_index"] => Some(Self::Buffered),
+            ["audio_signal", "length"] => Some(Self::Tdt),
             _ => None,
         }
     }
+}
+
+fn tdt_dimension(
+    encoder: Option<&[i64]>,
+    joiner: Option<&[i64]>,
+    blank: usize,
+    subsampling: usize,
+) -> Option<usize> {
+    let [_, dimension, _] = encoder? else {
+        return None;
+    };
+    let [_, _, _, logits] = joiner? else {
+        return None;
+    };
+    if subsampling != 8 || usize::try_from(*logits).ok()? != blank + 1 + DURATIONS {
+        return None;
+    }
+    usize::try_from(*dimension).ok().filter(|dim| *dim > 0)
 }
 
 struct Sessions {
@@ -260,12 +284,17 @@ impl Transducer {
             layers: count(&sessions, "pred_rnn_layers")?,
             encoder_dim: 0,
             blank: count(&sessions, "vocab_size")?,
+            tdt: kind == EncoderKind::Tdt,
         };
         let mismatch = || unsupported(&files.tokens, &"its tokens do not match the encoder");
         if tokens.len() != shape.blank + 1 || shape.subsampling == 0 {
             return Err(mismatch());
         }
         let layout = match kind {
+            EncoderKind::Tdt => {
+                shape.encoder_dim = tdt_shape(&sessions, &shape, path)?;
+                Layout::Tdt
+            }
             EncoderKind::CacheAware => {
                 let cache = CacheShape {
                     window: count(&sessions, "window_size")?,
@@ -308,6 +337,31 @@ impl Transducer {
             phrases: Arc::new(phrases),
         })
     }
+}
+
+fn tdt_shape(sessions: &Sessions, shape: &Shape, path: &Path) -> Result<usize, TransducerError> {
+    let encoder = sessions
+        .encoder
+        .outputs()
+        .first()
+        .and_then(|out| out.dtype().tensor_shape());
+    let joiner = sessions
+        .joiner
+        .outputs()
+        .first()
+        .and_then(|out| out.dtype().tensor_shape());
+    tdt_dimension(
+        encoder.map(|dims| &dims[..]),
+        joiner.map(|dims| &dims[..]),
+        shape.blank,
+        shape.subsampling,
+    )
+    .ok_or_else(|| {
+        unsupported(
+            path,
+            &"its shapes do not declare an 80 ms TDT model with five durations",
+        )
+    })
 }
 
 /// Reads a buffered encoder's sizes and runs it once on digital silence.
@@ -353,23 +407,38 @@ fn buffered_shape(
 }
 
 impl SpeechModel for Transducer {
-    type Stream = Segments<ModelStream>;
+    type Stream = Recognition;
 
-    fn stream(&self) -> Segments<ModelStream> {
+    fn stream(&self) -> Recognition {
         let shape = Arc::clone(&self.shape);
         let endpoint_blanks = ENDPOINT_MS.div_ceil(shape.subsampling * FRAME_MS);
         let sessions = Arc::clone(&self.sessions);
         let phrases = Arc::clone(&self.phrases);
-        let decoder = match &self.layout {
-            Layout::CacheAware(cache) => ModelStream::CacheAware(TransducerStream {
-                sessions,
-                carried: Carried::empty(cache),
-                phrases,
-                shape,
-                cache: Arc::clone(cache),
-                mel: LogMel::new(),
-                features: VecDeque::new(),
-            }),
+        let (decoder, lookahead) = match &self.layout {
+            Layout::Tdt => {
+                return Recognition::Revising(Revising::new(
+                    Replayed::new(OnnxBackend {
+                        sessions,
+                        shape,
+                        phrases,
+                        window: 0,
+                        prompt: 0,
+                    }),
+                    Arc::clone(&self.tokens),
+                ));
+            }
+            Layout::CacheAware(cache) => (
+                ModelStream::CacheAware(TransducerStream {
+                    sessions,
+                    carried: Carried::empty(cache),
+                    phrases,
+                    shape,
+                    cache: Arc::clone(cache),
+                    mel: LogMel::new(),
+                    features: VecDeque::new(),
+                }),
+                cache.window * HOP + WINDOW_TAIL,
+            ),
             Layout::Buffered(buffered, prompt) => {
                 let backend = OnnxBackend {
                     sessions,
@@ -378,19 +447,33 @@ impl SpeechModel for Transducer {
                     window: buffered.window,
                     prompt: *prompt,
                 };
-                ModelStream::Buffered(Buffered::new(backend, Arc::clone(buffered)))
+                (
+                    ModelStream::Buffered(Buffered::new(backend, Arc::clone(buffered))),
+                    BUFFERED_LOOKAHEAD,
+                )
             }
         };
-        let lookahead = match &self.layout {
-            Layout::CacheAware(cache) => cache.window * HOP + WINDOW_TAIL,
-            Layout::Buffered(..) => BUFFERED_LOOKAHEAD,
-        };
-        Segments::new(
+        Recognition::Frames(Segments::new(
             decoder,
             Arc::clone(&self.tokens),
             endpoint_blanks,
             lookahead,
-        )
+        ))
+    }
+}
+
+/// A recognition stream for either append-only frames or revisable offline windows.
+pub enum Recognition {
+    Frames(Segments<ModelStream>),
+    Revising(Revising<Replayed<OnnxBackend>>),
+}
+
+impl SpeechStream for Recognition {
+    fn accept(&mut self, frame: &Frame) -> Result<Vec<RecognizerEvent>, RecognizerError> {
+        match self {
+            Self::Frames(stream) => stream.accept(frame),
+            Self::Revising(stream) => stream.accept(frame),
+        }
     }
 }
 
@@ -557,6 +640,7 @@ impl TransducerStream {
             &mut Decoding {
                 predictor: &mut self.carried.predictor,
                 phrases: &mut self.carried.phrases,
+                skip: &mut 0,
             },
             Encoded {
                 values: encoded,
@@ -573,6 +657,7 @@ pub struct Decoding<'a> {
     predictor: &'a mut Option<Predictor>,
     /// Where the text so far stands in the word list.
     phrases: &'a mut TreeState,
+    skip: &'a mut usize,
 }
 
 /// Encoder output, `stride` frames to a channel.
@@ -604,7 +689,20 @@ fn decode(
         first: range.start,
         predictor,
     };
-    let emitted = greedy(&mut joiner, tree, carried.phrases, range.len())?;
+    let emitted = if shape.tdt {
+        let (next, emitted) = tdt_greedy(
+            joiner,
+            tree,
+            carried.phrases,
+            shape.blank,
+            range.len(),
+            carried.skip,
+        )?;
+        joiner = next;
+        emitted
+    } else {
+        greedy(&mut joiner, tree, carried.phrases, range.len())?
+    };
     *carried.predictor = Some(joiner.predictor);
     Ok(emitted)
 }
@@ -769,7 +867,11 @@ pub struct OnnxBackend {
 impl Backend for OnnxBackend {
     fn encode(&mut self, features: Vec<f32>, valid: usize) -> Result<Encoding, RecognizerError> {
         let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
-        encode_window(&mut sessions, self.window, self.prompt, features, valid)
+        if self.shape.tdt {
+            encode_offline(&mut sessions, features, valid)
+        } else {
+            encode_window(&mut sessions, self.window, self.prompt, features, valid)
+        }
     }
 
     fn decode(
@@ -791,6 +893,142 @@ impl Backend for OnnxBackend {
             },
             range,
         )
+    }
+}
+
+fn encode_offline(
+    sessions: &mut Sessions,
+    features: Vec<f32>,
+    window: usize,
+) -> Result<Encoding, RecognizerError> {
+    let inputs = ort::inputs![
+        Tensor::from_array((dims(&[1, MEL_BINS, window]), features)).map_err(failed)?,
+        Tensor::from_array((dims(&[1]), vec![i64::try_from(window).unwrap_or(i64::MAX)]))
+            .map_err(failed)?,
+    ];
+    let outputs = sessions.encoder.run(inputs).map_err(failed)?;
+    let (shape, values) = outputs[0].try_extract_tensor::<f32>().map_err(failed)?;
+    let stride = shape
+        .get(2)
+        .and_then(|n| usize::try_from(*n).ok())
+        .ok_or_else(|| failed("the encoder returned an unexpected shape"))?;
+    let (_, length) = outputs[1].try_extract_tensor::<i64>().map_err(failed)?;
+    let count = length
+        .first()
+        .and_then(|n| usize::try_from(*n).ok())
+        .unwrap_or(0)
+        .min(stride);
+    Ok(Encoding {
+        values: values.to_vec(),
+        stride,
+        count,
+    })
+}
+
+#[derive(Clone, Default)]
+struct ReplayState {
+    predictor: Option<Predictor>,
+    tree: TreeState,
+    skip: usize,
+}
+
+impl ReplayState {
+    fn decoding(&mut self) -> Decoding<'_> {
+        Decoding {
+            predictor: &mut self.predictor,
+            phrases: &mut self.tree,
+            skip: &mut self.skip,
+        }
+    }
+}
+
+/// Replays the tentative suffix with left context; a final replays the complete speech stretch.
+pub struct Replayed<B> {
+    backend: B,
+    mel: WindowMel,
+    prefix: Vec<Vec<usize>>,
+    anchor: ReplayState,
+}
+
+impl<B: Backend> Replayed<B> {
+    fn new(backend: B) -> Self {
+        Self {
+            backend,
+            mel: WindowMel::new(),
+            prefix: Vec::new(),
+            anchor: ReplayState::default(),
+        }
+    }
+
+    fn hear(&mut self, audio: &[f32]) -> Result<Encoding, RecognizerError> {
+        // Quiet speech otherwise falls below NeMo's additive log-energy guard.
+        let audio: Vec<f32> = audio.iter().map(|sample| sample * 16.0).collect();
+        let mel = self.mel.features(&audio);
+        let window = mel.len();
+        let mut features = vec![0.0; MEL_BINS * window];
+        for (t, frame) in mel.iter().enumerate() {
+            for (m, value) in frame.iter().enumerate() {
+                features[m * window + t] = *value;
+            }
+        }
+        self.backend.encode(features, window)
+    }
+}
+
+impl<B: Backend> SnapshotDecoder for Replayed<B> {
+    fn snapshot(&mut self, audio: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        const FRAME: usize = 1280;
+        const LEFT: usize = 8;
+        const WINDOW: usize = 24;
+        const REVISE: usize = 16;
+        let start = self.prefix.len();
+        let offset = start.saturating_sub(LEFT);
+        let heard = self.hear(&audio[offset * FRAME..])?;
+        let from = start - offset;
+        let mut carried = self.anchor.clone();
+        let mut all = self.prefix.clone();
+        let cut = if heard.count - from >= WINDOW {
+            heard.count - REVISE
+        } else {
+            from
+        };
+        if cut > from {
+            all.extend(self.backend.decode(
+                &heard.values,
+                heard.stride,
+                from..cut,
+                &mut carried.decoding(),
+            )?);
+            if all.iter().any(|tokens| !tokens.is_empty()) {
+                self.anchor = carried.clone();
+                self.prefix.clone_from(&all);
+            }
+        }
+        all.extend(self.backend.decode(
+            &heard.values,
+            heard.stride,
+            cut..heard.count,
+            &mut carried.decoding(),
+        )?);
+        Ok(all)
+    }
+
+    fn finish(&mut self, audio: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        let mut padded = audio.to_vec();
+        padded.resize(padded.len() + 12_800, 0.0);
+        let heard = self.hear(&padded)?;
+        let count = audio.len().div_ceil(1280).min(heard.count);
+        self.backend.decode(
+            &heard.values,
+            heard.stride,
+            0..count,
+            &mut ReplayState::default().decoding(),
+        )
+    }
+
+    fn next_segment(&mut self) {
+        self.prefix.clear();
+        self.anchor = ReplayState::default();
     }
 }
 
@@ -861,6 +1099,7 @@ impl<B: Backend> Buffered<B> {
             &mut Decoding {
                 predictor: &mut self.predictor,
                 phrases: &mut self.tree,
+                skip: &mut 0,
             },
         )?;
         self.silent_steps = if chunk.iter().any(|sample| *sample != 0.0) {
@@ -1448,6 +1687,227 @@ mod tests {
         ];
         for (inputs, kind) in cases {
             assert_eq!(EncoderKind::of(inputs), kind, "{inputs:?}");
+        }
+    }
+
+    #[test]
+    fn a_tdt_encoder_is_recognized_without_a_catalog_name() {
+        for (inputs, expected) in [
+            (&["audio_signal", "length"][..], Some(EncoderKind::Tdt)),
+            (&["features", "length"][..], None),
+            (&["audio_signal", "language"][..], None),
+        ] {
+            assert_eq!(EncoderKind::of(inputs), expected);
+        }
+        let encoder = [1, 1024, -1];
+        let tdt = [-1, -1, -1, 8198];
+        let plain = [-1, -1, -1, 8193];
+        for (encoder, joiner, subsampling, expected) in [
+            (Some(&encoder[..]), Some(&tdt[..]), 8, Some(1024)),
+            (Some(&encoder[..]), Some(&plain[..]), 8, None),
+            (Some(&encoder[..]), Some(&tdt[..]), 4, None),
+            (Some(&[1, 0, -1][..]), Some(&tdt[..]), 8, None),
+            (Some(&[1, -1, -1][..]), Some(&tdt[..]), 8, None),
+            (None, Some(&tdt[..]), 8, None),
+            (Some(&encoder[..]), None, 8, None),
+        ] {
+            assert_eq!(tdt_dimension(encoder, joiner, 8192, subsampling), expected);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct ReplayFake {
+        windows: Arc<Mutex<Vec<usize>>>,
+        decoded: Arc<Mutex<usize>>,
+    }
+
+    impl Backend for ReplayFake {
+        fn encode(
+            &mut self,
+            _features: Vec<f32>,
+            valid: usize,
+        ) -> Result<Encoding, RecognizerError> {
+            let count = valid / 8;
+            self.windows.lock().unwrap().push(count);
+            Ok(Encoding {
+                values: Vec::new(),
+                stride: count,
+                count,
+            })
+        }
+
+        fn decode(
+            &mut self,
+            _encoded: &[f32],
+            _stride: usize,
+            range: std::ops::Range<usize>,
+            carried: &mut Decoding<'_>,
+        ) -> Result<Vec<Vec<usize>>, RecognizerError> {
+            *self.decoded.lock().unwrap() += range.len();
+            let at = carried.predictor.as_ref().map_or(0, |p| p.output.len());
+            *carried.predictor = Some(Predictor {
+                output: vec![0.0; at + range.len()],
+                ..Predictor::default()
+            });
+            Ok((at..at + range.len()).map(|token| vec![token]).collect())
+        }
+    }
+
+    #[test]
+    fn replayed_windows_keep_each_frame_once_and_the_final_reconsiders_the_whole_stretch() {
+        let backend = ReplayFake::default();
+        let windows = Arc::clone(&backend.windows);
+        let decoded = Arc::clone(&backend.decoded);
+        let mut stream = Replayed::new(backend);
+        for count in [8, 16, 24, 32, 40, 48, 56, 64] {
+            let frames = stream.snapshot(&sound(count * 1280, 0)).unwrap();
+            assert_eq!(
+                frames.concat(),
+                (0..count).collect::<Vec<_>>(),
+                "no lost or duplicated frames at {count}"
+            );
+        }
+        assert_eq!(*windows.lock().unwrap(), [8, 16, 24, 32, 32, 32, 32, 32]);
+        assert_eq!(
+            *decoded.lock().unwrap(),
+            168,
+            "each tentative frame is decoded once per replay"
+        );
+        assert_eq!(
+            stream.finish(&sound(64 * 1280, 0)).unwrap().concat(),
+            (0..64).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            windows.lock().unwrap().last(),
+            Some(&74),
+            "the final encoder hears 800 ms of look-ahead"
+        );
+        stream.next_segment();
+        assert_eq!(
+            stream.snapshot(&sound(8 * 1280, 0)).unwrap().concat(),
+            (0..8).collect::<Vec<_>>()
+        );
+    }
+
+    #[derive(Clone)]
+    struct LateWord;
+
+    impl Backend for LateWord {
+        fn encode(
+            &mut self,
+            _features: Vec<f32>,
+            valid: usize,
+        ) -> Result<Encoding, RecognizerError> {
+            let count = valid / 8;
+            let mut values = vec![0.0; count];
+            if count >= 32 {
+                values[0] = SPEECH;
+            }
+            Ok(Encoding {
+                values,
+                stride: count,
+                count,
+            })
+        }
+
+        fn decode(
+            &mut self,
+            encoded: &[f32],
+            _stride: usize,
+            range: std::ops::Range<usize>,
+            carried: &mut Decoding<'_>,
+        ) -> Result<Vec<Vec<usize>>, RecognizerError> {
+            let predictor = carried.predictor.get_or_insert_with(Predictor::default);
+            Ok(range
+                .map(|frame| {
+                    if predictor.output.is_empty() && encoded[frame] == SPEECH {
+                        predictor.output.push(1.0);
+                        vec![0]
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn an_empty_early_window_does_not_discard_a_word_that_needs_more_context() {
+        let mut stream = Replayed::new(LateWord);
+        for count in [8, 16, 24] {
+            assert_eq!(
+                stream.snapshot(&sound(count * 1280, 0)).unwrap().concat(),
+                [] as [usize; 0]
+            );
+        }
+        for count in [32, 40] {
+            assert_eq!(
+                stream.snapshot(&sound(count * 1280, 0)).unwrap().concat(),
+                [0],
+                "the opening word is still available at frame {count}"
+            );
+        }
+    }
+
+    #[derive(Clone)]
+    struct AfterPause;
+
+    impl Backend for AfterPause {
+        fn encode(
+            &mut self,
+            features: Vec<f32>,
+            valid: usize,
+        ) -> Result<Encoding, RecognizerError> {
+            let mut values = vec![0.0; 2 * FRAMES];
+            for (frame, row) in features[..valid].chunks(8).enumerate() {
+                if row.windows(2).any(|pair| (pair[0] - pair[1]).abs() > 1e-4) {
+                    values[frame] = SPEECH;
+                }
+            }
+            Ok(Encoding {
+                values,
+                stride: FRAMES,
+                count: valid.div_ceil(8),
+            })
+        }
+
+        fn decode(
+            &mut self,
+            encoded: &[f32],
+            _stride: usize,
+            range: std::ops::Range<usize>,
+            carried: &mut Decoding<'_>,
+        ) -> Result<Vec<Vec<usize>>, RecognizerError> {
+            let predictor = carried.predictor.get_or_insert_with(Predictor::default);
+            Ok(range
+                .map(|frame| {
+                    if predictor.output.is_empty() && encoded[frame] == SPEECH {
+                        predictor.output.push(1.0);
+                        vec![0]
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn a_buffered_word_after_more_than_five_point_six_seconds_of_silence_is_kept() {
+        for seconds in [7, 10] {
+            let (fixture, _) = buffered();
+            let mut stream = Buffered::new(AfterPause, fixture.shape);
+            assert_eq!(stream.push(&sound(8 * STEP, 0)).unwrap().concat(), [0]);
+            stream.next_segment();
+            assert_eq!(
+                stream.push(&vec![0.0; seconds * 16_000]).unwrap().concat(),
+                [] as [usize; 0]
+            );
+            assert_eq!(
+                stream.push(&sound(8 * STEP, 1)).unwrap().concat(),
+                [0],
+                "the word after {seconds} seconds is present"
+            );
         }
     }
 }

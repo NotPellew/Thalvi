@@ -28,6 +28,7 @@ pub mod secondary;
 pub mod segments;
 pub mod spotter;
 pub mod tasks;
+mod tdt;
 pub mod transducer;
 pub mod vad;
 pub mod wake;
