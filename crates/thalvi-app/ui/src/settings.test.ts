@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Draft, HistoryEntry, Settings } from "./contract.ts";
-import { mountSettings, SAVED_TEXT } from "./settings.ts";
+import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry } from "./contract.ts";
+import { ELSEWHERE_TEXT, mountSettings, SAVED_TEXT } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO } from "./testing.ts";
 
 let root: HTMLElement;
@@ -70,6 +70,44 @@ function sent(stub: Awaited<ReturnType<typeof open>>): Settings {
   return call[0];
 }
 
+const SERVER = SETTINGS.stt.entries[0] as SpeechEntry;
+
+function device(model?: string, active = true): OnDeviceEntry {
+  return { kind: "on_device", id: "on-device", name: "On this computer", active, ...(model ? { model } : {}) };
+}
+
+/** Settings whose live entry in use is the on-device model, beside a Thalvi server entry not in use. */
+function local(model?: string): Settings {
+  return { ...SETTINGS, stt: { entries: [device(model), { ...SERVER, active: false }] } };
+}
+
+function deviceOf(settings: Settings): OnDeviceEntry {
+  const found = settings.stt.entries.find((entry): entry is OnDeviceEntry => entry.kind === "on_device");
+  if (!found) throw new Error("no on-device entry");
+  return found;
+}
+
+function edit(name: string): void {
+  (root.querySelector(`button[aria-label="Edit ${name}"]`) as HTMLButtonElement).click();
+}
+
+/** Opens the editor of the on-device entry; its model list loads meanwhile. */
+async function editLocal(): Promise<void> {
+  edit("On this computer");
+  await settle();
+}
+
+function use(name: string): void {
+  (root.querySelector(`button[aria-label="Use ${name}"]`) as HTMLButtonElement).click();
+}
+
+async function saveServer(): Promise<void> {
+  button("Save server").click();
+  await settle();
+}
+
+const editorNote = (): string => root.querySelector(".editor > .note:not([hidden])")?.textContent ?? "";
+
 describe("pages", () => {
   it("offers seven pages in order, each holding its controls under the right group", async () => {
     await open();
@@ -91,9 +129,8 @@ describe("pages", () => {
         id: "speech",
         title: "Speech",
         groups: {
-          Server: ["server address"],
-          Dictation: ["recognize speech", "language", "speech model", "word list"],
-          "Second transcription": ["second-pass transcription", "endpoint address", "model", "api", "api key"],
+          "Live dictation": ["speech servers", "word list"],
+          "Second pass": ["second-pass servers"],
         },
       },
       {
@@ -164,7 +201,9 @@ describe("save", () => {
   it("sends exactly the edits", async () => {
     const stub = await open();
     goTo("speech");
-    type(control("Server address", "input"), "wss://thalvi.example");
+    edit("Thalvi server");
+    type(control("Address", "input"), "wss://thalvi.example");
+    await saveServer();
     goTo("capture");
     type(control("Quiet before paste", "input"), "1.5");
     type(control("Threshold (dictation)", "input"), "0.8");
@@ -179,7 +218,7 @@ describe("save", () => {
     choose(control("Saved device", "select"), "USB Microphone");
     button("Save").click();
     const expected = structuredClone(SETTINGS);
-    expected.server = "wss://thalvi.example";
+    expected.stt.entries = [{ ...SERVER, address: "wss://thalvi.example" } as SpeechEntry];
     expected.ending_pause.paste = 1.5;
     expected.wake.capture.threshold = 0.8;
     expected.wake.conversation.model = "hey_jarvis";
@@ -201,13 +240,64 @@ describe("save", () => {
 
   it("marks unsaved edits and clears the mark on revert", async () => {
     const stub = await open();
-    type(control("Server address", "input"), "ws://other");
+    goTo("speech");
+    edit("Thalvi server");
+    type(control("Address", "input"), "ws://other");
+    await saveServer();
     expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
     button("Revert").click();
     await settle();
     expect(stub.backend.getSettings).toHaveBeenCalledTimes(2);
-    expect(control("Server address", "input").value).toBe(SETTINGS.server);
+    expect(root.querySelector(".trow.server")?.textContent).toContain("ws://127.0.0.1:8080");
     expect(root.querySelector(".msg")?.textContent).toBe("");
+  });
+
+  describe("when an agent changes the saved settings behind an open window", () => {
+    async function openChanged() {
+      const stub = await open(several());
+      const changed = several();
+      changed.stt.entries = changed.stt.entries.map((entry) => ({ ...entry, active: entry.id === "cybrex2" }));
+      stub.backend.getSettings.mockImplementation(() => Promise.resolve(structuredClone(changed)));
+      goTo("speech");
+      return stub;
+    }
+    const activeNames = (): (string | null)[] =>
+      Array.from(root.querySelectorAll(".trow.server")).filter((row) => row.textContent.includes("Active")).map((row) => row.querySelector(".phrase")?.textContent ?? null);
+
+    it("loads the new settings and stays on the current page when nothing is unsaved", async () => {
+      const stub = await openChanged();
+      expect(activeNames()).toEqual(["Thalvi server"]);
+      stub.changedElsewhere();
+      await settle();
+      expect(activeNames()).toEqual(["Cybrex2"]);
+      expect(root.querySelector('nav [aria-current="page"]')?.getAttribute("data-page")).toBe("speech");
+      expect(root.querySelector(".msg")?.textContent).toBe("");
+    });
+
+    it.each([
+      ["revert", "Quiet before paste"],
+      ["save", "Quiet before paste"],
+      ["revert", "Threshold (dictation)"],
+    ] as const)("keeps unsaved edits and says so until the user chooses to %s (edit of %s)", async (action, edited) => {
+      const stub = await openChanged();
+      goTo("capture");
+      type(control(edited, "input"), edited === "Threshold (dictation)" ? "0.8" : "1.5");
+      goTo("speech");
+      stub.changedElsewhere();
+      await settle();
+      expect(activeNames()).toEqual(["Thalvi server"]);
+      expect(stub.backend.getSettings).toHaveBeenCalledTimes(1);
+      expect(root.querySelector(".msg")?.textContent).toBe(ELSEWHERE_TEXT);
+      button(action === "revert" ? "Revert" : "Save").click();
+      await settle();
+      if (action === "revert") {
+        expect(activeNames()).toEqual(["Cybrex2"]);
+      } else {
+        expect(activeNames()).toEqual(["Thalvi server"]);
+        expect(sent(stub).stt.entries.find((entry) => entry.active)?.id).toBe(SERVER.id);
+      }
+      expect(root.querySelector(".msg")?.textContent).toBe(action === "revert" ? "" : SAVED_TEXT);
+    });
   });
 
   it.each(["edit", "apply failure"] as const)("keeps a later %s visible when an in-flight save completes", async (event) => {
@@ -403,8 +493,9 @@ describe("the wake word picker", () => {
 
 describe("a custom speech model folder", () => {
   async function openLocal() {
-    const stub = await open({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    const stub = await open(local());
     goTo("speech");
+    await editLocal();
     return stub;
   }
   const result = (): HTMLElement | null => rowOf("Speech model").querySelector<HTMLElement>(".note:not([hidden])");
@@ -450,43 +541,46 @@ describe("a custom speech model folder", () => {
     expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
   });
 
-  it("saves a valid folder as stt.model", async () => {
+  it("keeps a valid folder as the entry's model once the folder is checked", async () => {
     const stub = await openLocal();
     type(control("Speech model", "input"), "/models/mine");
+    await saveServer();
+    expect(stub.backend.validateSpeechModelFolder).toHaveBeenCalledWith("/models/mine");
+    expect(root.querySelector(".editor")?.hasAttribute("hidden")).toBe(true);
     button("Save").click();
     await settle();
-    expect(stub.backend.validateSpeechModelFolder).toHaveBeenCalledWith("/models/mine");
-    expect(sent(stub).stt).toEqual({ engine: "local", model: "/models/mine", secondary: null });
-    expect(result()?.textContent).toBe("This folder holds a speech model.");
+    expect(deviceOf(sent(stub)).model).toBe("/models/mine");
   });
 
-  it("does not save a folder that fails the check, and says why", async () => {
+  it("does not keep a folder that fails the check, and says why", async () => {
     const stub = await openLocal();
     stub.backend.validateSpeechModelFolder.mockRejectedValueOnce("There is no folder at /models/gone.");
     type(control("Speech model", "input"), "/models/gone");
-    button("Save").click();
-    await settle();
-    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    await saveServer();
+    expect(stub.backend.checkSpeechEntry).not.toHaveBeenCalled();
+    expect(root.querySelector(".editor")?.hasAttribute("hidden")).toBe(false);
     expect(result()?.textContent).toBe("There is no folder at /models/gone.");
-    expect(root.querySelector(".err")?.textContent).toBe("There is no folder at /models/gone.");
+    expect(editorNote()).toBe("There is no folder at /models/gone.");
+    expect(root.querySelector(".msg")?.textContent).toBe("");
   });
 
   it.each([
-    ["the built-in model", { engine: "local", model: "nemotron_160ms" }],
-    ["no model", { engine: "local" }],
-    ["the server engine", { engine: "server", model: "/models/mine" }],
-  ] as const)("saves without checking a folder for %s", async (_name, stt) => {
-    const stub = await open({ ...SETTINGS, stt: { ...stt, secondary: null } });
+    ["the built-in model", local("nemotron_160ms")],
+    ["no model", local()],
+  ])("keeps %s without checking a folder", async (_name, settings) => {
+    const stub = await open(settings);
     goTo("speech");
-    button("Save").click();
+    await editLocal();
+    await saveServer();
     expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
-    expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
+    expect(stub.backend.checkSpeechEntry).toHaveBeenCalledTimes(1);
   });
 });
 
 describe("the word list", () => {
   async function openWith(engine: "server" | "local", support: () => Promise<boolean>, phrases?: string[]) {
-    const stub = stubBackend({ ...SETTINGS, stt: { engine, secondary: null, ...(phrases ? { phrases } : {}) } });
+    const entries: SpeechEntry[] = [{ ...SERVER, active: engine === "server" }, device(undefined, engine === "local")];
+    const stub = stubBackend({ ...SETTINGS, stt: { entries, ...(phrases ? { phrases } : {}) } });
     stub.backend.wordListSupport.mockImplementation(support);
     mountSettings(root, stub.backend);
     await settle();
@@ -580,7 +674,7 @@ describe("the word list", () => {
 
   it("is offered without asking the server once the engine switches to this computer", async () => {
     const stub = await openWith("server", () => Promise.reject(new Error("Thalvi could not reach the server.")));
-    choose(control("Recognize speech", "select"), "local");
+    use("On this computer");
     await settle();
     expect(stub.backend.wordListSupport).toHaveBeenCalledTimes(1);
     expect(offered()).toBe(true);
@@ -590,9 +684,9 @@ describe("the word list", () => {
 
   it("asks again when the engine switches to the server", async () => {
     const stub = await openWith("local", () => Promise.resolve(true));
-    choose(control("Recognize speech", "select"), "server");
+    use("Thalvi server");
     await settle();
-    expect(stub.backend.wordListSupport).toHaveBeenCalledWith(SETTINGS.server);
+    expect(stub.backend.wordListSupport).toHaveBeenCalledWith(expect.objectContaining({ kind: "thalvi_server", address: "ws://127.0.0.1:8080" }));
     expect(offered()).toBe(true);
   });
 
@@ -618,47 +712,279 @@ describe("the word list", () => {
   });
 });
 
-describe("where speech is recognized", () => {
-  it("saves the engine, and the model only for the local engine", async () => {
-    const stub = await open();
+const CYBREX: SpeechEntry = {
+  kind: "realtime",
+  id: "cybrex2",
+  name: "Cybrex2",
+  active: false,
+  address: "ws://100.64.0.2:8012",
+  model: "nemotron",
+  has_key: true,
+};
+const OPENAI: SpeechEntry = {
+  kind: "second_pass",
+  id: "openai",
+  name: "OpenAI",
+  active: true,
+  address: "https://api.openai.com/v1",
+  model: "whisper-1",
+  api: "openai",
+  has_key: true,
+};
+const META: SpeechEntry = {
+  kind: "second_pass",
+  id: "meta",
+  name: "Meta",
+  active: false,
+  address: "https://meta.example/v1",
+  model: "asr",
+  api: "meta",
+};
+
+/** A Thalvi server in use, a recognizer reached directly, the on-device model, and two second-pass servers. */
+function several(): Settings {
+  return { ...SETTINGS, stt: { entries: [{ ...SERVER }, { ...CYBREX }, device(undefined, false), { ...OPENAI }, { ...META }] } };
+}
+
+function entryNamed(name: string): HTMLElement {
+  const found = Array.from(root.querySelectorAll<HTMLElement>(".trow.server")).find((entry) => entry.querySelector(".phrase")?.textContent === name);
+  if (!found) throw new Error(`no entry ${name}`);
+  return found;
+}
+
+const badgesOf = (name: string): (string | null)[] => Array.from(entryNamed(name).querySelectorAll(".badge")).map((badge) => badge.textContent);
+const names = (list: HTMLElement): (string | null)[] => Array.from(list.querySelectorAll(".trow.server .phrase")).map((phrase) => phrase.textContent);
+const lists = (): HTMLElement[] => Array.from(root.querySelectorAll<HTMLElement>("section[data-page=speech] .table"));
+
+async function addServer(kind: string): Promise<void> {
+  choose(root.querySelector('select[aria-label="Kind of speech server to add"]') as HTMLSelectElement, kind);
+  (root.querySelector('button[aria-label="Add a speech server"]') as HTMLButtonElement).click();
+  await settle();
+}
+
+describe("the speech server list", () => {
+  async function openSeveral() {
+    const stub = await open(several());
     goTo("speech");
-    expect(control("Recognize speech", "select").value).toBe("server");
-    expect(Array.from(control("Recognize speech", "select").options).map((option) => option.textContent)).toEqual([
-      "On this computer",
-      "Through the server",
-    ]);
-    type(control("Speech model", "input"), "/models/mine");
-    choose(control("Recognize speech", "select"), "local");
-    button("Save").click();
-    await settle();
-    expect(sent(stub).stt.engine).toBe("local");
-    expect(sent(stub).stt.model).toBe("/models/mine");
+    return stub;
+  }
 
-    await settle();
-    type(control("Speech model", "input"), "  ");
-    button("Save").click();
-    expect(stub.backend.saveSettings.mock.calls[1]?.[0].stt).toEqual({ engine: "local", secondary: null });
-
-    await settle();
-    type(control("Speech model", "input"), "nemotron_160ms");
-    choose(control("Recognize speech", "select"), "server");
-    button("Save").click();
-    expect(stub.backend.saveSettings.mock.calls[2]?.[0].stt).toEqual({ engine: "server", secondary: null });
+  it("lists each server with its kind and where it is, and marks the one in use", async () => {
+    await openSeveral();
+    const [live, second] = lists();
+    expect(names(live as HTMLElement)).toEqual(["Thalvi server", "Cybrex2", "On this computer"]);
+    expect(names(second as HTMLElement)).toEqual(["OpenAI", "Meta"]);
+    expect(badgesOf("Thalvi server")).toEqual(["Thalvi server", "Active"]);
+    expect(badgesOf("Cybrex2")).toEqual(["Realtime speech server", "Key saved"]);
+    expect(badgesOf("On this computer")).toEqual(["On this computer"]);
+    expect(entryNamed("Cybrex2").querySelector(".unit")?.textContent).toBe("ws://100.64.0.2:8012 · nemotron");
+    expect(entryNamed("On this computer").querySelector(".unit")?.textContent).toBe("nemotron_160ms");
+    expect(entryNamed("OpenAI").querySelector(".unit")?.textContent).toBe("https://api.openai.com/v1 · whisper-1 · OpenAI-style");
+    expect((root.querySelector('button[aria-label="Use Thalvi server"]') as HTMLButtonElement).disabled).toBe(true);
+    expect((root.querySelector('button[aria-label="Remove Thalvi server"]') as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("shows the saved local model", async () => {
-    await open({ ...SETTINGS, stt: { engine: "local", model: "nemotron_160ms", secondary: null } });
+  it("switches the live server with one click, saving only that and nothing else that is unsaved", async () => {
+    const stub = await openSeveral();
+    goTo("capture");
+    type(control("Quiet before paste", "input"), "1.5");
     goTo("speech");
-    expect(control("Recognize speech", "select").value).toBe("local");
-    expect(control("Speech model", "select").value).toBe("nemotron_160ms");
-    expect(control("Speech model", "input").value).toBe("");
+    use("Cybrex2");
+    await settle();
+    expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
+    const savedSettings = sent(stub);
+    expect(savedSettings.ending_pause.paste).toBe(SETTINGS.ending_pause.paste);
+    expect(savedSettings.stt.entries.map((entry) => [entry.name, entry.active])).toEqual([
+      ["Thalvi server", false],
+      ["Cybrex2", true],
+      ["On this computer", false],
+      ["OpenAI", true],
+      ["Meta", false],
+    ]);
+    expect(badgesOf("Cybrex2")).toContain("Active");
+    expect(badgesOf("Thalvi server")).not.toContain("Active");
+    expect((root.querySelector('button[aria-label="Use Cybrex2"]') as HTMLButtonElement).disabled).toBe(true);
+    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
+  });
+
+  it("keeps the server in use when the switch is refused, and says why", async () => {
+    const stub = await openSeveral();
+    stub.backend.saveSettings.mockRejectedValueOnce("The settings could not be saved to /config: disk full.");
+    use("Cybrex2");
+    await settle();
+    expect(root.querySelector(".err")?.textContent).toBe("The settings could not be saved to /config: disk full.");
+    expect(badgesOf("Thalvi server")).toContain("Active");
+    expect(badgesOf("Cybrex2")).not.toContain("Active");
+  });
+
+  it("adds a server once its fields are accepted, shown as not saved until Save", async () => {
+    const stub = await openSeveral();
+    await addServer("realtime");
+    expect(root.querySelector(".editor h4")?.textContent).toBe("Add a realtime speech server");
+    expect(control("Name", "input").value).toBe("Realtime speech server");
+    type(control("Name", "input"), "Office GPU");
+    type(control("Address", "input"), "ws://10.0.0.5:8012");
+    type(control("Model", "input"), "nemotron");
+    type(control("API key", "input"), "sk-new");
+    await saveServer();
+    expect(stub.backend.checkSpeechEntry).toHaveBeenCalledTimes(1);
+    const checked = stub.backend.checkSpeechEntry.mock.calls[0]?.[0];
+    expect(checked).toMatchObject({ kind: "realtime", name: "Office GPU", address: "ws://10.0.0.5:8012", model: "nemotron", api_key: "sk-new", active: false });
+    expect(checked).not.toHaveProperty("has_key");
+    expect(root.querySelector(".editor")?.hasAttribute("hidden")).toBe(true);
+    expect(badgesOf("Office GPU")).toEqual(["Realtime speech server", "Key saved", "Not saved"]);
+    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+
+    button("Save").click();
+    await settle();
+    expect(sent(stub).stt.entries.find((entry) => entry.name === "Office GPU")).toMatchObject({ active: false, api_key: "sk-new" });
+    expect(badgesOf("Office GPU")).toEqual(["Realtime speech server", "Key saved"]);
+  });
+
+  it("does not add a server the app refuses, and keeps the editor open with the reason", async () => {
+    const stub = await openSeveral();
+    stub.backend.checkSpeechEntry.mockRejectedValueOnce('Speech server "Realtime speech server": the address must be a ws or wss URL.');
+    await addServer("realtime");
+    type(control("Address", "input"), "http://nope");
+    await saveServer();
+    expect(editorNote()).toBe('Speech server "Realtime speech server": the address must be a ws or wss URL.');
+    expect(root.querySelector(".editor")?.hasAttribute("hidden")).toBe(false);
+    expect(names(lists()[0] as HTMLElement)).toEqual(["Thalvi server", "Cybrex2", "On this computer"]);
+    expect(root.querySelector(".msg")?.textContent).toBe("");
+  });
+
+  it("keeps every name distinct before asking the app", async () => {
+    const stub = await openSeveral();
+    await addServer("thalvi_server");
+    type(control("Name", "input"), "cybrex2");
+    await saveServer();
+    expect(editorNote()).toBe('Two speech servers are called "cybrex2". Give each its own name.');
+    expect(stub.backend.checkSpeechEntry).not.toHaveBeenCalled();
+  });
+
+  it("edits a server in place, cancels without a trace, and removes one that is not in use", async () => {
+    await openSeveral();
+    edit("Cybrex2");
+    expect(control("Address", "input").value).toBe("ws://100.64.0.2:8012");
+    type(control("Name", "input"), "Cybrex2 GPU");
+    type(control("Address", "input"), "ws://100.64.0.3:8012");
+    await saveServer();
+    expect(names(lists()[0] as HTMLElement)).toEqual(["Thalvi server", "Cybrex2 GPU", "On this computer"]);
+    expect(entryNamed("Cybrex2 GPU").querySelector(".unit")?.textContent).toBe("ws://100.64.0.3:8012 · nemotron");
+    expect(badgesOf("Cybrex2 GPU")).toContain("Not saved");
+
+    edit("Cybrex2 GPU");
+    type(control("Name", "input"), "Dropped");
+    button("Cancel").click();
+    expect(names(lists()[0] as HTMLElement)).toContain("Cybrex2 GPU");
+
+    (root.querySelector('button[aria-label="Remove Cybrex2 GPU"]') as HTMLButtonElement).click();
+    expect(names(lists()[0] as HTMLElement)).toEqual(["Thalvi server", "On this computer"]);
+  });
+
+  const keyActions: [string, (clear: HTMLButtonElement) => void, string | undefined, boolean][] = [
+    ["leaves it unchanged", () => undefined, undefined, true],
+    ["replaces it", () => { type(control("API key", "input"), "sk-new"); }, "sk-new", true],
+    ["clears it", (clear) => { clear.click(); }, "", false],
+  ];
+  it.each(keyActions)("shows a saved key only as saved, and %s", async (_name, act, sentKey, stillSaved) => {
+    const stub = await openSeveral();
+    edit("Cybrex2");
+    expect(control("API key", "input").value).toBe("");
+    expect(control("API key", "input").placeholder).toBe("Saved — leave blank to keep it");
+    act(within(rowOf("API key"), "Clear saved key"));
+    await saveServer();
+    button("Save").click();
+    await settle();
+    const entry = sent(stub).stt.entries.find((known) => known.id === "cybrex2");
+    expect(entry && "api_key" in entry ? entry.api_key : undefined).toBe(sentKey);
+    expect(badgesOf("Cybrex2").includes("Key saved")).toBe(stillSaved);
+  });
+
+  it("asks the app about the word list for the server it switches to", async () => {
+    const stub = await openSeveral();
+    stub.backend.wordListSupport.mockResolvedValue(true);
+    use("Cybrex2");
+    await settle();
+    expect(stub.backend.wordListSupport).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "realtime", id: "cybrex2" }));
   });
 });
 
+describe("second-pass servers", () => {
+  async function openSeveral() {
+    const stub = await open(several());
+    goTo("speech");
+    return stub;
+  }
+  const tickOf = (name: string): HTMLInputElement => entryNamed(name).querySelector("input[type=checkbox]") as HTMLInputElement;
+
+  it("runs the ticked ones, and a tick or an untick applies at once without losing the setup", async () => {
+    const stub = await openSeveral();
+    expect([tickOf("OpenAI").checked, tickOf("Meta").checked]).toEqual([true, false]);
+    flip(tickOf("Meta"));
+    await settle();
+    expect(sent(stub).stt.entries.filter((entry) => entry.kind === "second_pass").map((entry) => [entry.name, entry.active])).toEqual([
+      ["OpenAI", true],
+      ["Meta", true],
+    ]);
+    flip(tickOf("OpenAI"));
+    await settle();
+    const unticked = stub.backend.saveSettings.mock.calls[1]?.[0].stt.entries.find((entry) => entry.id === "openai");
+    expect(unticked).toMatchObject({ active: false, address: "https://api.openai.com/v1", model: "whisper-1", has_key: true });
+    expect(root.querySelector(".msg")?.textContent).not.toBe("Unsaved changes");
+  });
+
+  it("shows a tick that was refused as still off", async () => {
+    const stub = await openSeveral();
+    stub.backend.saveSettings.mockRejectedValueOnce("The settings could not be saved.");
+    flip(tickOf("Meta"));
+    await settle();
+    expect(tickOf("Meta").checked).toBe(false);
+    expect(root.querySelector(".err")?.textContent).toBe("The settings could not be saved.");
+  });
+
+  it("tries them in list order, which the arrows change and Save keeps", async () => {
+    const stub = await openSeveral();
+    expect((entryNamed("OpenAI").querySelector('button[aria-label="Move OpenAI up"]') as HTMLButtonElement).disabled).toBe(true);
+    (entryNamed("Meta").querySelector('button[aria-label="Move Meta up"]') as HTMLButtonElement).click();
+    expect(names(lists()[1] as HTMLElement)).toEqual(["Meta", "OpenAI"]);
+    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
+    button("Save").click();
+    await settle();
+    expect(sent(stub).stt.entries.filter((entry) => entry.kind === "second_pass").map((entry) => entry.name)).toEqual(["Meta", "OpenAI"]);
+  });
+
+  it("adds a second-pass API, ticks it in the draft only, and saves it with Save", async () => {
+    const stub = await openSeveral();
+    button("Add a second-pass API").click();
+    await settle();
+    expect(control("Name", "input").value).toBe("Second pass");
+    type(control("Address", "input"), "http://127.0.0.1:9000/v1");
+    type(control("Model", "input"), "whisper");
+    choose(control("API", "select"), "meta");
+    type(control("API key", "input"), "k");
+    expect(control("API key", "input").type).toBe("password");
+    await saveServer();
+    expect(stub.backend.checkSpeechEntry).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: "second_pass", address: "http://127.0.0.1:9000/v1", model: "whisper", api: "meta", api_key: "k" }),
+    );
+    expect(badgesOf("Second pass")).toContain("Not saved");
+    flip(tickOf("Second pass"));
+    await settle();
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    button("Save").click();
+    await settle();
+    expect(sent(stub).stt.entries.at(-1)).toMatchObject({ name: "Second pass", active: true, api: "meta", api_key: "k" });
+  });
+});
+
+
 describe("the speech model catalog", () => {
-  async function openCatalog(settings: Settings = { ...SETTINGS, stt: { engine: "local", secondary: null } }) {
+  async function openCatalog(settings: Settings = local()) {
     const stub = await open(settings);
     goTo("speech");
+    await editLocal();
     return stub;
   }
   const card = (): HTMLElement => {
@@ -690,7 +1016,7 @@ describe("the speech model catalog", () => {
   });
 
   it("lists All languages first, then every language of the catalog sorted", async () => {
-    const stub = stubBackend({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    const stub = stubBackend(local());
     stub.backend.listSpeechModels.mockResolvedValueOnce([
       { ...UNIFIED, languages: ["Spanish", "Dutch", "English"] },
       { ...NEMOTRON, languages: ["English", "Czech"] },
@@ -698,6 +1024,7 @@ describe("the speech model catalog", () => {
     mountSettings(root, stub.backend);
     await settle();
     goTo("speech");
+    await editLocal();
     expect(listed(languages())).toEqual([
       ["", "All languages"],
       ["Czech", "Czech"],
@@ -721,18 +1048,19 @@ describe("the speech model catalog", () => {
     const stub = await openCatalog();
     expect(root.querySelector(".msg")?.textContent).toBe("");
     choose(languages(), "Dutch");
-    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
     expect(picker().value).toBe("unified_160ms");
     expect(text(".facts")).toContain("OpenMDW-1.1");
     expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    await saveServer();
+    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
     button("Save").click();
     await settle();
-    expect(sent(stub).stt).toEqual({ engine: "local", model: "unified_160ms", secondary: null });
+    expect(deviceOf(sent(stub)).model).toBe("unified_160ms");
     expect(JSON.stringify(sent(stub))).not.toContain("Dutch");
   });
 
   it("keeps the selection when All languages or a language it supports is picked", async () => {
-    const stub = await openCatalog({ ...SETTINGS, stt: { engine: "local", model: "unified_160ms", secondary: null } });
+    const stub = await openCatalog(local("unified_160ms"));
     choose(languages(), "");
     expect(picker().value).toBe("unified_160ms");
     choose(languages(), "English");
@@ -740,31 +1068,34 @@ describe("the speech model catalog", () => {
     choose(languages(), "Dutch");
     choose(languages(), "");
     expect(picker().value).toBe("unified_160ms");
+    await saveServer();
     button("Save").click();
     await settle();
-    expect(sent(stub).stt).toEqual({ engine: "local", model: "unified_160ms", secondary: null });
+    expect(deviceOf(sent(stub)).model).toBe("unified_160ms");
   });
 
   it("leaves the own folder selected when the language changes", async () => {
-    await openCatalog({ ...SETTINGS, stt: { engine: "local", model: "/models/mine", secondary: null } });
+    await openCatalog(local("/models/mine"));
     choose(languages(), "Dutch");
     expect(picker().value).toBe("__folder");
     expect(control("Speech model", "input").value).toBe("/models/mine");
   });
 
   it("keeps the own folder usable with only All languages when the list fails to load", async () => {
-    const stub = stubBackend({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    const stub = stubBackend(local());
     stub.backend.listSpeechModels.mockRejectedValueOnce("Thalvi could not find a folder to keep its models in.");
     mountSettings(root, stub.backend);
     await settle();
     goTo("speech");
+    await editLocal();
     expect(listed(languages())).toEqual([["", "All languages"]]);
     expect(listed(picker())).toEqual([OWN]);
     choose(picker(), "__folder");
     type(control("Speech model", "input"), "/models/mine");
+    await saveServer();
     button("Save").click();
     await settle();
-    expect(sent(stub).stt.model).toBe("/models/mine");
+    expect(deviceOf(sent(stub)).model).toBe("/models/mine");
   });
 
   it("shows the picked model's description, size, license, languages, state and source", async () => {
@@ -783,20 +1114,22 @@ describe("the speech model catalog", () => {
     [1_540_000_000, "1.5 GB"],
     [8_952, "9 kB"],
   ])("shows %i bytes as %s", async (size, shown) => {
-    const stub = stubBackend({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    const stub = stubBackend(local());
     stub.backend.listSpeechModels.mockResolvedValueOnce([{ ...NEMOTRON, size }]);
     mountSettings(root, stub.backend);
     await settle();
     goTo("speech");
+    await editLocal();
     expect(text(".unit")).toBe(shown);
   });
 
   it("marks a downloaded model and offers no download", async () => {
-    const stub = stubBackend({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    const stub = stubBackend(local());
     stub.backend.listSpeechModels.mockResolvedValueOnce([{ ...NEMOTRON, cached: true }]);
     mountSettings(root, stub.backend);
     await settle();
     goTo("speech");
+    await editLocal();
     expect(text(".badge")).toBe("Downloaded");
     expect(download().hidden).toBe(true);
   });
@@ -862,11 +1195,12 @@ describe("the speech model catalog", () => {
   });
 
   it("says why the catalog could not be listed", async () => {
-    const stub = stubBackend({ ...SETTINGS, stt: { engine: "local", secondary: null } });
+    const stub = stubBackend(local());
     stub.backend.listSpeechModels.mockRejectedValueOnce("Thalvi could not find a folder to keep its models in.");
     mountSettings(root, stub.backend);
     await settle();
     goTo("speech");
+    await editLocal();
     expect(rowOf("Speech model").querySelector(".note:not([hidden])")?.textContent).toBe(
       "Thalvi could not find a folder to keep its models in.",
     );
@@ -883,10 +1217,11 @@ describe("the speech model catalog", () => {
       `License: OpenMDW-1.1. Languages: ${UNIFIED.languages.join(", ")}. The language is detected automatically.`,
     );
     expect(text(".unit")).toBe("647 MB");
+    await saveServer();
     button("Save").click();
     await settle();
     expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
-    expect(sent(stub).stt).toEqual({ engine: "local", model: "unified_160ms", secondary: null });
+    expect(deviceOf(sent(stub)).model).toBe("unified_160ms");
   });
 
   it("keeps showing the download of a model while another one is picked", async () => {
@@ -899,11 +1234,11 @@ describe("the speech model catalog", () => {
   });
 
   it("shows a saved model, and a saved folder as the own-folder entry", async () => {
-    await openCatalog({ ...SETTINGS, stt: { engine: "local", model: "unified_160ms", secondary: null } });
+    await openCatalog(local("unified_160ms"));
     expect(picker().value).toBe("unified_160ms");
     expect(text(".facts")).toContain("OpenMDW-1.1");
     root.innerHTML = "";
-    await openCatalog({ ...SETTINGS, stt: { engine: "local", model: "/models/mine", secondary: null } });
+    await openCatalog(local("/models/mine"));
     expect(picker().value).toBe("__folder");
     expect(control("Speech model", "input").value).toBe("/models/mine");
     expect(rowOf("Speech model").querySelector(".model:not([hidden])")).toBeNull();
@@ -912,53 +1247,10 @@ describe("the speech model catalog", () => {
   it("does not save the own-folder entry without a path", async () => {
     const stub = await openCatalog();
     choose(picker(), "__folder");
-    button("Save").click();
-    await settle();
-    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    await saveServer();
+    expect(stub.backend.checkSpeechEntry).not.toHaveBeenCalled();
     expect(rowOf("Speech model").querySelector(".own .note:not([hidden])")?.textContent).toBe("Type the folder path first.");
-    expect(root.querySelector(".err")?.textContent).toBe("Type the folder path of your own speech model first.");
-  });
-});
-
-describe("second transcription", () => {
-  it("stays off until the switch is flipped, and keeps its fields when flipped off", async () => {
-    const stub = await open();
-    goTo("speech");
-    expect(control("Second-pass transcription", "input").checked).toBe(false);
-    expect(control("Endpoint address", "input").disabled).toBe(true);
-    flip(control("Second-pass transcription", "input"));
-    expect(control("Endpoint address", "input").disabled).toBe(false);
-    type(control("Endpoint address", "input"), "http://127.0.0.1:9000/v1");
-    type(control("Model", "input"), "whisper");
-    type(control("API key", "input"), "k");
-    choose(control("API", "select"), "meta");
-    button("Save").click();
-    expect(sent(stub).stt.secondary).toEqual({ enabled: true, url: "http://127.0.0.1:9000/v1", model: "whisper", api: "meta", api_key: "k" });
-    expect(control("API key", "input").type).toBe("password");
-
-    await settle();
-    flip(control("Second-pass transcription", "input"));
-    expect(control("Endpoint address", "input").value).toBe("http://127.0.0.1:9000/v1");
-    expect(control("Endpoint address", "input").disabled).toBe(true);
-    button("Save").click();
-    expect(stub.backend.saveSettings.mock.calls[1]?.[0].stt.secondary).toEqual({
-      enabled: false,
-      url: "http://127.0.0.1:9000/v1",
-      model: "whisper",
-      api: "meta",
-      api_key: "k",
-    });
-  });
-
-  it("shows a saved off endpoint with the switch off and its fields kept", async () => {
-    await open({
-      ...SETTINGS,
-      stt: { engine: "server", secondary: { enabled: false, url: "http://127.0.0.1:9000/v1", model: "whisper", api: "meta", api_key: "k" } },
-    });
-    goTo("speech");
-    expect(control("Second-pass transcription", "input").checked).toBe(false);
-    expect(control("Endpoint address", "input").value).toBe("http://127.0.0.1:9000/v1");
-    expect(control("Model", "input").value).toBe("whisper");
+    expect(editorNote()).toBe("Type the folder path of your own speech model first.");
   });
 });
 
@@ -1316,7 +1608,10 @@ describe("live controls", () => {
     stub.emit({ state: "failed", notice: "The chosen microphone is unavailable.", headline: "Failed — Settings", causes: [], kind: "other" });
     if (action === "save") button("Save").click();
     else if (action === "revert") button("Revert").click();
-    else type(control("Server address", "input"), "ws://other");
+    else {
+      goTo("capture");
+      type(control("Quiet before paste", "input"), "1.5");
+    }
     await settle();
     expect(root.querySelector(".err")?.textContent).toBe("The chosen microphone is unavailable.");
     expect(root.querySelector(".msg")?.textContent).toBe(action === "edit" ? "Unsaved changes" : "");

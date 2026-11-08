@@ -205,8 +205,9 @@ STT_API_KEY=
 
 With it, Settings → Speech shows a **Word list**: names and terms, one per
 line, whose spelling recognition should favour (such as "Cybrex2"). Saving
-sends the list to the server, which keeps it and uses it for dictation and
-conversations. Meta's recognizer doesn't support it, so the field is hidden
+sends the list to the Thalvi server in use, which keeps it and uses it for
+dictation and conversations; a realtime speech server entry gets it at each
+connection. Meta's recognizer doesn't support it, so the field is hidden
 then. Dictation on this computer always uses the list, so the field shows
 whenever speech is recognized there.
 
@@ -234,7 +235,7 @@ Say "Hey Thalvi" in any window, dictate, then end with a phrase:
 | --- | --- |
 | "paste that" or "finish dictation" | types the text into the window you were in |
 | "submit" | types it and presses Enter |
-| "do that" | runs a configured action, such as opening a site or focusing an app |
+| "do that" | runs a configured action, such as opening a site or focusing an app; the action also runs without "do that" when the whole capture is the command, for example "open google.com" |
 | "scratch that" | drops the last piece |
 | "never mind" | drops the whole capture |
 
@@ -268,10 +269,25 @@ because its config is broken, a message box names the problem and the file.
 
 ### Speech recognition
 
-By default the app streams your speech to the server's `/transcription` at
-`ws://127.0.0.1:8080` (Settings → Speech → Server address). To dictate without
-the server or a network, choose **On this computer** under Speech and pick a
-language (it only narrows the list of models) and a model. The first use of a model downloads it (about 650 MB);
+Settings → Speech keeps a list of speech servers. **Live dictation** uses exactly
+one of them, and **Use** switches to another at once; it applies from the next
+capture, and a capture already running keeps its recognizer. The kinds are:
+
+- **Realtime speech server:** a recognizer that speaks Meta's realtime ASR
+  protocol, such as the self-hosted one below, which the app connects to itself
+  (address, model, API key), with no Thalvi server running.
+- **Through a Thalvi server:** streams to the server's `/transcription`
+  (by default `ws://127.0.0.1:8080`), which uses the recognizer in its `.env`.
+- **On this computer:** dictates without the server or a network. Pick a
+  language (it only narrows the list of models) and a model.
+
+Web conversations always use the server's own `STT_URL`. An existing config
+with `stt.engine`, `stt.model`, `stt.secondary` and `server` becomes entries
+the first time Thalvi reads it, with nothing to enter again. An API key is shown
+as saved and never again; leave it blank to keep it. A server that cannot be
+reached is named in the error, and Thalvi never falls back to another one.
+
+For the on-device model, the first use of a model downloads it (about 650 MB);
 after that it works offline. A model you pick applies from the next capture, and
 a capture already running keeps the model it started with. Settings shows each
 model's size, license and languages in full, whether it is downloaded, and can download
@@ -297,9 +313,12 @@ The unified model is NVIDIA's
 [Nemotron unified ASR](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b)
 under OpenMDW-1.1, exported to ONNX by Thalvi.
 
-**Second-pass transcription** (Settings → Speech, off by default) sends each
-accepted capture again to the endpoint you set there. Turning it off keeps the
-endpoint and key.
+**Second-pass transcription** (Settings → Speech → Second pass, none ticked by
+default) sends each accepted capture again to every ticked OpenAI-style or Meta
+transcription API. The first ticked one in list order (move them with the
+arrows) that answers replaces the live text; the others are only recorded, in
+the capture's `text.txt` and the metrics, for comparing later. Unticking keeps
+the address and key.
 
 ### Microphone
 
@@ -349,12 +368,44 @@ never API keys.
 
 `thalvi-desktop toggle`, `pause`, `resume`, `cancel` and `copy-error` control
 the running app (with the AppImage, run it with that word). `status` prints
-Waybar JSON. These commands work on Hyprland; Windows uses the tray. The
+Waybar JSON. They work on Hyprland, GNOME and Windows, and start nothing when
+Thalvi is not running. The
 examples in [`integrations/hyprland/`](integrations/hyprland/) add a Waybar
 microphone button (left click toggles listening without moving focus, right
 click opens Settings) and key bindings in `hyprland-binds.conf`, such as
 `bind = SUPER, E, exec, thalvi-desktop copy-error`. Pausing cancels the
 current capture and closes the microphone.
+
+### For agents
+
+A program you run, such as a coding agent, can read and change the settings, see
+what Thalvi is doing and control it with `thalvi-desktop` commands. Each prints
+one JSON object and exits 0, or non-zero when the answer is `"ok": false`.
+They talk to the running app over a private socket in your runtime folder on
+Linux, or a named pipe only your user can open on Windows; nothing listens on
+the network, and a command never starts the app or the microphone.
+
+| Command | Answer |
+| --- | --- |
+| `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false}`. `state` is `paused`, `loading`, `listening`, `capturing`, `pending`, `transcribing`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}`, and `awaiting_confirmation: true` marks a submit that waits for you. Nothing that was said is in it. |
+| `settings get` | `{"ok": true, "settings": {…}}`, every setting Settings offers plus `start_at_login` and `show_in_menu`. Speech server keys appear only as `"has_key": true/false`. |
+| `settings check '<json>'` | `{"ok": true, "valid": true}`, or `{"ok": false, "valid": false, "error": "…"}` with the message Settings shows. Saves nothing. |
+| `settings set '<json>'` | `{"ok": true, "changed": true, "applies": "now"}`, or `"next_capture"` while a capture runs. A refusal is `{"ok": false, "error": "…", "changed": false}` and changes nothing. A word list the Thalvi server could not take comes back as `"warning"`. |
+| `pause`, `resume`, `toggle`, `cancel`, `hold-start`, `hold-end`, `copy-error` | `{"ok": true, "took_effect": true, "state": "…"}`, or `{"ok": false, "took_effect": false, "error": "…", "state": "…"}`, such as when Thalvi is already paused. `hold-start` starts a capture that `hold-end` or `cancel` ends. |
+| `metrics summary` | `{"ok": true, "enabled": true, "window_hours": 24, "stages": {"connect", "partial_lag", "final", "delivery"}, "captures": {"ok": 3, …}}`; each stage has `count`, `outcomes`, `p50_ms` and `p95_ms`. `"enabled": false` and a message when metrics are off. |
+
+The change given to `settings check` and `settings set` is a JSON merge patch
+over what `settings get` returns: objects merge, `null` removes a key, and a
+list such as `stt.entries` or `stt.phrases` is replaced whole, so read it first
+and send it back with your change. Give `-` instead of the JSON to read it from
+standard input. A speech server entry takes `api_key` to set a key, `""` to
+clear it, and keeps the saved key when `api_key` is absent. The microphone
+changes only while Thalvi is paused.
+
+A confirmation stays with you: no command answers one, and a submit that waits
+for it shows as `awaiting_confirmation` in `state`. Any other failure of a
+command is `{"ok": false, "error": "…"}`; a command with no running app says so
+and exits 1, and one that is not a command exits 2.
 
 ### Hold a key to dictate
 

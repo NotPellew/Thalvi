@@ -279,7 +279,9 @@ impl View {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use thalvi_desktop::recognizer::{ConnectFailure, Detail, RecognizerError, ServerUrl};
+    use thalvi_desktop::recognizer::{
+        ConnectFailure, Detail, RecognizerError, ServerUrl, SpeechSource,
+    };
 
     use super::*;
 
@@ -636,7 +638,7 @@ mod tests {
     #[test]
     fn a_failure_carries_the_errors_text_headline_and_causes() {
         let error = RecognizerError::Unreachable {
-            server: ServerUrl::default(),
+            speech: SpeechSource::thalvi_server("Thalvi server", &ServerUrl::default()),
             reason: ConnectFailure::Refused,
             detail: Detail("connection refused (os error 111)".to_owned()),
         };

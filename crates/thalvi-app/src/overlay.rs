@@ -190,8 +190,26 @@ impl OverlayWindow for WebviewWindow {
     }
 
     fn set_visible(&self, visible: bool) -> Result<(), String> {
-        if visible { self.show() } else { self.hide() }.map_err(|error| error.to_string())
+        set_window_visible(self, visible)
     }
+}
+
+/// Windows shows it without activating it, which tao's `show` does.
+#[cfg(windows)]
+fn set_window_visible(window: &WebviewWindow, visible: bool) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    Desktop::set_overlay_visible(hwnd.0 as isize, visible);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn set_window_visible(window: &WebviewWindow, visible: bool) -> Result<(), String> {
+    if visible {
+        window.show()
+    } else {
+        window.hide()
+    }
+    .map_err(|error| error.to_string())
 }
 
 fn change_visibility(

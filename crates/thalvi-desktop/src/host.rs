@@ -1,15 +1,16 @@
 //! The desktop host interface: bind the window a capture starts in, type into it, and run desktop actions.
 
 #[cfg(target_os = "linux")]
+mod channel;
+#[cfg(target_os = "linux")]
 mod command;
 #[cfg(target_os = "linux")]
 mod gnome;
 #[cfg(target_os = "linux")]
 mod hyprland;
+mod line;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "linux")]
-mod state;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -17,6 +18,8 @@ use std::fmt;
 use std::path::Path;
 
 use crate::report::UserError;
+
+pub use line::{MAX_REQUEST, refusal};
 
 /// The title of the status overlay window, by which a desktop recognises it.
 pub const OVERLAY_TITLE: &str = "Thalvi overlay";
@@ -107,13 +110,13 @@ impl WebUrl {
     }
 }
 
-/// Keeps a desktop answering state queries from other programs, such as a status bar; dropping it
-/// stops. An answer is one short line the app chooses, never anything the user said.
-pub struct StateServer {
+/// Keeps a desktop answering requests from other programs of the same user, such as a status bar or
+/// an agent; dropping it stops. A request and its reply are each one line of JSON.
+pub struct RequestServer {
     _stop_on_drop: Box<dyn Send + Sync>,
 }
 
-impl StateServer {
+impl RequestServer {
     /// Wraps whatever stops the answering when dropped.
     pub fn new(stop_on_drop: impl Send + Sync + 'static) -> Self {
         Self {

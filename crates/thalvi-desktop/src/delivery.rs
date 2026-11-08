@@ -215,7 +215,7 @@ where
     }
 
     async fn run_task(&self, recorder: &Recorder, config: &DesktopConfig, text: &str) -> Finished {
-        let task = match tasks::decide(text, config) {
+        let task = match tasks::decide(text, &config.scripts) {
             Ok(task) => task,
             Err(error) => {
                 return self.keep(recorder, text, &error).await;
@@ -713,7 +713,7 @@ mod tests {
             FakeHost::default(),
             CaptureOutcome::Failed {
                 error: CaptureError::Recognizer(RecognizerError::Unreachable {
-                    server: ServerUrl::default(),
+                    speech: SpeechSource::thalvi_server("Office", &ServerUrl::default()),
                     reason: ConnectFailure::Refused,
                     detail: Detail("Connection refused (os error 111)".to_owned()),
                 }),
@@ -732,7 +732,7 @@ mod tests {
         let failed = |recoverable_text: Option<&str>| CaptureOutcome::Failed {
             error: CaptureError::NotReady {
                 waited: Duration::from_secs(8),
-                speech: SpeechSource::Server(ServerUrl::default()),
+                speech: SpeechSource::thalvi_server("Office", &ServerUrl::default()),
             },
             recoverable_text: recoverable_text.map(str::to_owned),
         };
@@ -740,7 +740,7 @@ mod tests {
         assert_eq!(
             notice.as_deref(),
             Some(
-                "The speech server at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix Settings → Speech → Server address. Captured text is on the clipboard."
+                "The Thalvi server \"Office\" at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix its address under Settings → Speech. Captured text is on the clipboard."
             )
         );
         assert_eq!(seen, calls(&["capture_target", "copy:\"so far\""]));
@@ -749,7 +749,7 @@ mod tests {
         assert_eq!(
             notice.as_deref(),
             Some(
-                "The speech server at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix Settings → Speech → Server address."
+                "The Thalvi server \"Office\" at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix its address under Settings → Speech."
             )
         );
         assert_eq!(seen, calls(&["capture_target"]));

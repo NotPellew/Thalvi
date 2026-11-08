@@ -32,7 +32,6 @@ const UNIFIED_LANGUAGES = [
 ];
 
 const SETTINGS: Settings = {
-  server: "ws://127.0.0.1:8080",
   wake: {
     capture: { model: "hey_thalvi", threshold: 0.7 },
     conversation: { model: "hey_mycroft", threshold: 0.5 },
@@ -48,7 +47,7 @@ const SETTINGS: Settings = {
     "scratch that": "scratch",
     "never mind": "cancel",
   },
-  stt: { engine: "server", secondary: null },
+  stt: { entries: [{ kind: "thalvi_server", id: "thalvi-server", name: "Thalvi server", active: true, address: "ws://127.0.0.1:8080" }] },
   apps: { slack: { classes: ["Slack"], executables: ["slack.exe"], input_keys: [] } },
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com/docs", label: "docs" }],
   overlay: { show: true, draft: true },
@@ -192,10 +191,11 @@ export function fakeBackend(params: URLSearchParams): Backend {
     getAudio: () => Promise.resolve(structuredClone(audioState)),
     onAudio: (listener) => audioListeners.push(listener),
     onSettingsSaved: (listener) => savedListeners.push(listener),
+    onSettingsChangedElsewhere: () => undefined,
     getSettings: () => Promise.resolve(structuredClone(saved)),
     saveSettings: (next) => {
-      if (!/^wss?:\/\//.test(next.server)) {
-        return Promise.reject(new Error("The desktop config is not valid: the server address must start with ws:// or wss://."));
+      if (next.stt.entries.filter((entry) => entry.kind !== "second_pass" && entry.active).length !== 1) {
+        return Promise.reject(new Error("The desktop config is not valid: exactly one live speech server must be active."));
       }
       if (next.microphone !== saved.microphone && !audioState.paused) {
         return Promise.reject(new Error("Pause listening before changing the microphone. Turn listening off, then save again."));
@@ -303,6 +303,12 @@ export function fakeBackend(params: URLSearchParams): Backend {
       }),
     onSpeechModelProgress: (listener) => speechListeners.push(listener),
     openSpeechModelSource: () => Promise.resolve(),
+    checkSpeechEntry: (entry) => {
+      const wanted = entry.kind === "second_pass" ? /^https?:\/\// : /^wss?:\/\//;
+      return "address" in entry && !wanted.test(entry.address)
+        ? Promise.reject(new Error(`Speech server "${entry.name}": the address must start with ${entry.kind === "second_pass" ? "http:// or https://" : "ws:// or wss://"}.`))
+        : Promise.resolve();
+    },
     wordListSupport: () => Promise.resolve(true),
     shareWordList: () => Promise.resolve(),
     appVersion: () => Promise.resolve("0.1.0 (fake)"),

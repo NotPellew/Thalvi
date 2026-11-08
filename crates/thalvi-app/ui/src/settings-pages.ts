@@ -9,13 +9,16 @@ import type {
   HistoryEntry,
   HistoryOutcome,
   ScriptActionKind,
+  LiveEntry,
+  OnDeviceEntry,
   SecondaryApi,
+  SecondPassEntry,
   Settings,
   SpeechModelInfo,
   SpeechModelProgress,
   Status,
+  SpeechEntry,
   WakeModelInfo,
-  SttEngine,
   SwitchState,
 } from "./contract.ts";
 import { errorText } from "./contract.ts";
@@ -51,9 +54,15 @@ export interface PageContext {
     opened: (id: string) => void;
     /** The app's state changed, so what a page shows from disk may be out of date. */
     refresh: () => void;
+    /** Settings were saved, so what a page marks as unsaved is out of date. */
+    saved: () => void;
   };
   /** Checks a page adds that must pass before Save sends; each returns null when it has nothing to check. */
   checks: (() => Promise<void> | null)[];
+  /** The settings as last saved, or null before they are read. */
+  saved: () => Settings | null;
+  /** Saves the last saved settings with `change` applied, leaving other unsaved edits in the draft; says why in the footer when it fails. */
+  applyNow: (change: (settings: Settings) => void) => Promise<void>;
 }
 
 /** An OS switch as read, or why it could not be. */
@@ -80,10 +89,6 @@ const SCRIPT_ACTIONS: readonly (readonly [ScriptActionKind, string])[] = [
 const APIS: readonly (readonly [SecondaryApi, string])[] = [
   ["openai", "OpenAI-style"],
   ["meta", "Meta"],
-];
-const ENGINES: readonly (readonly [SttEngine, string])[] = [
-  ["local", "On this computer"],
-  ["server", "Through the server"],
 ];
 const SPEECH_MODEL = "nemotron_160ms";
 const CUES: readonly (readonly [keyof Settings["cues"], string, string])[] = [
@@ -580,17 +585,61 @@ function modelOption(info: SpeechModelInfo): HTMLOptionElement {
   return el("option", { value: info.name }, `${info.title} (${languages}, ${formatSize(info.size)})`);
 }
 
-function speech({ draft, controls, backend, checks, live }: PageContext): HTMLElement[] {
-  const engine = controls.select(ENGINES, draft.stt.engine, (value) => {
-    draft.stt.engine = value;
-    syncModel();
-    checkWordList();
-  });
+const KIND_NAMES: Record<SpeechEntry["kind"], string> = {
+  realtime: "Realtime speech server",
+  thalvi_server: "Thalvi server",
+  on_device: "On this computer",
+  second_pass: "Second pass",
+};
+const LIVE_KINDS: readonly (readonly [LiveEntry["kind"], string])[] = [
+  ["realtime", "Realtime speech server"],
+  ["thalvi_server", "Through a Thalvi server"],
+  ["on_device", "On this computer"],
+];
+
+function isLive(entry: SpeechEntry): entry is LiveEntry {
+  return entry.kind !== "second_pass";
+}
+
+function hasKey(entry: SpeechEntry): boolean {
+  if (entry.kind !== "realtime" && entry.kind !== "second_pass") return false;
+  return entry.api_key === undefined ? entry.has_key === true : entry.api_key !== "";
+}
+
+function summary(entry: SpeechEntry): string {
+  switch (entry.kind) {
+    case "realtime":
+      return `${entry.address} · ${entry.model}`;
+    case "thalvi_server":
+      return entry.address;
+    case "on_device":
+      return entry.model ?? SPEECH_MODEL;
+    case "second_pass":
+      return `${entry.address} · ${entry.model} · ${APIS.find(([value]) => value === entry.api)?.[1] ?? entry.api}`;
+  }
+}
+
+function blankEntry(kind: SpeechEntry["kind"], name: string): SpeechEntry {
+  const base = { id: `e-${Math.random().toString(36).slice(2, 10)}`, name, active: false };
+  switch (kind) {
+    case "realtime":
+      return { ...base, kind, address: "", model: "" };
+    case "thalvi_server":
+      return { ...base, kind, address: "ws://127.0.0.1:8080" };
+    case "on_device":
+      return { ...base, kind };
+    case "second_pass":
+      return { ...base, kind, address: "", model: "", api: "openai" };
+  }
+}
+
+/** The model and folder rows of an On this computer entry; they write into `working`. */
+function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageContext): { rows: HTMLElement[]; validate: () => Promise<void> } {
   const catalog = new Map<string, ModelCard>();
   const listed: SpeechModelInfo[] = [];
   // Only narrows the model list; it is not saved and does not reach recognition.
   let language = ALL_LANGUAGES;
-  let chosen = draft.stt.model ?? "";
+  let chosen = working.model ?? "";
   const isCatalog = (name: string): boolean => name === SPEECH_MODEL || listed.some((info) => info.name === name);
   // Like the config, a name with a path separator is a folder. The entry stays picked while its path is still empty.
   let ownFolderPicked = /[\\/]/.test(chosen);
@@ -611,11 +660,7 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
   modelPicker.append(el("option", { value: "", disabled: true }, "Loading models…"));
   const modelList = el("div", { class: "models" });
   const listProblem = note();
-  const ownFolder = el(
-    "div",
-    { class: "own" },
-    el("span", { class: "unit" }, "Your own model folder"),
-  );
+  const ownFolder = el("div", { class: "own" }, el("span", { class: "unit" }, "Your own model folder"));
 
   live.speechModel = (event) => {
     catalog.get(event.name)?.progress(event);
@@ -647,7 +692,6 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
     if (!ownFolderPicked && first && !(current && inLanguage(current))) {
       chosen = first.name;
       syncModel();
-      controls.touched();
     }
     listModels();
   });
@@ -663,7 +707,6 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
       modelInput.value = "";
     }
     syncModel();
-    controls.touched();
   });
 
   backend.listSpeechModels().then(
@@ -711,14 +754,6 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
     else if (isCatalog(path)) showFolder(`${path} is downloaded on first use; there is no folder to check.`, false);
     else checkFolder(path).catch(() => undefined);
   });
-  checks.push(() => {
-    if (draft.stt.engine !== "local") return null;
-    if (ownFolderPicked && chosen === "") {
-      showFolder("Type the folder path first.", false);
-      return Promise.reject(new Error("Type the folder path of your own speech model first."));
-    }
-    return ownFolderPicked && !isCatalog(chosen) ? checkFolder(chosen) : null;
-  });
   ownFolder.append(el("div", { class: "trow check" }, speechModel.node, checkButton), folderResult);
   const speechModelField: Field = {
     node: el("div", { class: "stack wide" }, modelPicker, modelList, listProblem, ownFolder),
@@ -728,58 +763,316 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
   function syncModel(): void {
     latestCheck += 1;
     say(folderResult, "");
-    if (draft.stt.engine === "local" && chosen !== "") {
-      draft.stt.model = chosen;
+    if (chosen !== "") {
+      working.model = chosen;
     } else {
-      delete draft.stt.model;
+      delete working.model;
     }
     showSelection();
   }
 
-  const secondary = draft.stt.secondary ?? null;
-  let secondaryOn = secondary?.enabled ?? false;
-  const url = controls.text(secondary?.url ?? "", sync, { placeholder: "http://127.0.0.1:9000/v1" });
-  const model = controls.text(secondary?.model ?? "", sync);
-  const key = controls.text(secondary?.api_key ?? "", sync, { type: "password" });
-  const api = controls.select(APIS, secondary?.api ?? "openai", sync);
-  const inputs = [url, model, key].map((field) => field.field as HTMLInputElement);
-  const picker = api.field as HTMLSelectElement;
-  const toggle = controls.toggle(secondaryOn, (value) => {
-    secondaryOn = value;
-    syncEnabled();
-    sync();
+  return {
+    rows: [
+      row("Language", "Narrows the list of models below. It does not change what is recognized.", { node: languagePicker, field: languagePicker }),
+      row(
+        "Speech model",
+        `For recognition on this computer. Pick a model; it downloads on first use, or with its Download button. A model you pick applies from the next capture. Or point to your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.`,
+        speechModelField,
+      ),
+    ],
+    validate: () => {
+      if (ownFolderPicked && chosen === "") {
+        showFolder("Type the folder path first.", false);
+        return Promise.reject(new Error("Type the folder path of your own speech model first."));
+      }
+      return ownFolderPicked && !isCatalog(chosen) ? checkFolder(chosen) : Promise.resolve();
+    },
+  };
+}
+
+function speech(context: PageContext): HTMLElement[] {
+  const { draft, controls, backend } = context;
+  const entries = (): SpeechEntry[] => draft.stt.entries;
+  const activeLive = (): LiveEntry | undefined => entries().filter(isLive).find((entry) => entry.active);
+  const savedEntries = (): SpeechEntry[] => context.saved()?.stt.entries ?? [];
+  const isSaved = (entry: SpeechEntry): boolean => JSON.stringify(savedEntries().find((known) => known.id === entry.id)) === JSON.stringify(entry);
+
+  const liveList = el("div", { class: "table" });
+  const secondList = el("div", { class: "table" });
+  const editor = el("div", { class: "editor", hidden: true });
+  const problem = note();
+
+  function uniqueName(base: string): string {
+    const taken = new Set(entries().map((entry) => entry.name.toLowerCase()));
+    for (let count = 1; ; count += 1) {
+      const name = count === 1 ? base : `${base} ${String(count)}`;
+      if (!taken.has(name.toLowerCase())) return name;
+    }
+  }
+
+  /** Changes a saved entry's flag at once, as one click; an entry not saved yet changes in the draft only. */
+  function flag(id: string, change: (list: SpeechEntry[]) => void, after: () => void = () => undefined): void {
+    const savedAlready = savedEntries().some((known) => known.id === id);
+    if (!savedAlready) {
+      change(entries());
+      controls.touched();
+      render();
+      after();
+      return;
+    }
+    context.applyNow((settings) => {
+      change(settings.stt.entries);
+    }).then(() => {
+      render();
+      after();
+    }, () => {
+      render();
+    });
+  }
+
+  function useLive(id: string): void {
+    flag(id, (list) => {
+      for (const entry of list) if (isLive(entry)) entry.active = entry.id === id;
+    }, checkWordList);
+  }
+
+  function tick(id: string, on: boolean): void {
+    flag(id, (list) => {
+      const entry = list.find((known) => known.id === id);
+      if (entry) entry.active = on;
+    });
+  }
+
+  function move(id: string, by: -1 | 1): void {
+    const list = entries();
+    const here = list.findIndex((entry) => entry.id === id);
+    let there = here + by;
+    while (there >= 0 && there < list.length && list[there]?.kind !== "second_pass") there += by;
+    const moved = list[here];
+    const swapped = list[there];
+    if (moved === undefined || swapped === undefined) return;
+    list[here] = swapped;
+    list[there] = moved;
+    controls.touched();
+    render();
+  }
+
+  function remove(entry: SpeechEntry): void {
+    draft.stt.entries = entries().filter((known) => known.id !== entry.id);
+    controls.touched();
+    render();
+  }
+
+  function badges(entry: SpeechEntry): HTMLElement[] {
+    const found: HTMLElement[] = [el("span", { class: "badge" }, KIND_NAMES[entry.kind])];
+    if (isLive(entry) && entry.active) found.push(el("span", { class: "badge", "data-on": "true" }, "Active"));
+    if (hasKey(entry)) found.push(el("span", { class: "badge" }, "Key saved"));
+    if (!isSaved(entry)) found.push(el("span", { class: "badge", "data-saved": "false" }, "Not saved"));
+    return found;
+  }
+
+  function liveRow(entry: LiveEntry): HTMLElement {
+    const use = button(entry.active ? "In use" : "Use", () => {
+      useLive(entry.id);
+    }, "quiet");
+    use.disabled = entry.active;
+    use.setAttribute("aria-label", `Use ${entry.name}`);
+    const edit = button("Edit", () => {
+      openEditor(entry);
+    }, "quiet");
+    edit.setAttribute("aria-label", `Edit ${entry.name}`);
+    const drop = button("Remove", () => {
+      remove(entry);
+    }, "quiet");
+    drop.setAttribute("aria-label", `Remove ${entry.name}`);
+    drop.disabled = entry.active;
+    if (entry.active) drop.title = "Switch to another server first.";
+    return el(
+      "div",
+      { class: "trow server", "data-id": entry.id },
+      el("span", { class: "phrase" }, entry.name),
+      ...badges(entry),
+      el("small", { class: "unit" }, summary(entry)),
+      use,
+      edit,
+      drop,
+    );
+  }
+
+  function secondRow(entry: SecondPassEntry, index: number, count: number): HTMLElement {
+    const ticked = controls.toggle(entry.active, (on) => {
+      tick(entry.id, on);
+    });
+    (ticked.field as HTMLInputElement).setAttribute("aria-label", `Run ${entry.name}`);
+    const up = button("↑", () => {
+      move(entry.id, -1);
+    }, "quiet");
+    up.setAttribute("aria-label", `Move ${entry.name} up`);
+    up.disabled = index === 0;
+    const down = button("↓", () => {
+      move(entry.id, 1);
+    }, "quiet");
+    down.setAttribute("aria-label", `Move ${entry.name} down`);
+    down.disabled = index === count - 1;
+    const edit = button("Edit", () => {
+      openEditor(entry);
+    }, "quiet");
+    edit.setAttribute("aria-label", `Edit ${entry.name}`);
+    const drop = button("Remove", () => {
+      remove(entry);
+    }, "quiet");
+    drop.setAttribute("aria-label", `Remove ${entry.name}`);
+    return el(
+      "div",
+      { class: "trow server", "data-id": entry.id },
+      ticked.node,
+      el("span", { class: "phrase" }, entry.name),
+      ...badges(entry),
+      el("small", { class: "unit" }, summary(entry)),
+      up,
+      down,
+      edit,
+      drop,
+    );
+  }
+
+  function render(): void {
+    liveList.replaceChildren(...entries().filter(isLive).map(liveRow));
+    const second = entries().filter((entry): entry is SecondPassEntry => entry.kind === "second_pass");
+    secondList.replaceChildren(...second.map((entry, index) => secondRow(entry, index, second.length)));
+    secondList.hidden = second.length === 0;
+  }
+  context.live.saved = render;
+
+  function closeEditor(): void {
+    editor.replaceChildren();
+    editor.hidden = true;
+    context.live.speechModel = () => undefined;
+  }
+
+  function openEditor(existing: SpeechEntry | null, kind?: SpeechEntry["kind"]): void {
+    const working: SpeechEntry = existing ? structuredClone(existing) : blankEntry(kind ?? "realtime", uniqueName(KIND_NAMES[kind ?? "realtime"]));
+    const message = note();
+    let validate: () => Promise<void> = () => Promise.resolve();
+    const rows: HTMLElement[] = [
+      row("Name", "How this server is listed, and named when something goes wrong.", controls.text(working.name, (value) => {
+        working.name = value;
+      })),
+    ];
+    const address = (hint: string, placeholder: string): HTMLElement =>
+      row("Address", hint, controls.text("address" in working ? working.address : "", (value) => {
+        if ("address" in working) working.address = value;
+      }, { placeholder }));
+    const modelRow = (): HTMLElement =>
+      row("Model", "The model named in each request.", controls.text("model" in working ? (working.model ?? "") : "", (value) => {
+        if (working.kind === "realtime" || working.kind === "second_pass") working.model = value;
+      }));
+    const key: { input?: HTMLInputElement } = {};
+    let clearKey = false;
+    const keyRow = (): HTMLElement => {
+      const saved = hasKey(working);
+      const field = controls.text("", () => undefined, {
+        type: "password",
+        placeholder: saved ? "Saved — leave blank to keep it" : "",
+        label: "API key",
+      });
+      key.input = field.field as HTMLInputElement;
+      const cleared = el("small", { class: "unit", hidden: true }, "The saved key is cleared when you save this server.");
+      const clear = button("Clear saved key", () => {
+        clearKey = true;
+        clear.hidden = true;
+        cleared.hidden = false;
+      }, "quiet");
+      clear.hidden = !saved;
+      return row("API key", "Stored in the desktop config file. The saved key is never shown again.", {
+        node: el("div", { class: "stack wide" }, field.node, clear, cleared),
+        field: field.field,
+      });
+    };
+    switch (working.kind) {
+      case "realtime":
+        rows.push(address("The ws:// or wss:// address of a speech server that speaks Meta's realtime protocol, such as the self-hosted one.", "ws://127.0.0.1:8012"), modelRow(), keyRow());
+        break;
+      case "thalvi_server":
+        rows.push(address("The Thalvi server's address. Its own recognizer key stays in the server's .env.", "ws://127.0.0.1:8080"));
+        break;
+      case "on_device": {
+        const built = onDeviceRows(working, context);
+        rows.push(...built.rows);
+        validate = built.validate;
+        break;
+      }
+      case "second_pass": {
+        rows.push(
+          address("Where the second transcription is sent.", "http://127.0.0.1:9000/v1"),
+          modelRow(),
+          row("API", "Which transcription API the endpoint speaks.", controls.select(APIS, working.api, (value) => {
+            working.api = value;
+          })),
+          keyRow(),
+        );
+        break;
+      }
+    }
+    const done = button("Save server", () => {
+      say(message, "");
+      const typed = key.input?.value ?? "";
+      const entry = structuredClone(working);
+      if (entry.kind === "realtime" || entry.kind === "second_pass") {
+        if (typed !== "") entry.api_key = typed;
+        else if (clearKey) entry.api_key = "";
+      }
+      entry.name = entry.name.trim();
+      const others = entries().filter((known) => known.id !== entry.id);
+      if (others.some((known) => known.name.toLowerCase() === entry.name.toLowerCase())) {
+        say(message, `Two speech servers are called "${entry.name}". Give each its own name.`);
+        return;
+      }
+      const sent: SpeechEntry & { has_key?: boolean } = structuredClone(entry);
+      delete sent.has_key;
+      validate()
+        .then(() => backend.checkSpeechEntry(sent))
+        .then(
+          () => {
+            const index = entries().findIndex((known) => known.id === entry.id);
+            if (index >= 0) entries()[index] = entry;
+            else entries().push(entry);
+            controls.touched();
+            closeEditor();
+            render();
+            checkWordList();
+          },
+          (error: unknown) => {
+            say(message, errorText(error));
+          },
+        );
+    }, "primary");
+    const cancel = button("Cancel", closeEditor, "quiet");
+    editor.replaceChildren(
+      el("h4", {}, existing ? `Edit ${existing.name}` : `Add a ${KIND_NAMES[working.kind].toLowerCase()}`),
+      ...rows,
+      el("div", { class: "trow add" }, done, cancel),
+      message,
+    );
+    editor.hidden = false;
+  }
+
+  const kindPicker = controls.select(LIVE_KINDS, "realtime", () => undefined, "Kind of speech server to add");
+  const addLive = button("Add", () => {
+    openEditor(null, (kindPicker.field as HTMLSelectElement).value as LiveEntry["kind"]);
   });
-
-  function syncEnabled(): void {
-    for (const input of inputs) input.disabled = !secondaryOn;
-    picker.disabled = !secondaryOn;
-  }
-
-  function sync(): void {
-    const [urlInput, modelInput, keyInput] = inputs;
-    const blank = inputs.every((input) => input.value.trim() === "");
-    draft.stt.secondary =
-      !secondaryOn && blank
-        ? null
-        : {
-            enabled: secondaryOn,
-            url: urlInput?.value ?? "",
-            model: modelInput?.value ?? "",
-            api: APIS.find(([value]) => value === picker.value)?.[0] ?? "openai",
-            api_key: keyInput?.value ?? "",
-          };
-  }
-  syncEnabled();
-  const server = controls.text(draft.server, (value) => {
-    draft.server = value;
-  }, { placeholder: "ws://127.0.0.1:8080" });
-  server.field.addEventListener("change", checkWordList);
+  addLive.setAttribute("aria-label", "Add a speech server");
+  const addSecond = button("Add a second-pass API", () => {
+    openEditor(null, "second_pass");
+  });
+  const liveBlock = el("div", { class: "stack wide" }, liveList, el("div", { class: "trow add" }, kindPicker.node, addLive));
+  const secondBlock = el("div", { class: "stack wide" }, secondList, addSecond);
 
   const words = wordListTable(draft, controls);
   const wordProblem = note();
   const wordRow = row(
     "Word list",
-    "Names and terms to spell your way, added one at a time. Recognition on this computer favours them, and so does a server that supports it, in dictation and conversations.",
+    "Names and terms to spell your way, added one at a time. Recognition on this computer favours them, and so does a recognizer that supports it.",
     words.node,
   );
   words.node.append(wordProblem);
@@ -788,13 +1081,14 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
     const ask = (asked += 1);
     wordRow.classList.add("off");
     say(wordProblem, "");
-    if (draft.stt.engine === "local") {
+    const active = activeLive();
+    if (active === undefined || active.kind === "on_device") {
       wordRow.classList.remove("off");
       words.enable(true);
       return;
     }
     backend
-      .wordListSupport(draft.server)
+      .wordListSupport(active)
       .then((supported) => {
         if (ask !== asked) return;
         wordRow.classList.toggle("off", !supported);
@@ -807,26 +1101,25 @@ function speech({ draft, controls, backend, checks, live }: PageContext): HTMLEl
         say(wordProblem, errorText(error));
       });
   }
+  render();
   checkWordList();
 
   return [
-    group("Server"),
-    row("Server address", "Where Thalvi sends speech for recognition.", server),
-    group("Dictation"),
-    row("Recognize speech", "Where your dictation is turned into text. Conversation mode always uses the server.", engine),
-    row("Language", "Narrows the list of models below. It does not change what is recognized.", { node: languagePicker, field: languagePicker }),
+    group("Live dictation"),
     row(
-      "Speech model",
-      `For recognition on this computer. Pick a model; it downloads on first use, or with its Download button. A model you pick applies from the next capture. Or point to your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.`,
-      speechModelField,
+      "Speech servers",
+      "One is in use for dictation. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Conversation mode always uses the Thalvi server's own recognizer.",
+      liveBlock,
     ),
     wordRow,
-    group("Second transcription"),
-    row("Second-pass transcription", "Transcribes each accepted capture again on the endpoint below. Off keeps the endpoint and key.", toggle),
-    row("Endpoint address", "Where the second transcription is sent.", url),
-    row("Model", null, model),
-    row("API", "Which transcription API the endpoint speaks.", api),
-    row("API key", "Stored in the desktop config file.", key),
+    group("Second pass"),
+    row(
+      "Second-pass servers",
+      "Ticked servers transcribe each accepted capture again. The first one in this order that answers replaces the live text; the rest are only recorded. Ticking applies at once.",
+      secondBlock,
+    ),
+    problem,
+    editor,
   ];
 }
 

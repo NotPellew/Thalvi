@@ -949,6 +949,325 @@ async fn a_spoken_never_mind_keeps_what_was_dictated_before_it_without_the_phras
         .await;
 }
 
+/// Scripts for the commands that run without a spoken ending.
+const COMMANDS: &str = r#"{
+    "apps": {"editor": {"classes": ["Code"], "input_keys": ["ctrl", "l"]}},
+    "scripts": [
+        {"phrase": "open the project page", "action": "open_url",
+         "destination": "https://github.com/NotPellew/Thalvi", "label": "the project page"},
+        {"phrase": "switch to editor", "action": "focus_app", "destination": "editor"},
+        {"phrase": "message the demo channel saying", "action": "discord_message",
+         "destination": "https://discord.com/channels/1/2", "label": "Demo"}
+    ]
+}"#;
+
+fn pending_task(text: &str, waiting_for_quiet: bool) -> EngineState {
+    EngineState::PendingEnding {
+        route: CaptureRoute::Task,
+        text: text.to_owned(),
+        waiting_for_quiet,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_whole_capture_command_runs_after_the_task_pause_and_an_explicit_ending_still_wins() {
+    // (what is recognized and when, the route and text delivered, the provisional cues, when it is delivered)
+    type Case = (
+        &'static [(u64, &'static str)],
+        CaptureRoute,
+        &'static str,
+        &'static [u64],
+        u64,
+    );
+    let cases: [Case; 9] = [
+        (
+            &[(1000, "open google.com")],
+            CaptureRoute::Task,
+            "open google.com",
+            &[1000],
+            3500,
+        ),
+        (
+            &[(1000, "Open Google.com.")],
+            CaptureRoute::Task,
+            "Open Google.com.",
+            &[1000],
+            3500,
+        ),
+        (
+            &[(1000, "open the project page")],
+            CaptureRoute::Task,
+            "open the project page",
+            &[1000],
+            3500,
+        ),
+        (
+            &[(1000, "switch to editor")],
+            CaptureRoute::Task,
+            "switch to editor",
+            &[1000],
+            3500,
+        ),
+        (
+            &[(1000, "open"), (1400, "google.com")],
+            CaptureRoute::Task,
+            "open google.com",
+            &[1400],
+            3900,
+        ),
+        (
+            &[(1000, "open google.com paste that")],
+            CaptureRoute::Paste,
+            "open google.com",
+            &[1000],
+            1700,
+        ),
+        (
+            &[(1000, "open google.com submit")],
+            CaptureRoute::Submit,
+            "open google.com",
+            &[1000],
+            3500,
+        ),
+        (
+            &[(1000, "open google.com do that")],
+            CaptureRoute::Task,
+            "open google.com",
+            &[1000],
+            3500,
+        ),
+        // The command is armed, then "do that" is said on its own: the spoken ending starts a fresh pause.
+        (
+            &[(1000, "open google.com"), (1200, "do that")],
+            CaptureRoute::Task,
+            "open google.com",
+            &[1000, 1200],
+            3700,
+        ),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for (finals, route, text, provisional_at, commit) in cases {
+                let (mut rig, engine, frames) = Rig::new(COMMANDS);
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                for (at, said) in finals {
+                    rig.feed_until(*at, Kind::Quiet).await;
+                    rig.partial(said).await;
+                    rig.finals(said).await;
+                }
+                if route == CaptureRoute::Task && finals.len() == 1 {
+                    assert_eq!(rig.state(), pending_task(text, false), "{finals:?}");
+                }
+                rig.feed_until(commit - 1, Kind::Quiet).await;
+                assert!(!task.is_finished(), "{finals:?}: delivered early");
+                rig.at(commit).await;
+                assert_eq!(finished(task).await, accepted(route, text), "{finals:?}");
+                assert_eq!(rig.started(Cue::Accepted), [commit], "{finals:?}");
+                assert_eq!(rig.started(Cue::Provisional), provisional_at, "{finals:?}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_command_without_a_spoken_ending_does_not_agree_with_a_spotter_hit() {
+    LocalSet::new()
+        .run_until(async {
+            for (said, expected) in [
+                ("open google.com", "ended"),
+                ("open google.com do that", "agreed"),
+            ] {
+                let dir = record_dir("command-spotter");
+                let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+                let (mut rig, spot, engine, frames) = Rig::spotting(COMMANDS, recorder);
+                spot.hear(HEARD_AT_FRAME, "do that", Ending::Task);
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals(said).await;
+                rig.feed_until(3500, Kind::Quiet).await;
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Task, "open google.com"),
+                    "{said}"
+                );
+                let rows = read_lines(&dir.join("metrics.jsonl"));
+                let hit = rows
+                    .iter()
+                    .find(|row| row["event"] == "desktop_ending_spotter" && row["call"] == "hit")
+                    .unwrap();
+                assert_eq!(hit["outcome"], expected, "{said}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn speech_during_a_command_pause_cancels_it_and_the_capture_goes_on_as_dictation() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new(COMMANDS);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("open google.com").await;
+            rig.feed_until(2000, Kind::Quiet).await;
+            rig.partial("and then").await;
+            assert_eq!(rig.started(Cue::Cancelled), [2000]);
+            assert_eq!(
+                rig.state(),
+                EngineState::Capturing {
+                    committed: "open google.com".to_owned(),
+                    partial: Some("and then".to_owned()),
+                    notice: None,
+                }
+            );
+            rig.feed_until(6000, Kind::Quiet).await;
+            assert!(!task.is_finished(), "the cancelled command is not run");
+            rig.finals("and then paste that").await;
+            rig.feed_until(6699, Kind::Quiet).await;
+            assert!(!task.is_finished());
+            rig.at(6700).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "open google.com and then")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_speech_pauses_a_command_countdown_until_quiet_returns() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new(COMMANDS);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("open google.com").await;
+            rig.feed_until(2000, Kind::Quiet).await;
+            rig.feed_until(2240, Kind::Voice).await;
+            assert_eq!(rig.state(), pending_task("open google.com", true));
+            rig.feed_until(4819, Kind::Quiet).await;
+            assert!(
+                !task.is_finished(),
+                "the pause restarted when quiet returned"
+            );
+            assert_eq!(rig.state(), pending_task("open google.com", false));
+            rig.at(4820).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Task, "open google.com")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn never_mind_drops_a_command_that_is_waiting_out_its_pause() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new(COMMANDS);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("open google.com").await;
+            rig.feed_until(1500, Kind::Quiet).await;
+            assert_eq!(rig.state(), pending_task("open google.com", false));
+            rig.finals("never mind").await;
+            assert_eq!(rig.started(Cue::Cancelled), [1500]);
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("open google.com".to_owned())
+                }
+            );
+            assert_eq!(rig.started(Cue::Accepted).len(), 0);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn text_that_is_not_the_whole_command_never_runs_without_an_ending() {
+    LocalSet::new()
+        .run_until(async {
+            for said in [
+                "I said open google.com yesterday",
+                "open the file",
+                "open google.com and then some",
+                "message the demo channel saying hello",
+            ] {
+                let (mut rig, engine, frames) = Rig::new(COMMANDS);
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals(said).await;
+                rig.feed_until(8000, Kind::Quiet).await;
+                assert!(!task.is_finished(), "{said}: nothing runs by itself");
+                assert_eq!(rig.started(Cue::Provisional).len(), 0, "{said}");
+                assert_eq!(
+                    rig.state(),
+                    EngineState::Capturing {
+                        committed: said.to_owned(),
+                        partial: None,
+                        notice: None,
+                    },
+                    "{said}"
+                );
+                rig.handle.cancel();
+                assert_eq!(
+                    finished(task).await,
+                    CaptureOutcome::Cancelled {
+                        dictated: Some(said.to_owned())
+                    },
+                    "{said}"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_task_that_ran_without_an_ending_is_recorded_apart_from_one_that_had_one() {
+    LocalSet::new()
+        .run_until(async {
+            let all = RecordKinds {
+                metrics: true,
+                text: false,
+                audio: false,
+            };
+            for (said, states) in [
+                (
+                    "open google.com",
+                    ["pending_without_ending", "accepted_without_ending"],
+                ),
+                ("open google.com do that", ["pending", "accepted"]),
+            ] {
+                let dir = record_dir(&format!("without-ending-{}", said.len()));
+                let recorder = Recorder::in_dir(all, &dir).unwrap();
+                let (mut rig, engine, frames) = Rig::recording(COMMANDS, recorder);
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals(said).await;
+                rig.feed_until(3500, Kind::Quiet).await;
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Task, "open google.com"),
+                    "{said}"
+                );
+                let seen: Vec<String> = events(&read_lines(&dir.join("metrics.jsonl")))
+                    .into_iter()
+                    .filter(|(event, _)| event == "desktop_ending_state")
+                    .map(|(_, outcome)| outcome)
+                    .collect();
+                assert_eq!(seen, states, "{said}");
+            }
+        })
+        .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn cancelling_from_outside_stops_whatever_the_capture_is_doing() {
     #[derive(Clone, Copy)]
@@ -1096,7 +1415,7 @@ async fn a_failed_capture_says_what_happened_keeps_the_text_and_returns_to_liste
     let recognizer = |message: &str| CaptureError::Recognizer(RecognizerError::said(message));
     let not_ready = || CaptureError::NotReady {
         waited: Duration::from_secs(8),
-        speech: SpeechSource::Server(ServerUrl::default()),
+        speech: SpeechSource::thalvi_server("Thalvi server", &ServerUrl::default()),
     };
     // Fault, the error, the text kept, when the error cue plays, and whether a stream was open.
     let cases = [
@@ -1558,7 +1877,8 @@ async fn live_words(rig: &mut Rig) {
     rig.at(3500).await;
 }
 
-const FALLBACK_NOTICE: &str = "The second transcription failed. Using the live transcript.";
+const FALLBACK_NOTICE: &str =
+    "The second transcription failed for \"Second pass\". Using the live transcript.";
 
 #[tokio::test(start_paused = true)]
 async fn the_secondary_transcription_replaces_the_text_of_the_frames_that_were_sent() {
@@ -1659,6 +1979,120 @@ async fn the_live_transcript_is_kept_with_a_notice_when_the_secondary_cannot_sta
                 );
                 assert_eq!(rig.notices(), [FALLBACK_NOTICE], "{name}");
             }
+        })
+        .await;
+}
+
+/// A config with the Thalvi server entry active and these second-pass entries, in order:
+/// `(name, url, ticked)`.
+fn with_second_passes(entries: &[(&str, &str, bool)]) -> String {
+    let second: Vec<String> = entries
+        .iter()
+        .map(|(name, url, ticked)| {
+            format!(
+                r#"{{"kind": "second_pass", "id": "{name}", "name": "{name}", "active": {ticked}, "address": "{url}", "model": "m", "api": "openai"}}"#
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"entries": [{{"kind": "thalvi_server", "id": "s", "name": "Thalvi server", "active": true, "address": "ws://127.0.0.1:8080"}}, {}]}}}}"#,
+        second.join(", ")
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_first_ticked_entry_that_answers_replaces_the_text_and_the_rest_are_only_recorded() {
+    LocalSet::new()
+        .run_until(async {
+            let all = RecordKinds {
+                metrics: true,
+                text: true,
+                audio: false,
+            };
+            let dir = record_dir("several");
+            let (broken, mut broken_uploads) = serve(Reply::Status(500)).await;
+            let (second, mut second_uploads) =
+                serve(Reply::Json(r#"{"text": "Second words paste that"}"#)).await;
+            let (third, mut third_uploads) =
+                serve(Reply::Json(r#"{"text": "Third words paste that"}"#)).await;
+            let (unticked, mut unticked_uploads) =
+                serve(Reply::Json(r#"{"text": "Unticked words paste that"}"#)).await;
+            let config = with_second_passes(&[
+                ("Broken", &broken, true),
+                ("Unticked", &unticked, false),
+                ("Second", &second, true),
+                ("Third", &third, true),
+            ]);
+            let recorder = Recorder::in_dir(all, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording(&config, recorder);
+            let task = capture_task(engine, frames);
+            live_words(&mut rig).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "Second words")
+            );
+            assert!(broken_uploads.recv().await.is_some());
+            assert!(second_uploads.recv().await.is_some());
+            assert!(third_uploads.recv().await.is_some(), "the rest still run");
+            assert!(
+                unticked_uploads.try_recv().is_err(),
+                "an unticked entry never runs"
+            );
+            assert_eq!(
+                rig.notices(),
+                ["The second transcription failed for \"Broken\". Using the answer of \"Second\"."]
+            );
+
+            let metrics = read_lines(&dir.join("metrics.jsonl"));
+            let calls: Vec<_> = metrics
+                .iter()
+                .filter(|line| line["event"] == "desktop_secondary_stt")
+                .map(|line| {
+                    (
+                        line["entry"].as_str().unwrap().to_owned(),
+                        line["outcome"].as_str().unwrap().to_owned(),
+                        line["used"].as_bool().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                calls,
+                [
+                    ("Broken".to_owned(), "error".to_owned(), false),
+                    ("Second".to_owned(), "ok".to_owned(), true),
+                    ("Third".to_owned(), "ok".to_owned(), false),
+                ]
+            );
+            let folder = dictation_dirs(&dir).pop().unwrap();
+            assert_eq!(
+                std::fs::read_to_string(folder.join("text.txt")).unwrap(),
+                "heard: live words paste that\n\
+                 second transcription (Second): Second words paste that\n\
+                 second transcription (Third): Third words paste that\n\
+                 accepted (paste): Second words\n"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_ticked_entry_that_answers_keeps_the_live_text_and_names_every_one_that_failed() {
+    LocalSet::new()
+        .run_until(async {
+            let (first, _first) = serve(Reply::Status(500)).await;
+            let (second, _second) = serve(Reply::Stall).await;
+            let config = with_second_passes(&[("First", &first, true), ("Second", &second, true)]);
+            let (mut rig, engine, frames) = Rig::new(&config);
+            let task = capture_task(engine, frames);
+            live_words(&mut rig).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "live words")
+            );
+            assert_eq!(
+                rig.notices(),
+                ["The second transcription failed for \"First\", \"Second\". Using the live transcript."]
+            );
         })
         .await;
 }
@@ -1856,12 +2290,18 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
                 .unwrap();
             assert_eq!(secondary["model"], "m");
             assert_eq!(secondary["api"], "openai");
+            assert_eq!(secondary["entry"], "Second pass");
+            let ready = metrics
+                .iter()
+                .find(|line| line["event"] == "desktop_transcription_ready")
+                .unwrap();
+            assert_eq!(ready["entry"], "Thalvi server");
 
             let folder = dictation_dirs(&dir).pop().unwrap();
             assert_eq!(
                 std::fs::read_to_string(folder.join("text.txt")).unwrap(),
                 "heard: live words paste that\n\
-                 second transcription: Polished words paste that\n\
+                 second transcription (Second pass): Polished words paste that\n\
                  accepted (paste): Polished words\n"
             );
             assert_eq!(
@@ -1870,6 +2310,63 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
                 "only audio sent after the cue is recorded"
             );
             assert!(folder.join("wake.wav").exists());
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_delay_from_speech_to_the_recognizers_words_is_recorded_once_for_partials_and_per_final()
+ {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("lags");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, spot, engine, frames) = Rig::spotting(
+                r#"{"stt":{"entries":[{"kind":"thalvi_server","id":"test","name":"Metrics recognizer","active":true,"address":"ws://127.0.0.1:8080"}]}}"#,
+                recorder,
+            );
+            spot.hear(HEARD_AT_FRAME, "paste that", Ending::Paste);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.feed_until(1500, Kind::Voice).await;
+            rig.partial("live").await;
+            rig.feed_until(1900, Kind::Voice).await;
+            rig.partial("live words").await;
+            rig.feed_until(2200, Kind::Quiet).await;
+            rig.finals("live words paste that").await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3500).await;
+            finished(task).await;
+            let lines = read_lines(&dir.join("metrics.jsonl"));
+            let ready = lines
+                .iter()
+                .find(|line| line["event"] == "desktop_transcription_ready")
+                .unwrap();
+            assert_eq!(ready["entry"], "Metrics recognizer");
+            let lags = |event: &str| -> Vec<f64> {
+                lines
+                    .iter()
+                    .filter(|line| line["event"] == event)
+                    .map(|line| line["duration_ms"].as_f64().unwrap())
+                    .collect()
+            };
+            // The detector flags speech by its own rules, so only the span it can lie in is known.
+            let first_voice = (1000 / FRAME_MS + 1) * FRAME_MS;
+            let partial = lags("desktop_partial_lag");
+            let last = lags("desktop_final_lag");
+            assert_eq!(partial.len(), 1, "two partials, one lag: {partial:?}");
+            assert_eq!(last.len(), 1, "{last:?}");
+            #[expect(clippy::cast_precision_loss, reason = "small test times")]
+            let ms = |at: u64| at as f64;
+            assert!(
+                (0.0..=ms(1500 - first_voice)).contains(&partial[0]),
+                "{partial:?}"
+            );
+            assert!(
+                (0.0..=ms(2200 - first_voice)).contains(&last[0]) && last[0] > 0.0,
+                "{last:?}"
+            );
         })
         .await;
 }
@@ -3252,7 +3749,7 @@ async fn spoken_endings_are_text_during_a_hold_and_act_after_the_wake_word() {
         "make it so": "task", "drop last": "scratch", "forget it": "cancel"}}"#;
     // (config, what is said, what the same words do after the wake word; a hold
     // always pastes everything that was said)
-    let cases: [(&str, &str, CaptureOutcome); 6] = [
+    let cases: [(&str, &str, CaptureOutcome); 7] = [
         (
             "{}",
             "fix the bug never mind",
@@ -3286,6 +3783,11 @@ async fn spoken_endings_are_text_during_a_hold_and_act_after_the_wake_word() {
             CUSTOM,
             "run the tests make it so",
             accepted(CaptureRoute::Task, "run the tests"),
+        ),
+        (
+            "{}",
+            "open google.com",
+            accepted(CaptureRoute::Task, "open google.com"),
         ),
     ];
     LocalSet::new()

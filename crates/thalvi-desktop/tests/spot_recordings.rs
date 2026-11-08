@@ -167,7 +167,7 @@ fn literal<'a>(
 }
 
 fn session() -> CaptureSession {
-    CaptureSession::new(Endings::default(), EndingPauses::default())
+    CaptureSession::new(Endings::default(), EndingPauses::default(), Vec::new())
 }
 
 /// What literal endings the transcript of one capture carried, by phrase.

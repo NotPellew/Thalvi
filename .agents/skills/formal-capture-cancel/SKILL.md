@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `f557ebf0006b2102e23c23424f2acca3df97574b`. The recorded file hashes
+Sync commit: `cb7007419cf3ada15adea927ec63b3c0ec1e5551`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -28,14 +28,26 @@ accounts for presses during a rebuild and refuses them afterwards; its former
 body is `Runner::rebuild`. A dropped listener keeps its hold cursor until it
 resumes. Closing the microphone ends that interval and hands pending presses to
 Apply, which returns the accounted cursor to the live engine so a newer press
-cannot be skipped. None of these touch the mapped functions' cancellation
-behaviour, so the model is unchanged and only the hashes moved. The ending spotter and the GNOME
-host moved them again: `conclude` first settles the spotter's bookkeeping (synchronous, no await,
-before the cue and the recognizer release), `drive` gained a select branch that only plays a cue and
-shows a notice, `Runner::build` joins the spotter load with the wake load, and `Delivery::finish`
-maps a host's `Delivered` result to its notice. The spotter's notices are now part of the
-capturing state the overlay shows, set by synchronous code. No await boundary, control drain or admission of
-an accepted result changed, so the model is unchanged and only the hashes moved.
+cannot be skipped. Speech servers became a list of entries: `Engine::reconcile`
+runs every ticked second-pass entry (none runs when none is ticked, as before
+when the switch was off), still polling cancellation first, and the recognizer
+errors name their entry. `drive` times the recognizer's first words and each final
+result against the speech heard (`Heard`) for the metrics. None of these touch the mapped functions' cancellation
+behaviour, so the model is unchanged and only the hashes moved.
+The GNOME host (#267) changed `delivery.rs` and `runner.rs` without changing that:
+`Delivery::type_in` returns `Delivered::InWindow` or `Delivered::OnClipboard` from the
+same `Delivery::finish` admission, so a clipboard-only desktop is another admitted host
+action and a cancelled capture still never reaches it. `Runner::capture` now calls
+`Publisher::woke` before `drive`, which only sets the view's `copies` and `target`.
+A wake capture whose whole text is a task now arms the task ending itself; it
+reaches `Engine::conclude` through the same `Done::Accepted`, so that is unchanged too.
+The offline-model fix (#272) added a `RecognizerError::Model` variant, raised while the
+local model's files are fetched and so before any `RecognizerSession` exists.
+The ending spotter adds synchronous bookkeeping in `conclude` before the cue and
+recognizer release, and a `drive` branch that only plays a cue and shows a notice.
+`Runner::build` joins the spotter load with the wake load; capture notices are set
+synchronously. These changes preserve the mapped await boundaries, control drains
+and delivery admission, so the cancellation model is unchanged.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

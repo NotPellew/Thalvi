@@ -46,7 +46,6 @@ export interface AudioStatus {
 export type Ending = "paste" | "submit" | "task" | "scratch" | "cancel";
 export type ScriptActionKind = "open_url" | "focus_app" | "discord_message";
 export type SecondaryApi = "openai" | "meta";
-export type SttEngine = "server" | "local";
 export type Look = "gunmetal" | "holo" | "neon";
 
 export interface HeadSettings {
@@ -54,13 +53,50 @@ export interface HeadSettings {
   threshold: number;
 }
 
-export interface SecondarySettings {
-  enabled: boolean;
-  url: string;
+interface EntryBase {
+  /** Never shown; the key saved for an entry belongs to its id. */
+  id: string;
+  name: string;
+  /** The one live entry in use; for a second-pass entry, whether it is ticked. */
+  active: boolean;
+}
+
+/** A recognizer the desktop connects to itself, speaking Meta's realtime ASR protocol. */
+export interface RealtimeEntry extends EntryBase {
+  kind: "realtime";
+  address: string;
+  model: string;
+  /** Present only when the user replaced or cleared the key; absent keeps the saved one. */
+  api_key?: string;
+  /** Whether a key is saved; the key itself never reaches the window. */
+  has_key?: boolean;
+}
+
+/** A Thalvi server's `/transcription` route; its recognizer key is held in the server's `.env`. */
+export interface ThalviServerEntry extends EntryBase {
+  kind: "thalvi_server";
+  address: string;
+}
+
+/** The speech model on this computer. */
+export interface OnDeviceEntry extends EntryBase {
+  kind: "on_device";
+  /** A catalog name or a model folder; its default when absent. */
+  model?: string;
+}
+
+/** An OpenAI or Meta transcription API that transcribes each accepted capture again. */
+export interface SecondPassEntry extends EntryBase {
+  kind: "second_pass";
+  address: string;
   model: string;
   api: SecondaryApi;
-  api_key: string;
+  api_key?: string;
+  has_key?: boolean;
 }
+
+export type LiveEntry = RealtimeEntry | ThalviServerEntry | OnDeviceEntry;
+export type SpeechEntry = LiveEntry | SecondPassEntry;
 
 export interface AppSettings {
   classes: string[];
@@ -77,17 +113,14 @@ export interface ScriptSettings {
 
 /** The desktop config file with every field filled. */
 export interface Settings {
-  server: string;
   wake: { capture: HeadSettings; conversation: HeadSettings };
   cues: { wake: boolean; provisional: boolean; cancelled: boolean; accepted: boolean; error: boolean };
   ending_pause: { paste: number; submit: number; task: number };
   capture_limits: { idle: number; max: number };
   endings: Record<string, Ending>;
   stt: {
-    engine: SttEngine;
-    /** A catalog name or a model folder; only with the local engine, and its default when absent. */
-    model?: string;
-    secondary?: SecondarySettings | null;
+    /** Live entries (exactly one active) and second-pass entries; the order of the second-pass ones is the order they are tried. */
+    entries: SpeechEntry[];
     /** Spellings recognition favours; absent when empty. */
     phrases?: string[];
   };
@@ -174,6 +207,8 @@ export interface Backend {
   onAudio(listener: (audio: AudioStatus) => void): void;
   /** Settings were saved, from any window. */
   onSettingsSaved(listener: () => void): void;
+  /** An agent changed the saved settings or a switch the window reads from the OS; the window's own saves never fire this. */
+  onSettingsChangedElsewhere(listener: () => void): void;
   getSettings(): Promise<Settings>;
   saveSettings(settings: Settings): Promise<void>;
   setListening(on: boolean): Promise<void>;
@@ -227,8 +262,10 @@ export interface Backend {
   onSpeechModelProgress(listener: (progress: SpeechModelProgress) => void): void;
   /** Opens the model's page in the browser. */
   openSpeechModelSource(name: string): Promise<void>;
-  /** Whether the recognizer behind `server` boosts a word list; rejects with the plain reason it can't tell. */
-  wordListSupport(server: string): Promise<boolean>;
+  /** Resolves when the entry's fields can be used; rejects with the plain reason they cannot. */
+  checkSpeechEntry(entry: SpeechEntry): Promise<void>;
+  /** Whether the recognizer behind a live entry boosts a word list; rejects with the plain reason it can't tell. */
+  wordListSupport(entry: LiveEntry): Promise<boolean>;
   /** Saves the stored word list on the server; rejects with the plain reason it could not. */
   shareWordList(): Promise<void>;
   appVersion(): Promise<string>;

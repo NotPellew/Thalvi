@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::future::{FutureExt, LocalBoxFuture};
+use futures_util::future::{FutureExt, LocalBoxFuture, join_all};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -24,8 +24,9 @@ use crate::capture::{
     Endings, FinalStep, QuietWindow, has_words,
 };
 use crate::claim::{Effect, Resolution, Watch};
-use crate::config::DesktopConfig;
+use crate::config::{DesktopConfig, Script};
 use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues};
+use crate::entries::SecondPassEntry;
 use crate::frame::{FRAME_SAMPLES, Frame, Order, Queued};
 use crate::hold::{Cutoff, KeyState, Press, Presses, Refusal};
 use crate::metrics::{Dictation, Event, RecordKinds, Recorder};
@@ -33,7 +34,7 @@ use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
 };
 use crate::report::UserError;
-use crate::secondary::{self, SecondaryApi, SecondaryError, SecondaryStt};
+use crate::secondary::{self, SecondaryApi, SecondaryError};
 use crate::spotter::KeywordSpotter;
 use crate::vad::VadDetector;
 use crate::wake::{WakeEngine, WakeError, WakeEvent, WakeFrame};
@@ -213,7 +214,8 @@ pub enum CaptureError {
     #[error(transparent)]
     Recognizer(#[from] RecognizerError),
     #[error(
-        "{speech} was not ready after {}. Nothing was delivered. {}",
+        "{} was not ready after {}. Nothing was delivered. {}",
+        speech.subject(),
         plain_duration(*waited),
         speech.fix()
     )]
@@ -241,14 +243,10 @@ impl UserError for CaptureError {
     fn headline(&self) -> &'static str {
         match self {
             Self::Recognizer(error) => error.headline(),
-            Self::NotReady {
-                speech: SpeechSource::Server(_),
-                ..
-            } => "Speech server not ready — Settings",
-            Self::NotReady {
-                speech: SpeechSource::Local { .. },
-                ..
-            } => "Speech model not ready — Settings",
+            Self::NotReady { speech, .. } if speech.is_on_device() => {
+                "Speech model not ready — Settings"
+            }
+            Self::NotReady { .. } => "Speech server not ready — Settings",
             Self::Audio(error) => error.headline(),
             Self::MicStopped => "Microphone stopped mid-capture",
             Self::HoldTooShort => "Key released too soon",
@@ -405,8 +403,10 @@ pub struct Engine<R, W, C> {
     vad: VadDetector,
     endings: Endings,
     pauses: EndingPauses,
+    scripts: Vec<Script>,
     limits: CaptureLimits,
-    secondary: Option<SecondaryStt>,
+    /// The ticked second-pass entries in list order.
+    secondary: Vec<SecondPassEntry>,
     speech: SpeechSource,
     http: reqwest::Client,
     recorder: Recorder,
@@ -484,6 +484,7 @@ struct Live<S> {
     started: Instant,
     /// When the recognizer last returned words.
     last_words: Instant,
+    heard: Heard,
     cues: FuturesUnordered<LocalBoxFuture<'static, CueEnd>>,
     release: Release,
     /// The release of the hold that opened this capture; frames queued after it are not speech
@@ -503,6 +504,17 @@ struct SpotStats {
     hits: u32,
     total: Duration,
     slowest: Duration,
+}
+
+/// When speech was heard, to time the recognizer's answers to it.
+#[derive(Default)]
+struct Heard {
+    /// The first speech heard, until the recognizer's first words come.
+    first: Option<Instant>,
+    /// Whether the recognizer has returned words in this capture.
+    words_came: bool,
+    /// The latest speech heard since the recognizer's last final result.
+    last: Option<Instant>,
 }
 
 /// What the dictation key's release does to a capture.
@@ -682,8 +694,9 @@ where
             vad: VadDetector::new(),
             endings: config.endings.clone(),
             pauses: config.ending_pause,
+            scripts: config.scripts.clone(),
             limits: config.capture_limits,
-            secondary: config.stt.secondary.clone(),
+            secondary: config.stt.entries.ticked().cloned().collect(),
             speech: config.speech_source(),
             http: parts.http,
             recorder,
@@ -999,7 +1012,7 @@ where
             Event::TranscriptionReady,
             connection.0,
             Some(connection.1.unwrap_or_else(|| started.elapsed())),
-            Value::Null,
+            json!({"entry": self.speech.name()}),
         );
     }
 
@@ -1182,7 +1195,7 @@ where
         if held {
             CaptureSession::without_endings()
         } else {
-            CaptureSession::new(self.endings.clone(), self.pauses)
+            CaptureSession::new(self.endings.clone(), self.pauses, self.scripts.clone())
         }
     }
 
@@ -1275,8 +1288,7 @@ where
             text: self.capture_session(held.is_some()),
             partial: None,
             sent: Vec::new(),
-            keep_sent: self.secondary.as_ref().is_some_and(SecondaryStt::enabled)
-                || self.recorder.kinds().audio,
+            keep_sent: !self.secondary.is_empty() || self.recorder.kinds().audio,
             held: VecDeque::new(),
             speech_run: 0,
             relayed: false,
@@ -1284,6 +1296,7 @@ where
             last_audio: Instant::now(),
             started: Instant::now(),
             last_words: Instant::now(),
+            heard: Heard::default(),
             cues: FuturesUnordered::new(),
             release: held.map_or(Release::Over, |_| Release::Down),
             cutoff: held.map(|held| held.release.clone()),
@@ -1345,6 +1358,9 @@ where
                 Step::Event(Ok(RecognizerEvent::Partial(text))) => {
                     if has_words(&text) {
                         live.last_words = Instant::now();
+                        if !std::mem::replace(&mut live.heard.words_came, true) {
+                            self.lag(Event::PartialLag, live.heard.first.take());
+                        }
                     }
                     self.on_partial(live, text);
                     None
@@ -1352,6 +1368,7 @@ where
                 Step::Event(Ok(RecognizerEvent::Final(text))) => {
                     if has_words(&text) {
                         live.last_words = Instant::now();
+                        self.lag(Event::FinalLag, live.heard.last.take());
                     }
                     let done = self.on_final(live, &text);
                     done.or_else(|| {
@@ -1457,6 +1474,14 @@ where
         })
     }
 
+    /// Records how long after `since` the recognizer answered, when speech was heard since.
+    fn lag(&self, event: Event, since: Option<Instant>) {
+        if let Some(since) = since {
+            self.recorder
+                .metric(event, "ok", Some(since.elapsed()), Value::Null);
+        }
+    }
+
     /// Says that `count` presses of the dictation key started nothing, and why.
     fn ignore(&mut self, refusal: Refusal, count: u64) {
         refusal.record(&self.recorder, count);
@@ -1528,10 +1553,11 @@ where
                     live.speech_run = 0;
                 }
                 live.last_audio = now;
-                self.ending_state(if pending.window == QuietWindow::WaitingForQuiet {
-                    "waiting_for_quiet"
-                } else {
-                    "pending"
+                self.ending_state(match (pending.window, pending.without_ending) {
+                    (QuietWindow::WaitingForQuiet, false) => "waiting_for_quiet",
+                    (QuietWindow::WaitingForQuiet, true) => "waiting_for_quiet_without_ending",
+                    (QuietWindow::CountingDown { .. }, false) => "pending",
+                    (QuietWindow::CountingDown { .. }, true) => "pending_without_ending",
                 });
                 self.queue_cue(live, Cue::Provisional);
             }
@@ -1543,8 +1569,13 @@ where
     fn on_quiet(&self, live: &mut Live<R::Session>) -> Option<Done> {
         let now = Instant::now();
         let since = live.text.quiet_since();
+        let without_ending = live.text.pending().is_some_and(|p| p.without_ending);
         let request = live.text.poll_ready(now)?;
-        self.ending_state("accepted");
+        self.ending_state(if without_ending {
+            "accepted_without_ending"
+        } else {
+            "accepted"
+        });
         if let Some(since) = since {
             self.recorder.metric(
                 Event::EndingPause,
@@ -1582,6 +1613,12 @@ where
                 watch.speaking();
             } else {
                 watch.quiet_frame(now);
+            }
+        }
+        if live.speech {
+            live.heard.last = Some(now);
+            if !live.heard.words_came {
+                live.heard.first.get_or_insert(now);
             }
         }
         if !pending {
@@ -1860,8 +1897,9 @@ where
         completed
     }
 
-    /// Replaces the accepted text with the secondary transcription's when it agrees with the
-    /// ending the user spoke; otherwise keeps the live transcript and says so.
+    /// Replaces the accepted text with the first ticked entry's second transcription that agrees
+    /// with the ending the user spoke; the others are recorded only. Keeps the live transcript
+    /// when none does, and says so.
     async fn reconcile(
         &mut self,
         request: CaptureRequest,
@@ -1870,13 +1908,9 @@ where
         has_endings: bool,
         dictation: &Dictation,
     ) -> CaptureOutcome {
-        let Some(settings) = self
-            .secondary
-            .as_ref()
-            .filter(|settings| settings.enabled() && !scratched)
-        else {
+        if self.secondary.is_empty() || scratched {
             return CaptureOutcome::Accepted(request);
-        };
+        }
         self.set_state(EngineState::TranscribingSecondary {
             route: request.route,
         });
@@ -1884,45 +1918,86 @@ where
         let heard = tokio::select! {
             biased;
             _ = self.cancel.changed() => None,
-            heard = secondary::transcribe(&self.http, settings, sent) => Some(heard),
+            heard = join_all(self.secondary.iter().map(|entry| async {
+                let asked = Instant::now();
+                let heard = secondary::transcribe(&self.http, &entry.settings, sent).await;
+                (heard, asked.elapsed())
+            })) => Some(heard),
         };
-        let fields = json!({
-            "model": settings.model(),
-            "api": match settings.api() {
-                SecondaryApi::OpenAi => "openai",
-                SecondaryApi::Meta => "meta",
-            },
-        });
-        let (outcome, replaced) = match heard {
-            None => ("cancelled", None),
-            Some(Ok(raw)) => {
-                self.recorder
-                    .text(dictation, format!("second transcription: {raw}"));
-                match self.agreed(&raw, request.route, has_endings) {
-                    Some(text) => ("ok", Some(text)),
-                    None => ("error", None),
-                }
+        let Some(heard) = heard else {
+            for entry in &self.secondary {
+                self.record_second_pass(entry, "cancelled", started.elapsed(), false);
             }
-            Some(Err(SecondaryError::Timeout)) => ("timeout", None),
-            Some(Err(_)) => ("error", None),
+            return CaptureOutcome::cancelled_with(request.text);
         };
-        self.recorder.metric(
-            Event::SecondaryStt,
-            outcome,
-            Some(started.elapsed()),
-            fields,
-        );
-        match (outcome, replaced) {
-            ("cancelled", _) => CaptureOutcome::cancelled_with(request.text),
-            (_, Some(text)) => CaptureOutcome::Accepted(CaptureRequest {
+        let mut winner: Option<&SecondPassEntry> = None;
+        let mut text = None;
+        let mut failed = Vec::new();
+        for (entry, (heard, took)) in self.secondary.iter().zip(heard) {
+            let (outcome, agreed) = match heard {
+                Ok(raw) => {
+                    self.recorder.text(
+                        dictation,
+                        format!("second transcription ({}): {raw}", entry.name),
+                    );
+                    match self.agreed(&raw, request.route, has_endings) {
+                        Some(agreed) => ("ok", Some(agreed)),
+                        None => ("error", None),
+                    }
+                }
+                Err(SecondaryError::Timeout) => ("timeout", None),
+                Err(_) => ("error", None),
+            };
+            let used = agreed.is_some() && winner.is_none();
+            self.record_second_pass(entry, outcome, took, used);
+            if outcome != "ok" {
+                failed.push(format!("\"{}\"", entry.name));
+            }
+            if used {
+                winner = Some(entry);
+                text = agreed;
+            }
+        }
+        if !failed.is_empty() {
+            let used = winner.map_or_else(
+                || "the live transcript".to_owned(),
+                |entry| format!("the answer of \"{}\"", entry.name),
+            );
+            (self.notice)(&format!(
+                "The second transcription failed for {}. Using {used}.",
+                failed.join(", ")
+            ));
+        }
+        match text {
+            Some(text) => CaptureOutcome::Accepted(CaptureRequest {
                 route: request.route,
                 text,
             }),
-            _ => {
-                (self.notice)("The second transcription failed. Using the live transcript.");
-                CaptureOutcome::Accepted(request)
-            }
+            None => CaptureOutcome::Accepted(request),
         }
+    }
+
+    fn record_second_pass(
+        &self,
+        entry: &SecondPassEntry,
+        outcome: &'static str,
+        took: Duration,
+        used: bool,
+    ) {
+        self.recorder.metric(
+            Event::SecondaryStt,
+            outcome,
+            Some(took),
+            json!({
+                "entry": entry.name,
+                "model": entry.settings.model(),
+                "api": match entry.settings.api() {
+                    SecondaryApi::OpenAi => "openai",
+                    SecondaryApi::Meta => "meta",
+                },
+                "used": used,
+            }),
+        );
     }
 
     /// The secondary transcript without its ending phrase, when it ends the way the user did.
@@ -1935,7 +2010,7 @@ where
                 Err(_) => None,
             };
         }
-        let mut parser = CaptureSession::new(self.endings.clone(), self.pauses);
+        let mut parser = CaptureSession::new(self.endings.clone(), self.pauses, Vec::new());
         let mut text = match parser.on_final(raw, Instant::now(), false).ok()? {
             FinalStep::Armed(pending) if pending.route == route => pending.text,
             FinalStep::Continue { .. } if !parser.scratched() => {
@@ -1945,7 +2020,7 @@ where
         };
         // A second pass can hear the spoken ending twice ("Yes. Submit. Submit."); every trailing copy is the ending.
         loop {
-            let mut parser = CaptureSession::new(self.endings.clone(), self.pauses);
+            let mut parser = CaptureSession::new(self.endings.clone(), self.pauses, Vec::new());
             match parser.on_final(&text, Instant::now(), false) {
                 Ok(FinalStep::Armed(pending)) if pending.route == route => text = pending.text,
                 _ => break,
@@ -1964,14 +2039,19 @@ mod tests {
     fn not_ready_names_what_waited_and_the_setting_to_fix() {
         let cases = [
             (
-                SpeechSource::Server(ServerUrl::parse("ws://127.0.0.1:9").unwrap()),
-                "The speech server at ws://127.0.0.1:9 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix Settings → Speech → Server address.",
+                SpeechSource::thalvi_server(
+                    "Office",
+                    &ServerUrl::parse("ws://127.0.0.1:9").unwrap(),
+                ),
+                "The Thalvi server \"Office\" at ws://127.0.0.1:9 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix its address under Settings → Speech.",
             ),
             (
-                SpeechSource::Local {
-                    model: "nemotron_160ms".to_owned(),
-                },
-                "The speech model nemotron_160ms was not ready after 8 seconds. Nothing was delivered. Wait for it to finish loading, or pick another under Settings → Speech → Speech model.",
+                SpeechSource::direct("Cybrex2", "ws://100.64.0.2:8012".to_owned()),
+                "The speech server \"Cybrex2\" at ws://100.64.0.2:8012 was not ready after 8 seconds. Nothing was delivered. Check that it is running, or fix its address under Settings → Speech.",
+            ),
+            (
+                SpeechSource::on_device("On this computer", "nemotron_160ms".to_owned()),
+                "The speech model \"On this computer\" (nemotron_160ms) was not ready after 8 seconds. Nothing was delivered. Wait for it to finish loading, or pick another under Settings → Speech.",
             ),
         ];
         for (speech, expected) in cases {

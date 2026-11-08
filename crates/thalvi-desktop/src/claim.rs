@@ -46,6 +46,7 @@ impl Effect {
     ) -> Self {
         match step {
             Err(_) => Self::Nothing,
+            Ok(FinalStep::Armed(pending)) if pending.without_ending => Self::Text,
             Ok(FinalStep::Armed(pending)) => Self::Ending(match pending.route {
                 CaptureRoute::Paste => Ending::Paste,
                 CaptureRoute::Submit => Ending::Submit,

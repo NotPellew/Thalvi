@@ -33,13 +33,17 @@ areas your change touches. Editing rules are in
   0.6B (NeMo, buffered, 0.56 s lookahead, language detected) behind `STT_URL`. Why: no server change;
   5.8–6.6% word errors on the developer's takes (Meta-free, en/de/es), fits next to TTS on an 8 GB
   RTX 2080. Rejected: Voxtral 4B Realtime (too big), Nemotron 3.5 streaming (15%), Qwen3-ASR (2 s chunks).
+- **The desktop connects to its recognizer itself, from a list of speech servers.** `stt.entries` holds realtime
+  ASR, Thalvi server, on-device and second-pass entries; one live entry is active, ticked second passes run in list
+  order and the first that answers wins; `STT_URL` stays for web conversations. Why: switch recognizers with one click,
+  no `.env` edit or restart. Rejected: one setting per recognizer, a silent fallback between entries, several live entries (#228).
 - **The self-hosted recognizer computes in fp32.** Why: in fp16 its encoder overflows to NaN, decoded as `⁇`,
   when speech follows seconds of digital silence (#220); fp32 takes 1.25 GB more VRAM (7.7 of 8 GB beside TTS)
   and about 2 ms more per step on the RTX 2080. Rejected: bfloat16 (Turing has none), filling silence with
   noise (rescued one stretch of two), restarting streams.
 - **The word list is a recognition hint, used locally and on the server.** Settings' list goes to the
-  server, which gives it to recognizers that announce `phraseBoosting` (dictation and conversations), and
-  to local dictation. Why: NeMo boosting fixed "Cybrex2" with no new errors; text replacement can't fix
+  server (when a Thalvi server entry is active) and to a direct realtime recognizer at each connection, to
+  recognizers that announce `phraseBoosting`, and to local dictation. Why: NeMo boosting fixed "Cybrex2" with no new errors; text replacement can't fix
   what was misheard. Rejected: a flat logit bonus (no fix, stray tokens in silence), sending it to Meta.
 - **Local boosting fuses NeMo's phrase tree into the greedy search at alpha 2.** Why: "Cybrex2", digit
   and all, in 8 of 8 dictations, no new errors on 48 takes with a two-entry list, about 1 ms more per
@@ -82,9 +86,9 @@ areas your change touches. Editing rules are in
   synthesis. Web: Voice sets both, Speak replies only reply audio. Why: typed or locally
   recognized input can get spoken replies. Rejected: one `voice` switch, a compat message.
 - **Two wake entries, endings select the capture route.** One local inference pipeline
-  runs separate trained capture and conversation wake heads. Why: defer the action
-  choice until an ending without delaying conversation. Rejected: one phrase
-  for both flows.
+  runs separate trained capture and conversation wake heads; a wake capture whose whole text is
+  an `open_url`/`focus_app` phrase or `open <host>` runs as a task with no ending. Why: defer the
+  action choice until an ending, yet a ready command needs none. Rejected: one phrase for both flows.
 - **Wake context.** Both trained heads use 16 embedding frames. Why: this
   supports first-frame inference with upstream startup and reset history.
   Rejected: accepting longer contexts that need additional warm-up history.
@@ -106,8 +110,8 @@ areas your change touches. Editing rules are in
   stripping. Rejected: pre-wake audio, cutting it at the wake, and stripping the phrase.
 - **Silence commits capture.** Paste waits 0.7 s of speech silence, submit and tasks 2.5 s by
   default, each settable from 0 to 5 s; recognized speech cancels the pending ending, local speech
-  pauses the countdown, and submit confirms its target meanwhile. Why: paste is undoable and should
-  feel fast; submit and tasks reach others. Rejected: one fixed pause for all, a second spoken yes.
+  pauses the countdown, submit confirms its target, and a whole-text command waits the task pause.
+  Why: paste is undoable; submit and tasks reach others. Rejected: one fixed pause, a second spoken yes.
 - **A keyword spotter only warns about missed endings.** sherpa-onnx's 3.3M keyword model listens beside the recognizer; when the covering final lacks an ending it heard and the user then stays quiet for that ending's pause, the cancelled cue plays and a notice names the phrase. Nothing is cut, retried or acted on.
   Why: spotted times run 0.2–0.5 s late and finals carry no word times; a recheck by the same recognizer rescued 0 of 12 disputed hits in 62.8 min; the quiet gate keeps false alarms (16 in that time) silent.
   Rejected: cutting at the spotted time, a recheck, acting on the spotter alone, judging on a short timer (24 of 36 finals came late), quoting dictated words.
@@ -121,14 +125,14 @@ areas your change touches. Editing rules are in
   Rejected: two wtype calls, a delay per application.
 - **Musical earcons.** Five two- or three-note cues (wake, provisional ending, cancelled, accepted, error), each switchable under `cues` in the desktop config; the mic drops frames while a cue plays.
   Why: distinct contours tell capture state apart without looking, and the mic never hears them. Rejected: one beep for every state, and a post-delivery cue.
-- **Second-pass transcription is explicitly opt-in.** `stt.secondary.enabled`
-  defaults off and disabling preserves endpoint settings. Why: avoid uploading
+- **Second-pass transcription is explicitly opt-in.** A second-pass entry runs only
+  when ticked (`active`), and unticking keeps its settings and key. Why: avoid uploading
   every dictation and adding latency without an explicit choice. Rejected:
   treating an endpoint's presence as enablement.
-- **Resident controls and private bar status.** Control commands use single-instance
-  relaunch; Hyprland status reads a state-only socket in the private runtime folder.
-  Why: controls must not start a microphone and the plugin cannot answer queries.
-  Rejected: a keyboard listener for control commands, TCP, or transcript-bearing status.
+- **Resident controls and private request socket.** Commands reach the running app over a request/reply
+  socket in the private runtime folder (a user-only pipe on Windows): one JSON line each way, size-bounded,
+  known commands only. Why: controls must not start a microphone, and an agent needs an answer.
+  Rejected: single-instance relaunch (no answer), a keyboard listener, TCP, transcript-bearing replies.
 - **Hold to talk.** Holding a key dictates and releasing pastes: F9 without a modifier on Hyprland
   (compositor binds), Alt+KeyZ on Windows (`hold_key`, a swallowing keyboard hook that waits for the
   key and Alt both up); every word of a hold is text, and only `cancel` abandons one. Why: Hyprland 0.53.3 types held modifiers into the paste and drops the release when one comes up first, seen live; `RegisterHotKey` sees no release; the key already ends a dictation, and spoken endings cut off sentences that held them.

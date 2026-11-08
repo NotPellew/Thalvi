@@ -13,7 +13,8 @@ use axum::routing::get;
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
 use thalvi_desktop::recognizer::{
     ConnectFailure, FakeCall, FakeRecognizer, Recognizer, RecognizerError, RecognizerEvent,
-    RecognizerSession, ServerRecognizer, ServerUrl, ServerUrlError, UPSAMPLED_SAMPLES, Upsampler,
+    RecognizerSession, ServerRecognizer, ServerUrl, ServerUrlError, SpeechSource,
+    UPSAMPLED_SAMPLES, Upsampler,
 };
 use tokio::sync::{Notify, mpsc};
 
@@ -99,8 +100,14 @@ async fn recording() -> (ServerUrl, mpsc::UnboundedReceiver<Seen>) {
     (url, rx)
 }
 
+const OFFICE: &str = "Office";
+
+fn office(url: &ServerUrl) -> SpeechSource {
+    SpeechSource::thalvi_server(OFFICE, url)
+}
+
 async fn connect(url: ServerUrl) -> Result<impl RecognizerSession, RecognizerError> {
-    tokio::time::timeout(WAIT, ServerRecognizer::new(url).connect())
+    tokio::time::timeout(WAIT, ServerRecognizer::new(OFFICE, url).connect())
         .await
         .expect("connect finishes")
 }
@@ -139,7 +146,7 @@ async fn connect_resolves_only_after_ready_and_audio_follows_it() {
         })
         .await
     };
-    let recognizer = ServerRecognizer::new(url);
+    let recognizer = ServerRecognizer::new(OFFICE, url);
     let mut connecting = pin!(recognizer.connect());
     tokio::select! {
         () = accepted.notified() => {}
@@ -174,14 +181,21 @@ async fn connect_failures_say_why() {
         ServerUrl::parse(&format!("ws://{}", unused.local_addr().expect("address"))).expect("url");
     drop(unused);
 
-    let not_understood: Expected = |server| RecognizerError::NotUnderstood { server };
-    let dropped: Expected = |server| RecognizerError::Dropped { server };
+    let not_understood: Expected = |server| RecognizerError::NotUnderstood {
+        speech: office(&server),
+    };
+    let dropped: Expected = |server| RecognizerError::Dropped {
+        speech: office(&server),
+    };
     let cases: [(Vec<Message>, Expected); 6] = [
         (
             vec![text(
                 r#"{"type":"error","message":"The model is loading."}"#,
             )],
-            |_| RecognizerError::said("The model is loading."),
+            |server| RecognizerError::Reported {
+                speech: office(&server),
+                message: "The model is loading.".to_owned(),
+            },
         ),
         (vec![text(r#"{"type":"error"}"#)], not_understood),
         (
@@ -199,13 +213,13 @@ async fn connect_failures_say_why() {
     }
     let error = connect(refused.clone()).await.err().expect("connect fails");
     assert!(
-        matches!(&error, RecognizerError::Unreachable { server, reason: ConnectFailure::Refused, .. } if *server == refused),
+        matches!(&error, RecognizerError::Unreachable { speech, reason: ConnectFailure::Refused, .. } if *speech == office(&refused)),
         "{error:?}"
     );
     assert_eq!(
         error.to_string(),
         format!(
-            "Thalvi could not reach the speech server at {refused} (connection refused). Start the Thalvi server, or fix Settings → Speech → Server address."
+            "Thalvi could not reach the Thalvi server \"Office\" at {refused} (connection refused). Start the Thalvi server, or fix its address under Settings → Speech."
         )
     );
 }
@@ -224,7 +238,7 @@ async fn events_arrive_in_order_and_speech_markers_and_pings_are_skipped() {
         text(r#"{"type":"error"}"#),
     ])
     .await;
-    let mut session = connect(url).await.expect("ready");
+    let mut session = connect(url.clone()).await.expect("ready");
     let mut next = async || {
         tokio::time::timeout(WAIT, session.next_event())
             .await
@@ -232,19 +246,28 @@ async fn events_arrive_in_order_and_speech_markers_and_pings_are_skipped() {
     };
     assert_eq!(next().await, Ok(RecognizerEvent::Partial("he".into())));
     assert_eq!(next().await, Ok(RecognizerEvent::Final("hello".into())));
+    let office = office(&url);
     assert_eq!(
         next().await,
-        Err(RecognizerError::said("The model went away."))
+        Err(RecognizerError::Reported {
+            speech: office.clone(),
+            message: "The model went away.".to_owned()
+        })
     );
     assert_eq!(
         next().await,
-        Err(RecognizerError::said("Speech recognition failed."))
+        Err(RecognizerError::Reported {
+            speech: office,
+            message: "Speech recognition failed.".to_owned()
+        })
     );
 }
 
 #[tokio::test]
 async fn unusable_messages_after_ready_end_the_stream_with_a_reason() {
-    let not_understood: Expected = |server| RecognizerError::NotUnderstood { server };
+    let not_understood: Expected = |server| RecognizerError::NotUnderstood {
+        speech: office(&server),
+    };
     let cases: [(Message, Expected); 8] = [
         (text(r#"{"type":"mystery"}"#), not_understood),
         (text(r#"{"type":"partial","text":7}"#), not_understood),
@@ -254,7 +277,7 @@ async fn unusable_messages_after_ready_end_the_stream_with_a_reason() {
         (ready(), not_understood),
         (Message::Binary(vec![0, 0].into()), not_understood),
         (Message::Close(None), |server| RecognizerError::Dropped {
-            server,
+            speech: office(&server),
         }),
     ];
     for (message, expected) in cases {
@@ -287,7 +310,9 @@ async fn a_message_is_accepted_at_100_kb_and_refused_past_it() {
             if accepted {
                 Ok(RecognizerEvent::Partial(filler))
             } else {
-                Err(RecognizerError::Dropped { server: url })
+                Err(RecognizerError::Dropped {
+                    speech: office(&url),
+                })
             },
             "{size} bytes"
         );
