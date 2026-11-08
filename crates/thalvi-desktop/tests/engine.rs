@@ -1688,7 +1688,7 @@ async fn configured_capture_limits_replace_the_defaults() {
             assert!(!task.is_finished());
             rig.at(30_000).await;
             let idle = CaptureError::NoEnding(Duration::from_secs(20));
-            assert_eq!(idle.to_string(), "No words heard for 20 seconds.");
+            assert_eq!(idle.to_string(), "Didn't hear an ending for 20 seconds.");
             assert_eq!(
                 finished(task).await,
                 CaptureOutcome::Failed {
@@ -1735,8 +1735,12 @@ fn the_time_notices_read_whole_minutes_as_minutes_and_the_rest_as_seconds() {
     ] {
         let seconds = Duration::from_secs(seconds);
         assert_eq!(
-            CaptureError::NoEnding(seconds).to_string(),
+            CaptureError::NoWords(seconds).to_string(),
             format!("No words heard for {words}.")
+        );
+        assert_eq!(
+            CaptureError::NoEnding(seconds).to_string(),
+            format!("Didn't hear an ending for {words}.")
         );
         assert_eq!(
             CaptureError::TooLong(seconds).to_string(),
@@ -3217,6 +3221,13 @@ async fn the_capture_limits_still_end_a_capture_whose_recognizer_stopped_taking_
                     true,
                     15_000,
                     CaptureError::NoEnding(Duration::from_secs(10)),
+                ),
+                (
+                    "idle without words",
+                    r#"{"idle": 10, "max": 600}"#,
+                    false,
+                    CAPTURE_OPENS + 10_000,
+                    CaptureError::NoWords(Duration::from_secs(10)),
                 ),
                 (
                     "max",

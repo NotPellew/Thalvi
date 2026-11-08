@@ -65,6 +65,7 @@ the same pre-capture boundary; the mapped cancellation functions are unchanged.
 `SpotStats::record` now owns the same synchronous capture-summary metric calculation,
 so exact durations and the zero-frame case can be tested. `close_spotting` still
 records it before the ending cue; this metric extraction preserves the control drains and await boundaries.
+An idle failure now picks `NoEnding` or `NoWords` from the kept text; it only chooses the error and leaves every await, control drain and delivery admission as mapped.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
