@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use rustix::net::sockopt::socket_peercred;
+use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 
 use super::line::{LineError, MAX_REPLY, MAX_REQUEST, read_line, refusal};
 use crate::host::{HostError, RequestServer};
@@ -42,6 +42,16 @@ fn runtime_dir() -> Result<PathBuf, HostError> {
                 "The desktop session has no private runtime folder, so Thalvi cannot be controlled from outside.",
             )
         })
+}
+
+/// The user id of the process at the other end of `stream`, as this process's user namespace names it.
+///
+/// Not rustix's `socket_peercred`: that fails for a peer in a pid namespace this process cannot see,
+/// such as a sandboxed client of the same user, because the kernel then reports pid 0.
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    getsockopt(stream, PeerCredentials)
+        .ok()
+        .map(|credentials| credentials.uid())
 }
 
 /// Refuses a runtime folder that other users can get into.
@@ -168,7 +178,7 @@ fn accept(
             }
         };
         // Only the owner may ask: the folder already keeps other users out, so this is a second lock.
-        if socket_peercred(&connection).map_or(true, |peer| peer.uid.as_raw() != owner) {
+        if peer_uid(&connection) != Some(owner) {
             continue;
         }
         let Some(slot) = Slot::take(busy) else {
@@ -274,7 +284,7 @@ fn ask_in(
         }
     };
     let failed = |error: std::io::Error| unsupported(format!("Thalvi did not answer: {error}."));
-    if socket_peercred(&stream).map_or(true, |peer| peer.uid.as_raw() != owner) {
+    if peer_uid(&stream) != Some(owner) {
         return Err(unsupported(
             "The socket is not served by this user, so the request was not sent.",
         ));
@@ -410,6 +420,84 @@ mod tests {
         );
         assert!(!called.load(Ordering::SeqCst), "the handler never ran");
         drop(server);
+    }
+
+    const SANDBOX_ROLE: &str = "THALVI_TEST_SANDBOX_ROLE";
+
+    /// Runs this test binary's `sandboxed_peer` in its own user and pid namespace, as a bwrap sandbox of the same user would.
+    fn in_new_namespaces(role: &str, dir: &Path) -> std::io::Result<std::process::Child> {
+        std::process::Command::new("unshare")
+            .args([
+                "--user",
+                "--map-current-user",
+                "--pid",
+                "--fork",
+                "--kill-child",
+                "--",
+            ])
+            .arg(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "host::channel::tests::sandboxed_peer",
+                "--nocapture",
+            ])
+            .env(SANDBOX_ROLE, role)
+            .env("THALVI_TEST_SANDBOX_DIR", dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    }
+
+    /// The body of the two processes `a_server_and_client_of_one_user_in_separate_sandboxes_reach_each_other` starts.
+    #[test]
+    fn sandboxed_peer() {
+        let Ok(role) = std::env::var(SANDBOX_ROLE) else {
+            return;
+        };
+        let dir = PathBuf::from(std::env::var("THALVI_TEST_SANDBOX_DIR").unwrap());
+        match role.as_str() {
+            "serve" => {
+                let _server = serve_in(&dir, me(), SHORT, echo).unwrap();
+                // Serves until the test closes the pipe.
+                let _ = std::io::stdin().read(&mut [0; 1]);
+            }
+            "ask" => {
+                let answer = ask_in(&dir, me(), "state", Duration::from_secs(5)).unwrap();
+                assert_eq!(answer, Some("heard state".to_owned()));
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn a_server_and_client_of_one_user_in_separate_sandboxes_reach_each_other() {
+        let dir = Dir::new("sandboxes", 0o700);
+        let Ok(mut probe) = in_new_namespaces("probe", &dir.0) else {
+            eprintln!("skipped: no `unshare`");
+            return;
+        };
+        if !probe.wait().is_ok_and(|status| status.success()) {
+            eprintln!("skipped: this machine does not allow user namespaces");
+            return;
+        }
+        let mut server = in_new_namespaces("serve", &dir.0).unwrap();
+        let socket = dir.socket();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !socket.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the sandboxed server never started"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let client = in_new_namespaces("ask", &dir.0).unwrap().wait_with_output();
+        drop(server.stdin.take());
+        let _ = server.wait();
+        assert!(
+            client.unwrap().status.success(),
+            "the sandboxed client was not answered"
+        );
     }
 
     #[test]

@@ -29,6 +29,7 @@ webrtc-vad.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk.workspace = true
+nix.workspace = true
 rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]

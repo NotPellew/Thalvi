@@ -2483,6 +2483,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -4620,6 +4621,7 @@ dependencies = [
  "dirs 7.0.0",
  "futures-util",
  "gtk",
+ "nix",
  "ort",
  "proptest",
  "reqwest 0.12.28",
