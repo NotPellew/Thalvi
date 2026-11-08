@@ -4195,6 +4195,14 @@ async fn chat(
     (url, asked, ChatFeed(feed_tx))
 }
 
+/// The next request the fake chat endpoint got, failing instead of waiting forever when none comes.
+async fn request(asked: &mut tokio::sync::mpsc::UnboundedReceiver<Asked>) -> Asked {
+    tokio::time::timeout(Duration::from_secs(5), asked.recv())
+        .await
+        .expect("no request reached the writing endpoint")
+        .unwrap()
+}
+
 fn with_writing(url: &str) -> String {
     format!(
         r#"{{"ending_pause": {{"paste": 2.5}}, "writing": {{"url": "{url}", "model": "m", "api_key": "k"}}}}"#
@@ -4293,7 +4301,7 @@ async fn the_written_text_streams_into_the_state_and_is_pasted_when_the_stream_e
                 let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
                 let task = ask.start(engine, frames);
                 ask.say(&mut rig, WORDS).await;
-                assert!(asked.recv().await.is_some(), "{ask:?}");
+                request(&mut asked).await;
                 let writing = |text: &str| EngineState::Writing {
                     text: text.to_owned(),
                 };
@@ -4333,7 +4341,7 @@ async fn only_the_spoken_words_are_sent_with_the_language_instruction() {
                 let (mut rig, engine, frames) = Rig::new(&config);
                 let task = ask.start(engine, frames);
                 ask.say(&mut rig, words).await;
-                let asked = asked.recv().await.unwrap();
+                let asked = request(&mut asked).await;
                 finished(task).await;
                 let label = format!("{ask:?} {words:?}");
                 assert_eq!(asked.path, "/v1/chat/completions", "{label}");
@@ -4504,7 +4512,7 @@ async fn writing_that_takes_longer_than_fifteen_seconds_pastes_none_of_what_arri
                 let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
                 let task = capture_task(engine, frames);
                 Ask::Ending.say(&mut rig, WORDS).await;
-                assert!(asked.recv().await.is_some(), "{name}");
+                request(&mut asked).await;
                 let began = rig.now();
                 if stream_first {
                     feed.text("Hi Anna");
@@ -4539,7 +4547,7 @@ async fn cancelling_before_the_paste_drops_the_written_text() {
                     let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
                     let task = ask.start(engine, frames);
                     ask.say(&mut rig, WORDS).await;
-                    assert!(asked.recv().await.is_some(), "{label}");
+                    request(&mut asked).await;
                     if streaming {
                         feed.text("Hi Anna, I am");
                         rig.state_is(EngineState::Writing {
