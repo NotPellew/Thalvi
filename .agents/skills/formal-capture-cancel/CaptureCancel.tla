@@ -97,6 +97,8 @@ CloseReturns == /\ phase = "ending" /\ ~closeDone
                                stopRequested, cancelPending, cueDone, cueAccepted,
                                secondary, delivered>>
 
+\* The post-accept stage: second transcription, or writing for the Write route. Both poll
+\* cancellation first, so `secondary` stands for either or both.
 SecondaryReturns == /\ phase = "secondary" /\ phase' = "finish"
                     /\ result' = IF cancelPending THEN "cancelled" ELSE "accepted"
                     /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,

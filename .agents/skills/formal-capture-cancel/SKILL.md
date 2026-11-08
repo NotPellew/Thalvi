@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `f557ebf0006b2102e23c23424f2acca3df97574b`. The recorded file hashes
+Sync commit: `b2343467a3863c49717967162ff23b961ae21079`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -30,6 +30,18 @@ resumes. Closing the microphone ends that interval and hands pending presses to
 Apply, which returns the accounted cursor to the live engine so a newer press
 cannot be skipped. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
+Writing a dictation out ("write that out", the write key) adds one stage after
+`reconcile`: `Engine::write` streams a chat reply and returns Accepted (a paste of
+the written text), Failed (the user's words are kept for the clipboard) or
+Cancelled. It polls cancellation first, through `bounded`, at every await, so it
+is another case of the model's `secondary` stage: a post-accept step that sees a
+pending cancel before it can return Accepted. Its Failed result is not an
+accepted result, and an ended capture skips `Delivery::finish`, so the clipboard
+copy of the user's words is gated by `ended` like every other host effect. The
+model is unchanged apart from a comment, and the hashes moved for `engine.rs`,
+`delivery.rs` (a `Write` arm that pastes) and `runner.rs`, whose recorded hash was
+already stale at this change's base: its diff since the sync commit only names the
+target at wake (`Publisher::woke`) and touches none of the mapped functions.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
@@ -48,7 +60,7 @@ Matching hashes establish synchronization only, not correctness of the model.
 | Same file: `Runner::capture`, `Settling::settle` | `FinishEmpty` admits an Accepted result only if `ended` is clear. This is delivery admission at the last empty receive, not an atomic physical host effect. An ended capture skips `Delivery::finish` and is kept as cancelled. |
 | `crates/thalvi-desktop/src/engine.rs`: `EngineHandle::cancel`, `Engine::capture` | `cancelPending` represents the watch version change; capture entry consumes the old version. `Accept` and `ActiveCancelled` abstract capture work before the ending. |
 | Same file: `Engine::conclude`, `Engine::end_cue`, `Engine::end_with` | `CueReturns`, `CloseReturns`; the cue's cancellation-biased select and recognizer release are separate futures joined together. A completed cue retains its bool while close is still Pending. Neither completion is a transaction encompassing the other. |
-| Same file: `Engine::reconcile` | `secondary`, `SecondaryReturns`; disabled/skipped secondary returns Accepted directly, enabled secondary polls cancellation first. |
+| Same file: `Engine::reconcile`, `Engine::write`, `bounded` | `secondary`, `SecondaryReturns`; a disabled/skipped post-accept stage returns Accepted directly, an enabled one (second transcription, or writing for the Write route) polls cancellation first. |
 | `crates/thalvi-desktop/src/recognizer.rs`: `RecognizerSession`, `ServerSession::close` | `CloseReturns` may occur before or after the cue. Network close is awaited under a timeout, so it can remain Pending. |
 | `crates/thalvi-desktop/src/delivery.rs`: `Delivery::finish`, `type_in`, `call` | `delivered` abstracts admission to a valid configured host action. Actual host execution is outside the proof; once admitted it can run via `spawn_blocking`. Other changes to this file are not covered by the model. |
 
