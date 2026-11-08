@@ -32,9 +32,9 @@ export const SETTINGS: Settings = {
 };
 
 export const WAKE_MODELS_INFO: WakeModelInfo[] = [
-  { name: "hey_thalvi", title: "Hey Thalvi", size: 395_406, cached: true },
-  { name: "hey_mycroft", title: "Hey Mycroft", size: 857_691, cached: false },
-  { name: "hey_jarvis", title: "Hey Jarvis", size: 1_271_370, cached: false },
+  { name: "hey_thalvi", title: "Hey Thalvi", size: 395_406, cached: true, threshold: 0.7 },
+  { name: "hey_mycroft", title: "Hey Mycroft", size: 857_691, cached: false, threshold: 0.5 },
+  { name: "hey_jarvis", title: "Hey Jarvis", size: 1_271_370, cached: false, threshold: 0.5 },
 ];
 
 const UNIFIED_LANGUAGES = [

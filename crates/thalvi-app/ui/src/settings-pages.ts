@@ -307,10 +307,19 @@ function wakeHeads(context: PageContext): HTMLElement[] {
       } else {
         state.custom = false;
         config.model = picker.value;
+        const start = infos.get(picker.value)?.threshold;
+        if (start !== undefined) {
+          const slider = threshold.field as HTMLInputElement;
+          slider.value = String(start);
+          slider.dispatchEvent(new Event("input"));
+        }
         state.sayProblem("");
       }
       controls.touched();
       for (const other of heads) other.render();
+    });
+    const threshold = controls.slider(config.threshold, { min: 0.05, max: 1, step: 0.05 }, (value) => {
+      config.threshold = value;
     });
     heads.push(state);
     const field: Field = {
@@ -323,9 +332,7 @@ function wakeHeads(context: PageContext): HTMLElement[] {
       row(
         `Threshold (${name})`,
         "Higher wakes less often by mistake; lower catches quieter speech.",
-        controls.slider(config.threshold, { min: 0.05, max: 1, step: 0.05 }, (value) => {
-          config.threshold = value;
-        }),
+        threshold,
       ),
     ];
   }

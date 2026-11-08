@@ -123,22 +123,50 @@ impl Threshold {
 
 /// One head's model and threshold.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "RawHeadConfig")]
 pub struct HeadConfig {
     pub model: HeadModel,
-    #[serde(default = "default_threshold")]
     pub threshold: Threshold,
 }
 
-fn default_threshold() -> Threshold {
-    Threshold(0.5)
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHeadConfig {
+    model: HeadModel,
+    threshold: Option<Threshold>,
+}
+
+impl HeadConfig {
+    fn from_model(model: HeadModel) -> Self {
+        Self {
+            threshold: default_threshold(&model),
+            model,
+        }
+    }
+}
+
+impl From<RawHeadConfig> for HeadConfig {
+    fn from(raw: RawHeadConfig) -> Self {
+        let threshold = raw
+            .threshold
+            .unwrap_or_else(|| default_threshold(&raw.model));
+        Self {
+            model: raw.model,
+            threshold,
+        }
+    }
+}
+
+/// What a head starts at when config gives no threshold: its catalog default, else 0.5.
+fn default_threshold(model: &HeadModel) -> Threshold {
+    match model {
+        HeadModel::Catalog(head) => Threshold(head.default_threshold()),
+        HeadModel::File(_) => Threshold(0.5),
+    }
 }
 
 fn default_head(head: CatalogHead) -> HeadConfig {
-    HeadConfig {
-        model: HeadModel::Catalog(head),
-        threshold: default_threshold(),
-    }
+    HeadConfig::from_model(HeadModel::Catalog(head))
 }
 
 /// Both heads, validated once when read: the two models differ.
@@ -223,18 +251,12 @@ pub fn validate_wake_models(capture: &str, conversation: &str) -> Result<(), Wak
     let conversation = HeadModel::try_from(conversation.trim().to_owned())?;
     for model in [&capture, &conversation] {
         if let HeadModel::File(path) = model {
-            open_head(path, default_threshold())?;
+            open_head(path, default_threshold(model))?;
         }
     }
     WakeConfig::new(
-        HeadConfig {
-            model: capture,
-            threshold: default_threshold(),
-        },
-        HeadConfig {
-            model: conversation,
-            threshold: default_threshold(),
-        },
+        HeadConfig::from_model(capture),
+        HeadConfig::from_model(conversation),
     )?;
     Ok(())
 }
@@ -815,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn config_defaults_to_hey_thalvi_and_hey_mycroft_at_one_half() {
+    fn a_fresh_config_wakes_hey_thalvi_at_seven_tenths_and_hey_mycroft_at_one_half() {
         assert_eq!(read("{}").expect("valid"), WakeConfig::default());
         let config = WakeConfig::default();
         assert_eq!(
@@ -826,26 +848,47 @@ mod tests {
             config.conversation().model,
             HeadModel::Catalog(CatalogHead::HeyMycroft)
         );
-        assert_eq!(config.capture().threshold.get(), 0.5);
+        assert_eq!(config.capture().threshold.get(), 0.7);
         assert_eq!(config.conversation().threshold.get(), 0.5);
     }
 
     #[test]
-    fn each_head_is_a_catalog_name_or_an_onnx_path_with_its_own_threshold() {
-        let config = read(
-            r#"{"capture":{"model":"hey_jarvis","threshold":0.8},"conversation":{"model":"/models/mine.onnx"}}"#,
-        )
-        .expect("valid");
-        assert_eq!(
-            config.capture().model,
-            HeadModel::Catalog(CatalogHead::HeyJarvis)
-        );
-        assert_eq!(config.capture().threshold.get(), 0.8);
-        assert_eq!(
-            config.conversation().model,
-            HeadModel::File("/models/mine.onnx".into())
-        );
-        assert_eq!(config.conversation().threshold.get(), 0.5);
+    fn a_head_is_a_catalog_name_or_an_onnx_path_and_starts_at_its_default_threshold_unless_config_stores_one()
+     {
+        let thalvi = HeadModel::Catalog(CatalogHead::HeyThalvi);
+        let mycroft = HeadModel::Catalog(CatalogHead::HeyMycroft);
+        let jarvis = HeadModel::Catalog(CatalogHead::HeyJarvis);
+        let file = HeadModel::File("/models/mine.onnx".into());
+        // (capture head JSON, its model, its threshold)
+        let cases = [
+            (r#"{"model":"hey_thalvi"}"#, thalvi.clone(), 0.7),
+            (r#"{"model":"hey_mycroft"}"#, mycroft, 0.5),
+            (r#"{"model":"hey_jarvis"}"#, jarvis.clone(), 0.5),
+            (r#"{"model":"/models/mine.onnx"}"#, file.clone(), 0.5),
+            (
+                r#"{"model":"hey_thalvi","threshold":0.5}"#,
+                thalvi.clone(),
+                0.5,
+            ),
+            (r#"{"model":"hey_thalvi","threshold":0.9}"#, thalvi, 0.9),
+            (r#"{"model":"hey_jarvis","threshold":0.7}"#, jarvis, 0.7),
+            (
+                r#"{"model":"/models/mine.onnx","threshold":0.7}"#,
+                file,
+                0.7,
+            ),
+        ];
+        for (head, model, threshold) in cases {
+            let other = if model == HeadModel::Catalog(CatalogHead::HeyMycroft) {
+                "/models/other.onnx"
+            } else {
+                "hey_mycroft"
+            };
+            let json = format!(r#"{{"capture":{head},"conversation":{{"model":"{other}"}}}}"#);
+            let config = read(&json).expect(&json);
+            assert_eq!(config.capture().model, model, "{head}");
+            assert_eq!(config.capture().threshold.get(), threshold, "{head}");
+        }
     }
 
     #[test]
