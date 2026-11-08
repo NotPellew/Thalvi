@@ -16,7 +16,7 @@ use thalvi_desktop::engine::{CaptureOutcome, CuePlayer, Engine, Parts};
 use thalvi_desktop::frame::Frame;
 use thalvi_desktop::history::{Capture, Outcome, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
-use thalvi_desktop::host::{App, Host, HostError, TypedText, WebUrl};
+use thalvi_desktop::host::{App, Delivered, Host, HostError, TypedText, WebUrl};
 use thalvi_desktop::metrics::Recorder;
 use thalvi_desktop::recognizer::{
     FakeRecognizer, FakeSession, Recognizer, RecognizerError, RecognizerEvent, RecognizerSession,
@@ -32,13 +32,18 @@ impl RecordingHost {
 }
 impl Host for RecordingHost {
     type Target = String;
-    const OVERLAY_TAKES_CLICKS: bool = false;
+    fn copies_only(&self) -> bool {
+        false
+    }
+    fn overlay_takes_clicks(&self) -> bool {
+        false
+    }
     fn capture_target(&self) -> Result<String, HostError> {
         Ok("Editor".to_owned())
     }
-    fn deliver(&self, _: &String, _: &TypedText, _: bool) -> Result<(), HostError> {
+    fn deliver(&self, _: &String, _: &TypedText, _: bool) -> Result<Delivered, HostError> {
         self.called("deliver");
-        Ok(())
+        Ok(Delivered::InWindow)
     }
     fn copy(&self, _: &str) -> Result<(), HostError> {
         self.called("copy");
