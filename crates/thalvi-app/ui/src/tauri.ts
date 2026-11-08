@@ -30,6 +30,11 @@ export function tauriBackend(): Backend {
         listener();
       });
     },
+    onSettingsChangedElsewhere: (listener) => {
+      void listen("thalvi://settings-elsewhere", () => {
+        listener();
+      });
+    },
     getSettings: () => invoke<Settings>("get_settings"),
     saveSettings: (settings) => invoke<undefined>("save_settings", { settings }),
     setListening: (on) => invoke<undefined>("set_listening", { on }),

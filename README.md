@@ -368,12 +368,44 @@ never API keys.
 
 `thalvi-desktop toggle`, `pause`, `resume`, `cancel` and `copy-error` control
 the running app (with the AppImage, run it with that word). `status` prints
-Waybar JSON. These commands work on Hyprland; Windows uses the tray. The
+Waybar JSON. They work on Hyprland, GNOME and Windows, and start nothing when
+Thalvi is not running. The
 examples in [`integrations/hyprland/`](integrations/hyprland/) add a Waybar
 microphone button (left click toggles listening without moving focus, right
 click opens Settings) and key bindings in `hyprland-binds.conf`, such as
 `bind = SUPER, E, exec, thalvi-desktop copy-error`. Pausing cancels the
 current capture and closes the microphone.
+
+### For agents
+
+A program you run, such as a coding agent, can read and change the settings, see
+what Thalvi is doing and control it with `thalvi-desktop` commands. Each prints
+one JSON object and exits 0, or non-zero when the answer is `"ok": false`.
+They talk to the running app over a private socket in your runtime folder on
+Linux, or a named pipe only your user can open on Windows; nothing listens on
+the network, and a command never starts the app or the microphone.
+
+| Command | Answer |
+| --- | --- |
+| `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false}`. `state` is `paused`, `loading`, `listening`, `capturing`, `pending`, `transcribing`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}`, and `awaiting_confirmation: true` marks a submit that waits for you. Nothing that was said is in it. |
+| `settings get` | `{"ok": true, "settings": {…}}`, every setting Settings offers plus `start_at_login` and `show_in_menu`. Speech server keys appear only as `"has_key": true/false`. |
+| `settings check '<json>'` | `{"ok": true, "valid": true}`, or `{"ok": false, "valid": false, "error": "…"}` with the message Settings shows. Saves nothing. |
+| `settings set '<json>'` | `{"ok": true, "changed": true, "applies": "now"}`, or `"next_capture"` while a capture runs. A refusal is `{"ok": false, "error": "…", "changed": false}` and changes nothing. A word list the Thalvi server could not take comes back as `"warning"`. |
+| `pause`, `resume`, `toggle`, `cancel`, `hold-start`, `hold-end`, `copy-error` | `{"ok": true, "took_effect": true, "state": "…"}`, or `{"ok": false, "took_effect": false, "error": "…", "state": "…"}`, such as when Thalvi is already paused. `hold-start` starts a capture that `hold-end` or `cancel` ends. |
+| `metrics summary` | `{"ok": true, "enabled": true, "window_hours": 24, "stages": {"connect", "partial_lag", "final", "delivery"}, "captures": {"ok": 3, …}}`; each stage has `count`, `outcomes`, `p50_ms` and `p95_ms`. `"enabled": false` and a message when metrics are off. |
+
+The change given to `settings check` and `settings set` is a JSON merge patch
+over what `settings get` returns: objects merge, `null` removes a key, and a
+list such as `stt.entries` or `stt.phrases` is replaced whole, so read it first
+and send it back with your change. Give `-` instead of the JSON to read it from
+standard input. A speech server entry takes `api_key` to set a key, `""` to
+clear it, and keeps the saved key when `api_key` is absent. The microphone
+changes only while Thalvi is paused.
+
+A confirmation stays with you: no command answers one, and a submit that waits
+for it shows as `awaiting_confirmation` in `state`. Any other failure of a
+command is `{"ok": false, "error": "…"}`; a command with no running app says so
+and exits 1, and one that is not a command exits 2.
 
 ### Hold a key to dictate
 

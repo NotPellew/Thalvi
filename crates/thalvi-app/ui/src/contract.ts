@@ -200,6 +200,8 @@ export interface Backend {
   onAudio(listener: (audio: AudioStatus) => void): void;
   /** Settings were saved, from any window. */
   onSettingsSaved(listener: () => void): void;
+  /** An agent changed the saved settings or a switch the window reads from the OS; the window's own saves never fire this. */
+  onSettingsChangedElsewhere(listener: () => void): void;
   getSettings(): Promise<Settings>;
   saveSettings(settings: Settings): Promise<void>;
   setListening(on: boolean): Promise<void>;

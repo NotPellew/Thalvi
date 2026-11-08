@@ -2,10 +2,13 @@
 
 use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
 use super::gnome::{self, Clipboard, Gnome};
 use super::hyprland::{Hyprland, Window};
-use super::{App, Delivered, HoldSource, Host, HostError, StateServer, TypedText, WebUrl, state};
+use super::{
+    App, Delivered, HoldSource, Host, HostError, RequestServer, TypedText, WebUrl, channel,
+};
 use crate::hold::HoldKey;
 
 /// The desktop session Thalvi runs in.
@@ -153,15 +156,40 @@ impl Desktop {
         })
     }
 
-    /// Answers each query on the user's private runtime folder with `state()` until the guard is
-    /// dropped.
+    /// Answers each request on a socket in the user's private runtime folder with `handler(line)`
+    /// until the guard is dropped. Only the user's own programs are answered.
     ///
     /// # Errors
     /// [`HostError::Unsupported`] when no private folder is available or another app answers.
-    pub fn serve_state(
-        state: impl Fn() -> String + Send + 'static,
-    ) -> Result<StateServer, HostError> {
-        state::serve(state)
+    pub fn serve_requests(
+        handler: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> Result<RequestServer, HostError> {
+        channel::serve(handler)
+    }
+
+    /// [`Self::serve_requests`] on a socket in `dir`, which only the user may open.
+    ///
+    /// # Errors
+    /// As [`Self::serve_requests`], and when `dir` is open to other users.
+    #[doc(hidden)]
+    pub fn serve_requests_in(
+        dir: &Path,
+        handler: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> Result<RequestServer, HostError> {
+        channel::serve_at(dir, handler)
+    }
+
+    /// [`Self::send_request`] to the socket in `dir`.
+    ///
+    /// # Errors
+    /// As [`Self::send_request`].
+    #[doc(hidden)]
+    pub fn send_request_in(
+        dir: &Path,
+        request: &str,
+        timeout: Duration,
+    ) -> Result<Option<String>, HostError> {
+        channel::ask_at(dir, request, timeout)
     }
 
     /// Reports the hold key as the desktop allows: through binds on Hyprland, not at all on GNOME.
@@ -179,12 +207,13 @@ impl Desktop {
         }
     }
 
-    /// The running app's state line; `None` when no app answers.
+    /// The running app's reply to `request`, waiting up to `timeout` for each step; `None` when no
+    /// app answers.
     ///
     /// # Errors
     /// [`HostError::Unsupported`] when the answer could not be asked or read.
-    pub fn query_state() -> Result<Option<String>, HostError> {
-        state::query()
+    pub fn send_request(request: &str, timeout: Duration) -> Result<Option<String>, HostError> {
+        channel::ask(request, timeout)
     }
 
     /// Shows `message` in an error box titled `title` and waits until it is closed. Needs no

@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `79e5943c12ba416666ff9e510c94444b27ccf37c`. The recorded file hashes
+Sync commit: `cb7007419cf3ada15adea927ec63b3c0ec1e5551`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -31,7 +31,8 @@ Apply, which returns the accounted cursor to the live engine so a newer press
 cannot be skipped. Speech servers became a list of entries: `Engine::reconcile`
 runs every ticked second-pass entry (none runs when none is ticked, as before
 when the switch was off), still polling cancellation first, and the recognizer
-errors name their entry. None of these touch the mapped functions' cancellation
+errors name their entry. `drive` times the recognizer's first words and each final
+result against the speech heard (`Heard`) for the metrics. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
 The GNOME host (#267) changed `delivery.rs` and `runner.rs` without changing that:
 `Delivery::type_in` returns `Delivered::InWindow` or `Delivered::OnClipboard` from the

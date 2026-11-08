@@ -190,6 +190,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
     getAudio: () => Promise.resolve(structuredClone(audioState)),
     onAudio: (listener) => audioListeners.push(listener),
     onSettingsSaved: (listener) => savedListeners.push(listener),
+    onSettingsChangedElsewhere: () => undefined,
     getSettings: () => Promise.resolve(structuredClone(saved)),
     saveSettings: (next) => {
       if (next.stt.entries.filter((entry) => entry.kind !== "second_pass" && entry.active).length !== 1) {
