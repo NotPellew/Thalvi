@@ -18,6 +18,24 @@ use crate::status::{Failure, Status};
 /// How long a control is given to show in the engine's state before it is said to have had no effect.
 pub const EFFECT_WAIT: Duration = Duration::from_secs(3);
 
+/// The commands a refusal lists, so that it need not repeat the one that was sent.
+const COMMANDS: [&str; 14] = [
+    "status",
+    "state",
+    "pause",
+    "resume",
+    "toggle",
+    "cancel",
+    "hold-start",
+    "hold-end",
+    "copy-error",
+    "show",
+    "settings-get",
+    "settings-check",
+    "settings-set",
+    "metrics-summary",
+];
+
 /// What an outside program may ask. A request is one JSON object naming its `command`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "kebab-case", deny_unknown_fields)]
@@ -68,7 +86,10 @@ impl Request {
             let known = serde_json::from_value::<Self>(json!({"command": command}));
             match known {
                 Err(error) if error.to_string().starts_with("unknown variant") => {
-                    format!("Thalvi does not know the command {command}.")
+                    format!(
+                        "Thalvi does not know that command. The commands are {}.",
+                        COMMANDS.join(", ")
+                    )
                 }
                 _ => format!("The command {command} was sent without the details it needs."),
             }
@@ -1128,7 +1149,8 @@ mod tests {
             let reply = rig.ask_line(&json!({"command": command}).to_string());
             assert_eq!(
                 reply,
-                json!({"ok": false, "error": format!("Thalvi does not know the command {command}.")})
+                json!({"ok": false, "error": format!("Thalvi does not know that command. The commands are {}.", COMMANDS.join(", "))}),
+                "{command}"
             );
         }
         // A control that starts or ends a capture does not answer it, and a change to the endings
@@ -1155,6 +1177,20 @@ mod tests {
         let set = rig
             .set(json!({"stt": {"entries": [entry("cybrex2", "realtime", true, Some(SECRET))]}}));
         assert_eq!(set["ok"], true, "{set}");
+        let unknown = || {
+            format!(
+                "Thalvi does not know that command. The commands are {}.",
+                COMMANDS.join(", ")
+            )
+        };
+        for command in COMMANDS {
+            let parsed = Request::parse(&json!({"command": command}).to_string());
+            assert!(
+                parsed.as_ref().is_ok()
+                    || parsed.as_ref().is_err_and(|e| !e.contains("does not know")),
+                "{command} is listed but not a command: {parsed:?}"
+            );
+        }
         for (line, error) in [
             ("{", "That request is not JSON.".to_owned()),
             ("[]", "That request names no command.".to_owned()),
@@ -1166,10 +1202,8 @@ mod tests {
                 r#"{"command": "pause", "force": true}"#,
                 "The command pause takes no other details.".to_owned(),
             ),
-            (
-                r#"{"command": "rm"}"#,
-                "Thalvi does not know the command rm.".to_owned(),
-            ),
+            (r#"{"command": "rm"}"#, unknown()),
+            (&format!(r#"{{"command": "{SECRET}"}}"#), unknown()),
         ] {
             assert_eq!(
                 rig.ask_line(line),

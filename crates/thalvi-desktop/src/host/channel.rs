@@ -44,6 +44,20 @@ fn runtime_dir() -> Result<PathBuf, HostError> {
         })
 }
 
+/// Refuses a runtime folder that other users can get into.
+fn ensure_private(dir: &Path) -> Result<(), HostError> {
+    let mode = std::fs::metadata(dir)
+        .map_err(|error| unsupported(format!("The runtime folder could not be read: {error}.")))?
+        .permissions()
+        .mode();
+    if mode & 0o077 != 0 {
+        return Err(unsupported(
+            "The runtime folder is open to other users, so Thalvi cannot be controlled from outside.",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn serve(
     handler: impl Fn(&str) -> String + Send + Sync + 'static,
 ) -> Result<RequestServer, HostError> {
@@ -56,7 +70,12 @@ pub(super) fn serve(
 }
 
 pub(super) fn ask(request: &str, timeout: Duration) -> Result<Option<String>, HostError> {
-    ask_in(&runtime_dir()?, request, timeout)
+    ask_in(
+        &runtime_dir()?,
+        rustix::process::geteuid().as_raw(),
+        request,
+        timeout,
+    )
 }
 
 /// Serves in `dir` instead of the session's runtime folder, for tests that keep their own.
@@ -78,7 +97,7 @@ pub(super) fn ask_at(
     request: &str,
     timeout: Duration,
 ) -> Result<Option<String>, HostError> {
-    ask_in(dir, request, timeout)
+    ask_in(dir, rustix::process::geteuid().as_raw(), request, timeout)
 }
 
 fn serve_in(
@@ -87,15 +106,7 @@ fn serve_in(
     read_timeout: Duration,
     handler: impl Fn(&str) -> String + Send + Sync + 'static,
 ) -> Result<RequestServer, HostError> {
-    let mode = std::fs::metadata(dir)
-        .map_err(|error| unsupported(format!("The runtime folder could not be read: {error}.")))?
-        .permissions()
-        .mode();
-    if mode & 0o077 != 0 {
-        return Err(unsupported(
-            "The runtime folder is open to other users, so Thalvi cannot be controlled from outside.",
-        ));
-    }
+    ensure_private(dir)?;
     let path = dir.join(SOCKET);
     if UnixStream::connect(&path).is_ok() {
         return Err(unsupported("Another Thalvi is already running."));
@@ -235,7 +246,18 @@ impl Drop for Serving {
     }
 }
 
-fn ask_in(dir: &Path, request: &str, timeout: Duration) -> Result<Option<String>, HostError> {
+/// Sends `request` only to a socket in a private `dir` whose server runs as `owner`, since it may carry a key.
+fn ask_in(
+    dir: &Path,
+    owner: u32,
+    request: &str,
+    timeout: Duration,
+) -> Result<Option<String>, HostError> {
+    // No folder means no Thalvi has run here.
+    if matches!(dir.try_exists(), Ok(false)) {
+        return Ok(None);
+    }
+    ensure_private(dir)?;
     let stream = match UnixStream::connect(dir.join(SOCKET)) {
         Ok(stream) => stream,
         // No socket, or a stale one that nothing listens on.
@@ -252,6 +274,11 @@ fn ask_in(dir: &Path, request: &str, timeout: Duration) -> Result<Option<String>
         }
     };
     let failed = |error: std::io::Error| unsupported(format!("Thalvi did not answer: {error}."));
+    if socket_peercred(&stream).map_or(true, |peer| peer.uid.as_raw() != owner) {
+        return Err(unsupported(
+            "The socket is not served by this user, so the request was not sent.",
+        ));
+    }
     stream.set_read_timeout(Some(timeout)).map_err(failed)?;
     stream.set_write_timeout(Some(timeout)).map_err(failed)?;
     writeln!(&stream, "{request}").map_err(failed)?;
@@ -304,7 +331,7 @@ mod tests {
     }
 
     fn ask(dir: &Dir, request: &str) -> Result<Option<String>, HostError> {
-        ask_in(&dir.0, request, SHORT)
+        ask_in(&dir.0, me(), request, SHORT)
     }
 
     fn echo(request: &str) -> String {
@@ -386,17 +413,54 @@ mod tests {
     }
 
     #[test]
+    fn a_request_is_sent_only_to_a_private_folder_and_to_a_server_of_the_same_user() {
+        let dir = Dir::new("client", 0o700);
+        let called = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&called);
+        let server = serve_in(&dir.0, me(), SHORT, move |_| {
+            seen.store(true, Ordering::SeqCst);
+            "answered".to_owned()
+        })
+        .unwrap();
+
+        let other_server = ask_in(&dir.0, me() + 1, "state", SHORT);
+        assert_eq!(
+            other_server,
+            Err(unsupported(
+                "The socket is not served by this user, so the request was not sent."
+            ))
+        );
+        assert!(!called.load(Ordering::SeqCst), "nothing was sent to it");
+
+        std::fs::set_permissions(&dir.0, Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            ask(&dir, "state"),
+            Err(unsupported(
+                "The runtime folder is open to other users, so Thalvi cannot be controlled from outside."
+            ))
+        );
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "nothing was sent through it"
+        );
+
+        std::fs::set_permissions(&dir.0, Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(ask(&dir, "state").unwrap(), Some("answered".to_owned()));
+        drop(server);
+    }
+
+    #[test]
     fn a_request_is_read_within_its_bound_and_a_silent_client_is_given_up_on() {
         let dir = Dir::new("bound", 0o700);
         let server = serve_in(&dir.0, me(), SHORT, |request| request.len().to_string()).unwrap();
         let exactly = "a".repeat(MAX_REQUEST);
         assert_eq!(
-            ask_in(&dir.0, &exactly, Duration::from_secs(5)).unwrap(),
+            ask_in(&dir.0, me(), &exactly, Duration::from_secs(5)).unwrap(),
             Some(MAX_REQUEST.to_string()),
             "at the limit"
         );
         let past = "a".repeat(MAX_REQUEST + 1);
-        let refused = ask_in(&dir.0, &past, Duration::from_secs(5))
+        let refused = ask_in(&dir.0, me(), &past, Duration::from_secs(5))
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -405,7 +469,7 @@ mod tests {
             "just past it"
         );
         let far = "a".repeat(MAX_REQUEST * 4);
-        let refused_far = ask_in(&dir.0, &far, Duration::from_secs(5))
+        let refused_far = ask_in(&dir.0, me(), &far, Duration::from_secs(5))
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -436,7 +500,7 @@ mod tests {
                 let _ = connection.write_all(&reply);
             }
         });
-        let long = |dir: &Dir| ask_in(&dir.0, "state", Duration::from_secs(5));
+        let long = |dir: &Dir| ask_in(&dir.0, me(), "state", Duration::from_secs(5));
         assert_eq!(
             long(&dir).unwrap().map(|reply| reply.len()),
             Some(MAX_REPLY)
