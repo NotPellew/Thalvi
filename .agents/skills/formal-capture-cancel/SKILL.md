@@ -48,6 +48,9 @@ recognizer release, and a `drive` branch that only plays a cue and shows a notic
 `Runner::build` joins the spotter load with the wake load; capture notices are set
 synchronously. These changes preserve the mapped await boundaries, control drains
 and delivery admission, so the cancellation model is unchanged.
+The spotter loader now accepts its load future, like the wake loader, so tests
+exercise download status and both load outcomes. The future is still awaited at
+the same pre-capture boundary; the mapped cancellation functions are unchanged.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

@@ -227,6 +227,7 @@ async fn load_spotter(
     endings: &Endings,
     store: &ModelStore,
     recorder: &Recorder,
+    load: impl Future<Output = Result<Box<dyn KeywordSpotter>, SpotterError>>,
 ) -> (Option<Box<dyn KeywordSpotter>>, Option<String>) {
     let started = Instant::now();
     let mut downloads = false;
@@ -242,32 +243,15 @@ async fn load_spotter(
         println!("{SPOTTER_DOWNLOAD_NOTICE}");
         publisher.mode(Mode::SpotterDownload);
     }
-    let loaded = OnnxSpotter::load(endings, store).await;
+    let loaded = load.await;
     if downloads {
         publisher.mode(Mode::Starting);
     }
-    spotter_loaded(
-        loaded.map(|spotter| Box::new(spotter) as Box<dyn KeywordSpotter>),
-        started.elapsed(),
-        downloads,
-        endings.entries().count(),
-        recorder,
-    )
-}
-
-/// Records how the spotter loaded; when it did not, the notice for the user.
-fn spotter_loaded(
-    loaded: Result<Box<dyn KeywordSpotter>, SpotterError>,
-    took: Duration,
-    downloaded: bool,
-    phrases: usize,
-    recorder: &Recorder,
-) -> (Option<Box<dyn KeywordSpotter>>, Option<String>) {
     recorder.metric(
         Event::EndingSpotter,
         if loaded.is_ok() { "ok" } else { "error" },
-        Some(took),
-        json!({"call": "load", "phrases": phrases, "downloaded": downloaded}),
+        Some(started.elapsed()),
+        json!({"call": "load", "phrases": endings.entries().count(), "downloaded": downloads}),
     );
     match loaded {
         Ok(spotter) => (Some(spotter), None),
@@ -583,7 +567,11 @@ impl Runner {
                 &store,
                 WakeEngine::load(&config.wake, &store),
             ),
-            load_spotter(&self.publisher, &config.endings, &store, &recorder),
+            load_spotter(&self.publisher, &config.endings, &store, &recorder, async {
+                OnnxSpotter::load(&config.endings, &store)
+                    .await
+                    .map(|spotter| Box::new(spotter) as Box<dyn KeywordSpotter>)
+            }),
         );
         recorder.metric(
             Event::WakeLoad,
@@ -2563,29 +2551,79 @@ mod tests {
         drop(engine_level_tx);
         following.await.unwrap();
     }
-    #[test]
-    fn a_spotter_that_cannot_load_leaves_a_notice_naming_the_phrase_and_dictation_goes_on() {
+    #[tokio::test]
+    async fn the_spotter_loader_reports_downloads_and_returns_the_model_or_a_notice() {
         use thalvi_desktop::engine::fakes::FakeSpotter;
         use thalvi_desktop::spotter::Unspeakable;
 
-        let loaded =
-            |result| spotter_loaded(result, Duration::ZERO, false, 6, &Recorder::disabled());
-
-        let unhearable = SpotterError::Phrases(vec![Unspeakable {
-            phrase: "f\u{fc}ge ein".to_owned(),
-            characters: "\u{dc}".to_owned(),
-        }]);
-        let (spotter, notice) = loaded(Err(unhearable));
-        assert!(spotter.is_none());
-        let notice = notice.unwrap();
-        assert!(
-            notice.contains("\"f\u{fc}ge ein\"")
-                && notice.ends_with("Endings still work from the transcript."),
-            "{notice}"
-        );
-
-        let (fake, _control) = FakeSpotter::new();
-        let (spotter, notice) = loaded(Ok(Box::new(fake)));
-        assert!(spotter.is_some() && notice.is_none());
+        let assets = [
+            models::SPOTTER.encoder,
+            models::SPOTTER.decoder,
+            models::SPOTTER.joiner,
+            models::SPOTTER.pieces,
+        ];
+        for missing in [None, Some(0), Some(3)] {
+            let dir = std::env::temp_dir().join(format!(
+                "thalvi-spotter-load-{}-{missing:?}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            for (index, asset) in assets.iter().enumerate() {
+                if missing != Some(index) {
+                    std::fs::File::create(dir.join(asset.file_name))
+                        .unwrap()
+                        .set_len(asset.size)
+                        .unwrap();
+                }
+            }
+            let store = ModelStore::in_dir(&dir);
+            for fails in [false, true] {
+                let (out, status) = watch::channel(Status::Paused);
+                let publisher = Publisher::new(out, EndingPauses::default());
+                publisher.mode(Mode::Paused);
+                let recorder = Recorder::disabled();
+                let (spotter, notice) =
+                    load_spotter(&publisher, &Endings::default(), &store, &recorder, async {
+                        assert_eq!(
+                            *status.borrow(),
+                            if missing.is_some() {
+                                Status::Loading {
+                                    notice: SPOTTER_DOWNLOAD_NOTICE.to_owned(),
+                                    downloading: true,
+                                }
+                            } else {
+                                Status::Paused
+                            }
+                        );
+                        if fails {
+                            Err(SpotterError::Phrases(vec![Unspeakable {
+                                phrase: "f\u{fc}ge ein".to_owned(),
+                                characters: "\u{dc}".to_owned(),
+                            }]))
+                        } else {
+                            let (fake, _control) = FakeSpotter::new();
+                            Ok(Box::new(fake) as Box<dyn KeywordSpotter>)
+                        }
+                    })
+                    .await;
+                if fails {
+                    assert!(spotter.is_none());
+                    let notice = notice.unwrap();
+                    assert!(
+                        notice.contains("\"f\u{fc}ge ein\"")
+                            && notice.ends_with("Endings still work from the transcript."),
+                        "{notice}"
+                    );
+                } else {
+                    assert!(spotter.is_some() && notice.is_none());
+                }
+                if missing.is_some() {
+                    assert_eq!(title(&status.borrow()), "Thalvi: starting");
+                } else {
+                    assert_eq!(*status.borrow(), Status::Paused);
+                }
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 }

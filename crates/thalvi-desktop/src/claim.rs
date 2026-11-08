@@ -385,6 +385,7 @@ impl Watch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::Endings;
 
     fn hit(ending: Ending, end: u64) -> SpotterHit {
         SpotterHit {
@@ -515,11 +516,45 @@ mod tests {
         let now = Instant::now();
         let mut watch = watch();
         watch.hit(&hit(Ending::Paste, 40_000), now, false);
-        let limit = 40_000 + samples(NO_FINAL_AFTER);
+        let limit = 40_000 + 3 * u64::from(SAMPLE_RATE);
         send_to(&mut watch, limit - 1_280, now);
-        assert!(!watch.disputed(), "an 800 ms wait is not enough");
+        assert!(!watch.disputed(), "less than three seconds is not enough");
         send_to(&mut watch, limit + 1_280, now);
         assert!(watch.disputed());
+    }
+
+    #[test]
+    fn scratch_hits_agree_only_with_finals_that_edit_the_capture() {
+        let now = Instant::now();
+        for (finals, expected) in [
+            (vec!["scratch that"], Effect::Ending(Ending::Scratch)),
+            (
+                vec!["First", "Second", "scratch that", "scratch that"],
+                Effect::Ending(Ending::Scratch),
+            ),
+            (vec!["scratch that", "new words"], Effect::Text),
+            (vec!["scratch that", ""], Effect::Nothing),
+        ] {
+            let mut capture =
+                CaptureSession::new(Endings::default(), EndingPauses::default(), vec![]);
+            for text in &finals[..finals.len() - 1] {
+                capture.on_final(text, now, false).unwrap();
+            }
+            let before = capture.clone();
+            let step = capture.on_final(finals.last().unwrap(), now, false);
+            let effect = Effect::of(&before, &capture, &step);
+            assert_eq!(effect, expected, "{finals:?}");
+            let mut watch = watch();
+            watch.hit(&hit(Ending::Scratch, 40_000), now, false);
+            send_to(&mut watch, 52_000, now);
+            let resolution = watch.final_arrived(effect, now, false);
+            assert_eq!(
+                resolution.map(|r| r.outcome),
+                (expected == Effect::Ending(Ending::Scratch)).then_some(Outcome::Agreed),
+                "{finals:?}"
+            );
+            assert_eq!(watch.disputed(), expected == Effect::Text, "{finals:?}");
+        }
     }
 
     #[test]
