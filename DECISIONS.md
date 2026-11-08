@@ -53,6 +53,10 @@ areas your change touches. Editing rules are in
   and Qwen3-TTS's framed PCM stream are the custom adapters. Why: any provider
   or local server plugs in without code. Rejected: a plugin system (no faster,
   much more code).
+- **Same-site browser requests only.** The server refuses a request whose `Origin` names another
+  host than its `Host`; native clients send none. Why: browsers skip cross-origin checks on
+  WebSockets, so any page could open `/session`. Rejected for now: a token (no accounts), a host
+  allowlist against DNS rebinding (a new setting).
 - **Chat Completions first.** Self-hosted servers speak it. Why: one adapter
   covers Meta, Ollama and vLLM. Revisit: add Responses for Meta if its search
   grounding beats an MCP search tool on the road briefing.
