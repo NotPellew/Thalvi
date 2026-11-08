@@ -32,13 +32,18 @@ impl RecordingHost {
 }
 impl Host for RecordingHost {
     type Target = String;
-    const OVERLAY_TAKES_CLICKS: bool = false;
+    fn copies_only(&self) -> bool {
+        false
+    }
+    fn overlay_takes_clicks(&self) -> bool {
+        false
+    }
     fn capture_target(&self) -> Result<String, HostError> {
         Ok("Editor".to_owned())
     }
-    fn deliver(&self, _: &String, _: &TypedText, _: bool) -> Result<(), HostError> {
+    fn deliver(&self, _: &String, _: &TypedText, _: bool) -> Result<thalvi_desktop::host::Delivered, HostError> {
         self.called("deliver");
-        Ok(())
+        Ok(thalvi_desktop::host::Delivered::InWindow)
     }
     fn copy(&self, _: &str) -> Result<(), HostError> {
         self.called("copy");
