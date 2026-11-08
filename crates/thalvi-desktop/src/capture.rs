@@ -516,7 +516,7 @@ impl CaptureSession {
                 self.arm(CaptureRoute::Paste, before, text, now, speech, false)
             }
             Some((Ending::Write, before)) => {
-                self.arm(CaptureRoute::Write, before, text, now, speech)
+                self.arm(CaptureRoute::Write, before, text, now, speech, false)
             }
             Some((Ending::Submit, before)) => {
                 self.arm(CaptureRoute::Submit, before, text, now, speech, false)
