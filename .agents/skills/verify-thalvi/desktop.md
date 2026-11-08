@@ -8,8 +8,8 @@ its own recipes (`SKILL.md`); this file is the desktop counterpart.
 
 It covers what shows on screen and in stdout: the overlay, the Settings window at
 any size and look, model downloads, pause and resume. It has no real tray (use
-the CLI below) and no Windows, and no microphone unless it is a GNOME run (audio
-is a null device). Report what a run covered with those limits.
+the CLI below) and no Windows, and no microphone unless it is a GNOME run or `up --mic`
+(audio is a null device otherwise). Report what a run covered with those limits.
 
 `H` is the helper, run from the repository root:
 
@@ -103,6 +103,34 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
 - `Hyprland` only renders a window that is mapped; open Settings before taking
   screenshots of it.
 
+## Speak, type and go offline (Hyprland)
+
+`$H up --mic --offline` adds what a dictation check needs. `--mic` gives the run the
+private PipeWire microphone a GNOME run has (`$H say $R file.wav`, real time, once the app
+captures). `--offline` puts every sandbox of the run in its own network namespace with
+only loopback, so nothing leaves the machine and abstract unix sockets are the run's own.
+
+| Need | Command |
+| --- | --- |
+| Where typed text goes | `$H victim $R` opens a terminal that writes every byte typed into it to `$R/out/typed.txt` |
+| App that can type | `$H app-start $R BIN --hosted ...` |
+| Every socket the app opens | `$H app-start ... --trace` writes `$R/out/trace-TAG.txt` (strace of socket, connect, bind and datagram sends) |
+
+- Use `--hosted` for anything that types or pastes. Thalvi finds the window to type into
+  by its PID, and a window from another sandbox has PID 0 in the compositor, so the app
+  and `victim` are started by Hyprland itself (`app-stop` stops the app the same way).
+- A trace shows no AF_INET `connect` when nothing tried to leave the machine; a refused
+  attempt still appears there (`ENETUNREACH`). Run an app with an unreachable
+  `server` first as a control that the trace sees what it should.
+- Copy model files into `$R/home/.local/share/thalvi/models/` first. With
+  `recordings` on in the config (`metrics`, `text`), `$R/home/.local/share/thalvi/recordings/` holds
+  what the recognizer heard and how each capture ended.
+- Say the wake phrase, wait until `$H ctl $R status` shows `capturing`, wait about two
+  seconds more (the app does not listen during its wake cue), then say the dictation. Sound
+  played into the microphone before that is lost.
+- `pw-link -l` and `pw-cli ls Node` in `$H sh $R` with `PIPEWIRE_REMOTE=rig-pipewire` show
+  that the app reads only `rig-mic`.
+
 ## GNOME
 
 `$H up --gnome` starts a headless `gnome-shell` instead of kwin and Hyprland, in the
@@ -139,10 +167,10 @@ namespace that differs from the host's, no `/dev/snd`, only one render node, a
 private `/run/user/<uid>` holding only the run's sockets (no PipeWire, Pulse or
 real Wayland or Hyprland socket), `/home/<you>` absent with a private `HOME`,
 no `DISPLAY`, and an ALSA null device. A GNOME run has its own system bus,
-Xwayland and a private PipeWire instead (`rig-pipewire`). The network namespace is shared on
-purpose, so downloads are real and local proxies work; it also means abstract
-unix sockets are shared with the host, which is why X11 is off and the app is
-forced onto Wayland.
+Xwayland and a private PipeWire instead (`rig-pipewire`, also in `up --mic` runs). The network
+namespace is shared on purpose unless the run is `--offline`, so downloads are real and local
+proxies work; it also means abstract unix sockets are shared with the host, which is why X11
+is off and the app is forced onto Wayland.
 
 ## Evidence
 

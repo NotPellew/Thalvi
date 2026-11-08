@@ -18,6 +18,7 @@ use tokio_tungstenite::{
 };
 
 use crate::frame::{FRAME_SAMPLES, Frame};
+use crate::models::ModelError;
 use crate::report::UserError;
 
 /// Samples in one frame after upsampling to 24 kHz.
@@ -130,6 +131,12 @@ pub enum RecognizerError {
         "The speech server at {server} sent something Thalvi did not understand. Check that Settings → Speech → Server address points at a Thalvi server."
     )]
     NotUnderstood { server: ServerUrl },
+    /// A speech model that could not be provided; the headline is the model error's own.
+    #[error("{message}")]
+    Model {
+        headline: &'static str,
+        message: String,
+    },
     /// Text the recognizer wrote for the user itself.
     #[error("{0}")]
     Said(String),
@@ -141,7 +148,17 @@ impl UserError for RecognizerError {
             Self::Unreachable { .. } => "Can't reach speech server — Settings",
             Self::Dropped { .. } => "Speech server hung up — Settings",
             Self::NotUnderstood { .. } => "Bad speech server reply — Settings",
+            Self::Model { headline, .. } => headline,
             Self::Said(_) => "Speech recognition failed — Settings",
+        }
+    }
+}
+
+impl From<ModelError> for RecognizerError {
+    fn from(error: ModelError) -> Self {
+        Self::Model {
+            headline: error.headline(),
+            message: error.to_string(),
         }
     }
 }
