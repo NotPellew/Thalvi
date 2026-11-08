@@ -141,12 +141,17 @@ or judge it equivalent. Locally, run it with no desktop session and a throwaway
 - Commit in small steps that each say what changed. PRs land as merge
   commits, so a branch's commits stay in the history. Tidying a branch
   before merge is fine; don't squash it into one commit.
-- Branches: `<type>/<slug>`, three hyphenated words or fewer.
+- Branches: `<type>/<slug>`, three hyphenated words or fewer, cut from
+  `development`. PRs target `development`.
+- A release bumps the version on `development` (`chore(desktop): release
+  X.Y.Z`), merges `development` into `main` through a PR, then tags
+  `desktop-vX.Y.Z` on `main`. A fix for a released version branches from
+  `main` and targets it; `main` is then merged back into `development`.
 - The PR title becomes the merge commit's subject. The body states the
   problem, then the fix. Say `Closes #N` when the PR resolves an issue,
-  `Refs #N` when it only touches one. While PRs target `development`, the
-  Issues workflow closes those issues when the PR merges there, and reopens
-  them when a merged `Reverts #N` PR takes it back out.
+  `Refs #N` when it only touches one. The Issues workflow closes those
+  issues when the PR merges into `development`, and reopens them when a
+  merged `Reverts #N` PR takes it back out.
 - Use `.github/pull_request_template.md` for every PR body, including PRs
   created through CLI tools; preserve its headings and remove instructional
   comments.
