@@ -472,17 +472,23 @@ struct Live<S> {
     started: Instant,
     /// When the recognizer last returned words.
     last_words: Instant,
-    /// The first speech heard, until the recognizer's first words come.
-    first_speech: Option<Instant>,
-    /// Whether the recognizer has returned words in this capture.
-    words_came: bool,
-    /// The latest speech heard since the recognizer's last final result.
-    last_speech: Option<Instant>,
+    heard: Heard,
     cues: FuturesUnordered<LocalBoxFuture<'static, CueEnd>>,
     release: Release,
     /// The release of the hold that opened this capture; frames queued after it are not speech
     /// of the hold.
     cutoff: Option<Cutoff>,
+}
+
+/// When speech was heard, to time the recognizer's answers to it.
+#[derive(Default)]
+struct Heard {
+    /// The first speech heard, until the recognizer's first words come.
+    first: Option<Instant>,
+    /// Whether the recognizer has returned words in this capture.
+    words_came: bool,
+    /// The latest speech heard since the recognizer's last final result.
+    last: Option<Instant>,
 }
 
 /// What the dictation key's release does to a capture.
@@ -1241,9 +1247,7 @@ where
             last_audio: Instant::now(),
             started: Instant::now(),
             last_words: Instant::now(),
-            first_speech: None,
-            words_came: false,
-            last_speech: None,
+            heard: Heard::default(),
             cues: FuturesUnordered::new(),
             release: held.map_or(Release::Over, |_| Release::Down),
             cutoff: held.map(|held| held.release.clone()),
@@ -1301,8 +1305,8 @@ where
                 Step::Event(Ok(RecognizerEvent::Partial(text))) => {
                     if has_words(&text) {
                         live.last_words = Instant::now();
-                        if !std::mem::replace(&mut live.words_came, true) {
-                            self.lag(Event::PartialLag, live.first_speech.take());
+                        if !std::mem::replace(&mut live.heard.words_came, true) {
+                            self.lag(Event::PartialLag, live.heard.first.take());
                         }
                     }
                     self.on_partial(live, text);
@@ -1311,7 +1315,7 @@ where
                 Step::Event(Ok(RecognizerEvent::Final(text))) => {
                     if has_words(&text) {
                         live.last_words = Instant::now();
-                        self.lag(Event::FinalLag, live.last_speech.take());
+                        self.lag(Event::FinalLag, live.heard.last.take());
                     }
                     let done = self.on_final(live, &text);
                     done.or_else(|| {
@@ -1519,9 +1523,9 @@ where
         let pending = live.text.pending().is_some();
         live.speech = self.vad.speech(frame, pending);
         if live.speech {
-            live.last_speech = Some(now);
-            if live.first_speech.is_none() && !live.words_came {
-                live.first_speech = Some(now);
+            live.heard.last = Some(now);
+            if !live.heard.words_came {
+                live.heard.first.get_or_insert(now);
             }
         }
         if !pending {
