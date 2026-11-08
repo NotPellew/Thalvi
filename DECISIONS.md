@@ -126,10 +126,10 @@ areas your change touches. Editing rules are in
   when ticked (`active`), and unticking keeps its settings and key. Why: avoid uploading
   every dictation and adding latency without an explicit choice. Rejected:
   treating an endpoint's presence as enablement.
-- **Resident controls and private bar status.** Control commands use single-instance
-  relaunch; Hyprland status reads a state-only socket in the private runtime folder.
-  Why: controls must not start a microphone and the plugin cannot answer queries.
-  Rejected: a keyboard listener for control commands, TCP, or transcript-bearing status.
+- **Resident controls and private request socket.** Commands reach the running app over a request/reply
+  socket in the private runtime folder (a user-only pipe on Windows): one JSON line each way, size-bounded,
+  known commands only. Why: controls must not start a microphone, and an agent needs an answer.
+  Rejected: single-instance relaunch (no answer), a keyboard listener, TCP, transcript-bearing replies.
 - **Hold to talk.** Holding a key dictates and releasing pastes: F9 without a modifier on Hyprland
   (compositor binds), Alt+KeyZ on Windows (`hold_key`, a swallowing keyboard hook that waits for the
   key and Alt both up); every word of a hold is text, and only `cancel` abandons one. Why: Hyprland 0.53.3 types held modifiers into the paste and drops the release when one comes up first, seen live; `RegisterHotKey` sees no release; the key already ends a dictation, and spoken endings cut off sentences that held them.
