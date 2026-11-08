@@ -30,6 +30,15 @@ resumes. Closing the microphone ends that interval and hands pending presses to
 Apply, which returns the accounted cursor to the live engine so a newer press
 cannot be skipped. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
+The GNOME host (#267) changed `delivery.rs` and `runner.rs` without changing that:
+`Delivery::type_in` returns `Delivered::InWindow` or `Delivered::OnClipboard` from the
+same `Delivery::finish` admission, so a clipboard-only desktop is another admitted host
+action and a cancelled capture still never reaches it. `Runner::capture` now calls
+`Publisher::woke` before `drive`, which only sets the view's `copies` and `target`.
+A wake capture whose whole text is a task now arms the task ending itself; it
+reaches `Engine::conclude` through the same `Done::Accepted`, so that is unchanged too.
+The offline-model fix (#272) added a `RecognizerError::Model` variant, raised while the
+local model's files are fetched and so before any `RecognizerSession` exists.
 Writing a dictation out ("write that out", the write key) adds one stage after
 `reconcile`: `Engine::write` streams a chat reply and returns Accepted (a paste of
 the written text), Failed (the user's words are kept for the clipboard) or
@@ -38,10 +47,8 @@ is another case of the model's `secondary` stage: a post-accept step that sees a
 pending cancel before it can return Accepted. Its Failed result is not an
 accepted result, and an ended capture skips `Delivery::finish`, so the clipboard
 copy of the user's words is gated by `ended` like every other host effect. The
-model is unchanged apart from a comment, and the hashes moved for `engine.rs`,
-`delivery.rs` (a `Write` arm that pastes) and `runner.rs`, whose recorded hash was
-already stale at this change's base: its diff since the sync commit only names the
-target at wake (`Publisher::woke`) and touches none of the mapped functions.
+model is unchanged apart from a comment, and the hashes moved for `engine.rs` and
+`delivery.rs` (a `Write` arm that pastes).
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

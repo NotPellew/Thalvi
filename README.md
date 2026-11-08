@@ -235,7 +235,7 @@ Say "Hey Thalvi" in any window, dictate, then end with a phrase:
 | "paste that" or "finish dictation" | types the text into the window you were in |
 | "write that out" | has the writing model turn the words into proper text, then types that ([Write it out](#write-a-dictation-out)) |
 | "submit" | types it and presses Enter |
-| "do that" | runs a configured action, such as opening a site or focusing an app |
+| "do that" | runs a configured action, such as opening a site or focusing an app; the action also runs without "do that" when the whole capture is the command, for example "open google.com" |
 | "scratch that" | drops the last piece |
 | "never mind" | drops the whole capture |
 

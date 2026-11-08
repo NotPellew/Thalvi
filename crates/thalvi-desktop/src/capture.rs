@@ -8,6 +8,9 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
+use crate::config::Script;
+use crate::tasks::{self, Task};
+
 /// The most characters one capture holds.
 pub const MAX_CAPTURE_CHARS: usize = 20_000;
 
@@ -349,6 +352,8 @@ pub struct PendingEnding {
     /// What will be delivered: the capture without the ending phrase.
     pub text: String,
     pub window: QuietWindow,
+    /// The whole capture is a task and no ending was spoken.
+    pub without_ending: bool,
 }
 
 /// What a delivered capture asks the caller to do.
@@ -378,11 +383,19 @@ pub enum FinalStep {
 #[error("This capture is full. Finish or cancel it before continuing.")]
 pub struct CaptureFullError;
 
+/// What a wake-word capture listens for; a hold has none of it.
+#[derive(Clone, Debug)]
+struct Spoken {
+    endings: Endings,
+    /// The scripts whose phrase, spoken alone, runs without an ending.
+    scripts: Vec<Script>,
+}
+
 /// One dictation: final transcripts in, an ending delivered after a quiet pause out.
 /// Pure and synchronous; the caller supplies every instant.
 #[derive(Clone, Debug)]
 pub struct CaptureSession {
-    endings: Option<Endings>,
+    spoken: Option<Spoken>,
     pauses: EndingPauses,
     pieces: Vec<String>,
     scratched: bool,
@@ -391,9 +404,9 @@ pub struct CaptureSession {
 
 impl CaptureSession {
     #[must_use]
-    pub fn new(endings: Endings, pauses: EndingPauses) -> Self {
+    pub fn new(endings: Endings, pauses: EndingPauses, scripts: Vec<Script>) -> Self {
         Self {
-            endings: Some(endings),
+            spoken: Some(Spoken { endings, scripts }),
             pauses,
             pieces: Vec::new(),
             scratched: false,
@@ -406,7 +419,7 @@ impl CaptureSession {
     #[must_use]
     pub fn without_endings() -> Self {
         Self {
-            endings: None,
+            spoken: None,
             pauses: EndingPauses::default(),
             pieces: Vec::new(),
             scratched: false,
@@ -417,7 +430,7 @@ impl CaptureSession {
     /// Whether spoken phrases can end or edit this capture.
     #[must_use]
     pub fn has_endings(&self) -> bool {
-        self.endings.is_some()
+        self.spoken.is_some()
     }
 
     /// Everything captured so far; an armed ending's phrase is still in it until delivery.
@@ -478,9 +491,9 @@ impl CaptureSession {
             .join(" ");
         let cancelled_pending = self.pending.is_some();
         let ending = self
-            .endings
+            .spoken
             .as_ref()
-            .and_then(|endings| endings.find(&combined));
+            .and_then(|spoken| spoken.endings.find(&combined));
         match ending {
             Some((Ending::Cancel, before)) => {
                 self.pieces.clear();
@@ -500,24 +513,40 @@ impl CaptureSession {
                 Ok(FinalStep::Continue { cancelled_pending })
             }
             Some((Ending::Paste, before)) => {
-                self.arm(CaptureRoute::Paste, before, text, now, speech)
+                self.arm(CaptureRoute::Paste, before, text, now, speech, false)
             }
             Some((Ending::Write, before)) => {
                 self.arm(CaptureRoute::Write, before, text, now, speech)
             }
             Some((Ending::Submit, before)) => {
-                self.arm(CaptureRoute::Submit, before, text, now, speech)
+                self.arm(CaptureRoute::Submit, before, text, now, speech, false)
             }
-            Some((Ending::Task, before)) => self.arm(CaptureRoute::Task, before, text, now, speech),
+            Some((Ending::Task, before)) => {
+                self.arm(CaptureRoute::Task, before, text, now, speech, false)
+            }
             None => {
                 if combined.chars().count() > MAX_CAPTURE_CHARS {
                     return Err(CaptureFullError);
+                }
+                if self.is_whole_task(&combined) {
+                    return self.arm(CaptureRoute::Task, &combined, text, now, speech, true);
                 }
                 self.pieces.push(text.to_owned());
                 self.pending = None;
                 Ok(FinalStep::Continue { cancelled_pending })
             }
         }
+    }
+
+    /// Whether `text` alone is a task that needs no spoken ending: a configured phrase, else
+    /// `open <host>`, but not a Discord message, which matches on a prefix.
+    fn is_whole_task(&self, text: &str) -> bool {
+        self.spoken.as_ref().is_some_and(|spoken| {
+            matches!(
+                tasks::decide(text, &spoken.scripts),
+                Ok(Task::OpenUrl { .. } | Task::FocusApp { .. })
+            )
+        })
     }
 
     fn arm(
@@ -527,6 +556,7 @@ impl CaptureSession {
         text: &str,
         now: Instant,
         speech: bool,
+        without_ending: bool,
     ) -> Result<FinalStep, CaptureFullError> {
         if before.chars().count() > MAX_CAPTURE_CHARS {
             return Err(CaptureFullError);
@@ -541,6 +571,7 @@ impl CaptureSession {
             route,
             text: before.to_owned(),
             window,
+            without_ending,
         };
         self.pending = Some(pending.clone());
         Ok(FinalStep::Armed(pending))
@@ -726,7 +757,7 @@ mod tests {
     use super::*;
 
     fn session() -> CaptureSession {
-        CaptureSession::new(Endings::default(), EndingPauses::default())
+        CaptureSession::new(Endings::default(), EndingPauses::default(), Vec::new())
     }
 
     fn ms(base: Instant, millis: u64) -> Instant {
@@ -823,6 +854,7 @@ mod tests {
                 route: CaptureRoute::Paste,
                 text: "hello".to_owned(),
                 window: QuietWindow::WaitingForQuiet,
+                without_ending: false,
             })
         );
         assert_eq!(session.ready_at(), None);
@@ -1044,6 +1076,24 @@ mod tests {
     }
 
     #[test]
+    fn an_artifact_final_does_not_revive_a_cancelled_whole_text_task() {
+        let scripts = crate::config::DesktopConfig::from_json_str("{}")
+            .unwrap()
+            .scripts;
+        let mut session = CaptureSession::new(Endings::default(), EndingPauses::default(), scripts);
+        let now = Instant::now();
+        let armed = session.on_final("open google.com", now, false).unwrap();
+        assert!(
+            matches!(&armed, FinalStep::Armed(pending) if pending.without_ending),
+            "{armed:?}"
+        );
+        assert!(session.on_partial("and also"));
+        assert_eq!(session.pending(), None);
+        session.on_final("[noise]", now, false).unwrap();
+        assert_eq!(session.pending(), None);
+    }
+
+    #[test]
     fn endings_tolerate_up_to_two_trailing_artifacts() {
         for (ending, route) in [
             ("paste that", CaptureRoute::Paste),
@@ -1103,7 +1153,7 @@ mod tests {
             ("cancel", Ending::Cancel),
         ])
         .unwrap();
-        let mut session = CaptureSession::new(custom, EndingPauses::default());
+        let mut session = CaptureSession::new(custom, EndingPauses::default(), Vec::new());
         let now = Instant::now();
         for literal in ["Resend this", "A literal send this inside the sentence"] {
             assert_eq!(

@@ -100,36 +100,30 @@ can't break and doesn't slow down the next change.
 
 ## Gates
 
-CI runs exactly these as required checks on `main`. A new component adds its
-pinned toolchain, its commands here, and its CI job; one that ships on Windows
-also runs its gate on `windows-latest`. npm is the package manager; lockfiles
-are committed.
+CI runs these as required checks on `main`. `.github/scripts/gates <component>`
+runs a component's checks exactly as CI does and stops at the first failure.
+Components: `server`, `desktop-windows`, `web`, `desktop-ui`, `speech`,
+`issue-sync`; `all` runs every gate this OS can run and says which it skipped.
+CI jobs call the script after their toolchain setup, so a new check goes in the
+script, and a new component adds its pinned toolchain here, its case in the
+script and its CI job; one that ships on Windows also runs its gate on
+`windows-latest`. npm is the package manager; lockfiles are committed.
 
-- Server and Rust desktop (`crates/`): on Linux, install `libasound2-dev
-  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev`, build the desktop UI
-  first (`npm ci` and `npm run build` in `crates/thalvi-app/ui`, Node pinned in
-  `.node-version`), then `cargo fmt --all -- --check`, `cargo lint`,
-  `cargo test --workspace --locked`, `RUSTDOCFLAGS="-D warnings" cargo docs`, then
-  `npm exec --prefix ui -- tauri build --bundles appimage -- --locked` in
-  `crates/thalvi-app`.
-- Rust desktop on Windows (`windows-latest`): build the desktop UI the same
-  way, then `cargo fmt --all -- --check`, `cargo lint`,
-  `cargo test -p thalvi-desktop -p thalvi-app --locked`, then the same
-  `tauri build` with `--bundles nsis`. CI then runs
-  `.github/scripts/windows-smoke.ps1` on that installer: it installs and starts
+Prerequisites the script does not install:
+
+- Server and Rust desktop (`crates/`): the Rust toolchain; on Linux
+  `libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev`; Node
+  pinned in `.node-version`. `desktop-windows` needs the same toolchains on
+  `windows-latest` and runs from Git Bash. CI then runs
+  `.github/scripts/windows-smoke.ps1` on its installer: it installs and starts
   the app and opens Settings, and uploads screenshots.
-- Desktop UI (`crates/thalvi-app/ui/`): `npm ci`, `npm run typecheck`,
-  `npm run lint`, `npm test`, `npm run build`.
-- Web (`web/`): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`,
-  `npm run build`.
-- Speech servers (`compose.yaml`, `speech/`): `docker compose --profile kokoro
-  --profile vllm-omni config -q`, `pipx run shellcheck-py==0.11.0.1
-  speech/qwentts.sh speech/nemotron-asr.sh`, then in `speech/asr` (Python pinned
-  in `.python-version`, uv lockfile): `uv run --frozen ruff check`,
-  `uv run --frozen ruff format --check`, `uv run --frozen pytest`.
-- Issue sync (`.github/scripts/`): `pipx run shellcheck-py==0.11.0.1
-  .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh`, then
-  `.github/scripts/issue-refs.test.sh`.
+- Web and desktop UI: Node pinned in `.node-version`.
+- Speech servers: Docker with Compose, `pipx`, and `uv` (Python pinned in
+  `speech/asr/.python-version`).
+- Issue sync: `pipx`.
+
+Two required checks are not in the script:
+
 - Dependencies (`deny.toml`, cargo-deny 0.20.2): `cargo deny --workspace --locked
   check advisories licenses sources`.
 - Secrets (`.gitleaks.toml`, gitleaks 8.30.1): `gitleaks git --redact --no-banner

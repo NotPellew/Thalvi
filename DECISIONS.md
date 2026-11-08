@@ -82,9 +82,9 @@ areas your change touches. Editing rules are in
   synthesis. Web: Voice sets both, Speak replies only reply audio. Why: typed or locally
   recognized input can get spoken replies. Rejected: one `voice` switch, a compat message.
 - **Two wake entries, endings select the capture route.** One local inference pipeline
-  runs separate trained capture and conversation wake heads. Why: defer the action
-  choice until an ending without delaying conversation. Rejected: one phrase
-  for both flows.
+  runs separate trained capture and conversation wake heads; a wake capture whose whole text is
+  an `open_url`/`focus_app` phrase or `open <host>` runs as a task with no ending. Why: defer the
+  action choice until an ending, yet a ready command needs none. Rejected: one phrase for both flows.
 - **Wake context.** Both trained heads use 16 embedding frames. Why: this
   supports first-frame inference with upstream startup and reset history.
   Rejected: accepting longer contexts that need additional warm-up history.
@@ -106,8 +106,8 @@ areas your change touches. Editing rules are in
   stripping. Rejected: pre-wake audio, cutting it at the wake, and stripping the phrase.
 - **Silence commits capture.** Paste waits 0.7 s of speech silence, submit and tasks 2.5 s by
   default, each settable from 0 to 5 s; recognized speech cancels the pending ending, local speech
-  pauses the countdown, and submit confirms its target meanwhile. Why: paste is undoable and should
-  feel fast; submit and tasks reach others. Rejected: one fixed pause for all, a second spoken yes.
+  pauses the countdown, submit confirms its target, and a whole-text command waits the task pause.
+  Why: paste is undoable; submit and tasks reach others. Rejected: one fixed pause, a second spoken yes.
 - **Check, then type.** Delivery re-verifies the bound window just before injecting
   input, which goes to whatever window is focused; a switch in those milliseconds
   can misdirect it. Why: neither Hyprland nor Windows can address input to one window.
