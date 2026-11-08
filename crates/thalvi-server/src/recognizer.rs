@@ -1,51 +1,12 @@
-//! Owns the speech recognizer trait and the Meta realtime ASR client.
+//! Owns the speech recognizer trait and the server's Meta realtime ASR factory.
 
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
-use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_tungstenite::tungstenite::protocol::CloseFrame;
-use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use thalvi_asr::{Connection, Handshake};
 
 use crate::phrases::PhraseStore;
 
-/// One event from the recognizer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecognizerEvent {
-    /// The user started speaking.
-    SpeechStart {
-        /// Recognizer turn identifier.
-        turn_id: String,
-        /// Milliseconds of audio the recognizer had processed.
-        audio_processed_ms: Option<u64>,
-    },
-    /// The user stopped speaking.
-    SpeechEnd {
-        /// Recognizer turn identifier.
-        turn_id: String,
-        /// Milliseconds of audio the recognizer had processed.
-        audio_processed_ms: Option<u64>,
-    },
-    /// A cumulative partial transcript; replaces the previous partial.
-    Partial {
-        /// The partial transcript text.
-        text: String,
-    },
-    /// A completed user turn.
-    SpeechComplete {
-        /// Recognizer turn identifier.
-        turn_id: String,
-        /// The completed transcript text.
-        text: String,
-    },
-    /// A recognizer-side failure; the connection stays usable.
-    Error {
-        /// Plain-words failure detail from the recognizer.
-        message: String,
-    },
-}
+pub use thalvi_asr::Event as RecognizerEvent;
 
 /// A recognizer connection failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,9 +33,14 @@ impl RecognizerError {
     pub fn is_fatal(&self) -> bool {
         matches!(self, Self::Fatal(_))
     }
+}
 
-    fn retryable(message: impl Into<String>) -> Self {
-        Self::Retryable(message.into())
+impl From<thalvi_asr::Error> for RecognizerError {
+    fn from(error: thalvi_asr::Error) -> Self {
+        match error {
+            thalvi_asr::Error::Fatal(message) => Self::Fatal(message),
+            error => Self::Retryable(error.to_string()),
+        }
     }
 }
 
@@ -138,245 +104,42 @@ impl MetaRecognizerFactory {
     }
 }
 
-type ClientSocket =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
 /// A live Meta realtime ASR connection.
 pub struct MetaRecognizer {
-    socket: ClientSocket,
+    connection: Connection,
 }
 
 impl RecognizerFactory for MetaRecognizerFactory {
     type Rec = MetaRecognizer;
 
     async fn connect(&self) -> Result<Self::Rec, RecognizerError> {
-        let (mut socket, _response) =
-            tokio_tungstenite::connect_async(&self.url)
-                .await
-                .map_err(|error| {
-                    RecognizerError::retryable(format!("recognizer connect failed: {error}"))
-                })?;
-        let init = json!({
-            "authorization": { "accessToken": format!("Bearer {}", self.api_key) },
-            "audioEncoding": "PCM_24KHZ",
-            "model": self.model,
-            "mode": "ENDPOINTING",
-        });
-        socket
-            .send(WsMessage::Text(init.to_string().into()))
-            .await
-            .map_err(|error| {
-                RecognizerError::retryable(format!("recognizer handshake failed: {error}"))
-            })?;
-        let ack = tokio::time::timeout(Duration::from_secs(10), socket.next())
-            .await
-            .map_err(|_| RecognizerError::retryable("recognizer handshake timed out"))?;
-        match ack {
-            Some(Ok(WsMessage::Text(text))) => {
-                let value: Value = serde_json::from_str(&text).map_err(|error| {
-                    RecognizerError::retryable(format!(
-                        "recognizer handshake was not JSON: {error}"
-                    ))
-                })?;
-                if value.get("sessionId").is_some() {
-                    let boosts = value.get("phraseBoosting").and_then(Value::as_bool) == Some(true);
-                    *self.boosting.lock().unwrap_or_else(PoisonError::into_inner) = Some(boosts);
-                    let phrases = self.phrases.list();
-                    // Meta's recognizer doesn't announce boosting and never sees this message.
-                    if boosts && !phrases.is_empty() {
-                        let message = json!({"type": "phrases", "phrases": &*phrases});
-                        socket
-                            .send(WsMessage::Text(message.to_string().into()))
-                            .await
-                            .map_err(|error| {
-                                RecognizerError::retryable(format!(
-                                    "recognizer handshake failed: {error}"
-                                ))
-                            })?;
-                    }
-                    Ok(Self::Rec { socket })
-                } else if value.get("type").and_then(Value::as_str) == Some("error") {
-                    let message = value
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("recognizer rejected the session");
-                    Err(RecognizerError::retryable(message.to_string()))
-                } else {
-                    Err(RecognizerError::retryable(
-                        "recognizer handshake did not contain a sessionId",
-                    ))
-                }
-            }
-            Some(Ok(WsMessage::Close(frame))) => Err(close_error(frame.as_ref())),
-            Some(Ok(_)) => Err(RecognizerError::retryable(
-                "recognizer handshake had an unexpected frame",
-            )),
-            Some(Err(error)) => Err(RecognizerError::retryable(format!(
-                "recognizer handshake failed: {error}"
-            ))),
-            None => Err(RecognizerError::retryable(
-                "recognizer closed during handshake",
-            )),
-        }
+        let phrases = self.phrases.list();
+        let connection = Connection::open(Handshake {
+            url: &self.url,
+            model: &self.model,
+            api_key: &self.api_key,
+            phrases: &phrases,
+        })
+        .await?;
+        *self.boosting.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(connection.boosts_phrases());
+        Ok(MetaRecognizer { connection })
     }
 }
 
 impl Recognizer for MetaRecognizer {
     async fn send_audio(&mut self, audio: &[u8]) -> Result<(), RecognizerError> {
-        self.socket
-            .send(WsMessage::Binary(audio.to_vec().into()))
-            .await
-            .map_err(|error| RecognizerError::retryable(format!("recognizer send failed: {error}")))
+        Ok(self.connection.send_audio(audio.to_vec()).await?)
     }
 
     async fn next_event(&mut self) -> Option<Result<RecognizerEvent, RecognizerError>> {
-        loop {
-            match self.socket.next().await {
-                Some(Ok(WsMessage::Text(text))) => {
-                    if let Some(event) = parse_recognizer_text(&text) {
-                        return Some(event);
-                    }
-                }
-                Some(Ok(WsMessage::Close(frame))) => {
-                    return Some(Err(close_error(frame.as_ref())));
-                }
-                Some(Ok(_)) => {}
-                Some(Err(error)) => {
-                    return Some(Err(RecognizerError::retryable(format!(
-                        "recognizer connection failed: {error}"
-                    ))));
-                }
-                None => {
-                    return Some(Err(RecognizerError::retryable(
-                        "recognizer connection closed",
-                    )));
-                }
-            }
-        }
+        self.connection
+            .next_event()
+            .await
+            .map(|event| event.map_err(Into::into))
     }
 
     async fn close(&mut self) {
-        let _ = self
-            .socket
-            .send(WsMessage::Text(r#"{"type":"endStream"}"#.into()))
-            .await;
-        let _ = self.socket.close(None).await;
-    }
-}
-
-fn close_error(frame: Option<&CloseFrame>) -> RecognizerError {
-    let (code, reason) = frame.map_or((0_u16, String::new()), |frame| {
-        (u16::from(frame.code), frame.reason.to_string())
-    });
-    let detail = if reason.is_empty() {
-        format!("recognizer closed the connection (code {code})")
-    } else {
-        format!("recognizer closed the connection (code {code}): {reason}")
-    };
-    if code == u16::from(CloseCode::Policy) {
-        RecognizerError::Fatal(detail)
-    } else {
-        RecognizerError::Retryable(detail)
-    }
-}
-
-/// Parses one recognizer text frame; ignored frames return `None`.
-#[must_use]
-pub fn parse_recognizer_text(text: &str) -> Option<Result<RecognizerEvent, RecognizerError>> {
-    let value: Value = match serde_json::from_str(text) {
-        Ok(value) => value,
-        Err(error) => {
-            return Some(Err(RecognizerError::retryable(format!(
-                "recognizer sent invalid JSON: {error}"
-            ))));
-        }
-    };
-    let turn_id = value
-        .get("turnId")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let audio_processed_ms = value.get("audioProcessedMs").and_then(Value::as_u64);
-    match value.get("type").and_then(Value::as_str) {
-        Some("speechStart") => Some(Ok(RecognizerEvent::SpeechStart {
-            turn_id,
-            audio_processed_ms,
-        })),
-        Some("speechEnd") => Some(Ok(RecognizerEvent::SpeechEnd {
-            turn_id,
-            audio_processed_ms,
-        })),
-        Some("transcript") => Some(Ok(RecognizerEvent::Partial {
-            text: value
-                .get("transcript")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-        })),
-        Some("speechComplete") => Some(Ok(RecognizerEvent::SpeechComplete {
-            turn_id,
-            text: value
-                .get("transcript")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-        })),
-        Some("error") => Some(Ok(RecognizerEvent::Error {
-            message: value
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("speech recognition failed")
-                .to_string(),
-        })),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{RecognizerEvent, parse_recognizer_text};
-
-    #[test]
-    fn parses_events_and_ignores_progress_frames() {
-        let cases: Vec<(&str, Option<RecognizerEvent>)> = vec![
-            (
-                r#"{"type":"speechStart","turnId":"1","audioProcessedMs":120}"#,
-                Some(RecognizerEvent::SpeechStart {
-                    turn_id: "1".to_string(),
-                    audio_processed_ms: Some(120),
-                }),
-            ),
-            (
-                r#"{"type":"speechEnd","turnId":"1","audioProcessedMs":640}"#,
-                Some(RecognizerEvent::SpeechEnd {
-                    turn_id: "1".to_string(),
-                    audio_processed_ms: Some(640),
-                }),
-            ),
-            (
-                r#"{"type":"transcript","transcript":"hel","final":false}"#,
-                Some(RecognizerEvent::Partial {
-                    text: "hel".to_string(),
-                }),
-            ),
-            (
-                r#"{"type":"speechComplete","turnId":"1","transcript":"hello"}"#,
-                Some(RecognizerEvent::SpeechComplete {
-                    turn_id: "1".to_string(),
-                    text: "hello".to_string(),
-                }),
-            ),
-            (
-                r#"{"type":"error","message":"boom"}"#,
-                Some(RecognizerEvent::Error {
-                    message: "boom".to_string(),
-                }),
-            ),
-            (r#"{"type":"audioProgress"}"#, None),
-        ];
-        for (frame, expected) in cases {
-            let parsed = parse_recognizer_text(frame).map(|result| result.unwrap());
-            assert_eq!(parsed, expected);
-        }
+        self.connection.close().await;
     }
 }
