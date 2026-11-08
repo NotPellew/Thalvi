@@ -2271,6 +2271,28 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_switch_of_the_live_server_waits_for_the_end_of_the_running_capture() {
+        let running = DesktopConfig::from_json_str("{}").unwrap();
+        let switched = DesktopConfig::from_json_str(r#"{"stt": {"engine": "local"}}"#).unwrap();
+        assert_ne!(
+            running.stt.entries.active_live().id,
+            switched.stt.entries.active_live().id
+        );
+        let (outcome, requests, started) = run(
+            vec![],
+            vec![Control::Apply(Box::new(switched.clone())), Control::Cancel],
+        )
+        .await;
+        assert!(started);
+        assert_eq!(outcome, Some("cancelled"));
+        assert_eq!(
+            requests.pending,
+            Some(switched),
+            "the new entry is held for the next capture"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_second_toggle_changes_the_intent_without_reviving_a_cancelled_capture() {
         // Both toggles land before the capture starts: nothing starts, and the intent is on again.
         let (outcome, requests, started) = run(
