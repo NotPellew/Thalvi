@@ -960,7 +960,6 @@ impl TransducerSource {
     }
 
     async fn files(&self) -> Result<TransducerFiles, RecognizerError> {
-        let plain = |error: &dyn std::fmt::Display| RecognizerError::said(error.to_string());
         match &self.choice {
             SpeechChoice::Catalog(catalog) => {
                 let assets = catalog.assets();
@@ -969,22 +968,22 @@ impl TransducerSource {
                         .store
                         .fetch(&assets.encoder)
                         .await
-                        .map_err(|e| plain(&e))?,
+                        .map_err(RecognizerError::from)?,
                     decoder: self
                         .store
                         .fetch(&assets.decoder)
                         .await
-                        .map_err(|e| plain(&e))?,
+                        .map_err(RecognizerError::from)?,
                     joiner: self
                         .store
                         .fetch(&assets.joiner)
                         .await
-                        .map_err(|e| plain(&e))?,
+                        .map_err(RecognizerError::from)?,
                     tokens: self
                         .store
                         .fetch(&assets.tokens)
                         .await
-                        .map_err(|e| plain(&e))?,
+                        .map_err(RecognizerError::from)?,
                 })
             }
             SpeechChoice::Folder(dir) => Ok(TransducerFiles::in_folder(dir)),

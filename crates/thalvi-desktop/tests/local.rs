@@ -12,7 +12,11 @@ use serde_json::Value;
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::local::{LocalRecognizer, ModelSource, SpeechModel, SpeechStream};
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
+use thalvi_desktop::models::{CatalogSpeech, ModelStore};
+use thalvi_desktop::phrases::WordList;
 use thalvi_desktop::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
+use thalvi_desktop::report::UserError;
+use thalvi_desktop::transducer::{SpeechChoice, TransducerSource};
 
 const WAIT: Duration = Duration::from_secs(5);
 const FRAME: Frame = [0; FRAME_SAMPLES];
@@ -304,5 +308,26 @@ async fn a_model_that_cannot_be_fetched_is_reported_and_fetched_again_on_the_nex
             ("error".into(), "fake-model".into()),
             ("ok".into(), "fake-model".into())
         ]
+    );
+}
+
+#[tokio::test]
+async fn a_catalog_model_that_cannot_be_provided_fails_with_the_model_errors_own_headline() {
+    let blocker = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("local-model-blocker");
+    std::fs::write(&blocker, b"a file where the model folder should be").expect("writes");
+    let source = TransducerSource::new(
+        ModelStore::in_dir(blocker.join("models")),
+        SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms),
+        &WordList::default(),
+    );
+
+    let error = source.load().await.err().expect("no folder to fetch into");
+
+    assert_eq!(error.headline(), "Can't save the model file");
+    assert!(
+        error
+            .to_string()
+            .starts_with("Could not save the speech model nemotron_160ms.encoder.int8.onnx in "),
+        "{error}"
     );
 }

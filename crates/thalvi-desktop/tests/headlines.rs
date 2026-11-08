@@ -66,6 +66,14 @@ fn recognition() -> Cases {
             "Speech recognition failed — Settings",
         ),
         (
+            Box::new(RecognizerError::from(ModelError::Download {
+                kind: ModelKind::Speech,
+                file: "f".to_owned(),
+                source: download(),
+            })),
+            "Download failed — check internet",
+        ),
+        (
             Box::new(CaptureError::Recognizer(unreachable())),
             "Can't reach speech server — Settings",
         ),
