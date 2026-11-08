@@ -30,19 +30,21 @@ fn download() -> reqwest::Error {
         .expect_err("a relative URL is refused")
 }
 
+fn office() -> SpeechSource {
+    SpeechSource::thalvi_server("Office", &ServerUrl::default())
+}
+
 fn unreachable() -> RecognizerError {
     RecognizerError::Unreachable {
-        server: ServerUrl::default(),
+        speech: office(),
         reason: ConnectFailure::Refused,
         detail: Detail("refused".to_owned()),
     }
 }
 
 fn recognition() -> Cases {
-    let server = || SpeechSource::Server(ServerUrl::default());
-    let local = || SpeechSource::Local {
-        model: "nemotron".to_owned(),
-    };
+    let server = office;
+    let local = || SpeechSource::on_device("On this computer", "nemotron".to_owned());
     let seconds = Duration::from_secs(30);
     vec![
         (
@@ -50,15 +52,11 @@ fn recognition() -> Cases {
             "Can't reach speech server — Settings",
         ),
         (
-            Box::new(RecognizerError::Dropped {
-                server: ServerUrl::default(),
-            }),
+            Box::new(RecognizerError::Dropped { speech: office() }),
             "Speech server hung up — Settings",
         ),
         (
-            Box::new(RecognizerError::NotUnderstood {
-                server: ServerUrl::default(),
-            }),
+            Box::new(RecognizerError::NotUnderstood { speech: office() }),
             "Bad speech server reply — Settings",
         ),
         (

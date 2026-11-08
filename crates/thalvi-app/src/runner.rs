@@ -532,8 +532,7 @@ impl Runner {
         let gate = InputGate::default();
         let metrics = recorder.metrics();
         let recognizer = Chosen::new(
-            &config.stt.engine,
-            &config.server,
+            config.stt.entries.active_live(),
             store,
             metrics.clone(),
             &config.stt.phrases,
@@ -559,11 +558,7 @@ impl Runner {
             Arc::clone(&self.level),
             self.audio.subscribe(),
         ));
-        if local.is_some() {
-            println!("Transcribing on this machine.");
-        } else {
-            println!("Transcribing through {}.", config.server);
-        }
+        println!("Transcribing through {}.", config.speech_source());
         Ok(Session {
             engine,
             local,

@@ -7,15 +7,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::capture::{CaptureLimits, EndingPauses, Endings};
 use crate::cues::Cues;
+use crate::entries::{Entries, EntryError, RawStt};
 use crate::history::HistoryConfig;
 use crate::hold::HoldKey;
 use crate::host::{App, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
-use crate::models::CatalogSpeech;
 use crate::phrases::WordList;
 use crate::recognizer::{ServerUrl, SpeechSource};
-use crate::secondary::SecondaryStt;
-use crate::transducer::SpeechChoice;
 use crate::wake::WakeConfig;
 
 /// Why the desktop config could not be used. Messages are shown to the user as written.
@@ -44,7 +42,6 @@ pub enum ConfigError {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(try_from = "RawDesktopConfig")]
 pub struct DesktopConfig {
-    pub server: ServerUrl,
     pub wake: WakeConfig,
     pub cues: Cues,
     pub ending_pause: EndingPauses,
@@ -75,8 +72,9 @@ pub struct DesktopConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawDesktopConfig {
+    /// The address a config written before the speech server list kept; read only to migrate it.
     #[serde(default)]
-    server: ServerUrl,
+    server: Option<ServerUrl>,
     #[serde(default)]
     wake: WakeConfig,
     #[serde(default, deserialize_with = "cues")]
@@ -88,7 +86,7 @@ struct RawDesktopConfig {
     #[serde(default)]
     endings: Endings,
     #[serde(default)]
-    stt: SttConfig,
+    stt: RawStt,
     #[serde(default)]
     apps: BTreeMap<String, RawApp>,
     #[serde(default)]
@@ -112,15 +110,10 @@ struct RawDesktopConfig {
 }
 
 impl DesktopConfig {
-    /// Where dictation is recognized, as the settings name it.
+    /// The active live entry, as errors and notices name it.
     #[must_use]
     pub fn speech_source(&self) -> SpeechSource {
-        match &self.stt.engine {
-            SttEngine::Server => SpeechSource::Server(self.server.clone()),
-            SttEngine::Local(choice) => SpeechSource::Local {
-                model: choice.label(),
-            },
-        }
+        self.stt.entries.active_live().source()
     }
 }
 
@@ -189,14 +182,17 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
             .microphone
             .map(|name| nonempty(&name, "microphone"))
             .transpose()?;
+        let (entries, phrases) = raw
+            .stt
+            .entries(raw.server)
+            .map_err(|error: EntryError| error.to_string())?;
         Ok(Self {
-            server: raw.server,
             wake: raw.wake,
             cues: raw.cues,
             ending_pause: raw.ending_pause,
             capture_limits: raw.capture_limits,
             endings: raw.endings,
-            stt: raw.stt,
+            stt: SttConfig { entries, phrases },
             apps,
             scripts,
             overlay: raw.overlay,
@@ -385,81 +381,12 @@ fn nonempty(value: &str, label: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
-/// Where dictation is recognized.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum SttEngine {
-    /// Streams audio to the Thalvi server's `/transcription` route.
-    #[default]
-    Server,
-    /// Recognizes on this machine; opens no server connection.
-    Local(SpeechChoice),
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum EngineName {
-    Server,
-    Local,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawStt {
-    #[serde(default)]
-    secondary: Option<SecondaryStt>,
-    #[serde(default)]
-    engine: Option<EngineName>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    phrases: WordList,
-}
-
-impl TryFrom<RawStt> for SttConfig {
-    type Error = String;
-
-    fn try_from(raw: RawStt) -> Result<Self, String> {
-        let engine = match (raw.engine, raw.model) {
-            (None | Some(EngineName::Server), None) => SttEngine::Server,
-            (None | Some(EngineName::Server), Some(_)) => {
-                return Err("stt.model only applies when stt.engine is local.".to_owned());
-            }
-            (Some(EngineName::Local), None) => {
-                SttEngine::Local(SpeechChoice::Catalog(CatalogSpeech::ALL[0]))
-            }
-            (Some(EngineName::Local), Some(model)) => {
-                let choice = if let Some(catalog) = CatalogSpeech::ALL
-                    .iter()
-                    .find(|catalog| catalog.name() == model)
-                {
-                    SpeechChoice::Catalog(*catalog)
-                } else if model.contains(['/', '\\']) {
-                    SpeechChoice::Folder(PathBuf::from(model))
-                } else {
-                    return Err(format!(
-                        "Unknown speech model \"{model}\". Use {} or the path of a folder holding encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.",
-                        CatalogSpeech::ALL.map(CatalogSpeech::name).join(", ")
-                    ));
-                };
-                SttEngine::Local(choice)
-            }
-        };
-        Ok(Self {
-            secondary: raw.secondary,
-            engine,
-            phrases: raw.phrases,
-        })
-    }
-}
-
 /// Speech-to-text settings.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
-#[serde(try_from = "RawStt")]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SttConfig {
-    /// Re-transcribes each accepted capture on this endpoint only when its `enabled` switch is on.
-    pub secondary: Option<SecondaryStt>,
-    pub engine: SttEngine,
-    /// Spellings recognition favours, on this computer and on a server whose recognizer boosts phrases.
+    /// The speech servers: the live one dictation uses, and the second passes that may replace its text.
+    pub entries: Entries,
+    /// Spellings recognition favours, on this computer and on a recognizer that boosts phrases.
     pub phrases: WordList,
 }
 
@@ -467,21 +394,12 @@ impl Serialize for SttConfig {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
         struct FileStt<'a> {
-            secondary: &'a Option<SecondaryStt>,
-            engine: &'static str,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            model: Option<String>,
+            entries: &'a Entries,
             #[serde(skip_serializing_if = "WordList::is_empty")]
             phrases: &'a WordList,
         }
-        let (engine, model) = match &self.engine {
-            SttEngine::Server => ("server", None),
-            SttEngine::Local(choice) => ("local", Some(choice.label())),
-        };
         FileStt {
-            secondary: &self.secondary,
-            engine,
-            model,
+            entries: &self.entries,
             phrases: &self.phrases,
         }
         .serialize(serializer)
@@ -491,7 +409,6 @@ impl Serialize for SttConfig {
 /// A config in the form of its file; `record` is never part of it.
 #[derive(Serialize)]
 struct FileForm<'a> {
-    server: &'a ServerUrl,
     wake: &'a WakeConfig,
     cues: &'a Cues,
     ending_pause: &'a EndingPauses,
@@ -577,7 +494,6 @@ impl Serialize for DesktopConfig {
             })
             .collect::<Result<Vec<_>, S::Error>>()?;
         FileForm {
-            server: &self.server,
             wake: &self.wake,
             cues: &self.cues,
             ending_pause: &self.ending_pause,
@@ -670,8 +586,10 @@ mod tests {
     use super::*;
     use crate::capture::{CaptureRoute, Ending};
     use crate::cues::Cue;
-    use crate::models::CatalogHead;
-    use crate::secondary::SecondaryApi;
+    use crate::entries::{LiveKind, SecondPassEntry};
+    use crate::models::{CatalogHead, CatalogSpeech};
+    use crate::secondary::{SecondaryApi, SecondaryStt};
+    use crate::transducer::SpeechChoice;
     use crate::wake::HeadModel;
 
     fn parse(json: &str) -> Result<DesktopConfig, ConfigError> {
@@ -681,12 +599,12 @@ mod tests {
     #[test]
     fn an_empty_config_uses_the_defaults() {
         let config = parse("{}").unwrap();
-        assert_eq!(
-            config.server,
-            ServerUrl::parse("ws://127.0.0.1:8080").unwrap()
-        );
         assert_eq!(config.stt, SttConfig::default());
-        assert_eq!(config.stt.secondary, None);
+        assert_eq!(
+            config.stt.entries.active_live().kind,
+            LiveKind::ThalviServer(ServerUrl::parse("ws://127.0.0.1:8080").unwrap())
+        );
+        assert_eq!(config.stt.entries.second_pass(), []);
         assert_eq!(config.wake, WakeConfig::default());
         assert_eq!(config.cues, Cues::default());
         assert_eq!(config.ending_pause, EndingPauses::default());
@@ -733,20 +651,25 @@ mod tests {
         ] {
             let config = parse(&json).unwrap();
             assert_eq!(
-                config.stt.secondary.as_ref().map(SecondaryStt::enabled),
+                config
+                    .stt
+                    .entries
+                    .second_pass()
+                    .first()
+                    .map(SecondPassEntry::ticked),
                 expected,
                 "{json}"
             );
             let written = serde_json::to_string(&config).unwrap();
             let again = parse(&written).unwrap();
-            assert_eq!(again.stt.secondary, config.stt.secondary, "{written}");
+            assert_eq!(again.stt.entries, config.stt.entries, "{written}");
             if expected == Some(false) {
-                assert!(written.contains(r#""enabled":false"#), "{written}");
+                assert!(written.contains(r#""active":false"#), "{written}");
                 assert!(written.contains("http://127.0.0.1:9/v1"), "{written}");
                 assert!(written.contains(r#""api_key":"k""#), "{written}");
             }
             if expected == Some(true) {
-                assert!(written.contains(r#""enabled":true"#), "{written}");
+                assert!(written.contains(r#""active":true"#), "{written}");
             }
         }
         let off_blank = parse(
@@ -754,7 +677,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            off_blank.stt.secondary.as_ref().map(SecondaryStt::enabled),
+            off_blank
+                .stt
+                .entries
+                .second_pass()
+                .first()
+                .map(SecondPassEntry::ticked),
             Some(false)
         );
         let on_blank =
@@ -779,30 +707,37 @@ mod tests {
 
     #[test]
     fn dictation_is_recognized_on_the_server_unless_a_local_model_is_chosen() {
-        for (json, engine) in [
-            (r#"{"stt": {"engine": "server"}}"#, SttEngine::Server),
+        for (json, kind) in [
+            (
+                r#"{"stt": {"engine": "server"}}"#,
+                LiveKind::ThalviServer(ServerUrl::default()),
+            ),
             (
                 r#"{"stt": {"engine": "local"}}"#,
-                SttEngine::Local(SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms)),
+                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms)),
             ),
             (
                 r#"{"stt": {"engine": "local", "model": "nemotron_160ms"}}"#,
-                SttEngine::Local(SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms)),
+                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms)),
             ),
             (
                 r#"{"stt": {"engine": "local", "model": "unified_160ms"}}"#,
-                SttEngine::Local(SpeechChoice::Catalog(CatalogSpeech::Unified160ms)),
+                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::Unified160ms)),
             ),
             (
                 r#"{"stt": {"engine": "local", "model": "/models/mine"}}"#,
-                SttEngine::Local(SpeechChoice::Folder("/models/mine".into())),
+                LiveKind::OnDevice(SpeechChoice::Folder("/models/mine".into())),
             ),
             (
                 r#"{"stt": {"engine": "local", "model": "C:\\models\\mine"}}"#,
-                SttEngine::Local(SpeechChoice::Folder("C:\\models\\mine".into())),
+                LiveKind::OnDevice(SpeechChoice::Folder("C:\\models\\mine".into())),
             ),
         ] {
-            assert_eq!(parse(json).unwrap().stt.engine, engine, "{json}");
+            assert_eq!(
+                parse(json).unwrap().stt.entries.active_live().kind,
+                kind,
+                "{json}"
+            );
         }
     }
 
@@ -842,13 +777,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            config.server,
-            ServerUrl::parse("wss://thalvi.example:9000").unwrap()
+            config.stt.entries.active_live().kind,
+            LiveKind::ThalviServer(ServerUrl::parse("wss://thalvi.example:9000").unwrap())
         );
         assert_eq!(
-            config.stt.secondary,
+            config
+                .stt
+                .entries
+                .second_pass()
+                .first()
+                .map(|entry| &entry.settings),
             Some(
-                SecondaryStt::new(
+                &SecondaryStt::new(
                     "http://127.0.0.1:9/v1",
                     "m",
                     String::new(),
