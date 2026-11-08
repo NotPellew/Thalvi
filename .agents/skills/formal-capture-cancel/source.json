@@ -1,5 +1,5 @@
 {
-  "sync_commit": "cb7007419cf3ada15adea927ec63b3c0ec1e5551",
+  "sync_commit": "e2dbc0fedd10cef90da38f9f0c45f5399d7da05e",
   "files": {
     "crates/thalvi-app/src/runner.rs": {
       "sha256": "bea0dea8bd1a0cb3f249afdb9f453cb2b29e0fbd19de7561307369e214429922",
