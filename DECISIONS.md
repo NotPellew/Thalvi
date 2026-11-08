@@ -234,6 +234,10 @@ areas your change touches. Editing rules are in
   history in CI and staged changes in a hook. Why: nothing else watched Rust advisories, the binaries link
   every crate, and on a public repo a pushed secret has leaked. Rejected: bans (nothing to ban), flagging
   unmaintained transitive crates (no upgrade exists), a hook that refuses when gitleaks is missing.
+- **Rust caches are saved only on `development`.** CI runs on pushes to `development` and saves the Rust
+  caches there; PRs, and mutation runs on the Linux one, only read them. Why: a PR can read only its own and its
+  base branch's caches, so per-PR copies left every new PR cold and filled the 10 GB limit. Rejected: saving on
+  every PR, saving on `main` (frozen, so its caches go stale and are evicted).
 - **Mutation testing advises on the diff.** cargo-mutants reports survivors in a PR's changed Rust as
   annotations, on Linux. Why: agents write code and tests, and it found real gaps, but it can't tell those from
   equivalent mutants. Rejected: a required gate, whole-workspace runs (3,197 mutants, about 18 hours on a CI runner), Windows runs.
