@@ -15,7 +15,7 @@ use tracing::Instrument;
 
 use crate::history::{self, HistoryMatch};
 use crate::model::{ChatEvent, ChatMessage, ChatModel, Role, ToolCall, ToolDefinition, ToolResult};
-use crate::recognizer::{Recognizer, RecognizerEvent, RecognizerFactory};
+use crate::recognizer::{Recognizer, RecognizerEvent, RecognizerFactory, validate_frame};
 use crate::recorder::{AudioBuffer, Recorder, RecordingConfig, start_recording};
 use crate::sentence::SentenceSplitter;
 use crate::store::{Attachment, Detach, SessionStore};
@@ -895,7 +895,7 @@ async fn recognizer_disconnected(
     if let Some(handle) = recognizer {
         handle.ready = false;
     }
-    tracing::warn!(%message, fatal, "recognizer disconnected");
+    tracing::warn!(fatal, "recognizer disconnected");
     let message = if fatal {
         format!(
             "Speech recognition stopped and won't retry: {message}. Check the speech settings, then tap Start again."
@@ -917,6 +917,10 @@ async fn recognizer_disconnected(
 
 /// Passes one mic frame to a ready recognizer, keeping it for turn clips.
 fn forward_mic(audio: &[u8], recognizer: Option<&RecognizerHandle>, turn_log: &mut TurnLog) {
+    if let Err(reason) = validate_frame(audio) {
+        tracing::debug!(bytes = audio.len(), reason, "mic frame refused");
+        return;
+    }
     let forwarded = recognizer
         .is_some_and(|handle| handle.ready && handle.audio_tx.try_send(audio.to_vec()).is_ok());
     if !forwarded {
@@ -1377,7 +1381,7 @@ async fn handle_reply_event(
             send_task_step(sink, &step).await;
         }
         ReplyEvent::Failed(message) => {
-            tracing::warn!(%message, "reply failed");
+            tracing::warn!("reply failed");
             if let Some(active) = reply.take() {
                 record_assistant_history(history, &active, false);
                 emit_reply_record(&turn_log.recorder, &active, "failed", Some(&message));

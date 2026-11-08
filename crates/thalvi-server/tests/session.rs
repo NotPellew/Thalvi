@@ -869,6 +869,73 @@ async fn fatal_recognizer_error_is_not_retried() {
 }
 
 #[tokio::test]
+async fn provider_errors_reach_the_user_but_not_the_log() {
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    for (failing, provider_text, logged) in [
+        (
+            "recognizer",
+            "PROVIDER_ECHO_of_what_the_user_said",
+            "recognizer disconnected",
+        ),
+        ("model", "model blew up", "reply failed"),
+        ("speech", "tts blew up", "reply failed"),
+    ] {
+        let log = CapturedLog::default();
+        let writer = log.clone();
+        let _logging = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .finish(),
+        );
+        let mut harness = start().await;
+        voice_on(&mut harness).await;
+        match failing {
+            "recognizer" => harness
+                .factory
+                .push(0, Err(RecognizerError::Fatal(provider_text.to_string()))),
+            "model" => {
+                harness.model.add_script(vec![ModelChunk::Fail]);
+                harness.factory.complete_turn(0, "a question");
+            }
+            _ => {
+                harness
+                    .model
+                    .add_script(vec![ModelChunk::Delta("Hello there.".to_string())]);
+                harness.tts.add_script(TtsScript::Fail);
+                harness.factory.complete_turn(0, "a question");
+            }
+        }
+        let received = collect_until(
+            &mut harness.client,
+            |item| matches!(item, Received::Json(v) if v["type"] == "error"),
+        )
+        .await;
+        assert!(
+            received.iter().any(|item| matches!(item, Received::Json(v) if v["message"].as_str().is_some_and(|m| m.contains(provider_text)))),
+            "{failing}: {received:?}"
+        );
+        harness.server.abort();
+        let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains(logged), "{failing}: {log}");
+        assert!(!log.contains(provider_text), "{failing}: {log}");
+    }
+}
+
+#[tokio::test]
 async fn next_turn_history_includes_the_cut_off_reply_text() {
     let mut harness = start().await;
     voice_on(&mut harness).await;
@@ -966,6 +1033,22 @@ async fn audio_before_recognizer_ready_is_discarded_and_state_goes_starting_then
         .unwrap();
     wait_until(|| harness.factory.audio_received().len() == 1).await;
     assert_eq!(harness.factory.audio_received()[0], vec![9_u8; 3840]);
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn mic_frames_that_are_not_bounded_pcm_never_reach_the_recognizer() {
+    let mut harness = start().await;
+    voice_on(&mut harness).await;
+    for frame in [vec![], vec![1_u8; 3], vec![1_u8; 48_002], vec![2_u8; 3840]] {
+        harness
+            .client
+            .send(ClientMessage::Binary(frame.into()))
+            .await
+            .unwrap();
+    }
+    wait_until(|| !harness.factory.audio_received().is_empty()).await;
+    assert_eq!(harness.factory.audio_received(), vec![vec![2_u8; 3840]]);
     harness.server.abort();
 }
 

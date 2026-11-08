@@ -532,8 +532,14 @@ impl ModelStore {
         let mut total = 0;
         let written = async {
             while let Some(chunk) = response.chunk().await.map_err(net)? {
-                hasher.update(&chunk);
                 total += chunk.len() as u64;
+                if total > asset.size {
+                    return Err(ModelError::Checksum {
+                        kind: asset.kind,
+                        file: asset.file_name.to_owned(),
+                    });
+                }
+                hasher.update(&chunk);
                 received(total);
                 tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
                     .await

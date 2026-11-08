@@ -8,6 +8,20 @@ use crate::phrases::PhraseStore;
 
 pub use thalvi_asr::Event as RecognizerEvent;
 
+/// The largest audio frame a client may send: one second of 24 kHz mono s16le.
+pub const MAX_FRAME_BYTES: usize = 48_000;
+
+/// Accepts a client audio frame only when it is whole s16le samples, at most one second.
+///
+/// # Errors
+/// Returns a plain-words reason for an empty, oversized or odd-length frame.
+pub fn validate_frame(audio: &[u8]) -> Result<(), String> {
+    if audio.is_empty() || audio.len() > MAX_FRAME_BYTES || !audio.len().is_multiple_of(2) {
+        return Err("Send at most one second of 24 kHz mono s16le audio at a time.".to_string());
+    }
+    Ok(())
+}
+
 /// A recognizer connection failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecognizerError {
