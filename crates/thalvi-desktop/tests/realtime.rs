@@ -153,9 +153,6 @@ async fn a_recognizer_that_does_not_announce_boosting_never_sees_the_word_list()
 
 #[tokio::test]
 async fn a_failed_entry_says_which_one_and_never_shows_its_key() {
-    let unused = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let closed_port = format!("ws://{}", unused.local_addr().expect("address"));
-    drop(unused);
     let hangs_up = serve(|mut socket| async move {
         socket.next().await.unwrap().unwrap();
         socket.send(Message::Close(None)).await.unwrap();
@@ -184,6 +181,10 @@ async fn a_failed_entry_says_which_one_and_never_shows_its_key() {
     })
     .await;
 
+    // Freed only once every fake above holds its port, so the system cannot hand it to one of them.
+    let unused = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let closed_port = format!("ws://{}", unused.local_addr().expect("address"));
+    drop(unused);
     let mut errors = Vec::new();
     for address in [&closed_port, &hangs_up, &forbids, &rejects, &babbles] {
         let error = tokio::time::timeout(WAIT, recognizer(address, &[]).connect())
