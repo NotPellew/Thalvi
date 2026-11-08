@@ -34,6 +34,15 @@ when the switch was off), still polling cancellation first, and the recognizer
 errors name their entry. `drive` times the recognizer's first words and each final
 result against the speech heard (`Heard`) for the metrics. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
+The GNOME host (#267) changed `delivery.rs` and `runner.rs` without changing that:
+`Delivery::type_in` returns `Delivered::InWindow` or `Delivered::OnClipboard` from the
+same `Delivery::finish` admission, so a clipboard-only desktop is another admitted host
+action and a cancelled capture still never reaches it. `Runner::capture` now calls
+`Publisher::woke` before `drive`, which only sets the view's `copies` and `target`.
+A wake capture whose whole text is a task now arms the task ending itself; it
+reaches `Engine::conclude` through the same `Done::Accepted`, so that is unchanged too.
+The offline-model fix (#272) added a `RecognizerError::Model` variant, raised while the
+local model's files are fetched and so before any `RecognizerSession` exists.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

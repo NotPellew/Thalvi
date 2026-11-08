@@ -1,6 +1,6 @@
 //! Scripted task decisions and their execution through the desktop host.
 
-use crate::config::{DesktopConfig, ScriptAction};
+use crate::config::{Script, ScriptAction};
 use crate::host::{App, Host, HostError, WebUrl};
 use crate::report::UserError;
 
@@ -40,9 +40,9 @@ const DISCORD_OFF: &str = "Discord messages are switched off for now. Nothing wa
 ///
 /// # Errors
 /// [`NotConfigured`] when the text matches no script and is not a valid `open` request.
-pub fn decide(text: &str, config: &DesktopConfig) -> Result<Task, NotConfigured> {
+pub fn decide(text: &str, scripts: &[Script]) -> Result<Task, NotConfigured> {
     let spoken = normalize(text);
-    for script in &config.scripts {
+    for script in scripts {
         match &script.action {
             ScriptAction::DiscordMessage { destination } => {
                 let prefix = format!("{} ", script.phrase);
@@ -189,6 +189,7 @@ fn has_bad_percent(candidate: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DesktopConfig;
     use crate::delivery::fakes::FakeHost;
 
     fn config() -> DesktopConfig {
@@ -225,7 +226,7 @@ mod tests {
             ", open the project page",
         ] {
             assert_eq!(
-                decide(spoken, &config),
+                decide(spoken, &config.scripts),
                 Ok(open(
                     "https://github.com/NotPellew/Thalvi",
                     "the project page"
@@ -233,7 +234,7 @@ mod tests {
                 "{spoken}"
             );
         }
-        let focus = decide("Switch to Editor.", &config).unwrap();
+        let focus = decide("Switch to Editor.", &config.scripts).unwrap();
         let Task::FocusApp { app, label } = focus else {
             panic!("expected a focus task");
         };
@@ -301,7 +302,7 @@ mod tests {
             ("open\u{7f}example.com", None),
         ] {
             let expected = expected.map(|(url, label)| open(url, label));
-            assert_eq!(decide(spoken, &config).ok(), expected, "{spoken:?}");
+            assert_eq!(decide(spoken, &config.scripts).ok(), expected, "{spoken:?}");
         }
     }
 
@@ -314,7 +315,10 @@ mod tests {
             label: "Demo".to_owned(),
         };
         assert_eq!(
-            decide("Message the demo channel saying  Hello There ", &config),
+            decide(
+                "Message the demo channel saying  Hello There ",
+                &config.scripts
+            ),
             Ok(message("Hello There"))
         );
         for spoken in [
@@ -322,7 +326,11 @@ mod tests {
             "message the demo channel saying   ",
             "message the demo channel",
         ] {
-            assert_eq!(decide(spoken, &config), Err(NotConfigured), "{spoken:?}");
+            assert_eq!(
+                decide(spoken, &config.scripts),
+                Err(NotConfigured),
+                "{spoken:?}"
+            );
         }
     }
 
@@ -333,12 +341,12 @@ mod tests {
             execute(&open("https://example.com/", "example.com"), &host).as_deref(),
             Ok("Asked the browser to open example.com.")
         );
-        let focus = decide("switch to editor", &config()).unwrap();
+        let focus = decide("switch to editor", &config().scripts).unwrap();
         assert_eq!(
             execute(&focus, &host).as_deref(),
             Ok("Focused switch to editor.")
         );
-        let discord = decide("message the demo channel saying hi", &config()).unwrap();
+        let discord = decide("message the demo channel saying hi", &config().scripts).unwrap();
         assert!(matches!(
             execute(&discord, &host),
             Err(HostError::Unsupported(_))

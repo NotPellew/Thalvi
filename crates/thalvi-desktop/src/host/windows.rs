@@ -129,6 +129,12 @@ impl Windows {
     pub fn show_error(title: &str, message: &str) {
         win32::message_box(title, message);
     }
+
+    /// Shows or hides the overlay window `window` without activating it, which Tauri's `show`
+    /// would.
+    pub fn set_overlay_visible(window: Hwnd, visible: bool) {
+        win32::set_visible_unfocused(window, visible);
+    }
 }
 
 impl<A: Win32> Windows<A> {
@@ -301,8 +307,9 @@ impl<A: Win32> Host for Windows<A> {
     }
 
     fn prepare_overlay(&self, _width: f64, _height: f64) -> Result<f64, HostError> {
-        // Tauri's non-focusable window (WS_EX_NOACTIVATE) already never takes focus; the app
-        // sizes and positions it below the taskbar with the top returned here.
+        // The app shows the window with `set_overlay_visible`, because tao's `show` activates it
+        // despite WS_EX_NOACTIVATE; it sizes and positions it below the taskbar with the top
+        // returned here.
         self.api.work_area_top().ok_or_else(|| {
             HostError::Unsupported("Windows did not say where the taskbar is.".to_owned())
         })

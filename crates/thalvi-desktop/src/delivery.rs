@@ -215,7 +215,7 @@ where
     }
 
     async fn run_task(&self, recorder: &Recorder, config: &DesktopConfig, text: &str) -> Finished {
-        let task = match tasks::decide(text, config) {
+        let task = match tasks::decide(text, &config.scripts) {
             Ok(task) => task,
             Err(error) => {
                 return self.keep(recorder, text, &error).await;

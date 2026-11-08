@@ -444,6 +444,8 @@ fn create_windows(app: &AppHandle) -> tauri::Result<()> {
             .title("Thalvi settings")
             .inner_size(780.0, 680.0)
             .visible(false)
+            // Built at start, when a login start may hold the foreground; `show_settings` focuses it.
+            .focused(false)
             .build()?;
     let window = settings.clone();
     settings.on_window_event(move |event| {

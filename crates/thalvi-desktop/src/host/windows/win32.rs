@@ -37,10 +37,10 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetMessageW,
     GetWindow, GetWindowLongW, GetWindowThreadProcessId, HC_ACTION, IsIconic, IsWindow,
     IsWindowVisible, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, MB_ICONERROR, MB_OK, MSG,
-    MessageBoxW, PostThreadMessageW, SPI_GETWORKAREA, SW_RESTORE, SW_SHOWNORMAL,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SetWindowsHookExW, ShowWindow,
-    SystemParametersInfoW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WS_EX_TOOLWINDOW,
+    MessageBoxW, PostThreadMessageW, SPI_GETWORKAREA, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE,
+    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SetWindowsHookExW,
+    ShowWindow, SystemParametersInfoW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+    WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WS_EX_TOOLWINDOW,
 };
 use ::windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
@@ -63,6 +63,13 @@ impl Drop for Owned {
         // SAFETY: the handle came from a successful open call and is closed exactly once, here.
         let _ = unsafe { CloseHandle(self.0) };
     }
+}
+
+/// Shows `window` without activating it, or hides it.
+pub(super) fn set_visible_unfocused(window: Hwnd, visible: bool) {
+    let command = if visible { SW_SHOWNOACTIVATE } else { SW_HIDE };
+    // SAFETY: ShowWindow only acts on a window handle; a stale handle makes it fail harmlessly.
+    let _ = unsafe { ShowWindow(handle(window), command) };
 }
 
 /// Who runs process `pid`, or `None` when it is gone or Windows will not say.
@@ -529,5 +536,51 @@ impl Win32 for Real {
         // SAFETY: GetDpiForSystem takes no arguments.
         let dpi = unsafe { GetDpiForSystem() };
         Some(f64::from(area.top) * 96.0 / f64::from(dpi.max(96)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ::windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
+    use ::windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, WS_EX_NOACTIVATE, WS_POPUP,
+    };
+
+    use super::*;
+
+    #[test]
+    fn a_non_activating_window_shows_without_becoming_active() {
+        // SAFETY: STATIC is a system window class, so no module handle or registration is needed.
+        let window = unsafe {
+            CreateWindowExW(
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!("Thalvi test"),
+                WS_POPUP,
+                0,
+                0,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("the test window is created");
+        let window_id = window.0 as Hwnd;
+        // SAFETY: the calls only read the state of the window this test owns.
+        let visible = || unsafe { IsWindowVisible(window).as_bool() };
+        // SAFETY: GetActiveWindow takes no arguments.
+        let active = || unsafe { GetActiveWindow() } == window;
+
+        set_visible_unfocused(window_id, true);
+        let shown = (visible(), active());
+        set_visible_unfocused(window_id, false);
+        let hidden = visible();
+        // SAFETY: the window belongs to this thread and is not used afterwards.
+        unsafe { DestroyWindow(window) }.expect("the test window is destroyed");
+
+        assert_eq!((shown, hidden), ((true, false), false));
     }
 }
