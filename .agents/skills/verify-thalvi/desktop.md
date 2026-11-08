@@ -128,6 +128,13 @@ only loopback, so nothing leaves the machine and abstract unix sockets are the r
 - Say the wake phrase, wait until `$H ctl $R status` shows `capturing`, wait about two
   seconds more (the app does not listen during its wake cue), then say the dictation. Sound
   played into the microphone before that is lost.
+- Synthesize speech with Piper's `en_US-ryan-high` voice; espeak-ng and flite voices
+  score near 0 on `hey_thalvi` and don't wake it. Voice:
+  `https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/high/en_US-ryan-high.onnx`
+  plus its `.json`. Then `printf 'Hey Thalvi.' | uvx --from piper-tts==1.8.0 piper -m
+  en_US-ryan-high.onnx -f raw.wav` and `ffmpeg -i raw.wav -ar 16000 -ac 1 -sample_fmt s16 wake.wav`.
+- `say` holds a file while the app isn't reading the microphone, so a file can play late,
+  into the next case. Wait until `$R/home/mic-queue` is empty before starting a case.
 - `pw-link -l` and `pw-cli ls Node` in `$H sh $R` with `PIPEWIRE_REMOTE=rig-pipewire` show
   that the app reads only `rig-mic`.
 
