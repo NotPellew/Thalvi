@@ -401,7 +401,7 @@ function endingsTable({ draft, controls }: PageContext): HTMLElement {
     controls.touched();
     render();
   });
-  return el("div", { class: "stack wide" }, list, el("div", { class: "trow add" }, phrase.node, action.node, add), problem);
+  return el("div", { class: "stack wide" }, list, el("div", { class: "trow add phrase-add" }, phrase.node, action.node, add), problem);
 }
 
 /** The word list as chips with a remove button each, and one box whose + (or Enter) adds its word. */

@@ -56,6 +56,8 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .trow.add { justify-content: flex-end; }
 .trow.add input { flex: 1; max-width: 16em; }
 .trow.add.word-add { justify-content: flex-start; }
+.trow.add.phrase-add { justify-content: flex-start; }
+.trow.add.phrase-add input { max-width: none; }
 .trow.check input { flex: 1; }
 .card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
 .card legend { font: 700 12px var(--mono); color: var(--neon); padding: 0 6px; }
@@ -130,6 +132,9 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
   .table .trow:not(.add) { flex-wrap: wrap; }
   .table .trow:not(.add) .phrase { flex-basis: 100%; }
   .table .trow:not(.add) select { flex: 1; }
+  .trow.add.phrase-add { flex-wrap: wrap; }
+  .trow.add.phrase-add input { flex-basis: 100%; }
+  .trow.add.phrase-add select { flex: 1; }
 }
 
 @media (max-width: 360px) {
