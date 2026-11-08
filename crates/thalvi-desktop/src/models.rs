@@ -205,6 +205,7 @@ pub struct WakeModelInfo {
 pub enum CatalogSpeech {
     Nemotron160ms,
     Unified160ms,
+    ParakeetTdtV3,
 }
 
 /// A catalog model's files, which a model folder must also contain under these names.
@@ -273,8 +274,8 @@ macro_rules! speech_assets {
     };
 }
 
-/// The languages on NVIDIA's card for the unified model.
-const UNIFIED_LANGUAGES: [&str; 25] = [
+/// The languages on NVIDIA's cards for the unified and Parakeet models.
+const EUROPEAN_LANGUAGES: [&str; 25] = [
     "Bulgarian",
     "Croatian",
     "Czech",
@@ -303,7 +304,7 @@ const UNIFIED_LANGUAGES: [&str; 25] = [
 ];
 
 impl CatalogSpeech {
-    pub const ALL: [Self; 2] = [Self::Nemotron160ms, Self::Unified160ms];
+    pub const ALL: [Self; 3] = [Self::Nemotron160ms, Self::Unified160ms, Self::ParakeetTdtV3];
 
     /// The catalog model called `name` in config.
     #[must_use]
@@ -316,6 +317,7 @@ impl CatalogSpeech {
         match self {
             Self::Nemotron160ms => "Nemotron Streaming",
             Self::Unified160ms => "Nemotron Unified",
+            Self::ParakeetTdtV3 => "Parakeet TDT",
         }
     }
 
@@ -328,6 +330,9 @@ impl CatalogSpeech {
             Self::Unified160ms => {
                 "From NVIDIA: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it needs a fast CPU and text appears about half a second later. Exported by Thalvi."
             }
+            Self::ParakeetTdtV3 => {
+                "From NVIDIA: light on the CPU, with punctuation and capitals. Text may change while you speak and settles when you pause. More word errors than Nemotron Unified in German and Spanish."
+            }
         }
     }
 
@@ -337,6 +342,7 @@ impl CatalogSpeech {
         match self {
             Self::Nemotron160ms => "NVIDIA Open Model License",
             Self::Unified160ms => "OpenMDW-1.1",
+            Self::ParakeetTdtV3 => "CC BY 4.0",
         }
     }
 
@@ -345,7 +351,7 @@ impl CatalogSpeech {
     pub fn languages(self) -> &'static [&'static str] {
         match self {
             Self::Nemotron160ms => &["English"],
-            Self::Unified160ms => &UNIFIED_LANGUAGES,
+            Self::Unified160ms | Self::ParakeetTdtV3 => &EUROPEAN_LANGUAGES,
         }
     }
 
@@ -357,6 +363,7 @@ impl CatalogSpeech {
                 "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25"
             }
             Self::Unified160ms => "https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b",
+            Self::ParakeetTdtV3 => "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
         }
     }
 
@@ -366,13 +373,14 @@ impl CatalogSpeech {
         match self {
             Self::Nemotron160ms => "nemotron_160ms",
             Self::Unified160ms => "unified_160ms",
+            Self::ParakeetTdtV3 => "parakeet_tdt_v3",
         }
     }
 
-    /// The downloads that provide this model, each pinned by size and checksum. The Nemotron
-    /// Speech Streaming ones (NVIDIA Open Model License) are sherpa-onnx's int8 exports, pinned by
-    /// repository commit; Nemotron Unified ASR (OpenMDW-1.1) is Thalvi's own export, which is not
-    /// published anywhere else.
+    /// The downloads that provide this model, each pinned by size and checksum. Nemotron Speech
+    /// Streaming (NVIDIA Open Model License) and Parakeet TDT (CC BY 4.0) are sherpa-onnx's int8
+    /// exports, pinned by repository commit; Nemotron Unified ASR (OpenMDW-1.1) is Thalvi's own
+    /// export, which is not published anywhere else.
     #[must_use]
     pub fn assets(self) -> SpeechAssets<'static> {
         match self {
@@ -414,6 +422,26 @@ impl CatalogSpeech {
                 (
                     42_928,
                     "94139a0b2134fd40664ca72260026fa8a073336bb2f062239c8ecde2c8031763"
+                )
+            ),
+            Self::ParakeetTdtV3 => speech_assets!(
+                "parakeet_tdt_v3",
+                "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/ed5d745623472f97cfc2e6c2916ee248798fc5a8/",
+                (
+                    652_282_294,
+                    "1afbe69c1ffdabee94755f42e4daf1d93549131a3da11356bda84fcef0f2c479"
+                ),
+                (
+                    11_845_274,
+                    "0222a86147299d4dee90edf95b6d13827edb42ad8b7c9cf0b2582f030937c0b5"
+                ),
+                (
+                    6_355_277,
+                    "cbd02f3696e9944970111fb439d9c3fd365a80374565f13f2b9c7007d253fc98"
+                ),
+                (
+                    93_939,
+                    "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
                 )
             ),
         }

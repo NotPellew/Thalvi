@@ -725,6 +725,10 @@ mod tests {
                 LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::Unified160ms)),
             ),
             (
+                r#"{"stt": {"engine": "local", "model": "parakeet_tdt_v3"}}"#,
+                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ParakeetTdtV3)),
+            ),
+            (
                 r#"{"stt": {"engine": "local", "model": "/models/mine"}}"#,
                 LiveKind::OnDevice(SpeechChoice::Folder("/models/mine".into())),
             ),
@@ -1032,7 +1036,7 @@ mod tests {
             ),
             (
                 r#"{"stt": {"engine": "local", "model": "whisper"}}"#,
-                "Unknown speech model \"whisper\". Use nemotron_160ms, unified_160ms or the path of a folder",
+                "Unknown speech model \"whisper\". Use nemotron_160ms, unified_160ms, parakeet_tdt_v3 or the path of a folder",
             ),
             (r#"{"stt": {"engine": "cloud"}}"#, "unknown variant `cloud`"),
         ] {

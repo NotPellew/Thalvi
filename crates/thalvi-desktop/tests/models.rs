@@ -484,6 +484,14 @@ async fn the_catalog_lists_each_model_with_its_size_license_languages_source_and
                 25,
                 "https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b"
             ),
+            (
+                "parakeet_tdt_v3",
+                "Parakeet TDT",
+                670_576_784,
+                "CC BY 4.0",
+                25,
+                "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3"
+            ),
         ]
     );
     assert!(models.iter().all(|model| !model.cached));
