@@ -12,7 +12,7 @@
       ]
     },
     "crates/thalvi-desktop/src/engine.rs": {
-      "sha256": "4cd161c5fafd4f5b208990328f1249f3038d878014a8da318471067aa0058a3c",
+      "sha256": "29f9e4113e576d6eae304eb8e5582e42fc74249d440b3e60617b393ba22e4262",
       "functions": [
         "EngineHandle::cancel",
         "Engine::capture",

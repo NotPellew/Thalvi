@@ -4723,6 +4723,7 @@ async fn a_heard_ending_the_transcript_lacks_is_told_once_after_the_quiet_interv
                 rig.open().await;
                 rig.feed_until(920, Quiet).await;
                 assert_eq!(spot.received(), HEARD_AT_FRAME, "{name}");
+                assert_eq!(spot.resets(), 1, "{name}: each wake starts a fresh search");
                 rig.play(&script).await;
                 rig.feed_until(notice_at - 1, Quiet).await;
                 assert_eq!(

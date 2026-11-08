@@ -51,6 +51,9 @@ and delivery admission, so the cancellation model is unchanged.
 The spotter loader now accepts its load future, like the wake loader, so tests
 exercise download status and both load outcomes. The future is still awaited at
 the same pre-capture boundary; the mapped cancellation functions are unchanged.
+`SpotStats::record` now owns the same synchronous capture-summary metric calculation,
+so exact durations and the zero-frame case can be tested. `close_spotting` still
+records it before the ending cue; all mapped functions remain byte-for-byte unchanged.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

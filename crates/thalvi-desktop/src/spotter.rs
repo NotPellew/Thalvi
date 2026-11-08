@@ -421,6 +421,16 @@ struct Path {
 }
 
 impl Path {
+    fn best(paths: &[Self]) -> Option<&Self> {
+        paths.iter().reduce(|best, path| {
+            if best.log_prob < path.log_prob {
+                path
+            } else {
+                best
+            }
+        })
+    }
+
     fn start() -> Self {
         Self {
             tokens: vec![-1, 0],
@@ -858,16 +868,7 @@ impl OnnxSpotter {
                 next.push(path);
             }
         }
-        let best = next
-            .iter()
-            .reduce(|best, path| {
-                if best.log_prob < path.log_prob {
-                    path
-                } else {
-                    best
-                }
-            })
-            .cloned();
+        let best = Path::best(&next).cloned();
         self.paths = next;
         let Some(best) = best else {
             return Ok(None);
@@ -924,17 +925,7 @@ impl OnnxSpotter {
             }
             self.decoded += 1;
         }
-        self.trailing_blanks = self
-            .paths
-            .iter()
-            .reduce(|best, path| {
-                if best.log_prob < path.log_prob {
-                    path
-                } else {
-                    best
-                }
-            })
-            .map_or(0, |best| best.trailing_blanks);
+        self.trailing_blanks = Path::best(&self.paths).map_or(0, |best| best.trailing_blanks);
         Ok(hit)
     }
 }
@@ -968,6 +959,50 @@ impl KeywordSpotter for OnnxSpotter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spotter_failures_name_the_part_that_failed_for_the_user() {
+        for (error, headline) in [
+            (
+                SpotterError::Phrases(vec![Unspeakable {
+                    phrase: "f\u{fc}ge ein".to_owned(),
+                    characters: "\u{dc}".to_owned(),
+                }]),
+                "Ending phrases can't be heard",
+            ),
+            (
+                SpotterError::Model(ModelError::Checksum {
+                    kind: crate::models::ModelKind::Spotter,
+                    file: "encoder.onnx".to_owned(),
+                }),
+                "Downloaded model was damaged",
+            ),
+            (
+                SpotterError::Runtime("runtime unavailable".to_owned()),
+                "Phrase detector won't start",
+            ),
+            (
+                SpotterError::Load {
+                    file: "encoder.onnx".to_owned(),
+                    reason: "missing file".to_owned(),
+                },
+                "Phrase model can't be loaded",
+            ),
+            (
+                SpotterError::Unsupported {
+                    file: "encoder.onnx".to_owned(),
+                    reason: "wrong shape".to_owned(),
+                },
+                "Phrase model can't be used",
+            ),
+            (
+                SpotterError::Inference("failed frame".to_owned()),
+                "Phrase detection failed",
+            ),
+        ] {
+            assert_eq!(error.headline(), headline, "{error}");
+        }
+    }
 
     #[test]
     fn a_state_machine_boosts_phrases_and_recognises_them_through_shared_prefixes() {
@@ -1014,6 +1049,361 @@ mod tests {
         out
     }
 
+    /// Raw fields of the pinned models, to alter declarations without altering their weights.
+    fn model_fields(mut bytes: &[u8]) -> Vec<(u64, &[u8], &[u8])> {
+        fn number(bytes: &mut &[u8]) -> u64 {
+            let mut value = 0;
+            for shift in (0..64).step_by(7) {
+                let (&byte, rest) = bytes.split_first().unwrap();
+                *bytes = rest;
+                value |= u64::from(byte & 127) << shift;
+                if byte < 128 {
+                    return value;
+                }
+            }
+            panic!("invalid field in the pinned fixture");
+        }
+        let mut out = Vec::new();
+        while !bytes.is_empty() {
+            let start = bytes;
+            let key = number(&mut bytes);
+            let payload = match key & 7 {
+                0 => {
+                    number(&mut bytes);
+                    &[][..]
+                }
+                2 => {
+                    let len = usize::try_from(number(&mut bytes)).unwrap();
+                    let (payload, rest) = bytes.split_at(len);
+                    bytes = rest;
+                    payload
+                }
+                wire => panic!("unexpected fixture wire type {wire}"),
+            };
+            out.push((key >> 3, &start[..start.len() - bytes.len()], payload));
+        }
+        out
+    }
+
+    fn model_metadata(bytes: &[u8], key: &str, value: &str) -> Vec<u8> {
+        let mut changed = false;
+        let out = model_fields(bytes)
+            .into_iter()
+            .flat_map(|(tag, raw, payload)| {
+                if tag == 14
+                    && model_fields(payload)
+                        .iter()
+                        .any(|(tag, _, data)| *tag == 1 && *data == key.as_bytes())
+                {
+                    changed = true;
+                    field(
+                        14,
+                        &[field(1, key.as_bytes()), field(2, value.as_bytes())].concat(),
+                    )
+                } else {
+                    raw.to_vec()
+                }
+            })
+            .collect();
+        assert!(changed, "missing model metadata {key}");
+        out
+    }
+
+    fn model_graph(bytes: &[u8], change: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
+        model_fields(bytes)
+            .into_iter()
+            .flat_map(|(tag, raw, payload)| {
+                if tag == 7 {
+                    field(7, &change(payload))
+                } else {
+                    raw.to_vec()
+                }
+            })
+            .collect()
+    }
+
+    fn model_without_last_output(bytes: &[u8]) -> Vec<u8> {
+        model_graph(bytes, |graph| {
+            let fields = model_fields(graph);
+            let last = fields.iter().rposition(|(tag, _, _)| *tag == 12).unwrap();
+            fields
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| *index != last)
+                .flat_map(|(_, (_, raw, _))| raw.iter().copied())
+                .collect()
+        })
+    }
+
+    fn model_with_extra_input(bytes: &[u8]) -> Vec<u8> {
+        model_graph(bytes, |graph| {
+            let input = model_fields(graph)
+                .into_iter()
+                .find(|(tag, _, _)| *tag == 11)
+                .unwrap()
+                .2;
+            let renamed: Vec<u8> = model_fields(input)
+                .into_iter()
+                .flat_map(|(tag, raw, _)| {
+                    if tag == 1 {
+                        field(1, b"unused_for_layout_test")
+                    } else {
+                        raw.to_vec()
+                    }
+                })
+                .collect();
+            [graph, &field(11, &renamed)].concat()
+        })
+    }
+
+    async fn network_fixture() -> (Files, usize) {
+        let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
+        let store = ModelStore::in_dir(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(target)
+                .join("tmp/models"),
+        );
+        let files = Files {
+            encoder: store.fetch(&models::SPOTTER.encoder).await.unwrap(),
+            decoder: store.fetch(&models::SPOTTER.decoder).await.unwrap(),
+            joiner: store.fetch(&models::SPOTTER.joiner).await.unwrap(),
+        };
+        let pieces = read_pieces(
+            &std::fs::read(store.fetch(&models::SPOTTER.pieces).await.unwrap()).unwrap(),
+        )
+        .unwrap();
+        (files, pieces.count)
+    }
+
+    #[tokio::test]
+    async fn a_completed_phrase_requires_two_blanks_and_includes_the_exact_confidence_boundary() {
+        let (files, vocab) = network_fixture().await;
+        let mut network = Network::load(&files, vocab).unwrap();
+        let caches = network.layouts.iter().map(Layout::zeros).collect();
+        let (activations, _) = network
+            .encode(vec![0.0; network.window * KALDI_BINS], caches)
+            .unwrap();
+        let graph = Graph::new(&[vec![1, 2]]);
+        let state = graph.step(graph.step(ROOT, 1).1, 2).1;
+        let mut spotter = OnnxSpotter {
+            caches: network.layouts.iter().map(Layout::zeros).collect(),
+            network,
+            graph,
+            phrases: vec![("two tokens".to_owned(), Ending::Paste)],
+            unknown: None,
+            fbank: KaldiFbank::new(),
+            features: std::collections::VecDeque::new(),
+            paths: Vec::new(),
+            trailing_blanks: 0,
+            decoded: 0,
+        };
+        for (probabilities, blanks, accepted) in [
+            ([0.2, 0.2], 1, false),
+            ([0.2, 0.3], 0, false),
+            ([0.2, 0.3], 1, true),
+            ([0.4, 0.6], 1, true),
+        ] {
+            spotter.paths = vec![Path {
+                tokens: vec![-1, 0, 1, 2],
+                frames: vec![2, 5],
+                probabilities: probabilities.to_vec(),
+                log_prob: -3.0,
+                trailing_blanks: blanks,
+                state,
+            }];
+            let heard = spotter
+                .advance(&activations[..spotter.network.dim], 7)
+                .unwrap();
+            assert_eq!(heard.is_some(), accepted, "{probabilities:?}, {blanks}");
+            if let Some(hit) = heard {
+                assert_eq!((hit.start_sample, hit.end_sample), (1280, 3840));
+                assert_eq!(
+                    (hit.phrase.as_str(), hit.ending),
+                    ("two tokens", Ending::Paste)
+                );
+                assert_eq!(hit.confidence, probabilities.iter().sum::<f32>() / 2.0);
+            }
+        }
+        spotter.reset();
+        spotter
+            .features
+            .resize(spotter.network.window - 7, [0.0; KALDI_BINS]);
+        assert!(
+            spotter
+                .push(&[0; crate::frame::FRAME_SAMPLES])
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            spotter.decoded, 0,
+            "a complete window waits for the next feature"
+        );
+        spotter.features = std::iter::repeat_n([0.0; KALDI_BINS], spotter.network.window).collect();
+        spotter.paths = vec![Path {
+            tokens: vec![-1, 0, 1],
+            frames: vec![2],
+            probabilities: vec![0.1],
+            log_prob: 0.0,
+            trailing_blanks: 34,
+            state: spotter.graph.step(ROOT, 1).1,
+        }];
+        assert!(spotter.decode_chunk().unwrap().is_none());
+        let decoded = u32::try_from(activations.len() / spotter.network.dim).unwrap();
+        assert_eq!(
+            spotter.trailing_blanks,
+            34 + decoded,
+            "silence follows the best beam"
+        );
+    }
+
+    #[tokio::test]
+    async fn equally_likely_completed_phrases_keep_the_beams_original_order() {
+        let (files, vocab) = network_fixture().await;
+        let mut network = Network::load(&files, vocab).unwrap();
+        let caches = network.layouts.iter().map(Layout::zeros).collect();
+        let (activations, _) = network
+            .encode(vec![0.0; network.window * KALDI_BINS], caches)
+            .unwrap();
+        let graph = Graph::new(&[vec![1, 2], vec![2, 1]]);
+        let rows = network
+            .log_probabilities(&activations[..network.dim], vec![1, 2, 2, 1])
+            .unwrap();
+        let paths: Vec<Path> = [[1, 2], [2, 1]]
+            .into_iter()
+            .zip(rows)
+            .map(|(tokens, row)| {
+                assert!(row[1..].iter().all(|score| row[BLANK] - score > 3.0));
+                Path {
+                    tokens: vec![
+                        -1,
+                        0,
+                        i64::try_from(tokens[0]).unwrap(),
+                        i64::try_from(tokens[1]).unwrap(),
+                    ],
+                    frames: vec![2, 5],
+                    probabilities: vec![0.5, 0.5],
+                    log_prob: -10.0 - f64::from(row[BLANK]),
+                    trailing_blanks: 1,
+                    state: graph.step(graph.step(ROOT, tokens[0]).1, tokens[1]).1,
+                }
+            })
+            .collect();
+        let mut spotter = OnnxSpotter {
+            caches: network.layouts.iter().map(Layout::zeros).collect(),
+            network,
+            graph,
+            phrases: vec![
+                ("first".to_owned(), Ending::Paste),
+                ("second".to_owned(), Ending::Task),
+            ],
+            unknown: None,
+            fbank: KaldiFbank::new(),
+            features: std::collections::VecDeque::new(),
+            paths: Vec::new(),
+            trailing_blanks: 0,
+            decoded: 0,
+        };
+        for (order, phrase) in [([0, 1], "first"), ([1, 0], "second")] {
+            spotter.paths = order.into_iter().map(|at| paths[at].clone()).collect();
+            let hit = spotter
+                .advance(&activations[..spotter.network.dim], 7)
+                .unwrap()
+                .unwrap();
+            assert_eq!(hit.phrase, phrase);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_network_normalizes_scores_and_refuses_inconsistent_models_before_capture() {
+        let (files, vocab) = network_fixture().await;
+        let mut network = Network::load(&files, vocab).unwrap();
+        let caches = network.layouts.iter().map(Layout::zeros).collect();
+        let (activations, _) = network
+            .encode(vec![0.0; network.window * KALDI_BINS], caches)
+            .unwrap();
+        let rows = network
+            .log_probabilities(&activations[..network.dim], vec![-1, 0, 1, 0])
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            assert_eq!(row.len(), vocab);
+            assert!(row.iter().all(|score| score.is_finite() && *score <= 0.0));
+            assert!((row.iter().map(|score| score.exp()).sum::<f32>() - 1.0).abs() < 1e-5);
+        }
+        let dir =
+            std::env::temp_dir().join(format!("thalvi-spotter-models-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let encoder = dir.join("encoder.onnx");
+        std::fs::write(
+            &encoder,
+            model_without_last_output(&std::fs::read(&files.encoder).unwrap()),
+        )
+        .unwrap();
+        let decoder = dir.join("decoder.onnx");
+        std::fs::write(
+            &decoder,
+            model_metadata(&std::fs::read(&files.decoder).unwrap(), "context_size", "3"),
+        )
+        .unwrap();
+        let joiner = dir.join("joiner.onnx");
+        std::fs::write(
+            &joiner,
+            model_metadata(
+                &std::fs::read(&files.joiner).unwrap(),
+                "joiner_dim",
+                &(network.dim + 1).to_string(),
+            ),
+        )
+        .unwrap();
+        let extra_input = dir.join("joiner-extra-input.onnx");
+        std::fs::write(
+            &extra_input,
+            model_with_extra_input(&std::fs::read(&files.joiner).unwrap()),
+        )
+        .unwrap();
+        for (encoder, decoder, joiner, reason) in [
+            (
+                encoder,
+                files.decoder.clone(),
+                files.joiner.clone(),
+                "cached states do not match",
+            ),
+            (
+                files.encoder.clone(),
+                decoder,
+                files.joiner.clone(),
+                "tokens do not match",
+            ),
+            (
+                files.encoder.clone(),
+                files.decoder.clone(),
+                joiner,
+                "encoder returned an unexpected shape",
+            ),
+            (
+                files.encoder.clone(),
+                files.decoder.clone(),
+                extra_input,
+                "not a transducer predictor and joiner",
+            ),
+        ] {
+            let candidate = Files {
+                encoder,
+                decoder,
+                joiner,
+            };
+            match Network::load(&candidate, vocab) {
+                Err(SpotterError::Unsupported { reason: got, .. }) => {
+                    assert!(got.contains(reason), "{got}");
+                }
+                Err(error) => panic!("wrong refusal: {error}"),
+                Ok(_) => panic!("inconsistent model was accepted: {reason}"),
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// A model file with these (text, score, type) pieces and the given model type.
     fn model(pieces: &[(&str, f32, usize)], model_type: usize) -> Vec<u8> {
         let mut out = Vec::new();
@@ -1033,22 +1423,30 @@ mod tests {
 
     #[test]
     fn phrases_are_cut_into_the_pieces_with_the_best_total_score() {
-        let bytes = model(
-            &[
-                ("<unk>", 0.0, 2),
-                ("\u{2581}", -2.0, 1),
-                ("A", -5.0, 1),
-                ("B", -5.0, 1),
-                ("AB", -10.0, 1),
-                ("\u{2581}A", -6.0, 1),
-                ("'", -3.0, 1),
-            ],
-            1,
-        );
-        let pieces = read_pieces(&bytes).expect("a unigram model");
+        let bytes = |joined_score| {
+            model(
+                &[
+                    ("<unk>", 0.0, 2),
+                    ("\u{2581}", -2.0, 1),
+                    ("A", -5.0, 1),
+                    ("B", -5.0, 1),
+                    ("AB", -10.0, 1),
+                    ("\u{2581}A", joined_score, 1),
+                    ("'", -3.0, 1),
+                ],
+                1,
+            )
+        };
+        let pieces = read_pieces(&bytes(-6.0)).expect("a unigram model");
         assert_eq!(pieces.unknown, Some(0));
         // "▁AB": ▁A + B = -11 beats ▁ + AB = -12 and ▁ + A + B = -12.
         assert_eq!(pieces.encode("ab"), Ok(vec![5, 3]));
+        let tied = read_pieces(&bytes(-7.0)).expect("a unigram model");
+        assert_eq!(
+            tied.encode("ab"),
+            Ok(vec![1, 4]),
+            "the earliest start wins a tie"
+        );
         // Words are separated by the word-start piece; apostrophes are pieces of their own.
         assert_eq!(pieces.encode("a b"), Ok(vec![5, 1, 3]));
         assert_eq!(pieces.encode("a'b"), Ok(vec![5, 6, 3]));

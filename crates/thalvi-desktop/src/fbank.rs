@@ -513,6 +513,8 @@ mod tests {
         for size in chunks {
             mel.push(&samples[at..at + size], &mut out);
             at += size;
+            assert_eq!(out.len(), at.saturating_sub(120) / 160);
+            assert!(mel.samples.kept.len() < 400, "old audio is released");
         }
         out
     }
@@ -540,8 +542,10 @@ mod tests {
                 -5.5949,
             ),
         ];
-        for chunks in [vec![4000], vec![1280, 1280, 1280, 160]] {
+        let whole = features(&[4000]);
+        for chunks in [vec![4000], vec![1280, 1280, 1280, 160], vec![1; 4000]] {
             let frames = features(&chunks);
+            assert_eq!(frames, whole);
             assert_eq!(frames.len(), 24);
             for (number, head, sum, last) in expected {
                 let frame = &frames[number];
@@ -628,6 +632,29 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_first_sample_does_not_hide_the_signal_later_in_a_window() {
+        let mut samples = [0.0; 440];
+        samples[240] = 0.5;
+        samples[241] = -0.5;
+        let mut signal = Vec::new();
+        LogMel::new().push(&samples, &mut signal);
+        assert!(signal.iter().flatten().all(|value| value.is_finite()));
+        assert!(signal[1].iter().any(|value| *value > f32::EPSILON.ln()));
+        let mut signal = Vec::new();
+        KaldiFbank::new().push(&samples, &mut signal);
+        let mut silence = Vec::new();
+        KaldiFbank::new().push(&[0.0; 440], &mut silence);
+        assert_eq!(signal.len(), 2);
+        assert!(signal.iter().flatten().all(|value| value.is_finite()));
+        assert!(
+            signal[1]
+                .iter()
+                .zip(&silence[1])
+                .any(|(heard, quiet)| heard > quiet)
+        );
+    }
+
+    #[test]
     fn kaldi_frames_match_kaldi_native_fbank_however_the_samples_arrive() {
         // Expected values come from kaldi-native-fbank's OnlineFbank with sherpa-onnx's keyword options.
         let expected: [(usize, [f32; 6], f32, f32); 3] = [
@@ -651,14 +678,25 @@ mod tests {
             ),
         ];
         let samples = noise(4000);
-        for chunks in [vec![4000], vec![1280, 1280, 1280, 160]] {
+        let mut whole = Vec::new();
+        KaldiFbank::new().push(&samples, &mut whole);
+        assert!(
+            kaldi_filters()
+                .iter()
+                .flat_map(|filter| &filter.weights)
+                .all(|weight| (0.0..=1.0).contains(weight))
+        );
+        for chunks in [vec![4000], vec![1280, 1280, 1280, 160], vec![1; 4000]] {
             let mut fbank = KaldiFbank::new();
             let mut frames = Vec::new();
             let mut at = 0;
             for size in chunks {
                 fbank.push(&samples[at..at + size], &mut frames);
                 at += size;
+                assert_eq!(frames.len(), at.saturating_sub(120) / 160);
+                assert!(fbank.samples.kept.len() < 400, "old audio is released");
             }
+            assert_eq!(frames, whole);
             assert_eq!(frames.len(), 24);
             for (number, head, sum, last) in expected {
                 let frame = &frames[number];

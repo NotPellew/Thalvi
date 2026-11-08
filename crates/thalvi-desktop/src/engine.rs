@@ -506,6 +506,31 @@ struct SpotStats {
     slowest: Duration,
 }
 
+impl SpotStats {
+    fn record(&self, recorder: &Recorder) {
+        if self.frames > 0 {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a frame count is far below 2^52"
+            )]
+            let mean = millis(self.total) / self.frames as f64;
+            let tenth = |ms: f64| (ms * 1000.0).round() / 1000.0;
+            recorder.metric(
+                Event::EndingSpotter,
+                "ok",
+                Some(self.total),
+                json!({
+                    "call": "capture",
+                    "frames": self.frames,
+                    "hits": self.hits,
+                    "step_mean_ms": tenth(mean),
+                    "step_max_ms": tenth(millis(self.slowest)),
+                }),
+            );
+        }
+    }
+}
+
 /// When speech was heard, to time the recognizer's answers to it.
 #[derive(Default)]
 struct Heard {
@@ -1764,26 +1789,7 @@ where
         {
             self.spot_resolved(&done);
         }
-        if live.spot.frames > 0 {
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "a frame count is far below 2^52"
-            )]
-            let mean = millis(live.spot.total) / live.spot.frames as f64;
-            let tenth = |ms: f64| (ms * 1000.0).round() / 1000.0;
-            self.recorder.metric(
-                Event::EndingSpotter,
-                "ok",
-                Some(live.spot.total),
-                json!({
-                    "call": "capture",
-                    "frames": live.spot.frames,
-                    "hits": live.spot.hits,
-                    "step_mean_ms": tenth(mean),
-                    "step_max_ms": tenth(millis(live.spot.slowest)),
-                }),
-            );
-        }
+        live.spot.record(&self.recorder);
     }
 
     /// Sends `frames` to the recognizer only, giving up when the user cancels or a capture limit
@@ -2035,6 +2041,54 @@ mod tests {
     use super::*;
     use crate::recognizer::ServerUrl;
 
+    #[tokio::test]
+    async fn spotter_totals_record_exact_timings_and_nothing_when_no_frame_was_processed() {
+        for frames in [0, 2] {
+            let dir = std::env::temp_dir()
+                .join(format!("thalvi-spot-stats-{}-{frames}", std::process::id()));
+            let recorder = Recorder::in_dir(
+                RecordKinds {
+                    metrics: true,
+                    ..RecordKinds::default()
+                },
+                &dir,
+            )
+            .unwrap();
+            let stats = if frames == 0 {
+                SpotStats::default()
+            } else {
+                SpotStats {
+                    frames,
+                    hits: 1,
+                    total: Duration::from_micros(3456),
+                    slowest: Duration::from_micros(2345),
+                }
+            };
+            stats.record(&recorder);
+            recorder.finish().await;
+            let path = dir.join("metrics.jsonl");
+            if frames == 0 {
+                assert!(!path.exists());
+            } else {
+                let lines = std::fs::read_to_string(&path).unwrap();
+                let rows: Vec<Value> = lines
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                assert_eq!(rows.len(), 1);
+                let row = &rows[0];
+                assert_eq!(row["call"], "capture");
+                assert_eq!(row["frames"], 2);
+                assert_eq!(row["hits"], 1);
+                assert!((row["duration_ms"].as_f64().unwrap() - 3.456).abs() < 1e-9);
+                assert_eq!(row["step_mean_ms"], 1.728);
+                assert_eq!(row["step_max_ms"], 2.345);
+            }
+            if dir.exists() {
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        }
+    }
     #[test]
     fn not_ready_names_what_waited_and_the_setting_to_fix() {
         let cases = [
