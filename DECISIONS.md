@@ -204,7 +204,11 @@ areas your change touches. Editing rules are in
   branches may be rewritten before merge. Why: the commits show the work being
   iterated, which is enough; no full audit trail. Rejected: squash merge (hides
   the iteration), a force-push block on all branches (more friction).
-- **No review gate.** The `main` ruleset requires PRs and passing checks but
+- **Work lands on `development`; releases merge it into `main`.** PRs target `development`; a release PR
+  merges it into `main`, and only a tag on `main` publishes. Why: `main` stays what users run, and a
+  release is one reviewable diff. Rejected: PRs straight to `main` (every merge a release candidate),
+  changing GitHub's default branch during the hackathon freeze.
+- **No review gate.** The `main` and `development` rulesets require PRs and passing checks but
   no approvals. Why: Thalvi has one author, and GitHub does not let authors
   approve their own PRs. Revisit if a second contributor joins.
 - **Issues are optional.** Why: in a 9-day solo build, PRs and the commit
