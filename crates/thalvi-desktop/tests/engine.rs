@@ -1968,6 +1968,54 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_delay_from_speech_to_the_recognizers_words_is_recorded_once_for_partials_and_per_final()
+ {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("lags");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.feed_until(1500, Kind::Voice).await;
+            rig.partial("live").await;
+            rig.feed_until(1900, Kind::Voice).await;
+            rig.partial("live words").await;
+            rig.feed_until(2200, Kind::Quiet).await;
+            rig.finals("live words paste that").await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3500).await;
+            finished(task).await;
+            let lines = read_lines(&dir.join("metrics.jsonl"));
+            let lags = |event: &str| -> Vec<f64> {
+                lines
+                    .iter()
+                    .filter(|line| line["event"] == event)
+                    .map(|line| line["duration_ms"].as_f64().unwrap())
+                    .collect()
+            };
+            // The detector flags speech by its own rules, so only the span it can lie in is known.
+            let first_voice = (1000 / FRAME_MS + 1) * FRAME_MS;
+            let partial = lags("desktop_partial_lag");
+            let last = lags("desktop_final_lag");
+            assert_eq!(partial.len(), 1, "two partials, one lag: {partial:?}");
+            assert_eq!(last.len(), 1, "{last:?}");
+            #[expect(clippy::cast_precision_loss, reason = "small test times")]
+            let ms = |at: u64| at as f64;
+            assert!(
+                (0.0..=ms(1500 - first_voice)).contains(&partial[0]),
+                "{partial:?}"
+            );
+            assert!(
+                (0.0..=ms(2200 - first_voice)).contains(&last[0]) && last[0] > 0.0,
+                "{last:?}"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_failed_capture_records_which_kind_of_failure_and_its_calls() {
     LocalSet::new()
         .run_until(async {

@@ -472,6 +472,12 @@ struct Live<S> {
     started: Instant,
     /// When the recognizer last returned words.
     last_words: Instant,
+    /// The first speech heard, until the recognizer's first words come.
+    first_speech: Option<Instant>,
+    /// Whether the recognizer has returned words in this capture.
+    words_came: bool,
+    /// The latest speech heard since the recognizer's last final result.
+    last_speech: Option<Instant>,
     cues: FuturesUnordered<LocalBoxFuture<'static, CueEnd>>,
     release: Release,
     /// The release of the hold that opened this capture; frames queued after it are not speech
@@ -1235,6 +1241,9 @@ where
             last_audio: Instant::now(),
             started: Instant::now(),
             last_words: Instant::now(),
+            first_speech: None,
+            words_came: false,
+            last_speech: None,
             cues: FuturesUnordered::new(),
             release: held.map_or(Release::Over, |_| Release::Down),
             cutoff: held.map(|held| held.release.clone()),
@@ -1292,6 +1301,9 @@ where
                 Step::Event(Ok(RecognizerEvent::Partial(text))) => {
                     if has_words(&text) {
                         live.last_words = Instant::now();
+                        if !std::mem::replace(&mut live.words_came, true) {
+                            self.lag(Event::PartialLag, live.first_speech.take());
+                        }
                     }
                     self.on_partial(live, text);
                     None
@@ -1299,6 +1311,7 @@ where
                 Step::Event(Ok(RecognizerEvent::Final(text))) => {
                     if has_words(&text) {
                         live.last_words = Instant::now();
+                        self.lag(Event::FinalLag, live.last_speech.take());
                     }
                     let done = self.on_final(live, &text);
                     done.or_else(|| {
@@ -1400,6 +1413,14 @@ where
         })
     }
 
+    /// Records how long after `since` the recognizer answered, when speech was heard since.
+    fn lag(&self, event: Event, since: Option<Instant>) {
+        if let Some(since) = since {
+            self.recorder
+                .metric(event, "ok", Some(since.elapsed()), Value::Null);
+        }
+    }
+
     /// Says that `count` presses of the dictation key started nothing, and why.
     fn ignore(&mut self, refusal: Refusal, count: u64) {
         refusal.record(&self.recorder, count);
@@ -1497,6 +1518,12 @@ where
         }
         let pending = live.text.pending().is_some();
         live.speech = self.vad.speech(frame, pending);
+        if live.speech {
+            live.last_speech = Some(now);
+            if live.first_speech.is_none() && !live.words_came {
+                live.first_speech = Some(now);
+            }
+        }
         if !pending {
             live.speech_run = 0;
             live.relayed = false;
