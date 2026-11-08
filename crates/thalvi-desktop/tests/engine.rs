@@ -4131,12 +4131,48 @@ fn hearing(config: &str) -> (Rig, SpotterControl, TestEngine, FakeFrames) {
     (rig, spot, engine, frames)
 }
 
+/// The words the overlay holds for the open capture.
+fn drafted(rig: &Rig) -> String {
+    match rig.state() {
+        EngineState::Capturing { committed, .. } => committed,
+        other => panic!("not capturing: {other:?}"),
+    }
+}
+
 /// The notice the overlay shows with the open capture, if any.
 fn shown(rig: &Rig) -> Option<String> {
     match rig.state() {
         EngineState::Capturing { notice, .. } => notice,
         _ => None,
     }
+}
+
+/// The metrics of a capture whose heard ending was told: the hit and the capture's totals, no words.
+fn assert_recorded_as_notified(dir: &std::path::Path, name: &str) {
+    let metrics = read_lines(&dir.join("metrics.jsonl"));
+    let hit = metrics
+        .iter()
+        .find(|line| line["event"] == "desktop_ending_spotter" && line["call"] == "hit")
+        .unwrap_or_else(|| panic!("{name}: no hit line in {metrics:?}"));
+    assert_eq!(
+        (hit["outcome"].as_str(), hit["ending"].as_str()),
+        (Some("notified"), Some("paste")),
+        "{name}"
+    );
+    assert!(
+        metrics
+            .iter()
+            .any(|line| line["event"] == "desktop_ending_spotter"
+                && line["call"] == "capture"
+                && line["frames"].as_u64().is_some_and(|frames| frames > 9)
+                && line["hits"] == 1),
+        "{name}: capture summary"
+    );
+    let written = std::fs::read_to_string(dir.join("metrics.jsonl")).unwrap();
+    assert!(
+        !written.contains("haste") && !written.contains("report"),
+        "{name}: no words in metrics"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -4207,10 +4243,11 @@ async fn a_heard_ending_the_transcript_lacks_is_told_once_after_the_quiet_interv
                 assert_eq!(shown(&rig), Some(notice), "{name}: still shown");
                 assert_eq!(rig.started(Cue::Cancelled).len(), 1, "{name}: told once");
                 assert!(rig.notices().is_empty(), "{name}: {:?}", rig.notices());
-                let EngineState::Capturing { committed, .. } = rig.state() else {
-                    panic!("{name}: capturing");
-                };
-                assert_eq!(committed, "Write the report tomorrow haste that", "{name}");
+                assert_eq!(
+                    drafted(&rig),
+                    "Write the report tomorrow haste that",
+                    "{name}"
+                );
                 // Saying it again delivers everything: nothing was cut at the heard phrase.
                 let again = notice_at + 800;
                 rig.finals("Paste that.").await;
@@ -4220,30 +4257,7 @@ async fn a_heard_ending_the_transcript_lacks_is_told_once_after_the_quiet_interv
                     accepted(CaptureRoute::Paste, "Write the report tomorrow haste that"),
                     "{name}"
                 );
-                let metrics = read_lines(&dir.join("metrics.jsonl"));
-                let hit = metrics
-                    .iter()
-                    .find(|line| line["event"] == "desktop_ending_spotter" && line["call"] == "hit")
-                    .unwrap_or_else(|| panic!("{name}: no hit line in {metrics:?}"));
-                assert_eq!(
-                    (hit["outcome"].as_str(), hit["ending"].as_str()),
-                    (Some("notified"), Some("paste")),
-                    "{name}"
-                );
-                assert!(
-                    metrics
-                        .iter()
-                        .any(|line| line["event"] == "desktop_ending_spotter"
-                            && line["call"] == "capture"
-                            && line["frames"].as_u64().is_some_and(|frames| frames > 9)
-                            && line["hits"] == 1),
-                    "{name}: capture summary"
-                );
-                let written = std::fs::read_to_string(dir.join("metrics.jsonl")).unwrap();
-                assert!(
-                    !written.contains("haste") && !written.contains("report"),
-                    "{name}: no words in metrics"
-                );
+                assert_recorded_as_notified(&dir, name);
             }
         })
         .await;
@@ -4367,7 +4381,7 @@ async fn a_hold_gives_the_spotter_no_frames_and_the_capture_runs_as_before() {
                 accepted(CaptureRoute::Paste, "write the report tomorrow haste that")
             );
             assert_eq!((spot.received(), spot.resets()), (0, 0));
-            assert!(rig.notices().is_empty());
+            assert_eq!(rig.notices(), Vec::<String>::new());
         })
         .await;
 }
@@ -4397,7 +4411,7 @@ async fn cancelling_while_a_dispute_waits_for_quiet_cancels_and_tells_nothing() 
             );
             rig.at(5000).await;
             assert_eq!(rig.started(Cue::Cancelled).len(), 0);
-            assert!(rig.notices().is_empty());
+            assert_eq!(rig.notices(), Vec::<String>::new());
         })
         .await;
 }
@@ -4447,7 +4461,7 @@ async fn a_notice_stays_on_the_overlay_until_words_are_heard_and_artifacts_do_no
             assert_eq!(shown(&rig), Some(notice), "artifacts are not words");
             rig.play(&[Partial(1800, "and then")]).await;
             assert_eq!(shown(&rig), None, "words clear it");
-            assert!(rig.notices().is_empty());
+            assert_eq!(rig.notices(), Vec::<String>::new());
             rig.handle.cancel();
             let _ = finished(task).await;
         })
@@ -4473,7 +4487,7 @@ async fn a_spotter_that_could_not_load_is_told_once_with_the_first_capture_until
             rig.feed_until(1000, Kind::Voice).await;
             rig.partial("Hello").await;
             assert_eq!(shown(&rig), None);
-            assert!(rig.notices().is_empty());
+            assert_eq!(rig.notices(), Vec::<String>::new());
             rig.handle.cancel();
             let _ = finished(task).await;
         })
