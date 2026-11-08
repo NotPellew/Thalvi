@@ -438,16 +438,29 @@ mod tests {
     }
 
     #[test]
-    fn a_final_that_came_before_the_spotter_still_decides_the_hit() {
+    fn a_covering_final_in_either_order_reports_its_delay_from_the_phrase_end() {
         let now = Instant::now();
-        let mut watch = watch();
-        send_to(&mut watch, 50_000, now);
-        assert_eq!(
-            watch.final_arrived(Effect::Ending(Ending::Paste), now, false),
-            None
-        );
-        let resolved = watch.hit(&hit(Ending::Paste, 40_000), now, false);
-        assert_eq!(resolved.map(|r| r.outcome), Some(Outcome::Agreed));
+        for (end, delay) in [
+            (51_200, Duration::ZERO),
+            (40_960, Duration::from_millis(640)),
+        ] {
+            for hit_first in [false, true] {
+                let mut watch = watch();
+                send_to(&mut watch, 51_200, now);
+                let hit = hit(Ending::Paste, end);
+                let effect = Effect::Ending(Ending::Paste);
+                let resolved = if hit_first {
+                    assert_eq!(watch.hit(&hit, now, false), None);
+                    watch.final_arrived(effect, now, false)
+                } else {
+                    assert_eq!(watch.final_arrived(effect, now, false), None);
+                    watch.hit(&hit, now, false)
+                }
+                .expect("the final covers the phrase, including its exact end");
+                assert_eq!(resolved.outcome, Outcome::Agreed);
+                assert_eq!(resolved.covering_after, Some(delay));
+            }
+        }
     }
 
     #[test]
