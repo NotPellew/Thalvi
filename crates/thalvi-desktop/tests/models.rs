@@ -36,6 +36,14 @@ async fn serve() -> (SocketAddr, tokio::task::JoinHandle<()>) {
         .route("/other.onnx", get(|| async { "something else entirely" }))
         .route("/gone.onnx", get(|| async { StatusCode::NOT_FOUND }))
         .route(
+            "/endless.onnx",
+            get(|| async {
+                Body::from_stream(futures_util::stream::repeat_with(|| {
+                    Ok::<_, std::io::Error>(Bytes::from_static(GOOD))
+                }))
+            }),
+        )
+        .route(
             "/stalls.onnx",
             get(|| async {
                 Body::from_stream(futures_util::stream::unfold(0, |sent| async move {
@@ -107,29 +115,34 @@ async fn a_missing_file_is_downloaded_once_and_then_served_from_disk() {
 }
 
 #[tokio::test]
-async fn a_download_with_the_wrong_checksum_is_deleted_and_refused() {
+async fn a_download_that_is_not_the_pinned_file_is_deleted_and_refused() {
     let (address, _server) = serve().await;
-    let dir = dir("mismatch");
-    let url = format!("http://{address}/other.onnx");
-    let sha = sha256(GOOD);
-    let asset = Asset {
-        kind: ModelKind::Wake,
-        file_name: "good.onnx",
-        url: &url,
-        size: GOOD.len() as u64,
-        sha256: &sha,
-    };
+    for served in ["other.onnx", "endless.onnx"] {
+        let dir = dir(&format!("mismatch-{served}"));
+        let url = format!("http://{address}/{served}");
+        let sha = sha256(GOOD);
+        let asset = Asset {
+            kind: ModelKind::Wake,
+            file_name: "good.onnx",
+            url: &url,
+            size: GOOD.len() as u64,
+            sha256: &sha,
+        };
 
-    let error = ModelStore::in_dir(&dir)
-        .fetch(&asset)
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            ModelStore::in_dir(&dir).fetch(&asset),
+        )
         .await
+        .expect("stops on its own")
         .expect_err("refused");
-    assert!(matches!(error, ModelError::Checksum { .. }));
-    assert_eq!(
-        error.to_string(),
-        "The downloaded wake model good.onnx did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
-    );
-    assert_eq!(leftovers(&dir), Vec::<String>::new());
+        assert!(matches!(error, ModelError::Checksum { .. }), "{served}");
+        assert_eq!(
+            error.to_string(),
+            "The downloaded wake model good.onnx did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
+        );
+        assert_eq!(leftovers(&dir), Vec::<String>::new(), "{served}");
+    }
 }
 
 #[tokio::test]
