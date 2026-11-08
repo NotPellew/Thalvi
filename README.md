@@ -233,6 +233,7 @@ Say "Hey Thalvi" in any window, dictate, then end with a phrase:
 | Say | Thalvi |
 | --- | --- |
 | "paste that" or "finish dictation" | types the text into the window you were in |
+| "write that out" | has the writing model turn the words into proper text, then types that ([Write it out](#write-a-dictation-out)) |
 | "submit" | types it and presses Enter |
 | "do that" | runs a configured action, such as opening a site or focusing an app |
 | "scratch that" | drops the last piece |
@@ -376,6 +377,29 @@ bound to `thalvi-desktop cancel` (the Hyprland examples bind SUPER+Escape).
   `Digit1`, `Space`, `F9`). While an administrator window is focused, Windows
   shows Thalvi no keys and lets it type nothing, so the key reaches that window
   as usual and no dictation starts.
+
+### Write a dictation out
+
+Say "tell Anna I'm late, sorry, write that out", or hold the write key the way
+you hold the hold key, and Thalvi sends the words you said to a model that turns
+them into proper text in the language you spoke. The overlay says "Writing…" and
+shows the text as it streams in; when the stream ends the text is pasted like any
+other dictation, and **Ctrl+Z** undoes it. Cancel as usual before then and nothing
+is typed. Without "write that out" or the write key, the words are pasted as
+recognized. There is no write-and-send: press Enter yourself after reading it.
+
+The model is any OpenAI-compatible chat completions endpoint (Glimmer, Baseten, a
+llama.cpp server, Meta), set under **Settings → Speech → Writing** as `writing`
+in the config: `url`, `model` and `api_key`. Only the recognized words are sent:
+no window, app or other context. Saving never calls it. If it is not set up,
+fails, answers with nothing, or takes longer than 15 seconds, nothing is typed,
+Thalvi says what happened, and your own words go on the clipboard to paste with
+Ctrl+V.
+
+- **Hyprland:** F10, with no modifier; add the `write-start` and `write-end`
+  binds from `hyprland-binds.conf`.
+- **Windows:** Alt and X (`write_key` in the config), kept from the focused app
+  like the hold key. It must differ from `hold_key`.
 
 ### Config
 
