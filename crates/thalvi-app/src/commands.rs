@@ -8,11 +8,12 @@
 use std::path::Path;
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 use thalvi_desktop::audio;
 use thalvi_desktop::draft::DraftView;
+use thalvi_desktop::entries::{self, LiveKind, Realtime};
 use thalvi_desktop::history::{Entry, HistoryError, Store as History};
 use thalvi_desktop::host::{Host, WebUrl};
 use thalvi_desktop::metrics::{Event, Recorder};
@@ -261,23 +262,68 @@ impl<'a> SpeechModelProgress<'a> {
     }
 }
 
-/// Whether the recognizer behind `server` boosts a word list, so Settings can offer one.
+/// Checks one speech server entry where it is added or edited, before it joins the list.
+///
+/// # Errors
+/// The plain reason the entry cannot be used.
 #[tauri::command]
-pub async fn word_list_support(server: String, state: State<'_, AppState>) -> Result<bool, String> {
-    let server = ServerUrl::parse(&server).map_err(|error| error.to_string())?;
-    let recorder =
-        Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
-    phrases::server_boosts(&reqwest::Client::new(), &server, &recorder.metrics()).await
+pub fn check_speech_entry(entry: Value) -> Result<(), String> {
+    entries::check(&entry)
 }
 
-/// Saves the stored word list on the server, which gives it to its recognizer.
+/// The live entries whose recognizer can be asked about a word list.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum Asked {
+    Realtime {
+        id: String,
+        address: String,
+        model: String,
+        /// Absent when the saved key is meant.
+        #[serde(default)]
+        api_key: Option<String>,
+    },
+    ThalviServer {
+        address: String,
+    },
+}
+
+/// Whether the recognizer behind a live entry boosts a word list, so Settings can offer one.
+#[tauri::command]
+pub async fn word_list_support(entry: Value, state: State<'_, AppState>) -> Result<bool, String> {
+    let asked = serde_json::from_value::<Asked>(entry).map_err(|error| error.to_string())?;
+    let recorder =
+        Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
+    match asked {
+        Asked::ThalviServer { address } => {
+            let server = ServerUrl::parse(&address).map_err(|error| error.to_string())?;
+            phrases::server_boosts(&reqwest::Client::new(), &server, &recorder.metrics()).await
+        }
+        Asked::Realtime {
+            id,
+            address,
+            model,
+            api_key,
+        } => {
+            let key = api_key.unwrap_or_else(|| state.config().stt.entries.key_of(&id).to_owned());
+            let realtime = Realtime::new(&address, &model, key)?;
+            phrases::realtime_boosts(&realtime, &recorder.metrics()).await
+        }
+    }
+}
+
+/// Saves the stored word list on the active Thalvi server, which gives it to its recognizer; a
+/// recognizer reached directly is given the list at each connection instead.
 #[tauri::command]
 pub async fn share_word_list(state: State<'_, AppState>) -> Result<(), String> {
     let config = state.config();
+    let LiveKind::ThalviServer(server) = &config.stt.entries.active_live().kind else {
+        return Ok(());
+    };
     let recorder = Recorder::per_user(config.recordings).map_err(|error| error.to_string())?;
     phrases::share(
         &reqwest::Client::new(),
-        &config.server,
+        server,
         &config.stt.phrases,
         &recorder.metrics(),
     )

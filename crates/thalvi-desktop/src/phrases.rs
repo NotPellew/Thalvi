@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::entries::Realtime;
 use crate::metrics::{Event, Metrics};
 use crate::recognizer::ServerUrl;
 
@@ -129,6 +130,48 @@ pub async fn server_boosts(
                 format!("Thalvi could not reach the server at {server} to ask about a word list.")
             }
         }),
+    };
+    metrics.metric(
+        Event::WordList,
+        if result.is_ok() { "ok" } else { "error" },
+        Some(started.elapsed()),
+        json!({"call": "check"}),
+    );
+    result
+}
+
+/// Whether a recognizer reached directly announces phrase boosting in its handshake; Meta's does not.
+///
+/// # Errors
+/// A plain message when the recognizer can't be reached or doesn't accept the session.
+pub async fn realtime_boosts(realtime: &Realtime, metrics: &Metrics) -> Result<bool, String> {
+    let started = Instant::now();
+    let address = realtime.address();
+    let opened = tokio::time::timeout(
+        TIMEOUT,
+        thalvi_asr::Connection::open(thalvi_asr::Handshake {
+            url: address,
+            model: realtime.model(),
+            api_key: realtime.api_key(),
+            phrases: &[],
+        }),
+    )
+    .await;
+    let result = match opened {
+        Ok(Ok(mut connection)) => {
+            let boosts = connection.boosts_phrases();
+            connection.close().await;
+            Ok(boosts)
+        }
+        Ok(Err(thalvi_asr::Error::Refused(message))) => Err(format!(
+            "The recognizer at {address} refused the session when Thalvi asked about a word list: {message}"
+        )),
+        Ok(Err(thalvi_asr::Error::Connect(_))) | Err(_) => Err(format!(
+            "Thalvi could not reach the recognizer at {address} to ask about a word list."
+        )),
+        Ok(Err(_)) => Err(format!(
+            "The recognizer at {address} answered something Thalvi did not understand when asked about a word list."
+        )),
     };
     metrics.metric(
         Event::WordList,

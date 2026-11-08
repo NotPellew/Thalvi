@@ -45,6 +45,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     status: () => undefined,
     opened: () => undefined,
     refresh: () => undefined,
+    saved: () => undefined,
   };
 
   function applyView(): void {
@@ -129,7 +130,11 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     baseline = JSON.stringify(draft);
     applyLook(root, draft.look);
     checks = [];
-    pages = buildPages({ draft, backend, root, controls: createControls(feedback), microphones, audio, holdKeyUnavailable, startAtLogin, menuEntry, live, checks });
+    pages = buildPages({
+      draft, backend, root, controls: createControls(feedback), microphones, audio, holdKeyUnavailable, startAtLogin, menuEntry, live, checks,
+      saved: () => (baseline === "" ? null : (JSON.parse(baseline) as Settings)),
+      applyNow,
+    });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {
       const button = el("button", { type: "button", "data-page": page.id }, page.title);
@@ -142,6 +147,33 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     showAudio(audio);
     feedback();
     applyView();
+  }
+
+  /** Saves the saved settings with `change` applied; unsaved edits stay in the draft and unsaved. */
+  async function applyNow(change: (settings: Settings) => void): Promise<void> {
+    if (baseline === "") return;
+    if (saving) {
+      saveFailure = "Wait for the save in progress to finish.";
+      feedback();
+      throw new Error(saveFailure);
+    }
+    const next = JSON.parse(baseline) as Settings;
+    change(next);
+    saveFailure = "";
+    saving = true;
+    feedback();
+    try {
+      await backend.saveSettings(next);
+      baseline = JSON.stringify(next);
+      if (draft !== null) change(draft);
+      saved = true;
+    } catch (error) {
+      saveFailure = errorText(error);
+      throw error;
+    } finally {
+      saving = false;
+      feedback();
+    }
   }
 
   function open(id: string): void {
@@ -199,6 +231,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       .then(() => {
         baseline = JSON.stringify(sending);
         saved = true;
+        live.saved();
         if (JSON.stringify(listBefore ?? []) === JSON.stringify(sending.stt.phrases ?? [])) return undefined;
         // The server keeps its own copy for dictation and conversations; a miss is said, the save stands.
         return backend.shareWordList().catch((error: unknown) => {

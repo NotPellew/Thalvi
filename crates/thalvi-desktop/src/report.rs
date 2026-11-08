@@ -6,8 +6,6 @@ use std::fmt::Write as _;
 use chrono::{DateTime, Utc};
 
 use crate::config::DesktopConfig;
-use crate::recognizer::SpeechSource;
-use crate::secondary::SecondaryStt;
 
 /// The messages of every error behind `error`, outermost first, without `error` itself.
 #[must_use]
@@ -77,13 +75,7 @@ impl Report {
         system: System,
         config: &DesktopConfig,
     ) -> Self {
-        let mut settings = vec![match config.speech_source() {
-            SpeechSource::Server(server) => ("Speech recognition", format!("server at {server}")),
-            SpeechSource::Local { model } => (
-                "Speech recognition",
-                format!("on this computer, model {model}"),
-            ),
-        }];
+        let mut settings = vec![("Speech recognition", config.speech_source().to_string())];
         settings.push((
             "Microphone",
             config
@@ -91,11 +83,7 @@ impl Report {
                 .clone()
                 .unwrap_or_else(|| "system default".to_owned()),
         ));
-        let second = config
-            .stt
-            .secondary
-            .as_ref()
-            .is_some_and(SecondaryStt::enabled);
+        let second = config.stt.entries.ticked().next().is_some();
         settings.push((
             "Second transcription",
             if second { "on" } else { "off" }.to_owned(),
@@ -145,7 +133,7 @@ mod tests {
     use chrono::TimeZone as _;
 
     use super::*;
-    use crate::recognizer::{ConnectFailure, Detail, RecognizerError, ServerUrl};
+    use crate::recognizer::{ConnectFailure, Detail, RecognizerError, ServerUrl, SpeechSource};
 
     fn config(json: &str) -> DesktopConfig {
         DesktopConfig::from_json_str(json).unwrap()
@@ -169,7 +157,7 @@ mod tests {
                  Error: Thalvi could not reach the speech server.\n\n\
                  Technical cause:\n- connection refused (os error 111)\n\n\
                  Time: 2026-11-03 12:34:56 UTC\nThalvi: 1.2.3\nSystem: linux, Hyprland\n\n\
-                 Settings:\n- Speech recognition: server at ws://127.0.0.1:9\n- Microphone: USB Mic\n- Second transcription: off\n",
+                 Settings:\n- Speech recognition: the Thalvi server \"Thalvi server\" at ws://127.0.0.1:9\n- Microphone: USB Mic\n- Second transcription: off\n",
             ),
             (
                 "",
@@ -178,7 +166,7 @@ mod tests {
                 "\
                  Error: Thalvi could not reach the speech server.\n\n\
                  Time: 2026-11-03 12:34:56 UTC\nThalvi: 1.2.3\nSystem: linux\n\n\
-                 Settings:\n- Speech recognition: on this computer, model nemotron_160ms\n- Microphone: system default\n- Second transcription: off\n",
+                 Settings:\n- Speech recognition: the speech model \"On this computer\" (nemotron_160ms)\n- Microphone: system default\n- Second transcription: off\n",
             ),
         ];
         for (desktop, causes, json, expected) in cases {
@@ -209,7 +197,7 @@ mod tests {
     #[test]
     fn the_cause_chain_lists_each_source_below_the_error_itself() {
         let error = RecognizerError::Unreachable {
-            server: ServerUrl::default(),
+            speech: SpeechSource::thalvi_server("Office", &ServerUrl::default()),
             reason: ConnectFailure::Refused,
             detail: Detail("IO error: Connection refused (os error 111)".to_owned()),
         };

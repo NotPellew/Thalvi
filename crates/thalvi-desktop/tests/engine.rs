@@ -1353,7 +1353,7 @@ async fn a_failed_capture_says_what_happened_keeps_the_text_and_returns_to_liste
     let recognizer = |message: &str| CaptureError::Recognizer(RecognizerError::said(message));
     let not_ready = || CaptureError::NotReady {
         waited: Duration::from_secs(8),
-        speech: SpeechSource::Server(ServerUrl::default()),
+        speech: SpeechSource::thalvi_server("Thalvi server", &ServerUrl::default()),
     };
     // Fault, the error, the text kept, when the error cue plays, and whether a stream was open.
     let cases = [
@@ -1815,7 +1815,8 @@ async fn live_words(rig: &mut Rig) {
     rig.at(3500).await;
 }
 
-const FALLBACK_NOTICE: &str = "The second transcription failed. Using the live transcript.";
+const FALLBACK_NOTICE: &str =
+    "The second transcription failed for \"Second pass\". Using the live transcript.";
 
 #[tokio::test(start_paused = true)]
 async fn the_secondary_transcription_replaces_the_text_of_the_frames_that_were_sent() {
@@ -1916,6 +1917,120 @@ async fn the_live_transcript_is_kept_with_a_notice_when_the_secondary_cannot_sta
                 );
                 assert_eq!(rig.notices(), [FALLBACK_NOTICE], "{name}");
             }
+        })
+        .await;
+}
+
+/// A config with the Thalvi server entry active and these second-pass entries, in order:
+/// `(name, url, ticked)`.
+fn with_second_passes(entries: &[(&str, &str, bool)]) -> String {
+    let second: Vec<String> = entries
+        .iter()
+        .map(|(name, url, ticked)| {
+            format!(
+                r#"{{"kind": "second_pass", "id": "{name}", "name": "{name}", "active": {ticked}, "address": "{url}", "model": "m", "api": "openai"}}"#
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"entries": [{{"kind": "thalvi_server", "id": "s", "name": "Thalvi server", "active": true, "address": "ws://127.0.0.1:8080"}}, {}]}}}}"#,
+        second.join(", ")
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_first_ticked_entry_that_answers_replaces_the_text_and_the_rest_are_only_recorded() {
+    LocalSet::new()
+        .run_until(async {
+            let all = RecordKinds {
+                metrics: true,
+                text: true,
+                audio: false,
+            };
+            let dir = record_dir("several");
+            let (broken, mut broken_uploads) = serve(Reply::Status(500)).await;
+            let (second, mut second_uploads) =
+                serve(Reply::Json(r#"{"text": "Second words paste that"}"#)).await;
+            let (third, mut third_uploads) =
+                serve(Reply::Json(r#"{"text": "Third words paste that"}"#)).await;
+            let (unticked, mut unticked_uploads) =
+                serve(Reply::Json(r#"{"text": "Unticked words paste that"}"#)).await;
+            let config = with_second_passes(&[
+                ("Broken", &broken, true),
+                ("Unticked", &unticked, false),
+                ("Second", &second, true),
+                ("Third", &third, true),
+            ]);
+            let recorder = Recorder::in_dir(all, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording(&config, recorder);
+            let task = capture_task(engine, frames);
+            live_words(&mut rig).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "Second words")
+            );
+            assert!(broken_uploads.recv().await.is_some());
+            assert!(second_uploads.recv().await.is_some());
+            assert!(third_uploads.recv().await.is_some(), "the rest still run");
+            assert!(
+                unticked_uploads.try_recv().is_err(),
+                "an unticked entry never runs"
+            );
+            assert_eq!(
+                rig.notices(),
+                ["The second transcription failed for \"Broken\". Using the answer of \"Second\"."]
+            );
+
+            let metrics = read_lines(&dir.join("metrics.jsonl"));
+            let calls: Vec<_> = metrics
+                .iter()
+                .filter(|line| line["event"] == "desktop_secondary_stt")
+                .map(|line| {
+                    (
+                        line["entry"].as_str().unwrap().to_owned(),
+                        line["outcome"].as_str().unwrap().to_owned(),
+                        line["used"].as_bool().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                calls,
+                [
+                    ("Broken".to_owned(), "error".to_owned(), false),
+                    ("Second".to_owned(), "ok".to_owned(), true),
+                    ("Third".to_owned(), "ok".to_owned(), false),
+                ]
+            );
+            let folder = dictation_dirs(&dir).pop().unwrap();
+            assert_eq!(
+                std::fs::read_to_string(folder.join("text.txt")).unwrap(),
+                "heard: live words paste that\n\
+                 second transcription (Second): Second words paste that\n\
+                 second transcription (Third): Third words paste that\n\
+                 accepted (paste): Second words\n"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_ticked_entry_that_answers_keeps_the_live_text_and_names_every_one_that_failed() {
+    LocalSet::new()
+        .run_until(async {
+            let (first, _first) = serve(Reply::Status(500)).await;
+            let (second, _second) = serve(Reply::Stall).await;
+            let config = with_second_passes(&[("First", &first, true), ("Second", &second, true)]);
+            let (mut rig, engine, frames) = Rig::new(&config);
+            let task = capture_task(engine, frames);
+            live_words(&mut rig).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "live words")
+            );
+            assert_eq!(
+                rig.notices(),
+                ["The second transcription failed for \"First\", \"Second\". Using the live transcript."]
+            );
         })
         .await;
 }
@@ -2112,12 +2227,18 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
                 .unwrap();
             assert_eq!(secondary["model"], "m");
             assert_eq!(secondary["api"], "openai");
+            assert_eq!(secondary["entry"], "Second pass");
+            let ready = metrics
+                .iter()
+                .find(|line| line["event"] == "desktop_transcription_ready")
+                .unwrap();
+            assert_eq!(ready["entry"], "Thalvi server");
 
             let folder = dictation_dirs(&dir).pop().unwrap();
             assert_eq!(
                 std::fs::read_to_string(folder.join("text.txt")).unwrap(),
                 "heard: live words paste that\n\
-                 second transcription: Polished words paste that\n\
+                 second transcription (Second pass): Polished words paste that\n\
                  accepted (paste): Polished words\n"
             );
             assert_eq!(

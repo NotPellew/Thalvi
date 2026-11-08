@@ -62,6 +62,7 @@ impl Store {
             );
             settings.insert("show_in_menu".to_owned(), Value::Bool(current.show_in_menu));
         }
+        unmask_keys(&mut settings, current);
         let config =
             DesktopConfig::from_json_str(&settings.to_string()).map_err(|error| match error {
                 // The window writes this JSON itself, so a line and column would mean nothing.
@@ -95,7 +96,8 @@ impl Store {
     }
 }
 
-/// The settings window's form of `config`: the file form.
+/// The settings window's form of `config`: the file form, without the OS switches and with API
+/// keys replaced by whether the entry has one.
 ///
 /// # Errors
 /// Fails when the config cannot be written as JSON.
@@ -105,7 +107,44 @@ pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
         settings.remove("start_at_login");
         settings.remove("show_in_menu");
     }
+    for entry in entries_of(&mut settings) {
+        if let Some(key) = entry.remove("api_key") {
+            entry.insert(
+                "has_key".to_owned(),
+                Value::Bool(key != Value::String(String::new())),
+            );
+        }
+    }
     Ok(settings)
+}
+
+/// The entry objects of the speech server list in `settings`.
+fn entries_of(settings: &mut Value) -> impl Iterator<Item = &mut serde_json::Map<String, Value>> {
+    settings
+        .pointer_mut("/stt/entries")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object_mut)
+}
+
+/// Gives each entry without an `api_key` the one saved for its id: the form only carries a key it
+/// replaces or clears.
+fn unmask_keys(settings: &mut Value, current: &DesktopConfig) {
+    for entry in entries_of(settings) {
+        entry.remove("has_key");
+        let keyed = matches!(
+            entry.get("kind").and_then(Value::as_str),
+            Some("realtime" | "second_pass")
+        );
+        if keyed && !entry.contains_key("api_key") {
+            let saved = entry
+                .get("id")
+                .and_then(Value::as_str)
+                .map_or("", |id| current.stt.entries.key_of(id));
+            entry.insert("api_key".to_owned(), Value::String(saved.to_owned()));
+        }
+    }
 }
 
 fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
@@ -139,7 +178,8 @@ fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use thalvi_desktop::config::{Look, SttEngine};
+    use thalvi_desktop::config::Look;
+    use thalvi_desktop::entries::LiveKind;
     use thalvi_desktop::transducer::SpeechChoice;
 
     use super::*;
@@ -180,7 +220,6 @@ mod tests {
                 "overlay",
                 "recordings",
                 "scripts",
-                "server",
                 "stt",
                 "wake"
             ]
@@ -261,7 +300,9 @@ mod tests {
     fn a_custom_speech_model_folder_survives_save_and_reload() {
         let (store, dir) = store("folder");
         let mut settings = settings_json(&store_defaults()).unwrap();
-        settings["stt"] = json!({"engine": "local", "model": "/models/mine"});
+        settings["stt"] = json!({"entries": [
+            {"kind": "on_device", "id": "d", "name": "On this computer", "active": true, "model": "/models/mine"}
+        ]});
 
         let saved = store.save(settings, &store_defaults()).unwrap();
         let reloaded = store.load().unwrap();
@@ -269,12 +310,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(
-            saved.stt.engine,
-            SttEngine::Local(SpeechChoice::Folder("/models/mine".into()))
+            saved.stt.entries.active_live().kind,
+            LiveKind::OnDevice(SpeechChoice::Folder("/models/mine".into()))
         );
         assert_eq!(reloaded, saved);
-        assert_eq!(shown["stt"]["engine"], json!("local"));
-        assert_eq!(shown["stt"]["model"], json!("/models/mine"));
+        assert_eq!(shown["stt"]["entries"][0]["model"], json!("/models/mine"));
+    }
+
+    #[test]
+    fn keys_never_reach_the_form_and_stay_unless_replaced_or_cleared() {
+        let (store, dir) = store("keys");
+        let entry = |id: &str, kind: &str, key: Option<&str>| {
+            let mut entry = json!({"kind": kind, "id": id, "name": id, "active": id == "live",
+                "address": if kind == "realtime" { "ws://127.0.0.1:8012" } else { "http://127.0.0.1:9/v1" },
+                "model": "m"});
+            if let Some(key) = key {
+                entry["api_key"] = json!(key);
+            }
+            entry
+        };
+        let mut settings = settings_json(&store_defaults()).unwrap();
+        settings["stt"] = json!({"entries": [
+            entry("live", "realtime", Some("live-secret")),
+            entry("second", "second_pass", Some("second-secret")),
+            entry("blank", "second_pass", None),
+        ]});
+        store.save(settings, &store_defaults()).unwrap();
+        let saved = store.load().unwrap();
+
+        let form = settings_json(&saved).unwrap();
+        assert!(!form.to_string().contains("secret"), "{form}");
+        let has: Vec<_> = form["stt"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["has_key"].clone())
+            .collect();
+        assert_eq!(has, [json!(true), json!(true), json!(false)]);
+
+        // An untouched form keeps both keys; a replaced key changes and a cleared one empties.
+        let keys = |config: &DesktopConfig| {
+            ["live", "second", "blank"].map(|id| config.stt.entries.key_of(id).to_owned())
+        };
+        let after_untouched = store.save(form.clone(), &saved).unwrap();
+        let mut edited = form;
+        edited["stt"]["entries"][0]["api_key"] = json!("replaced");
+        edited["stt"]["entries"][1]["api_key"] = json!("");
+        let after_edit = store.save(edited, &after_untouched).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(keys(&after_untouched), ["live-secret", "second-secret", ""]);
+        assert_eq!(keys(&after_edit), ["replaced", "", ""]);
     }
 
     #[cfg(unix)]
@@ -284,8 +370,10 @@ mod tests {
 
         let (store, dir) = store("private");
         let mut settings = settings_json(&store_defaults()).unwrap();
-        settings["stt"] =
-            json!({"secondary": {"url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k"}});
+        settings["stt"] = json!({"entries": [
+            {"kind": "thalvi_server", "id": "s", "name": "Thalvi server", "active": true, "address": "ws://127.0.0.1:8080"},
+            {"kind": "second_pass", "id": "p", "name": "P", "active": true, "address": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k"}
+        ]});
         // A leftover from an earlier crash must not lend its permissions to the new file.
         std::fs::create_dir_all(store.path.parent().unwrap()).unwrap();
         let leftover = store.path.with_extension("json.tmp");

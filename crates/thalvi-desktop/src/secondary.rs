@@ -45,7 +45,7 @@ struct RawSecondaryStt {
 }
 
 /// Settings of the secondary transcription endpoint; it runs only when `enabled`.
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "RawSecondaryStt")]
 pub struct SecondaryStt {
     enabled: bool,
@@ -112,6 +112,24 @@ impl SecondaryStt {
     #[must_use]
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// The same settings, run or not.
+    #[must_use]
+    pub fn with_enabled(self, enabled: bool) -> Self {
+        Self { enabled, ..self }
+    }
+
+    /// The endpoint's base address.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        &self.url
+    }
+
+    /// The key sent to the endpoint; empty when it needs none.
+    #[must_use]
+    pub fn api_key(&self) -> &str {
+        &self.api_key
     }
 
     /// The model named in each request.

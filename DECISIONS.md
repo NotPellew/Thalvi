@@ -33,13 +33,17 @@ areas your change touches. Editing rules are in
   0.6B (NeMo, buffered, 0.56 s lookahead, language detected) behind `STT_URL`. Why: no server change;
   5.8–6.6% word errors on the developer's takes (Meta-free, en/de/es), fits next to TTS on an 8 GB
   RTX 2080. Rejected: Voxtral 4B Realtime (too big), Nemotron 3.5 streaming (15%), Qwen3-ASR (2 s chunks).
+- **The desktop connects to its recognizer itself, from a list of speech servers.** `stt.entries` holds realtime
+  ASR, Thalvi server, on-device and second-pass entries; one live entry is active, ticked second passes run in list
+  order and the first that answers wins; `STT_URL` stays for web conversations. Why: switch recognizers with one click,
+  no `.env` edit or restart. Rejected: one setting per recognizer, a silent fallback between entries, several live entries (#228).
 - **The self-hosted recognizer computes in fp32.** Why: in fp16 its encoder overflows to NaN, decoded as `⁇`,
   when speech follows seconds of digital silence (#220); fp32 takes 1.25 GB more VRAM (7.7 of 8 GB beside TTS)
   and about 2 ms more per step on the RTX 2080. Rejected: bfloat16 (Turing has none), filling silence with
   noise (rescued one stretch of two), restarting streams.
 - **The word list is a recognition hint, used locally and on the server.** Settings' list goes to the
-  server, which gives it to recognizers that announce `phraseBoosting` (dictation and conversations), and
-  to local dictation. Why: NeMo boosting fixed "Cybrex2" with no new errors; text replacement can't fix
+  server (when a Thalvi server entry is active) and to a direct realtime recognizer at each connection, to
+  recognizers that announce `phraseBoosting`, and to local dictation. Why: NeMo boosting fixed "Cybrex2" with no new errors; text replacement can't fix
   what was misheard. Rejected: a flat logit bonus (no fix, stray tokens in silence), sending it to Meta.
 - **Local boosting fuses NeMo's phrase tree into the greedy search at alpha 2.** Why: "Cybrex2", digit
   and all, in 8 of 8 dictations, no new errors on 48 takes with a two-entry list, about 1 ms more per
@@ -118,8 +122,8 @@ areas your change touches. Editing rules are in
   Rejected: two wtype calls, a delay per application.
 - **Musical earcons.** Five two- or three-note cues (wake, provisional ending, cancelled, accepted, error), each switchable under `cues` in the desktop config; the mic drops frames while a cue plays.
   Why: distinct contours tell capture state apart without looking, and the mic never hears them. Rejected: one beep for every state, and a post-delivery cue.
-- **Second-pass transcription is explicitly opt-in.** `stt.secondary.enabled`
-  defaults off and disabling preserves endpoint settings. Why: avoid uploading
+- **Second-pass transcription is explicitly opt-in.** A second-pass entry runs only
+  when ticked (`active`), and unticking keeps its settings and key. Why: avoid uploading
   every dictation and adding latency without an explicit choice. Rejected:
   treating an endpoint's presence as enablement.
 - **Resident controls and private bar status.** Control commands use single-instance

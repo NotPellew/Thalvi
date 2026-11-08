@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `7fcc64d63bbddfc9f752ef0554ddc2a2aaf09851`. The recorded file hashes
+Sync commit: `79e5943c12ba416666ff9e510c94444b27ccf37c`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -28,7 +28,10 @@ accounts for presses during a rebuild and refuses them afterwards; its former
 body is `Runner::rebuild`. A dropped listener keeps its hold cursor until it
 resumes. Closing the microphone ends that interval and hands pending presses to
 Apply, which returns the accounted cursor to the live engine so a newer press
-cannot be skipped. None of these touch the mapped functions' cancellation
+cannot be skipped. Speech servers became a list of entries: `Engine::reconcile`
+runs every ticked second-pass entry (none runs when none is ticked, as before
+when the switch was off), still polling cancellation first, and the recognizer
+errors name their entry. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
 The GNOME host (#267) changed `delivery.rs` and `runner.rs` without changing that:
 `Delivery::type_in` returns `Delivered::InWindow` or `Delivered::OnClipboard` from the
@@ -37,6 +40,8 @@ action and a cancelled capture still never reaches it. `Runner::capture` now cal
 `Publisher::woke` before `drive`, which only sets the view's `copies` and `target`.
 A wake capture whose whole text is a task now arms the task ending itself; it
 reaches `Engine::conclude` through the same `Done::Accepted`, so that is unchanged too.
+The offline-model fix (#272) added a `RecognizerError::Model` variant, raised while the
+local model's files are fetched and so before any `RecognizerSession` exists.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

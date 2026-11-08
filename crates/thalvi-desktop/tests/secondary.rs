@@ -388,7 +388,7 @@ fn the_switch_defaults_off_and_off_keeps_the_endpoint() {
     .expect("off settings keep the endpoint");
     assert!(!off.enabled());
     assert_eq!(
-        serde_json::to_value(&off).unwrap(),
-        serde_json::json!({"enabled": false, "url": "http://localhost:9000", "model": "m", "api_key": "hunter2", "api": "meta"})
+        (off.address(), off.model(), off.api_key(), off.api()),
+        ("http://localhost:9000", "m", "hunter2", SecondaryApi::Meta)
     );
 }

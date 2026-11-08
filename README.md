@@ -205,8 +205,9 @@ STT_API_KEY=
 
 With it, Settings → Speech shows a **Word list**: names and terms, one per
 line, whose spelling recognition should favour (such as "Cybrex2"). Saving
-sends the list to the server, which keeps it and uses it for dictation and
-conversations. Meta's recognizer doesn't support it, so the field is hidden
+sends the list to the Thalvi server in use, which keeps it and uses it for
+dictation and conversations; a realtime speech server entry gets it at each
+connection. Meta's recognizer doesn't support it, so the field is hidden
 then. Dictation on this computer always uses the list, so the field shows
 whenever speech is recognized there.
 
@@ -268,10 +269,25 @@ because its config is broken, a message box names the problem and the file.
 
 ### Speech recognition
 
-By default the app streams your speech to the server's `/transcription` at
-`ws://127.0.0.1:8080` (Settings → Speech → Server address). To dictate without
-the server or a network, choose **On this computer** under Speech and pick a
-language (it only narrows the list of models) and a model. The first use of a model downloads it (about 650 MB);
+Settings → Speech keeps a list of speech servers. **Live dictation** uses exactly
+one of them, and **Use** switches to another at once; it applies from the next
+capture, and a capture already running keeps its recognizer. The kinds are:
+
+- **Realtime speech server:** a recognizer that speaks Meta's realtime ASR
+  protocol, such as the self-hosted one below, which the app connects to itself
+  (address, model, API key), with no Thalvi server running.
+- **Through a Thalvi server:** streams to the server's `/transcription`
+  (by default `ws://127.0.0.1:8080`), which uses the recognizer in its `.env`.
+- **On this computer:** dictates without the server or a network. Pick a
+  language (it only narrows the list of models) and a model.
+
+Web conversations always use the server's own `STT_URL`. An existing config
+with `stt.engine`, `stt.model`, `stt.secondary` and `server` becomes entries
+the first time Thalvi reads it, with nothing to enter again. An API key is shown
+as saved and never again; leave it blank to keep it. A server that cannot be
+reached is named in the error, and Thalvi never falls back to another one.
+
+For the on-device model, the first use of a model downloads it (about 650 MB);
 after that it works offline. A model you pick applies from the next capture, and
 a capture already running keeps the model it started with. Settings shows each
 model's size, license and languages in full, whether it is downloaded, and can download
@@ -297,9 +313,12 @@ The unified model is NVIDIA's
 [Nemotron unified ASR](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b)
 under OpenMDW-1.1, exported to ONNX by Thalvi.
 
-**Second-pass transcription** (Settings → Speech, off by default) sends each
-accepted capture again to the endpoint you set there. Turning it off keeps the
-endpoint and key.
+**Second-pass transcription** (Settings → Speech → Second pass, none ticked by
+default) sends each accepted capture again to every ticked OpenAI-style or Meta
+transcription API. The first ticked one in list order (move them with the
+arrows) that answers replaces the live text; the others are only recorded, in
+the capture's `text.txt` and the metrics, for comparing later. Unticking keeps
+the address and key.
 
 ### Microphone
 
