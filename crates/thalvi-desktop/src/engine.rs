@@ -239,6 +239,8 @@ pub enum CaptureError {
     #[error("No words were heard while the key was held. Nothing was typed.")]
     NothingHeard,
     #[error("No words heard for {}.", plain_duration(*.0))]
+    NoWords(Duration),
+    #[error("Didn't hear an ending for {}.", plain_duration(*.0))]
     NoEnding(Duration),
     #[error("Capture stopped after {} without an ending.", plain_duration(*.0))]
     TooLong(Duration),
@@ -258,7 +260,8 @@ impl UserError for CaptureError {
             Self::Writing(error) => error.headline(),
             Self::MicStopped => "Microphone stopped mid-capture",
             Self::HoldTooShort => "Key released too soon",
-            Self::NothingHeard | Self::NoEnding(_) => "No words heard",
+            Self::NothingHeard | Self::NoWords(_) => "No words heard",
+            Self::NoEnding(_) => "No ending heard",
             Self::TooLong(_) => "Capture too long — not delivered",
             Self::Full(_) => "Capture full — finish or cancel",
         }
@@ -288,7 +291,7 @@ impl CaptureError {
             Self::Writing(_) => "writing",
             Self::HoldTooShort => "hold_too_short",
             Self::NothingHeard => "hold_empty",
-            Self::NoEnding(_) => "no_ending",
+            Self::NoWords(_) | Self::NoEnding(_) => "no_ending",
             Self::TooLong(_) => "too_long",
             Self::Full(_) => "full",
         }
@@ -731,6 +734,15 @@ fn nothing_delivered(outcome: &CaptureOutcome) -> Option<&'static str> {
         }
         CaptureOutcome::Cancelled { .. } => Some("cancelled"),
         CaptureOutcome::Failed { error, .. } => Some(error.kind()),
+    }
+}
+
+/// The capture heard no new words for `idle`: words were heard but never their ending, or none at all.
+fn idle_error(idle: Duration, text: &CaptureSession) -> CaptureError {
+    if recoverable(text).is_some() {
+        CaptureError::NoEnding(idle)
+    } else {
+        CaptureError::NoWords(idle)
     }
 }
 
@@ -1476,7 +1488,7 @@ where
                     None
                 }
                 Step::Silent => Some(Done::Failed(CaptureError::MicStopped)),
-                Step::Idle => Some(Done::Failed(CaptureError::NoEnding(self.limits.idle()))),
+                Step::Idle => Some(Done::Failed(idle_error(self.limits.idle(), &live.text))),
                 Step::TooLong => Some(Done::Failed(CaptureError::TooLong(self.limits.max()))),
                 Step::Tail => Some(self.finish_hold(live, held)),
                 Step::Key(open) => {
@@ -1864,7 +1876,7 @@ where
                 _ = self.cancel.changed() => return Err(Stop::Cancelled),
                 sent = live.session.send_frame(frame) => sent.map_err(|e| Stop::Failed(e.into()))?,
                 () = tokio::time::sleep_until(live.last_words + limits.idle()) => {
-                    return Err(Stop::Failed(CaptureError::NoEnding(limits.idle())));
+                    return Err(Stop::Failed(idle_error(limits.idle(), &live.text)));
                 }
                 () = tokio::time::sleep_until(live.started + limits.max()) => {
                     return Err(Stop::Failed(CaptureError::TooLong(limits.max())));

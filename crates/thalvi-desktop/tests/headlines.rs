@@ -98,7 +98,8 @@ fn recognition() -> Cases {
             Box::new(CaptureError::MicStopped),
             "Microphone stopped mid-capture",
         ),
-        (Box::new(CaptureError::NoEnding(seconds)), "No words heard"),
+        (Box::new(CaptureError::NoEnding(seconds)), "No ending heard"),
+        (Box::new(CaptureError::NoWords(seconds)), "No words heard"),
         (
             Box::new(CaptureError::HoldTooShort),
             "Key released too soon",
