@@ -142,6 +142,7 @@ pub struct Revising<D> {
     audio: Vec<f32>,
     waiting: usize,
     quiet: usize,
+    zeros: usize,
     shown: String,
     recent: std::collections::VecDeque<Frame>,
 }
@@ -155,6 +156,7 @@ impl<D: SnapshotDecoder> Revising<D> {
             audio: Vec::new(),
             waiting: 0,
             quiet: 0,
+            zeros: 0,
             shown: String::new(),
             recent: std::collections::VecDeque::new(),
         }
@@ -172,13 +174,21 @@ impl<D: SnapshotDecoder> Revising<D> {
         } else {
             self.quiet += samples.len();
         }
-        if self.audio.is_empty() && samples.iter().all(|sample| *sample == 0.0) {
+        let silent = samples.iter().all(|sample| *sample == 0.0);
+        if self.audio.is_empty() && silent {
             return Ok(Vec::new());
         }
+        self.zeros = if silent {
+            self.zeros + samples.len()
+        } else {
+            0
+        };
+        // A microphone never sends digital silence; the engine does, to end the input.
+        let flush = self.zeros >= ENDPOINT;
         self.audio.extend_from_slice(samples);
         self.waiting += samples.len();
-        let finish = self.quiet >= ENDPOINT;
-        let just_quiet = finish && self.quiet - samples.len() < ENDPOINT;
+        let finish = flush || self.quiet >= ENDPOINT;
+        let just_quiet = flush || finish && self.quiet - samples.len() < ENDPOINT;
         if self.waiting < UPDATE && !just_quiet {
             return Ok(Vec::new());
         }
@@ -195,13 +205,18 @@ impl<D: SnapshotDecoder> Revising<D> {
             .count();
         let tokens: Vec<usize> = frames.into_iter().flatten().collect();
         let current = text(&tokens, &self.pieces);
-        if finish && trailing >= 8 && !current.is_empty() {
+        if finish && (flush || trailing >= 8) && !current.is_empty() {
             self.audio.clear();
+            self.zeros = 0;
             self.shown.clear();
             self.decoder.next_segment();
             return Ok(vec![RecognizerEvent::Final(current)]);
         }
-        if finish && current.is_empty() && self.audio.len() > WORDLESS_TAIL {
+        if flush {
+            self.audio.clear();
+            self.zeros = 0;
+            self.decoder.next_segment();
+        } else if finish && current.is_empty() && self.audio.len() > WORDLESS_TAIL {
             self.audio.drain(..self.audio.len() - WORDLESS_TAIL);
             self.decoder.next_segment();
         }
@@ -361,7 +376,7 @@ mod tests {
                     (true, 16, vec![(0, 1), (15, 2)]),
                     (true, 24, vec![(0, 1), (15, 2)]),
                 ],
-                "S..",
+                "Sqq",
                 vec![
                     RecognizerEvent::Partial("one".into()),
                     RecognizerEvent::Partial("one two".into()),
@@ -397,7 +412,7 @@ mod tests {
                     (true, 16, vec![]),
                     (true, 24, vec![(0, 1)]),
                 ],
-                "S..",
+                "Sqq",
                 vec![
                     RecognizerEvent::Partial("wrong".into()),
                     RecognizerEvent::Partial(String::new()),
@@ -435,5 +450,36 @@ mod tests {
         );
         assert!(stream.decoder.script.is_empty());
         assert_eq!(stream.decoder.resets, 5, "each trim restarts the decoding");
+    }
+
+    #[test]
+    fn digital_silence_ends_the_stretch_at_once() {
+        for (name, snapshots, script, expected) in [
+            (
+                "with its pending word",
+                vec![(false, 8, vec![(0, 1)]), (true, 16, vec![(0, 1), (15, 2)])],
+                "S.",
+                "one two",
+            ),
+            (
+                "and a wordless stretch is not carried into the next",
+                vec![
+                    (true, 8, vec![]),
+                    (true, 16, vec![]),
+                    (false, 8, vec![(0, 1)]),
+                    (true, 16, vec![(0, 1)]),
+                ],
+                "q.S.",
+                "one",
+            ),
+        ] {
+            let (events, stream) = run(script, snapshots);
+            assert_eq!(
+                events.last(),
+                Some(&RecognizerEvent::Final(expected.into())),
+                "{name}"
+            );
+            assert!(stream.decoder.script.is_empty(), "{name}");
+        }
     }
 }
