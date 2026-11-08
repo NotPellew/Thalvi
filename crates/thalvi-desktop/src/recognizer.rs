@@ -34,42 +34,104 @@ pub enum RecognizerEvent {
     Final(String),
 }
 
-/// What the user does when the speech server cannot be used.
-const START_SERVER: &str = "Start the Thalvi server, or fix Settings → Speech → Server address.";
-
-/// Where dictation is recognized, as the settings name it.
+/// Where an entry recognizes speech, as errors and notices name it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SpeechSource {
-    Server(ServerUrl),
-    /// The model on this computer; `model` is its name or folder.
-    Local {
-        model: String,
-    },
+enum Place {
+    /// A recognizer that speaks the realtime ASR protocol, reached directly.
+    Direct(String),
+    ThalviServer(ServerUrl),
+    OnDevice(String),
+}
+
+/// The live entry that recognizes dictation, named for the user.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeechSource {
+    name: String,
+    place: Place,
 }
 
 impl SpeechSource {
-    /// Names what is not working, for the start of a sentence.
-    fn subject(&self) -> String {
-        match self {
-            Self::Server(server) => format!("The speech server at {server}"),
-            Self::Local { model } => format!("The speech model {model}"),
+    /// A recognizer reached directly at `address`.
+    #[must_use]
+    pub fn direct(name: &str, address: String) -> Self {
+        Self {
+            name: name.to_owned(),
+            place: Place::Direct(address),
         }
+    }
+
+    #[must_use]
+    pub fn thalvi_server(name: &str, server: &ServerUrl) -> Self {
+        Self {
+            name: name.to_owned(),
+            place: Place::ThalviServer(server.clone()),
+        }
+    }
+
+    /// The model on this computer; `model` is its name or folder.
+    #[must_use]
+    pub fn on_device(name: &str, model: String) -> Self {
+        Self {
+            name: name.to_owned(),
+            place: Place::OnDevice(model),
+        }
+    }
+
+    /// The entry's name in Settings.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether the entry runs on this computer.
+    #[must_use]
+    pub fn is_on_device(&self) -> bool {
+        matches!(self.place, Place::OnDevice(_))
+    }
+
+    /// Names what is not working, for the start of a sentence.
+    pub(crate) fn subject(&self) -> String {
+        let named = self.to_string();
+        let mut letters = named.chars();
+        letters
+            .next()
+            .map(|first| first.to_uppercase().chain(letters).collect())
+            .unwrap_or(named)
     }
 
     /// What to do about it, naming the setting.
     pub(crate) fn fix(&self) -> &'static str {
-        match self {
-            Self::Server(_) => START_SERVER,
-            Self::Local { .. } => {
-                "Wait for it to finish loading, or pick another under Settings → Speech → Speech model."
+        match self.place {
+            Place::Direct(_) => {
+                "Check that it is running, or fix its address under Settings → Speech."
             }
+            Place::ThalviServer(_) => {
+                "Start the Thalvi server, or fix its address under Settings → Speech."
+            }
+            Place::OnDevice(_) => {
+                "Wait for it to finish loading, or pick another under Settings → Speech."
+            }
+        }
+    }
+
+    /// What the entry should be when it answers something else than a speech connection.
+    fn expected(&self) -> &'static str {
+        match self.place {
+            Place::Direct(_) => "a realtime speech recognizer",
+            Place::ThalviServer(_) => "a Thalvi server",
+            Place::OnDevice(_) => "a speech model",
         }
     }
 }
 
 impl std::fmt::Display for SpeechSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.subject())
+        let name = &self.name;
+        match &self.place {
+            Place::Direct(address) => write!(f, "the speech server \"{name}\" at {address}"),
+            Place::ThalviServer(server) => write!(f, "the Thalvi server \"{name}\" at {server}"),
+            Place::OnDevice(model) => write!(f, "the speech model \"{name}\" ({model})"),
+        }
     }
 }
 
@@ -91,7 +153,7 @@ pub enum ConnectFailure {
 }
 
 impl ConnectFailure {
-    fn of(error: &tungstenite::Error) -> Self {
+    pub(crate) fn of(error: &tungstenite::Error) -> Self {
         use std::io::ErrorKind;
         match error {
             tungstenite::Error::Io(io) => match io.kind() {
@@ -113,24 +175,33 @@ impl ConnectFailure {
 pub struct Detail(pub String);
 
 /// A failure the user can be told about in plain words; `Display` says what failed, why and
-/// what to do.
+/// what to do, naming the entry.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RecognizerError {
-    #[error("Thalvi could not reach the speech server at {server} ({reason}). {START_SERVER}")]
+    #[error("Thalvi could not reach {speech} ({reason}). {}", speech.fix())]
     Unreachable {
-        server: ServerUrl,
+        speech: SpeechSource,
         reason: ConnectFailure,
         #[source]
         detail: Detail,
     },
     #[error(
-        "The speech server at {server} closed the connection. Nothing was delivered. Check that the Thalvi server is still running."
+        "{} closed the connection. Nothing was delivered. Check that it is still running.",
+        speech.subject()
     )]
-    Dropped { server: ServerUrl },
+    Dropped { speech: SpeechSource },
     #[error(
-        "The speech server at {server} sent something Thalvi did not understand. Check that Settings → Speech → Server address points at a Thalvi server."
+        "{} sent something Thalvi did not understand. Check that its address under Settings → Speech is {}.",
+        speech.subject(),
+        speech.expected()
     )]
-    NotUnderstood { server: ServerUrl },
+    NotUnderstood { speech: SpeechSource },
+    /// The entry refused the session or reported a failure, in its own words.
+    #[error("{} reported a problem: {message}", speech.subject())]
+    Reported {
+        speech: SpeechSource,
+        message: String,
+    },
     /// A speech model that could not be provided; the headline is the model error's own.
     #[error("{message}")]
     Model {
@@ -149,7 +220,7 @@ impl UserError for RecognizerError {
             Self::Dropped { .. } => "Speech server hung up — Settings",
             Self::NotUnderstood { .. } => "Bad speech server reply — Settings",
             Self::Model { headline, .. } => headline,
-            Self::Said(_) => "Speech recognition failed — Settings",
+            Self::Reported { .. } | Self::Said(_) => "Speech recognition failed — Settings",
         }
     }
 }
@@ -344,12 +415,15 @@ impl Upsampler {
 #[derive(Clone, Debug)]
 pub struct ServerRecognizer {
     url: ServerUrl,
+    speech: SpeechSource,
 }
 
 impl ServerRecognizer {
+    /// The recognizer of the Thalvi server entry called `name`.
     #[must_use]
-    pub fn new(url: ServerUrl) -> Self {
-        Self { url }
+    pub fn new(name: &str, url: ServerUrl) -> Self {
+        let speech = SpeechSource::thalvi_server(name, &url);
+        Self { url, speech }
     }
 }
 
@@ -359,7 +433,7 @@ type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 pub struct ServerSession {
     socket: Socket,
     upsampler: Upsampler,
-    server: ServerUrl,
+    speech: SpeechSource,
 }
 
 #[derive(Deserialize)]
@@ -373,15 +447,15 @@ enum ServerMessage {
     Error { message: Option<String> },
 }
 
-fn parse(text: &str, server: &ServerUrl) -> Result<ServerMessage, RecognizerError> {
+fn parse(text: &str, speech: &SpeechSource) -> Result<ServerMessage, RecognizerError> {
     serde_json::from_str(text).map_err(|_| RecognizerError::NotUnderstood {
-        server: server.clone(),
+        speech: speech.clone(),
     })
 }
 
-fn dropped(server: &ServerUrl) -> RecognizerError {
+fn dropped(speech: &SpeechSource) -> RecognizerError {
     RecognizerError::Dropped {
-        server: server.clone(),
+        speech: speech.clone(),
     }
 }
 
@@ -390,32 +464,38 @@ impl Recognizer for ServerRecognizer {
 
     async fn connect(&self) -> Result<ServerSession, RecognizerError> {
         let config = WebSocketConfig::default().max_message_size(Some(MAX_MESSAGE_BYTES));
-        let server = &self.url;
-        let (mut socket, _) = connect_async_with_config(server.transcription(), Some(config), true)
-            .await
-            .map_err(|error| RecognizerError::Unreachable {
-                server: server.clone(),
-                reason: ConnectFailure::of(&error),
-                detail: Detail(error.to_string()),
-            })?;
+        let speech = &self.speech;
+        let (mut socket, _) =
+            connect_async_with_config(self.url.transcription(), Some(config), true)
+                .await
+                .map_err(|error| RecognizerError::Unreachable {
+                    speech: speech.clone(),
+                    reason: ConnectFailure::of(&error),
+                    detail: Detail(error.to_string()),
+                })?;
         loop {
             match socket.next().await {
-                Some(Ok(Message::Text(text))) => match parse(&text, server) {
+                Some(Ok(Message::Text(text))) => match parse(&text, speech) {
                     Ok(ServerMessage::Ready) => break,
                     Ok(ServerMessage::Error {
                         message: Some(message),
-                    }) => return Err(RecognizerError::said(message)),
+                    }) => {
+                        return Err(RecognizerError::Reported {
+                            speech: speech.clone(),
+                            message,
+                        });
+                    }
                     _ => {
                         return Err(RecognizerError::NotUnderstood {
-                            server: server.clone(),
+                            speech: speech.clone(),
                         });
                     }
                 },
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                Some(Ok(Message::Close(_)) | Err(_)) | None => return Err(dropped(server)),
+                Some(Ok(Message::Close(_)) | Err(_)) | None => return Err(dropped(speech)),
                 Some(Ok(_)) => {
                     return Err(RecognizerError::NotUnderstood {
-                        server: server.clone(),
+                        speech: speech.clone(),
                     });
                 }
             }
@@ -423,7 +503,7 @@ impl Recognizer for ServerRecognizer {
         Ok(ServerSession {
             socket,
             upsampler: Upsampler::default(),
-            server: server.clone(),
+            speech: speech.clone(),
         })
     }
 }
@@ -439,34 +519,38 @@ impl RecognizerSession for ServerSession {
         self.socket
             .send(Message::Binary(bytes.into()))
             .await
-            .map_err(|_| dropped(&self.server))
+            .map_err(|_| dropped(&self.speech))
     }
 
     async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
         loop {
             match self.socket.next().await {
-                Some(Ok(Message::Text(text))) => match parse(&text, &self.server)? {
+                Some(Ok(Message::Text(text))) => match parse(&text, &self.speech)? {
                     ServerMessage::Partial { text } => return Ok(RecognizerEvent::Partial(text)),
                     ServerMessage::Final { text } => return Ok(RecognizerEvent::Final(text)),
                     ServerMessage::Error { message } => {
-                        return Err(RecognizerError::said(
-                            message.unwrap_or_else(|| "Speech recognition failed.".to_string()),
-                        ));
+                        return Err(RecognizerError::Reported {
+                            speech: self.speech.clone(),
+                            message: message
+                                .unwrap_or_else(|| "Speech recognition failed.".to_string()),
+                        });
                     }
                     ServerMessage::SpeechStart | ServerMessage::SpeechEnd => {}
                     ServerMessage::Ready => {
                         return Err(RecognizerError::NotUnderstood {
-                            server: self.server.clone(),
+                            speech: self.speech.clone(),
                         });
                     }
                 },
                 Some(Ok(Message::Binary(_))) => {
                     return Err(RecognizerError::NotUnderstood {
-                        server: self.server.clone(),
+                        speech: self.speech.clone(),
                     });
                 }
                 Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
-                Some(Ok(Message::Close(_)) | Err(_)) | None => return Err(dropped(&self.server)),
+                Some(Ok(Message::Close(_)) | Err(_)) | None => {
+                    return Err(dropped(&self.speech));
+                }
             }
         }
     }
@@ -655,7 +739,8 @@ mod tests {
 
     #[test]
     fn a_failed_connection_is_told_apart_and_says_what_to_fix() {
-        let server = ServerUrl::parse("ws://127.0.0.1:9").unwrap();
+        let speech =
+            SpeechSource::thalvi_server("Office", &ServerUrl::parse("ws://127.0.0.1:9").unwrap());
         let cases = [
             (
                 tungstenite::Error::Io(IoError::from(ErrorKind::ConnectionRefused)),
@@ -686,14 +771,14 @@ mod tests {
         for (error, reason, words) in cases {
             assert_eq!(ConnectFailure::of(&error), reason, "{error}");
             let failure = RecognizerError::Unreachable {
-                server: server.clone(),
+                speech: speech.clone(),
                 reason,
                 detail: Detail(error.to_string()),
             };
             assert_eq!(
                 failure.to_string(),
                 format!(
-                    "Thalvi could not reach the speech server at ws://127.0.0.1:9 ({words}). Start the Thalvi server, or fix Settings → Speech → Server address."
+                    "Thalvi could not reach the Thalvi server \"Office\" at ws://127.0.0.1:9 ({words}). Start the Thalvi server, or fix its address under Settings → Speech."
                 )
             );
             assert_eq!(

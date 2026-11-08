@@ -12,18 +12,21 @@ use thalvi_desktop::delivery::Delivery;
 use thalvi_desktop::draft::Drafts;
 use thalvi_desktop::history;
 use thalvi_desktop::hold::HoldKind;
-use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, HostError, StateServer};
+use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, HostError, RequestServer, refusal};
+use thalvi_desktop::metrics::Recorder;
 use thalvi_desktop::models::SpeechDownloads;
+use tokio::sync::watch;
 
+use crate::agent::{self, Running, Switch};
+use crate::client;
 use crate::commands;
-use crate::control;
-use crate::launch::{Command, Launch, relaunch_command};
+use crate::launch::{Launch, relaunch_shows_settings};
 use crate::menu_entry::{self, MenuEntry};
 use crate::overlay::{self, Overlay, Visibility};
-use crate::runner::{Control, EngineLink};
+use crate::runner::{AudioStatus, Control, EngineLink};
 use crate::settings::Store;
 use crate::startup::{self, APP_NAME, LOGIN_ARG, Registration};
-use crate::status::{FailureKind, LastError, Status};
+use crate::status::{Failure, FailureKind, LastError, Status};
 use crate::tray::{self, CopyItem, Tray};
 
 const SETTINGS: &str = "settings";
@@ -31,6 +34,9 @@ const SETTINGS: &str = "settings";
 /// The settings page that holds the last dictation, and the event that opens a page.
 const HISTORY_PAGE: &str = "history";
 const OPEN_PAGE_EVENT: &str = "thalvi://open-page";
+
+/// Sent when an agent changes what the open settings window shows; the window's own saves never send it.
+const CHANGED_ELSEWHERE_EVENT: &str = "thalvi://settings-elsewhere";
 
 /// What the commands and the tray menu reach.
 pub struct AppState {
@@ -55,8 +61,8 @@ pub struct AppState {
     login_problem: Mutex<Option<String>>,
     /// Why the app menu entry could not be rewritten on start, for the switch to show.
     menu_problem: Mutex<Option<String>>,
-    /// Answers status bars until the app quits.
-    state_server: Mutex<Option<StateServer>>,
+    /// Answers requests from outside, such as status bars and agents, until the app quits.
+    request_server: Mutex<Option<RequestServer>>,
     /// Reports the hold key where the app sees the keyboard itself; empty elsewhere.
     hold_watch: Mutex<Option<HoldWatch>>,
     hold_unavailable: Option<&'static str>,
@@ -78,18 +84,6 @@ impl AppState {
             Arc::clone(&history),
             Arc::clone(&drafts),
         )?;
-        let last_error = LastError::default();
-        let state_server = match Desktop::serve_state(control::answer(
-            link.status_updates(),
-            last_error.clone(),
-        )) {
-            Ok(server) => Some(server),
-            Err(error) => {
-                // The app works without a status bar; the bar then reports Thalvi as not running.
-                println!("{error} The status bar module stays off.");
-                None
-            }
-        };
         let held = watch_hold_keys(&config, &link);
         Ok(Self {
             link,
@@ -99,14 +93,14 @@ impl AppState {
             history,
             drafts,
             delivery,
-            last_error,
+            last_error: LastError::default(),
             tray: OnceLock::new(),
             host: Arc::new(Desktop::detect().map_err(|error| error.to_string())?),
             overlay_shown: AtomicBool::new(config.overlay.show),
             login_problem: Mutex::new(None),
             menu_problem: Mutex::new(None),
             config: Mutex::new(config),
-            state_server: Mutex::new(state_server),
+            request_server: Mutex::new(None),
             hold_watch: Mutex::new(held.watch),
             hold_unavailable: held.unavailable,
         })
@@ -287,6 +281,19 @@ struct Level {
 }
 
 pub fn run() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let launch = Launch::parse(&args, || {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map(|_| text)
+    });
+    let (login, config) = match launch {
+        Ok(Launch::Ask(request)) => return client::run(&request),
+        Ok(Launch::Open { login, config }) => (login, config),
+        Err(message) => {
+            println!("{}", refusal(&message));
+            return ExitCode::from(2);
+        }
+    };
     // Recording failures and dropped events are reported only through `tracing`.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -295,7 +302,7 @@ pub fn run() -> ExitCode {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
-    match start() {
+    match start(login, config) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             report_failure(&message);
@@ -313,26 +320,23 @@ fn report_failure(message: &str) {
     }
 }
 
-fn start() -> Result<(), String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let (command, config) = match Launch::parse(&args)? {
-        Launch::Status => {
-            println!("{}", control::bar_json(Desktop::query_state()));
-            return Ok(());
-        }
-        Launch::Run { command, config } => {
-            if command == Command::CopyError {
-                control::check_copy_error(Desktop::query_state())?;
-            }
-            (command, config)
-        }
-    };
+fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> {
+    // An app that already runs opens its settings, or is left as the login entry finds it.
+    if if login {
+        client::app_runs()
+    } else {
+        client::opened_running_app()
+    } {
+        return Ok(());
+    }
     // GTK's backend is fixed when it starts, which the builder below does.
     #[cfg(target_os = "linux")]
     Desktop::prepare_toolkit().map_err(|error| error.to_string())?;
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
-            act(app, relaunch_command(&args));
+            if relaunch_shows_settings(&args) {
+                show_settings(app);
+            }
         }))
         .plugin(
             tauri_plugin_autostart::Builder::new()
@@ -366,6 +370,7 @@ fn start() -> Result<(), String> {
             commands::list_speech_models,
             commands::download_speech_model,
             commands::open_speech_model_source,
+            commands::check_speech_entry,
             commands::word_list_support,
             commands::share_word_list,
             commands::get_history,
@@ -386,9 +391,6 @@ fn start() -> Result<(), String> {
         })
         .build(tauri::generate_context!())
         .map_err(|error| error.to_string())?;
-    // A relaunch has already been handed to the running app by now, so reaching this point means
-    // no app runs; a control command must not start the engine, the microphone or any window.
-    command.first_start()?;
     app.run(|_, event| {
         // The tray keeps the app alive when no window is open.
         if let RunEvent::ExitRequested {
@@ -408,8 +410,31 @@ fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), Stri
     state.restore_login(app);
     state.restore_menu_entry(&menu_entry::System::from_env());
     app.manage(state);
+    serve_requests(app);
     create_windows(app).map_err(|error| error.to_string())?;
     follow_engine(app).map_err(|error| error.to_string())
+}
+
+/// Starts answering requests from outside. The app works without; status bars then report Thalvi
+/// as not running, and the commands say so.
+fn serve_requests(app: &AppHandle) {
+    let handle = app.clone();
+    let listening = Desktop::serve_requests(move |line| {
+        tauri::async_runtime::block_on(agent::answer(
+            &Live(handle.clone()),
+            agent::EFFECT_WAIT,
+            line,
+        ))
+    });
+    match listening {
+        Ok(requests) => {
+            *app.state::<AppState>()
+                .request_server
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(requests);
+        }
+        Err(error) => println!("{error} The status bar module and the agent commands stay off."),
+    }
 }
 
 fn create_windows(app: &AppHandle) -> tauri::Result<()> {
@@ -514,56 +539,112 @@ fn show_settings(app: &AppHandle) {
     }
 }
 
-fn act(app: &AppHandle, command: Command) {
-    // A relaunch can arrive while the first instance is still starting.
-    let Some(state) = app.try_state::<AppState>() else {
-        return;
+/// Copies the last error's report; a failure shows on the tray item and in the log.
+///
+/// # Errors
+/// Why there is nothing to copy, or why the clipboard refused it.
+async fn copy_last_error(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let failure = state
+        .last_error
+        .get()
+        .ok_or("Thalvi has shown no error to copy.")?;
+    let copied = commands::copy(app, &state, &failure.notice, &failure.causes).await;
+    let item = match &copied {
+        Ok(()) => CopyItem::Ready,
+        Err(reason) => {
+            eprintln!("The error report could not be copied: {reason}");
+            CopyItem::Failed(reason.clone())
+        }
     };
-    match command {
-        Command::Show => show_settings(app),
-        Command::Login => {}
-        Command::Toggle => state.link.send(Control::ToggleListening),
-        Command::Pause => state.link.send(Control::SetListening(false)),
-        Command::Resume => state.link.send(Control::SetListening(true)),
-        Command::Cancel => state.link.send(Control::Cancel),
-        Command::HoldStart => state.link.hold_input().set(true),
-        Command::HoldEnd => state.link.hold_input().set(false),
-        Command::WriteStart => state.link.hold_input().set_write(true),
-        Command::WriteEnd => state.link.hold_input().set_write(false),
-        Command::CopyError => copy_last_error(app),
+    if let Some(tray) = state.tray.get() {
+        tray.copy_item(&item);
     }
+    copied
 }
 
-/// Copies the last error's report; a failure shows on the tray item and in the log.
-fn copy_last_error(app: &AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let Some(failure) = state.last_error.get() else {
-            return;
-        };
-        let item = match commands::copy(&app, &state, &failure.notice, &failure.causes).await {
-            Ok(()) => CopyItem::Ready,
-            Err(reason) => {
-                eprintln!("The error report could not be copied: {reason}");
-                CopyItem::Failed(reason)
-            }
-        };
-        if let Some(tray) = state.tray.get() {
-            tray.copy_item(&item);
+/// The running app, as the commands from outside see it.
+struct Live(AppHandle);
+
+impl Running for Live {
+    fn status(&self) -> watch::Receiver<Status> {
+        self.0.state::<AppState>().link.status_updates()
+    }
+
+    fn audio(&self) -> watch::Receiver<AudioStatus> {
+        self.0.state::<AppState>().link.audio_updates()
+    }
+
+    fn last_error(&self) -> Option<Failure> {
+        self.0.state::<AppState>().last_error.get()
+    }
+
+    fn control(&self, control: Control) {
+        self.0.state::<AppState>().link.send(control);
+    }
+
+    fn hold(&self, kind: HoldKind, down: bool) {
+        let input = self.0.state::<AppState>().link.hold_input();
+        match kind {
+            HoldKind::Dictate => input.set(down),
+            HoldKind::Write => input.set_write(down),
         }
-    });
+    }
+
+    fn show_settings(&self) {
+        show_settings(&self.0);
+    }
+
+    async fn copy_error(&self) -> Result<(), String> {
+        copy_last_error(&self.0).await
+    }
+
+    fn config(&self) -> DesktopConfig {
+        self.0.state::<AppState>().config()
+    }
+
+    fn save(&self, settings: serde_json::Value) -> Result<DesktopConfig, String> {
+        let config = commands::save(&self.0, &self.0.state::<AppState>(), settings)?;
+        let _ = self.0.emit(CHANGED_ELSEWHERE_EVENT, ());
+        Ok(config)
+    }
+
+    async fn share_word_list(&self) -> Result<(), String> {
+        commands::share(&self.0.state::<AppState>()).await
+    }
+
+    fn set_switch(&self, switch: Switch, on: bool) -> Result<(), String> {
+        let state = self.0.state::<AppState>();
+        match switch {
+            Switch::StartAtLogin => startup::set(&self.0, on, || state.remember_login(on))
+                .map_err(|error| error.to_string()),
+            Switch::ShowInMenu => menu_entry::set(&menu_entry::System::from_env(), on, || {
+                state.remember_menu_entry(on)
+            }),
+        }?;
+        let _ = self.0.emit(CHANGED_ELSEWHERE_EVENT, ());
+        Ok(())
+    }
+
+    fn recordings(&self) -> Result<std::path::PathBuf, String> {
+        Recorder::dir().map_err(|error| error.to_string())
+    }
 }
 
 /// Handles a tray menu item.
 pub fn on_menu(app: &AppHandle, id: &str) {
     match id {
-        tray::TOGGLE => act(app, Command::Toggle),
-        tray::CANCEL => act(app, Command::Cancel),
-        tray::COPY_ERROR => act(app, Command::CopyError),
-        tray::SETTINGS => act(app, Command::Show),
+        tray::TOGGLE => app.state::<AppState>().link.send(Control::ToggleListening),
+        tray::CANCEL => app.state::<AppState>().link.send(Control::Cancel),
+        tray::COPY_ERROR => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = copy_last_error(&app).await;
+            });
+        }
+        tray::SETTINGS => show_settings(app),
         tray::LAST_DICTATION => {
-            act(app, Command::Show);
+            show_settings(app);
             let _ = app.emit(OPEN_PAGE_EVENT, HISTORY_PAGE);
         }
         tray::QUIT => {
@@ -573,7 +654,7 @@ pub fn on_menu(app: &AppHandle, id: &str) {
                 // Bars read "not running" while the microphone and the recognizer close.
                 drop(
                     state
-                        .state_server
+                        .request_server
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .take(),

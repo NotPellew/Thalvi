@@ -136,8 +136,9 @@ export function createModule(onCancel: () => void): Module {
         show("live", { wave: true });
         break;
       case "capturing":
-        lines(options.showDraft, () => {
-          ticker.words(status.committed, status.partial ?? "", true);
+        lines(options.showDraft || status.notice !== null, () => {
+          if (status.notice === null) ticker.words(status.committed, status.partial ?? "", true);
+          else ticker.notice(status.notice);
         });
         show("live", { wave: true });
         break;

@@ -62,9 +62,9 @@ up() {
     --local) mode=local ;;
     *) usage ;;
   esac
-  run_id="$(date +%Y%m%d-%H%M%S)-$$"
-  run_dir="${TMPDIR:-/var/tmp}/thalvi-verify-$run_id"
-  mkdir -p "$run_dir/data" "$run_dir/evidence"
+  run_dir="$(mktemp -d "${TMPDIR:-/var/tmp}/thalvi-verify-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
+  run_id="${run_dir##*/thalvi-verify-}"
+  mkdir "$run_dir/data" "$run_dir/evidence"
   echo "RUN_DIR=$run_dir"
   if [[ "$mode" == local ]]; then
     python3 -I "$SCRIPTS/local_endpoints.py" resolve "$REPO" >"$run_dir/local.env"

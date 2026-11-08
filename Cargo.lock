@@ -2483,6 +2483,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -4601,6 +4602,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "thalvi-asr"
+version = "0.1.1"
+dependencies = [
+ "futures-util",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+]
+
+[[package]]
 name = "thalvi-desktop"
 version = "0.1.1"
 dependencies = [
@@ -4610,13 +4621,16 @@ dependencies = [
  "dirs 7.0.0",
  "futures-util",
  "gtk",
+ "nix",
  "ort",
  "proptest",
  "reqwest 0.12.28",
  "rtrb",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "thalvi-asr",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -4638,6 +4652,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "thalvi-asr",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tower-http 0.7.1",

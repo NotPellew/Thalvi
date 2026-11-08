@@ -1,11 +1,10 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
-import type { AudioStatus, Backend, Draft, HistoryEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, LiveEntry, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, WakeModelInfo } from "./contract.ts";
 import type { Clock } from "./overlay.ts";
 
 export const SETTINGS: Settings = {
-  server: "ws://127.0.0.1:8080",
   wake: {
     capture: { model: "hey_thalvi", threshold: 0.5 },
     conversation: { model: "hey_mycroft", threshold: 0.5 },
@@ -21,7 +20,7 @@ export const SETTINGS: Settings = {
     "scratch that": "scratch",
     "never mind": "cancel",
   },
-  stt: { engine: "server", secondary: null },
+  stt: { entries: [{ kind: "thalvi_server", id: "thalvi-server", name: "Thalvi server", active: true, address: "ws://127.0.0.1:8080" }] },
   apps: { slack: { classes: ["Slack"], executables: [], input_keys: ["ctrl", "k"] } },
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com", label: "docs" }],
   overlay: { show: true, draft: true },
@@ -96,6 +95,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
   const levelListeners: ((level: number) => void)[] = [];
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
   const savedListeners: (() => void)[] = [];
+  const elsewhereListeners: (() => void)[] = [];
   const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
   const pageListeners: ((page: string) => void)[] = [];
   let audioState: AudioStatus = {
@@ -114,6 +114,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     getAudio: vi.fn(() => Promise.resolve(structuredClone(audioState))),
     onAudio: vi.fn((listener: (audio: AudioStatus) => void) => audioListeners.push(listener)),
     onSettingsSaved: vi.fn((listener: () => void) => savedListeners.push(listener)),
+    onSettingsChangedElsewhere: vi.fn((listener: () => void) => elsewhereListeners.push(listener)),
     getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
     saveSettings: vi.fn<(settings: Settings) => Promise<void>>(() => Promise.resolve()),
     setListening: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
@@ -154,7 +155,8 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     downloadSpeechModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     onSpeechModelProgress: vi.fn((listener: (progress: SpeechModelProgress) => void) => speechListeners.push(listener)),
     openSpeechModelSource: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
-    wordListSupport: vi.fn<(server: string) => Promise<boolean>>(() => Promise.resolve(false)),
+    checkSpeechEntry: vi.fn<(entry: SpeechEntry) => Promise<void>>(() => Promise.resolve()),
+    wordListSupport: vi.fn<(entry: LiveEntry) => Promise<boolean>>(() => Promise.resolve(false)),
     shareWordList: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     appVersion: vi.fn(() => Promise.resolve("1.2.3")),
   } satisfies Backend;
@@ -184,6 +186,9 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     },
     saved: () => {
       for (const listener of savedListeners) listener();
+    },
+    changedElsewhere: () => {
+      for (const listener of elsewhereListeners) listener();
     },
   };
 }

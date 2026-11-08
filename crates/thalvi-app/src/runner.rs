@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use thalvi_desktop::audio::{Frames, InputGate, Microphone};
-use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
+use thalvi_desktop::capture::{CaptureRoute, EndingPauses, Endings};
 use thalvi_desktop::chosen::Chosen;
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::{Bound, Delivery, Finished};
@@ -24,15 +24,17 @@ use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{Desktop, Host};
 use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
-use thalvi_desktop::models::ModelStore;
+use thalvi_desktop::models::{self, ModelStore};
 use thalvi_desktop::report::{UserError, causes};
+use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
 use thalvi_desktop::transducer::TransducerSource;
 use thalvi_desktop::wake::{WakeConfig, WakeEngine};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::status::{
-    Failure, FailureKind, Mode, STARTING_NOTICE, SpeechLoad, Status, View, WAKE_DOWNLOAD_NOTICE,
+    Failure, FailureKind, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, SpeechLoad, Status, View,
+    WAKE_DOWNLOAD_NOTICE,
 };
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
@@ -216,6 +218,49 @@ async fn load_wake<T>(
     let loaded = load.await;
     publisher.mode(Mode::Starting);
     loaded
+}
+
+/// Loads the ending spotter next to the wake models. It only double-checks the transcript, so a
+/// failure is a notice, shown with the first capture, and dictation goes on without it.
+async fn load_spotter(
+    publisher: &Publisher,
+    endings: &Endings,
+    store: &ModelStore,
+    recorder: &Recorder,
+    load: impl Future<Output = Result<Box<dyn KeywordSpotter>, SpotterError>>,
+) -> (Option<Box<dyn KeywordSpotter>>, Option<String>) {
+    let started = Instant::now();
+    let mut downloads = false;
+    for asset in [
+        models::SPOTTER.encoder,
+        models::SPOTTER.decoder,
+        models::SPOTTER.joiner,
+        models::SPOTTER.pieces,
+    ] {
+        downloads |= !store.is_asset_cached(&asset).await;
+    }
+    if downloads {
+        println!("{SPOTTER_DOWNLOAD_NOTICE}");
+        publisher.mode(Mode::SpotterDownload);
+    }
+    let loaded = load.await;
+    if downloads {
+        publisher.mode(Mode::Starting);
+    }
+    recorder.metric(
+        Event::EndingSpotter,
+        if loaded.is_ok() { "ok" } else { "error" },
+        Some(started.elapsed()),
+        json!({"call": "load", "phrases": endings.entries().count(), "downloaded": downloads}),
+    );
+    match loaded {
+        Ok(spotter) => (Some(spotter), None),
+        Err(error) => {
+            let notice = format!("{error} Endings still work from the transcript.");
+            println!("{notice}");
+            (None, Some(notice))
+        }
+    }
 }
 
 /// Derives the status from the view and publishes it when it changes.
@@ -515,13 +560,19 @@ impl Runner {
             Recorder::per_user(config.recordings).map_err(|error| Failure::of(&error))?;
         let store = ModelStore::per_user().map_err(|error| Failure::of(&error))?;
         let started = Instant::now();
-        let wake = load_wake(
-            &self.publisher,
-            &config.wake,
-            &store,
-            WakeEngine::load(&config.wake, &store),
-        )
-        .await;
+        let (wake, (spotter, spotter_off)) = tokio::join!(
+            load_wake(
+                &self.publisher,
+                &config.wake,
+                &store,
+                WakeEngine::load(&config.wake, &store),
+            ),
+            load_spotter(&self.publisher, &config.endings, &store, &recorder, async {
+                OnnxSpotter::load(&config.endings, &store)
+                    .await
+                    .map(|spotter| Box::new(spotter) as Box<dyn KeywordSpotter>)
+            }),
+        );
         recorder.metric(
             Event::WakeLoad,
             if wake.is_ok() { "ok" } else { "error" },
@@ -532,8 +583,7 @@ impl Runner {
         let gate = InputGate::default();
         let metrics = recorder.metrics();
         let recognizer = Chosen::new(
-            &config.stt.engine,
-            &config.server,
+            config.stt.entries.active_live(),
             store,
             metrics.clone(),
             &config.stt.phrases,
@@ -548,6 +598,8 @@ impl Runner {
                 http: self.http.clone(),
                 hold: self.key_state.clone(),
                 notice: self.publisher.notice_sink(),
+                spotter,
+                spotter_off,
             },
             config,
             recorder,
@@ -559,11 +611,7 @@ impl Runner {
             Arc::clone(&self.level),
             self.audio.subscribe(),
         ));
-        if local.is_some() {
-            println!("Transcribing on this machine.");
-        } else {
-            println!("Transcribing through {}.", config.server);
-        }
+        println!("Transcribing through {}.", config.speech_source());
         Ok(Session {
             engine,
             local,
@@ -1264,6 +1312,9 @@ async fn follow(
                     break;
                 }
                 let engine = state.borrow_and_update().clone();
+                if let EngineState::Capturing { notice: Some(notice), .. } = &engine {
+                    println!("{notice}");
+                }
                 publisher.update(|view| view.engine = engine);
             }
             changed = level.changed() => {
@@ -1514,6 +1565,8 @@ mod tests {
                 recognizer, wake, cues, gate, hold,
                 http: reqwest::Client::new(),
                 notice: publisher.notice_sink(),
+                spotter: None,
+                spotter_off: None,
             }, &DesktopConfig::from_json_str("{}").unwrap(), Recorder::disabled());
             let listening = tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -1529,6 +1582,7 @@ mod tests {
             publisher.mode(Mode::Idle);
             publisher.update(|view| view.engine = EngineState::Capturing {
                 committed: "keep speaking".to_owned(), partial: None,
+                notice: None,
             });
             publisher.notice_sink()(Refusal::Capturing.notice());
             assert!(matches!(&*status.borrow(), Status::Capturing { committed, .. } if committed == "keep speaking"));
@@ -1746,6 +1800,8 @@ mod tests {
                         hold,
                         http: reqwest::Client::new(),
                         notice: publisher.notice_sink(),
+                        spotter: None,
+                        spotter_off: None,
                     },
                     &DesktopConfig::from_json_str("{}").unwrap(),
                     Recorder::disabled(),
@@ -2276,6 +2332,28 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_switch_of_the_live_server_waits_for_the_end_of_the_running_capture() {
+        let running = DesktopConfig::from_json_str("{}").unwrap();
+        let switched = DesktopConfig::from_json_str(r#"{"stt": {"engine": "local"}}"#).unwrap();
+        assert_ne!(
+            running.stt.entries.active_live().id,
+            switched.stt.entries.active_live().id
+        );
+        let (outcome, requests, started) = run(
+            vec![],
+            vec![Control::Apply(Box::new(switched.clone())), Control::Cancel],
+        )
+        .await;
+        assert!(started);
+        assert_eq!(outcome, Some("cancelled"));
+        assert_eq!(
+            requests.pending,
+            Some(switched),
+            "the new entry is held for the next capture"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_second_toggle_changes_the_intent_without_reviving_a_cancelled_capture() {
         // Both toggles land before the capture starts: nothing starts, and the intent is on again.
         let (outcome, requests, started) = run(
@@ -2472,5 +2550,80 @@ mod tests {
         drop(state_tx);
         drop(engine_level_tx);
         following.await.unwrap();
+    }
+    #[tokio::test]
+    async fn the_spotter_loader_reports_downloads_and_returns_the_model_or_a_notice() {
+        use thalvi_desktop::engine::fakes::FakeSpotter;
+        use thalvi_desktop::spotter::Unspeakable;
+
+        let assets = [
+            models::SPOTTER.encoder,
+            models::SPOTTER.decoder,
+            models::SPOTTER.joiner,
+            models::SPOTTER.pieces,
+        ];
+        for missing in [None, Some(0), Some(3)] {
+            let dir = std::env::temp_dir().join(format!(
+                "thalvi-spotter-load-{}-{missing:?}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            for (index, asset) in assets.iter().enumerate() {
+                if missing != Some(index) {
+                    std::fs::File::create(dir.join(asset.file_name))
+                        .unwrap()
+                        .set_len(asset.size)
+                        .unwrap();
+                }
+            }
+            let store = ModelStore::in_dir(&dir);
+            for fails in [false, true] {
+                let (out, status) = watch::channel(Status::Paused);
+                let publisher = Publisher::new(out, EndingPauses::default());
+                publisher.mode(Mode::Paused);
+                let recorder = Recorder::disabled();
+                let (spotter, notice) =
+                    load_spotter(&publisher, &Endings::default(), &store, &recorder, async {
+                        assert_eq!(
+                            *status.borrow(),
+                            if missing.is_some() {
+                                Status::Loading {
+                                    notice: SPOTTER_DOWNLOAD_NOTICE.to_owned(),
+                                    downloading: true,
+                                }
+                            } else {
+                                Status::Paused
+                            }
+                        );
+                        if fails {
+                            Err(SpotterError::Phrases(vec![Unspeakable {
+                                phrase: "f\u{fc}ge ein".to_owned(),
+                                characters: "\u{dc}".to_owned(),
+                            }]))
+                        } else {
+                            let (fake, _control) = FakeSpotter::new();
+                            Ok(Box::new(fake) as Box<dyn KeywordSpotter>)
+                        }
+                    })
+                    .await;
+                if fails {
+                    assert!(spotter.is_none());
+                    let notice = notice.unwrap();
+                    assert!(
+                        notice.contains("\"f\u{fc}ge ein\"")
+                            && notice.ends_with("Endings still work from the transcript."),
+                        "{notice}"
+                    );
+                } else {
+                    assert!(spotter.is_some() && notice.is_none());
+                }
+                if missing.is_some() {
+                    assert_eq!(title(&status.borrow()), "Thalvi: starting");
+                } else {
+                    assert_eq!(*status.borrow(), Status::Paused);
+                }
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 }

@@ -32,10 +32,10 @@ impl RecordingHost {
 }
 impl Host for RecordingHost {
     type Target = String;
-    fn copies_only(&self) -> bool {
+    fn overlay_takes_clicks(&self) -> bool {
         false
     }
-    fn overlay_takes_clicks(&self) -> bool {
+    fn copies_only(&self) -> bool {
         false
     }
     fn capture_target(&self) -> Result<String, HostError> {
@@ -264,6 +264,8 @@ async fn closing_capture(cancel: bool) {
             http: reqwest::Client::new(),
             hold,
             notice: Box::new(|_| {}),
+            spotter: None,
+            spotter_off: None,
         },
         &config,
         Recorder::disabled(),
@@ -407,6 +409,8 @@ async fn no_rebuild_apply_handoff_keeps_holds_and_reports_taps() {
                     http: reqwest::Client::new(),
                     hold,
                     notice: Box::new(|_| {}),
+                    spotter: None,
+                    spotter_off: None,
                 },
                 &config,
                 Recorder::disabled(),

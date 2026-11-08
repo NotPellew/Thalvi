@@ -44,6 +44,7 @@ body { font-size: 14px; }
 }
 .tail { display: flex; flex-direction: column-reverse; max-height: 4.35em; overflow: hidden; }
 .text { overflow-wrap: anywhere; }
+.text[data-notice="true"] { color: var(--amber); }
 .p { color: var(--mut); }
 .c:not(:empty) + .p:not(:empty)::before { content: " "; }
 .end { margin-left: 0.4em; padding: 0 4px; border-radius: 4px; background: color-mix(in srgb, var(--amber) 22%, transparent); color: var(--amber); }

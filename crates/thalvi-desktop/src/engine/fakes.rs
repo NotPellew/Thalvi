@@ -9,8 +9,10 @@ use tokio::time::Instant;
 
 use super::{CuePlayer, FrameSource, WakeDetector};
 use crate::audio::{AudioError, InputGate};
+use crate::capture::Ending;
 use crate::cues::{Cue, CueError, CueTiming};
-use crate::frame::{Frame, Queued};
+use crate::frame::{FRAME_SAMPLES, Frame, Queued};
+use crate::spotter::{KeywordSpotter, SpotterError, SpotterHit};
 use crate::wake::{WakeError, WakeEvent, WakeFrame};
 
 /// Microphone frames a test feeds in, dropped while the gate is off or from before it changed,
@@ -295,5 +297,87 @@ impl CuePlayer for FakeCuePlayer {
             return Err(CueError::NoOutputDevice);
         }
         Ok(Some(timing))
+    }
+}
+
+#[derive(Default)]
+struct SpotScript {
+    /// Hits by the number of the frame, counted from the last reset, that brings them out.
+    hits: Vec<(u64, SpotterHit)>,
+    fail_at: Option<u64>,
+    frames: u64,
+    received: u64,
+    resets: u32,
+}
+
+/// A keyword spotter that hears what a test scripts, by frame number.
+pub struct FakeSpotter(Rc<RefCell<SpotScript>>);
+
+/// Test-side handle of [`FakeSpotter`].
+pub struct SpotterControl(Rc<RefCell<SpotScript>>);
+
+impl FakeSpotter {
+    #[must_use]
+    pub fn new() -> (Self, SpotterControl) {
+        let script = Rc::new(RefCell::new(SpotScript::default()));
+        (Self(Rc::clone(&script)), SpotterControl(script))
+    }
+}
+
+impl KeywordSpotter for FakeSpotter {
+    fn reset(&mut self) {
+        let mut script = self.0.borrow_mut();
+        script.frames = 0;
+        script.resets += 1;
+    }
+
+    fn push(&mut self, _frame: &Frame) -> Result<Option<SpotterHit>, SpotterError> {
+        let mut script = self.0.borrow_mut();
+        script.frames += 1;
+        script.received += 1;
+        if script.fail_at == Some(script.frames) {
+            return Err(SpotterError::Inference("scripted failure".to_owned()));
+        }
+        let frames = script.frames;
+        Ok(script
+            .hits
+            .iter()
+            .find(|(at, _)| *at == frames)
+            .map(|(_, hit)| hit.clone()))
+    }
+}
+
+impl SpotterControl {
+    /// The frame numbered `at` (from 1 since the last reset) brings out `phrase`, heard as
+    /// ending two frames earlier, as the real model's lag does.
+    pub fn hear(&self, at: u64, phrase: &str, ending: Ending) {
+        let frame = FRAME_SAMPLES as u64;
+        self.0.borrow_mut().hits.push((
+            at,
+            SpotterHit {
+                phrase: phrase.to_owned(),
+                ending,
+                start_sample: at.saturating_sub(8) * frame,
+                end_sample: at.saturating_sub(2) * frame,
+                confidence: 0.5,
+            },
+        ));
+    }
+
+    /// The frame numbered `at` makes the spotter fail.
+    pub fn fail_at(&self, at: u64) {
+        self.0.borrow_mut().fail_at = Some(at);
+    }
+
+    /// Frames given to the spotter in all.
+    #[must_use]
+    pub fn received(&self) -> u64 {
+        self.0.borrow().received
+    }
+
+    /// How many times the spotter was reset.
+    #[must_use]
+    pub fn resets(&self) -> u32 {
+        self.0.borrow().resets
     }
 }

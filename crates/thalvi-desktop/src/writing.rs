@@ -77,6 +77,12 @@ impl Writing {
         &self.model
     }
 
+    /// The key kept in the config when a settings form leaves it unchanged.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.api_key
+    }
+
     /// Asks the endpoint to write `words` out, with nothing else about the user: the reply is
     /// read piece by piece through [`Reply::next`].
     ///

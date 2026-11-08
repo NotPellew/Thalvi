@@ -324,6 +324,7 @@ mod tests {
                     target: Some(kitty()),
                     committed: "secret words".to_owned(),
                     partial: Some("more".to_owned()),
+                    notice: None,
                 },
                 Icon::Capturing,
                 "Thalvi: capturing",

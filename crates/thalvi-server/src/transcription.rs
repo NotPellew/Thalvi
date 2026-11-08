@@ -9,12 +9,13 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::time::Instant;
 
-use crate::recognizer::{Recognizer, RecognizerEvent, RecognizerFactory};
+use crate::recognizer::{
+    MAX_FRAME_BYTES, Recognizer, RecognizerEvent, RecognizerFactory, validate_frame,
+};
 use crate::recorder::{Recorder, RecordingConfig, start_recording};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_AUDIO_BYTES: usize = 48_000;
-const MAX_BUFFERED_AUDIO_BYTES: usize = MAX_AUDIO_BYTES * 8;
+const MAX_BUFFERED_AUDIO_BYTES: usize = MAX_FRAME_BYTES * 8;
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -89,13 +90,6 @@ async fn send(socket: &mut WebSocket, value: serde_json::Value) -> Result<(), St
     .map_err(|_| "The capture connection closed.".to_string())
 }
 
-fn validate_audio(audio: &[u8]) -> Result<(), String> {
-    if audio.is_empty() || audio.len() > MAX_AUDIO_BYTES || !audio.len().is_multiple_of(2) {
-        return Err("Send at most one second of 24 kHz mono s16le audio at a time.".to_string());
-    }
-    Ok(())
-}
-
 /// Relays one capture; with audio recording on, what reached the recognizer streams to
 /// `capture.wav` and `captured` says whether any did.
 async fn relay<R: Recognizer>(
@@ -116,7 +110,7 @@ async fn relay<R: Recognizer>(
             } else {
                 let message = socket.recv().await;
                 if let Some(Ok(Message::Binary(audio))) = &message {
-                    validate_audio(audio)?;
+                    validate_frame(audio)?;
                 }
                 Ok::<_, String>(message)
             }
@@ -140,7 +134,7 @@ async fn relay<R: Recognizer>(
                             }
                             next = socket.recv() => match next {
                                 Some(Ok(Message::Binary(next))) => {
-                                    validate_audio(&next)?;
+                                    validate_frame(&next)?;
                                     if buffered_bytes + next.len() > MAX_BUFFERED_AUDIO_BYTES {
                                         return Err("Speech recognition stopped accepting audio. Capture stopped without delivery.".to_string());
                                     }

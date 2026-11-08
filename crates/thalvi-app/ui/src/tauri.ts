@@ -30,6 +30,11 @@ export function tauriBackend(): Backend {
         listener();
       });
     },
+    onSettingsChangedElsewhere: (listener) => {
+      void listen("thalvi://settings-elsewhere", () => {
+        listener();
+      });
+    },
     getSettings: () => invoke<Settings>("get_settings"),
     saveSettings: (settings) => invoke<undefined>("save_settings", { settings }),
     setListening: (on) => invoke<undefined>("set_listening", { on }),
@@ -77,7 +82,8 @@ export function tauriBackend(): Backend {
       });
     },
     openSpeechModelSource: (name) => invoke<undefined>("open_speech_model_source", { name }),
-    wordListSupport: (server) => invoke<boolean>("word_list_support", { server }),
+    checkSpeechEntry: (entry) => invoke<undefined>("check_speech_entry", { entry }),
+    wordListSupport: (entry) => invoke<boolean>("word_list_support", { entry }),
     shareWordList: () => invoke<undefined>("share_word_list"),
     appVersion: getVersion,
   };

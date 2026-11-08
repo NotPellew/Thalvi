@@ -1,5 +1,6 @@
 //! Opt-in local metrics and the recordings of each dictation, written off the capture path.
 
+use std::collections::BTreeMap;
 use std::fmt::{self, Display};
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
@@ -53,6 +54,10 @@ pub enum Event {
     WakeNothing,
     WakeReset,
     TranscriptionReady,
+    /// From the first speech the microphone heard in a capture to the recognizer's first words.
+    PartialLag,
+    /// From the last speech heard before a final result to that result.
+    FinalLag,
     SecondaryStt,
     /// One call to the writing model: time to the first text and in all, and how it ended.
     Writing,
@@ -68,6 +73,8 @@ pub enum Event {
     Cue,
     EndingState,
     EndingPause,
+    /// The ending spotter: loading it (`load`), one capture's work (`capture`), or a heard ending's fate (`hit`).
+    EndingSpotter,
     EndCue,
     CaptureFlow,
     /// The dictation key went down: it started a capture, or was refused and why.
@@ -92,6 +99,8 @@ impl Event {
             Self::WakeNothing => "desktop_wake_nothing",
             Self::WakeReset => "desktop_wake_reset",
             Self::TranscriptionReady => "desktop_transcription_ready",
+            Self::PartialLag => "desktop_partial_lag",
+            Self::FinalLag => "desktop_final_lag",
             Self::SecondaryStt => "desktop_secondary_stt",
             Self::Writing => "desktop_writing",
             Self::SpeechLoad => "desktop_speech_load",
@@ -102,6 +111,7 @@ impl Event {
             Self::Cue => "desktop_cue",
             Self::EndingState => "desktop_ending_state",
             Self::EndingPause => "desktop_ending_pause",
+            Self::EndingSpotter => "desktop_ending_spotter",
             Self::EndCue => "desktop_end_cue",
             Self::CaptureFlow => "desktop_capture_flow",
             Self::HoldStart => "desktop_hold_start",
@@ -541,12 +551,116 @@ fn wav(pcm: &[i16]) -> Vec<u8> {
     bytes
 }
 
-pub(crate) fn now_ms() -> u64 {
+/// Milliseconds since the Unix epoch, as `ts_ms` in the log.
+#[must_use]
+pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| {
             u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+/// How far back [`summarize`] looks.
+pub const SUMMARY_WINDOW: Duration = Duration::from_hours(24);
+
+/// The delays and outcomes of one stage of a dictation.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct StageSummary {
+    /// How many times the stage ran, whatever came of it.
+    pub count: usize,
+    /// How often each outcome came up.
+    pub outcomes: BTreeMap<String, usize>,
+    /// Percentiles of the time the stage took, nearest rank; `None` when no run took a measured time.
+    pub p50_ms: Option<f64>,
+    pub p95_ms: Option<f64>,
+}
+
+/// The stages of a dictation, each with its delays and outcomes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Stages {
+    /// Opening the recognizer.
+    pub connect: StageSummary,
+    /// The first speech to the first words.
+    pub partial_lag: StageSummary,
+    /// The last speech to a final result.
+    #[serde(rename = "final")]
+    pub final_lag: StageSummary,
+    /// Typing or copying the text.
+    pub delivery: StageSummary,
+}
+
+/// What `metrics.jsonl` says about the dictations of a recent window.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Summary {
+    pub stages: Stages,
+    /// How the captures ended.
+    pub captures: BTreeMap<String, usize>,
+}
+
+/// Summarizes the metrics in `dir` written within `window` before now.
+///
+/// Lines that are not metrics are skipped, so a damaged log still gives what can be read.
+#[must_use]
+pub fn summarize(dir: &Path, window: Duration) -> Summary {
+    let since = now_ms().saturating_sub(u64::try_from(window.as_millis()).unwrap_or(u64::MAX));
+    let path = dir.join("metrics.jsonl");
+    let mut summary = Summary::default();
+    let mut times: [Vec<f64>; 4] = Default::default();
+    for file in [backup(&path, 2), backup(&path, 1), path] {
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Ok(line) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if line["ts_ms"].as_u64().is_none_or(|at| at < since) {
+                continue;
+            }
+            let outcome = line["outcome"].as_str().unwrap_or("unknown").to_owned();
+            let stage = match line["event"].as_str() {
+                Some("desktop_capture_flow") => {
+                    *summary.captures.entry(outcome).or_default() += 1;
+                    continue;
+                }
+                Some("desktop_transcription_ready") => (&mut summary.stages.connect, 0),
+                Some("desktop_partial_lag") => (&mut summary.stages.partial_lag, 1),
+                Some("desktop_final_lag") => (&mut summary.stages.final_lag, 2),
+                Some("desktop_host_call")
+                    if matches!(line["call"].as_str(), Some("deliver" | "copy")) =>
+                {
+                    (&mut summary.stages.delivery, 3)
+                }
+                _ => continue,
+            };
+            stage.0.count += 1;
+            *stage.0.outcomes.entry(outcome).or_default() += 1;
+            if let Some(took) = line["duration_ms"].as_f64() {
+                times[stage.1].push(took);
+            }
+        }
+    }
+    for (stage, mut took) in [
+        &mut summary.stages.connect,
+        &mut summary.stages.partial_lag,
+        &mut summary.stages.final_lag,
+        &mut summary.stages.delivery,
+    ]
+    .into_iter()
+    .zip(times)
+    {
+        took.sort_by(f64::total_cmp);
+        stage.p50_ms = percentile(&took, 50);
+        stage.p95_ms = percentile(&took, 95);
+    }
+    summary
+}
+
+/// The nearest-rank percentile of sorted `values`.
+fn percentile(values: &[f64], percent: usize) -> Option<f64> {
+    let rank = (values.len() * percent).div_ceil(100).max(1);
+    values.get(rank - 1).copied()
 }
 
 #[cfg(test)]
@@ -667,6 +781,7 @@ mod tests {
             (Event::Cue, "desktop_cue"),
             (Event::EndingState, "desktop_ending_state"),
             (Event::EndingPause, "desktop_ending_pause"),
+            (Event::EndingSpotter, "desktop_ending_spotter"),
             (Event::EndCue, "desktop_end_cue"),
             (Event::CaptureFlow, "desktop_capture_flow"),
             (Event::HoldStart, "desktop_hold_start"),
@@ -938,5 +1053,108 @@ mod tests {
         let written = lines(&dir.root().join("metrics.jsonl"));
         assert_eq!(written.len(), QUEUE_CAPACITY);
         assert_eq!(written[QUEUE_CAPACITY - 1]["n"], QUEUE_CAPACITY - 1);
+    }
+
+    #[test]
+    fn the_summary_gives_percentiles_per_stage_and_counts_outcomes_within_the_window() {
+        let dir = TempDir::new("summary");
+        std::fs::create_dir_all(dir.root()).unwrap();
+        let now = now_ms();
+        let hour = 3_600_000_u64;
+        let line = |at: u64, event: &str, outcome: &str, took: Option<f64>, call: Option<&str>| {
+            let mut line = json!({"ts_ms": at, "event": event, "outcome": outcome});
+            if let Some(took) = took {
+                line["duration_ms"] = json!(took);
+            }
+            if let Some(call) = call {
+                line["call"] = json!(call);
+            }
+            line.to_string()
+        };
+        let recent = now - hour;
+        let mut lines = vec![
+            line(
+                recent,
+                "desktop_transcription_ready",
+                "error",
+                Some(900.0),
+                None,
+            ),
+            line(
+                now - 25 * hour,
+                "desktop_transcription_ready",
+                "ok",
+                Some(5000.0),
+                None,
+            ),
+            line(recent, "desktop_capture_flow", "ok", Some(3000.0), None),
+            line(recent, "desktop_capture_flow", "ok", Some(3000.0), None),
+            line(
+                recent,
+                "desktop_capture_flow",
+                "cancelled",
+                Some(500.0),
+                None,
+            ),
+            line(recent, "desktop_partial_lag", "ok", Some(300.0), None),
+            line(recent, "desktop_final_lag", "ok", Some(400.0), None),
+            line(
+                recent,
+                "desktop_host_call",
+                "ok",
+                Some(30.0),
+                Some("deliver"),
+            ),
+            line(
+                recent,
+                "desktop_host_call",
+                "ok",
+                Some(50.0),
+                Some("capture_target"),
+            ),
+            line(recent, "desktop_wake_inference", "ok", Some(1.0), None),
+            "not json".to_owned(),
+        ];
+        for n in 1..=19 {
+            lines.push(line(
+                recent,
+                "desktop_transcription_ready",
+                "ok",
+                Some(f64::from(n) * 10.0),
+                None,
+            ));
+        }
+        std::fs::write(dir.root().join("metrics.jsonl"), lines.join("\n")).unwrap();
+
+        let summary = summarize(&dir.root(), SUMMARY_WINDOW);
+        // 19 ok connects of 10..190 and one error of 900: 20 values, p50 is the 10th, p95 the 19th.
+        assert_eq!(summary.stages.connect.count, 20);
+        assert_eq!(
+            summary.stages.connect.outcomes,
+            BTreeMap::from([("error".to_owned(), 1), ("ok".to_owned(), 19)])
+        );
+        assert_eq!(
+            (summary.stages.connect.p50_ms, summary.stages.connect.p95_ms),
+            (Some(100.0), Some(190.0))
+        );
+        assert_eq!(
+            (
+                summary.stages.partial_lag.p50_ms,
+                summary.stages.partial_lag.p95_ms
+            ),
+            (Some(300.0), Some(300.0))
+        );
+        assert_eq!(summary.stages.final_lag.p50_ms, Some(400.0));
+        assert_eq!(
+            summary.stages.delivery.count, 1,
+            "only the delivering host call"
+        );
+        assert_eq!(summary.stages.delivery.p95_ms, Some(30.0));
+        assert_eq!(
+            summary.captures,
+            BTreeMap::from([("cancelled".to_owned(), 1), ("ok".to_owned(), 2)])
+        );
+        let quiet = summarize(&dir.0, SUMMARY_WINDOW);
+        assert_eq!(quiet, Summary::default(), "no log, nothing to say");
     }
 }
