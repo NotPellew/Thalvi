@@ -352,6 +352,9 @@ describe("tables", () => {
     type(add.querySelector<HTMLInputElement>(".add input") as HTMLInputElement, "  Send   It ");
     choose(add.querySelector<HTMLSelectElement>(".add select") as HTMLSelectElement, "submit");
     (add.querySelector(".add button") as HTMLElement).click();
+    const phrases = Array.from(add.querySelectorAll(".table .phrase"), (node) => node.textContent);
+    expect(phrases.at(-1)).toBe("“send it”");
+    expect(add.querySelector(".table")?.nextElementSibling).toBe(add.querySelector(".trow.add"));
     root.querySelector<HTMLElement>('button[aria-label="Remove “never mind”"]')?.click();
     button("Save").click();
     const expected = structuredClone(SETTINGS);
