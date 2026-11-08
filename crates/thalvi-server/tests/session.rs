@@ -970,6 +970,22 @@ async fn audio_before_recognizer_ready_is_discarded_and_state_goes_starting_then
 }
 
 #[tokio::test]
+async fn mic_frames_that_are_not_bounded_pcm_never_reach_the_recognizer() {
+    let mut harness = start().await;
+    voice_on(&mut harness).await;
+    for frame in [vec![], vec![1_u8; 3], vec![1_u8; 48_002], vec![2_u8; 3840]] {
+        harness
+            .client
+            .send(ClientMessage::Binary(frame.into()))
+            .await
+            .unwrap();
+    }
+    wait_until(|| !harness.factory.audio_received().is_empty()).await;
+    assert_eq!(harness.factory.audio_received(), vec![vec![2_u8; 3840]]);
+    harness.server.abort();
+}
+
+#[tokio::test]
 async fn text_turn_is_answered_and_interrupts_a_reply_without_voice() {
     let mut harness = start().await;
     let gate = Arc::new(Notify::new());
