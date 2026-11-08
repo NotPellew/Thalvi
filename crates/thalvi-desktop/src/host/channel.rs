@@ -404,6 +404,15 @@ mod tests {
             refusal("That request is too long."),
             "just past it"
         );
+        let far = "a".repeat(MAX_REQUEST * 4);
+        let refused_far = ask_in(&dir.0, &far, Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            refused_far,
+            refusal("That request is too long."),
+            "a sender far past it still reads the refusal"
+        );
         // Connected but silent: the app stops waiting and the next client is still answered.
         let mut silent = UnixStream::connect(dir.socket()).unwrap();
         let mut closed = Vec::new();
