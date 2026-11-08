@@ -10,7 +10,7 @@ use super::{
     App, Delivered, HoldSource, Host, HostError, Modifier, OVERLAY_TITLE, Shortcut, TypedText,
     WebUrl,
 };
-use crate::hold::HoldKey;
+use crate::hold::{HoldKey, HoldKind};
 
 /// The window as Hyprland identifies it; the pid tells a reused address from the original window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,12 +45,12 @@ impl Hyprland {
         clippy::unnecessary_wraps,
         reason = "the same signature as the Windows host, whose hook can fail"
     )]
-    pub fn watch_hold_key(
-        _key: &HoldKey,
-        _on_change: impl Fn(bool) + Send + 'static,
+    pub fn watch_hold_keys(
+        _keys: &[(HoldKind, HoldKey)],
+        _on_change: impl Fn(HoldKind, bool) + Send + 'static,
     ) -> Result<HoldSource, HostError> {
         Ok(HoldSource::Binds(
-            "On Hyprland the hold key is a bind in hyprland.conf: see integrations/hyprland/hyprland-binds.conf.",
+            "On Hyprland the hold and write keys are binds in hyprland.conf: see integrations/hyprland/hyprland-binds.conf.",
         ))
     }
 }
@@ -338,7 +338,8 @@ impl<R: CommandRunner> Host for Hyprland<R> {
 mod tests {
     #[test]
     fn the_hold_key_is_no_failure_on_hyprland_where_binds_report_it() {
-        let source = Hyprland::watch_hold_key(&HoldKey::default(), |_| {});
+        let source =
+            Hyprland::watch_hold_keys(&[(HoldKind::Dictate, HoldKey::default())], |_, _| {});
         assert!(
             matches!(source, Ok(HoldSource::Binds(reason)) if reason.contains("hyprland.conf"))
         );

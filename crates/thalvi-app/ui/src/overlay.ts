@@ -21,7 +21,7 @@ export const realClock: Clock = {
 const BARS = 9;
 const FLAT = 4 / 22;
 const ENVELOPE = [0.45, 0.65, 0.82, 0.95, 1, 0.95, 0.82, 0.65, 0.45];
-const ROUTE_WORD: Record<Route, string> = { paste: "PASTE", submit: "SUBMIT", task: "TASK" };
+const ROUTE_WORD: Record<Route, string> = { paste: "PASTE", write: "WRITE", submit: "SUBMIT", task: "TASK" };
 
 function actionWord(route: Route, copies: boolean): string {
   return copiesText(route, copies) ? "COPY" : ROUTE_WORD[route];
@@ -110,7 +110,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
   }
 
   function cancellable(): boolean {
-    return clickable && (live() || (status.state === "working" && status.cancellable));
+    return clickable && (live() || status.state === "writing" || (status.state === "working" && status.cancellable));
   }
 
   function schedule(): void {
@@ -136,7 +136,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
     root.hidden = next.state === "paused" || next.state === "listening";
     root.dataset["state"] = next.state;
     const noticing = next.state === "capturing" && next.notice !== null;
-    const drafting = noticing || (showDraft && (next.state === "capturing" || next.state === "pending"));
+    const drafting = noticing || (showDraft && (next.state === "capturing" || next.state === "pending" || next.state === "writing"));
     text.dataset["notice"] = String(noticing);
     draft.hidden = !drafting;
     ending.hidden = true;
@@ -178,6 +178,12 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
         }
         break;
       }
+      case "writing":
+        pillView("working", "WRITING…", next.target);
+        committed.textContent = next.text;
+        partial.textContent = "";
+        caret.hidden = false;
+        break;
       case "working":
         pillView("working", "WORKING", next.target);
         break;

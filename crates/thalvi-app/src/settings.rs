@@ -219,6 +219,14 @@ pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
             );
         }
     }
+    if let Some(writing) = settings.get_mut("writing").and_then(Value::as_object_mut)
+        && let Some(key) = writing.remove("api_key")
+    {
+        writing.insert(
+            "has_key".to_owned(),
+            Value::Bool(key != Value::String(String::new())),
+        );
+    }
     Ok(settings)
 }
 
@@ -247,6 +255,16 @@ fn unmask_keys(settings: &mut Value, current: &DesktopConfig) {
                 .and_then(Value::as_str)
                 .map_or("", |id| current.stt.entries.key_of(id));
             entry.insert("api_key".to_owned(), Value::String(saved.to_owned()));
+        }
+    }
+    if let Some(writing) = settings.get_mut("writing").and_then(Value::as_object_mut) {
+        writing.remove("has_key");
+        if !writing.contains_key("api_key") {
+            let saved = current
+                .writing
+                .as_ref()
+                .map_or("", thalvi_desktop::writing::Writing::key);
+            writing.insert("api_key".to_owned(), Value::String(saved.to_owned()));
         }
     }
 }
@@ -325,7 +343,9 @@ mod tests {
                 "recordings",
                 "scripts",
                 "stt",
-                "wake"
+                "wake",
+                "write_key",
+                "writing"
             ]
         );
         assert_eq!(
@@ -465,6 +485,36 @@ mod tests {
 
         assert_eq!(keys(&after_untouched), ["live-secret", "second-secret", ""]);
         assert_eq!(keys(&after_edit), ["replaced", "", ""]);
+    }
+
+    #[test]
+    fn a_writing_endpoint_is_checked_and_its_key_is_hidden_preserved_replaced_or_cleared() {
+        let (store, dir) = store("writing");
+        let mut settings = settings_json(&store_defaults()).unwrap();
+        settings["writing"] = json!({"url": "ftp://x", "model": "m", "api_key": "k"});
+        let refused = store.save(settings.clone(), &store_defaults()).unwrap_err();
+        assert!(refused.starts_with("writing.url must be"), "{refused}");
+        assert!(!store.path.exists());
+        settings["writing"] =
+            json!({"url": "http://127.0.0.1:8000/v1/", "model": "m", "api_key": "k"});
+        let mut current = store.save(settings, &store_defaults()).unwrap();
+        for replacement in [None, Some("new-key"), Some("")] {
+            let mut shown = settings_json(&current).unwrap();
+            assert!(shown["writing"].get("api_key").is_none());
+            assert_eq!(
+                shown["writing"]["has_key"],
+                !current.writing.as_ref().unwrap().key().is_empty()
+            );
+            shown["writing"]["model"] = json!("updated");
+            let expected = replacement.unwrap_or("k");
+            if let Some(key) = replacement {
+                shown["writing"]["api_key"] = json!(key);
+            }
+            current = store.save(shown, &current).unwrap();
+            assert_eq!(current.writing.as_ref().unwrap().key(), expected);
+            assert_eq!(store.load().unwrap(), current);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]

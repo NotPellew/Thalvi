@@ -52,6 +52,8 @@ describe("each status", () => {
     { name: "pending, counting", status: pending(false), hidden: false, label: "SUBMIT IN 2 s", target: "→ Slack", draft: true },
     { name: "pending, short pause", status: pending(false, 700), hidden: false, label: "SUBMIT IN 1 s", target: "→ Slack", draft: true },
     { name: "pending, copying", status: pending(false, 2500, true), hidden: false, label: "COPY IN 2 s", target: "→ Slack", draft: true },
+    { name: "pending, writing out", status: { state: "pending", target: "Slack", route: "write", text: SENTENCE, waitingForQuiet: false, pauseMs: 700, copies: false }, hidden: false, label: "WRITE IN 1 s", target: "→ Slack", draft: true },
+    { name: "writing", status: { state: "writing", target: "Slack", text: "" }, hidden: false, label: "WRITING…", target: "→ Slack", draft: true },
     { name: "working", status: { state: "working", target: "Slack", route: "task", cancellable: false }, hidden: false, label: "WORKING", target: "→ Slack", draft: false },
     {
       name: "failed shows its headline, not the full notice",
@@ -103,6 +105,15 @@ describe("draft", () => {
     emit({ state: "capturing", target: null, committed: "Hello there", partial: "wor", notice: null });
     expect(pick(".c").textContent).toBe("Hello there");
     expect(pick(".p").textContent).toBe("wor");
+    expect(pick(".caret").hidden).toBe(false);
+  });
+
+  it("shows the written text as it streams in, with a caret and no ending", () => {
+    const { emit } = mount();
+    emit({ state: "writing", target: "Slack", text: "Hi Anna, I am" });
+    expect(pick(".c").textContent).toBe("Hi Anna, I am");
+    expect(pick(".p").textContent).toBe("");
+    expect(pick(".end").hidden).toBe(true);
     expect(pick(".caret").hidden).toBe(false);
   });
 
@@ -231,6 +242,7 @@ describe("the cancel buttons", () => {
         return [!pick(".x").hidden, !pick(".mx").hidden];
       };
       expect(shown({ state: "capturing", target: null, committed: "", partial: null, notice: null })).toEqual([capturing, capturing]);
+      expect(shown({ state: "writing", target: "Slack", text: "Hi" })).toEqual([working, working]);
       expect(shown({ state: "working", target: "Slack", route: "task", cancellable: true })).toEqual([working, working]);
       expect(shown({ state: "working", target: "Slack", route: "task", cancellable: false })).toEqual([false, false]);
       expect(shown({ state: "done", target: "Slack", route: "task", notice: "Done" })).toEqual([false, false]);

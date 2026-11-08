@@ -45,7 +45,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
 use ::windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
 use super::{Hwnd, Identity, Key, KeyEvent, Process, Win32};
-use crate::hold::{self, HoldHook, HoldKey, Verdict};
+use crate::hold::{self, HoldHooks, HoldKey, HoldKind, Verdict};
 use crate::host::{HoldWatch, HostError};
 
 /// The live Windows desktop.
@@ -206,11 +206,11 @@ fn input(event: KeyEvent) -> INPUT {
 /// or Win so the focused app does not take that release for a lone press that opens its menu.
 const MASK_KEY: u16 = 0xE8;
 
-type OnChange = Box<dyn Fn(bool) + Send>;
+type OnChange = Box<dyn Fn(HoldKind, bool) + Send>;
 
 /// What the keyboard hook procedure works with; it runs on the thread that installed the hook.
 struct Rules {
-    hook: HoldHook,
+    hooks: HoldHooks,
     on_change: OnChange,
 }
 
@@ -282,13 +282,13 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
             let decision = RULES.with(|rules| {
                 let mut rules = rules.try_borrow_mut().ok()?;
                 let rules = rules.as_mut()?;
-                let decision = rules.hook.on_event(event, physically_down);
-                if let Some(down) = decision.change {
-                    (rules.on_change)(down);
+                let (verdict, changes) = rules.hooks.on_event(event, physically_down);
+                for (kind, down) in changes {
+                    (rules.on_change)(kind, down);
                 }
-                Some(decision)
+                Some(verdict)
             });
-            match decision.map(|decision| decision.verdict) {
+            match decision {
                 Some(Verdict::Swallow) => return LRESULT(1),
                 Some(Verdict::Mask) => {
                     if Verdict::after_mask(mask_release(event.vk, extended)) == Verdict::Swallow {
@@ -319,15 +319,18 @@ impl Drop for HookThread {
     }
 }
 
-/// Starts the keyboard hook for `key` on a thread of its own, reporting each change to `on_change`.
-pub(super) fn watch_hold_key(key: HoldKey, on_change: OnChange) -> Result<HoldWatch, HostError> {
+/// Starts the keyboard hook for `keys` on a thread of its own, reporting each change to `on_change`.
+pub(super) fn watch_hold_keys(
+    keys: Vec<(HoldKind, HoldKey)>,
+    on_change: OnChange,
+) -> Result<HoldWatch, HostError> {
     let (ready_tx, ready) = std::sync::mpsc::channel();
     let join = std::thread::Builder::new()
         .name("thalvi-hold-key".to_owned())
         .spawn(move || {
             RULES.with(|rules| {
                 *rules.borrow_mut() = Some(Rules {
-                    hook: HoldHook::new(key),
+                    hooks: HoldHooks::new(keys),
                     on_change,
                 });
             });
@@ -353,7 +356,8 @@ pub(super) fn watch_hold_key(key: HoldKey, on_change: OnChange) -> Result<HoldWa
             RULES.with(|rules| {
                 if let Some(rules) = rules.borrow_mut().take() {
                     // A key still held when watching ends must not stay down.
-                    (rules.on_change)(false);
+                    (rules.on_change)(HoldKind::Dictate, false);
+                    (rules.on_change)(HoldKind::Write, false);
                 }
             });
         })

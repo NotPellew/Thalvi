@@ -28,7 +28,7 @@ use crate::config::{DesktopConfig, Script};
 use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues};
 use crate::entries::SecondPassEntry;
 use crate::frame::{FRAME_SAMPLES, Frame, Order, Queued};
-use crate::hold::{Cutoff, KeyState, Press, Presses, Refusal};
+use crate::hold::{Cutoff, HoldKind, KeyState, Press, Presses, Refusal};
 use crate::metrics::{Dictation, Event, RecordKinds, Recorder};
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
@@ -39,6 +39,7 @@ use crate::spotter::KeywordSpotter;
 use crate::vad::VadDetector;
 use crate::wake::{WakeEngine, WakeError, WakeEvent, WakeFrame};
 use crate::wake_stats::{Latency, LatencySummary, NearMisses};
+use crate::writing::{self, Writing, WritingError};
 
 /// How long the recognizer and the wake cue have to be ready before the capture is abandoned.
 const READY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -206,6 +207,10 @@ pub enum EngineState {
     TranscribingSecondary {
         route: CaptureRoute,
     },
+    /// The writing model is putting the words into proper text; `text` is what has streamed in.
+    Writing {
+        text: String,
+    },
 }
 
 /// Why a capture failed; `Display` is the plain notice for the user.
@@ -227,6 +232,8 @@ pub enum CaptureError {
     Audio(#[from] AudioError),
     #[error("Microphone audio stopped. Nothing was delivered.")]
     MicStopped,
+    #[error("{0} Nothing was typed.")]
+    Writing(WritingError),
     #[error("The key was released too quickly to dictate. Nothing was typed.")]
     HoldTooShort,
     #[error("No words were heard while the key was held. Nothing was typed.")]
@@ -248,6 +255,7 @@ impl UserError for CaptureError {
             }
             Self::NotReady { .. } => "Speech server not ready — Settings",
             Self::Audio(error) => error.headline(),
+            Self::Writing(error) => error.headline(),
             Self::MicStopped => "Microphone stopped mid-capture",
             Self::HoldTooShort => "Key released too soon",
             Self::NothingHeard | Self::NoEnding(_) => "No words heard",
@@ -277,6 +285,7 @@ impl CaptureError {
             Self::NotReady { .. } => "not_ready",
             Self::Audio(_) => "audio",
             Self::MicStopped => "mic_stopped",
+            Self::Writing(_) => "writing",
             Self::HoldTooShort => "hold_too_short",
             Self::NothingHeard => "hold_empty",
             Self::NoEnding(_) => "no_ending",
@@ -407,6 +416,7 @@ pub struct Engine<R, W, C> {
     limits: CaptureLimits,
     /// The ticked second-pass entries in list order.
     secondary: Vec<SecondPassEntry>,
+    writing: Option<Writing>,
     speech: SpeechSource,
     http: reqwest::Client,
     recorder: Recorder,
@@ -444,9 +454,20 @@ pub struct Engine<R, W, C> {
 /// A press of the dictation key that opened a capture.
 struct Held {
     press: u64,
+    kind: HoldKind,
     at: Instant,
     /// Where this press was released among the queued frames, however many presses followed.
     release: Cutoff,
+}
+
+impl Held {
+    /// What releasing the key delivers.
+    fn route(&self) -> CaptureRoute {
+        match self.kind {
+            HoldKind::Dictate => CaptureRoute::Paste,
+            HoldKind::Write => CaptureRoute::Write,
+        }
+    }
 }
 
 /// A wake word heard: when, and the folder of its recordings.
@@ -649,6 +670,38 @@ fn released_early(pressed: Instant) -> (CaptureError, &'static str) {
     }
 }
 
+/// How a step bounded by cancellation and a deadline ended.
+enum Bounded<T> {
+    Cancelled,
+    TimedOut,
+    Done(T),
+}
+
+impl<T> Bounded<Result<T, WritingError>> {
+    /// The step's value, or why it gave none: its error, a timeout, or `None` for a cancel.
+    fn finish(self) -> Result<T, Option<WritingError>> {
+        match self {
+            Self::Cancelled => Err(None),
+            Self::TimedOut => Err(Some(WritingError::Timeout)),
+            Self::Done(done) => done.map_err(Some),
+        }
+    }
+}
+
+/// Polls `work` unless the user cancels or `deadline` passes first; cancellation wins a tie.
+async fn bounded<T>(
+    cancel: &mut watch::Receiver<u64>,
+    deadline: Instant,
+    work: impl Future<Output = T>,
+) -> Bounded<T> {
+    tokio::select! {
+        biased;
+        _ = cancel.changed() => Bounded::Cancelled,
+        () = tokio::time::sleep_until(deadline) => Bounded::TimedOut,
+        done = work => Bounded::Done(done),
+    }
+}
+
 async fn until(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
@@ -722,6 +775,7 @@ where
             scripts: config.scripts.clone(),
             limits: config.capture_limits,
             secondary: config.stt.entries.ticked().cloned().collect(),
+            writing: config.writing.clone(),
             speech: config.speech_source(),
             http: parts.http,
             recorder,
@@ -931,6 +985,7 @@ where
         let at = Instant::now();
         self.held = Some(Held {
             press: press.number,
+            kind: press.kind,
             at,
             release: press.release,
         });
@@ -1077,7 +1132,13 @@ where
                 Event::HoldStart,
                 "ok",
                 None,
-                json!({"dictation": woke.dictation.to_string()}),
+                json!({
+                    "dictation": woke.dictation.to_string(),
+                    "key": match held.as_ref().map(|held| held.kind) {
+                        Some(HoldKind::Write) => "write",
+                        _ => "hold",
+                    },
+                }),
             );
         }
         let outcome = match self.start(frames, &woke, held.as_ref()).await {
@@ -1397,7 +1458,8 @@ where
                     }
                     let done = self.on_final(live, &text);
                     done.or_else(|| {
-                        matches!(live.release, Release::Tail(_)).then(|| self.finish_hold(live))
+                        matches!(live.release, Release::Tail(_))
+                            .then(|| self.finish_hold(live, held))
                     })
                 }
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),
@@ -1416,7 +1478,7 @@ where
                 Step::Silent => Some(Done::Failed(CaptureError::MicStopped)),
                 Step::Idle => Some(Done::Failed(CaptureError::NoEnding(self.limits.idle()))),
                 Step::TooLong => Some(Done::Failed(CaptureError::TooLong(self.limits.max()))),
-                Step::Tail => Some(self.finish_hold(live)),
+                Step::Tail => Some(self.finish_hold(live, held)),
                 Step::Key(open) => {
                     key_open = open;
                     self.on_key(live, held, frames).await
@@ -1481,7 +1543,7 @@ where
     }
 
     /// Ends a released hold: what was said, with the words still being recognized, is pasted.
-    fn finish_hold(&mut self, live: &mut Live<R::Session>) -> Done {
+    fn finish_hold(&mut self, live: &mut Live<R::Session>, held: Option<&Held>) -> Done {
         if let Some(partial) = live.partial.take().filter(|text| has_words(text))
             && let Some(done) = self.on_final(live, &partial)
         {
@@ -1494,7 +1556,7 @@ where
         }
         self.hold_end = Some("released");
         Done::Accepted(CaptureRequest {
-            route: CaptureRoute::Paste,
+            route: held.map_or(CaptureRoute::Paste, Held::route),
             text,
         })
     }
@@ -1863,8 +1925,17 @@ where
             Done::Accepted(request) => {
                 self.gate.set_enabled(false);
                 if self.end_with(Cue::Accepted, decided, session, true).await {
-                    self.reconcile(request, &sent, scratched, has_endings, dictation)
+                    match self
+                        .reconcile(request, &sent, scratched, has_endings, dictation)
                         .await
+                    {
+                        CaptureOutcome::Accepted(request)
+                            if request.route == CaptureRoute::Write =>
+                        {
+                            self.write(request.text).await
+                        }
+                        outcome => outcome,
+                    }
                 } else {
                     CaptureOutcome::cancelled_with(request.text)
                 }
@@ -1980,6 +2051,98 @@ where
                 text,
             }),
             None => CaptureOutcome::Accepted(request),
+        }
+    }
+
+    /// Has the writing model put `words` into proper text and hands it on as a paste. Nothing is
+    /// pasted unless text came back whole within [`writing::LIMIT`]: otherwise the words are kept
+    /// for the clipboard with the reason, or, when the user cancels meanwhile, as cancelled.
+    async fn write(&mut self, words: String) -> CaptureOutcome {
+        if !has_words(&words) {
+            return CaptureOutcome::Accepted(CaptureRequest {
+                route: CaptureRoute::Paste,
+                text: words,
+            });
+        }
+        let Some(settings) = self.writing.clone() else {
+            return self.not_written(&words, Some(WritingError::NotSetUp), None, None);
+        };
+        self.set_state(EngineState::Writing {
+            text: String::new(),
+        });
+        let started = Instant::now();
+        let deadline = started + writing::LIMIT;
+        let mut first = None;
+        let mut text = String::new();
+        let mut reply = match bounded(
+            &mut self.cancel,
+            deadline,
+            settings.start(&self.http, &words),
+        )
+        .await
+        .finish()
+        {
+            Ok(reply) => reply,
+            Err(stop) => return self.not_written(&words, stop, Some(started), first),
+        };
+        loop {
+            match bounded(&mut self.cancel, deadline, reply.next())
+                .await
+                .finish()
+            {
+                Ok(Some(piece)) => {
+                    first.get_or_insert_with(|| started.elapsed());
+                    text.push_str(&piece);
+                    self.set_state(EngineState::Writing { text: text.clone() });
+                }
+                Ok(None) => break,
+                Err(stop) => return self.not_written(&words, stop, Some(started), first),
+            }
+        }
+        let written = text.trim();
+        if written.is_empty() {
+            return self.not_written(&words, Some(WritingError::Empty), Some(started), first);
+        }
+        self.writing_metric("ok", started, first);
+        CaptureOutcome::Accepted(CaptureRequest {
+            route: CaptureRoute::Paste,
+            text: written.to_owned(),
+        })
+    }
+
+    fn writing_metric(&self, outcome: &str, started: Instant, first: Option<Duration>) {
+        let Some(settings) = &self.writing else {
+            return;
+        };
+        self.recorder.metric(
+            Event::Writing,
+            outcome,
+            Some(started.elapsed()),
+            json!({"model": settings.model(), "first_token_ms": first.map(millis)}),
+        );
+    }
+
+    /// The outcome of a writing call that gave no text: `error`, or a cancel when `None`.
+    fn not_written(
+        &self,
+        words: &str,
+        error: Option<WritingError>,
+        started: Option<Instant>,
+        first: Option<Duration>,
+    ) -> CaptureOutcome {
+        let outcome = error.map_or("cancelled", WritingError::kind);
+        match started {
+            Some(started) => self.writing_metric(outcome, started, first),
+            None => self
+                .recorder
+                .metric(Event::Writing, outcome, None, Value::Null),
+        }
+        match error {
+            None => CaptureOutcome::cancelled_with(words.to_owned()),
+            Some(error) => CaptureOutcome::Failed {
+                error: CaptureError::Writing(error),
+                recoverable_text: Some(words.to_owned()),
+            },
         }
     }
 

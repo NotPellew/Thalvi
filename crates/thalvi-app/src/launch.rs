@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::agent::Request;
 use crate::startup::LOGIN_ARG;
 
-const USAGE: &str = "Usage: thalvi-desktop [toggle | pause | resume | cancel | hold-start | hold-end | copy-error | state | status | settings get | settings check <json> | settings set <json> | metrics summary | config-file]";
+const USAGE: &str = "Usage: thalvi-desktop [toggle | pause | resume | cancel | hold-start | hold-end | write-start | write-end | copy-error | state | status | settings get | settings check <json> | settings set <json> | metrics summary | config-file]";
 
 /// The command line after the program name.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +45,8 @@ impl Launch {
             ["cancel"] => Ok(Self::Ask(Request::Cancel)),
             ["hold-start"] => Ok(Self::Ask(Request::HoldStart)),
             ["hold-end"] => Ok(Self::Ask(Request::HoldEnd)),
+            ["write-start"] => Ok(Self::Ask(Request::WriteStart)),
+            ["write-end"] => Ok(Self::Ask(Request::WriteEnd)),
             ["copy-error"] => Ok(Self::Ask(Request::CopyError)),
             ["settings", "get"] => Ok(Self::Ask(Request::SettingsGet)),
             ["settings", "check", change] => Ok(Self::Ask(Request::SettingsCheck {
@@ -116,6 +118,8 @@ mod tests {
             (&["cancel"][..], ask(Request::Cancel)),
             (&["hold-start"][..], ask(Request::HoldStart)),
             (&["hold-end"][..], ask(Request::HoldEnd)),
+            (&["write-start"][..], ask(Request::WriteStart)),
+            (&["write-end"][..], ask(Request::WriteEnd)),
             (&["copy-error"][..], ask(Request::CopyError)),
             (&["status"][..], ask(Request::Status)),
             (&["state"][..], ask(Request::State)),

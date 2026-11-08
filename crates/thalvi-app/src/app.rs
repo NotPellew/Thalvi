@@ -11,7 +11,7 @@ use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::Delivery;
 use thalvi_desktop::draft::Drafts;
 use thalvi_desktop::history;
-use thalvi_desktop::hold::HoldKey;
+use thalvi_desktop::hold::HoldKind;
 use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, HostError, RequestServer, refusal};
 use thalvi_desktop::metrics::Recorder;
 use thalvi_desktop::models::SpeechDownloads;
@@ -84,7 +84,7 @@ impl AppState {
             Arc::clone(&history),
             Arc::clone(&drafts),
         )?;
-        let held = watch_hold_key(&config.hold_key, &link);
+        let held = watch_hold_keys(&config, &link);
         Ok(Self {
             link,
             store,
@@ -204,7 +204,8 @@ impl AppState {
             .store(config.overlay.show, Ordering::SeqCst);
         let key_changed = {
             let mut current = self.config.lock().unwrap_or_else(PoisonError::into_inner);
-            let changed = current.hold_key != config.hold_key;
+            let changed =
+                (&current.hold_key, &current.write_key) != (&config.hold_key, &config.write_key);
             *current = config.clone();
             changed
         };
@@ -215,13 +216,13 @@ impl AppState {
                 .unwrap_or_else(PoisonError::into_inner);
             // The old hook goes before the new one comes.
             *watch = None;
-            *watch = watch_hold_key(&config.hold_key, &self.link).watch;
+            *watch = watch_hold_keys(config, &self.link).watch;
         }
         self.link.send(Control::Apply(Box::new(config.clone())));
     }
 }
 
-/// What watching the hold key came to.
+/// What watching the hold keys came to.
 #[derive(Default)]
 struct Held {
     watch: Option<HoldWatch>,
@@ -229,14 +230,21 @@ struct Held {
     unavailable: Option<&'static str>,
 }
 
-/// Starts reporting `key` to the engine where the desktop lets the app see it. Where binds
-/// report it instead, that is only logged; where the desktop offers no hold key, Settings says
-/// so and nothing looks like an error; where the desktop refuses, the user is told through the
-/// status, and the rest of the app goes on.
-fn watch_hold_key(key: &HoldKey, link: &EngineLink) -> Held {
+/// Starts reporting the hold and write keys to the engine where the desktop lets the app see
+/// them. Where binds report them instead, that is only logged; where the desktop offers no hold
+/// key, Settings says so and nothing looks like an error; where the desktop refuses, the user is
+/// told through the status, and the rest of the app goes on.
+fn watch_hold_keys(config: &DesktopConfig, link: &EngineLink) -> Held {
     let input = link.hold_input();
+    let keys = [
+        (HoldKind::Dictate, config.hold_key.clone()),
+        (HoldKind::Write, config.write_key.clone()),
+    ];
     held(
-        Desktop::watch_hold_key(key, move |down| input.set(down)),
+        Desktop::watch_hold_keys(&keys, move |kind, down| match kind {
+            HoldKind::Dictate => input.set(down),
+            HoldKind::Write => input.set_write(down),
+        }),
         |notice| link.send(Control::HoldKeyFailed(notice)),
     )
 }
@@ -575,8 +583,12 @@ impl Running for Live {
         self.0.state::<AppState>().link.send(control);
     }
 
-    fn hold(&self, down: bool) {
-        self.0.state::<AppState>().link.hold_input().set(down);
+    fn hold(&self, kind: HoldKind, down: bool) {
+        let input = self.0.state::<AppState>().link.hold_input();
+        match kind {
+            HoldKind::Dictate => input.set(down),
+            HoldKind::Write => input.set_write(down),
+        }
     }
 
     fn show_settings(&self) {

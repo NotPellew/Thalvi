@@ -9,7 +9,7 @@ use super::hyprland::{Hyprland, Window};
 use super::{
     App, Delivered, HoldSource, Host, HostError, RequestServer, TypedText, WebUrl, channel,
 };
-use crate::hold::HoldKey;
+use crate::hold::{HoldKey, HoldKind};
 
 /// The desktop session Thalvi runs in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,18 +192,18 @@ impl Desktop {
         channel::ask_at(dir, request, timeout)
     }
 
-    /// Reports the hold key as the desktop allows: through binds on Hyprland, not at all on GNOME.
+    /// Reports the hold keys as the desktop allows: through binds on Hyprland, not at all on GNOME.
     ///
     /// # Errors
     /// [`HostError::Unsupported`] when this desktop cannot detect a key's release, or is none
     /// Thalvi supports.
-    pub fn watch_hold_key(
-        key: &HoldKey,
-        on_change: impl Fn(bool) + Send + 'static,
+    pub fn watch_hold_keys(
+        keys: &[(HoldKind, HoldKey)],
+        on_change: impl Fn(HoldKind, bool) + Send + 'static,
     ) -> Result<HoldSource, HostError> {
         match Session::detect()? {
-            Session::Hyprland => Hyprland::watch_hold_key(key, on_change),
-            Session::Gnome => Gnome::watch_hold_key(key, on_change),
+            Session::Hyprland => Hyprland::watch_hold_keys(keys, on_change),
+            Session::Gnome => Gnome::watch_hold_keys(keys, on_change),
         }
     }
 

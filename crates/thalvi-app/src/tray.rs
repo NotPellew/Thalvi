@@ -40,7 +40,9 @@ impl Icon {
             Status::Listening | Status::Done { .. } => Self::Listening,
             Status::Starting { .. } | Status::Capturing { .. } => Self::Capturing,
             Status::Pending { .. } => Self::Pending,
-            Status::Working { .. } | Status::Loading { .. } => Self::Working,
+            Status::Working { .. } | Status::Writing { .. } | Status::Loading { .. } => {
+                Self::Working
+            }
             Status::Failed { .. } => Self::Error,
         }
     }
@@ -138,12 +140,14 @@ pub fn title(status: &Status) -> String {
             "{} pending, {} s",
             match route {
                 CaptureRoute::Paste => "paste",
+                CaptureRoute::Write => "write",
                 CaptureRoute::Submit => "submit",
                 CaptureRoute::Task => "task",
             },
             seconds(*pause_ms)
         ),
         Status::Working { .. } => "working".to_owned(),
+        Status::Writing { .. } => "writing".to_owned(),
         Status::Loading { .. } => "starting".to_owned(),
         Status::Failed { .. } => "something went wrong".to_owned(),
     };
@@ -168,6 +172,7 @@ pub fn can_cancel(status: &Status) -> bool {
         Status::Starting { .. }
             | Status::Capturing { .. }
             | Status::Pending { .. }
+            | Status::Writing { .. }
             | Status::Working {
                 cancellable: true,
                 ..
@@ -340,6 +345,19 @@ mod tests {
                 "Thalvi: task pending, 3 s",
             ),
             (
+                pending_status(CaptureRoute::Write, 700),
+                Icon::Pending,
+                "Thalvi: write pending, 0.7 s",
+            ),
+            (
+                Status::Writing {
+                    target: Some(kitty()),
+                    text: "secret words".to_owned(),
+                },
+                Icon::Working,
+                "Thalvi: writing",
+            ),
+            (
                 Status::Working {
                     target: Some(kitty()),
                     route: CaptureRoute::Task,
@@ -455,6 +473,13 @@ mod tests {
                 true,
             ),
             (pending_status(CaptureRoute::Paste, 700), true),
+            (
+                Status::Writing {
+                    target: Some(kitty()),
+                    text: String::new(),
+                },
+                true,
+            ),
             (working(true), true),
             (working(false), false),
             (

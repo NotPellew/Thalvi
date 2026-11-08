@@ -49,6 +49,7 @@ impl Effect {
             Ok(FinalStep::Armed(pending)) if pending.without_ending => Self::Text,
             Ok(FinalStep::Armed(pending)) => Self::Ending(match pending.route {
                 CaptureRoute::Paste => Ending::Paste,
+                CaptureRoute::Write => Ending::Write,
                 CaptureRoute::Submit => Ending::Submit,
                 CaptureRoute::Task => Ending::Task,
             }),
@@ -186,6 +187,7 @@ impl Watch {
     fn pause(&self, ending: Ending) -> Duration {
         self.pauses.get(match ending {
             Ending::Paste | Ending::Scratch | Ending::Cancel => CaptureRoute::Paste,
+            Ending::Write => CaptureRoute::Write,
             Ending::Submit => CaptureRoute::Submit,
             Ending::Task => CaptureRoute::Task,
         })
@@ -405,6 +407,31 @@ mod tests {
     fn send_to(watch: &mut Watch, samples: u64, now: Instant) {
         let more = usize::try_from((samples - watch.sent) / FRAME_SAMPLES as u64).expect("fits");
         watch.sent(more, now, false);
+    }
+
+    #[test]
+    fn a_write_ending_agrees_with_the_spotter_and_its_dispute_waits_the_paste_pause() {
+        let now = Instant::now();
+        let before = CaptureSession::new(Endings::default(), EndingPauses::default(), Vec::new());
+        let mut after = before.clone();
+        let step = after.on_final("tell Anna I am late write that out", now, false);
+        let effect = Effect::of(&before, &after, &step);
+        assert_eq!(effect, Effect::Ending(Ending::Write));
+        let mut agreed = watch();
+        agreed.hit(&hit(Ending::Write, 40_000), now, false);
+        send_to(&mut agreed, 52_000, now);
+        assert_eq!(
+            agreed.final_arrived(effect, now, false).unwrap().outcome,
+            Outcome::Agreed
+        );
+        let mut disputed = watch();
+        disputed.hit(&hit(Ending::Write, 40_000), now, false);
+        send_to(&mut disputed, 52_000, now);
+        disputed.final_arrived(Effect::Text, now, false);
+        assert_eq!(
+            disputed.ready_at(),
+            Some(now + EndingPauses::default().get(CaptureRoute::Write))
+        );
     }
 
     #[test]

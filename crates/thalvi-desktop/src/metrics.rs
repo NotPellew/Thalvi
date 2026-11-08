@@ -59,6 +59,8 @@ pub enum Event {
     /// From the last speech heard before a final result to that result.
     FinalLag,
     SecondaryStt,
+    /// One call to the writing model: time to the first text and in all, and how it ended.
+    Writing,
     /// Fetching and loading the local speech model.
     SpeechLoad,
     /// Downloading a catalog speech model from the settings window.
@@ -100,6 +102,7 @@ impl Event {
             Self::PartialLag => "desktop_partial_lag",
             Self::FinalLag => "desktop_final_lag",
             Self::SecondaryStt => "desktop_secondary_stt",
+            Self::Writing => "desktop_writing",
             Self::SpeechLoad => "desktop_speech_load",
             Self::SpeechDownload => "desktop_speech_download",
             Self::WordList => "desktop_word_list",

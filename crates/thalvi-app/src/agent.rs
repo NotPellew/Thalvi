@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thalvi_desktop::capture::CaptureRoute;
 use thalvi_desktop::config::DesktopConfig;
+use thalvi_desktop::hold::HoldKind;
 use thalvi_desktop::metrics::{self, SUMMARY_WINDOW};
 use tokio::sync::watch;
 
@@ -19,7 +20,7 @@ use crate::status::{Failure, Status};
 pub const EFFECT_WAIT: Duration = Duration::from_secs(3);
 
 /// The commands a refusal lists, so that it need not repeat the one that was sent.
-const COMMANDS: [&str; 14] = [
+const COMMANDS: [&str; 16] = [
     "status",
     "state",
     "pause",
@@ -28,6 +29,8 @@ const COMMANDS: [&str; 14] = [
     "cancel",
     "hold-start",
     "hold-end",
+    "write-start",
+    "write-end",
     "copy-error",
     "show",
     "settings-get",
@@ -56,6 +59,10 @@ pub enum Request {
     HoldStart,
     /// The dictation key came up.
     HoldEnd,
+    /// The writing key went down: release writes out and pastes the dictation.
+    WriteStart,
+    /// The writing key came up.
+    WriteEnd,
     /// Copy the report of the last error shown.
     CopyError,
     /// Open the settings window.
@@ -146,7 +153,7 @@ pub trait Running {
     fn last_error(&self) -> Option<Failure>;
     fn control(&self, control: Control);
     /// Presses or releases the dictation key.
-    fn hold(&self, down: bool);
+    fn hold(&self, kind: HoldKind, down: bool);
     fn show_settings(&self);
     async fn copy_error(&self) -> Result<(), String>;
     fn config(&self) -> DesktopConfig;
@@ -235,8 +242,10 @@ async fn handle(running: &impl Running, wait: Duration, request: Request) -> Str
         Request::Resume => resume(running, wait).await,
         Request::Toggle => toggle(running, wait).await,
         Request::Cancel => cancel(running, wait).await,
-        Request::HoldStart => hold_start(running, wait).await,
-        Request::HoldEnd => hold_end(running, wait).await,
+        Request::HoldStart => hold_start(running, HoldKind::Dictate, wait).await,
+        Request::HoldEnd => hold_end(running, HoldKind::Dictate, wait).await,
+        Request::WriteStart => hold_start(running, HoldKind::Write, wait).await,
+        Request::WriteEnd => hold_end(running, HoldKind::Write, wait).await,
         Request::CopyError => copy_error(running).await,
     }
 }
@@ -255,6 +264,7 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
             cancellable: true, ..
         } => "transcribing",
         Status::Working { .. } => "delivering",
+        Status::Writing { .. } => "writing",
         Status::Loading { .. } => "loading",
         Status::Failed { .. } => "failed",
     }
@@ -297,6 +307,7 @@ fn capturing(status: &Status) -> bool {
         Status::Starting { .. }
             | Status::Capturing { .. }
             | Status::Pending { .. }
+            | Status::Writing { .. }
             | Status::Working {
                 cancellable: true,
                 ..
@@ -402,7 +413,7 @@ async fn cancel(running: &impl Running, wait: Duration) -> String {
     }
 }
 
-async fn hold_start(running: &impl Running, wait: Duration) -> String {
+async fn hold_start(running: &impl Running, kind: HoldKind, wait: Duration) -> String {
     let mut status = running.status();
     let refusal = match &*status.borrow() {
         Status::Paused => Some("Thalvi is paused. Resume it first."),
@@ -414,7 +425,7 @@ async fn hold_start(running: &impl Running, wait: Duration) -> String {
     if let Some(refusal) = refusal {
         return no_effect(running, refusal);
     }
-    running.hold(true);
+    running.hold(kind, true);
     if reached(&mut status, wait, |status| {
         capturing(status) || matches!(status, Status::Working { .. })
     })
@@ -426,10 +437,10 @@ async fn hold_start(running: &impl Running, wait: Duration) -> String {
     }
 }
 
-async fn hold_end(running: &impl Running, wait: Duration) -> String {
+async fn hold_end(running: &impl Running, kind: HoldKind, wait: Duration) -> String {
     let mut status = running.status();
     let holding = speaking(&status.borrow());
-    running.hold(false);
+    running.hold(kind, false);
     if !holding {
         return no_effect(running, "No capture is being taken.");
     }
@@ -705,8 +716,12 @@ mod tests {
             }
         }
 
-        fn hold(&self, down: bool) {
-            lock(&self.sent).push(format!("hold {down}"));
+        fn hold(&self, kind: HoldKind, down: bool) {
+            let key = match kind {
+                HoldKind::Dictate => "hold",
+                HoldKind::Write => "write",
+            };
+            lock(&self.sent).push(format!("{key} {down}"));
             if self.ignoring.load(Ordering::SeqCst) {
                 return;
             }
@@ -1051,6 +1066,22 @@ mod tests {
     }
 
     #[test]
+    fn writing_controls_use_the_write_key_and_writing_can_be_cancelled() {
+        let rig = Rig::new("write-control", "{}");
+        assert_eq!(rig.ask(&Request::WriteStart)["took_effect"], true);
+        assert_eq!(rig.ask(&Request::WriteEnd)["took_effect"], true);
+        assert_eq!(*lock(&rig.fake.sent), ["write true", "write false"]);
+        rig.fake.set_status(Status::Writing {
+            target: None,
+            text: "private words".to_owned(),
+        });
+        let refused = rig.ask(&Request::HoldStart);
+        assert_eq!(refused["took_effect"], false);
+        assert_eq!(rig.ask(&Request::Cancel)["took_effect"], true);
+        assert_eq!(rig.ask(&Request::Status)["state"], "listening");
+    }
+
+    #[test]
     fn state_names_what_thalvi_is_doing_and_never_what_was_said() {
         let rig = Rig::new(
             "state",
@@ -1060,6 +1091,13 @@ mod tests {
             ),
         );
         let words = [
+            (
+                Status::Writing {
+                    target: Some("kitty".to_owned()),
+                    text: "my password is hunter2".to_owned(),
+                },
+                "writing",
+            ),
             (Status::Paused, "paused"),
             (Status::Listening, "listening"),
             (capturing_status(), "capturing"),

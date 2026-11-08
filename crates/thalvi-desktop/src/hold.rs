@@ -68,6 +68,9 @@ const CODES: [(&str, u16); 49] = [
 /// Where `KeyZ` is in [`CODES`].
 const DEFAULT_CODE: usize = 29;
 
+/// Where `KeyX` is in [`CODES`].
+const WRITE_CODE: usize = 30;
+
 /// Why a hold key name was refused. Shown as written.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HoldKeyError {
@@ -149,6 +152,17 @@ impl Default for HoldKey {
     }
 }
 
+impl HoldKey {
+    /// Alt with X: where the write key starts, next to the hold key.
+    #[must_use]
+    pub fn write_default() -> Self {
+        Self {
+            modifiers: vec![Modifier::Alt],
+            code: WRITE_CODE,
+        }
+    }
+}
+
 impl fmt::Display for HoldKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (name, modifier) in MODIFIERS {
@@ -173,15 +187,27 @@ impl Serialize for HoldKey {
     }
 }
 
-/// Whether the hold key is down, and how many times it has been pressed.
+/// Which of the two hold keys a hold came from, and so what its release does with the words.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HoldKind {
+    /// The hold key: the words are pasted as dictated.
+    #[default]
+    Dictate,
+    /// The write key: the words are written out as proper text, then pasted.
+    Write,
+}
+
+/// Whether a hold key is down, which one, and how many times a key has been pressed.
 #[derive(Clone, Debug, Default)]
 pub struct KeyState {
     pub presses: u64,
     pub down: bool,
+    /// The key of the latest press.
+    pub kind: HoldKind,
     /// The latest press's release.
     pub release: Cutoff,
-    /// When the key came up while already up: a release that overtook its press.
-    early_release: Option<Instant>,
+    /// When a key came up while already up: a release that overtook its press.
+    early_release: Option<(HoldKind, Instant)>,
 }
 
 /// How long after a release that overtook its press that press still counts as released. The
@@ -210,6 +236,7 @@ impl Cutoff {
 #[derive(Clone, Debug)]
 pub struct Press {
     pub number: u64,
+    pub kind: HoldKind,
     pub release: Cutoff,
 }
 
@@ -257,6 +284,7 @@ impl Presses {
         self.seen = state.presses;
         fresh.then(|| Press {
             number: state.presses,
+            kind: state.kind,
             release: state.release.clone(),
         })
     }
@@ -355,7 +383,7 @@ impl Refusal {
     }
 }
 
-/// Where the hold key's presses and releases come in, from a compositor bind or the keyboard hook.
+/// Where the hold keys' presses and releases come in, from a compositor bind or the keyboard hook.
 #[derive(Clone)]
 pub struct HoldInput(Arc<watch::Sender<KeyState>>);
 
@@ -366,23 +394,37 @@ impl HoldInput {
         (Self(Arc::new(sender)), receiver)
     }
 
-    /// The key went down or up; a repeated press changes nothing, so key auto-repeat starts
+    /// The hold key went down or up; a repeated press changes nothing, so key auto-repeat starts
     /// nothing extra. A release while up is the next press's, which it overtook.
     pub fn set(&self, down: bool) {
+        self.change(HoldKind::Dictate, down);
+    }
+
+    /// The write key went down or up, as [`set`](Self::set) for the hold key.
+    pub fn set_write(&self, down: bool) {
+        self.change(HoldKind::Write, down);
+    }
+
+    fn change(&self, kind: HoldKind, down: bool) {
         self.0.send_if_modified(|state| {
+            // One hold at a time: the other key means nothing until this one is up.
+            if state.down && state.kind != kind {
+                return false;
+            }
             if state.down == down {
                 if !down {
-                    state.early_release = Some(Instant::now());
+                    state.early_release = Some((kind, Instant::now()));
                 }
                 return false;
             }
             if down {
                 state.presses += 1;
+                state.kind = kind;
                 state.release = Cutoff::default();
                 let overtaken = state
                     .early_release
                     .take()
-                    .is_some_and(|at| at.elapsed() < OVERTAKEN_PRESS);
+                    .is_some_and(|(early, at)| early == kind && at.elapsed() < OVERTAKEN_PRESS);
                 if overtaken {
                     state.release.release();
                     return true;
@@ -632,6 +674,41 @@ impl HoldHook {
     }
 }
 
+/// Decides, event by event, which keys are the hold keys, one [`HoldHook`] per key. Pure.
+pub struct HoldHooks(Vec<(HoldKind, HoldHook)>);
+
+impl HoldHooks {
+    #[must_use]
+    pub fn new(keys: Vec<(HoldKind, HoldKey)>) -> Self {
+        Self(
+            keys.into_iter()
+                .map(|(kind, key)| (kind, HoldHook::new(key)))
+                .collect(),
+        )
+    }
+
+    /// What every key makes of `event`: the strongest verdict, and the keys that went down or up.
+    #[must_use]
+    pub fn on_event(
+        &mut self,
+        event: KeyEvent,
+        physically_down: impl Fn(u16) -> bool,
+    ) -> (Verdict, Vec<(HoldKind, bool)>) {
+        let mut verdict = Verdict::Pass;
+        let mut changes = Vec::new();
+        for (kind, hook) in &mut self.0 {
+            let decision = hook.on_event(event, &physically_down);
+            verdict = match (verdict, decision.verdict) {
+                (Verdict::Swallow, _) | (_, Verdict::Swallow) => Verdict::Swallow,
+                (Verdict::Mask, _) | (_, Verdict::Mask) => Verdict::Mask,
+                _ => Verdict::Pass,
+            };
+            changes.extend(decision.change.map(|down| (*kind, down)));
+        }
+        (verdict, changes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::{Just, Strategy};
@@ -653,6 +730,7 @@ mod tests {
             assert_eq!(key.modifiers().contains(&Modifier::Alt), alt, "{name}");
         }
         assert_eq!(HoldKey::default().to_string(), "Alt+KeyZ");
+        assert_eq!(HoldKey::write_default().to_string(), "Alt+KeyX");
     }
 
     #[test]
@@ -1001,6 +1079,76 @@ mod tests {
         assert_eq!(seen(), (1, false));
         input.set(true);
         assert_eq!(seen(), (2, true));
+    }
+
+    #[test]
+    fn a_press_says_which_key_it_was_and_the_other_key_means_nothing_during_a_hold() {
+        let (input, state) = HoldInput::new();
+        let mut presses = Presses::new(state);
+        let kind = |presses: &mut Presses| presses.take().map(|press| press.kind);
+        input.set_write(true);
+        assert_eq!(kind(&mut presses), Some(HoldKind::Write));
+        // The hold key is no hold while the write key is down, and neither is its release.
+        input.set(true);
+        input.set(false);
+        assert!(!presses.is_over(1), "the write hold goes on");
+        assert_eq!(kind(&mut presses), None);
+        assert_eq!(presses.take_lost(), 0);
+        input.set_write(false);
+        assert!(presses.is_over(1));
+        input.set(true);
+        assert_eq!(kind(&mut presses), Some(HoldKind::Dictate));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_release_that_overtook_its_press_belongs_to_the_same_key() {
+        let (input, state) = HoldInput::new();
+        let mut presses = Presses::new(state);
+        input.set_write(false);
+        input.set(true);
+        assert_eq!(
+            presses.take().map(|press| press.kind),
+            Some(HoldKind::Dictate),
+            "another key's early release does not cancel this press"
+        );
+    }
+
+    #[test]
+    fn two_keys_are_two_holds_and_the_strongest_verdict_wins() {
+        let mut hooks = HoldHooks::new(vec![
+            (HoldKind::Dictate, HoldKey::default()),
+            (HoldKind::Write, HoldKey::write_default()),
+        ]);
+        let with_alt = |vk| vk == ALT;
+        let step = |hooks: &mut HoldHooks, vk, down, keyboard: &dyn Fn(u16) -> bool| {
+            hooks.on_event(event(vk, down), keyboard)
+        };
+        assert_eq!(
+            step(&mut hooks, ALT, true, &with_alt),
+            (Verdict::Pass, vec![])
+        );
+        assert_eq!(
+            step(&mut hooks, X, true, &with_alt),
+            (Verdict::Swallow, vec![(HoldKind::Write, true)])
+        );
+        assert_eq!(
+            step(&mut hooks, X, false, &with_alt),
+            (Verdict::Swallow, vec![]),
+            "the write hold lasts until Alt is up too"
+        );
+        assert_eq!(
+            step(&mut hooks, Z, true, &with_alt),
+            (Verdict::Swallow, vec![(HoldKind::Dictate, true)])
+        );
+        assert_eq!(
+            step(&mut hooks, ALT, false, &|_| false),
+            (Verdict::Mask, vec![(HoldKind::Write, false)]),
+            "one mask for both keys, and only the write hold is over"
+        );
+        assert_eq!(
+            step(&mut hooks, Z, false, &|_| false),
+            (Verdict::Swallow, vec![(HoldKind::Dictate, false)])
+        );
     }
 
     #[test]

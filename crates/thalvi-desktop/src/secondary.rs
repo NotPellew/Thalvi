@@ -11,6 +11,19 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const SAMPLE_RATE: u32 = 24_000;
 const BOUNDARY: &str = "thalvi-capture-boundary-7d1f0c2a9b3e";
 
+/// `url` as an endpoint's base address without a trailing slash, when it is an `http` or `https`
+/// URL with a host and no credentials, query or fragment.
+pub(crate) fn base_url(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    (matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some()
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none())
+    .then(|| parsed.as_str().trim_end_matches('/').to_string())
+}
+
 /// Which transcription API the secondary endpoint speaks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -85,23 +98,14 @@ impl SecondaryStt {
                 api,
             });
         }
-        let parsed = reqwest::Url::parse(url.trim()).map_err(|_| SecondarySttError::Url)?;
-        if !matches!(parsed.scheme(), "http" | "https")
-            || parsed.host_str().is_none()
-            || !parsed.username().is_empty()
-            || parsed.password().is_some()
-            || parsed.query().is_some()
-            || parsed.fragment().is_some()
-        {
-            return Err(SecondarySttError::Url);
-        }
+        let url = base_url(url).ok_or(SecondarySttError::Url)?;
         let model = model.trim();
         if model.is_empty() {
             return Err(SecondarySttError::Model);
         }
         Ok(Self {
             enabled,
-            url: parsed.as_str().trim_end_matches('/').to_string(),
+            url,
             model: model.to_string(),
             api_key,
             api,

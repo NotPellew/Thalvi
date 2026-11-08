@@ -76,6 +76,7 @@ export interface Page {
 
 const ENDINGS: readonly (readonly [Ending, string])[] = [
   ["paste", "Paste"],
+  ["write", "Write out, then paste"],
   ["submit", "Paste and Enter"],
   ["task", "Run task"],
   ["scratch", "Scratch the draft"],
@@ -112,7 +113,7 @@ const DRAFT_OUTCOMES: Record<DraftOutcome, string> = {
   maybePartial: "Typing stopped partway: some of this text may already be in the window. Check it there, or use Copy text.",
 };
 /** While one of these runs the status changes with every word; the draft is read again once it ends. */
-const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "working"];
+const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "working"];
 const WHEN = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 export function row(label: string, hint: string | null, control: Field | HTMLElement): HTMLElement {
@@ -472,6 +473,7 @@ function holdKey({ holdKeyUnavailable }: PageContext): HTMLElement[] {
   return [
     group("Hold key"),
     row("Hold a key to dictate", null, unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null })),
+    row("Hold a key to write", null, unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null })),
   ];
 }
 
@@ -1068,6 +1070,29 @@ function speech(context: PageContext): HTMLElement[] {
   const liveBlock = el("div", { class: "stack wide" }, liveList, el("div", { class: "trow add" }, kindPicker.node, addLive));
   const secondBlock = el("div", { class: "stack wide" }, secondList, addSecond);
 
+  const writing = draft.writing;
+  const writingUrl = controls.text(writing?.url ?? "", () => { syncWriting(); }, { placeholder: "http://127.0.0.1:8000/v1" });
+  const writingModel = controls.text(writing?.model ?? "", () => { syncWriting(); });
+  const writingKey = controls.text(writing?.api_key ?? "", () => { syncWriting(true); }, { type: "password", placeholder: writing?.has_key === true ? "A key is saved" : "" });
+  const writingInputs = [writingUrl, writingModel, writingKey].map((field) => field.field as HTMLInputElement);
+  const clearWritingKey = button("Clear saved writing key", () => {
+    const input = writingKey.field as HTMLInputElement;
+    input.value = "";
+    input.placeholder = "Cleared on Save";
+    syncWriting(true);
+    clearWritingKey.hidden = true;
+    controls.touched();
+  });
+  clearWritingKey.hidden = writing?.has_key !== true;
+  const writingKeyField = { node: el("div", { class: "stack" }, writingKey.node, clearWritingKey), field: writingKey.field };
+
+  function syncWriting(replaceKey = false): void {
+    const [urlInput, modelInput, keyInput] = writingInputs;
+    draft.writing = writingInputs.every((input) => input.value.trim() === "")
+      ? null
+      : { ...draft.writing, url: urlInput?.value ?? "", model: modelInput?.value ?? "", ...(replaceKey ? { api_key: keyInput?.value ?? "" } : {}) };
+  }
+
   const words = wordListTable(draft, controls);
   const wordProblem = note();
   const wordRow = row(
@@ -1120,6 +1145,14 @@ function speech(context: PageContext): HTMLElement[] {
     ),
     problem,
     editor,
+    group("Writing"),
+    row(
+      "Writing endpoint address",
+      "A chat completions endpoint that writes a dictation out as proper text when you say “write that out” or hold the write key. Only the words you said are sent. Saving never calls it.",
+      writingUrl,
+    ),
+    row("Writing model", "The model the endpoint should use.", writingModel),
+    row("Writing API key", "Stored in the desktop config file; unchanged keeps the saved key.", writingKeyField),
   ];
 }
 
