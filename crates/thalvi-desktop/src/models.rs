@@ -142,6 +142,16 @@ impl CatalogHead {
         }
     }
 
+    /// The wake threshold used when config gives none.
+    #[must_use]
+    pub fn default_threshold(self) -> f32 {
+        match self {
+            // The false-wake and recall numbers for v0.0.14 were measured at 0.7.
+            Self::HeyThalvi => 0.7,
+            Self::HeyMycroft | Self::HeyJarvis => 0.5,
+        }
+    }
+
     /// The catalog head called `name` in config.
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {
@@ -178,7 +188,7 @@ impl CatalogHead {
 }
 
 /// What the settings window shows of a catalog wake head.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WakeModelInfo {
     pub name: &'static str,
     pub title: &'static str,
@@ -186,6 +196,8 @@ pub struct WakeModelInfo {
     pub size: u64,
     /// The file is on disk at its pinned size.
     pub cached: bool,
+    /// The threshold the head starts at.
+    pub threshold: f32,
 }
 
 /// A speech model that ships in the catalog and is chosen by name.
@@ -628,6 +640,7 @@ impl ModelStore {
                 title: head.title(),
                 size: asset.size,
                 cached: self.is_asset_cached(&asset).await,
+                threshold: head.default_threshold(),
             });
         }
         models
@@ -819,16 +832,16 @@ mod tests {
         )
         .expect("cached head at pinned size");
         let models = store.wake_models().await;
-        let cached: Vec<(&str, &str, bool)> = models
+        let cached: Vec<(&str, &str, bool, f32)> = models
             .iter()
-            .map(|model| (model.name, model.title, model.cached))
+            .map(|model| (model.name, model.title, model.cached, model.threshold))
             .collect();
         assert_eq!(
             cached,
             [
-                ("hey_thalvi", "Hey Thalvi", true),
-                ("hey_mycroft", "Hey Mycroft", false),
-                ("hey_jarvis", "Hey Jarvis", false),
+                ("hey_thalvi", "Hey Thalvi", true, 0.7),
+                ("hey_mycroft", "Hey Mycroft", false, 0.5),
+                ("hey_jarvis", "Hey Jarvis", false, 0.5),
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);

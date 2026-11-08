@@ -339,6 +339,19 @@ describe("the wake word picker", () => {
     expect(dictation.querySelector<HTMLOptionElement>('option[value="hey_thalvi"]')?.disabled).toBe(false);
   });
 
+  it("moves the threshold to the chosen catalog phrase's default and saves it", async () => {
+    const stub = await openCapture({ ...SETTINGS, wake: { ...SETTINGS.wake, capture: { model: "hey_thalvi", threshold: 0.9 } } });
+    const shown = (): string => rowOf("Threshold (dictation)").querySelector("output")?.textContent ?? "";
+    expect(shown()).toBe("0.90");
+    choose(control("Wake model (dictation)", "select"), "hey_jarvis");
+    expect(shown()).toBe("0.50");
+    choose(control("Wake model (dictation)", "select"), "hey_thalvi");
+    expect(shown()).toBe("0.70");
+    button("Save").click();
+    await settle();
+    expect(sent(stub).wake.capture).toEqual({ model: "hey_thalvi", threshold: 0.7 });
+  });
+
   it("shows the picked custom file name and saves its path", async () => {
     const stub = await openCapture();
     choose(control("Wake model (dictation)", "select"), "__custom");

@@ -2020,7 +2020,7 @@ fn wake_lines(dir: &std::path::Path, event: &str) -> Vec<serde_json::Value> {
 async fn a_near_miss_is_one_line_per_episode_with_its_peak_and_a_crossing_is_none() {
     LocalSet::new()
         .run_until(async {
-            // Per frame (capture, conversation); both thresholds are 0.5.
+            // Per frame (capture, conversation); both thresholds are set to 0.5.
             let frames = [
                 (0.0, 0.0),
                 (0.1, 0.0),
@@ -2036,7 +2036,8 @@ async fn a_near_miss_is_one_line_per_episode_with_its_peak_and_a_crossing_is_non
             ];
             let dir = record_dir("near-miss");
             let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
-            let (rig, engine, frames_in) = Rig::recording("{}", recorder);
+            let config = r#"{"wake":{"capture":{"model":"hey_thalvi","threshold":0.5}}}"#;
+            let (rig, engine, frames_in) = Rig::recording(config, recorder);
             let task = listen_task(engine, frames_in, 1);
             for (id, (capture, conversation)) in frames.into_iter().enumerate() {
                 rig.wake.score(capture, conversation);

@@ -153,6 +153,8 @@ export interface WakeModelInfo {
   size: number;
   /** The file is on disk at its pinned size. */
   cached: boolean;
+  /** The threshold the head starts at. */
+  threshold: number;
 }
 
 /** One step of a speech model download; `message` is the plain reason, only with `failed`. */

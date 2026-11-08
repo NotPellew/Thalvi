@@ -34,7 +34,7 @@ const UNIFIED_LANGUAGES = [
 const SETTINGS: Settings = {
   server: "ws://127.0.0.1:8080",
   wake: {
-    capture: { model: "hey_thalvi", threshold: 0.5 },
+    capture: { model: "hey_thalvi", threshold: 0.7 },
     conversation: { model: "hey_mycroft", threshold: 0.5 },
   },
   cues: { wake: true, provisional: true, cancelled: true, accepted: true, error: true },
@@ -106,9 +106,9 @@ export function fakeBackend(params: URLSearchParams): Backend {
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
   const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
   const wakeModels: WakeModelInfo[] = [
-    { name: "hey_thalvi", title: "Hey Thalvi", size: 395_406, cached: true },
-    { name: "hey_mycroft", title: "Hey Mycroft", size: 857_691, cached: false },
-    { name: "hey_jarvis", title: "Hey Jarvis", size: 1_271_370, cached: false },
+    { name: "hey_thalvi", title: "Hey Thalvi", size: 395_406, cached: true, threshold: 0.7 },
+    { name: "hey_mycroft", title: "Hey Mycroft", size: 857_691, cached: false, threshold: 0.5 },
+    { name: "hey_jarvis", title: "Hey Jarvis", size: 1_271_370, cached: false, threshold: 0.5 },
   ];
   const speechModels: SpeechModelInfo[] = [
     {
