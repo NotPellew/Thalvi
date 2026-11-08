@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `f557ebf0006b2102e23c23424f2acca3df97574b`. The recorded file hashes
+Sync commit: `1a3ac3e15b6e07fcf8e321b63456e7feb2165ded`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -28,7 +28,10 @@ accounts for presses during a rebuild and refuses them afterwards; its former
 body is `Runner::rebuild`. A dropped listener keeps its hold cursor until it
 resumes. Closing the microphone ends that interval and hands pending presses to
 Apply, which returns the accounted cursor to the live engine so a newer press
-cannot be skipped. None of these touch the mapped functions' cancellation
+cannot be skipped. Speech servers became a list of entries: `Engine::reconcile`
+runs every ticked second-pass entry (none runs when none is ticked, as before
+when the switch was off), still polling cancellation first, and the recognizer
+errors name their entry. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
