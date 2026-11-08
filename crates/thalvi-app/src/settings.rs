@@ -546,6 +546,97 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_merge_patch_merges_objects_removes_nulls_and_replaces_lists() {
+        for (target, patch, expected) in [
+            (
+                json!({"a": {"b": 1, "c": 2}}),
+                json!({"a": {"b": 3}}),
+                json!({"a": {"b": 3, "c": 2}}),
+            ),
+            (json!({"a": 1, "b": 2}), json!({"a": null}), json!({"b": 2})),
+            (
+                json!({"a": [1, 2, 3]}),
+                json!({"a": [4]}),
+                json!({"a": [4]}),
+            ),
+            (
+                json!({"a": 1}),
+                json!({"a": {"b": 1}}),
+                json!({"a": {"b": 1}}),
+            ),
+            (json!({"a": {"b": 1}}), json!({"a": 5}), json!({"a": 5})),
+            (
+                json!({"a": 1}),
+                json!({"b": {"c": null}}),
+                json!({"a": 1, "b": {}}),
+            ),
+        ] {
+            let mut merged = target.clone();
+            merge_patch(&mut merged, &patch);
+            assert_eq!(merged, expected, "{target} + {patch}");
+        }
+    }
+
+    /// The form of the default config with `change` merged in, as the commands build it.
+    fn judged(
+        current: &DesktopConfig,
+        change: &Value,
+        paused: bool,
+    ) -> Result<DesktopConfig, String> {
+        let mut form = settings_json(current).unwrap();
+        merge_patch(&mut form, change);
+        judge(form, current, paused)
+    }
+
+    #[test]
+    fn only_what_a_change_touches_gets_the_checks_settings_runs_on_it() {
+        let missing = |folder: &str| json!({"kind": "on_device", "id": "d", "name": "Here", "active": true, "model": folder});
+        let current = judged(
+            &store_defaults(),
+            &json!({"stt": {"entries": [missing("/models/gone")]}}),
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            current.contains("/models/gone"),
+            "a new folder is checked: {current}"
+        );
+
+        // Settings checks a folder when it is chosen, so one already saved stays through other changes.
+        let mut config = store_defaults();
+        let mut form = settings_json(&config).unwrap();
+        form["stt"]["entries"] = json!([missing("/models/gone")]);
+        config = DesktopConfig::from_json_str(&form.to_string()).unwrap();
+        assert!(judged(&config, &json!({"look": "neon"}), true).is_ok());
+
+        let mut equal = settings_json(&store_defaults()).unwrap();
+        let head = equal["wake"]["capture"]["model"].clone();
+        equal["wake"]["conversation"]["model"] = head;
+        let wake = judge(equal, &store_defaults(), true).unwrap_err();
+        assert_eq!(
+            wake,
+            "The capture and conversation wake models must be different."
+        );
+
+        let loose = json!({"kind": "second_pass", "id": "p", "name": "P", "active": false,
+            "address": "not a url", "model": "m"});
+        let strict = judged(
+            &store_defaults(),
+            &json!({"stt": {"entries": [
+            store_entries_default(), loose]}}),
+            true,
+        );
+        assert!(
+            strict.is_err(),
+            "a new second pass entry is checked even when not ticked"
+        );
+    }
+
+    fn store_entries_default() -> Value {
+        settings_json(&store_defaults()).unwrap()["stt"]["entries"][0].clone()
+    }
+
     fn store_defaults() -> DesktopConfig {
         DesktopConfig::from_json_str("{}").unwrap()
     }
