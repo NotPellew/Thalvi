@@ -31,7 +31,8 @@ Apply, which returns the accounted cursor to the live engine so a newer press
 cannot be skipped. Speech servers became a list of entries: `Engine::reconcile`
 runs every ticked second-pass entry (none runs when none is ticked, as before
 when the switch was off), still polling cancellation first, and the recognizer
-errors name their entry. None of these touch the mapped functions' cancellation
+errors name their entry. `drive` times the recognizer's first words and each final
+result against the speech heard (`Heard`) for the metrics. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only

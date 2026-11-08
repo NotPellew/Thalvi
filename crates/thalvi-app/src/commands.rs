@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 use thalvi_desktop::audio;
+use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::draft::DraftView;
 use thalvi_desktop::entries::{self, LiveKind, Realtime};
 use thalvi_desktop::history::{Entry, HistoryError, Store as History};
@@ -31,7 +32,7 @@ use crate::app::AppState;
 use crate::menu_entry;
 use crate::overlay;
 use crate::runner::{AudioStatus, Control};
-use crate::settings::settings_json;
+use crate::settings::{ensure_microphone_change_allowed, settings_json};
 use crate::startup;
 use crate::status::Status;
 use crate::switch::{SwitchState, Unavailable};
@@ -51,28 +52,6 @@ pub fn get_audio(state: State<'_, AppState>) -> AudioStatus {
     state.link.audio()
 }
 
-/// Refuses a microphone change while listening is not paused, before anything is written.
-///
-/// # Errors
-/// The plain refusal when the saved device would change while the microphone may be open.
-fn ensure_microphone_change_allowed(
-    settings: &Value,
-    current: Option<&str>,
-    paused: bool,
-) -> Result<(), String> {
-    let incoming = match settings.get("microphone") {
-        Some(Value::String(name)) => Some(name.trim().to_owned()),
-        _ => None,
-    };
-    if incoming.as_deref() != current && !paused {
-        return Err(
-            "Pause listening before changing the microphone. Turn listening off, then save again."
-                .to_owned(),
-        );
-    }
-    Ok(())
-}
-
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
     settings_json(&state.config())
@@ -84,6 +63,14 @@ pub fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    save(&app, &state, settings).map(drop)
+}
+
+/// Saves and applies what Settings sends, and what an outside program sends in its place.
+///
+/// # Errors
+/// The plain reason the settings were refused, in which case nothing changed.
+pub fn save(app: &AppHandle, state: &AppState, settings: Value) -> Result<DesktopConfig, String> {
     ensure_microphone_change_allowed(
         &settings,
         state.config().microphone.as_deref(),
@@ -94,13 +81,13 @@ pub fn save_settings(
     state.apply(&config);
     if config.look != look {
         // The settings are saved either way; the overlay keeps its old place.
-        if let Err(error) = overlay::replace(&app, &state.host()) {
+        if let Err(error) = overlay::replace(app, &state.host()) {
             eprintln!("The overlay could not be placed again for the new look: {error}");
         }
     }
     // The overlay window is hidden and idle, so it re-reads the settings when told.
     let _ = app.emit("thalvi://settings", ());
-    Ok(())
+    Ok(config)
 }
 
 #[tauri::command]
@@ -316,6 +303,14 @@ pub async fn word_list_support(entry: Value, state: State<'_, AppState>) -> Resu
 /// recognizer reached directly is given the list at each connection instead.
 #[tauri::command]
 pub async fn share_word_list(state: State<'_, AppState>) -> Result<(), String> {
+    share(&state).await
+}
+
+/// Gives the active Thalvi server the stored word list; any other recognizer needs none.
+///
+/// # Errors
+/// The plain reason the list could not be saved there.
+pub async fn share(state: &AppState) -> Result<(), String> {
     let config = state.config();
     let LiveKind::ThalviServer(server) = &config.stt.entries.active_live().kind else {
         return Ok(());
@@ -549,41 +544,5 @@ mod tests {
             serde_json::to_value(SpeechModelProgress::failed("m", "No network.".to_owned())).ok(),
             Some(json!({"name": "m", "percent": 0, "status": "failed", "message": "No network."}))
         );
-    }
-
-    #[test]
-    fn a_microphone_change_needs_a_pause_but_other_saves_do_not() {
-        let refusal =
-            "Pause listening before changing the microphone. Turn listening off, then save again.";
-        for (settings, current, paused, expected) in [
-            (json!({"microphone": "USB Mic"}), None, false, Err(refusal)),
-            (
-                json!({"microphone": null}),
-                Some("USB Mic"),
-                false,
-                Err(refusal),
-            ),
-            (json!({"microphone": "USB Mic"}), None, true, Ok(())),
-            (json!({"microphone": null}), Some("USB Mic"), true, Ok(())),
-            (
-                json!({"microphone": "USB Mic"}),
-                Some("USB Mic"),
-                false,
-                Ok(()),
-            ),
-            (json!({"microphone": null}), None, false, Ok(())),
-            (
-                json!({"microphone": " USB Mic "}),
-                Some("USB Mic"),
-                false,
-                Ok(()),
-            ),
-        ] {
-            assert_eq!(
-                ensure_microphone_change_allowed(&settings, current, paused),
-                expected.map_err(str::to_owned),
-                "{settings} current={current:?} paused={paused}"
-            );
-        }
     }
 }

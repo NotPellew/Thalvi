@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use thalvi_desktop::config::{ConfigError, DesktopConfig};
+use thalvi_desktop::entries::{self, LiveKind};
+use thalvi_desktop::transducer::{SpeechChoice, check_folder};
+use thalvi_desktop::wake::validate_wake_models;
 
 /// Where the config lives.
 #[derive(Clone, Debug)]
@@ -55,26 +58,8 @@ impl Store {
         mut settings: Value,
         current: &DesktopConfig,
     ) -> Result<DesktopConfig, String> {
-        if let Some(settings) = settings.as_object_mut() {
-            settings.insert(
-                "start_at_login".to_owned(),
-                Value::Bool(current.start_at_login),
-            );
-            settings.insert("show_in_menu".to_owned(), Value::Bool(current.show_in_menu));
-        }
-        unmask_keys(&mut settings, current);
-        let config =
-            DesktopConfig::from_json_str(&settings.to_string()).map_err(|error| match error {
-                // The window writes this JSON itself, so a line and column would mean nothing.
-                ConfigError::Invalid(error) => {
-                    let text = error.to_string();
-                    let position = format!(" at line {} column {}", error.line(), error.column());
-                    text.strip_suffix(&position).unwrap_or(&text).to_owned()
-                }
-                error @ (ConfigError::Read { .. } | ConfigError::InvalidFile { .. }) => {
-                    error.to_string()
-                }
-            })?;
+        prepare(&mut settings, current);
+        let config = load(&settings)?;
         let json = serde_json::to_string_pretty(&config)
             .map_err(|error| format!("The settings could not be written: {error}"))?;
         write_atomically(&self.path, &json).map_err(|error| {
@@ -94,6 +79,125 @@ impl Store {
         let settings = serde_json::to_value(config).map_err(|error| error.to_string())?;
         self.save(settings, config).map(drop)
     }
+}
+
+/// Fills in what the form never carries: the OS switches' preferences are `current`'s, and each
+/// speech entry without an `api_key` keeps the one saved for its id.
+fn prepare(settings: &mut Value, current: &DesktopConfig) {
+    if let Some(settings) = settings.as_object_mut() {
+        settings.insert(
+            "start_at_login".to_owned(),
+            Value::Bool(current.start_at_login),
+        );
+        settings.insert("show_in_menu".to_owned(), Value::Bool(current.show_in_menu));
+    }
+    unmask_keys(settings, current);
+}
+
+/// Validates `settings` as the loader does at startup.
+fn load(settings: &Value) -> Result<DesktopConfig, String> {
+    DesktopConfig::from_json_str(&settings.to_string()).map_err(|error| match error {
+        // The window writes this JSON itself, so a line and column would mean nothing.
+        ConfigError::Invalid(error) => {
+            let text = error.to_string();
+            let position = format!(" at line {} column {}", error.line(), error.column());
+            text.strip_suffix(&position).unwrap_or(&text).to_owned()
+        }
+        error @ (ConfigError::Read { .. } | ConfigError::InvalidFile { .. }) => error.to_string(),
+    })
+}
+
+/// Refuses a microphone change while listening is not paused, before anything is written.
+///
+/// # Errors
+/// The plain refusal when the saved device would change while the microphone may be open.
+pub fn ensure_microphone_change_allowed(
+    settings: &Value,
+    current: Option<&str>,
+    paused: bool,
+) -> Result<(), String> {
+    let incoming = match settings.get("microphone") {
+        Some(Value::String(name)) => Some(name.trim().to_owned()),
+        _ => None,
+    };
+    if incoming.as_deref() != current && !paused {
+        return Err(
+            "Pause listening before changing the microphone. Turn listening off, then save again."
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// Applies a JSON merge patch (RFC 7386) to `target`: objects merge, `null` removes a key, and
+/// anything else, an array included, replaces.
+pub fn merge_patch(target: &mut Value, patch: &Value) {
+    let Value::Object(patch) = patch else {
+        *target = patch.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = Value::Object(serde_json::Map::new());
+    }
+    if let Some(target) = target.as_object_mut() {
+        for (key, value) in patch {
+            if value.is_null() {
+                target.remove(key);
+            } else {
+                merge_patch(target.entry(key.clone()).or_insert(Value::Null), value);
+            }
+        }
+    }
+}
+
+/// Everything Settings checks before a save, without writing: the microphone rule, the loader's
+/// validation, and for what differs from `current` the checks Settings runs as an entry, a model
+/// folder or a wake model is chosen.
+///
+/// # Errors
+/// The plain message Settings would show.
+pub fn judge(
+    mut settings: Value,
+    current: &DesktopConfig,
+    paused: bool,
+) -> Result<DesktopConfig, String> {
+    ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
+    prepare(&mut settings, current);
+    let config = load(&settings)?;
+    let mut before = serde_json::to_value(current).map_err(|error| error.to_string())?;
+    let known: Vec<Value> = entries_of(&mut before)
+        .map(|entry| Value::Object(entry.clone()))
+        .collect();
+    for entry in entries_of(&mut settings) {
+        let entry = Value::Object(entry.clone());
+        if !known.contains(&entry) {
+            entries::check(&entry)?;
+        }
+    }
+    for entry in config.stt.entries.live() {
+        if let LiveKind::OnDevice(SpeechChoice::Folder(folder)) = &entry.kind
+            && !current
+                .stt
+                .entries
+                .live()
+                .iter()
+                .any(|known| known.kind == entry.kind)
+        {
+            check_folder(folder).map_err(|error| error.to_string())?;
+        }
+    }
+    if settings.get("wake") != before.get("wake") {
+        let model = |head: &str| {
+            settings
+                .pointer(&format!("/wake/{head}/model"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        validate_wake_models(&model("capture"), &model("conversation"))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(config)
 }
 
 /// The settings window's form of `config`: the file form, without the OS switches and with API
@@ -404,6 +508,42 @@ mod tests {
             "The paste pause must be a number of seconds from 0 to 5."
         );
         assert!(!exists, "nothing is created for invalid settings");
+    }
+
+    #[test]
+    fn a_microphone_change_needs_a_pause_but_other_saves_do_not() {
+        let refusal =
+            "Pause listening before changing the microphone. Turn listening off, then save again.";
+        for (settings, current, paused, expected) in [
+            (json!({"microphone": "USB Mic"}), None, false, Err(refusal)),
+            (
+                json!({"microphone": null}),
+                Some("USB Mic"),
+                false,
+                Err(refusal),
+            ),
+            (json!({"microphone": "USB Mic"}), None, true, Ok(())),
+            (json!({"microphone": null}), Some("USB Mic"), true, Ok(())),
+            (
+                json!({"microphone": "USB Mic"}),
+                Some("USB Mic"),
+                false,
+                Ok(()),
+            ),
+            (json!({"microphone": null}), None, false, Ok(())),
+            (
+                json!({"microphone": " USB Mic "}),
+                Some("USB Mic"),
+                false,
+                Ok(()),
+            ),
+        ] {
+            assert_eq!(
+                ensure_microphone_change_allowed(&settings, current, paused),
+                expected.map_err(str::to_owned),
+                "{settings} current={current:?} paused={paused}"
+            );
+        }
     }
 
     fn store_defaults() -> DesktopConfig {
