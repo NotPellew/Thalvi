@@ -895,7 +895,7 @@ async fn recognizer_disconnected(
     if let Some(handle) = recognizer {
         handle.ready = false;
     }
-    tracing::warn!(%message, fatal, "recognizer disconnected");
+    tracing::warn!(fatal, "recognizer disconnected");
     let message = if fatal {
         format!(
             "Speech recognition stopped and won't retry: {message}. Check the speech settings, then tap Start again."
