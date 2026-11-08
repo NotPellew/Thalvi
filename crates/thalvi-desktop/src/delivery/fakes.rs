@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::host::{App, Host, HostError, TypedText, WebUrl};
+use crate::host::{App, Delivered, Host, HostError, TypedText, WebUrl};
 
 /// The window the fake host binds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,12 +27,20 @@ enum Behavior {
 pub struct FakeHost {
     calls: Mutex<Vec<String>>,
     behavior: BTreeMap<&'static str, Behavior>,
+    clipboard_only: bool,
 }
 
 impl FakeHost {
     #[must_use]
     pub fn failing(mut self, method: &'static str, error: HostError) -> Self {
         self.behavior.insert(method, Behavior::Fail(error));
+        self
+    }
+
+    /// Delivers to the clipboard only, as a desktop that cannot type does.
+    #[must_use]
+    pub fn clipboard_only(mut self) -> Self {
+        self.clipboard_only = true;
         self
     }
 
@@ -66,18 +74,36 @@ impl FakeHost {
 impl Host for FakeHost {
     type Target = FakeWindow;
 
-    const OVERLAY_TAKES_CLICKS: bool = true;
+    fn overlay_takes_clicks(&self) -> bool {
+        true
+    }
+
+    fn copies_only(&self) -> bool {
+        self.clipboard_only
+    }
 
     fn capture_target(&self) -> Result<FakeWindow, HostError> {
         self.record("capture_target", "capture_target".to_owned())?;
         Ok(FakeWindow("the editor"))
     }
 
-    fn deliver(&self, target: &FakeWindow, text: &TypedText, enter: bool) -> Result<(), HostError> {
+    fn deliver(
+        &self,
+        target: &FakeWindow,
+        text: &TypedText,
+        enter: bool,
+    ) -> Result<Delivered, HostError> {
         self.record(
             "deliver",
             format!("deliver:{}:{:?}:enter={enter}", target.0, text.as_str()),
         )
+        .map(|()| {
+            if self.clipboard_only {
+                Delivered::OnClipboard
+            } else {
+                Delivered::InWindow
+            }
+        })
     }
 
     fn copy(&self, text: &str) -> Result<(), HostError> {

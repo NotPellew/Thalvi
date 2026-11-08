@@ -7,9 +7,9 @@ reachable, so an agent can use it with no developer involved. The web client has
 its own recipes (`SKILL.md`); this file is the desktop counterpart.
 
 It covers what shows on screen and in stdout: the overlay, the Settings window at
-any size and look, model downloads, pause and resume. It has no microphone (audio
-is a null device), no real tray (use the CLI below) and no Windows. Report what a
-run covered with those limits.
+any size and look, model downloads, pause and resume. It has no real tray (use
+the CLI below) and no Windows, and no microphone unless it is a GNOME run (audio
+is a null device). Report what a run covered with those limits.
 
 `H` is the helper, run from the repository root:
 
@@ -19,7 +19,9 @@ H=.agents/skills/verify-thalvi/scripts/thalvi-desktop-rig
 
 Needs `bwrap`, `kwin_wayland`, `Hyprland`, `hyprctl`, `grim`, `wtype`, python3
 with Pillow (for image checks), and a non-NVIDIA render node (`/dev/dri`). Run
-`$H help` for the commands.
+`$H help` for the commands. A GNOME run (below) instead needs `gnome-shell`,
+`pipewire`, `wireplumber`, `ffmpeg`, `xdpyinfo`, python3 with `gi` and GTK 3, and
+`wl-clipboard` for tests.
 
 ## Build the commit
 
@@ -101,13 +103,43 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
 - `Hyprland` only renders a window that is mapped; open Settings before taking
   screenshots of it.
 
+## GNOME
+
+`$H up --gnome` starts a headless `gnome-shell` instead of kwin and Hyprland, in the
+same sandbox. Apps see `XDG_CURRENT_DESKTOP=GNOME`, `XDG_SESSION_TYPE=wayland`,
+Wayland `rig-gnome` and Xwayland (`DISPLAY` names the socket file, with the run's
+`XAUTHORITY`). `proof`, `app-start`, `app-stop`, `ctl`, `sh`, `shot` and `down`
+work as above; `hypr` and `burst` do not exist.
+
+| Need | Command |
+| --- | --- |
+| Which window has focus | `$H gnome $R focus` (titles), `$H gnome $R windows` (focus, class, size, title) |
+| Keys | `$H gnome $R key Return`, `$H gnome $R type 'text'` (to the focused window) |
+| Clipboard text | `$H gnome $R clip` reads through X11 without taking focus |
+| Say something | `$H say $R file.wav` plays into the default microphone, in real time, once the app captures (16 kHz mono; later files queue) |
+| A window that logs focus | `/tmp/thalvi-gnome-rig.py victim LOG &` inside `$H sh $R bash -c '...'`; the sandbox ends with its command |
+
+- `wl-copy` and `wl-paste` each take keyboard focus for about a millisecond, every
+  time (10 of 10 in a victim window). An X11 selection does not, and mutter
+  bridges it both ways: judge whether the app steals focus from what it does, not
+  from reading back with `wl-paste`.
+- A Wayland window cannot refuse focus or place itself (GTK 3 `accept_focus`,
+  keep-above and type hints did not help). An X11 window with the same hints takes
+  no focus, and `move()` puts it at the top centre (below the 32 px panel).
+- `shot` and `windows` ask the shell over D-Bus, which answers only the owner of
+  `org.freedesktop.impl.portal.desktop.gnome`; the helper takes that name on the
+  run's private bus. The orange dot in the panel comes with the virtual keyboard
+  session.
+- Playback goes to a speaker that discards, in real time.
+
 ## Isolation, and its limits
 
 `$H proof $R` records what the sandbox cannot reach. A passing run shows: a PID
 namespace that differs from the host's, no `/dev/snd`, only one render node, a
 private `/run/user/<uid>` holding only the run's sockets (no PipeWire, Pulse or
 real Wayland or Hyprland socket), `/home/<you>` absent with a private `HOME`,
-no `DISPLAY`, and an ALSA null device. The network namespace is shared on
+no `DISPLAY`, and an ALSA null device. A GNOME run has its own system bus,
+Xwayland and a private PipeWire instead (`rig-pipewire`). The network namespace is shared on
 purpose, so downloads are real and local proxies work; it also means abstract
 unix sockets are shared with the host, which is why X11 is off and the app is
 forced onto Wayland.
@@ -141,5 +173,14 @@ app against the real session.
 - `bwrap --die-with-parent` follows the process that launched it, so each
   sandbox is started under a detached holder shell; killing the holder takes the
   sandbox down.
+- `gnome-shell` cannot start without logind, and the host's is the developer's
+  session, so the host's system bus is hidden and `thalvi-gnome-rig.py logind`
+  serves one session on a private one. Without a keyboard in the seat clients never
+  get focus, so a held RemoteDesktop session makes one.
+- ALSA's `file` and `null` plugins deliver audio at CPU speed and zero-fill a short
+  read, so a FIFO does not pace them. The microphone is a PipeWire source on a pipe
+  that a feeder writes in real time, and the ALSA default device is PipeWire's.
+- `DISPLAY=:0` tries the host's abstract X socket first; the run's cookie makes the
+  host refuse it (`proof` shows it), and the socket-file form avoids the attempt.
 - The private D-Bus runs without AppArmor mediation, which fails inside the
   sandbox and would stop the relaunch path (`ctl`) from working.

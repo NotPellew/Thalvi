@@ -18,10 +18,10 @@ areas your change touches. Editing rules are in
   the clipboard only: it exposes neither the focused window nor focus by ID.
   Why: the desktops we can qualify. Rejected: KDE, X11 and macOS until needed,
   and claiming untested platform parity.
-- **Rust desktop app with a Tauri UI.** One process runs engine, tray, a top
-  overlay and a settings window; the overlay never takes focus (Hyprland window
-  rules via the host, a non-activating window on Windows). Why: one TypeScript
-  UI, no IPC. Rejected: layer-shell webview (blank), GTK-only overlay, egui.
+- **Rust desktop app with a Tauri UI.** One process runs engine, tray, a top overlay and a settings window; the overlay never takes
+  focus (Hyprland window rules via the host, a non-activating window on Windows, an XWayland window on GNOME, where the app runs on GTK's X11 backend).
+  Why: one TypeScript UI, no IPC; on GNOME's Mutter a Wayland window and `wl-copy` each take focus, an X11 window and clipboard do not (measured).
+  Rejected: layer-shell webview (blank), GTK-only overlay, egui, native Wayland GTK on GNOME.
 - **Three looks for the desktop UI.** `look` picks gunmetal (default), holo or neon for the overlay
   and settings window; the overlay hangs from the top of the usable screen area, one 460 × 200 size
   for all looks. Why: the developer chose gunmetal, the others stay as options; resizing re-centres it

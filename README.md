@@ -21,8 +21,9 @@ The same voice helps whenever typing isn't an option:
 
 Thalvi has two parts:
 
-- **The desktop app** (Hyprland and Windows) listens for "Hey Thalvi" and
-  types what you dictate into the window you are using.
+- **The desktop app** (Hyprland, Windows, and GNOME Wayland with dictation
+  copied to the clipboard) listens for "Hey Thalvi" and types what you dictate
+  into the window you are using.
 - **The server and its web client** hold the spoken conversation. Open it in a
   browser, on your phone for example, and talk over it to interrupt.
 

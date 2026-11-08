@@ -96,7 +96,7 @@ impl Visibility {
 /// Why the desktop could not place the window or why it could not be created.
 pub fn create(app: &AppHandle, host: &Desktop) -> Result<WebviewWindow, String> {
     let frame = Frame::on_screen(app, host)?;
-    WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("overlay.html".into()))
+    let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("overlay.html".into()))
         .title(OVERLAY_TITLE)
         .inner_size(WIDTH, HEIGHT)
         .position(frame.left, frame.top)
@@ -110,7 +110,11 @@ pub fn create(app: &AppHandle, host: &Desktop) -> Result<WebviewWindow, String> 
         .focused(false)
         .visible(false)
         .build()
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    // Before the window is first mapped, while it is hidden: the desktop decides focus at map.
+    #[cfg(target_os = "linux")]
+    host.settle_overlay_window(&window.gtk_window().map_err(|error| error.to_string())?);
+    Ok(window)
 }
 
 /// Places the overlay window again, below whatever the desktop reserves at the top now.
@@ -323,6 +327,7 @@ mod tests {
                     text: String::new(),
                     waiting_for_quiet: false,
                     pause_ms: 700,
+                    copies: false,
                 },
                 Visibility::Show,
             ),

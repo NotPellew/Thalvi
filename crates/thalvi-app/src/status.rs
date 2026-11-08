@@ -38,6 +38,8 @@ pub enum Status {
         waiting_for_quiet: bool,
         /// The pause configured for `route`.
         pause_ms: u64,
+        /// The action is a copy to the clipboard, whatever the route.
+        copies: bool,
     },
     /// A second transcription or the delivery is running.
     Working {
@@ -184,6 +186,8 @@ pub struct View {
     pub engine: EngineState,
     /// The window bound at the latest wake.
     pub target: Option<String>,
+    /// The desktop only copies dictation to the clipboard, so ending an action is a copy.
+    pub copies: bool,
     pub pauses: EndingPauses,
     /// What the speech model needs, while it loads.
     pub loading: Option<SpeechLoad>,
@@ -246,6 +250,7 @@ impl View {
                     waiting_for_quiet: *waiting_for_quiet,
                     pause_ms: u64::try_from(self.pauses.get(*route).as_millis())
                         .unwrap_or(u64::MAX),
+                    copies: self.copies,
                 },
                 EngineState::TranscribingSecondary { route } => Status::Working {
                     target,
@@ -269,6 +274,7 @@ mod tests {
             mode,
             engine,
             target: Some("kitty".to_owned()),
+            copies: false,
             pauses: EndingPauses::default(),
             loading: None,
         }
@@ -312,6 +318,7 @@ mod tests {
                     text: "hello".to_owned(),
                     waiting_for_quiet: true,
                     pause_ms: 2500,
+                    copies: false,
                 },
             ),
             (
@@ -322,6 +329,7 @@ mod tests {
                     text: "hello".to_owned(),
                     waiting_for_quiet: false,
                     pause_ms: 700,
+                    copies: false,
                 },
             ),
             (
@@ -504,9 +512,10 @@ mod tests {
                     text: "hi".to_owned(),
                     waiting_for_quiet: false,
                     pause_ms: 2500,
+                    copies: true,
                 },
                 json!({"state": "pending", "target": "kitty", "route": "submit", "text": "hi",
-                       "waitingForQuiet": false, "pauseMs": 2500}),
+                       "waitingForQuiet": false, "pauseMs": 2500, "copies": true}),
             ),
             (
                 Status::Working {

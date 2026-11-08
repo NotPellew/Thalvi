@@ -5,7 +5,9 @@ mod win32;
 use std::fmt;
 use std::path::Path;
 
-use super::{App, HoldSource, Host, HostError, Modifier, StateServer, TypedText, WebUrl};
+use super::{
+    App, Delivered, HoldSource, Host, HostError, Modifier, StateServer, TypedText, WebUrl,
+};
 use crate::hold::HoldKey;
 pub use win32::Real;
 
@@ -184,7 +186,13 @@ impl<A: Win32> Windows<A> {
 impl<A: Win32> Host for Windows<A> {
     type Target = Target;
 
-    const OVERLAY_TAKES_CLICKS: bool = true;
+    fn overlay_takes_clicks(&self) -> bool {
+        true
+    }
+
+    fn copies_only(&self) -> bool {
+        false
+    }
 
     fn capture_target(&self) -> Result<Target, HostError> {
         let window = self.api.foreground().ok_or_else(|| {
@@ -199,7 +207,12 @@ impl<A: Win32> Host for Windows<A> {
         })
     }
 
-    fn deliver(&self, target: &Target, text: &TypedText, enter: bool) -> Result<(), HostError> {
+    fn deliver(
+        &self,
+        target: &Target,
+        text: &TypedText,
+        enter: bool,
+    ) -> Result<Delivered, HostError> {
         let process = self.live_process(target)?;
         self.check_input_reaches(&process)?;
         if !self.in_front(target.window) {
@@ -209,6 +222,7 @@ impl<A: Win32> Host for Windows<A> {
             &typing_events(text.as_str(), enter),
             "Typing stopped partway. Some of the text may have been typed.",
         )
+        .map(|()| Delivered::InWindow)
     }
 
     fn copy(&self, text: &str) -> Result<(), HostError> {

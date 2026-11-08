@@ -51,6 +51,7 @@ export function tauriBackend(): Backend {
         listener(event.payload);
       });
     },
+    getHoldKeyUnavailable: () => invoke<string | null>("get_hold_key_unavailable"),
     getStartAtLogin: () => invoke<SwitchState>("get_start_at_login"),
     setStartAtLogin: (on) => invoke<undefined>("set_start_at_login", { on }),
     getMenuEntry: () => invoke<SwitchState>("get_menu_entry"),
