@@ -12,7 +12,7 @@
       ]
     },
     "crates/thalvi-desktop/src/engine.rs": {
-      "sha256": "b757c1db18cc929360427a74d8335a4b816dc5894bbdfa411164940378c1000d",
+      "sha256": "52e6567f74e9f1d12ad6a117afd5d59a05288123ef051a37286431f523fac2c0",
       "functions": [
         "EngineHandle::cancel",
         "Engine::capture",
@@ -23,14 +23,14 @@
       ]
     },
     "crates/thalvi-desktop/src/recognizer.rs": {
-      "sha256": "13a01bb5d5e3bbe2554ff3efbbf00be526e4b6ccd7d92266b06cbedae289a75e",
+      "sha256": "1a8eeae8b4164b7f132a653b01e85f78b7b976294295162ade436595f4104c06",
       "functions": [
         "RecognizerSession",
         "ServerSession::close"
       ]
     },
     "crates/thalvi-desktop/src/delivery.rs": {
-      "sha256": "4df15fbea1c6ca048943cf8bdcfd243d3dcf9ed002ebef2473520eb5fb441ac7",
+      "sha256": "34a96c1ef7e94092721fe1447ba6201618b9b9751c94e86a7fddba77b7dd0883",
       "functions": [
         "Delivery::finish",
         "Delivery::type_in",
