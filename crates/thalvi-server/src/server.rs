@@ -5,9 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::body::Bytes;
+use axum::extract::Request;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures_util::StreamExt;
@@ -167,6 +169,32 @@ fn with_tts<T: Tts + Clone + 'static>(
         .merge(api::routes().with_state(store))
         .merge(learning_api::routes().with_state(learnings))
         .fallback_service(ServeDir::new(&config.web_dir))
+        .layer(middleware::from_fn(refuse_other_sites))
+}
+
+/// Refuses requests a browser sends from a page on another site. Browsers apply no
+/// cross-origin check to web sockets; native clients send no `Origin`.
+async fn refuse_other_sites(request: Request, next: Next) -> Response {
+    let headers = request.headers();
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        let origin_host = origin
+            .to_str()
+            .ok()
+            .and_then(|origin| origin.split_once("://"))
+            .map(|(_, host)| host);
+        let host = headers
+            .get(header::HOST)
+            .and_then(|host| host.to_str().ok());
+        if !matches!((origin_host, host), (Some(origin), Some(host)) if origin.eq_ignore_ascii_case(host))
+        {
+            tracing::warn!(?origin, ?host, "refused a request from another site");
+            return plain_error(
+                StatusCode::FORBIDDEN,
+                "Only Thalvi's own page can use this server.",
+            );
+        }
+    }
+    next.run(request).await
 }
 
 async fn transcription_upgrade<T: Tts + Clone + 'static>(
@@ -411,6 +439,7 @@ mod tests {
     use axum::http::StatusCode;
     use axum::routing::post;
     use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 
     use crate::config::Config;
 
@@ -539,6 +568,45 @@ mod tests {
             ["sohee"],
             "only the accepted preview reaches speech"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn only_native_clients_and_pages_from_this_server_get_through() {
+        let dir = scratch("origin");
+        let app =
+            router(&config("http://127.0.0.1:1/v1", &dir, &[])).unwrap_or_else(|e| panic!("{e}"));
+        let base = serve(app).await;
+        let client = reqwest::Client::new();
+        let refused = StatusCode::FORBIDDEN;
+        for (path, upgraded) in [
+            ("/session", StatusCode::SWITCHING_PROTOCOLS),
+            ("/transcription", StatusCode::SWITCHING_PROTOCOLS),
+            ("/voices", StatusCode::OK),
+        ] {
+            for (origin, expected) in [
+                (None, upgraded),
+                (Some(base.as_str()), upgraded),
+                (Some("https://elsewhere.example"), refused),
+                (Some("null"), refused),
+            ] {
+                let mut request = client
+                    .get(format!("{base}{path}"))
+                    .header("connection", "upgrade")
+                    .header("upgrade", "websocket")
+                    .header("sec-websocket-version", "13")
+                    .header("sec-websocket-key", generate_key());
+                if let Some(origin) = origin {
+                    request = request.header("origin", origin);
+                }
+                let status = request
+                    .send()
+                    .await
+                    .unwrap_or_else(|e| panic!("{e}"))
+                    .status();
+                assert_eq!(status, expected, "path={path} origin={origin:?}");
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
