@@ -9,7 +9,9 @@ import { buildPages, type Page, type PageContext, type SwitchRead } from "./sett
 
 export const ELSEWHERE_TEXT = "Changed outside this window — Revert loads the saved settings";
 
-export const SAVED_TEXT = "Saved — applies after the current capture; the saved microphone is not active until it opens";
+export const SAVED_TEXT = "Saved — applies after the current capture";
+
+export const SAVED_MICROPHONE_TEXT = `${SAVED_TEXT}; the saved microphone is not active until it opens`;
 
 export function mountSettings(root: HTMLElement, backend: Backend): void {
   const search = el("input", { type: "search", "aria-label": "Search settings", placeholder: "Search settings", class: "search" });
@@ -38,6 +40,8 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   let saveFailure = "";
   let saving = false;
   let saved = false;
+  // The microphone the last save chose (null is the system default); unset when that save left it alone.
+  let savedMicrophone: { name: string | null } | null = null;
   let changedElsewhere = false;
   let audio: AudioStatus = { selected: null, active: null, paused: false };
   const live: PageContext["live"] = {
@@ -86,7 +90,17 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     const dirty = draft !== null && JSON.stringify(draft) !== baseline;
     message.textContent = saving ? "Saving…" : changedElsewhere ? ELSEWHERE_TEXT : dirty ? "Unsaved changes"
       : copyNote !== "" ? copyNote
-      : saved && failure.textContent === "" ? SAVED_TEXT : "";
+      : saved && failure.textContent === "" ? savedText() : "";
+  }
+
+  function savedText(): string {
+    const open = savedMicrophone !== null && audio.active !== null && audio.selected === savedMicrophone.name;
+    return savedMicrophone === null || open ? SAVED_TEXT : SAVED_MICROPHONE_TEXT;
+  }
+
+  function markSaved(before: Settings | undefined, after: Settings): void {
+    saved = true;
+    savedMicrophone = before === undefined || before.microphone === after.microphone ? null : { name: after.microphone };
   }
 
   let lastState: Status["state"] | null = null;
@@ -106,6 +120,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     live.audio(next);
     live.listening(!next.paused);
     if (next.paused || next.active === null) live.level(0);
+    feedback();
   }
 
   async function load(): Promise<void> {
@@ -161,7 +176,8 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       feedback();
       throw new Error(saveFailure);
     }
-    const next = JSON.parse(baseline) as Settings;
+    const before = JSON.parse(baseline) as Settings;
+    const next = structuredClone(before);
     change(next);
     saveFailure = "";
     saving = true;
@@ -170,7 +186,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       await backend.saveSettings(next);
       baseline = JSON.stringify(next);
       if (draft !== null) change(draft);
-      saved = true;
+      markSaved(before, next);
       changedElsewhere = false;
     } catch (error) {
       saveFailure = errorText(error);
@@ -231,11 +247,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     revert.disabled = true;
     const pending = checks.map((check) => check()).filter((check) => check !== null);
     const sent = pending.length === 0 ? backend.saveSettings(sending) : Promise.all(pending).then(() => backend.saveSettings(sending));
-    const listBefore = baseline === "" ? undefined : (JSON.parse(baseline) as Settings).stt.phrases;
+    const before = baseline === "" ? undefined : (JSON.parse(baseline) as Settings);
+    const listBefore = before?.stt.phrases;
     sent
       .then(() => {
         baseline = JSON.stringify(sending);
-        saved = true;
+        markSaved(before, sending);
         changedElsewhere = false;
         live.saved();
         if (JSON.stringify(listBefore ?? []) === JSON.stringify(sending.stt.phrases ?? [])) return undefined;

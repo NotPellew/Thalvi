@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry } from "./contract.ts";
-import { ELSEWHERE_TEXT, mountSettings, SAVED_TEXT } from "./settings.ts";
+import { ELSEWHERE_TEXT, mountSettings, SAVED_MICROPHONE_TEXT, SAVED_TEXT } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO } from "./testing.ts";
 
 let root: HTMLElement;
@@ -197,6 +197,28 @@ describe("save", () => {
     expect(sent(stub)).toEqual(SETTINGS);
     await settle();
     expect(root.querySelector(".msg")?.textContent).toBe(SAVED_TEXT);
+  });
+
+  it.each<[string, boolean, boolean, boolean, string]>([
+    ["only a non-microphone setting changed", false, true, false, "Saved — applies after the current capture"],
+    ["the microphone changed and has not opened", true, false, false, "Saved — applies after the current capture; the saved microphone is not active until it opens"],
+    ["the microphone changed and opens after the save", true, false, true, "Saved — applies after the current capture"],
+    ["the microphone and another setting changed", true, true, false, "Saved — applies after the current capture; the saved microphone is not active until it opens"],
+  ])("says only what applies to the change saved: %s", async (_case, microphone, other, opens, footer) => {
+    const stub = await open();
+    if (other) {
+      goTo("capture");
+      type(control("Quiet before paste", "input"), "1.5");
+    }
+    if (microphone) {
+      goTo("microphone");
+      stub.emit({ state: "paused" });
+      choose(control("Saved device", "select"), "USB Microphone");
+    }
+    button("Save").click();
+    await settle();
+    if (opens) stub.audio({ selected: "USB Microphone", active: "USB Microphone", paused: false });
+    expect(root.querySelector(".msg")?.textContent).toBe(footer);
   });
 
   it("sends exactly the edits", async () => {
@@ -1563,7 +1585,7 @@ describe("live controls", () => {
     expect(control("Saved device", "select").value).toBe("USB Microphone");
     expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe("None — no microphone is open");
     expect(control("Listening", "input").checked).toBe(false);
-    expect(root.querySelector(".msg")?.textContent).toBe(SAVED_TEXT);
+    expect(root.querySelector(".msg")?.textContent).toBe(SAVED_MICROPHONE_TEXT);
   });
 
   it("shows a failed apply plainly and clears the saved message", async () => {
