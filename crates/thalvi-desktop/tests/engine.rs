@@ -4431,10 +4431,8 @@ async fn a_writing_call_that_gives_no_text_pastes_nothing_and_keeps_the_words() 
 
     LocalSet::new()
         .run_until(async {
-            let refused = {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                format!("http://{}/v1", listener.local_addr().unwrap())
-            };
+            // Port 0 fails at once everywhere; Windows retries a refused port for seconds, past the paused clock's deadline.
+            let refused = "http://127.0.0.1:0/v1".to_owned();
             // (name, endpoint, the reason, whether a request reached the endpoint)
             let cases = [
                 ("no endpoint is set up", None, NotSetUp, false),
