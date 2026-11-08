@@ -4246,14 +4246,15 @@ async fn a_heard_ending_is_never_told_when_the_transcript_carries_it_or_the_user
     }
     let cases: [(&str, Vec<Act>, End, &[u64]); 6] = [
         (
+            // 2.2 s after the phrase ended, long after a 0.8 s timer would have called it missed.
             "a late final carries the ending: late agreement",
             vec![
                 Audio(1000, Quiet),
-                Audio(1900, Quiet),
-                Final(1900, "Write the report paste that"),
+                Audio(3000, Quiet),
+                Final(3000, "Write the report paste that"),
             ],
-            End::Delivers(CaptureRoute::Paste, "Write the report", 1900 + 700),
-            &[1900],
+            End::Delivers(CaptureRoute::Paste, "Write the report", 3000 + 700),
+            &[3000],
         ),
         (
             "the final came before the spotter: both signals deliver once",

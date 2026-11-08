@@ -15,9 +15,9 @@ use crate::frame::{FRAME_SAMPLES, SAMPLE_RATE};
 use crate::spotter::SpotterHit;
 
 /// How long after the end of a heard phrase the covering final may take before the transcript is
-/// taken to have none. Measured on the local recognizer, whose final comes up to 2 s after the
-/// words end; a dispute is otherwise judged by the final itself, never by the clock.
-pub const NO_FINAL_AFTER: Duration = Duration::from_millis(2_800);
+/// taken to have none: twice the slowest of 66 on the local recognizer (1.48 s, median 0.8 s). A
+/// dispute is otherwise judged by the final itself, never by the clock.
+pub const NO_FINAL_AFTER: Duration = Duration::from_secs(3);
 
 const SAMPLES_PER_SECOND: u64 = SAMPLE_RATE as u64;
 
