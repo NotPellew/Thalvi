@@ -33,7 +33,8 @@ behaviour, so the model is unchanged and only the hashes moved. The ending spott
 host moved them again: `conclude` first settles the spotter's bookkeeping (synchronous, no await,
 before the cue and the recognizer release), `drive` gained a select branch that only plays a cue and
 shows a notice, `Runner::build` joins the spotter load with the wake load, and `Delivery::finish`
-maps a host's `Delivered` result to its notice. No await boundary, control drain or admission of
+maps a host's `Delivered` result to its notice. The spotter's notices are now part of the
+capturing state the overlay shows, set by synchronous code. No await boundary, control drain or admission of
 an accepted result changed, so the model is unchanged and only the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
