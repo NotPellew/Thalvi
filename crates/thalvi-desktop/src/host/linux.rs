@@ -192,6 +192,13 @@ impl Desktop {
         channel::ask_at(dir, request, timeout)
     }
 
+    /// The keys a config without hold keys gets on this desktop: the hold key, then the write key.
+    /// GNOME offers no hold key, so these are Hyprland's.
+    #[must_use]
+    pub fn default_hold_keys() -> (HoldKey, HoldKey) {
+        Hyprland::default_hold_keys()
+    }
+
     /// Reports the hold keys as the desktop allows: through binds on Hyprland, not at all on GNOME.
     ///
     /// # Errors

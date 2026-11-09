@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn the_hold_key_is_no_failure_on_gnome_but_says_why_it_does_nothing() {
-        let source = Gnome::watch_hold_keys(&[(HoldKind::Dictate, HoldKey::default())], |_, _| {});
+        let source = Gnome::watch_hold_keys(&[(HoldKind::Dictate, HoldKey::alt_z())], |_, _| {});
         assert!(matches!(source, Ok(HoldSource::Unavailable(reason)) if reason.contains("let go")));
     }
 }

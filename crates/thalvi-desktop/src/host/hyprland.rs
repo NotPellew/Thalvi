@@ -37,6 +37,13 @@ impl Hyprland {
         Self { run: SystemRunner }
     }
 
+    /// The keys a config without hold keys gets: the hold key, then the write key. Hyprland takes
+    /// no modifier on them.
+    #[must_use]
+    pub fn default_hold_keys() -> (HoldKey, HoldKey) {
+        (HoldKey::f9(), HoldKey::f10())
+    }
+
     /// The compositor reports the key, through the binds in `hyprland.conf` that run the
     /// `hold-start` and `hold-end` commands, so there is nothing to watch.
     ///
@@ -509,8 +516,7 @@ impl<R: CommandRunner> Host for Hyprland<R> {
 mod tests {
     #[test]
     fn the_hold_key_is_no_failure_on_hyprland_where_binds_report_it() {
-        let source =
-            Hyprland::watch_hold_keys(&[(HoldKind::Dictate, HoldKey::default())], |_, _| {});
+        let source = Hyprland::watch_hold_keys(&[(HoldKind::Dictate, HoldKey::alt_z())], |_, _| {});
         assert!(
             matches!(source, Ok(HoldSource::Binds(reason)) if reason.contains("hyprland.conf"))
         );

@@ -98,6 +98,12 @@ impl Windows {
         pipe::serve(Arc::new(handler))
     }
 
+    /// The keys a config without hold keys gets on this desktop: the hold key, then the write key.
+    #[must_use]
+    pub fn default_hold_keys() -> (HoldKey, HoldKey) {
+        (HoldKey::alt_z(), HoldKey::alt_x())
+    }
+
     /// Reports each press and release of `keys` to `on_change` until the guard is dropped, and
     /// keeps them from the focused app. `on_change` runs inside the keyboard hook: it must not block.
     ///

@@ -229,6 +229,9 @@ pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
     if let Some(settings) = settings.as_object_mut() {
         settings.remove("start_at_login");
         settings.remove("show_in_menu");
+        // The file keeps a key only when it is not the desktop's default; the form shows the key in effect.
+        settings.insert("hold_key".to_owned(), config.hold_key.to_string().into());
+        settings.insert("write_key".to_owned(), config.write_key.to_string().into());
     }
     for entry in entries_of(&mut settings) {
         if let Some(key) = entry.remove("api_key") {
@@ -334,6 +337,7 @@ mod tests {
     use serde_json::json;
     use thalvi_desktop::config::Look;
     use thalvi_desktop::entries::LiveKind;
+    use thalvi_desktop::host::Desktop;
     use thalvi_desktop::transducer::SpeechChoice;
 
     use super::*;
@@ -421,6 +425,31 @@ mod tests {
             (true, false, true)
         );
         assert_eq!(leftovers, ["desktop.json"]);
+    }
+
+    #[test]
+    fn the_form_shows_the_hold_keys_in_effect_and_the_file_keeps_only_a_changed_one() {
+        let (store, dir) = store("hold-keys");
+        let (hold, write) = Desktop::default_hold_keys();
+        let mut settings = settings_json(&store_defaults()).unwrap();
+        assert_eq!(settings["hold_key"], hold.to_string());
+        assert_eq!(settings["write_key"], write.to_string());
+
+        let file = || -> Value {
+            serde_json::from_str(&std::fs::read_to_string(&store.path).unwrap()).unwrap()
+        };
+        store.save(settings.clone(), &store_defaults()).unwrap();
+        assert_eq!(
+            (file().get("hold_key"), file().get("write_key")),
+            (None, None)
+        );
+
+        settings["hold_key"] = json!("Ctrl+F8");
+        let saved = store.save(settings, &store_defaults()).unwrap();
+        let (kept, absent) = (file()["hold_key"].clone(), file().get("write_key").cloned());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(saved.hold_key.to_string(), "Ctrl+F8");
+        assert_eq!((kept, absent), (json!("Ctrl+F8"), None));
     }
 
     #[test]
