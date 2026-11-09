@@ -22,7 +22,7 @@ The same voice helps whenever typing isn't an option:
 Thalvi has two parts:
 
 - **The desktop app** (Hyprland, Windows, and GNOME Wayland with dictation
-  copied to the clipboard) listens for "Hey Thalvi" and types what you dictate
+  copied to the clipboard) listens for "Hey Thalvi" and pastes what you dictate
   into the window you are using.
 - **The server and its web client** hold the spoken conversation. Open it in a
   browser, on your phone for example, and talk over it to interrupt.
@@ -233,14 +233,19 @@ Say "Hey Thalvi" in any window, dictate, then end with a phrase:
 
 | Say | Thalvi |
 | --- | --- |
-| "paste that" or "finish dictation" | types the text into the window you were in |
-| "write that out" | has the writing model turn the words into proper text, then types that ([Write it out](#write-a-dictation-out)) |
-| "submit" | types it and presses Enter |
+| "paste that" or "finish dictation" | pastes the text into the window you were in |
+| "write that out" | has the writing model turn the words into proper text, then pastes that ([Write it out](#write-a-dictation-out)) |
+| "submit" | pastes it and presses Enter |
 | "do that" | runs a configured action, such as opening a site or focusing an app; the action also runs without "do that" when the whole capture is the command, for example "open google.com" |
 | "scratch that" | drops the last piece |
 | "never mind" | drops the whole capture |
 
-Delivered text is also put on the clipboard. An overlay at the top of the
+Thalvi puts the text on the clipboard and presses the paste shortcut in the window,
+so line breaks arrive as line breaks and nothing is sent by them; the text stays on
+the clipboard. The shortcut is Ctrl+V, and Ctrl+Shift+V in a known terminal on
+Hyprland (kitty, foot, Alacritty, WezTerm, Ghostty, GNOME Console and Terminal,
+Konsole, Ptyxis, xterm). In another terminal Ctrl+V pastes nothing; paste yourself.
+An overlay at the top of the
 screen shows what Thalvi is doing and never takes focus. The tray pauses,
 cancels, copies the last error and opens Settings.
 
@@ -431,7 +436,7 @@ bound to `thalvi-desktop cancel` (the Hyprland examples bind SUPER+Escape).
   hold ends when the key and Alt are both up. Set another as `hold_key` in the
   config, such as `Ctrl+Shift+F9`, named by its place on the keyboard (`Alt+KeyZ`,
   `Digit1`, `Space`, `F9`). While an administrator window is focused, Windows
-  shows Thalvi no keys and lets it type nothing, so the key reaches that window
+  shows Thalvi no keys and lets it send no keys, so the key reaches that window
   as usual and no dictation starts.
 
 ### Write a dictation out
@@ -441,7 +446,7 @@ you hold the hold key, and Thalvi sends the words you said to a model that turns
 them into proper text in the language you spoke. The overlay says "Writing…" and
 shows the text as it streams in; when the stream ends the text is pasted like any
 other dictation, and **Ctrl+Z** undoes it. Cancel as usual before then and nothing
-is typed. Without "write that out" or the write key, the words are pasted as
+is pasted. Without "write that out" or the write key, the words are pasted as
 recognized. There is no write-and-send: press Enter yourself after reading it.
 
 The model is any OpenAI-compatible chat completions endpoint (Glimmer, Baseten, a
@@ -449,10 +454,10 @@ llama.cpp server, Meta), set under **Settings → Speech → Writing** as `writi
 in the config: `url`, `model` and `api_key`. The model gets the **Writing prompt**
 (`prompt`) as its instructions and the recognized words as the message: no window,
 app or other context. The default prompt follows what you ask for (an email, a tone,
-a wording), invents nothing and answers in one paragraph, since a typed line break
-would press Enter; edit it in Settings or restore the default there.
+a wording), invents nothing and keeps line breaks to where the text needs them, such as an
+email; edit it in Settings or restore the default there.
 How closely a model follows it depends on the model. Saving never calls the model.
-If it is not set up, fails, answers with nothing, or takes longer than 15 seconds, nothing is typed,
+If it is not set up, fails, answers with nothing, or takes longer than 15 seconds, nothing is pasted,
 Thalvi says what happened, and your own words go on the clipboard to paste with
 Ctrl+V.
 

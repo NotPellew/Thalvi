@@ -259,11 +259,11 @@ fn everything_else() -> Cases {
         ),
         (
             Box::new(HostError::NothingTyped("x".to_owned())),
-            "Nothing was typed — Settings",
+            "Nothing was pasted — Settings",
         ),
         (
             Box::new(HostError::MaybePartial("x".to_owned())),
-            "Some input may have been typed",
+            "Some text may have been pasted",
         ),
         (Box::new(NotConfigured), "That task isn't configured yet"),
     ]

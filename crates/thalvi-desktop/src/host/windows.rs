@@ -1,4 +1,4 @@
-//! Windows host: window identity, `SendInput` typing and the clipboard, over a small Win32 seam.
+//! Windows host: window identity, the clipboard and `SendInput` key presses, over a small Win32 seam.
 
 mod pipe;
 mod win32;
@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    App, Delivered, HoldSource, Host, HostError, Modifier, RequestServer, TypedText, WebUrl,
+    App, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, PasteText, RequestServer,
+    WebUrl,
 };
 use crate::hold::{HoldKey, HoldKind};
 pub use win32::Real;
@@ -37,16 +38,9 @@ pub struct Process {
 /// One keyboard event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeyEvent {
-    key: Key,
+    /// A virtual-key code.
+    key: u16,
     release: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Key {
-    /// One UTF-16 code unit typed as a character.
-    Unicode(u16),
-    /// A virtual-key code pressed as a key.
-    Virtual(u16),
 }
 
 /// The Win32 calls the host rules depend on. The real and the test implementation are the only two.
@@ -151,7 +145,7 @@ impl<A: Win32> Windows<A> {
         self.api
             .process(target.window)
             .filter(|process| process.identity == target.identity)
-            .ok_or_else(|| nothing_typed("The window closed. Nothing was typed."))
+            .ok_or_else(|| nothing_typed("The window closed. Nothing was pasted."))
     }
 
     fn check_input_reaches(&self, process: &Process) -> Result<(), HostError> {
@@ -159,11 +153,11 @@ impl<A: Win32> Windows<A> {
             Some(level) if level <= self.own_integrity => Ok(()),
             Some(_) => Err(nothing_typed(
                 "That window runs with more permissions than Thalvi, such as an administrator \
-                 window, and Windows drops typing into it. Nothing was typed.",
+                 window, and Windows drops keys sent to it. Nothing was pasted.",
             )),
             None => Err(nothing_typed(
                 "Thalvi could not check whether that window runs as an administrator. Nothing \
-                 was typed.",
+                 was pasted.",
             )),
         }
     }
@@ -183,10 +177,19 @@ impl<A: Win32> Windows<A> {
         }
         match self.api.send_input(events) {
             0 => Err(HostError::NothingTyped(
-                "Windows refused the input. Nothing was typed.".to_owned(),
+                "Windows refused the input. Nothing was pasted.".to_owned(),
             )),
             accepted if accepted == events.len() => Ok(()),
-            _ => Err(HostError::MaybePartial(partial.to_owned())),
+            accepted => {
+                // A key left down would stay pressed for every program, so let go of what was pressed.
+                let stuck = releases(&events[..accepted]);
+                if !stuck.is_empty() && self.api.send_input(&stuck) < stuck.len() {
+                    return Err(HostError::MaybePartial(format!(
+                        "{partial} A key Thalvi pressed may still be held down; tap it to let go."
+                    )));
+                }
+                Err(HostError::MaybePartial(partial.to_owned()))
+            }
         }
     }
 }
@@ -204,7 +207,7 @@ impl<A: Win32> Host for Windows<A> {
 
     fn capture_target(&self) -> Result<Target, HostError> {
         let window = self.api.foreground().ok_or_else(|| {
-            nothing_typed("No window is in front, so Thalvi has nowhere to type.")
+            nothing_typed("No window is in front, so Thalvi has nowhere to paste.")
         })?;
         let process = self.api.process(window).ok_or_else(|| {
             nothing_typed("Thalvi could not tell which program the window in front belongs to.")
@@ -218,23 +221,27 @@ impl<A: Win32> Host for Windows<A> {
     fn deliver(
         &self,
         target: &Target,
-        text: &TypedText,
+        text: &PasteText,
         enter: bool,
     ) -> Result<Delivered, HostError> {
+        // Copied first, so the text is on the clipboard whatever happens to the window.
+        let paste = !text.as_str().is_empty();
+        if paste {
+            self.copy(text.as_str())?;
+        }
         let process = self.live_process(target)?;
         self.check_input_reaches(&process)?;
         if !self.in_front(target.window) {
-            return Err(nothing_typed("The window changed. Nothing was typed."));
+            return Err(nothing_typed("The window changed. Nothing was pasted."));
         }
-        self.send(
-            &typing_events(text.as_str(), enter),
-            "Typing stopped partway. Some of the text may have been typed.",
-        )
-        .map(|()| Delivered::InWindow)
+        self.send(&paste_events(paste, enter), MAYBE_PASTED)
+            .map(|()| Delivered::InWindow)
     }
 
     fn copy(&self, text: &str) -> Result<(), HostError> {
-        if self.api.set_clipboard(text) {
+        // Windows text uses CRLF line breaks, and some programs show a lone LF as one line.
+        let text = text.replace("\r\n", "\n").replace('\n', "\r\n");
+        if self.api.set_clipboard(&text) {
             Ok(())
         } else {
             Err(nothing_typed(
@@ -321,17 +328,44 @@ fn nothing_typed(notice: &str) -> HostError {
 }
 
 const VK_RETURN: u16 = 0x0D;
+const VK_CONTROL: u16 = 0x11;
+const VK_V: u16 = 0x56;
 
-fn tap(key: Key) -> [KeyEvent; 2] {
+fn tap(key: u16) -> [KeyEvent; 2] {
     [false, true].map(|release| KeyEvent { key, release })
 }
 
-/// Every UTF-16 code unit as a press and release, so characters outside the BMP go as surrogate pairs.
-fn typing_events(text: &str, enter: bool) -> Vec<KeyEvent> {
-    text.encode_utf16()
-        .map(Key::Unicode)
-        .chain(enter.then_some(Key::Virtual(VK_RETURN)))
-        .flat_map(tap)
+/// Ctrl+V when `paste`, then Enter when `enter`.
+fn paste_events(paste: bool, enter: bool) -> Vec<KeyEvent> {
+    let ctrl = |release| KeyEvent {
+        key: VK_CONTROL,
+        release,
+    };
+    let mut events = Vec::new();
+    if paste {
+        events.push(ctrl(false));
+        events.extend(tap(VK_V));
+        events.push(ctrl(true));
+    }
+    if enter {
+        events.extend(tap(VK_RETURN));
+    }
+    events
+}
+
+/// Key-ups for every key that `sent` pressed and did not release, the last pressed first.
+fn releases(sent: &[KeyEvent]) -> Vec<KeyEvent> {
+    let mut held: Vec<u16> = Vec::new();
+    for event in sent {
+        if event.release {
+            held.retain(|key| *key != event.key);
+        } else {
+            held.push(event.key);
+        }
+    }
+    held.into_iter()
+        .rev()
+        .map(|key| KeyEvent { key, release: true })
         .collect()
 }
 
@@ -341,13 +375,11 @@ fn shortcut_events(modifiers: &[Modifier], key: &str) -> Result<Vec<KeyEvent>, H
             "Windows has no key called {key}, so the shortcut was not pressed."
         ))
     })?;
-    let held = modifiers.iter().map(|modifier| {
-        Key::Virtual(match modifier {
-            Modifier::Shift => 0x10,
-            Modifier::Ctrl => 0x11,
-            Modifier::Alt => 0x12,
-            Modifier::Logo => 0x5B,
-        })
+    let held = modifiers.iter().map(|modifier| match modifier {
+        Modifier::Shift => 0x10,
+        Modifier::Ctrl => VK_CONTROL,
+        Modifier::Alt => 0x12,
+        Modifier::Logo => 0x5B,
     });
     let down = |key| KeyEvent {
         key,
@@ -357,7 +389,7 @@ fn shortcut_events(modifiers: &[Modifier], key: &str) -> Result<Vec<KeyEvent>, H
     Ok(held
         .clone()
         .map(down)
-        .chain(tap(Key::Virtual(code)))
+        .chain(tap(code))
         .chain(held.rev().map(up))
         .collect())
 }
@@ -418,6 +450,8 @@ mod tests {
         /// Window that `focus` brings to the front; `None` when Windows refuses.
         focus_grants: Option<Hwnd>,
         accepts: Option<usize>,
+        /// How many events of a batch after the first Windows accepts; `accepts` when unset.
+        later_accepts: Option<usize>,
         focused: Vec<Hwnd>,
         sent: Vec<Vec<KeyEvent>>,
         clipboard: Vec<String>,
@@ -478,8 +512,13 @@ mod tests {
         }
         fn send_input(&self, events: &[KeyEvent]) -> usize {
             let mut state = self.0.lock().unwrap();
+            let limit = if state.sent.is_empty() {
+                state.accepts
+            } else {
+                state.later_accepts.or(state.accepts)
+            };
             state.sent.push(events.to_vec());
-            state.accepts.map_or(events.len(), |n| n.min(events.len()))
+            limit.map_or(events.len(), |n| n.min(events.len()))
         }
         fn set_clipboard(&self, text: &str) -> bool {
             let mut state = self.0.lock().unwrap();
@@ -504,16 +543,27 @@ mod tests {
         Windows::new(fake).unwrap()
     }
 
-    fn text(text: &str) -> TypedText {
-        TypedText::new(text).unwrap()
+    fn text(text: &str) -> PasteText {
+        PasteText::new(text).unwrap()
     }
 
-    fn unit(unit: u16) -> [KeyEvent; 2] {
-        tap(Key::Unicode(unit))
+    fn ctrl_v() -> Vec<KeyEvent> {
+        [
+            vec![KeyEvent {
+                key: VK_CONTROL,
+                release: false,
+            }],
+            virtual_tap(VK_V).to_vec(),
+            vec![KeyEvent {
+                key: VK_CONTROL,
+                release: true,
+            }],
+        ]
+        .concat()
     }
 
     fn virtual_tap(code: u16) -> [KeyEvent; 2] {
-        tap(Key::Virtual(code))
+        tap(code)
     }
 
     fn app(executables: &[&str], shortcut: Option<Shortcut>) -> App {
@@ -541,7 +591,7 @@ mod tests {
         desktop.api.with(|state| state.foreground = None);
         assert_eq!(
             nothing_typed_text(desktop.capture_target().unwrap_err()),
-            "No window is in front, so Thalvi has nowhere to type."
+            "No window is in front, so Thalvi has nowhere to paste."
         );
 
         desktop.api.with(|state| state.foreground = Some(999));
@@ -607,40 +657,43 @@ mod tests {
     }
 
     #[test]
-    fn typing_into_the_bound_foreground_sends_one_batch_and_leaves_the_clipboard_alone() {
-        let desktop = windows(Fake::desktop());
-        let target = desktop.capture_target().unwrap();
+    fn pasting_into_the_bound_foreground_sets_the_clipboard_with_crlf_and_sends_one_batch() {
+        let return_key = virtual_tap(VK_RETURN).to_vec();
+        for (words, enter, copied, events) in [
+            (
+                "aé👋\nline",
+                true,
+                Some("aé👋\r\nline"),
+                [ctrl_v(), return_key.clone()].concat(),
+            ),
+            ("hi", false, Some("hi"), ctrl_v()),
+            ("", true, None, return_key),
+            ("", false, None, Vec::new()),
+        ] {
+            let desktop = windows(Fake::desktop());
+            let target = desktop.capture_target().unwrap();
 
-        desktop.deliver(&target, &text("aé👋"), true).unwrap();
+            desktop.deliver(&target, &text(words), enter).unwrap();
 
-        let expected: Vec<KeyEvent> = [
-            unit(0x61),
-            unit(0xE9),
-            unit(0xD83D),
-            unit(0xDC4B),
-            virtual_tap(VK_RETURN),
-        ]
-        .concat();
-        assert_eq!(desktop.api.read(|state| state.sent.clone()), [expected]);
-        assert!(desktop.api.read(|state| state.focused.is_empty()));
-        assert!(desktop.api.read(|state| state.clipboard.is_empty()));
+            let sent = desktop.api.read(|state| state.sent.clone());
+            let expected = if events.is_empty() {
+                vec![]
+            } else {
+                vec![events]
+            };
+            assert_eq!(sent, expected, "{words:?} enter={enter}");
+            assert_eq!(
+                desktop.api.read(|state| state.clipboard.clone()),
+                copied.map(str::to_owned).into_iter().collect::<Vec<_>>(),
+                "{words:?}"
+            );
+            assert!(desktop.api.read(|state| state.focused.is_empty()));
+        }
     }
 
     #[test]
-    fn typing_without_enter_presses_no_return_and_empty_text_sends_nothing() {
-        let desktop = windows(Fake::desktop());
-        let target = desktop.capture_target().unwrap();
-
-        desktop.deliver(&target, &text("hi"), false).unwrap();
-        desktop.deliver(&target, &text(""), false).unwrap();
-
-        let expected: Vec<KeyEvent> = [unit(0x68), unit(0x69)].concat();
-        assert_eq!(desktop.api.read(|state| state.sent.clone()), [expected]);
-    }
-
-    #[test]
-    fn a_changed_foreground_gets_one_focus_attempt_and_types_only_if_it_works() {
-        for (grants, typed) in [(Some(NOTEPAD), true), (None, false)] {
+    fn a_changed_foreground_gets_one_focus_attempt_and_pastes_only_if_it_works() {
+        for (grants, pasted) in [(Some(NOTEPAD), true), (None, false)] {
             let desktop = windows(Fake::desktop());
             let target = desktop.capture_target().unwrap();
             desktop.api.with(|state| {
@@ -653,14 +706,15 @@ mod tests {
             assert_eq!(desktop.api.read(|state| state.focused.clone()), [NOTEPAD]);
             assert_eq!(
                 desktop.api.read(|state| state.sent.len()),
-                usize::from(typed)
+                usize::from(pasted)
             );
-            if typed {
+            assert_eq!(desktop.api.read(|state| state.clipboard.clone()), ["hi"]);
+            if pasted {
                 result.unwrap();
             } else {
                 assert_eq!(
                     nothing_typed_text(result.unwrap_err()),
-                    "The window changed. Nothing was typed."
+                    "The window changed. Nothing was pasted."
                 );
             }
         }
@@ -698,7 +752,8 @@ mod tests {
             let notice =
                 nothing_typed_text(desktop.deliver(&target, &text("hi"), true).unwrap_err());
 
-            assert_eq!(notice, "The window closed. Nothing was typed.", "{case}");
+            assert_eq!(notice, "The window closed. Nothing was pasted.", "{case}");
+            assert_eq!(desktop.api.read(|state| state.clipboard.clone()), ["hi"]);
             assert!(
                 desktop
                     .api
@@ -745,21 +800,59 @@ mod tests {
     }
 
     #[test]
-    fn typing_that_windows_cut_short_is_reported_once_and_never_retried() {
+    fn a_paste_that_windows_cut_short_is_reported_once_and_releases_the_keys_it_pressed() {
+        let key_up = |key| KeyEvent { key, release: true };
+        // The batch is Ctrl down, V down, V up, Ctrl up, Return down, Return up.
+        for (accepted, released) in [
+            (1, vec![key_up(VK_CONTROL)]),
+            (2, vec![key_up(VK_V), key_up(VK_CONTROL)]),
+            (3, vec![key_up(VK_CONTROL)]),
+            (4, vec![]),
+            (5, vec![key_up(VK_RETURN)]),
+        ] {
+            let desktop = windows(Fake::desktop());
+            let target = desktop.capture_target().unwrap();
+            desktop.api.with(|state| state.accepts = Some(accepted));
+
+            let error = desktop.deliver(&target, &text("hello"), true).unwrap_err();
+
+            assert!(
+                matches!(&error, HostError::MaybePartial(notice) if notice == MAYBE_PASTED),
+                "{accepted}: {error:?}"
+            );
+            let sent = desktop.api.read(|state| state.sent.clone());
+            assert_eq!(
+                sent.len(),
+                1 + usize::from(!released.is_empty()),
+                "{accepted}"
+            );
+            assert_eq!(
+                sent.get(1).cloned().unwrap_or_default(),
+                released,
+                "{accepted}"
+            );
+        }
+
+        // Windows refusing the key-ups too is told, since Ctrl would stay down.
         let desktop = windows(Fake::desktop());
         let target = desktop.capture_target().unwrap();
-        desktop.api.with(|state| state.accepts = Some(3));
-
+        desktop.api.with(|state| {
+            state.accepts = Some(2);
+            state.later_accepts = Some(1);
+        });
         let error = desktop.deliver(&target, &text("hello"), true).unwrap_err();
-
         assert!(
-            matches!(&error, HostError::MaybePartial(notice) if notice.starts_with("Typing stopped partway"))
+            matches!(&error, HostError::MaybePartial(notice) if notice.starts_with(MAYBE_PASTED) && notice.contains("still be held down")),
+            "{error:?}"
         );
-        assert_eq!(desktop.api.read(|state| state.sent.len()), 1);
+        assert_eq!(desktop.api.read(|state| state.sent.len()), 2);
 
+        let desktop = windows(Fake::desktop());
+        let target = desktop.capture_target().unwrap();
         desktop.api.with(|state| state.accepts = Some(0));
         let error = desktop.deliver(&target, &text("hello"), true).unwrap_err();
         assert!(matches!(error, HostError::NothingTyped(_)), "{error:?}");
+        assert_eq!(desktop.api.read(|state| state.sent.len()), 1);
     }
 
     #[test]
@@ -779,12 +872,12 @@ mod tests {
         assert_eq!(target.window, OTHER);
         assert_eq!(target.identity, identity(3, "T3 Code.exe"));
         let expected: Vec<KeyEvent> = [
-            tap(Key::Virtual(0x11))[0],
-            tap(Key::Virtual(0x10))[0],
+            tap(0x11)[0],
+            tap(0x10)[0],
             virtual_tap(0x4B)[0],
             virtual_tap(0x4B)[1],
-            tap(Key::Virtual(0x10))[1],
-            tap(Key::Virtual(0x11))[1],
+            tap(0x10)[1],
+            tap(0x11)[1],
         ]
         .to_vec();
         assert_eq!(desktop.api.read(|state| state.sent.clone()), [expected]);
@@ -946,6 +1039,12 @@ mod tests {
             nothing_typed_text(desktop.copy("lost").unwrap_err()),
             "Windows would not let Thalvi use the clipboard."
         );
+        let target = desktop.capture_target().unwrap();
+        assert_eq!(
+            nothing_typed_text(desktop.deliver(&target, &text("lost"), true).unwrap_err()),
+            "Windows would not let Thalvi use the clipboard."
+        );
+        assert!(desktop.api.read(|state| state.sent.is_empty()));
         assert_eq!(
             nothing_typed_text(desktop.open_url(&url).unwrap_err()),
             "Windows could not open the web address."

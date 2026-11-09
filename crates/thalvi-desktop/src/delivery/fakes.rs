@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::host::{App, Delivered, Host, HostError, TypedText, WebUrl};
+use crate::host::{App, Delivered, Host, HostError, PasteText, WebUrl};
 
 /// The window the fake host binds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,7 +90,7 @@ impl Host for FakeHost {
     fn deliver(
         &self,
         target: &FakeWindow,
-        text: &TypedText,
+        text: &PasteText,
         enter: bool,
     ) -> Result<Delivered, HostError> {
         self.record(

@@ -232,11 +232,11 @@ pub enum CaptureError {
     Audio(#[from] AudioError),
     #[error("Microphone audio stopped. Nothing was delivered.")]
     MicStopped,
-    #[error("{0} Nothing was typed.")]
+    #[error("{0} Nothing was pasted.")]
     Writing(WritingError),
-    #[error("The key was released too quickly to dictate. Nothing was typed.")]
+    #[error("The key was released too quickly to dictate. Nothing was pasted.")]
     HoldTooShort,
-    #[error("No words were heard while the key was held. Nothing was typed.")]
+    #[error("No words were heard while the key was held. Nothing was pasted.")]
     NothingHeard,
     #[error("No words heard for {}.", plain_duration(*.0))]
     NoWords(Duration),

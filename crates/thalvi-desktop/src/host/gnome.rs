@@ -9,7 +9,7 @@ use std::fmt;
 use std::path::Path;
 
 use super::command::{CommandRunner, SystemRunner, tool};
-use super::{App, Delivered, HoldSource, Host, HostError, TypedText, WebUrl};
+use super::{App, Delivered, HoldSource, Host, HostError, PasteText, WebUrl};
 use crate::hold::{HoldKey, HoldKind};
 
 /// Where GNOME dictation goes: there is no window to bind, so the text waits on the clipboard.
@@ -82,7 +82,7 @@ impl<R: CommandRunner, T: Toolkit> Host for Gnome<R, T> {
     fn deliver(
         &self,
         _target: &Clipboard,
-        text: &TypedText,
+        text: &PasteText,
         _enter: bool,
     ) -> Result<Delivered, HostError> {
         if text.as_str().is_empty() {
@@ -173,8 +173,8 @@ mod tests {
         host.toolkit.clipboard.lock().unwrap().clone()
     }
 
-    fn typed(text: &str) -> TypedText {
-        TypedText::new(text).unwrap()
+    fn typed(text: &str) -> PasteText {
+        PasteText::new(text).unwrap()
     }
 
     #[test]

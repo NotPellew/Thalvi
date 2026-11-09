@@ -30,7 +30,7 @@ use ::windows::Win32::System::Threading::{
 use ::windows::Win32::UI::HiDpi::GetDpiForSystem;
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
 };
 use ::windows::Win32::UI::Shell::ShellExecuteW;
 use ::windows::Win32::UI::WindowsAndMessaging::{
@@ -44,7 +44,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
 };
 use ::windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
-use super::{Hwnd, Identity, Key, KeyEvent, Process, Win32};
+use super::{Hwnd, Identity, KeyEvent, Process, Win32};
 use crate::hold::{self, HoldHooks, HoldKey, HoldKind, Verdict};
 use crate::host::{HoldWatch, HostError};
 
@@ -181,10 +181,7 @@ unsafe extern "system" fn collect_window(window: HWND, windows: LPARAM) -> BOOL 
 }
 
 fn input(event: KeyEvent) -> INPUT {
-    let (code, scan, mut flags) = match event.key {
-        Key::Unicode(unit) => (0, unit, KEYEVENTF_UNICODE),
-        Key::Virtual(code) => (code, 0, KEYBD_EVENT_FLAGS(0)),
-    };
+    let mut flags = KEYBD_EVENT_FLAGS(0);
     if event.release {
         flags |= KEYEVENTF_KEYUP;
     }
@@ -192,8 +189,8 @@ fn input(event: KeyEvent) -> INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(code),
-                wScan: scan,
+                wVk: VIRTUAL_KEY(event.key),
+                wScan: 0,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,

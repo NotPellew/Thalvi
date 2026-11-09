@@ -119,11 +119,14 @@ areas your change touches. Editing rules are in
 - **A keyword spotter only warns about missed endings.** sherpa-onnx's 3.3M keyword model listens beside the recognizer; when the covering final lacks an ending it heard and the user then stays quiet for that ending's pause, the cancelled cue plays and a notice names the phrase. Nothing is cut, retried or acted on.
   Why: spotted times run 0.2–0.5 s late and finals carry no word times; a recheck by the same recognizer rescued 0 of 12 disputed hits in 62.8 min; the quiet gate keeps false alarms (16 in that time) silent.
   Rejected: cutting at the spotted time, a recheck, acting on the spotter alone, judging on a short timer (24 of 36 finals came late), quoting dictated words.
-- **Check, then type.** Delivery re-verifies the bound window just before injecting
-  input, which goes to whatever window is focused; a switch in those milliseconds
-  can misdirect it. Why: neither Hyprland nor Windows can address input to one window.
+- **Delivery is a paste.** Dictation and writing go on the clipboard and the bound window gets Ctrl+V (Ctrl+Shift+V in a known Linux terminal class); text may hold line breaks and tabs, no other control character. Hyprland sends the keys with `sendshortcut` and the keycode of V from the first layout (libxkbcommon).
+  Why: a paste inserts line breaks without Enter; GTK 3 ignores wtype's Ctrl keys, and `sendshortcut` keeps a key name's first keycode across layout changes.
+  Rejected: typing with Shift+Enter for line breaks, typing single lines and pasting multi-line text (two paths), wtype keys, keeping multi-line text out of terminals (a shell with bracketed paste off runs pasted lines, as the user's own paste does).
+- **Check, then paste.** Delivery re-verifies the bound window just before pressing keys,
+  which go to whatever window is focused, except Hyprland's paste keys, which are addressed to it. Why: Enter and Windows
+  input cannot be addressed to one window, so a switch in those milliseconds can misdirect them.
   Rejected: per-desktop accessibility or input protocols (much code for a rare race).
-- **Enter waits 250 ms.** On Hyprland, submit waits 250 ms between the text and Enter.
+- **Enter waits 250 ms.** On Hyprland, submit waits 250 ms between the paste and Enter.
   Why: Muse Code 1.4.14 read a faster Enter as a new line while the overlay said sent;
   0 of 15 sent at up to 100 ms, 15 of 15 from 150 ms.
   Rejected: two wtype calls, a delay per application.
@@ -141,9 +144,9 @@ areas your change touches. Editing rules are in
   (compositor binds), Alt+KeyZ on Windows (`hold_key`, a swallowing keyboard hook that waits for the
   key and Alt both up); a second key, `write_key` (F10, Alt+KeyX), releases into the writing model instead; every word of a hold is text, and only `cancel` abandons one. Why: Hyprland 0.53.3 types held modifiers into the paste and drops the release when one comes up first, seen live, and drops a plain `bindr` when another key is pressed or a modifier is down during the hold, so the release is `bindrti`; `RegisterHotKey` sees no release; the key already ends a dictation, and spoken endings cut off sentences that held them.
   Rejected: Alt+Y with binds, Ctrl+Z/Y, spoken endings during a hold.
-- **Writing is one direct chat call, words only, paste only.** "write that out" or the write key sends the
-  recognized words to an OpenAI-compatible endpoint from Settings and pastes what streams back; no context, no
-  Enter, 15 s at most; any failure pastes nothing and puts the words on the clipboard. Why: dictation then needs
+- **Writing is one direct chat call, words only.** "write that out" or the write key sends the
+  recognized words to an OpenAI-compatible endpoint from Settings and pastes what streams back, line breaks included; no
+  context, no Enter, 15 s at most; any failure pastes nothing and puts the words on the clipboard. Why: dictation then needs
   no server, and text the user did not say is never sent unread. Rejected: the Thalvi server, app-aware tone, write-and-send.
 - **The writing prompt is a stored override of one built-in default.** `writing.prompt` is the system message; it is
   saved only when it differs from the default, and a blank one is refused where the config loads. Why: users who never
@@ -229,7 +232,7 @@ areas your change touches. Editing rules are in
 - **Issues are optional.** Why: in a 9-day solo build, PRs and the commit
   history are record enough. Rejected: an issue for every change.
 - **`unsafe` only for Win32.** The workspace denies `unsafe`; only the Windows
-  host module opts out, each block with `// SAFETY:`. Why: typing and window
+  host module opts out, each block with `// SAFETY:`. Why: key presses, the clipboard and window
   checks need raw Win32 calls. Rejected: `forbid` with wrapper crates (none
   covers the checks), clipboard-only Windows, `unsafe` allowed everywhere.
 - **Commit checks run on `pull_request`.** They need only read access, and
