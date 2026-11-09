@@ -40,7 +40,9 @@ gate_server() {
   step cargo lint
   step cargo test --workspace --locked
   RUSTDOCFLAGS="-D warnings" step cargo docs
-  in_dir crates/thalvi-app npm exec --prefix ui -- tauri build --bundles appimage -- --locked
+  # linuxdeploy looks for libwebgpu_dawn.so, which the build links into the target folder, on this path.
+  in_dir crates/thalvi-app env LD_LIBRARY_PATH="${CARGO_TARGET_DIR:-$PWD/target}/release" \
+    npm exec --prefix ui -- tauri build --bundles appimage -- --locked
 }
 
 gate_desktop_windows() {
