@@ -443,10 +443,14 @@ phrase ends or cancels a hold: words such as "never mind" are dictated as text.
 To abandon a hold, use the `cancel` command: the tray's **Cancel**, or a key
 bound to `thalvi-desktop cancel` (the Hyprland examples bind SUPER+Escape).
 
-- **Hyprland:** F9, with no modifier. Add the `hold-start` and `hold-end` binds
-  from `hyprland-binds.conf`, release bind flags included. Hyprland types any modifier you still hold into the
-  pasted text and skips the release when a modifier comes up first, so the key
-  must be a single key.
+- **Hyprland:** F9, with no modifier. Thalvi binds the key in Hyprland itself while
+  it runs and binds it again after `hyprctl reload`, so `hyprland.conf` needs no
+  lines for it. Set another of F1 to F12 as `hold_key` in the config. Hyprland types
+  any modifier you still hold into the pasted text and skips the release when a
+  modifier comes up first, so the key must be a single key. If another bind already
+  uses the key, or `hold-start` lines from an older `hyprland-binds.conf` are still in
+  `hyprland.conf`, Thalvi says so and binds nothing until you remove them or pick
+  another key; a key that cannot be bound keeps the previous one working.
 - **Windows:** Alt and the key left of X (Z on a QWERTY keyboard, Y on QWERTZ).
   The app watches the keyboard itself and keeps the key from the focused app; the
   hold ends when the key and Alt are both up. Set another as `hold_key` in the
@@ -477,8 +481,8 @@ If it is not set up, fails, answers with nothing, or takes longer than 15 second
 Thalvi says what happened, and your own words go on the clipboard to paste with
 Ctrl+V.
 
-- **Hyprland:** F10, with no modifier; add the `write-start` and `write-end`
-  binds from `hyprland-binds.conf`.
+- **Hyprland:** F10, with no modifier, bound by Thalvi like the hold key
+  (`write_key` in the config).
 - **Windows:** Alt and X (`write_key` in the config), kept from the focused app
   like the hold key. It must differ from `hold_key`.
 
