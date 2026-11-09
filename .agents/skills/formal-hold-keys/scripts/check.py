@@ -18,10 +18,13 @@ HOLD = 'crates/thalvi-desktop/src/hold.rs'
 PROPERTIES = ('EachPressCountedOnce', 'HoldFollowsItsKey', 'FreeKeyStartsHold')
 # Each mutation puts back one way `hold.rs` broke or could break, and the property it must break.
 MUTATIONS = {
-    'NoOvertakeCredit': ('state.early_release = Some((kind, Instant::now()));', '', 'HoldFollowsItsKey'),
+    'NoOvertakeCredit': ('            } else if phase == KeyPhase::Down {\n                KeyPhase::Up\n            } else {\n                KeyPhase::Overtaken(Instant::now())\n            };',
+                        '            } else {\n                KeyPhase::Up\n            };', 'HoldFollowsItsKey'),
     'NoOtherKeyGuard': ('if state.down && state.kind != kind {\n                return false;\n            }',
                         '', 'HoldFollowsItsKey'),
     'UncountedLoss': ('self.lost += unseen - u64::from(fresh);', '', 'EachPressCountedOnce'),
+    'ForgetIgnoredKey': ('            // Every key follows its own events, even while the other key\'s hold ignores them.\n            state.phases[index] = if down {\n                if overtaken {\n                    KeyPhase::Up\n                } else {\n                    KeyPhase::Down\n                }\n            } else if phase == KeyPhase::Down {\n                KeyPhase::Up\n            } else {\n                KeyPhase::Overtaken(Instant::now())\n            };\n            // One hold at a time: the other key means nothing until this one is up.\n            if state.down && state.kind != kind {\n                return false;\n            }',
+                         '            // One hold at a time: the other key means nothing until this one is up.\n            if state.down && state.kind != kind {\n                return false;\n            }\n            state.phases[index] = if down {\n                if overtaken {\n                    KeyPhase::Up\n                } else {\n                    KeyPhase::Down\n                }\n            } else if phase == KeyPhase::Down {\n                KeyPhase::Up\n            } else {\n                KeyPhase::Overtaken(Instant::now())\n            };', 'FreeKeyStartsHold'),
 }
 
 

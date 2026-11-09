@@ -422,10 +422,12 @@ async fn hold_start(running: &impl Running, kind: HoldKind, wait: Duration) -> S
         Status::Working { .. } => Some("The last text is still being delivered."),
         _ => None,
     };
+    // Every press reaches the key input, as on Windows, so its release finds a press to end;
+    // the engine refuses the ones it cannot act on.
+    running.hold(kind, true);
     if let Some(refusal) = refusal {
         return no_effect(running, refusal);
     }
-    running.hold(kind, true);
     if reached(&mut status, wait, |status| {
         capturing(status) || matches!(status, Status::Working { .. })
     })
@@ -601,6 +603,7 @@ mod tests {
     use std::sync::{Arc, Mutex, PoisonError};
 
     use thalvi_desktop::config::Look;
+    use thalvi_desktop::hold::{HoldInput, Presses};
     #[cfg(target_os = "linux")]
     use thalvi_desktop::host::RequestServer;
     use thalvi_desktop::writing::DEFAULT_PROMPT;
@@ -632,6 +635,8 @@ mod tests {
         shown: AtomicUsize,
         copy_refused: AtomicBool,
         ignoring: AtomicBool,
+        keys: HoldInput,
+        presses: Mutex<Presses>,
         folder: PathBuf,
     }
 
@@ -642,6 +647,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&folder);
             std::fs::create_dir_all(&folder).unwrap();
             let config = DesktopConfig::from_json_str(config).unwrap();
+            let (keys, state) = HoldInput::new();
             Arc::new(Self {
                 status: watch::channel(Status::Listening).0,
                 audio: watch::channel(AudioStatus {
@@ -659,6 +665,8 @@ mod tests {
                 shown: AtomicUsize::new(0),
                 copy_refused: AtomicBool::new(false),
                 ignoring: AtomicBool::new(false),
+                keys,
+                presses: Mutex::new(Presses::new(state)),
                 folder,
             })
         }
@@ -724,6 +732,10 @@ mod tests {
                 HoldKind::Write => "write",
             };
             lock(&self.sent).push(format!("{key} {down}"));
+            match kind {
+                HoldKind::Dictate => self.keys.set(down),
+                HoldKind::Write => self.keys.set_write(down),
+            }
             if self.ignoring.load(Ordering::SeqCst) {
                 return;
             }
@@ -1168,6 +1180,41 @@ mod tests {
     }
 
     #[test]
+    fn a_key_pressed_during_the_other_keys_hold_starts_a_hold_when_pressed_again() {
+        // Each key's press and release reach the key input, even while the other key's hold
+        // refuses the press, so the release is never mistaken for one that overtook a press.
+        for (first, second, name) in [
+            (Request::WriteStart, Request::HoldStart, "write first"),
+            (Request::HoldStart, Request::WriteStart, "hold first"),
+        ] {
+            let (first_end, second_end, expected) = match first {
+                Request::WriteStart => (Request::WriteEnd, Request::HoldEnd, HoldKind::Dictate),
+                _ => (Request::HoldEnd, Request::WriteEnd, HoldKind::Write),
+            };
+            let rig = Rig::new("cross-hold", "{}");
+            assert_eq!(rig.ask(&first)["took_effect"], true, "{name}");
+            assert!(lock(&rig.fake.presses).take().is_some(), "{name}");
+            let refused = rig.ask(&second);
+            assert_eq!(
+                refused["error"], "A capture is already running.",
+                "{name}: the other key's press is still refused in words"
+            );
+            assert_eq!(rig.ask(&first_end)["took_effect"], true, "{name}");
+            assert_eq!(rig.ask(&second_end)["took_effect"], false, "{name}");
+            rig.fake.set_status(Status::Listening);
+            let again = rig.ask(&second);
+            assert_eq!(again["took_effect"], true, "{name}: {again}");
+            let press = lock(&rig.fake.presses).take();
+            assert_eq!(
+                press.map(|press| press.kind),
+                Some(expected),
+                "{name}: the pressed key holds"
+            );
+            assert_eq!(lock(&rig.fake.presses).take_lost(), 0, "{name}");
+        }
+    }
+
+    #[test]
     fn state_names_what_thalvi_is_doing_and_never_what_was_said() {
         let rig = Rig::new(
             "state",
@@ -1292,8 +1339,8 @@ mod tests {
         );
         assert_eq!(
             rig.fake.sent(),
-            ["hold false"],
-            "no control reached the engine except the key's release"
+            ["hold true", "hold false"],
+            "no control reached the engine except the key's press and release"
         );
     }
 
