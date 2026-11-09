@@ -166,7 +166,6 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
         let (events_tx, events_rx) = events::unbounded_channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let cache = Arc::clone(&self.model);
-        let used = Arc::clone(&model);
         let work = Work {
             stream: model.stream(),
             device: model.device(),
@@ -176,13 +175,7 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
             name: self.name.clone(),
             metrics: self.metrics.clone(),
             forget: Box::new(move || {
-                let mut cached = cache.lock().unwrap_or_else(PoisonError::into_inner);
-                if cached
-                    .as_ref()
-                    .is_some_and(|model| Arc::ptr_eq(model, &used))
-                {
-                    *cached = None;
-                }
+                *cache.lock().unwrap_or_else(PoisonError::into_inner) = None;
             }),
         };
         std::thread::Builder::new()

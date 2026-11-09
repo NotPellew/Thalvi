@@ -174,7 +174,7 @@ mod tests {
         }))
     }
 
-    fn seed(dir: &std::path::Path, assets: crate::models::SpeechAssets<'_>) {
+    fn seed(dir: &std::path::Path, assets: &crate::models::SpeechAssets<'_>) {
         for asset in [assets.encoder, assets.decoder, assets.joiner, assets.tokens]
             .into_iter()
             .chain(assets.encoder_data)
@@ -221,13 +221,13 @@ mod tests {
         let will_gpu = "Will run on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)";
 
         assert_eq!(line(unified).await, will_gpu, "nothing downloaded yet");
-        seed(&dir, unified.assets());
+        seed(&dir, &unified.assets());
         assert_eq!(
             line(unified).await,
             "Will run on the CPU: the GPU model isn't downloaded",
             "only the int8 files"
         );
-        seed(&dir, unified.assets_of(Export::Gpu));
+        seed(&dir, &unified.assets_of(Export::Gpu));
         assert_eq!(line(unified).await, will_gpu, "the GPU files too");
         assert_eq!(
             line(CatalogSpeech::Nemotron160ms).await,

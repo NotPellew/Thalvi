@@ -164,15 +164,11 @@ impl Adapters {
         found
     }
 
-    /// What the latest check found, or a check now when there has been none.
+    /// What the latest check found, or a check now when there has been none; callers at once share that one check.
     #[must_use]
     pub fn last_or_check(&self) -> Adapter {
-        let last = self
-            .last
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        last.unwrap_or_else(|| self.check())
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        last.get_or_insert_with(|| (self.check)()).clone()
     }
 }
 
@@ -884,5 +880,30 @@ mod tests {
         assert_eq!(asked(), 2, "a load checks again");
         assert_eq!(adapters.last_or_check(), Adapter::Discrete(rtx()));
         assert_eq!(asked(), 2, "and Settings then reads that result");
+    }
+
+    #[test]
+    fn cards_asking_at_once_share_the_one_check() {
+        let counted = Arc::new(AtomicUsize::new(0));
+        let adapters = Adapters::checking({
+            let counted = Arc::clone(&counted);
+            move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                for _ in 0..1_000 {
+                    std::thread::yield_now();
+                }
+                Adapter::Unusable
+            }
+        });
+        let together = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _card in 0..8 {
+                scope.spawn(|| {
+                    together.wait();
+                    assert_eq!(adapters.last_or_check(), Adapter::Unusable);
+                });
+            }
+        });
+        assert_eq!(counted.load(Ordering::SeqCst), 1);
     }
 }

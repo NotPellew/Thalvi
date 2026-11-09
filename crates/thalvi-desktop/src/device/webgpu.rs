@@ -345,3 +345,54 @@ fn placement(session: &Session) -> Option<Vec<Placed>> {
     }
     Some(placed)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CString;
+
+    use super::*;
+
+    #[test]
+    fn dawn_strings_are_read_by_their_length_or_up_to_the_nul_when_the_length_is_the_sentinel() {
+        let name = CString::new("NVIDIA GeForce RTX 5070 Ti").unwrap();
+        for (case, view, expected) in [
+            (
+                "by length",
+                StringView {
+                    data: name.as_ptr(),
+                    length: 6,
+                },
+                "NVIDIA",
+            ),
+            (
+                "up to the NUL",
+                StringView {
+                    data: name.as_ptr(),
+                    length: WGPU_STRLEN,
+                },
+                "NVIDIA GeForce RTX 5070 Ti",
+            ),
+            (
+                "no data",
+                StringView {
+                    data: std::ptr::null(),
+                    length: WGPU_STRLEN,
+                },
+                "",
+            ),
+        ] {
+            assert_eq!(text(&view), expected, "{case}");
+        }
+    }
+
+    #[test]
+    fn an_onnx_runtime_call_succeeded_only_when_it_returned_no_status() {
+        let message = CString::new("it failed").unwrap();
+        // SAFETY: `message` is a NUL-terminated string that outlives the call, which copies it.
+        let failure = unsafe {
+            (ort::api().CreateStatus)(ort::sys::OrtErrorCode::ORT_FAIL, message.as_ptr())
+        };
+        assert!(!succeeded(failure));
+        assert!(succeeded(ort::sys::OrtStatusPtr::default()));
+    }
+}
