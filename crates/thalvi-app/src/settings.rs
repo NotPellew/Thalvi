@@ -302,11 +302,20 @@ fn unmask_keys(settings: &mut Value, current: &DesktopConfig) {
 }
 
 fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // Each writer renames only its own file: no save can unlink or move another's.
     let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
+    temporary.push(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     let temporary = PathBuf::from(temporary);
     let written =
         write_private(&temporary, contents).and_then(|()| std::fs::rename(&temporary, path));

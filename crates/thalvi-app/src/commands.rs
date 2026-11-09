@@ -32,7 +32,7 @@ use crate::app::AppState;
 use crate::menu_entry;
 use crate::overlay;
 use crate::runner::{AudioStatus, Control};
-use crate::settings::{ensure_microphone_change_allowed, settings_json};
+use crate::settings::settings_json;
 use crate::startup;
 use crate::status::Status;
 use crate::switch::{SwitchState, Unavailable};
@@ -71,15 +71,8 @@ pub fn save_settings(
 /// # Errors
 /// The plain reason the settings were refused, in which case nothing changed.
 pub fn save(app: &AppHandle, state: &AppState, settings: Value) -> Result<DesktopConfig, String> {
-    ensure_microphone_change_allowed(
-        &settings,
-        state.config().microphone.as_deref(),
-        state.link.audio().paused,
-    )?;
-    let config = state.store.save(settings, &state.config())?;
-    let look = state.config().look;
-    state.apply(&config);
-    if config.look != look {
+    let (config, look_changed) = state.save_form(settings)?;
+    if look_changed {
         // The settings are saved either way; the overlay keeps its old place.
         if let Err(error) = overlay::replace(app, &state.host()) {
             eprintln!("The overlay could not be placed again for the new look: {error}");
