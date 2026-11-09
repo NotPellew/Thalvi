@@ -35,11 +35,14 @@ dev-job run --job "$job" -- bash -c '
   (cd "$DEV_JOB_SCRATCH/src/crates/thalvi-app/ui" && npm ci && npm run build) &&
   (cd "$DEV_JOB_SCRATCH/src" && cargo build -p thalvi-app --locked) &&
   mkdir -p /var/tmp/thalvi-rig/bin/<name> &&
-  cp "$CARGO_TARGET_DIR/debug/thalvi-desktop" /var/tmp/thalvi-rig/bin/<name>/'
+  cp "$CARGO_TARGET_DIR/debug/thalvi-desktop" /var/tmp/thalvi-rig/bin/<name>/ &&
+  cp -L "$CARGO_TARGET_DIR/debug/libwebgpu_dawn.so" /var/tmp/thalvi-rig/bin/<name>/'
 dev-job finish "$job"
 ```
 
-A warm target builds in about a minute. Evidence and binaries live under
+The binary loads `libwebgpu_dawn.so` from its own folder (rpath `$ORIGIN`);
+`app-start` and `ctl` bind every `.so` beside it into the sandbox, and without it
+the app exits 127 at once. A warm target builds in about a minute. Evidence and binaries live under
 `/var/tmp/thalvi-rig/` (`THALVI_RIG_BASE` changes it); never commit them.
 
 ## Launch
