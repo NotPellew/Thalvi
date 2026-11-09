@@ -1149,6 +1149,9 @@ describe("the next dictation summary and state words", () => {
       goTo("speech");
       stub.emit(LOADING);
       await settle();
+      const picker = root.querySelector<HTMLSelectElement>('select[aria-label="Kind of speech server to add"]');
+      if (!picker) throw new Error("no speech entry kind picker");
+      choose(picker, "on_device");
       button("Use a speech server instead").click();
       expect((root.querySelector(".editor") as HTMLElement).hidden).toBe(false);
       expect(root.querySelector(".editor h4")?.textContent).toBe("Add a realtime speech server");

@@ -848,7 +848,7 @@ function speech(context: PageContext): HTMLElement[] {
   const nextDictation = el("p", { class: "next-dictation", role: "status" }, "");
   const retryProblem = note();
   const useServer = button("Use a speech server instead", () => {
-    addSelected();
+    openEditor(null, "realtime");
   });
   const retry = button("Retry", retryDownload);
   const summaryActions = el("div", { class: "trow", hidden: true }, useServer, retry, retryProblem);
