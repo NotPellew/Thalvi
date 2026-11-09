@@ -849,6 +849,42 @@ mod tests {
     }
 
     #[test]
+    fn a_save_the_file_system_refuses_is_reported_and_changes_nothing() {
+        let dir = std::env::temp_dir().join(format!("thalvi-app-refused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("block"), b"not a directory").unwrap();
+        let store = Store::new(Some(dir.join("block").join("desktop.json"))).unwrap();
+        let start = DesktopConfig::from_json_str("{}").unwrap();
+        let saves = SyncedConfig::new(store, start.clone());
+        let mut settings = crate::settings::settings_json(&start).unwrap();
+        settings["look"] = serde_json::json!("holo");
+        let mut applied = false;
+
+        let form = saves
+            .save_form(settings, true, |_| applied = true)
+            .unwrap_err();
+        let switch = saves
+            .remember(|c| c.start_at_login = !start.start_at_login)
+            .unwrap_err();
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for error in [form, switch] {
+            assert!(
+                error.starts_with("The settings could not be saved to "),
+                "{error}"
+            );
+        }
+        assert!(!applied, "a refused form is not applied");
+        assert_eq!(saves.config(), start, "the running config is unchanged");
+        assert_eq!(leftovers, ["block"], "nothing is written");
+    }
+
+    #[test]
     fn only_a_refused_hold_key_is_told_as_a_failure() {
         // (what the desktop said, failure told, watching, why unavailable)
         type Case = (
