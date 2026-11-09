@@ -601,7 +601,9 @@ mod tests {
     use std::sync::{Arc, Mutex, PoisonError};
 
     #[cfg(target_os = "linux")]
+    use thalvi_desktop::config::Look;
     use thalvi_desktop::host::RequestServer;
+    use thalvi_desktop::writing::DEFAULT_PROMPT;
 
     use super::*;
     use crate::settings::Store;
@@ -915,6 +917,43 @@ mod tests {
         assert_eq!(rig.fake.config().stt.entries.key_of("cybrex2"), SECRET);
         let unchanged = rig.set(json!({"look": "holo"}));
         assert_eq!(unchanged, json!({"ok": true, "changed": false}));
+    }
+
+    #[test]
+    fn the_writing_prompt_is_read_checked_and_set_like_settings_with_the_key_masked() {
+        let rig = Rig::new(
+            "prompt",
+            &format!(
+                r#"{{"look": "neon", "writing": {{"url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "{SECRET}"}}}}"#
+            ),
+        );
+        let get = || rig.ask(&Request::SettingsGet);
+        assert_eq!(get()["settings"]["writing"]["prompt"], DEFAULT_PROMPT);
+        assert_eq!(get()["settings"]["writing_default_prompt"], DEFAULT_PROMPT);
+
+        let blank = json!({"writing": {"prompt": "  "}});
+        let message = "writing.prompt must not be blank. Restore the default to start over.";
+        let check = rig.ask(&Request::SettingsCheck {
+            settings: blank.clone(),
+        });
+        assert_eq!(
+            check,
+            json!({"ok": false, "error": message, "valid": false})
+        );
+        let set = rig.set(blank);
+        assert_eq!(set["error"], message);
+        assert_eq!(rig.fake.config().writing.unwrap().prompt(), DEFAULT_PROMPT);
+
+        let set = rig.set(json!({"writing": {"prompt": "Be brief."}}));
+        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
+        let config = rig.fake.config();
+        let writing = config.writing.as_ref().unwrap();
+        assert_eq!((writing.prompt(), writing.key()), ("Be brief.", SECRET));
+        assert_eq!(config.look, Look::Neon, "unrelated settings are kept");
+        let shown = get();
+        assert_eq!(shown["settings"]["writing"]["prompt"], "Be brief.");
+        assert!(!shown.to_string().contains(SECRET), "{shown}");
+        assert_eq!(rig.fake.store.load().unwrap(), config);
     }
 
     #[test]

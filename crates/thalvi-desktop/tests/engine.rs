@@ -30,7 +30,7 @@ use thalvi_desktop::recognizer::{
 use thalvi_desktop::spotter::KeywordSpotter;
 use thalvi_desktop::vad::VadDetector;
 use thalvi_desktop::wake::WakeEvent;
-use thalvi_desktop::writing::WritingError;
+use thalvi_desktop::writing::{DEFAULT_PROMPT, WritingError};
 use tokio::task::{JoinHandle, LocalSet};
 
 type TestEngine = Engine<FakeRecognizer, FakeWake, FakeCuePlayer>;
@@ -4869,7 +4869,7 @@ async fn the_written_text_streams_into_the_state_and_is_pasted_when_the_stream_e
 }
 
 #[tokio::test(start_paused = true)]
-async fn only_the_spoken_words_are_sent_with_the_language_instruction() {
+async fn only_the_spoken_words_are_sent_with_the_default_prompt() {
     LocalSet::new()
         .run_until(async {
             for (ask, words, key) in [
@@ -4902,16 +4902,40 @@ async fn only_the_spoken_words_are_sent_with_the_language_instruction() {
                 let messages = body["messages"].as_array().unwrap();
                 assert_eq!(messages.len(), 2, "{label}");
                 assert_eq!(messages[0]["role"], "system", "{label}");
-                let prompt = messages[0]["content"].as_str().unwrap();
-                for instruction in ["language they spoke", "Add no facts", "text only"] {
-                    assert!(prompt.contains(instruction), "{label}: {prompt}");
-                }
+                assert_eq!(messages[0]["content"], DEFAULT_PROMPT, "{label}");
                 assert_eq!(
                     messages[1],
                     json!({"role": "user", "content": words}),
                     "{label}"
                 );
             }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_saved_prompt_is_the_system_message_and_the_words_stay_the_user_message() {
+    LocalSet::new()
+        .run_until(async {
+            let prompt = "Write short emails.\nSign off with “Best”.";
+            let (url, mut asked, _feed) = chat(Chat::Stream("data: [DONE]\n\n")).await;
+            let config = json!({
+                "ending_pause": {"paste": 2.5},
+                "writing": {"url": url, "model": "m", "prompt": prompt},
+            })
+            .to_string();
+            let (mut rig, engine, frames) = Rig::new(&config);
+            let task = Ask::Key.start(engine, frames);
+            Ask::Key.say(&mut rig, WORDS).await;
+            let asked = request(&mut asked).await;
+            finished(task).await;
+            assert_eq!(
+                asked.body["messages"],
+                json!([
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": WORDS},
+                ])
+            );
         })
         .await;
 }
