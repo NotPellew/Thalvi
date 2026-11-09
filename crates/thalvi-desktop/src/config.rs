@@ -601,6 +601,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
+    use serde_json::json;
+
     use super::*;
     use crate::capture::{CaptureRoute, Ending};
     use crate::cues::Cue;
@@ -609,6 +611,7 @@ mod tests {
     use crate::secondary::{SecondaryApi, SecondaryStt};
     use crate::transducer::SpeechChoice;
     use crate::wake::HeadModel;
+    use crate::writing::DEFAULT_PROMPT;
 
     fn parse(json: &str) -> Result<DesktopConfig, ConfigError> {
         DesktopConfig::from_json_str(json)
@@ -672,7 +675,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(endpoint.model(), "m");
+        assert_eq!(
+            endpoint.prompt(),
+            DEFAULT_PROMPT,
+            "no prompt means the default"
+        );
         for (json, expected) in [
+            (
+                r#"{"writing": {"url": "http://x", "model": "m", "prompt": " \n"}}"#,
+                "writing.prompt must not be blank",
+            ),
             (
                 r#"{"writing": {"url": "ftp://x", "model": "m"}}"#,
                 "writing.url must be",
@@ -693,6 +705,25 @@ mod tests {
             let error = writing(json).unwrap_err().to_string();
             assert!(error.contains(expected), "{json}: {error}");
         }
+    }
+
+    #[test]
+    fn a_writing_prompt_is_kept_only_when_it_differs_from_the_default() {
+        let stored = |prompt: &str| {
+            let json = json!({"writing": {"url": "http://x", "model": "m", "prompt": prompt}});
+            let config = parse(&json.to_string()).unwrap();
+            let written = serde_json::to_value(&config).unwrap();
+            assert_eq!(parse(&written.to_string()).unwrap(), config);
+            (
+                config.writing.unwrap().prompt().to_owned(),
+                written["writing"].get("prompt").cloned(),
+            )
+        };
+        assert_eq!(stored(DEFAULT_PROMPT), (DEFAULT_PROMPT.to_owned(), None));
+        assert_eq!(
+            stored("  Be brief.\n"),
+            ("Be brief.".to_owned(), Some(json!("Be brief.")))
+        );
     }
 
     #[test]

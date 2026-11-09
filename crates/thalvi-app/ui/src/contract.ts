@@ -101,6 +101,8 @@ export interface WritingSettings {
   model: string;
   api_key?: string;
   has_key?: boolean;
+  /** Set only when it differs from `Settings.writing_default_prompt`; Settings shows the prompt in effect. */
+  prompt?: string;
 }
 export type LiveEntry = RealtimeEntry | ThalviServerEntry | OnDeviceEntry;
 export type SpeechEntry = LiveEntry | SecondPassEntry;
@@ -143,6 +145,8 @@ export interface Settings {
   write_key: string;
   /** The chat endpoint that writes dictation out; null until one is set up. */
   writing: WritingSettings | null;
+  /** The writing prompt used until the user sets their own; read only. */
+  writing_default_prompt: string;
   /** Whether finished captures are kept on this computer, and how many. */
   history: { enabled: boolean; limit: number };
 }

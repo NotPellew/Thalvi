@@ -7,6 +7,7 @@ use thalvi_desktop::config::{ConfigError, DesktopConfig};
 use thalvi_desktop::entries::{self, LiveKind};
 use thalvi_desktop::transducer::{SpeechChoice, check_folder};
 use thalvi_desktop::wake::validate_wake_models;
+use thalvi_desktop::writing::{DEFAULT_PROMPT, Writing};
 
 /// Where the config lives.
 #[derive(Clone, Debug)]
@@ -82,9 +83,11 @@ impl Store {
 }
 
 /// Fills in what the form never carries: the OS switches' preferences are `current`'s, and each
-/// speech entry without an `api_key` keeps the one saved for its id.
+/// speech entry without an `api_key` keeps the one saved for its id. What the form only shows,
+/// the default writing prompt, is dropped.
 fn prepare(settings: &mut Value, current: &DesktopConfig) {
     if let Some(settings) = settings.as_object_mut() {
+        settings.remove("writing_default_prompt");
         settings.insert(
             "start_at_login".to_owned(),
             Value::Bool(current.start_at_login),
@@ -200,8 +203,9 @@ pub fn judge(
     Ok(config)
 }
 
-/// The settings window's form of `config`: the file form, without the OS switches and with API
-/// keys replaced by whether the entry has one.
+/// The settings window's form of `config`: the file form, without the OS switches, with API keys
+/// replaced by whether the entry has one, the writing prompt in effect, and the default prompt
+/// the window offers to restore.
 ///
 /// # Errors
 /// Fails when the config cannot be written as JSON.
@@ -225,6 +229,22 @@ pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
         writing.insert(
             "has_key".to_owned(),
             Value::Bool(key != Value::String(String::new())),
+        );
+        writing.insert(
+            "prompt".to_owned(),
+            Value::String(
+                config
+                    .writing
+                    .as_ref()
+                    .map_or(DEFAULT_PROMPT, Writing::prompt)
+                    .to_owned(),
+            ),
+        );
+    }
+    if let Some(settings) = settings.as_object_mut() {
+        settings.insert(
+            "writing_default_prompt".to_owned(),
+            Value::String(DEFAULT_PROMPT.to_owned()),
         );
     }
     Ok(settings)
@@ -260,10 +280,7 @@ fn unmask_keys(settings: &mut Value, current: &DesktopConfig) {
     if let Some(writing) = settings.get_mut("writing").and_then(Value::as_object_mut) {
         writing.remove("has_key");
         if !writing.contains_key("api_key") {
-            let saved = current
-                .writing
-                .as_ref()
-                .map_or("", thalvi_desktop::writing::Writing::key);
+            let saved = current.writing.as_ref().map_or("", Writing::key);
             writing.insert("api_key".to_owned(), Value::String(saved.to_owned()));
         }
     }
@@ -345,7 +362,8 @@ mod tests {
                 "stt",
                 "wake",
                 "write_key",
-                "writing"
+                "writing",
+                "writing_default_prompt"
             ]
         );
         assert_eq!(
@@ -485,6 +503,48 @@ mod tests {
 
         assert_eq!(keys(&after_untouched), ["live-secret", "second-secret", ""]);
         assert_eq!(keys(&after_edit), ["replaced", "", ""]);
+    }
+
+    #[test]
+    fn the_writing_prompt_is_shown_as_in_effect_saved_when_changed_and_refused_when_blank() {
+        let (store, dir) = store("prompt");
+        let endpoint = json!({"url": "http://127.0.0.1:8000/v1", "model": "m", "api_key": "k"});
+        let mut settings = settings_json(&store_defaults()).unwrap();
+        assert_eq!(settings["writing_default_prompt"], DEFAULT_PROMPT);
+        settings["writing"] = endpoint.clone();
+        let mut current = store.save(settings, &store_defaults()).unwrap();
+        let file = || std::fs::read_to_string(&store.path).unwrap();
+        assert!(!file().contains("prompt"), "the default is not stored");
+        let mut shown = settings_json(&current).unwrap();
+        assert_eq!(shown["writing"]["prompt"], DEFAULT_PROMPT);
+
+        shown["writing"]["prompt"] = json!("  Be brief.\nNo greeting.  ");
+        current = store.save(shown, &current).unwrap();
+        assert_eq!(
+            current.writing.as_ref().unwrap().prompt(),
+            "Be brief.\nNo greeting."
+        );
+        assert_eq!(store.load().unwrap(), current, "kept after a restart");
+        let mut shown = settings_json(&current).unwrap();
+        assert_eq!(shown["writing"]["prompt"], "Be brief.\nNo greeting.");
+
+        for blank in ["", " \n\t"] {
+            shown["writing"]["prompt"] = json!(blank);
+            let refused = store.save(shown.clone(), &current).unwrap_err();
+            assert!(
+                refused.starts_with("writing.prompt must not be blank"),
+                "{refused}"
+            );
+            assert_eq!(store.load().unwrap(), current, "nothing was written");
+        }
+
+        shown["writing"]["prompt"] = json!(DEFAULT_PROMPT);
+        store.save(shown, &current).unwrap();
+        assert!(
+            !file().contains("prompt"),
+            "restoring the default removes it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -657,6 +717,9 @@ mod tests {
         let mut config = store_defaults();
         let mut form = settings_json(&config).unwrap();
         form["stt"]["entries"] = json!([missing("/models/gone")]);
+        form.as_object_mut()
+            .unwrap()
+            .remove("writing_default_prompt");
         config = DesktopConfig::from_json_str(&form.to_string()).unwrap();
         assert!(judged(&config, &json!({"look": "neon"}), true).is_ok());
 

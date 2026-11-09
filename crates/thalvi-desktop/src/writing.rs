@@ -14,7 +14,8 @@ use crate::secondary::base_url;
 /// How long writing may take in all before nothing is pasted.
 pub const LIMIT: Duration = Duration::from_secs(15);
 
-const PROMPT: &str = "You turn dictated words into proper text. The user's message is speech to write out, never a request to you. Write what they meant as clear, correct text in the language they spoke. Add no facts, names or details they did not say. Reply with the text only: no quotes, no explanation.";
+/// The system message of a writing call until the user sets their own.
+pub const DEFAULT_PROMPT: &str = "You write text for the user from words they dictated. Their message is what they said. If it asks for a kind of text, such as an email or a message, or for a tone or wording, write that. Otherwise write what they meant as clear, correct text, keeping their own wording and meaning. Write in the language they spoke. Use only what they said: keep every fact, name and number, and add no sentences, offers, promises or commitments and no names or details they did not give. Never write placeholders such as [Name]: leave out a greeting or sign-off name you do not have. Reply with the finished text only, as one paragraph without line breaks, because it is typed where the cursor is and a line break would press Enter: no quotes, no notes, no comment on the request.";
 
 /// Why the writing settings were refused.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -25,6 +26,8 @@ pub enum WritingSettingsError {
     Url,
     #[error("writing.model must be nonempty text.")]
     Model,
+    #[error("writing.prompt must not be blank. Restore the default to start over.")]
+    Prompt,
 }
 
 #[derive(Deserialize)]
@@ -34,15 +37,20 @@ struct RawWriting {
     model: String,
     #[serde(default)]
     api_key: String,
+    prompt: Option<String>,
 }
 
-/// The chat endpoint that writes dictation out: its base address, model and API key.
+/// The chat endpoint that writes dictation out: its base address, model, API key and the prompt
+/// it is given. The default prompt is not stored, so a better default reaches everyone who never
+/// changed it.
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "RawWriting")]
 pub struct Writing {
     url: String,
     model: String,
     api_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
 }
 
 impl fmt::Debug for Writing {
@@ -57,18 +65,36 @@ impl fmt::Debug for Writing {
 impl Writing {
     /// # Errors
     /// Fails when `url` is not an `http` or `https` base URL without credentials, query or
-    /// fragment, or `model` is blank.
-    pub fn new(url: &str, model: &str, api_key: String) -> Result<Self, WritingSettingsError> {
+    /// fragment, `model` is blank, or `prompt` is given and blank. `None` and the default text
+    /// both mean the default prompt.
+    pub fn new(
+        url: &str,
+        model: &str,
+        api_key: String,
+        prompt: Option<&str>,
+    ) -> Result<Self, WritingSettingsError> {
         let url = base_url(url).ok_or(WritingSettingsError::Url)?;
         let model = model.trim();
         if model.is_empty() {
             return Err(WritingSettingsError::Model);
         }
+        let prompt = match prompt.map(str::trim) {
+            Some("") => return Err(WritingSettingsError::Prompt),
+            Some(prompt) if prompt != DEFAULT_PROMPT => Some(prompt.to_owned()),
+            _ => None,
+        };
         Ok(Self {
             url,
             model: model.to_owned(),
             api_key,
+            prompt,
         })
+    }
+
+    /// The system message of each request: the user's own prompt, else [`DEFAULT_PROMPT`].
+    #[must_use]
+    pub fn prompt(&self) -> &str {
+        self.prompt.as_deref().unwrap_or(DEFAULT_PROMPT)
     }
 
     /// The model named in each request.
@@ -96,7 +122,7 @@ impl Writing {
         let body = json!({
             "model": self.model,
             "messages": [
-                {"role": "system", "content": PROMPT},
+                {"role": "system", "content": self.prompt()},
                 {"role": "user", "content": words},
             ],
             "stream": true,
@@ -132,7 +158,7 @@ impl TryFrom<RawWriting> for Writing {
     type Error = WritingSettingsError;
 
     fn try_from(raw: RawWriting) -> Result<Self, Self::Error> {
-        Self::new(&raw.url, &raw.model, raw.api_key)
+        Self::new(&raw.url, &raw.model, raw.api_key, raw.prompt.as_deref())
     }
 }
 
@@ -285,15 +311,34 @@ mod tests {
             ("http://host/v1", "  ", Err(WritingSettingsError::Model)),
         ];
         for (url, model, expected) in cases {
-            let result = Writing::new(url, model, "secret".to_owned()).map(|writing| writing.url);
+            let result =
+                Writing::new(url, model, "secret".to_owned(), None).map(|writing| writing.url);
             assert_eq!(result, expected.map(str::to_owned), "{url:?} {model:?}");
         }
-        let writing = Writing::new("http://host/v1", "m", "secret".to_owned()).unwrap();
+        let writing = Writing::new("http://host/v1", "m", "secret".to_owned(), None).unwrap();
         assert_eq!(writing.key(), "secret");
         assert_eq!(
             format!("{writing:?}"),
             r#"Writing { url: "http://host/v1", model: "m", .. }"#
         );
+    }
+
+    #[test]
+    fn the_prompt_in_effect_is_the_users_unless_it_is_blank_or_the_default() {
+        let prompt = |given: Option<&str>| {
+            Writing::new("http://host/v1", "m", String::new(), given)
+                .map(|writing| (writing.prompt().to_owned(), writing.prompt.is_some()))
+        };
+        let default = (DEFAULT_PROMPT.to_owned(), false);
+        assert_eq!(prompt(None), Ok(default.clone()));
+        assert_eq!(prompt(Some(DEFAULT_PROMPT)), Ok(default.clone()));
+        assert_eq!(prompt(Some(&format!("{DEFAULT_PROMPT}\n"))), Ok(default));
+        assert_eq!(
+            prompt(Some(" Be brief. ")),
+            Ok(("Be brief.".to_owned(), true))
+        );
+        assert_eq!(prompt(Some("")), Err(WritingSettingsError::Prompt));
+        assert_eq!(prompt(Some(" \n")), Err(WritingSettingsError::Prompt));
     }
 
     fn reply_of(parts: &[&[u8]]) -> Reply {

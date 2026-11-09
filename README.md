@@ -446,9 +446,13 @@ recognized. There is no write-and-send: press Enter yourself after reading it.
 
 The model is any OpenAI-compatible chat completions endpoint (Glimmer, Baseten, a
 llama.cpp server, Meta), set under **Settings → Speech → Writing** as `writing`
-in the config: `url`, `model` and `api_key`. Only the recognized words are sent:
-no window, app or other context. Saving never calls it. If it is not set up,
-fails, answers with nothing, or takes longer than 15 seconds, nothing is typed,
+in the config: `url`, `model` and `api_key`. The model gets the **Writing prompt**
+(`prompt`) as its instructions and the recognized words as the message: no window,
+app or other context. The default prompt follows what you ask for (an email, a tone,
+a wording), invents nothing and answers in one paragraph, since a typed line break
+would press Enter; edit it in Settings or restore the default there.
+How closely a model follows it depends on the model. Saving never calls the model.
+If it is not set up, fails, answers with nothing, or takes longer than 15 seconds, nothing is typed,
 Thalvi says what happened, and your own words go on the clipboard to paste with
 Ctrl+V.
 

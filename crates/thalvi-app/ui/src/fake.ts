@@ -58,6 +58,7 @@ const SETTINGS: Settings = {
   hold_key: "Alt+KeyZ",
   write_key: "Alt+KeyX",
   writing: null,
+  writing_default_prompt: "Write what I dictated as clear text.",
   history: { enabled: true, limit: 200 },
 };
 
