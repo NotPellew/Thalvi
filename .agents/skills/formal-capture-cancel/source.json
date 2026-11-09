@@ -12,7 +12,7 @@
       ]
     },
     "crates/thalvi-desktop/src/engine.rs": {
-      "sha256": "70fd7333610e87a666670889b1572014496fdaa83a5cc4fcafdfaad771493c51",
+      "sha256": "eeb9411b5408449ae239eb59759f789016c2daa236c9371915d4a552c17c3baa",
       "functions": [
         "EngineHandle::cancel",
         "Engine::capture",
@@ -25,7 +25,7 @@
       ]
     },
     "crates/thalvi-desktop/src/recognizer.rs": {
-      "sha256": "1a8eeae8b4164b7f132a653b01e85f78b7b976294295162ade436595f4104c06",
+      "sha256": "69cb3830175b1ef523da3e2aa21b9e8ae86ca374ed60eb69d46032449d8c0b56",
       "functions": [
         "RecognizerSession",
         "ServerSession::close"
