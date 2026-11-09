@@ -588,6 +588,8 @@ async fn a_speech_download_reports_progress_up_to_done() {
     );
     assert!(store.is_cached(&assets).await);
     assert_eq!(leftovers(&dir).len(), 4);
+    assert_eq!(store.path(&assets.encoder), dir.join("m.encoder.onnx"));
+    assert!(store.path(&assets.tokens).is_file());
 }
 
 #[tokio::test]
