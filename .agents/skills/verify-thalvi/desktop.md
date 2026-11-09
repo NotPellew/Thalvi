@@ -1,9 +1,10 @@
 # Verify the desktop app in a sandbox
 
 Runs the real `thalvi-desktop` (a chosen commit's debug build) on a real
-Hyprland, nested in a headless compositor, inside `bwrap`. Nothing of the
-developer's desktop, microphone, audio, config, model cache or running Thalvi is
-reachable, so an agent can use it with no developer involved. The web client has
+Hyprland, nested in a headless compositor, inside `bwrap`. The developer's
+home, desktop, microphone, audio, config, model cache and running Thalvi are out
+of reach (the rest of `/` is read-only, and the network is shared unless the run
+is `--offline`; see Isolation), so an agent can use it with no developer involved. The web client has
 its own recipes (`SKILL.md`); this file is the desktop counterpart.
 
 It covers what shows on screen and in stdout: the overlay, the Settings window at
@@ -58,12 +59,22 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   between cases by deleting `$R/home/.local/share/thalvi` (that is the app's
   private data directory, models included) and rewriting
   `$R/home/.config/thalvi/desktop.json` (`--config` copies a file there).
-- Without `--config` the defaults apply, and the on-device speech model
-  downloads 650 MB at start. Always set `server` to an unreachable address
-  (`ws://127.0.0.1:1`, never the developer's server) and, when the on-device
-  engine is chosen, `HTTPS_PROXY=http://127.0.0.1:1` unless the download is the
-  point. Copy model files read-only into `$R/home/.local/share/thalvi/models/`
-  to skip a download.
+- Without `--config` the defaults apply: speech goes to a Thalvi server at
+  `ws://127.0.0.1:8080`, which on the host can be the developer's own. Always
+  point the live entry at an unreachable address:
+  `{"stt":{"entries":[{"kind":"thalvi_server","id":"rig","name":"Rig","active":true,"address":"ws://127.0.0.1:1"}]}}`.
+  An on-device entry (`{"kind":"on_device","id":"dev","name":"On this computer","active":true,"model":"nemotron_160ms"}`)
+  downloads about 650 MB at start; add `--env HTTPS_PROXY=http://127.0.0.1:1`
+  unless the download is the point. Add `"recordings":{"metrics":true,"text":true,"audio":false}`
+  for the evidence below.
+- Copy model files read-only from a cache into `$R/home/.local/share/thalvi/models/`
+  to skip downloads (the app checks their hashes). Every start needs
+  `melspectrogram.onnx`, `embedding_model.onnx`, `hey_thalvi_v0.0.14.onnx`,
+  `hey_mycroft_v0.1.onnx`, `openwakeword/` and the ending spotter's
+  `kws_gigaspeech_3m.*` and `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/`
+  (about 20 MB together); on-device Nemotron adds `nemotron_160ms.*`. A missing
+  ending spotter downloads from modelscope.cn, which can be slow enough to fail;
+  the app then says so and keeps working.
 - App output is `$R/out/app-<tag>.log`, every line stamped with its arrival time.
   The app's own state: `$H ctl $R status`.
 
@@ -77,11 +88,12 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
 | Window size | `$H hypr $R dispatch setfloating "title:^Thalvi settings\$"`, then `$H hypr $R dispatch resizewindowpixel "exact 400 680,title:^Thalvi settings\$"`; repeat until `$H hypr $R clients` shows `size: 400,680` |
 | Screenshot | `$H shot $R name` (whole screen, `$R/out/name.png`); crop with Pillow, view with the image reader |
 | Frame burst | `$H burst $R name 100 0.15` writes `name-001.png...` and `name-times.txt` (time of each frame, same clock as the log) |
-| Download proxy | `scripts/throttle-proxy.py PORT 250000` slows a real download so the notice stays on screen; with rate `0` it answers 502 after 2 s |
+| Download proxy | `.agents/skills/verify-thalvi/scripts/throttle-proxy.py PORT 250000` slows a real download so the notice stays on screen; with rate `0` it answers 502 after 2 s |
 | Anything else inside | `$H sh $R <command>` |
 
-- `app-start` returns before the app is ready. Repeat `$H ctl $R status` under a
-  bounded loop until it answers, open Settings, then wait for its window in
+- `app-start` returns before the app is ready. `$H ctl $R status` answers at once
+  with class `unavailable` (not running yet), then `loading`; repeat it under a
+  bounded loop until the class is neither, open Settings, then wait for its window in
   `$H hypr $R clients` before sending keys.
 - The overlay and Settings share the window class `thalvi-desktop`, so a `class:`
   selector can move the overlay instead. Select Settings by its title.
@@ -124,8 +136,8 @@ only loopback, so nothing leaves the machine and abstract unix sockets are the r
   and `victim` are started by Hyprland itself (`app-stop` stops the app the same way).
 - A trace shows no AF_INET `connect` when nothing tried to leave the machine; a refused
   attempt still appears there (`ENETUNREACH`). Run an app with an unreachable
-  `server` first as a control that the trace sees what it should.
-- Copy model files into `$R/home/.local/share/thalvi/models/` first. With
+  speech server first as a control that the trace sees what it should.
+- Copy the model files (Launch lists them) in first. With
   `recordings` on in the config (`metrics`, `text`), `$R/home/.local/share/thalvi/recordings/` holds
   what the recognizer heard and how each capture ended.
 - Say the wake phrase (or `ctl hold-start`), then wait until the capture is ready before
@@ -222,8 +234,9 @@ $H app-stop $R     # the app only
 $H down $R         # app and compositors; $R/out stays
 ```
 
-Both stop by recorded PID (the holder shell of each sandbox); nothing is
-matched by name. Check with `ps -eo pid,etime,cmd | grep -E 'bwrap|/tmp/thalvi'`
+Both stop by recorded PID (the holder shell of each sandbox). The one name
+match is a `--hosted` app, which `app-stop` ends with `pkill -x app-bin` inside
+the run's own compositor PID namespace. Check with `ps -eo pid,etime,cmd | grep -E 'bwrap|/tmp/thalvi'`
 that nothing of this run is left. Stop proxies you started by their recorded
 PID. Never run `thalvi-desktop` outside the sandbox: even `--help` starts the
 app against the real session.
