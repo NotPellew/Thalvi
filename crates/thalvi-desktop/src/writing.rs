@@ -28,6 +28,32 @@ pub enum WritingSettingsError {
     Model,
     #[error("writing.prompt must not be blank. Restore the default to start over.")]
     Prompt,
+    #[error("writing.openings needs a phrase with at least one word in every rule.")]
+    OpeningPhrase,
+    #[error("writing.openings has a blank prompt for “{0}”.")]
+    OpeningPrompt(String),
+    #[error("writing.openings has “{0}” twice.")]
+    OpeningTwice(String),
+}
+
+/// The words of `text` as matching compares them: lowercase, each run of characters that are
+/// not letters or digits one space, trimmed. The same function reads a phrase and what was said.
+#[must_use]
+pub fn normalize(text: &str) -> String {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A writing prompt for dictations that begin with a phrase.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Opening {
+    /// Stored normalized.
+    pub phrase: String,
+    pub prompt: String,
 }
 
 #[derive(Deserialize)]
@@ -38,6 +64,8 @@ struct RawWriting {
     #[serde(default)]
     api_key: String,
     prompt: Option<String>,
+    #[serde(default)]
+    openings: Vec<Opening>,
 }
 
 /// The chat endpoint that writes dictation out: its base address, model, API key and the prompt
@@ -51,6 +79,8 @@ pub struct Writing {
     api_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    openings: Vec<Opening>,
 }
 
 impl fmt::Debug for Writing {
@@ -65,13 +95,15 @@ impl fmt::Debug for Writing {
 impl Writing {
     /// # Errors
     /// Fails when `url` is not an `http` or `https` base URL without credentials, query or
-    /// fragment, `model` is blank, or `prompt` is given and blank. `None` and the default text
-    /// both mean the default prompt.
+    /// fragment, `model` is blank, `prompt` is given and blank, or an opening has no word in its
+    /// phrase, a blank prompt or the same normalized phrase as another. `None` and the default
+    /// text both mean the default prompt.
     pub fn new(
         url: &str,
         model: &str,
         api_key: String,
         prompt: Option<&str>,
+        openings: Vec<Opening>,
     ) -> Result<Self, WritingSettingsError> {
         let url = base_url(url).ok_or(WritingSettingsError::Url)?;
         let model = model.trim();
@@ -83,18 +115,53 @@ impl Writing {
             Some(prompt) if prompt != DEFAULT_PROMPT => Some(prompt.to_owned()),
             _ => None,
         };
+        let mut checked: Vec<Opening> = Vec::with_capacity(openings.len());
+        for opening in openings {
+            let phrase = normalize(&opening.phrase);
+            if phrase.is_empty() {
+                return Err(WritingSettingsError::OpeningPhrase);
+            }
+            let prompt = opening.prompt.trim();
+            if prompt.is_empty() {
+                return Err(WritingSettingsError::OpeningPrompt(phrase));
+            }
+            if checked.iter().any(|known| known.phrase == phrase) {
+                return Err(WritingSettingsError::OpeningTwice(phrase));
+            }
+            checked.push(Opening {
+                phrase,
+                prompt: prompt.to_owned(),
+            });
+        }
         Ok(Self {
             url,
             model: model.to_owned(),
             api_key,
             prompt,
+            openings: checked,
         })
     }
 
-    /// The system message of each request: the user's own prompt, else [`DEFAULT_PROMPT`].
+    /// The prompt used when no opening matches: the user's own, else [`DEFAULT_PROMPT`].
     #[must_use]
     pub fn prompt(&self) -> &str {
         self.prompt.as_deref().unwrap_or(DEFAULT_PROMPT)
+    }
+
+    /// The system message for `words`: the prompt of the opening they begin with, the longest
+    /// phrase winning, else [`prompt`](Self::prompt). Whole words only.
+    #[must_use]
+    pub fn prompt_for(&self, words: &str) -> &str {
+        let words = normalize(words);
+        self.openings
+            .iter()
+            .filter(|opening| {
+                words
+                    .strip_prefix(&opening.phrase)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+            })
+            .max_by_key(|opening| opening.phrase.len())
+            .map_or_else(|| self.prompt(), |opening| opening.prompt.as_str())
     }
 
     /// The model named in each request.
@@ -122,7 +189,7 @@ impl Writing {
         let body = json!({
             "model": self.model,
             "messages": [
-                {"role": "system", "content": self.prompt()},
+                {"role": "system", "content": self.prompt_for(words)},
                 {"role": "user", "content": words},
             ],
             "stream": true,
@@ -158,7 +225,13 @@ impl TryFrom<RawWriting> for Writing {
     type Error = WritingSettingsError;
 
     fn try_from(raw: RawWriting) -> Result<Self, Self::Error> {
-        Self::new(&raw.url, &raw.model, raw.api_key, raw.prompt.as_deref())
+        Self::new(
+            &raw.url,
+            &raw.model,
+            raw.api_key,
+            raw.prompt.as_deref(),
+            raw.openings,
+        )
     }
 }
 
@@ -311,11 +384,12 @@ mod tests {
             ("http://host/v1", "  ", Err(WritingSettingsError::Model)),
         ];
         for (url, model, expected) in cases {
-            let result =
-                Writing::new(url, model, "secret".to_owned(), None).map(|writing| writing.url);
+            let result = Writing::new(url, model, "secret".to_owned(), None, Vec::new())
+                .map(|writing| writing.url);
             assert_eq!(result, expected.map(str::to_owned), "{url:?} {model:?}");
         }
-        let writing = Writing::new("http://host/v1", "m", "secret".to_owned(), None).unwrap();
+        let writing =
+            Writing::new("http://host/v1", "m", "secret".to_owned(), None, Vec::new()).unwrap();
         assert_eq!(writing.key(), "secret");
         assert_eq!(
             format!("{writing:?}"),
@@ -326,7 +400,7 @@ mod tests {
     #[test]
     fn the_prompt_in_effect_is_the_users_unless_it_is_blank_or_the_default() {
         let prompt = |given: Option<&str>| {
-            Writing::new("http://host/v1", "m", String::new(), given)
+            Writing::new("http://host/v1", "m", String::new(), given, Vec::new())
                 .map(|writing| (writing.prompt().to_owned(), writing.prompt.is_some()))
         };
         let default = (DEFAULT_PROMPT.to_owned(), false);
@@ -339,6 +413,80 @@ mod tests {
         );
         assert_eq!(prompt(Some("")), Err(WritingSettingsError::Prompt));
         assert_eq!(prompt(Some(" \n")), Err(WritingSettingsError::Prompt));
+    }
+
+    fn opening(phrase: &str, prompt: &str) -> Opening {
+        Opening {
+            phrase: phrase.to_owned(),
+            prompt: prompt.to_owned(),
+        }
+    }
+
+    fn with_openings(
+        prompt: Option<&str>,
+        openings: Vec<Opening>,
+    ) -> Result<Writing, WritingSettingsError> {
+        Writing::new("http://host/v1", "m", String::new(), prompt, openings)
+    }
+
+    #[test]
+    fn a_dictation_gets_the_prompt_of_the_longest_opening_it_begins_with_else_the_fallback() {
+        let rules = vec![
+            opening("write me an email", "EMAIL"),
+            opening("Write me", "ME"),
+            opening("schreib eine nachricht", "NACHRICHT"),
+            opening("wow", "WOW"),
+        ];
+        let writing = with_openings(Some("FALLBACK"), rules.clone()).unwrap();
+        let default = with_openings(None, rules).unwrap();
+        // (what was said, the prompt chosen)
+        let cases = [
+            ("Write me an email, to Anna: I'm late.", "EMAIL"),
+            ("WRITE   ME AN EMAIL", "EMAIL"),
+            ("write me an email", "EMAIL"),
+            ("write me a poem", "ME"),
+            ("write me", "ME"),
+            ("Schreib eine Nachricht an Jörg!", "NACHRICHT"),
+            ("wow, that is loud", "WOW"),
+            ("wowser that is loud", "FALLBACK"),
+            ("please write me an email", "FALLBACK"),
+            ("write", "FALLBACK"),
+            ("", "FALLBACK"),
+        ];
+        for (said, expected) in cases {
+            assert_eq!(writing.prompt_for(said), expected, "{said:?}");
+        }
+        assert_eq!(default.prompt_for("nothing like it"), DEFAULT_PROMPT);
+    }
+
+    #[test]
+    fn openings_are_stored_normalized_and_refused_when_they_cannot_be_used() {
+        let stored = with_openings(
+            None,
+            vec![opening("  Write, me an E-mail! ", "  Be short.\n ")],
+        )
+        .unwrap();
+        assert_eq!(
+            stored.openings,
+            [opening("write me an e mail", "Be short.")]
+        );
+
+        let refused = |openings: Vec<Opening>| with_openings(None, openings).unwrap_err();
+        assert_eq!(
+            refused(vec![opening(" ,. ", "p")]),
+            WritingSettingsError::OpeningPhrase
+        );
+        assert_eq!(
+            refused(vec![opening("ok", "p"), opening("", "p")]),
+            WritingSettingsError::OpeningPhrase
+        );
+        assert_eq!(
+            refused(vec![opening("Write me", " \n")]),
+            WritingSettingsError::OpeningPrompt("write me".to_owned())
+        );
+        let twice = refused(vec![opening("write me", "a"), opening("Write, me!", "b")]);
+        assert_eq!(twice.to_string(), "writing.openings has “write me” twice.");
+        assert!(with_openings(None, Vec::new()).unwrap().openings.is_empty());
     }
 
     fn reply_of(parts: &[&[u8]]) -> Reply {
