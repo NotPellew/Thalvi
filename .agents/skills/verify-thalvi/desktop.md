@@ -142,6 +142,16 @@ only loopback, so nothing leaves the machine and abstract unix sockets are the r
   `https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/high/en_US-ryan-high.onnx`
   plus its `.json`. Then `printf 'Hey Thalvi.' | uvx --from piper-tts==1.8.0 piper -m
   en_US-ryan-high.onnx -f raw.wav` and `ffmpeg -i raw.wav -ar 16000 -ac 1 -sample_fmt s16 wake.wav`.
+- `say` takes a host path. It prints `QUEUED=NAME`, and `$R/out/mic.log` gets `played NAME`
+  once the last sample is in the microphone. Wait for that line before `ctl hold-end`:
+  `timeout 20 sh -c 'until grep -q "played $1" "$0"; do sleep 0.05; done' $R/out/mic.log NAME`.
+  The queue empties when a file starts, not when it ends.
+- Pad each dictation clip with trailing silence (`ffmpeg ... -af apad=pad_dur=1s`). A hold
+  released at the very last sample lost the last word (`on Tuesday` became `onto`); with
+  300 ms or 1 s of silence the whole sentence arrived in 4 of 4 holds.
+- For a spoken ending use `Finish dictation.`: from the Ryan voice it ended and pasted 3 of 3
+  wake captures, while `Paste that.` was heard as `Taste that` and the capture stayed open.
+  `ctl cancel` closes a capture that never ends.
 - `say` holds a file while the app isn't reading the microphone, so a file can play late,
   into the next case. Wait until `$R/home/mic-queue` is empty before starting a case.
 - `pw-link -l` and `pw-cli ls Node` in `$H sh $R` with `PIPEWIRE_REMOTE=rig-pipewire` show
@@ -171,7 +181,7 @@ work as above; `hypr` and `burst` do not exist.
 | Which window has focus | `$H gnome $R focus` (titles), `$H gnome $R windows` (focus, class, size, title) |
 | Keys | `$H gnome $R key Return`, `$H gnome $R type 'text'` (to the focused window) |
 | Clipboard text | `$H gnome $R clip` reads through X11 without taking focus |
-| Say something | `$H say $R file.wav` plays into the default microphone, in real time, once the app captures (16 kHz mono; later files queue) |
+| Say something | `$H say $R file.wav` plays into the default microphone, in real time, once the app captures (16 kHz mono; later files queue; `played NAME` in `$R/out/mic.log` when done) |
 | A window that logs focus | `/tmp/thalvi-gnome-rig.py victim LOG &` inside `$H sh $R bash -c '...'`; the sandbox ends with its command |
 
 - `wl-copy` and `wl-paste` each take keyboard focus for about a millisecond, every

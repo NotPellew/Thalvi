@@ -25,7 +25,8 @@ ctl R ARGS...              run `thalvi-desktop ARGS` against the running app (pa
 hypr R ARGS...             hyprctl against the inner compositor (not in --gnome runs)
 shot R NAME                screenshot of the inner compositor to R/out/NAME.png
 burst R NAME N GAP         N screenshots NAME-001.png... GAP seconds apart (0.1 works); NAME-times.txt stamps each (not in --gnome runs)
-say R WAV                  runs with a microphone: play WAV into it, in real time (queues behind earlier ones)
+say R WAV                  runs with a microphone: play WAV into it, in real time (queues behind earlier ones);
+                           prints QUEUED=NAME, and R/out/mic.log gets `played NAME` when it has played
 gnome R ARGS...            --gnome runs: windows | focus | key NAME | type TEXT | clip | victim LOG (what holds focus, keys, clipboard)
 sh R CMD...                run any command in a sandbox joined to the same private dirs
 proof R                    write R/out/isolation.txt: what the sandbox cannot reach
@@ -436,6 +437,7 @@ cmd_say() {
   local name; name=$r/home/mic-queue/$(date +%s%N)
   ffmpeg -loglevel error -y -i "$wav" -ar 16000 -ac 1 -f s16le "$name.tmp" || die "say: ffmpeg could not read $wav"
   mv "$name.tmp" "$name.raw"
+  echo "QUEUED=${name##*/}.raw"
 }
 
 main() {
