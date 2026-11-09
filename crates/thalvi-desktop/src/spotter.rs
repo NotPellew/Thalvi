@@ -1172,6 +1172,48 @@ mod tests {
             .collect()
     }
 
+    /// `bytes` with the payload of its first (or last) field numbered `tag` replaced.
+    fn edit_field(
+        bytes: &[u8],
+        tag: u64,
+        last: bool,
+        change: impl Fn(&[u8]) -> Vec<u8>,
+    ) -> Vec<u8> {
+        let fields = model_fields(bytes);
+        let chosen = if last {
+            fields.iter().rposition(|(found, _, _)| *found == tag)
+        } else {
+            fields.iter().position(|(found, _, _)| *found == tag)
+        }
+        .unwrap();
+        fields
+            .into_iter()
+            .enumerate()
+            .flat_map(|(at, (_, raw, payload))| {
+                if at == chosen {
+                    field(usize::try_from(tag).unwrap(), &change(payload))
+                } else {
+                    raw.to_vec()
+                }
+            })
+            .collect()
+    }
+
+    /// The encoder with the mel bins of its first input left open: any number is declared fine.
+    fn model_with_open_mel_bins(bytes: &[u8]) -> Vec<u8> {
+        model_graph(bytes, |graph| {
+            edit_field(graph, 11, false, |input| {
+                edit_field(input, 2, false, |kind| {
+                    edit_field(kind, 1, false, |tensor| {
+                        edit_field(tensor, 2, false, |shape| {
+                            edit_field(shape, 1, true, |_| field(2, b"bins"))
+                        })
+                    })
+                })
+            })
+        })
+    }
+
     fn model_without_last_output(bytes: &[u8]) -> Vec<u8> {
         model_graph(bytes, |graph| {
             let fields = model_fields(graph);
@@ -1365,6 +1407,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn beam_paths_that_fall_back_to_the_root_forget_their_tokens_and_merge() {
+        let (files, vocab) = network_fixture().await;
+        let mut network = Network::load(&files, vocab).unwrap();
+        let caches = network.layouts.iter().map(Layout::zeros).collect();
+        let (activations, _) = network
+            .encode(vec![0.0; network.window * KALDI_BINS], caches)
+            .unwrap();
+        // A phrase of pieces that silence never favours, so no kept path starts it.
+        let graph = Graph::new(&[vec![vocab - 1, vocab - 2]]);
+        let mut spotter = OnnxSpotter {
+            caches: network.layouts.iter().map(Layout::zeros).collect(),
+            network,
+            graph,
+            phrases: vec![("far away".to_owned(), Ending::Paste)],
+            unknown: None,
+            fbank: KaldiFbank::new(),
+            features: std::collections::VecDeque::new(),
+            paths: vec![Path::start()],
+            trailing_blanks: 0,
+            decoded: 0,
+        };
+        let dim = spotter.network.dim;
+        assert!(spotter.advance(&activations[..dim], 3).unwrap().is_none());
+        let tokens: Vec<_> = spotter.paths.iter().map(|path| &path.tokens).collect();
+        assert_eq!(tokens, [&vec![-1, 0]]);
+    }
+
+    #[tokio::test]
     async fn encoder_chunks_must_be_nonzero_whole_steps_that_fit_the_window() {
         let (files, vocab) = network_fixture().await;
         let network = Network::load(&files, vocab).unwrap();
@@ -1396,6 +1466,32 @@ mod tests {
                 Err(error) => panic!("{shift}: wrong refusal: {error}"),
                 Ok(_) => panic!("invalid chunk length {shift} was accepted"),
             }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_encoder_that_leaves_its_mel_bins_open_is_refused_before_capture() {
+        let (files, vocab) = network_fixture().await;
+        let dir = std::env::temp_dir().join(format!("thalvi-spotter-bins-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let encoder = dir.join("encoder.onnx");
+        std::fs::write(
+            &encoder,
+            model_with_open_mel_bins(&std::fs::read(&files.encoder).unwrap()),
+        )
+        .unwrap();
+        let candidate = Files {
+            encoder,
+            decoder: files.decoder.clone(),
+            joiner: files.joiner.clone(),
+        };
+        match Network::load(&candidate, vocab) {
+            Err(SpotterError::Unsupported { reason, .. }) => {
+                assert!(reason.contains("needs 80 mel bins"), "{reason}");
+            }
+            Err(error) => panic!("wrong refusal: {error}"),
+            Ok(_) => panic!("an encoder with open mel bins was accepted"),
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
