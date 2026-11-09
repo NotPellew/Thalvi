@@ -825,6 +825,12 @@ function speech(context: PageContext): HTMLElement[] {
   let editingSecond = false;
   let editingAdd = false;
   const nextDictation = el("p", { class: "next-dictation", role: "status" }, "");
+  const retryProblem = note();
+  const useServer = button("Use a speech server instead", () => {
+    addSelected();
+  });
+  const retry = button("Retry", retryDownload);
+  const summaryActions = el("div", { class: "trow", hidden: true }, useServer, retry, retryProblem);
   let currentStatus: Status = { state: "listening" };
   const modelTitles = new Map<string, string>();
   const speechModels: Promise<SpeechModelInfo[]> = backend.listSpeechModels();
@@ -888,6 +894,27 @@ function speech(context: PageContext): HTMLElement[] {
     }
     const modelPart = entry.kind === "on_device" ? ` · ${modelTitleFor(entry)}` : "";
     nextDictation.textContent = `Next dictation: ${entry.name}${modelPart} — ${statusState(currentStatus)}`;
+    const preparing = entry.kind === "on_device" && (currentStatus.state === "loading" || currentStatus.state === "failed");
+    summaryActions.hidden = !preparing;
+    retry.hidden = currentStatus.state !== "failed";
+    if (!preparing) say(retryProblem, "");
+  }
+
+  function retryDownload(): void {
+    const entry = summaryEntry();
+    if (entry?.kind !== "on_device") return;
+    say(retryProblem, "");
+    retry.disabled = true;
+    // The model card's downloader checks every file again and fetches what is missing or corrupt.
+    backend
+      .downloadSpeechModel(entry.model ?? SPEECH_MODEL)
+      .then(() => backend.setListening(true))
+      .catch((error: unknown) => {
+        say(retryProblem, errorText(error));
+      })
+      .finally(() => {
+        retry.disabled = false;
+      });
   }
 
   function entryDescription(entry: SpeechEntry): string {
@@ -1229,9 +1256,10 @@ function speech(context: PageContext): HTMLElement[] {
   }
 
   const kindPicker = controls.select(LIVE_KINDS, "realtime", () => undefined, "Kind of speech server to add");
-  const addLive = button("Add", () => {
+  function addSelected(): void {
     openEditor(null, (kindPicker.field as HTMLSelectElement).value as LiveEntry["kind"]);
-  });
+  }
+  const addLive = button("Add", addSelected);
   addLive.setAttribute("aria-label", "Add a speech server");
   const addSecond = button("Add a second-pass API", () => {
     openEditor(null, "second_pass");
@@ -1323,6 +1351,7 @@ function speech(context: PageContext): HTMLElement[] {
   return [
     group("Live dictation"),
     nextDictation,
+    summaryActions,
     row(
       "Speech servers",
       "One is in use for dictation. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Conversation mode always uses the Thalvi server's own recognizer.",

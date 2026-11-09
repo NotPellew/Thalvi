@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry } from "./contract.ts";
+import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry, Status } from "./contract.ts";
 import settingsCss from "./settings.css?raw";
 import { ELSEWHERE_TEXT, mountSettings, SAVED_MICROPHONE_TEXT, SAVED_TEXT } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO } from "./testing.ts";
@@ -1114,6 +1114,65 @@ describe("the next dictation summary and state words", () => {
     await settle();
     expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Unified — Ready");
     expect(stub.backend.saveSettings).toHaveBeenCalled();
+  });
+
+  describe("the summary's actions while the recognizer is being prepared", () => {
+    const LOADING: Status = { state: "loading", notice: "Loading the speech model. The first time it downloads about 650 MB." };
+    const FAILED: Status = { state: "failed", notice: "n", headline: "Download failed", causes: [], kind: "other" };
+    const actions = (): string[] => {
+      const row = root.querySelector(".next-dictation + div");
+      return row === null || (row as HTMLElement).hidden
+        ? []
+        : Array.from(row.querySelectorAll("button"))
+            .filter((candidate) => !candidate.hidden)
+            .map((candidate) => candidate.textContent);
+    };
+
+    it.each([
+      ["on this computer, loading", local, LOADING, ["Use a speech server instead"]],
+      ["on this computer, failed", local, FAILED, ["Use a speech server instead", "Retry"]],
+      ["on this computer, listening", local, { state: "listening" }, []],
+      ["on this computer, paused", local, { state: "paused" }, []],
+      ["a server, loading", several, LOADING, []],
+      ["a server, failed", several, FAILED, []],
+    ] as [string, () => Settings, Status, string[]][])("shows %s with %j", async (_name, settings, status, expected) => {
+      const stub = await open(settings());
+      goTo("speech");
+      await settle();
+      stub.emit(status);
+      await settle();
+      expect(actions()).toEqual(expected);
+    });
+
+    it("opens the add editor for Use a speech server instead and switches nothing", async () => {
+      const stub = await open(local());
+      goTo("speech");
+      stub.emit(LOADING);
+      await settle();
+      button("Use a speech server instead").click();
+      expect((root.querySelector(".editor") as HTMLElement).hidden).toBe(false);
+      expect(root.querySelector(".editor h4")?.textContent).toBe("Add a realtime speech server");
+      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+      expect(stub.backend.downloadSpeechModel).not.toHaveBeenCalled();
+    });
+
+    it("retries through the model download and clears the failure, or says why it failed again", async () => {
+      const stub = await open(local());
+      goTo("speech");
+      stub.emit(FAILED);
+      await settle();
+      button("Retry").click();
+      await settle();
+      expect(stub.backend.downloadSpeechModel).toHaveBeenCalledExactlyOnceWith("nemotron_160ms");
+      expect(stub.backend.setListening).toHaveBeenCalledExactlyOnceWith(true);
+
+      stub.backend.downloadSpeechModel.mockRejectedValueOnce(new Error("The download of Nemotron Streaming failed: offline."));
+      button("Retry").click();
+      await settle();
+      expect(root.querySelector(".next-dictation + div .note")?.textContent).toBe("The download of Nemotron Streaming failed: offline.");
+      expect(stub.backend.setListening).toHaveBeenCalledTimes(1);
+      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    });
   });
 
   it("follows Use to a server entry", async () => {
