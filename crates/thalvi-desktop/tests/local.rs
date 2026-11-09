@@ -556,6 +556,7 @@ fn fails_at_once(_: usize) -> Reply {
 #[tokio::test]
 async fn a_model_error_drops_the_model_so_the_next_capture_loads_and_plans_again() {
     let rig = rig("lost", fails_at_once, None, 0);
+    assert_eq!(rig.recognizer.name(), "fake-model");
     rig.then_provide(dictation);
     let mut lost = rig.recognizer.connect().await.expect("connects");
     assert_eq!(

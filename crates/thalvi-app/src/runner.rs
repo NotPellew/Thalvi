@@ -23,7 +23,7 @@ use thalvi_desktop::engine::{
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{Desktop, Host};
-use thalvi_desktop::local::LocalRecognizer;
+use thalvi_desktop::local::{LocalRecognizer, ModelSource};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::{self, ModelStore};
 use thalvi_desktop::report::{UserError, causes};
@@ -355,6 +355,39 @@ impl Publisher {
     }
 }
 
+/// Loads the model, showing each step it takes until it is ready, and a failure as a notice.
+async fn load_showing<S: ModelSource>(local: &LocalRecognizer<S>, publisher: &Publisher) {
+    let mut steps = local.steps();
+    let load = local.load();
+    tokio::pin!(load);
+    let loaded = loop {
+        tokio::select! {
+            loaded = &mut load => break loaded,
+            Ok(()) = steps.changed() => {
+                let step = *steps.borrow_and_update();
+                println!("{}", load_notice(step));
+                publisher.loading(Some(step));
+            }
+        }
+    };
+    if let Err(error) = &loaded {
+        println!("{error}");
+    }
+    publisher.update(|view| {
+        view.loading = None;
+        if let Err(error) = loaded
+            && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
+        {
+            view.mode = Mode::Failed(Failure {
+                kind: FailureKind::Other,
+                notice: format!("{error} Dictation will try again when you start it."),
+                headline: error.headline(),
+                causes: causes(&error),
+            });
+        }
+    });
+}
+
 /// Everything one engine needs; replaced when settings change.
 struct Session {
     engine: Engine<Chosen, WakeEngine, CpalCuePlayer>,
@@ -533,40 +566,12 @@ impl Runner {
             self.publisher.loading(None);
             return;
         };
-        let mut steps = local.steps();
-        let first = *steps.borrow_and_update();
+        let first = *local.steps().borrow();
         println!("{}", load_notice(first));
         self.publisher.loading(Some(first));
         let publisher = Rc::clone(&self.publisher);
         self.loading = Some(tokio::task::spawn_local(async move {
-            let load = local.load();
-            tokio::pin!(load);
-            let loaded = loop {
-                tokio::select! {
-                    loaded = &mut load => break loaded,
-                    Ok(()) = steps.changed() => {
-                        let step = *steps.borrow_and_update();
-                        println!("{}", load_notice(step));
-                        publisher.loading(Some(step));
-                    }
-                }
-            };
-            if let Err(error) = &loaded {
-                println!("{error}");
-            }
-            publisher.update(|view| {
-                view.loading = None;
-                if let Err(error) = loaded
-                    && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
-                {
-                    view.mode = Mode::Failed(Failure {
-                        kind: FailureKind::Other,
-                        notice: format!("{error} Dictation will try again when you start it."),
-                        headline: error.headline(),
-                        causes: causes(&error),
-                    });
-                }
-            });
+            load_showing(&local, &publisher).await;
         }));
     }
 
@@ -1483,6 +1488,117 @@ mod tests {
         publisher.loading(None);
         assert!(!shown(), "loaded");
         assert_eq!(title(&status.borrow()), "Thalvi: listening");
+    }
+
+    /// Takes the steps it is told to, one at a time, and then fails or loads.
+    struct Scripted {
+        gate: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        fails: bool,
+    }
+
+    struct NoModel;
+
+    struct NoStream;
+
+    impl thalvi_desktop::local::SpeechStream for NoStream {
+        fn accept(
+            &mut self,
+            _frame: &thalvi_desktop::frame::Frame,
+        ) -> Result<
+            Vec<thalvi_desktop::recognizer::RecognizerEvent>,
+            thalvi_desktop::recognizer::RecognizerError,
+        > {
+            Ok(Vec::new())
+        }
+    }
+
+    impl thalvi_desktop::local::SpeechModel for NoModel {
+        type Stream = NoStream;
+
+        fn device(&self) -> thalvi_desktop::device::Device {
+            thalvi_desktop::device::Device::Cpu(thalvi_desktop::device::Fallback::CpuModel)
+        }
+
+        fn stream(&self) -> NoStream {
+            NoStream
+        }
+    }
+
+    impl ModelSource for Scripted {
+        type Model = NoModel;
+
+        async fn load(
+            &self,
+            step: impl Fn(Step) + Send + Sync,
+        ) -> Result<NoModel, thalvi_desktop::recognizer::RecognizerError> {
+            step(Step::Fetching(Export::Gpu));
+            let gate = self.gate.lock().unwrap().take().unwrap();
+            let _ = gate.await;
+            step(Step::Fetching(Export::Cpu));
+            if self.fails {
+                Err(thalvi_desktop::recognizer::RecognizerError::said(
+                    "Could not download the speech model.",
+                ))
+            } else {
+                Ok(NoModel)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_load_shows_each_step_it_takes_and_then_nothing_or_its_failure() {
+        for (case, fails, mode, shown) in [
+            ("loads", false, Mode::Idle, Mode::Idle),
+            (
+                "fails",
+                true,
+                Mode::Idle,
+                Mode::Failed(Failure {
+                    kind: FailureKind::Other,
+                    notice: "Could not download the speech model. Dictation will try again when you start it."
+                        .to_owned(),
+                    headline: "Speech recognition failed — Settings",
+                    causes: Vec::new(),
+                }),
+            ),
+            ("fails while paused", true, Mode::Paused, Mode::Paused),
+        ] {
+            let (release, gate) = tokio::sync::oneshot::channel();
+            let local = LocalRecognizer::new(
+                Scripted {
+                    gate: std::sync::Mutex::new(Some(gate)),
+                    fails,
+                },
+                "test",
+                Recorder::disabled().metrics(),
+            );
+            let (out, status) = watch::channel(Status::Paused);
+            let publisher = Publisher::new(out, EndingPauses::default());
+            publisher.mode(mode.clone());
+            let load = load_showing(&local, &publisher);
+            tokio::pin!(load);
+
+            tokio::select! {
+                () = &mut load => panic!("{case}: finished before the GPU download was shown"),
+                () = async {
+                    while publisher.view.borrow().loading != Some(Step::Fetching(Export::Gpu)) {
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
+            }
+            if mode == Mode::Idle {
+                let notice = "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.";
+                assert_eq!(
+                    *status.borrow(),
+                    Status::Loading { notice: notice.to_owned(), downloading: true },
+                    "{case}: the step is shown"
+                );
+            }
+            release.send(()).unwrap();
+            load.await;
+            assert_eq!(publisher.view.borrow().loading, None, "{case}: loading ends");
+            assert_eq!(publisher.view.borrow().mode, shown, "{case}");
+        }
     }
 
     #[tokio::test]
