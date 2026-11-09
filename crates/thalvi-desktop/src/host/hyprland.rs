@@ -4,11 +4,12 @@ use std::fmt;
 use std::path::Path;
 
 use serde::Deserialize;
+use xkbcommon::xkb::{self, Keycode, Keysym};
 
 use super::command::{CommandError, CommandRunner, SystemRunner, tool, wl_copy};
 use super::{
-    App, Delivered, HoldSource, Host, HostError, Modifier, OVERLAY_TITLE, PasteText, Shortcut,
-    WebUrl,
+    App, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, OVERLAY_TITLE, PasteText,
+    Shortcut, WebUrl,
 };
 use crate::hold::{HoldKey, HoldKind};
 
@@ -69,8 +70,7 @@ const NO_FOCUSED_WINDOW: &str = "The desktop did not identify the focused window
 const INVALID_WINDOW_LIST: &str = "The desktop returned an invalid window list.";
 const INVALID_MONITOR_LIST: &str = "The desktop returned an invalid monitor list.";
 const NOTHING_TYPED: &str = " Nothing was pasted.";
-const PARTIAL: &str =
-    "Pasting or pressing Enter failed or stopped partway. Check the target before retrying.";
+const ENTER_FAILED: &str = "The text was pasted, but Thalvi may not have pressed Enter. Check the window before trying again.";
 
 /// One window as `hyprctl -j` prints it; any field may be absent, as for no focused window.
 #[derive(Deserialize)]
@@ -111,6 +111,47 @@ struct Monitor {
     focused: bool,
     /// Space panels reserve, in logical pixels, in the order left, top, right, bottom.
     reserved: [i64; 4],
+}
+
+/// The keyboard as `hyprctl -j devices` prints it: the names its keymap is compiled from.
+#[derive(Deserialize)]
+struct Keyboard {
+    rules: String,
+    model: String,
+    layout: String,
+    variant: String,
+    options: String,
+    #[serde(default)]
+    main: bool,
+}
+
+#[derive(Deserialize)]
+struct Devices {
+    keyboards: Vec<Keyboard>,
+}
+
+impl Keyboard {
+    /// The keycode that types `v` on this keyboard: in its first layout, since `sendshortcut`
+    /// sends the key with that layout's group whichever one is active, else in the first other
+    /// layout that has one, since a program matches Ctrl shortcuts against a Latin layout.
+    fn v_keycode(&self) -> Option<u32> {
+        let keymap = xkb::Keymap::new_from_names(
+            &xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
+            &self.rules,
+            &self.model,
+            &self.layout,
+            &self.variant,
+            Some(self.options.clone()),
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )?;
+        (0..keymap.num_layouts()).find_map(|layout| {
+            (keymap.min_keycode().raw()..=keymap.max_keycode().raw()).find(|code| {
+                keymap
+                    .key_get_syms_by_level(Keycode::new(*code), layout, 0)
+                    .contains(&Keysym::v)
+            })
+        })
+    }
 }
 
 /// States on a failure that nothing reached a window.
@@ -155,7 +196,7 @@ fn key_failure(error: &CommandError) -> HostError {
     match error {
         CommandError::NotInstalled(_) => nothing_typed(tool(error)),
         CommandError::TimedOut(_) | CommandError::Failed { .. } => {
-            HostError::MaybePartial(PARTIAL.to_owned())
+            HostError::MaybePartial(MAYBE_PASTED.to_owned())
         }
     }
 }
@@ -190,6 +231,22 @@ impl<R: CommandRunner> Hyprland<R> {
             .and_then(Row::window)
             .map(|(_, window)| window)
             .ok_or_else(|| HostError::NothingTyped(NO_FOCUSED_WINDOW.to_owned()))
+    }
+
+    /// How `sendshortcut` names the V key. Hyprland resolves a key name once per name, against the
+    /// keyboard that last sent a key, so a layout change leaves the old key and a virtual keyboard
+    /// such as wtype's fails it with "key not found"; a keycode from the keymap now in use does not.
+    fn v_key(&self) -> String {
+        let code = self
+            .json("devices")
+            .ok()
+            .and_then(|devices| serde_json::from_str::<Devices>(&devices).ok())
+            .and_then(|devices| {
+                let mut keyboards = devices.keyboards;
+                keyboards.sort_by_key(|keyboard| !keyboard.main);
+                keyboards.first().and_then(Keyboard::v_keycode)
+            });
+        code.map_or_else(|| "v".to_owned(), |code| format!("code:{code}"))
     }
 
     /// Every window, most recently focused first.
@@ -262,7 +319,12 @@ impl<R: CommandRunner> Host for Hyprland<R> {
         if paste {
             // The compositor sends the keys with its own keymap; GTK 3 ignores a Ctrl shortcut
             // that wtype sends with its own.
-            let shortcut = format!("{},v,address:{}", paste_modifiers(target), target.address);
+            let shortcut = format!(
+                "{},{},address:{}",
+                paste_modifiers(target),
+                self.v_key(),
+                target.address
+            );
             let reply = self
                 .run
                 .run("hyprctl", &["dispatch", "sendshortcut", &shortcut], None)
@@ -281,7 +343,7 @@ impl<R: CommandRunner> Host for Hyprland<R> {
             self.run.run("wtype", &keys, None).map_err(|error| {
                 if paste {
                     // The paste went through, so the text is in the window even if Enter is not.
-                    HostError::MaybePartial(PARTIAL.to_owned())
+                    HostError::MaybePartial(ENTER_FAILED.to_owned())
                 } else {
                     key_failure(&error)
                 }
@@ -428,6 +490,20 @@ mod tests {
         )
     }
 
+    /// `hyprctl -j devices` for keyboards given as (layout, variant, active index, main).
+    fn keyboards(keyboards: &[(&str, &str, u32, bool)]) -> String {
+        let rows: Vec<String> = keyboards
+            .iter()
+            .map(|(layout, variant, index, main)| {
+                format!(
+                    r#"{{"rules": "", "model": "", "layout": "{layout}", "variant": "{variant}",
+                        "options": "", "active_layout_index": {index}, "main": {main}}}"#
+                )
+            })
+            .collect();
+        format!(r#"{{"keyboards": [{}], "mice": []}}"#, rows.join(","))
+    }
+
     fn window(address: &str, pid: u32, class: &str) -> Window {
         Window {
             address: address.to_owned(),
@@ -459,6 +535,7 @@ mod tests {
                     *focused.lock().unwrap() = focus_lands_on.to_owned();
                     Ok("ok".to_owned())
                 }
+                ["hyprctl", "-j", "devices"] => Ok(keyboards(&[("us", "", 0, true)])),
                 ["hyprctl", "dispatch", "sendshortcut", _] => Ok("ok\n".to_owned()),
                 _ => Ok(String::new()),
             }
@@ -568,10 +645,60 @@ mod tests {
                 "hyprctl -j clients".to_owned(),
                 "hyprctl dispatch focuswindow address:0x2".to_owned(),
                 "hyprctl -j activewindow".to_owned(),
-                format!("hyprctl dispatch sendshortcut {shortcut},v,address:0x2"),
+                "hyprctl -j devices".to_owned(),
+                format!("hyprctl dispatch sendshortcut {shortcut},code:55,address:0x2"),
             ];
             expected.extend(submit.then(|| enter.to_owned()));
             assert_eq!(commands(&host), expected, "{class} submit={submit}");
+        }
+    }
+
+    #[test]
+    fn the_paste_key_is_the_one_that_types_v_in_the_layout_now_in_use() {
+        let paste_key = |devices: Result<String, CommandError>| {
+            let host = host(move |_, _| devices.clone());
+            host.v_key()
+        };
+        for (name, devices, expected) in [
+            ("us", Ok(keyboards(&[("us", "", 0, true)])), "code:55"),
+            ("de", Ok(keyboards(&[("de", "", 0, true)])), "code:55"),
+            (
+                "dvorak, where V sits elsewhere",
+                Ok(keyboards(&[("us", "dvorak", 0, true)])),
+                "code:60",
+            ),
+            (
+                "the first layout, though another is active",
+                Ok(keyboards(&[("us,de", "dvorak,", 1, true)])),
+                "code:60",
+            ),
+            (
+                "a first layout without a V falls back to one that has it",
+                Ok(keyboards(&[("ru,us", "", 0, true)])),
+                "code:55",
+            ),
+            (
+                "the main keyboard, not a virtual one",
+                Ok(keyboards(&[
+                    ("de", "", 0, false),
+                    ("us", "dvorak", 0, true),
+                ])),
+                "code:60",
+            ),
+            (
+                "an unknown layout is left to Hyprland",
+                Ok(keyboards(&[("no-such-layout", "", 0, true)])),
+                "v",
+            ),
+            ("no keyboards", Ok(keyboards(&[])), "v"),
+            ("not json", Ok("nope".to_owned()), "v"),
+            (
+                "hyprctl failing",
+                Err(CommandError::TimedOut("hyprctl".to_owned())),
+                "v",
+            ),
+        ] {
+            assert_eq!(paste_key(devices), expected, "{name}");
         }
     }
 
@@ -639,7 +766,14 @@ mod tests {
 
     #[test]
     fn a_key_tool_that_fails_after_focus_may_have_pasted_part_of_the_text() {
-        let partial = HostError::MaybePartial(PARTIAL.to_owned());
+        let partial = HostError::MaybePartial(
+            "Thalvi may or may not have pasted the text. Check the window before trying again."
+                .to_owned(),
+        );
+        let enter_failed = HostError::MaybePartial(
+            "The text was pasted, but Thalvi may not have pressed Enter. Check the window before trying again."
+                .to_owned(),
+        );
         let failed = |program: &str| CommandError::Failed {
             program: program.to_owned(),
             reason: None,
@@ -674,14 +808,14 @@ mod tests {
                 "wtype",
                 Err(failed("wtype")),
                 true,
-                partial.clone(),
+                enter_failed.clone(),
             ),
             (
                 "enter tool missing after the paste",
                 "wtype",
                 Err(CommandError::NotInstalled("wtype".to_owned())),
                 true,
-                partial,
+                enter_failed,
             ),
         ] {
             let host = host(move |argv, _| match argv {

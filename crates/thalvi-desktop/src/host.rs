@@ -40,6 +40,10 @@ pub enum Delivered {
     OnClipboard,
 }
 
+/// What a failed paste says when it is not known whether the text reached the window.
+pub(crate) const MAYBE_PASTED: &str =
+    "Thalvi may or may not have pasted the text. Check the window before trying again.";
+
 /// Why a host action did not complete. The text is the plain notice shown to the user.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HostError {
@@ -214,7 +218,7 @@ pub trait Host: Send + Sync {
     ///
     /// # Errors
     /// [`HostError::NothingTyped`] when the target closed, lost focus or refuses input;
-    /// [`HostError::MaybePartial`] when the paste or Enter stopped partway.
+    /// [`HostError::MaybePartial`] when it is not known whether the paste or Enter reached the window.
     fn deliver(
         &self,
         target: &Self::Target,
