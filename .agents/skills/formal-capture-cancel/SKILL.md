@@ -69,6 +69,14 @@ the same pre-capture boundary; the mapped cancellation functions are unchanged.
 so exact durations and the zero-frame case can be tested. `close_spotting` still
 records it before the ending cue; this metric extraction preserves the control drains and await boundaries.
 An idle failure now picks `NoEnding` or `NoWords` from the kept text; it only chooses the error and leaves every await, control drain and delivery admission as mapped.
+`Engine::reconcile` now stops waiting at the earliest ticked entry, in list order, whose
+answer agrees, and leaves the later requests running in the engine's `recorded_only` set,
+which `scan` and `drive` poll and which only records them. Its one await is still a
+cancellation-first select that also takes the answers, and it returns without another
+await once the entry is known, so the model's `secondary` stage is unchanged: a pending
+cancel wins that select before an answer can become Accepted. Recorded-only requests
+never feed a capture's outcome and a later cancel does not touch them, so they are
+outside the modeled delivery path.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
