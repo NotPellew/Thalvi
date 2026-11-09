@@ -15,7 +15,7 @@ use crate::secondary::base_url;
 pub const LIMIT: Duration = Duration::from_secs(15);
 
 /// The system message of a writing call until the user sets their own.
-pub const DEFAULT_PROMPT: &str = "You write text for the user from words they dictated. Their message is what they said. If it asks for a kind of text, such as an email or a message, or for a tone or wording, write that. Otherwise write what they meant as clear, correct text, keeping their own wording and meaning. Write in the language they spoke. Use only what they said: keep every fact, name and number, and add no sentences, offers, promises or commitments and no names or details they did not give. Never write placeholders such as [Name]: leave out a greeting or sign-off name you do not have. Reply with the finished text only, as one paragraph without line breaks, because it is typed where the cursor is and a line break would press Enter: no quotes, no notes, no comment on the request.";
+pub const DEFAULT_PROMPT: &str = "You write text for the user from words they dictated. Their message is what they said. If it asks for a kind of text, such as an email or a message, or for a tone or wording, write that. Otherwise write what they meant as clear, correct text, keeping their own wording and meaning. Write in the language they spoke. Use only what they said: keep every fact, name and number, and add no sentences, offers, promises or commitments and no names or details they did not give. Never write placeholders such as [Name]: leave out a greeting or sign-off name you do not have. Reply with the finished text only, with line breaks only where the text needs them, such as between the parts of an email: no quotes, no notes, no comment on the request.";
 
 /// Why the writing settings were refused.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -163,7 +163,7 @@ impl TryFrom<RawWriting> for Writing {
 }
 
 /// Why writing produced no text. Messages are shown to the user as written, and the engine adds
-/// that nothing was typed.
+/// that nothing was pasted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum WritingError {
     #[error("No writing model is set up. Add one under Settings → Speech → Writing.")]
