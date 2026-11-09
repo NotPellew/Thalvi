@@ -125,9 +125,15 @@ only loopback, so nothing leaves the machine and abstract unix sockets are the r
 - Copy model files into `$R/home/.local/share/thalvi/models/` first. With
   `recordings` on in the config (`metrics`, `text`), `$R/home/.local/share/thalvi/recordings/` holds
   what the recognizer heard and how each capture ended.
-- Say the wake phrase, wait until `$H ctl $R status` shows `capturing`, wait about two
-  seconds more (the app does not listen during its wake cue), then say the dictation. Sound
-  played into the microphone before that is lost.
+- Say the wake phrase (or `ctl hold-start`), then wait until the capture is ready before
+  saying the dictation. `ctl status` reads `capturing` from the moment the wake cue starts,
+  and the app records nothing until the cue (250 to 370 ms) has ended and the recognizer is
+  connected; a clip started on that word lost its first 250 ms in 1 of 16 trials. With
+  `metrics` on, a new `desktop_transcription_ready` line in
+  `$R/home/.local/share/thalvi/recordings/metrics.jsonl` marks the moment (0.3 to 0.55 s after
+  `hold-start`); `say` right after it kept the whole clip in 16 of 16 trials. Without
+  metrics, wait about two seconds after `capturing`. Sound played into the microphone before
+  that is lost.
 - Synthesize speech with Piper's `en_US-ryan-high` voice; espeak-ng and flite voices
   score near 0 on `hey_thalvi` and don't wake it. Voice:
   `https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/high/en_US-ryan-high.onnx`
