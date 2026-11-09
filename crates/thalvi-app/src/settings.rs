@@ -618,6 +618,65 @@ mod tests {
     }
 
     #[test]
+    fn writing_openings_are_shown_saved_across_a_restart_and_refused_when_unusable() {
+        let (store, dir) = store("openings");
+        let mut settings = settings_json(&store_defaults()).unwrap();
+        settings["writing"] =
+            json!({"url": "http://127.0.0.1:8000/v1", "model": "m", "api_key": "k"});
+        let mut current = store.save(settings, &store_defaults()).unwrap();
+        let file = || std::fs::read_to_string(&store.path).unwrap();
+        assert!(!file().contains("openings"));
+        assert!(
+            settings_json(&current).unwrap()["writing"]
+                .get("openings")
+                .is_none()
+        );
+
+        let mut shown = settings_json(&current).unwrap();
+        shown["writing"]["openings"] = json!([
+            {"phrase": "Write me an email", "prompt": " Greeting, body, sign-off. "},
+            {"phrase": "write a message", "prompt": "Short and casual."},
+        ]);
+        current = store.save(shown, &current).unwrap();
+        let expected = json!([
+            {"phrase": "write me an email", "prompt": "Greeting, body, sign-off."},
+            {"phrase": "write a message", "prompt": "Short and casual."},
+        ]);
+        assert_eq!(
+            settings_json(&current).unwrap()["writing"]["openings"],
+            expected
+        );
+        assert_eq!(store.load().unwrap(), current, "kept after a restart");
+
+        for (openings, refusal) in [
+            (
+                json!([{"phrase": "a", "prompt": "x"}, {"phrase": "A!", "prompt": "y"}]),
+                "writing.openings has “a” twice.",
+            ),
+            (
+                json!([{"phrase": "a", "prompt": "  "}]),
+                "writing.openings has a blank prompt for “a”.",
+            ),
+            (
+                json!([{"phrase": " ", "prompt": "x"}]),
+                "writing.openings needs a phrase",
+            ),
+        ] {
+            let mut shown = settings_json(&current).unwrap();
+            shown["writing"]["openings"] = openings;
+            let refused = store.save(shown, &current).unwrap_err();
+            assert!(refused.starts_with(refusal), "{refused}");
+            assert_eq!(store.load().unwrap(), current, "nothing was written");
+        }
+
+        let mut shown = settings_json(&current).unwrap();
+        shown["writing"]["openings"] = json!([]);
+        store.save(shown, &current).unwrap();
+        assert!(!file().contains("openings"), "an empty list is not written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_writing_endpoint_is_checked_and_its_key_is_hidden_preserved_replaced_or_cleared() {
         let (store, dir) = store("writing");
         let mut settings = settings_json(&store_defaults()).unwrap();
