@@ -403,6 +403,10 @@ function endingsTable({ draft, controls }: PageContext): HTMLElement {
       say(problem, "Type the phrase to add first.");
       return;
     }
+    if (Object.hasOwn(draft.endings, words)) {
+      say(problem, `“${words}” is already in the list.`);
+      return;
+    }
     say(problem, "");
     draft.endings[words] = chosen;
     (phrase.field as HTMLInputElement).value = "";

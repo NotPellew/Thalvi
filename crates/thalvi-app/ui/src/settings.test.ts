@@ -371,6 +371,47 @@ describe("tables", () => {
     expect(sent(stub).endings).toEqual(expected.endings);
   });
 
+  it.each([
+    ["the same action", "paste that", "paste", true],
+    ["a different action", "paste that", "submit", true],
+    ["different case and spacing", "  Paste   THAT ", "paste", true],
+    ["a new phrase, which also clears the earlier notice", "Hold  On", "submit", false],
+  ] as const)("adds an ending phrase given %s only when it is not already listed", async (_name, typed, ending, refused) => {
+    await open();
+    goTo("capture");
+    const table = rowOf("Ending phrases");
+    const field = table.querySelector<HTMLInputElement>(".add input") as HTMLInputElement;
+    const picker = table.querySelector<HTMLSelectElement>(".add select") as HTMLSelectElement;
+    const notice = (): string => table.querySelector(".note:not([hidden])")?.textContent ?? "";
+    const phrases = (): (string | null)[] => Array.from(table.querySelectorAll(".table .phrase"), (node) => node.textContent);
+    const existing = (): string => table.querySelector<HTMLSelectElement>('select[aria-label="Action for “paste that”"]')?.value ?? "";
+    const before = phrases();
+    const tryAdd = (text: string, action: string): void => {
+      type(field, text);
+      choose(picker, action);
+      (table.querySelector(".add button") as HTMLElement).click();
+    };
+    if (!refused) {
+      tryAdd("paste that", "scratch");
+      expect(notice()).toBe("“paste that” is already in the list.");
+    }
+    tryAdd(typed, ending);
+    expect(existing()).toBe("paste");
+    if (refused) {
+      expect(notice()).toBe("“paste that” is already in the list.");
+      expect(field.value).toBe(typed);
+      expect(picker.value).toBe(ending);
+      expect(phrases()).toEqual(before);
+      expect(root.querySelector(".msg")?.textContent).not.toBe("Unsaved changes");
+    } else {
+      expect(notice()).toBe("");
+      expect(field.value).toBe("");
+      expect(phrases()).toEqual([...before, "“hold on”"]);
+      expect(table.querySelector<HTMLSelectElement>('select[aria-label="Action for “hold on”"]')?.value).toBe("submit");
+      expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
+    }
+  });
+
   it("edits an app and a script", async () => {
     const stub = await open();
     goTo("tasks");
