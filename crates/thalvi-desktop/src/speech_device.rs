@@ -3,14 +3,19 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::device::{Adapter, Adapters, Device, Export, Fallback};
-use crate::local::LocalRecognizer;
+use crate::local::{LocalRecognizer, ModelSource};
 use crate::models::{CatalogSpeech, ModelStore};
-use crate::transducer::TransducerSource;
+
+/// The recognizer whose model the engine runs: its name, and where the model runs now.
+struct Active {
+    name: String,
+    device: Box<dyn Fn() -> Option<Device> + Send + Sync>,
+}
 
 /// The model the engine has loaded, and what the latest check of the graphics adapter found.
 pub struct SpeechDevices {
     adapters: Adapters,
-    active: Mutex<Option<Arc<LocalRecognizer<TransducerSource>>>>,
+    active: Mutex<Option<Active>>,
 }
 
 impl SpeechDevices {
@@ -29,8 +34,11 @@ impl SpeechDevices {
     }
 
     /// Names the recognizer whose model Settings reports as the one running; `None` when the engine has none.
-    pub fn use_recognizer(&self, local: Option<Arc<LocalRecognizer<TransducerSource>>>) {
-        *self.active.lock().unwrap_or_else(PoisonError::into_inner) = local;
+    pub fn use_recognizer<S: ModelSource>(&self, local: Option<Arc<LocalRecognizer<S>>>) {
+        *self.active.lock().unwrap_or_else(PoisonError::into_inner) = local.map(|local| Active {
+            name: local.name().to_owned(),
+            device: Box::new(move || local.device()),
+        });
     }
 
     /// Where each catalog model would load on this computer, from the latest adapter check, or one now when no
@@ -49,9 +57,9 @@ impl SpeechDevices {
             .active
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-            .filter(|local| local.name() == model.name())
-            .and_then(|local| local.device());
+            .as_ref()
+            .filter(|active| active.name == model.name())
+            .and_then(|active| (active.device)());
         let planned = self.plans().await(model);
         let gpu_files = model.uses_gpu() && store.is_cached(&model.assets_of(Export::Gpu)).await;
         let cpu_files = store.is_cached(&model.assets_of(Export::Cpu)).await;
@@ -234,5 +242,88 @@ mod tests {
             "Will run on the CPU: this model runs on the CPU"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A model that runs on `device` and does nothing else.
+    struct Source(Device);
+
+    struct Model(Device);
+
+    struct Stream;
+
+    impl crate::local::SpeechStream for Stream {
+        fn accept(
+            &mut self,
+            _frame: &crate::frame::Frame,
+        ) -> Result<Vec<crate::recognizer::RecognizerEvent>, crate::recognizer::RecognizerError>
+        {
+            Ok(Vec::new())
+        }
+    }
+
+    impl crate::local::SpeechModel for Model {
+        type Stream = Stream;
+
+        fn device(&self) -> Device {
+            self.0.clone()
+        }
+
+        fn stream(&self) -> Stream {
+            Stream
+        }
+    }
+
+    impl ModelSource for Source {
+        type Model = Model;
+
+        fn load(
+            &self,
+            _step: impl Fn(crate::device::Step) + Send + Sync,
+        ) -> impl std::future::Future<Output = Result<Model, crate::recognizer::RecognizerError>> + Send
+        {
+            std::future::ready(Ok(Model(self.0.clone())))
+        }
+    }
+
+    fn recognizer(name: &str, device: Device) -> Arc<LocalRecognizer<Source>> {
+        Arc::new(LocalRecognizer::new(
+            Source(device),
+            name,
+            crate::metrics::Recorder::disabled().metrics(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn settings_say_where_the_model_the_engine_loaded_runs_and_nothing_stale_after_it_is_replaced()
+     {
+        let dir = std::env::temp_dir().join(format!("thalvi-active-{}", std::process::id()));
+        let store = ModelStore::in_dir(&dir);
+        let checks = Arc::new(AtomicUsize::new(0));
+        let devices = devices(&checks);
+        let line = async || devices.line(&store, CatalogSpeech::Unified160ms).await;
+        let will_gpu = "Will run on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)";
+
+        let local = recognizer("unified_160ms", Device::Cpu(Fallback::DriverFailed));
+        devices.use_recognizer(Some(Arc::clone(&local)));
+        assert_eq!(line().await, will_gpu, "named but not loaded yet");
+        local.load().await.unwrap();
+        assert_eq!(
+            line().await,
+            "Runs on the CPU: the GPU driver failed to start"
+        );
+
+        devices.use_recognizer(Some(recognizer("nemotron_160ms", Device::Gpu(rtx()))));
+        assert_eq!(line().await, will_gpu, "another model is the active one");
+        devices.use_recognizer::<Source>(None);
+        assert_eq!(line().await, will_gpu, "no engine model");
+
+        let _ = devices.adapters().check();
+        let before = checks.load(Ordering::SeqCst);
+        let _ = line().await;
+        assert_eq!(
+            checks.load(Ordering::SeqCst),
+            before,
+            "the check a load made is the one Settings reads"
+        );
     }
 }

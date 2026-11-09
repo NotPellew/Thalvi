@@ -1578,14 +1578,18 @@ mod tests {
             let load = load_showing(&local, &publisher);
             tokio::pin!(load);
 
-            tokio::select! {
-                () = &mut load => panic!("{case}: finished before the GPU download was shown"),
-                () = async {
-                    while publisher.view.borrow().loading != Some(Step::Fetching(Export::Gpu)) {
-                        tokio::task::yield_now().await;
-                    }
-                } => {}
-            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    () = &mut load => panic!("{case}: finished before the GPU download was shown"),
+                    () = async {
+                        while publisher.view.borrow().loading != Some(Step::Fetching(Export::Gpu)) {
+                            tokio::task::yield_now().await;
+                        }
+                    } => {}
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{case}: the GPU download is never shown"));
             if mode == Mode::Idle {
                 let notice = "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.";
                 assert_eq!(
