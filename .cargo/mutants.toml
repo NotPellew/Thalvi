@@ -18,8 +18,6 @@ exclude_re = [
     "replace [<>] with [<>]= in (kaldi_filters|log_add)",
     # Bins past Nyquist are in no filter either way.
     "replace / with \\* in kaldi_filters",
-    # The first sample's pre-emphasis is multiplied by a window that is zero there.
-    "replace (-=|\\*) with (\\+=|\\+) in (LogMel|KaldiFbank)::frame",
     # The encoder window is 45 samples, which no chunk length divisible by 4 can equal.
     "replace > with >= in Network::load",
     # The pinned decoder accepts -1 and 1 alike as the first context token.
