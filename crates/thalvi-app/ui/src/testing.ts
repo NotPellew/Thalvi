@@ -155,6 +155,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     listSpeechModels: vi.fn<() => Promise<SpeechModelInfo[]>>(() => Promise.resolve([{ ...NEMOTRON }, { ...UNIFIED }])),
     downloadSpeechModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     onSpeechModelProgress: vi.fn((listener: (progress: SpeechModelProgress) => void) => speechListeners.push(listener)),
+    speechDevice: vi.fn<(name: string) => Promise<string>>(() => Promise.resolve("Will run on the CPU: this model runs on the CPU")),
     openSpeechModelSource: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     checkSpeechEntry: vi.fn<(entry: SpeechEntry) => Promise<void>>(() => Promise.resolve()),
     wordListSupport: vi.fn<(entry: LiveEntry) => Promise<boolean>>(() => Promise.resolve(false)),

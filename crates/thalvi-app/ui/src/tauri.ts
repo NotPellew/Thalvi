@@ -81,6 +81,7 @@ export function tauriBackend(): Backend {
         listener(event.payload);
       });
     },
+    speechDevice: (name) => invoke<string>("speech_device", { name }),
     openSpeechModelSource: (name) => invoke<undefined>("open_speech_model_source", { name }),
     checkSpeechEntry: (entry) => invoke<undefined>("check_speech_entry", { entry }),
     wordListSupport: (entry) => invoke<boolean>("word_list_support", { entry }),

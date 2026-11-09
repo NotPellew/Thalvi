@@ -359,7 +359,11 @@ function wakeHeads(context: PageContext): HTMLElement[] {
       },
     );
   }
-  live.refresh = refresh;
+  const before = live.refresh;
+  live.refresh = () => {
+    before();
+    refresh();
+  };
   refresh();
   for (const state of heads) state.render();
   return nodes;
@@ -520,6 +524,7 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
   const source = el("a", { href: info.source, target: "_blank", rel: "noreferrer" }, "Source");
   const meter = el("progress", { max: "100", value: "0", "aria-label": `Download of ${info.title}`, hidden: true });
   const status = el("span", { class: "unit", role: "status" });
+  const device = el("small", { class: "device" });
   const problem = note();
   const download = button("Download", () => {
     say(problem, "");
@@ -556,9 +561,24 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
         ? "Checking files…"
         : `Downloading… ${String(event.percent)}%`;
     download.disabled = running;
-    if (event.status === "done") cached(true);
+    if (event.status === "done") {
+      cached(true);
+      showDevice();
+    }
     if (event.status === "failed") say(problem, event.message ?? "The download failed.");
   }
+
+  function showDevice(): void {
+    backend.speechDevice(info.name).then(
+      (line) => {
+        device.textContent = line;
+      },
+      (error: unknown) => {
+        device.textContent = errorText(error);
+      },
+    );
+  }
+  showDevice();
 
   cached(info.cached);
   return {
@@ -572,6 +592,7 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
         { class: "facts" },
         `License: ${info.license}. Languages: ${info.languages.join(", ")}.${info.languages.length > 1 ? " The language is detected automatically." : ""}`,
       ),
+      device,
       el("div", { class: "trow" }, source, download, meter, status),
       problem,
     ),
@@ -897,10 +918,27 @@ function speech(context: PageContext): HTMLElement[] {
       el("span", { class: "phrase" }, entry.name),
       ...badges(entry),
       el("small", { class: "unit" }, summary(entry)),
+      ...deviceLine(entry),
       use,
       edit,
       drop,
     );
+  }
+
+  /** Where an on-device catalog model runs; a model folder of the user's own has no line. */
+  function deviceLine(entry: LiveEntry): HTMLElement[] {
+    const model = entry.kind === "on_device" ? (entry.model ?? SPEECH_MODEL) : "";
+    if (model === "" || /[\\/]/.test(model)) return [];
+    const line = el("small", { class: "device" });
+    backend.speechDevice(model).then(
+      (text) => {
+        line.textContent = text;
+      },
+      (error: unknown) => {
+        line.textContent = errorText(error);
+      },
+    );
+    return [line];
   }
 
   function secondRow(entry: SecondPassEntry, index: number, count: number): HTMLElement {
@@ -947,6 +985,12 @@ function speech(context: PageContext): HTMLElement[] {
     secondList.hidden = second.length === 0;
   }
   context.live.saved = render;
+  // The model loads behind this long-lived window, so what runs where is asked again when the app's state changes.
+  const before = context.live.refresh;
+  context.live.refresh = () => {
+    before();
+    render();
+  };
 
   function closeEditor(): void {
     editor.replaceChildren();
