@@ -1,6 +1,6 @@
 ---
 name: formal-web-mic
-description: Check that the web client never leaves the microphone open when a conversation ends (moved, deleted, or a private one lost) while Voice is still starting, and that voice is on exactly while a working microphone is held. Use on any change to web/src/main.ts (startVoice, acquireAudio, releaseUnused), web/src/mic.ts (openMic), web/src/controller.ts (setVoice, micStopped, message) or the voice and ended handling in web/src/session.ts and view.ts; update the source-mapped TLA+ model before rerunning when that code changes.
+description: Check that the web client never leaves the microphone open when a conversation ends (moved, deleted, or a private one lost) while Voice is still starting, and that voice is on exactly while a working microphone is held. Use on any change to web/src/device-audio.ts (startVoice, acquire, releaseUnused), web/src/mic.ts (openMic), web/src/controller.ts (setVoice, micStopped, message) or the voice and ended handling in web/src/session.ts and view.ts; update the source-mapped TLA+ model before rerunning when that code changes.
 ---
 
 # Formal web mic
@@ -22,35 +22,33 @@ Three invariants, each one sentence:
 - `NoMicAfterEnd`: once the conversation has ended (`link === "ended"`) and no
   `startVoice` is running, `micInput` holds nothing.
 
-**Current result: FINDING.** `NoOrphanMic` and `NoMicAfterEnd` are broken.
+**Current result: PASS.** All three hold. #330 found `NoOrphanMic` and
+`NoMicAfterEnd` broken; the fix is described below, and the self-test keeps a
+mutation that puts each gap back.
 
-`NoOrphanMic`, the conversation ends while Voice is starting:
+The two gaps, as the model found them:
 
-1. The user taps Voice: `startVoice` runs `acquireAudio`, and `openMic` awaits `getUserMedia` (the permission prompt may be open).
-2. The prompt is granted, and `openMic` awaits `ctx.audioWorklet.addModule`. The conversation's `ended` can also arrive before the grant.
-3. The server's `ended` arrives (moved to another device, deleted, or a private conversation's link lost). `Controller.message` turns voice and speak off and calls `releaseUnused`. `micInput` is still null, so no microphone is stopped. The `AudioContext` is closed.
-4. `addModule` resolves on the closed context. `new AudioWorkletNode` throws `InvalidStateError`, outside `openMic`'s `try`, so the stream's tracks are never stopped. `startVoice`'s catch shows "The microphone could not be started."
+- The conversation ended while Voice was starting: `releaseUnused` found no
+  `micInput` to stop and closed the `AudioContext`. After the permission
+  prompt, `addModule` resolved on the closed context and
+  `new AudioWorkletNode` threw `InvalidStateError`, outside `openMic`'s `try`,
+  so the stream's tracks were never stopped and the browser kept recording.
+  Measured with `scripts/closed-context-probe.html` in HeadlessChrome 153: the
+  track's `readyState` stays `live`.
+- The conversation ended during `await ctx.resume()`: `openMic` then succeeded
+  on the open context and `setVoice(true)` turned voice on in an ended
+  conversation, whose Voice button `view.ts` disables. This trace comes from
+  the model and was not reproduced in a browser.
 
-The browser keeps recording from the microphone: its indicator stays on, and no
-control in the page can stop it until the page is reloaded. Steps 2 to 4 were
-measured with `scripts/closed-context-probe.html` in HeadlessChrome 153: the
-track's `readyState` stays `live`.
-
-`NoMicAfterEnd`, the conversation ends during `await ctx.resume()`:
-
-1. The user taps Voice; `acquireAudio` creates a context and awaits `ctx.resume()`. `audio` is still null.
-2. `ended` arrives; `releaseUnused` has no `audio` to close.
-3. `resume` returns, and `openMic` succeeds on the open context. `startVoice` sets `micInput` and calls `setVoice(true)`, which turns voice on although the link has ended.
-
-The microphone stays open with Voice on, and `view.ts` disables the Voice button
-in an ended conversation, so the user cannot turn it off. This trace comes from
-the model; it was not reproduced in a browser. `ctx.resume()` inside a tap
-usually returns within milliseconds, so this window is far narrower than the
-prompt in the first trace.
+The fix: `openMic` stops its stream's tracks on any failure after
+`getUserMedia` resolved, and `startVoice` stops a microphone that arrives after
+`link === "ended"` and releases the context. In both cases the end's own notice
+stays on screen; the generic "The microphone could not be started." no longer
+replaces it.
 
 ## Covers
 
-Sync commit: `261bb2e0d87119034947afd68ef7844bebf0d381`. [source.json](source.json)
+Sync commit: `41228a49fafc85002521e45f02634a6fb6c544d7`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 
@@ -59,15 +57,15 @@ awaits, or one event:
 
 | Code | Model action |
 | --- | --- |
-| `web/src/main.ts`: `view.onVoice` → `startVoice`, `acquireAudio` up to `await ctx.resume()` | `Tap` (only while not busy, voice off and the link not ended, as `view.ts` enables the button) |
-| `acquireAudio` after `resume`, `openMic` up to `await getUserMedia` | `Resumed` |
+| `web/src/main.ts`: `view.onVoice` → `web/src/device-audio.ts`: `startVoice`, `acquire` up to `await ctx.resume()` | `Tap` (only while not busy, voice off and the link not ended, as `view.ts` enables the button) |
+| `acquire` after `resume`, `openMic` up to `await getUserMedia` | `Resumed` |
 | `openMic` (`web/src/mic.ts`) after `getUserMedia` resolves, up to `await addModule` | `Granted`; a rejection runs `startVoice`'s catch: `Denied` |
-| `openMic` after `addModule` settles, through node creation and return, then `startVoice` setting `micInput` and calling `Controller.setVoice(true)`, or its catch with `releaseUnused` | `Opened`, one step because no await follows `addModule` |
+| `openMic` after `addModule` settles, through node creation and return (its catch stops the tracks), then `startVoice` setting `micInput` and calling `Controller.setVoice(true)`, or stopping the mic when the link has ended, or its catch with `releaseUnused` | `Opened`, one step because no await follows `addModule` |
 | `web/src/controller.ts`: `Controller.message` with `ended` (also `lost` for a private conversation via `session.ts` `endedState`), then `releaseUnused` | `Ended` |
 | `Controller.message` with `input` from `text` while voice is on | `ServerTextInput` |
 | `view.onVoice` while voice is on: `Controller.setVoice(false)` | `VoiceOff` |
 | `openMic`'s track `onended` → `Controller.micStopped` | `TrackEnded` |
-| `main.ts`: `releaseUnused` | `Release`: stops `micInput` unless voice is on; closes the context unless voice or speak is. |
+| `device-audio.ts`: `releaseUnused` (`main.ts` passes it to the Controller) | `Release`: stops `micInput` unless voice is on; closes the context unless voice or speak is. |
 
 Browser behaviour enters as two constants, measured by the probe:
 `ClosedAddModuleRejects = FALSE` and `ClosedNodeThrows = TRUE` (HeadlessChrome 153).
@@ -94,8 +92,7 @@ a 120 s limit and a 512 MB heap. It prints `EVIDENCE=/var/tmp/thalvi-formal-web-
 and keeps TLC's output there. Each counterexample prints as numbered actions
 from the table. Exit 0 prints `PASS`; exit 1 prints `COUNTEREXAMPLE <invariant>`
 for each broken one, then `FAIL`; exit 2 prints `BLOCKED` for source drift, a tool
-error or a timeout. The current result is exit 1, with `NoOrphanMic` and
-`NoMicAfterEnd` broken (the finding above). Never turn a failure into a pass.
+error or a timeout. The current result is exit 0. Never turn a failure into a pass.
 
 After changing the verification:
 
@@ -103,14 +100,13 @@ After changing the verification:
 .agents/skills/formal-web-mic/scripts/check.py --self-test
 ```
 
-It first runs `GuardedOpen = TRUE`, which must pass every invariant (47
-distinct states). In that design, `openMic` stops its tracks on any failure and
-`startVoice` drops a microphone that arrives after the link ended. This shows
-the finding comes from those two gaps, not from the model. Then each mutation
-must break its invariant:
+It first runs the model as it is, which must pass every invariant (44
+distinct states). Then each mutation must break its invariant:
 
 | Mutation constant | What it puts back | Must break |
 | --- | --- | --- |
+| `OpenMicLeaksTracks` | `openMic` stops no tracks when it fails after `getUserMedia` (the #330 fix reverted) | `NoOrphanMic` |
+| `KeepsMicAfterEnd` | `startVoice` keeps a microphone that arrives after the link ended (the #330 fix reverted) | `NoMicAfterEnd` |
 | `ReleaseKeepsMic` | `releaseUnused` no longer stops `micInput` (694a725 added this release when the server turns voice off) | `MicOnlyWithVoice` |
 | `MicStoppedKeepsVoice` | a dead track leaves voice on | `MicOnlyWithVoice` |
 
@@ -148,8 +144,8 @@ bug: report the steps in the code's words, with the harm.
    of `releaseUnused`, and every message that turns voice off or ends the link.
 2. Update the model from the code **before** running TLC. A new await is a new
    pending state that other events can interleave with; code with no await
-   between stays one action. A fix that matches `GuardedOpen` should be modeled
-   from the code itself, not by turning the flag on.
+   between stays one action. A fix should be modeled from the code itself,
+   not by turning a flag on.
 3. Change an invariant only if the promise changed on purpose, with evidence (a
    doc comment, test, DECISIONS.md entry or commit message), and record the old
    wording, the new wording and that evidence here.
@@ -160,8 +156,8 @@ bug: report the steps in the code's words, with the harm.
 5. Run the check and `--self-test`. When a fix lands, the faithful run must pass;
    update the finding above, and add a mutation that reverts the fix.
 
-To prove this recipe, in a throwaway worktree delete `micInput.mic.stop();` from
-`releaseUnused` in `web/src/main.ts`. The unchanged recipe must first report
+To prove this recipe, in a throwaway worktree delete `this.micInput.mic.stop();` from
+`releaseUnused` in `web/src/device-audio.ts`. The unchanged recipe must first report
 `SOURCE DRIFT`. Reading the diff, `releaseUnused` now keeps the stream running,
 which is `ReleaseKeepsMic = TRUE` in the scratch `.cfg`; refresh the hash. The
 check must then also report `COUNTEREXAMPLE MicOnlyWithVoice`, which holds on

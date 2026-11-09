@@ -24,37 +24,44 @@ Three properties, each checked on the real code:
 - `FreeKeyStartsHold`: a key that goes down in order while no hold is open and
   the other key is up starts a hold of that key.
 
-**Current result: FINDING.** `FreeKeyStartsHold` is broken on the real code:
+**Current result: PASS.** All three properties hold on the real code. Until #326,
+`FreeKeyStartsHold` was broken:
 
 1. The write key goes down: `HoldInput::change` starts a write hold, and the engine takes it.
 2. The hold key goes down: `change` ignores it ("one hold at a time").
 3. The write key comes up: the write hold ends.
-4. The hold key comes up while no key is down: `change` takes it for a release that overtook its own press and stores `early_release` for the hold key.
-5. Within `OVERTAKEN_PRESS` (1 s) the hold key goes down again: `change` counts the press and sets its `Cutoff` at once, without setting `down`. `take` returns `None` and `take_lost` 1, so the engine refuses it as `Refusal::TooQuick`.
+4. The hold key comes up while no hold is open: `change` took it for a release that overtook its own press and stored an early-release credit for the hold key.
+5. Within `OVERTAKEN_PRESS` (1 s) the hold key goes down again: `change` counted the press and set its `Cutoff` at once, without setting `down`. `take` returned `None` and `take_lost` 1, so the engine refused it as `Refusal::TooQuick`.
 
-In `HoldInput` either key can be the first one. Harm: a user who touched the other key during
-a hold and presses it again within a second is told "The key was pressed and
-released too quickly" while holding it, and nothing is dictated. The key stays
-unusable until a second passes without its release. On Windows, `HoldHooks` ends
-both holds when the shared modifier comes up and reports them in the order
-`app.rs` builds the hooks, Dictate then Write. So a write key touched during a
-dictation hold reaches step 4 there, but not the reverse. On Hyprland each bind
-reports on its own, so either order can (not tried on a live session). The
-early-release credit came with 3ad1240, and the second key with 1913ec5, which
-made an ignored press's release look like an overtaken one. Reproduced at the
-sync commit by `scripts/check.py`.
+In `HoldInput` either key could be the first one. Harm: a user who touched the
+other key during a hold and pressed it again within a second was told "The key
+was pressed and released too quickly" while holding it, and nothing was
+dictated.
+
+The fix records each key's own phase (`KeyPhase`: up, down, or up with a release
+that overtook a press) on every event, before the "one hold at a time" check, so
+an ignored press is still a press whose release is its own, and a release can
+only be an overtake while that key is up. The early-release credit came with
+3ad1240, and the second key with 1913ec5, which made an ignored press's release
+look like an overtaken one. On Windows, `HoldHooks` ends both holds when the
+shared modifier comes up and reports them in the order `app.rs` builds the
+hooks, Dictate then Write, so a write key touched during a dictation hold reached
+the old step 4 there, but not the reverse; on Hyprland each bind reports on its
+own, so either order could (not tried on a live session).
 
 ## Covers
 
 Sync commit: `a5060554df34d8b99071e7f379376d4e69466f41`. [source.json](source.json)
 records the whole-file hash of `crates/thalvi-desktop/src/hold.rs`. Matching
-hashes establish synchronization only, not that the event model still fits.
+hashes establish synchronization only, not that the event model still fits. The
+recorded hash also covers the #326 fix, whose own commit cannot name itself, so
+`sync_commit` stays at the last commit the check ran against before it.
 
 | Code | In the harness |
 | --- | --- |
-| `hold.rs`: `HoldInput::set`, `HoldInput::set_write`, `HoldInput::change`, `KeyState`, `OVERTAKEN_PRESS` | Called for each arriving key event, in arrival order. Every scenario runs within microseconds, so every early release is inside the 1 s window: the worst case for overtake credit. |
+| `hold.rs`: `HoldInput::set`, `HoldInput::set_write`, `HoldInput::change`, `KeyState`, `KeyPhase`, `OVERTAKEN_PRESS` | Called for each arriving key event, in arrival order. Every scenario runs within microseconds, so every early release is inside the 1 s window: the worst case for overtake credit. |
 | `hold.rs`: `Presses::take`, `Presses::take_lost`, `Presses::is_over`, `Cutoff` | A "look" calls `is_over` on the open hold, then `take` and `take_lost`, as `Engine::scan` and `Engine::on_key` do after each change of the watch. |
-| Hyprland binds (one process per press and per release) | An arrival order may swap a quick tap's press and release (`arrivals` in `harness.rs`). |
+| Hyprland binds (one process per press and per release) | Every `hold-start`, `hold-end`, `write-start` and `write-end` request reaches `HoldInput` through `Running::hold` (`agent.rs`), refused or not, as the Windows hook delivers every key event, so one arrival sequence covers both. An arrival order may swap a quick tap's press and release (`arrivals` in `harness.rs`). |
 | `Engine::scan`'s biased `self.key.changed()` branch | Eager mode: a look after every arrival, up to 8 events. |
 | A watch whose changes are seen late (coalesced, or a cursor not polled) | Late mode: a look after any subset of arrivals, up to 7 events; only `EachPressCountedOnce` is judged there. |
 
@@ -87,8 +94,7 @@ compiling; each run has a 600 s limit. It prints `EVIDENCE=...`; `harness.txt` t
 holds the full output. Exit 0 prints `PASS`; exit 1 prints each broken
 property's shortest counterexample as numbered steps, then `FAIL`; exit 2 prints
 `BLOCKED` for source drift, a build failure or a timeout. The current result is
-exit 1 with `COUNTEREXAMPLE FreeKeyStartsHold` (the finding above). Never turn a
-failure into a pass.
+exit 0 with `PASS`. Never turn a failure into a pass.
 
 After changing the harness, check that each property can still fail:
 
@@ -101,14 +107,15 @@ break its property:
 
 | Mutation | What it puts back | Must break |
 | --- | --- | --- |
-| `NoOvertakeCredit` | no `early_release`: the code before 3ad1240, where a tap whose release arrived first left a hold open | `HoldFollowsItsKey` |
+| `NoOvertakeCredit` | no credit for a release while the key is up: the code before 3ad1240, where a tap whose release arrived first left a hold open | `HoldFollowsItsKey` |
 | `NoOtherKeyGuard` | no "one hold at a time" check: the other key's release ends the hold | `HoldFollowsItsKey` |
 | `UncountedLoss` | `Presses::take` stops counting presses it passes over | `EachPressCountedOnce` |
+| `ForgetIgnoredKey` | the other key's press and release leave no phase behind while a hold ignores them: the #326 bug | `FreeKeyStartsHold` |
 
-`FreeKeyStartsHold` has no mutation while the finding stands, because the real
-code already shows it can fail. When a fix lands, add the fix's reversal as its
-mutation. A mutation whose text no longer matches `hold.rs` stops the self-test
-with `BLOCKED`; update it from the code.
+A fix for the finding must turn `FreeKeyStartsHold` to `HOLDS` without breaking
+the other two, and `ForgetIgnoredKey` is that fix's reversal, so the self-test
+keeps showing the property can fail. A mutation whose text no longer matches
+`hold.rs` stops the self-test with `BLOCKED`; update it from the code.
 
 ## Read a result
 
@@ -144,10 +151,11 @@ to make a run pass.
    `FreeKeyStartsHold` to `HOLDS` without breaking the other two; update the
    finding text here and add its mutation.
 
-To prove this recipe, in a throwaway worktree delete the line
-`state.early_release = Some((kind, Instant::now()));` from `HoldInput::change`.
-The unchanged recipe must first report `SOURCE DRIFT`. The diff changes no
-assumption of the harness, so refresh the hash and rerun: the check must report
+To prove this recipe, in a throwaway worktree make a release while the key is
+up leave the phase `Up` instead of `Overtaken(Instant::now())` in
+`HoldInput::change` (the `NoOvertakeCredit` mutation). The unchanged recipe must
+first report `SOURCE DRIFT`. The diff changes no assumption of the harness, so
+refresh the hash and rerun: the check must report
 `COUNTEREXAMPLE HoldFollowsItsKey` with a tap whose release overtook its press.
 Remove the worktree and confirm the checkout is unchanged.
 
