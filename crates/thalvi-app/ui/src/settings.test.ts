@@ -286,7 +286,7 @@ describe("save", () => {
       return stub;
     }
     const activeNames = (): (string | null)[] =>
-      Array.from(root.querySelectorAll(".trow.server")).filter((row) => row.textContent.includes("Active")).map((row) => row.querySelector(".phrase")?.textContent ?? null);
+      Array.from(root.querySelectorAll(".trow.server")).filter((row) => row.textContent.includes("In use")).map((row) => row.querySelector(".phrase")?.textContent ?? null);
 
     it("loads the new settings and stays on the current page when nothing is unsaved", async () => {
       const stub = await openChanged();
@@ -808,13 +808,13 @@ describe("the speech server list", () => {
     const [live, second] = lists();
     expect(names(live as HTMLElement)).toEqual(["Thalvi server", "Cybrex2", "On this computer"]);
     expect(names(second as HTMLElement)).toEqual(["OpenAI", "Meta"]);
-    expect(badgesOf("Thalvi server")).toEqual(["Thalvi server", "Active"]);
+    expect(badgesOf("Thalvi server")).toEqual(["In use"]);
     expect(badgesOf("Cybrex2")).toEqual(["Realtime speech server", "Key saved"]);
-    expect(badgesOf("On this computer")).toEqual(["On this computer"]);
-    expect(entryNamed("Cybrex2").querySelector(".unit")?.textContent).toBe("ws://100.64.0.2:8012 · nemotron");
-    expect(entryNamed("On this computer").querySelector(".unit")?.textContent).toBe("nemotron_160ms");
-    expect(entryNamed("OpenAI").querySelector(".unit")?.textContent).toBe("https://api.openai.com/v1 · whisper-1 · OpenAI-style");
-    expect((root.querySelector('button[aria-label="Use Thalvi server"]') as HTMLButtonElement).disabled).toBe(true);
+    expect(badgesOf("On this computer")).toEqual([]);
+    expect(entryNamed("Cybrex2").querySelector("details")?.textContent).toContain("ws://100.64.0.2:8012 · nemotron");
+    expect(entryNamed("On this computer").querySelector("details")?.textContent).toContain("nemotron_160ms");
+    expect(entryNamed("OpenAI").querySelector("details")?.textContent).toContain("https://api.openai.com/v1 · whisper-1 · OpenAI-style");
+    expect(root.querySelector('button[aria-label="Use Thalvi server"]')).toBeNull();
     expect((root.querySelector('button[aria-label="Remove Thalvi server"]') as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -835,9 +835,9 @@ describe("the speech server list", () => {
       ["OpenAI", true],
       ["Meta", false],
     ]);
-    expect(badgesOf("Cybrex2")).toContain("Active");
-    expect(badgesOf("Thalvi server")).not.toContain("Active");
-    expect((root.querySelector('button[aria-label="Use Cybrex2"]') as HTMLButtonElement).disabled).toBe(true);
+    expect(badgesOf("Cybrex2")).toContain("In use");
+    expect(badgesOf("Thalvi server")).not.toContain("In use");
+    expect(root.querySelector('button[aria-label="Use Cybrex2"]')).toBeNull();
     expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
   });
 
@@ -847,8 +847,8 @@ describe("the speech server list", () => {
     use("Cybrex2");
     await settle();
     expect(root.querySelector(".err")?.textContent).toBe("The settings could not be saved to /config: disk full.");
-    expect(badgesOf("Thalvi server")).toContain("Active");
-    expect(badgesOf("Cybrex2")).not.toContain("Active");
+    expect(badgesOf("Thalvi server")).toContain("In use");
+    expect(badgesOf("Cybrex2")).not.toContain("In use");
   });
 
   it("adds a server once its fields are accepted, shown as not saved until Save", async () => {
@@ -905,7 +905,7 @@ describe("the speech server list", () => {
     type(control("Address", "input"), "ws://100.64.0.3:8012");
     await saveServer();
     expect(names(lists()[0] as HTMLElement)).toEqual(["Thalvi server", "Cybrex2 GPU", "On this computer"]);
-    expect(entryNamed("Cybrex2 GPU").querySelector(".unit")?.textContent).toBe("ws://100.64.0.3:8012 · nemotron");
+    expect(entryNamed("Cybrex2 GPU").querySelector("details")?.textContent).toContain("ws://100.64.0.3:8012 · nemotron");
     expect(badgesOf("Cybrex2 GPU")).toContain("Not saved");
 
     edit("Cybrex2 GPU");
@@ -1077,6 +1077,100 @@ describe("the attached speech editor", () => {
   });
 });
 
+describe("the next dictation summary and state words", () => {
+  const summaryText = (): string => root.querySelector(".next-dictation")?.textContent ?? "";
+  const occurrences = (haystack: string, needle: string): number => haystack.split(needle).length - 1;
+
+  it.each([
+    ["listening", { state: "listening" }, "Ready"],
+    ["starting", { state: "starting", target: null }, "Ready"],
+    ["capturing", { state: "capturing", target: null, committed: "", partial: null, notice: null }, "Ready"],
+    ["pending", { state: "pending", target: null, route: "paste", text: "hi", waitingForQuiet: false, pauseMs: 0, copies: false }, "Ready"],
+    ["writing", { state: "writing", target: null, text: "" }, "Ready"],
+    ["working", { state: "working", target: null, route: "paste", cancellable: true }, "Ready"],
+    ["done", { state: "done", target: null, route: "paste", notice: "Pasted" }, "Ready"],
+    ["loading", { state: "loading", notice: "Loading the speech model." }, "Loading the speech model."],
+    ["paused", { state: "paused" }, "Paused — resume to dictate"],
+    ["failed", { state: "failed", notice: "n", headline: "Can't reach speech server — Settings", causes: [], kind: "other" }, "Can't reach speech server — Settings"],
+  ] as const)("shows %s as the summary state pushed through onStatus", async (_name, status, state) => {
+    const stub = await open(several());
+    goTo("speech");
+    await settle();
+    stub.emit(status as never);
+    await settle();
+    expect(summaryText()).toBe(`Next dictation: Thalvi server — ${state}`);
+  });
+
+  it("shows the on-device model title, follows Use, and keeps the saved entry while its edit is unsaved", async () => {
+    const stub = await open(local());
+    goTo("speech");
+    await settle();
+    expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Streaming — Ready");
+    await editLocal();
+    choose(control("Speech model", "select"), "unified_160ms");
+    await saveServer();
+    expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Streaming — Ready");
+    button("Save").click();
+    await settle();
+    expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Unified — Ready");
+    expect(stub.backend.saveSettings).toHaveBeenCalled();
+  });
+
+  it("follows Use to a server entry", async () => {
+    const stub = await open(several());
+    goTo("speech");
+    use("Cybrex2");
+    await settle();
+    expect(summaryText()).toBe("Next dictation: Cybrex2 — Ready");
+    expect(stub.backend.saveSettings).toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Thalvi server", ["In use"], false],
+    ["Cybrex2", ["Realtime speech server", "Key saved"], true],
+    ["On this computer", [], true],
+    ["OpenAI", ["Second pass", "Key saved"], false],
+  ] as const)("shows badges and Use for %s", async (name, badges, hasUse) => {
+    await open(several());
+    goTo("speech");
+    expect(badgesOf(name)).toEqual(badges);
+    const useButton = root.querySelector(`button[aria-label="Use ${name}"]`);
+    expect(useButton !== null).toBe(hasUse);
+    if (name === "On this computer") expect(occurrences(entryNamed(name).textContent, "On this computer")).toBe(1);
+    expect(entryNamed(name).textContent).not.toContain("Active");
+  });
+
+  it("keeps entry details collapsed by default", async () => {
+    await open(several());
+    goTo("speech");
+    const entryDetails = entryNamed("Cybrex2").querySelector("details") as HTMLDetailsElement;
+    expect(entryDetails).not.toBeNull();
+    expect(entryDetails.open).toBe(false);
+    expect(entryDetails.querySelector("summary")?.textContent).toBe("Details");
+    expect(entryDetails.textContent).toContain("cybrex2");
+    expect(entryDetails.textContent).toContain("ws://100.64.0.2:8012");
+  });
+
+  it("labels the model filter and collapses model details", async () => {
+    await open(local());
+    goTo("speech");
+    await editLocal();
+    expect(rowOf("Show models for").textContent).toContain("Filters this list. Each model recognizes the languages on its card.");
+    expect(control("Show models for", "select").getAttribute("aria-label")).toBe("Show models for");
+    const cardEl = rowOf("Speech model").querySelector<HTMLElement>(".model:not([hidden])") as HTMLElement;
+    const cardBadges = Array.from(cardEl.querySelectorAll(".badge")).map((badge) => badge.textContent);
+    expect(cardBadges).toContain("Selected");
+    expect(cardBadges).toContain("Not downloaded");
+    expect(cardEl.textContent).toContain("Nemotron Streaming");
+    const details = cardEl.querySelector("details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(details.querySelector("summary")?.textContent).toBe("Details");
+    expect(details.textContent).toContain("nemotron_160ms");
+    expect(details.textContent).toContain("NVIDIA Open Model License");
+    expect(details.textContent).toContain(NEMOTRON.source);
+  });
+});
+
 describe("the speech model catalog", () => {
   async function openCatalog(settings: Settings = local()) {
     const stub = await open(settings);
@@ -1094,7 +1188,7 @@ describe("the speech model catalog", () => {
   const download = (): HTMLButtonElement => within(card(), "Download");
   const meter = (): HTMLProgressElement => card().querySelector("progress") as HTMLProgressElement;
   const picker = (): HTMLSelectElement => control("Speech model", "select");
-  const languages = (): HTMLSelectElement => control("Language", "select");
+  const languages = (): HTMLSelectElement => control("Show models for", "select");
   const listed = (select: HTMLSelectElement): (string | null)[][] =>
     Array.from(select.options).map((option) => [option.value, option.textContent]);
   const OWN = ["__folder", "Your own model folder"];
@@ -1103,8 +1197,8 @@ describe("the speech model catalog", () => {
 
   it("offers each model and an own folder in labelled drop-downs, with the default picked", async () => {
     await openCatalog();
-    expect(languages().getAttribute("aria-label")).toBe("Language");
-    expect(rowOf("Language").querySelector("label")?.getAttribute("for")).toBe(languages().id);
+    expect(languages().getAttribute("aria-label")).toBe("Show models for");
+    expect(rowOf("Show models for").querySelector("label")?.getAttribute("for")).toBe(languages().id);
     expect(picker().getAttribute("aria-label")).toBe("Speech model");
     expect(rowOf("Speech model").querySelector("label")?.getAttribute("for")).toBe(picker().id);
     expect(listed(picker())).toEqual([STREAMING, UNIFIED_OPTION, OWN]);
@@ -1146,7 +1240,7 @@ describe("the speech model catalog", () => {
     expect(root.querySelector(".msg")?.textContent).toBe("");
     choose(languages(), "Dutch");
     expect(picker().value).toBe("unified_160ms");
-    expect(text(".facts")).toContain("OpenMDW-1.1");
+    expect(card().querySelector("details")?.textContent).toContain("OpenMDW-1.1");
     expect(stub.backend.saveSettings).not.toHaveBeenCalled();
     await saveServer();
     expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
@@ -1199,7 +1293,7 @@ describe("the speech model catalog", () => {
     await openCatalog();
     expect(rowOf("Speech model").querySelectorAll(".model:not([hidden])")).toHaveLength(1);
     expect(card().textContent).toContain(NEMOTRON.description);
-    expect(text(".facts")).toBe("License: NVIDIA Open Model License. Languages: English.");
+    expect(text(".facts")).toBe("Languages: English.");
     expect(text(".unit")).toBe("662 MB");
     expect(text(".badge")).toBe("Not downloaded");
     expect(card().querySelector("a")?.getAttribute("href")).toBe(NEMOTRON.source);
@@ -1311,7 +1405,7 @@ describe("the speech model catalog", () => {
     choose(picker(), "unified_160ms");
     expect(control("Speech model", "input").value).toBe("");
     expect(text(".facts")).toBe(
-      `License: OpenMDW-1.1. Languages: ${UNIFIED.languages.join(", ")}. The language is detected automatically.`,
+      `Languages: ${UNIFIED.languages.join(", ")}. The language is detected automatically.`,
     );
     expect(text(".unit")).toBe("647 MB");
     await saveServer();
@@ -1333,7 +1427,7 @@ describe("the speech model catalog", () => {
   it("shows a saved model, and a saved folder as the own-folder entry", async () => {
     await openCatalog(local("unified_160ms"));
     expect(picker().value).toBe("unified_160ms");
-    expect(text(".facts")).toContain("OpenMDW-1.1");
+    expect(card().querySelector("details")?.textContent).toContain("OpenMDW-1.1");
     root.innerHTML = "";
     await openCatalog(local("/models/mine"));
     expect(picker().value).toBe("__folder");

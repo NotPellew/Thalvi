@@ -74,6 +74,7 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .next-dictation { margin: 6px 0; font-size: 13px; }
 .next-dictation:empty { display: none; }
 details.entry-details, details.model-details { font-size: 12px; color: var(--mut); }
+.trow.server details.entry-details { flex-basis: 100%; }
 details.entry-details summary, details.model-details summary { cursor: pointer; }
 textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .entries { display: flex; flex-direction: column; gap: 6px; max-height: 24em; overflow-y: auto; }

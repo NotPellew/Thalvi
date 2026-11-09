@@ -277,15 +277,20 @@ because its config is broken, a message box names the problem and the file.
 
 Settings → Speech keeps a list of speech servers. **Live dictation** uses exactly
 one of them, and **Use** switches to another at once; it applies from the next
-capture, and a capture already running keeps its recognizer. The kinds are:
+capture, and a capture already running keeps its recognizer. At the top of
+Live dictation, **Next dictation** names the entry (and, on this computer, the
+model) that will handle the next dictation and whether it is ready. The entry
+in use is marked **In use** and has no **Use** button. IDs and addresses are
+under each entry's collapsed **Details**. The kinds are:
 
 - **Realtime speech server:** a recognizer that speaks Meta's realtime ASR
   protocol, such as the self-hosted one below, which the app connects to itself
   (address, model, API key), with no Thalvi server running.
 - **Through a Thalvi server:** streams to the server's `/transcription`
   (by default `ws://127.0.0.1:8080`), which uses the recognizer in its `.env`.
-- **On this computer:** dictates without the server or a network. Pick a
-  language (it only narrows the list of models) and a model.
+- **On this computer:** dictates without the server or a network. Use
+  **Show models for** to filter the list of models (each model recognizes the
+  languages on its card), then pick a model.
 
 Web conversations always use the server's own `STT_URL`. An existing config
 with `stt.engine`, `stt.model`, `stt.secondary` and `server` becomes entries
@@ -296,8 +301,10 @@ reached is named in the error, and Thalvi never falls back to another one.
 For the on-device model, the first use of a model downloads it (about 650 MB);
 after that it works offline. A model you pick applies from the next capture, and
 a capture already running keeps the model it started with. Settings shows each
-model's size, license and languages in full, whether it is downloaded, and can download
-it, or you can point to your own model folder and check it before saving.
+model's description, languages and size, whether it is **Selected** and
+**Downloaded** or **Not downloaded**, and can download it; its ID, source and
+license are under the card's collapsed **Details**. Or you can point to your
+own model folder and check it before saving.
 Word errors below are on LibriSpeech (120 clips) and on 48 of the developer's
 own takes, int8 on the CPU, language detected automatically. The unified model
 also made 8.38% on German and 7.09% on Spanish (80 Multilingual LibriSpeech clips
