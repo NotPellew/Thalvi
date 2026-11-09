@@ -61,7 +61,7 @@ recorded hash also covers the #326 fix, whose own commit cannot name itself, so
 | --- | --- |
 | `hold.rs`: `HoldInput::set`, `HoldInput::set_write`, `HoldInput::change`, `KeyState`, `KeyPhase`, `OVERTAKEN_PRESS` | Called for each arriving key event, in arrival order. Every scenario runs within microseconds, so every early release is inside the 1 s window: the worst case for overtake credit. |
 | `hold.rs`: `Presses::take`, `Presses::take_lost`, `Presses::is_over`, `Cutoff` | A "look" calls `is_over` on the open hold, then `take` and `take_lost`, as `Engine::scan` and `Engine::on_key` do after each change of the watch. |
-| Hyprland binds (one process per press and per release) | An arrival order may swap a quick tap's press and release (`arrivals` in `harness.rs`). |
+| Hyprland binds (one process per press and per release) | Every `hold-start`, `hold-end`, `write-start` and `write-end` request reaches `HoldInput` through `Running::hold` (`agent.rs`), refused or not, as the Windows hook delivers every key event, so one arrival sequence covers both. An arrival order may swap a quick tap's press and release (`arrivals` in `harness.rs`). |
 | `Engine::scan`'s biased `self.key.changed()` branch | Eager mode: a look after every arrival, up to 8 events. |
 | A watch whose changes are seen late (coalesced, or a cursor not polled) | Late mode: a look after any subset of arrivals, up to 7 events; only `EachPressCountedOnce` is judged there. |
 
