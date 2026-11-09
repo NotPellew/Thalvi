@@ -1,24 +1,27 @@
-"""Exports Nemotron unified ASR 0.6B to the model folder Thalvi's desktop app runs on its CPU.
+"""Exports Nemotron unified ASR 0.6B to the model folder Thalvi's desktop app runs on its CPU or, with --fp16, its GPU.
 
 Run in `speech/asr` on the checkpoint that `speech/nemotron-asr.sh` pins:
     uv run --frozen --extra nemo --with onnx --with onnxruntime --with onnxscript \
-        python export_unified_onnx.py nemotron-labs-unified-asr-0.6b.nemo OUTPUT_FOLDER
+        python export_unified_onnx.py [--fp16] nemotron-labs-unified-asr-0.6b.nemo OUTPUT_FOLDER
 
-The folder's files are the assets of `unified_160ms` in `crates/thalvi-desktop/src/models.rs`, published in the
-`speech-models-v1` release with the checkpoint's OpenMDW-1.1 `LICENSE.md`.
+The folder's files are the assets of `unified_160ms` in `crates/thalvi-desktop/src/models.rs`, published with the
+checkpoint's OpenMDW-1.1 `LICENSE.md`: the int8 export as the `speech-models-v1` release, the --fp16 export (an fp16
+encoder with external data, fp32 decoder and joiner) as `speech-models-v2`. The int8 files cannot use a GPU: a third of
+their operators run only on the CPU.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
-import sys
 from pathlib import Path
 
 import onnx
 import torch
 from nemo.collections.asr.models import ASRModel
 from onnxruntime.quantization import QuantType, quantize_dynamic
+from onnxruntime.transformers.float16 import convert_float_to_float16
 
 LEFT_S, CHUNK_S, RIGHT_S = 5.6, 0.16, 0.40
 # Left context, chunk and right context in 80 ms encoder frames, as in pipeline.yaml.
@@ -45,7 +48,7 @@ class PromptedEncoder(torch.nn.Module):
         return fused.transpose(1, 2), encoded_len
 
 
-def export(model_path: str, out: Path) -> None:
+def export(model_path: str, out: Path, fp16: bool) -> None:
     work = out / "work"
     work.mkdir(parents=True, exist_ok=True)
     asr = ASRModel.restore_from(model_path, map_location=torch.device("cpu")).eval()
@@ -64,20 +67,24 @@ def export(model_path: str, out: Path) -> None:
         dynamo=False,
         external_data=True,
     )
-    # MatMul only: it keeps the encoder a single file under ONNX's 2 GB limit at the word errors of fp32.
-    quantize_dynamic(
-        str(work / "encoder.onnx"),
-        str(work / "encoder.q.onnx"),
-        weight_type=QuantType.QUInt8,
-        op_types_to_quantize=["MatMul"],
-        use_external_data_format=False,
-    )
+    if not fp16:
+        # MatMul only: it keeps the encoder a single file under ONNX's 2 GB limit at the word errors of fp32.
+        quantize_dynamic(
+            str(work / "encoder.onnx"),
+            str(work / "encoder.q.onnx"),
+            weight_type=QuantType.QUInt8,
+            op_types_to_quantize=["MatMul"],
+            use_external_data_format=False,
+        )
 
     asr.set_export_config({"cache_support": False})
     asr.decoder.export(str(work / "decoder.onnx"))
     asr.joint.export(str(work / "joiner.onnx"))
     for name in ("decoder", "joiner"):
-        quantize_dynamic(str(work / f"{name}.onnx"), str(out / f"{name}.int8.onnx"), weight_type=QuantType.QUInt8)
+        if fp16:
+            shutil.copy(work / f"{name}.onnx", out / f"{name}.fp32.onnx")
+        else:
+            quantize_dynamic(str(work / f"{name}.onnx"), str(out / f"{name}.int8.onnx"), weight_type=QuantType.QUInt8)
 
     metadata = {
         "model_type": "UnifiedBufferedRNNT",
@@ -94,12 +101,28 @@ def export(model_path: str, out: Path) -> None:
         "prompt_auto": auto,
         "prompts": json.dumps(dict(asr.cfg.model_defaults.get("prompt_dictionary") or {}), sort_keys=True),
     }
-    encoder = onnx.load(str(work / "encoder.q.onnx"))
+    if fp16:
+        encoder = onnx.load(str(work / "encoder.onnx"))
+        # Inputs and outputs stay fp32, so the app feeds both exports alike.
+        encoder = convert_float_to_float16(encoder, keep_io_types=True, disable_shape_infer=True)
+    else:
+        encoder = onnx.load(str(work / "encoder.q.onnx"))
     del encoder.metadata_props[:]
     for key, value in metadata.items():
         entry = encoder.metadata_props.add()
         entry.key, entry.value = key, str(value)
-    onnx.save(encoder, str(out / "encoder.int8.onnx"))
+    if fp16:
+        # The data file's name is written into the model, which finds it beside itself; the app keeps both together.
+        onnx.save(
+            encoder,
+            str(out / "encoder.fp16.onnx"),
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location="encoder.fp16.onnx.data",
+            size_threshold=1024,
+        )
+    else:
+        onnx.save(encoder, str(out / "encoder.int8.onnx"))
 
     vocabulary = list(asr.joint.vocabulary)
     with open(out / "tokens.txt", "w", encoding="utf-8") as tokens:
@@ -110,4 +133,9 @@ def export(model_path: str, out: Path) -> None:
 
 
 if __name__ == "__main__":
-    export(sys.argv[1], Path(sys.argv[2]))
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--fp16", action="store_true", help="export for the GPU: fp16 encoder, fp32 decoder and joiner")
+    parser.add_argument("checkpoint")
+    parser.add_argument("output", type=Path)
+    arguments = parser.parse_args()
+    export(arguments.checkpoint, arguments.output, arguments.fp16)
