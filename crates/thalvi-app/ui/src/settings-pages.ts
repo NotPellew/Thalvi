@@ -805,6 +805,9 @@ function speech(context: PageContext): HTMLElement[] {
   const secondList = el("div", { class: "table" });
   const editor = el("div", { class: "editor", hidden: true });
   const problem = note();
+  let editingId: string | null = null;
+  let editingSecond = false;
+  let editingAdd = false;
 
   function uniqueName(base: string): string {
     const taken = new Set(entries().map((entry) => entry.name.toLowerCase()));
@@ -862,6 +865,7 @@ function speech(context: PageContext): HTMLElement[] {
   }
 
   function remove(entry: SpeechEntry): void {
+    if (editingId === entry.id) closeEditor(false);
     draft.stt.entries = entries().filter((known) => known.id !== entry.id);
     controls.touched();
     render();
@@ -885,6 +889,7 @@ function speech(context: PageContext): HTMLElement[] {
       openEditor(entry);
     }, "quiet");
     edit.setAttribute("aria-label", `Edit ${entry.name}`);
+    edit.setAttribute("aria-expanded", String(editingId === entry.id));
     const drop = button("Remove", () => {
       remove(entry);
     }, "quiet");
@@ -922,6 +927,7 @@ function speech(context: PageContext): HTMLElement[] {
       openEditor(entry);
     }, "quiet");
     edit.setAttribute("aria-label", `Edit ${entry.name}`);
+    edit.setAttribute("aria-expanded", String(editingId === entry.id));
     const drop = button("Remove", () => {
       remove(entry);
     }, "quiet");
@@ -940,21 +946,64 @@ function speech(context: PageContext): HTMLElement[] {
     );
   }
 
+  function editButtonFor(id: string): HTMLButtonElement | null {
+    for (const list of [liveList, secondList]) {
+      const row = list.querySelector<HTMLElement>(`.trow.server[data-id="${id}"]`);
+      const found = row?.querySelector<HTMLButtonElement>('button[aria-label^="Edit "]');
+      if (found) return found;
+    }
+    return null;
+  }
+
   function render(): void {
-    liveList.replaceChildren(...entries().filter(isLive).map(liveRow));
+    if (editingId !== null && !entries().some((entry) => entry.id === editingId)) {
+      editingId = null;
+      editor.hidden = true;
+      editor.replaceChildren();
+    }
+    const liveChildren: HTMLElement[] = [];
+    for (const entry of entries().filter(isLive)) {
+      liveChildren.push(liveRow(entry));
+      if (editingId === entry.id && !editingSecond) liveChildren.push(editor);
+    }
+    if (editingAdd && !editingSecond) liveChildren.push(editor);
+    liveList.replaceChildren(...liveChildren);
     const second = entries().filter((entry): entry is SecondPassEntry => entry.kind === "second_pass");
-    secondList.replaceChildren(...second.map((entry, index) => secondRow(entry, index, second.length)));
-    secondList.hidden = second.length === 0;
+    const secondChildren: HTMLElement[] = [];
+    second.forEach((entry, index) => {
+      secondChildren.push(secondRow(entry, index, second.length));
+      if (editingId === entry.id && editingSecond) secondChildren.push(editor);
+    });
+    if (editingAdd && editingSecond) secondChildren.push(editor);
+    if (!liveChildren.includes(editor) && !secondChildren.includes(editor)) liveChildren.push(editor);
+    liveList.replaceChildren(...liveChildren);
+    secondList.replaceChildren(...secondChildren);
+    secondList.hidden = second.length === 0 && !((editingId !== null && editingSecond) || (editingAdd && editingSecond));
   }
   context.live.saved = render;
 
-  function closeEditor(): void {
+  function closeEditor(returnFocus = true): void {
+    const wasId = editingId;
+    editingId = null;
+    editingAdd = false;
     editor.replaceChildren();
     editor.hidden = true;
     context.live.speechModel = () => undefined;
+    for (const list of [liveList, secondList]) {
+      for (const btn of list.querySelectorAll('button[aria-label^="Edit "]')) btn.setAttribute("aria-expanded", "false");
+    }
+    if (returnFocus && wasId !== null) {
+      editButtonFor(wasId)?.focus();
+      queueMicrotask(() => {
+        editButtonFor(wasId)?.focus();
+      });
+    }
   }
 
   function openEditor(existing: SpeechEntry | null, kind?: SpeechEntry["kind"]): void {
+    editingAdd = existing === null;
+    editingId = existing?.id ?? null;
+    editingSecond = existing ? existing.kind === "second_pass" : kind === "second_pass";
     const working: SpeechEntry = existing ? structuredClone(existing) : blankEntry(kind ?? "realtime", uniqueName(KIND_NAMES[kind ?? "realtime"]));
     const message = note();
     let validate: () => Promise<void> = () => Promise.resolve();
@@ -1051,14 +1100,27 @@ function speech(context: PageContext): HTMLElement[] {
           },
         );
     }, "primary");
-    const cancel = button("Cancel", closeEditor, "quiet");
+    const cancel = button("Cancel", () => {
+      closeEditor();
+    }, "quiet");
+    const headingId = uid("editor");
+    const heading = el(
+      "h4",
+      { id: headingId },
+      existing
+        ? `Editing “${existing.name}” · ${existing.kind === "second_pass" ? "second pass" : "live dictation"}`
+        : `Add a ${KIND_NAMES[working.kind].toLowerCase()}`,
+    );
+    editor.setAttribute("aria-labelledby", headingId);
     editor.replaceChildren(
-      el("h4", {}, existing ? `Edit ${existing.name}` : `Add a ${KIND_NAMES[working.kind].toLowerCase()}`),
+      heading,
       ...rows,
       el("div", { class: "trow add" }, done, cancel),
       message,
     );
     editor.hidden = false;
+    render();
+    editor.querySelector<HTMLElement>("input, select, textarea")?.focus();
   }
 
   const kindPicker = controls.select(LIVE_KINDS, "realtime", () => undefined, "Kind of speech server to add");
@@ -1069,7 +1131,7 @@ function speech(context: PageContext): HTMLElement[] {
   const addSecond = button("Add a second-pass API", () => {
     openEditor(null, "second_pass");
   });
-  const liveBlock = el("div", { class: "stack wide" }, liveList, el("div", { class: "trow add" }, kindPicker.node, addLive));
+  const liveBlock = el("div", { class: "stack wide" }, liveList, problem, el("div", { class: "trow add" }, kindPicker.node, addLive));
   const secondBlock = el("div", { class: "stack wide" }, secondList, addSecond);
 
   const writing = draft.writing;
@@ -1167,8 +1229,6 @@ function speech(context: PageContext): HTMLElement[] {
       "Ticked servers transcribe each accepted capture again. The first one in this order that answers replaces the live text; the rest are only recorded. Ticking applies at once.",
       secondBlock,
     ),
-    problem,
-    editor,
     group("Writing"),
     row(
       "Writing endpoint address",

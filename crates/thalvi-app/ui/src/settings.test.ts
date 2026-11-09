@@ -1014,6 +1014,69 @@ describe("second-pass servers", () => {
 });
 
 
+describe("the attached speech editor", () => {
+  async function openSeveral() {
+    const stub = await open(several());
+    goTo("speech");
+    return stub;
+  }
+  const editorEl = (): HTMLElement => root.querySelector(".editor") as HTMLElement;
+  const editButton = (name: string): HTMLButtonElement => root.querySelector(`button[aria-label="Edit ${name}"]`) as HTMLButtonElement;
+
+  it.each([
+    ["Cybrex2", 0, "Editing “Cybrex2” · live dictation"],
+    ["On this computer", 0, "Editing “On this computer” · live dictation"],
+    ["OpenAI", 1, "Editing “OpenAI” · second pass"],
+  ] as const)("opens the editor right after the %s row in its own list", async (name, listIndex, heading) => {
+    await openSeveral();
+    edit(name);
+    await settle();
+    const editor = editorEl();
+    const row = entryNamed(name);
+    expect(editor.hidden).toBe(false);
+    expect(editor.parentElement).toBe(lists()[listIndex]);
+    expect(editor.previousElementSibling).toBe(row);
+    const title = editor.querySelector("h4") as HTMLElement;
+    expect(title.textContent).toBe(heading);
+    expect(editor.getAttribute("aria-labelledby")).toBe(title.id);
+    expect(title.id).not.toBe("");
+    expect(editButton(name).getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(editor.querySelector("input"));
+    button("Cancel").click();
+    expect(editor.hidden).toBe(true);
+    expect(editButton(name).getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(editButton(name));
+  });
+
+  it("moves the one editor when another entry is edited", async () => {
+    await openSeveral();
+    edit("Cybrex2");
+    await settle();
+    edit("OpenAI");
+    await settle();
+    expect(root.querySelectorAll(".editor")).toHaveLength(1);
+    expect(editorEl().previousElementSibling).toBe(entryNamed("OpenAI"));
+    expect(editorEl().parentElement).toBe(lists()[1]);
+    expect(editButton("Cybrex2").getAttribute("aria-expanded")).toBe("false");
+    expect(editButton("OpenAI").getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("opens the add editor at the end of the live list, and closes the editor when its entry is removed", async () => {
+    await openSeveral();
+    await addServer("realtime");
+    expect(editorEl().hidden).toBe(false);
+    expect(editorEl().parentElement).toBe(lists()[0]);
+    expect(editorEl().previousElementSibling).toBe(entryNamed("On this computer"));
+    button("Cancel").click();
+    edit("Cybrex2");
+    await settle();
+    expect(editorEl().hidden).toBe(false);
+    (root.querySelector('button[aria-label="Remove Cybrex2"]') as HTMLButtonElement).click();
+    expect(editorEl().hidden).toBe(true);
+    expect(names(lists()[0] as HTMLElement)).not.toContain("Cybrex2");
+  });
+});
+
 describe("the speech model catalog", () => {
   async function openCatalog(settings: Settings = local()) {
     const stub = await open(settings);
