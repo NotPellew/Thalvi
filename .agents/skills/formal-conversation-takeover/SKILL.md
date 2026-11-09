@@ -52,10 +52,11 @@ From the repository root, with Python 3.12+:
 .agents/skills/formal-conversation-takeover/scripts/check.py
 ```
 
-The command installs TLC's `v1.8.0` release artifact into
-`${XDG_CACHE_HOME:-~/.cache}/thalvi-formal/` and verifies SHA-256
-`c57d4d7bbee3ed2c89c32cb9c60cac728f751e80e2570bc4b7368ae39291fc21`; the checksum,
-not the release URL, pins the contents
+The command installs TLC's stable `v1.7.4` release artifact (TLC2 Version 2.19
+of 08 August 2024) into `${XDG_CACHE_HOME:-~/.cache}/thalvi-formal/` and verifies
+SHA-256 `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`, the
+same pin as `formal-capture-cancel`. The `v1.8.0` pre-release is re-uploaded
+upstream, so its checksum does not hold
 ([upstream](https://github.com/tlaplus/tlaplus)). It uses an existing `java`
 (11+); on Linux x86-64 without one it installs Temurin JRE `21.0.9+10` in the
 same cache, verifying SHA-256
