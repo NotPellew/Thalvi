@@ -1,0 +1,42 @@
+{
+  "sync_commit": "261bb2e0d87119034947afd68ef7844bebf0d381",
+  "files": {
+    "web/src/main.ts": {
+      "sha256": "9f899e1459696ae758ca2874af167927fd82a3f18e6d10ba5fe3d7d7aed6f85d",
+      "functions": [
+        "releaseUnused",
+        "acquireAudio",
+        "startVoice",
+        "view.onVoice"
+      ]
+    },
+    "web/src/mic.ts": {
+      "sha256": "88088c56ca1cce80eb90579db9a2f2e8c027c4ed39cf58ef5dfa91bbaded023e",
+      "functions": [
+        "openMic"
+      ]
+    },
+    "web/src/controller.ts": {
+      "sha256": "3df21a7091dd5bd7b84989eeee853a717e3be30f1ed1d4cfa65a1abe883fa14e",
+      "functions": [
+        "Controller.setVoice",
+        "Controller.micStopped",
+        "Controller.message",
+        "Controller.lost"
+      ]
+    },
+    "web/src/session.ts": {
+      "sha256": "4e938f4496b7e35454b5cf73b114e865c0b43848452bbb823860af34c914aa85",
+      "functions": [
+        "reduce",
+        "endedState"
+      ]
+    },
+    "web/src/view.ts": {
+      "sha256": "073640977378cd7f9bd9c3609b354a4a0fa88ba65d3598a7a185e470f97275e9",
+      "functions": [
+        "render (voice.disabled)"
+      ]
+    }
+  }
+}
