@@ -74,6 +74,7 @@ explicitly. No mapped function changed, so only the hash moved.
 The on-device model's load now reports the steps it takes and a download's percent (`load_speech_model` runs the
 load through `load_showing`, a select over the load and the recognizer's step channel, and `Publisher`
 shows each step as the loading notice). No mapped function changed, so only the `runner.rs` hash moved.
+`Engine::reconcile` now returns after the earliest agreeing ticked entry, keeping later requests as recorded-only tasks. Its cancellation-first select still fences acceptance; these later tasks do not feed the capture outcome. The recognizer change only extends its test fake; the mapped session and close remain unchanged.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

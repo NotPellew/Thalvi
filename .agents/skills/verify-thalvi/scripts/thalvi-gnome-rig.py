@@ -167,7 +167,8 @@ def run_input():
 
 
 def run_mic(fifo, queue):
-    """Plays each .raw file queued in `queue` into the PipeWire microphone's pipe, in real time.
+    """Plays each .raw file queued in `queue` into the PipeWire microphone's pipe, in real time, and prints
+    `played NAME` once the file's last sample is in the pipe.
 
     Samples are 16 kHz mono signed 16-bit. The source reads the pipe only while an app captures, and drops what
     is written faster than it plays: the pipe is kept to one page and the clock restarts after every wait and
@@ -179,9 +180,13 @@ def run_mic(fifo, queue):
     chunk_bytes = rate * chunk_ms // 1000 * 2
     fd = None
     pending = b""
+    playing = None
     start, tick = time.monotonic(), 0
     while True:
         if not pending:
+            if playing:
+                print("played", playing, flush=True)
+                playing = None
             names = sorted(n for n in os.listdir(queue) if n.endswith(".raw"))
             if not names:
                 time.sleep(chunk_ms / 1000)
@@ -189,6 +194,7 @@ def run_mic(fifo, queue):
             with open(os.path.join(queue, names[0]), "rb") as f:
                 pending = f.read()
             os.unlink(os.path.join(queue, names[0]))
+            playing = names[0]
         if time.monotonic() > start + (tick + 1) * chunk_ms / 1000:
             start, tick = time.monotonic(), 0
         try:

@@ -341,9 +341,11 @@ under OpenMDW-1.1, exported to ONNX by Thalvi. Parakeet is NVIDIA's
 **Second-pass transcription** (Settings → Speech → Second pass, none ticked by
 default) sends each accepted capture again to every ticked OpenAI-style or Meta
 transcription API. The first ticked one in list order (move them with the
-arrows) that answers replaces the live text; the others are only recorded, in
-the capture's `text.txt` and the metrics, for comparing later. Unticking keeps
-the address and key.
+arrows) that answers replaces the live text, and Thalvi pastes as soon as that
+one is known: an earlier entry that fails or disagrees is waited for, a later
+one never. The others keep running and are only recorded, in the capture's
+`text.txt` and the metrics, for comparing later; one that fails says so in a
+notice. Unticking keeps the address and key.
 
 ### Microphone
 
