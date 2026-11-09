@@ -2469,6 +2469,73 @@ async fn a_recorded_only_entry_records_its_own_latency_however_long_the_engine_w
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_second_pass_the_paste_did_not_wait_for_is_recorded_while_the_next_capture_runs() {
+    LocalSet::new()
+        .run_until(async {
+            // `(name, A's delay, B's delay, [(ms after the second wake, whether B's failure shows)])`.
+            // The second capture's ending is accepted 3500 ms after its wake word.
+            for (name, a, b, checks) in [
+                (
+                    "while it listens for words and their ending",
+                    300,
+                    2500,
+                    &[(1800, false), (2800, true)][..],
+                ),
+                (
+                    "while it waits for its own second passes",
+                    2000,
+                    6500,
+                    &[(3000, false)][..],
+                ),
+            ] {
+                let (a, _a) = serve(Reply::After(a, A)).await;
+                let (b, _b) = serve(Reply::After(b, "{}")).await;
+                let config = with_second_passes(&[("A", &a, true), ("B", &b, true)]);
+                let (mut rig, mut engine, mut frames) = Rig::new(&config);
+                let notices = Rc::clone(&rig.notices);
+                let seen = Rc::new(RefCell::new(Vec::new()));
+                let log = Rc::clone(&seen);
+                let task = tokio::task::spawn_local(async move {
+                    for _ in 0..2 {
+                        engine.listen(&mut frames).await.unwrap();
+                        let outcome = engine.capture(&mut frames).await;
+                        log.borrow_mut().push((outcome, notices.borrow().clone()));
+                    }
+                    engine.finish().await;
+                });
+                live_words(&mut rig).await;
+                while seen.borrow().is_empty() {
+                    rig.at(rig.now() + 100).await;
+                }
+                let wake = rig.now();
+                rig.server.connect_again();
+                rig.wake_word().await;
+                rig.server.ready();
+                settle().await;
+                rig.at(wake + 230).await;
+                rig.feed_until(wake + 1000, Kind::Quiet).await;
+                rig.finals("more words paste that").await;
+                for (after, shown) in checks {
+                    rig.feed_until(wake + after, Kind::Quiet).await;
+                    let expected: &[&str] = if *shown { &[B_ONLY_RECORDED] } else { &[] };
+                    assert_eq!(rig.notices(), expected, "{name}: at {after}");
+                }
+                rig.feed_until(wake + 3500, Kind::Quiet).await;
+                finished(task).await;
+
+                let seen = seen.borrow();
+                assert_eq!(
+                    seen[1].0,
+                    accepted(CaptureRoute::Paste, "A words"),
+                    "{name}"
+                );
+                assert_eq!(seen[1].1, [B_ONLY_RECORDED], "{name}: by the second paste");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn cancelling_during_the_secondary_transcription_abandons_it() {
     LocalSet::new()
         .run_until(async {

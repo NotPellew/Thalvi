@@ -578,10 +578,14 @@ pub enum FakeCall {
     Close,
 }
 
+type ReadySlot = Arc<Mutex<Option<oneshot::Receiver<Result<(), RecognizerError>>>>>;
+type EventsSlot =
+    Arc<Mutex<Option<mpsc::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>>>>;
+
 /// A scripted recognizer for tests; [`FakeControl`] drives it.
 pub struct FakeRecognizer {
-    ready: Mutex<Option<oneshot::Receiver<Result<(), RecognizerError>>>>,
-    events: Mutex<Option<mpsc::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>>>,
+    ready: ReadySlot,
+    events: EventsSlot,
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
 }
@@ -590,6 +594,7 @@ pub struct FakeRecognizer {
 pub struct FakeControl {
     ready: Option<oneshot::Sender<Result<(), RecognizerError>>>,
     events: mpsc::UnboundedSender<Result<RecognizerEvent, RecognizerError>>,
+    slots: (ReadySlot, EventsSlot),
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
 }
@@ -609,16 +614,19 @@ impl FakeRecognizer {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let calls = Arc::new(Mutex::new(Vec::new()));
         let stalled = Arc::new(AtomicBool::new(false));
+        let ready = Arc::new(Mutex::new(Some(ready_rx)));
+        let events = Arc::new(Mutex::new(Some(events_rx)));
         (
             Self {
-                ready: Mutex::new(Some(ready_rx)),
-                events: Mutex::new(Some(events_rx)),
+                ready: Arc::clone(&ready),
+                events: Arc::clone(&events),
                 calls: Arc::clone(&calls),
                 stalled: Arc::clone(&stalled),
             },
             FakeControl {
                 ready: Some(ready_tx),
                 events: events_tx,
+                slots: (ready, events),
                 calls,
                 stalled,
             },
@@ -651,6 +659,17 @@ impl Recognizer for FakeRecognizer {
 }
 
 impl FakeControl {
+    /// Lets the recognizer connect once more, to a fresh session this control then drives; the
+    /// calls log carries over.
+    pub fn connect_again(&mut self) {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        *self.slots.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(ready_rx);
+        *self.slots.1.lock().unwrap_or_else(PoisonError::into_inner) = Some(events_rx);
+        self.ready = Some(ready_tx);
+        self.events = events_tx;
+    }
+
     pub fn ready(&mut self) {
         if let Some(ready) = self.ready.take() {
             let _ = ready.send(Ok(()));
