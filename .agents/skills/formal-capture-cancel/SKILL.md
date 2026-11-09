@@ -110,11 +110,11 @@ From the repository root, with Python 3.12+:
 .agents/skills/formal-capture-cancel/scripts/check.py
 ```
 
-The command installs TLC's `v1.8.0` release artifact into
+The command installs TLC's stable `v1.7.4` release artifact (TLC2 Version 2.19 of 08 August 2024) into
 `${XDG_CACHE_HOME:-~/.cache}/thalvi-formal/` and verifies SHA-256
-`c57d4d7bbee3ed2c89c32cb9c60cac728f751e80e2570bc4b7368ae39291fc21`.
-The artifact identifies itself as TLC `2026.11.02.164701`, revision `dc6a944`;
-the checksum, rather than a moving release URL, pins its contents.
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`.
+It is a published release whose file does not change. The `v1.8.0` pre-release
+is re-uploaded upstream, which broke the old checksum on 2026-11-06.
 [Upstream tool and download instructions](https://github.com/tlaplus/tlaplus).
 
 Use an existing `java` (11+). On Linux x86-64 without Java, the command installs
