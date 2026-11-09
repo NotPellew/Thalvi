@@ -93,6 +93,8 @@ const APIS: readonly (readonly [SecondaryApi, string])[] = [
   ["meta", "Meta"],
 ];
 const SPEECH_MODEL = "nemotron_160ms";
+/** Like the config, a speech model name with a path separator is a folder of the user's own. */
+const isModelFolder = (name: string): boolean => /[\\/]/.test(name);
 const CUES: readonly (readonly [keyof Settings["cues"], string, string])[] = [
   ["wake", "Wake", "Thalvi heard the wake phrase and is listening."],
   ["provisional", "Ending heard", "An ending phrase was heard; the countdown has begun."],
@@ -679,8 +681,8 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
   let language = ALL_LANGUAGES;
   let chosen = working.model ?? "";
   const isCatalog = (name: string): boolean => name === SPEECH_MODEL || listed.some((info) => info.name === name);
-  // Like the config, a name with a path separator is a folder. The entry stays picked while its path is still empty.
-  let ownFolderPicked = /[\\/]/.test(chosen);
+  // The entry stays picked while its path is still empty.
+  let ownFolderPicked = isModelFolder(chosen);
   const speechModel = controls.text(
     ownFolderPicked ? chosen : "",
     (value) => {
@@ -917,7 +919,8 @@ function speech(context: PageContext): HTMLElement[] {
     nextDictation.textContent = `Next dictation: ${entry.name}${modelPart} — ${statusState(currentStatus)}`;
     const preparing = entry.kind === "on_device" && (currentStatus.state === "loading" || currentStatus.state === "failed");
     summaryActions.hidden = !preparing;
-    retry.hidden = currentStatus.state !== "failed";
+    // Only a catalog model can be downloaded again; a folder of the user's own is fixed on disk.
+    retry.hidden = currentStatus.state !== "failed" || (entry.kind === "on_device" && isModelFolder(entry.model ?? SPEECH_MODEL));
     if (!preparing) say(retryProblem, "");
   }
 
@@ -1064,7 +1067,7 @@ function speech(context: PageContext): HTMLElement[] {
   /** Where an on-device catalog model runs; a model folder of the user's own has no line. */
   function deviceLine(entry: LiveEntry): HTMLElement[] {
     const model = entry.kind === "on_device" ? (entry.model ?? SPEECH_MODEL) : "";
-    if (model === "" || /[\\/]/.test(model)) return [];
+    if (model === "" || isModelFolder(model)) return [];
     const line = el("small", { class: "device" });
     backend.speechDevice(model).then(
       (text) => {

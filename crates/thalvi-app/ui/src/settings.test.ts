@@ -1132,6 +1132,7 @@ describe("the next dictation summary and state words", () => {
     it.each([
       ["on this computer, loading", local, LOADING, ["Use a speech server instead"]],
       ["on this computer, failed", local, FAILED, ["Use a speech server instead", "Retry"]],
+      ["your own model folder, failed", () => local("/models/mine"), FAILED, ["Use a speech server instead"]],
       ["on this computer, listening", local, { state: "listening" }, []],
       ["on this computer, paused", local, { state: "paused" }, []],
       ["a server, loading", several, LOADING, []],
