@@ -133,7 +133,7 @@ describe("pages", () => {
         groups: {
           "Live dictation": ["speech servers", "word list"],
           "Second pass": ["second-pass servers"],
-          Writing: ["writing endpoint address", "writing model", "writing api key", "writing prompt"],
+          Writing: ["writing endpoint address", "writing model", "writing api key", "writing prompt", "opening phrases"],
         },
       },
       {
