@@ -1,7 +1,7 @@
 """Exports Nemotron unified ASR 0.6B to the model folder Thalvi's desktop app runs on its CPU or, with --fp16, its GPU.
 
 Run in `speech/asr` on the checkpoint that `speech/nemotron-asr.sh` pins:
-    uv run --frozen --extra nemo --with onnx --with onnxruntime --with onnxscript \
+    uv run --frozen --extra nemo --with onnx==1.23.2 --with onnxruntime==1.31.1 --with onnxscript==0.7.2 \
         python export_unified_onnx.py [--fp16] nemotron-labs-unified-asr-0.6b.nemo OUTPUT_FOLDER
 
 The folder's files are the assets of `unified_160ms` in `crates/thalvi-desktop/src/models.rs`, published with the

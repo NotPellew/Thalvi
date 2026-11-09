@@ -293,8 +293,8 @@ the first time Thalvi reads it, with nothing to enter again. An API key is shown
 as saved and never again; leave it blank to keep it. A server that cannot be
 reached is named in the error, and Thalvi never falls back to another one.
 
-For the on-device model, the first use of a model downloads it (about 650 MB);
-after that it works offline. A model you pick applies from the next capture, and
+For the on-device model, the first use of a model downloads it (about 650 MB, or
+1.3 GB for Nemotron Unified's GPU files); after that it works offline. A model you pick applies from the next capture, and
 a capture already running keeps the model it started with. Settings shows each
 model's size, license and languages in full, whether it is downloaded, and can download
 it, or you can point to your own model folder and check it before saving.
@@ -306,7 +306,7 @@ each).
 | Drop-down entry (config name) | Model | Languages | LibriSpeech | Developer's takes | Notes |
 |---|---|---|---|---|---|
 | Nemotron Streaming (`nemotron_160ms`, default) | Nemotron Speech Streaming 0.6B | English | 3.46% | 7.14% | Lightest on the CPU; text appears soonest. Mostly without punctuation. |
-| Nemotron Unified (`unified_160ms`) | Nemotron Unified ASR 0.6B | 25 European languages | 3.03% | 6.35% | Punctuation and capitals. Re-reads the last 6 s every 160 ms: about 70 ms of work per step on 4 cores of a Ryzen, so on the CPU it needs a fast CPU. On Linux with a discrete GPU it runs there instead, through WebGPU and an fp16 export (about 30 ms a step on an RTX 5070 Ti, a 1.2 GB download); Settings says which it uses. Text appears about 0.5 s later. Our own export, under OpenMDW-1.1. |
+| Nemotron Unified (`unified_160ms`) | Nemotron Unified ASR 0.6B | 25 European languages | 3.03% | 6.35% | Punctuation and capitals. Re-reads the last 6 s every 160 ms: about 70 ms of work per step on 4 cores of a Ryzen, so on the CPU it needs a fast CPU. On Linux with a discrete GPU it runs there instead, through WebGPU and an fp16 export (about 30 ms a step on an RTX 5070 Ti, a 1.3 GB download); Settings says which it uses. Until the GPU files are downloaded it runs on the CPU, and Settings offers the download. Text appears about 0.5 s later. Our own export, under OpenMDW-1.1. |
 | Parakeet TDT (`parakeet_tdt_v3`) | Parakeet TDT 0.6B v3 | 25 European languages | 2.33%* | 4.76%* | Punctuation and capitals. Light on the CPU: about a seventh of real time on 4 cores, against about one for Unified. Not a streaming model: it re-reads the last 2.6 s every 640 ms, so words may change while you speak, and the text is final about a second after you pause. Under CC BY 4.0. |
 
 Nemotron Speech Streaming at 80 ms and 560 ms (3.62% and 3.46% on LibriSpeech)

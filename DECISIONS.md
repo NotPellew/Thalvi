@@ -103,7 +103,10 @@ areas your change touches. Editing rules are in
 - **ONNX Runtime from ort's prebuilt binaries, linked in.** On Linux its WebGPU build also needs
   `libwebgpu_dawn.so` beside the executable (rpath `$ORIGIN`, shipped in the AppImage). Why: one way
   to provide it. Rejected: a system or bundled dynamic ONNX Runtime (a version and a file per OS).
-- **WebGPU for on-device recognition, discrete GPUs only.** Linux runs Nemotron Unified (fp16 export, `speech-models-v2`) on one, else on the CPU with the reason in Settings; other models and Windows (#317) stay on the CPU. Why: partial lag p50 73 → 32 ms at the same word errors; Streaming and Parakeet were no faster. Rejected: CUDA (NVIDIA only, about 1.65 GiB of libraries, wrong fp16 output in #282), DirectML (Windows only), integrated GPUs (slower than the CPU in #282).
+- **WebGPU for on-device recognition, discrete GPUs only.** Linux runs Nemotron Unified (fp16 export) on
+  one, else on the CPU with the reason in Settings, also until its 1.3 GB are downloaded; other models and
+  Windows (#317) stay on the CPU. Why: partial lag p50 73 → 32 ms at the same word errors; Streaming and
+  Parakeet were no faster. Rejected: CUDA (NVIDIA only, 1.65 GiB, wrong fp16 in #282), DirectML, integrated GPUs.
 - **Wake heads chosen by name or path, downloaded pinned.** Each head is a catalog
   name or a local `.onnx` path with its own threshold; catalog files download on first
   use into the user data directory and must match their SHA-256. Why: users change a
