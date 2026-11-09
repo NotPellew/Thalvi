@@ -71,6 +71,9 @@ records it before the ending cue; this metric extraction preserves the control d
 An idle failure now picks `NoEnding` or `NoWords` from the kept text; it only chooses the error and leaves every await, control drain and delivery admission as mapped.
 The default recognizer became On this computer (#141); a `runner.rs` test now names its server engine
 explicitly. No mapped function changed, so only the hash moved.
+The on-device model's load now reports the files' progress (`load_speech_model` runs the load
+through `load_with_progress`, a select over the load and a progress channel, and `Publisher`
+shows it as the loading notice). No mapped function changed, so only the `runner.rs` hash moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

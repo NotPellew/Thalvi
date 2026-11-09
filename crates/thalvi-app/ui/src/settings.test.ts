@@ -1117,7 +1117,7 @@ describe("the next dictation summary and state words", () => {
   });
 
   describe("the summary's actions while the recognizer is being prepared", () => {
-    const LOADING: Status = { state: "loading", notice: "Loading the speech model. The first time it downloads about 650 MB." };
+    const LOADING: Status = { state: "loading", notice: "Downloading the speech model — 42%" };
     const FAILED: Status = { state: "failed", notice: "n", headline: "Download failed", causes: [], kind: "other" };
     const actions = (): string[] => {
       const row = root.querySelector(".next-dictation + div");

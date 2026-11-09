@@ -6,6 +6,7 @@ use serde::Serialize;
 use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 use thalvi_desktop::engine::EngineState;
 use thalvi_desktop::local::LocalRecognizer;
+use thalvi_desktop::models::SpeechProgress;
 use thalvi_desktop::report::{UserError, causes};
 use thalvi_desktop::transducer::TransducerSource;
 
@@ -143,28 +144,59 @@ impl LastError {
     }
 }
 
-/// What the speech model needs before it is ready.
+/// How far the speech model is from ready.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpeechLoad {
-    FromDisk,
-    Download,
+    /// The files are being checked; `download` when they are not all on disk.
+    Checking {
+        download: bool,
+    },
+    Downloading {
+        percent: u8,
+    },
+    /// The files are on disk and the model is loading.
+    Loading,
 }
 
 impl SpeechLoad {
     pub async fn of(local: &LocalRecognizer<TransducerSource>) -> Self {
         if local.source().is_cached().await {
-            Self::FromDisk
+            Self::Loading
         } else {
-            Self::Download
+            Self::Checking { download: true }
+        }
+    }
+
+    /// The state after the model's files report `progress`.
+    #[must_use]
+    pub fn after(self, progress: SpeechProgress) -> Self {
+        match progress {
+            SpeechProgress::Verifying => Self::Checking {
+                download: self == (Self::Checking { download: true }),
+            },
+            SpeechProgress::Downloading { percent } => Self::Downloading { percent },
+            SpeechProgress::Done => Self::Loading,
         }
     }
 
     #[must_use]
-    pub fn notice(self) -> &'static str {
+    pub fn notice(self) -> String {
         match self {
-            Self::FromDisk => "Loading the speech model.",
-            Self::Download => "Loading the speech model. The first time it downloads about 650 MB.",
+            Self::Checking { .. } => "Checking the speech model files.".to_owned(),
+            Self::Downloading { percent } => {
+                format!("Downloading the speech model \u{2014} {percent}%")
+            }
+            Self::Loading => "Loading the speech model.".to_owned(),
         }
+    }
+
+    /// Files are being downloaded or are about to be.
+    #[must_use]
+    pub fn downloading(self) -> bool {
+        matches!(
+            self,
+            Self::Checking { download: true } | Self::Downloading { .. }
+        )
     }
 }
 
@@ -211,8 +243,8 @@ impl View {
             (self.loading, &self.engine, &self.mode)
         {
             return Status::Loading {
-                notice: load.notice().to_owned(),
-                downloading: load == SpeechLoad::Download,
+                notice: load.notice(),
+                downloading: load.downloading(),
             };
         }
         match (&self.mode, &self.engine) {
@@ -499,10 +531,63 @@ mod tests {
     }
 
     #[test]
+    fn the_overlay_is_told_of_a_download_only_when_files_are_missing_or_damaged() {
+        let percent = |percent| SpeechProgress::Downloading { percent };
+        // Each case: the state at the start, then (report, notice, downloading) after each report.
+        let cases = [
+            (
+                SpeechLoad::Loading,
+                vec![
+                    (
+                        SpeechProgress::Verifying,
+                        "Checking the speech model files.",
+                        false,
+                    ),
+                    (SpeechProgress::Done, "Loading the speech model.", false),
+                ],
+            ),
+            (
+                SpeechLoad::Loading,
+                vec![
+                    (
+                        SpeechProgress::Verifying,
+                        "Checking the speech model files.",
+                        false,
+                    ),
+                    (percent(7), "Downloading the speech model \u{2014} 7%", true),
+                    (SpeechProgress::Done, "Loading the speech model.", false),
+                ],
+            ),
+            (
+                SpeechLoad::Checking { download: true },
+                vec![
+                    (
+                        SpeechProgress::Verifying,
+                        "Checking the speech model files.",
+                        true,
+                    ),
+                    (percent(0), "Downloading the speech model \u{2014} 0%", true),
+                ],
+            ),
+        ];
+        for (start, steps) in cases {
+            let mut load = start;
+            for (report, notice, downloading) in steps {
+                load = load.after(report);
+                assert_eq!(
+                    (load.notice().as_str(), load.downloading()),
+                    (notice, downloading),
+                    "{start:?} then {report:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn loading_the_speech_model_shows_until_a_capture_starts_a_failure_or_a_pause() {
         let loading = |mode, engine| {
             let mut view = view(mode, engine);
-            view.loading = Some(SpeechLoad::FromDisk);
+            view.loading = Some(SpeechLoad::Loading);
             view.status()
         };
         let notice = || "Loading the speech model.".to_owned();

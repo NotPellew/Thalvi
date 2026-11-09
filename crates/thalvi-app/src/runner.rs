@@ -24,7 +24,7 @@ use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{Desktop, Host};
 use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
-use thalvi_desktop::models::{self, ModelStore};
+use thalvi_desktop::models::{self, ModelStore, SpeechProgress};
 use thalvi_desktop::report::{UserError, causes};
 use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
 use thalvi_desktop::transducer::TransducerSource;
@@ -201,6 +201,22 @@ fn finish_runtime(runtime: tokio::runtime::Runtime, stopped: &std_mpsc::Sender<(
     let _ = stopped.send(());
 }
 
+/// Runs `load`, showing the speech model's file progress from `reports` until `load` ends.
+async fn load_with_progress<T>(
+    publisher: &Publisher,
+    load: impl Future<Output = T>,
+    mut reports: mpsc::UnboundedReceiver<SpeechProgress>,
+) -> T {
+    let mut load = pin!(load);
+    loop {
+        tokio::select! {
+            biased;
+            Some(report) = reports.recv() => publisher.speech_progress(report),
+            loaded = &mut load => return loaded,
+        }
+    }
+}
+
 /// Loads the wake models, with the status saying so while a file downloads.
 async fn load_wake<T>(
     publisher: &Publisher,
@@ -318,6 +334,11 @@ impl Publisher {
 
     fn loading(&self, load: Option<SpeechLoad>) {
         self.update(|view| view.loading = load);
+    }
+
+    /// The speech model's files report `progress`; nothing is shown once the load has ended.
+    fn speech_progress(&self, progress: SpeechProgress) {
+        self.update(|view| view.loading = view.loading.map(|load| load.after(progress)));
     }
 
     /// Says why a press of the hold key started nothing. A refusal that only repeats an earlier
@@ -529,8 +550,16 @@ impl Runner {
         println!("{}", load.notice());
         self.publisher.loading(Some(load));
         let publisher = Rc::clone(&self.publisher);
+        let (progress, reports) = mpsc::unbounded_channel();
         self.loading = Some(tokio::task::spawn_local(async move {
-            let loaded = local.load().await;
+            let loaded = load_with_progress(
+                &publisher,
+                local.load(move |report| {
+                    let _ = progress.send(report);
+                }),
+                reports,
+            )
+            .await;
             if let Err(error) = &loaded {
                 println!("{error}");
             }
@@ -1458,10 +1487,14 @@ mod tests {
             publisher.mode(Mode::Idle);
             assert_eq!(shown(), overlay, "{case}: loading the model");
             assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}");
-            assert_eq!(
-                matches!(&*status.borrow(), Status::Loading { notice, .. } if notice.contains("650 MB")),
-                overlay,
-                "{case}: the download notice"
+            let expected = if overlay {
+                "Checking the speech model files."
+            } else {
+                "Loading the speech model."
+            };
+            assert!(
+                matches!(&*status.borrow(), Status::Loading { notice, .. } if notice == expected),
+                "{case}: the notice"
             );
 
             publisher.loading(None);
@@ -1469,6 +1502,114 @@ mod tests {
             assert_eq!(title(&status.borrow()), "Thalvi: listening", "{case}");
             std::fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// The loading notice now, and whether the overlay shows.
+    fn loading_now(status: &watch::Receiver<Status>) -> (String, bool) {
+        let status = status.borrow();
+        match &*status {
+            Status::Loading { notice, .. } => (
+                notice.clone(),
+                Visibility::of(&status, true) == Visibility::Show,
+            ),
+            other => panic!("not loading: {other:?}"),
+        }
+    }
+
+    /// Waits for the next status change, then returns [`loading_now`].
+    async fn next_loading(status: &mut watch::Receiver<Status>) -> (String, bool) {
+        tokio::time::timeout(WAIT, status.changed())
+            .await
+            .expect("the status changed")
+            .expect("the publisher lives");
+        loading_now(status)
+    }
+
+    fn loading_publisher() -> (Rc<Publisher>, watch::Receiver<Status>) {
+        let (out, mut status) = watch::channel(Status::Paused);
+        let publisher = Publisher::new(out, EndingPauses::default());
+        publisher.mode(Mode::Idle);
+        publisher.loading(Some(SpeechLoad::Checking { download: true }));
+        status.mark_unchanged();
+        (publisher, status)
+    }
+
+    #[tokio::test]
+    async fn the_loading_notice_follows_the_speech_model_files_once_per_percent() {
+        LocalSet::new()
+            .run_until(async {
+                let (publisher, mut status) = loading_publisher();
+                let (progress, reports) = mpsc::unbounded_channel();
+                let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+                let load = tokio::task::spawn_local(async move {
+                    load_with_progress(&publisher, finished, reports).await
+                });
+                let percent = |percent| SpeechProgress::Downloading { percent };
+                let mut shown = vec![loading_now(&status)];
+                for (report, changes) in [
+                    (SpeechProgress::Verifying, false),
+                    (percent(0), true),
+                    (percent(0), false),
+                    (percent(1), true),
+                    (percent(50), true),
+                    (percent(100), true),
+                    (SpeechProgress::Done, true),
+                ] {
+                    progress.send(report).unwrap();
+                    if changes {
+                        shown.push(next_loading(&mut status).await);
+                    }
+                }
+                finish.send(()).unwrap();
+                load.await.unwrap().unwrap();
+
+                let download = |text: &str| (text.to_owned(), true);
+                assert_eq!(
+                    shown,
+                    [
+                        download("Checking the speech model files."),
+                        download("Downloading the speech model \u{2014} 0%"),
+                        download("Downloading the speech model \u{2014} 1%"),
+                        download("Downloading the speech model \u{2014} 50%"),
+                        download("Downloading the speech model \u{2014} 100%"),
+                        ("Loading the speech model.".to_owned(), false),
+                    ]
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn switching_away_mid_download_leaves_no_downloading_notice() {
+        LocalSet::new()
+            .run_until(async {
+                let (publisher, mut status) = loading_publisher();
+                let (progress, reports) = mpsc::unbounded_channel();
+                let load = tokio::task::spawn_local({
+                    let publisher = Rc::clone(&publisher);
+                    async move {
+                        load_with_progress(&publisher, std::future::pending::<()>(), reports).await;
+                    }
+                });
+                progress
+                    .send(SpeechProgress::Downloading { percent: 40 })
+                    .unwrap();
+                assert_eq!(
+                    next_loading(&mut status).await.0,
+                    "Downloading the speech model \u{2014} 40%"
+                );
+
+                load.abort();
+                assert!(load.await.unwrap_err().is_cancelled());
+                publisher.loading(None);
+                let late = progress.send(SpeechProgress::Downloading { percent: 41 });
+
+                assert!(late.is_err(), "progress still has a listener");
+                assert_eq!(*status.borrow(), Status::Listening);
+            })
+            .await;
     }
 
     #[tokio::test]

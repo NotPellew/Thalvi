@@ -271,7 +271,7 @@ is needed.
 
 Start it once and it stays in the tray; starting it again opens Settings. The
 first start writes the default config, opens Settings on Speech, and downloads
-the wake models and, once, the speech model (about 650 MB), so the first "Hey
+the wake models and, once, the speech model, so the first "Hey
 Thalvi" works with no setup. If Thalvi cannot start, for example because its
 config is broken, a message box names the problem and the file.
 
@@ -301,8 +301,8 @@ the first time Thalvi reads it, with nothing to enter again. An API key is shown
 as saved and never again; leave it blank to keep it. A server that cannot be
 reached is named in the error, and Thalvi never falls back to another one.
 
-For the on-device model, Thalvi downloads a missing model when it starts (about
-650 MB, once), and Next dictation shows that until it is ready. While it
+For the on-device model, Thalvi downloads a missing model when it starts (once),
+and Next dictation shows the download's percent until it is ready. While it
 downloads or if it fails, **Use a speech server instead** opens the form to add
 a server, and after a failure **Retry** fetches the model again; Thalvi never
 switches recognizers by itself. After that it works offline. A model you pick applies from the next capture, and
