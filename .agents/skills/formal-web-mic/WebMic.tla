@@ -1,6 +1,6 @@
 --------------------------------- MODULE WebMic ---------------------------------
-(* The web client's microphone around a conversation's end, as web/src/main.ts
-   (startVoice, acquireAudio, releaseUnused), web/src/mic.ts (openMic) and
+(* The web client's microphone around a conversation's end, as web/src/device-audio.ts
+   (startVoice, acquire, releaseUnused), web/src/mic.ts (openMic) and
    web/src/controller.ts (setVoice, micStopped, message) run it. JavaScript runs
    one task at a time, so each action is the code between two awaits, or one
    event from the server, the user or the device. SKILL.md maps them. *)
@@ -9,7 +9,8 @@ EXTENDS Naturals
 CONSTANTS MaxTaps,
           ClosedAddModuleRejects,  \* measured: Chromium 153 resolves addModule on a closed context
           ClosedNodeThrows,        \* measured: Chromium 153 throws InvalidStateError for the node
-          GuardedOpen,             \* a design that stops the tracks on every failure and drops a mic nobody wants
+          OpenMicLeaksTracks,      \* mutation: openMic stops no tracks when it fails after getUserMedia
+          KeepsMicAfterEnd,        \* mutation: startVoice keeps a microphone that arrives after the link ended
           ReleaseKeepsMic, MicStoppedKeepsVoice
 
 Ctxs == 1..MaxTaps
@@ -105,19 +106,16 @@ Denied ==
 
 \* openMic: `await ctx.audioWorklet.addModule(...)` settles. With no await after it, openMic
 \* builds its nodes and returns, and startVoice sets micInput and calls setVoice(true), all in
-\* one step. A rejection stops the tracks; a node on a closed context throws outside openMic's
-\* try, so the stream is nobody's.
+\* one step. A node on a closed context throws; openMic's catch stops the tracks. startVoice
+\* stops a microphone that arrives after the link ended and calls releaseUnused.
 Opened ==
     /\ pc = "addModule"
     /\ IF ctxState[startCtx] = "closed" /\ ClosedAddModuleRejects
        THEN FailWith("stopped") /\ UNCHANGED voice
        ELSE IF ctxState[startCtx] = "closed" /\ ClosedNodeThrows
-       THEN FailWith(IF GuardedOpen THEN "stopped" ELSE "live") /\ UNCHANGED voice
-       ELSE IF GuardedOpen /\ link = "ended"
-       THEN /\ stream' = [stream EXCEPT ![taps] = "stopped"]
-            /\ owner' = [owner EXCEPT ![taps] = "nobody"]
-            /\ pc' = "idle"
-            /\ UNCHANGED <<micInput, voice, ctxState, audio>>
+       THEN FailWith(IF OpenMicLeaksTracks THEN "live" ELSE "stopped") /\ UNCHANGED voice
+       ELSE IF link = "ended" /\ ~KeepsMicAfterEnd
+       THEN FailWith("stopped") /\ UNCHANGED voice
        ELSE /\ micInput' = taps
             /\ owner' = [owner EXCEPT ![taps] = "micInput"]
             /\ voice' = TRUE
