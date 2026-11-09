@@ -35,13 +35,13 @@ impl Store {
     }
 
     /// The config to start with, and whether this is the first start: no file at the per-user path.
-    /// A first start writes the defaults as a save with nothing changed would; a path given on the
-    /// command line must exist, so it is never one.
+    /// A first start writes the defaults as a save with nothing changed would. A path given on the
+    /// command line must exist, so a missing one is an error before it can be a first start.
     ///
     /// # Errors
     /// Why the file cannot be read or is not valid, or why the defaults cannot be written.
     pub fn start(&self) -> Result<(DesktopConfig, bool), String> {
-        let first_start = !self.required && !self.path.exists();
+        let first_start = !self.path.exists();
         let config = self.load()?;
         if first_start {
             self.save_switches(&config)?;
