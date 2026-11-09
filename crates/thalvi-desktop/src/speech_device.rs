@@ -74,6 +74,8 @@ fn describe(loaded: Option<Device>, planned: Device, gpu_files: bool, cpu_files:
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::device::Gpu;
 
@@ -162,5 +164,75 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    fn devices(checks: &Arc<AtomicUsize>) -> SpeechDevices {
+        let checks = Arc::clone(checks);
+        SpeechDevices::new(Adapters::checking(move || {
+            checks.fetch_add(1, Ordering::SeqCst);
+            Adapter::Discrete(rtx())
+        }))
+    }
+
+    fn seed(dir: &std::path::Path, assets: crate::models::SpeechAssets<'_>) {
+        for asset in [assets.encoder, assets.decoder, assets.joiner, assets.tokens]
+            .into_iter()
+            .chain(assets.encoder_data)
+        {
+            let path = dir.join(asset.file_name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(path)
+                .unwrap()
+                .set_len(asset.size)
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn one_check_plans_every_model_and_only_the_gpu_model_gets_the_gpu() {
+        let checks = Arc::new(AtomicUsize::new(0));
+        let devices = devices(&checks);
+        for _settings_opened in 0..2 {
+            let plans = devices.plans().await;
+            let planned: Vec<_> = CatalogSpeech::ALL.map(&plans).into_iter().collect();
+            let expected: Vec<_> = CatalogSpeech::ALL
+                .map(|model| {
+                    if model == CatalogSpeech::Unified160ms {
+                        Device::Gpu(rtx())
+                    } else {
+                        Device::Cpu(Fallback::CpuModel)
+                    }
+                })
+                .into_iter()
+                .collect();
+            assert_eq!(planned, expected);
+        }
+        assert_eq!(checks.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_model_the_engine_has_not_loaded_will_run_where_its_files_on_disk_let_it() {
+        let dir = std::env::temp_dir().join(format!("thalvi-line-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = ModelStore::in_dir(&dir);
+        let devices = devices(&Arc::new(AtomicUsize::new(0)));
+        let line = async |model| devices.line(&store, model).await;
+        let unified = CatalogSpeech::Unified160ms;
+        let will_gpu = "Will run on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)";
+
+        assert_eq!(line(unified).await, will_gpu, "nothing downloaded yet");
+        seed(&dir, unified.assets());
+        assert_eq!(
+            line(unified).await,
+            "Will run on the CPU: the GPU model isn't downloaded",
+            "only the int8 files"
+        );
+        seed(&dir, unified.assets_of(Export::Gpu));
+        assert_eq!(line(unified).await, will_gpu, "the GPU files too");
+        assert_eq!(
+            line(CatalogSpeech::Nemotron160ms).await,
+            "Will run on the CPU: this model runs on the CPU"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

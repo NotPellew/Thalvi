@@ -30,6 +30,7 @@ exclude_re = [
     "impl Running for Live",
     "watch_hold_keys",
     "overlay_takes_clicks",
+    # Tauri commands that only pass AppState to SpeechDevices, ModelStore and Download, which the tests above them cover.
     "crates/thalvi-app/src/(app|commands).rs.*replace (start|list_speech_models|speech_device|download_speech_model) ->",
     "get_hold_key_unavailable",
 ]

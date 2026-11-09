@@ -19,8 +19,8 @@ use thalvi_desktop::history::{Entry, HistoryError, Store as History};
 use thalvi_desktop::host::{Host, WebUrl};
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{
-    CatalogHead, CatalogSpeech, ModelError, ModelStore, SpeechModelInfo, SpeechProgress,
-    WakeModelInfo,
+    CatalogHead, CatalogSpeech, ModelError, ModelStore, SpeechAssets, SpeechDownloads,
+    SpeechModelInfo, SpeechProgress, WakeModelInfo,
 };
 use thalvi_desktop::phrases;
 use thalvi_desktop::recognizer::ServerUrl;
@@ -351,34 +351,55 @@ pub async fn download_speech_model(
     let store = ModelStore::per_user().map_err(|error| error.to_string())?;
     let recorder =
         Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
-    let started = Instant::now();
     let assets = model.assets_on(&state.speech_devices.plans().await(model));
-    let result = state
-        .speech_downloads
-        .run(model.name(), &store, &assets, |progress| {
-            let _ = app.emit(
-                "thalvi://speech-model-progress",
-                SpeechModelProgress::of(model.name(), progress),
-            );
+    let download = Download {
+        name: model.name(),
+        assets: &assets,
+        store: &store,
+        downloads: &state.speech_downloads,
+        recorder: &recorder,
+    };
+    download
+        .run(|progress| {
+            let _ = app.emit("thalvi://speech-model-progress", progress);
         })
-        .await;
-    if matches!(result, Err(ModelError::AlreadyDownloading { .. })) {
-        return result.map_err(|error| error.to_string());
-    }
-    recorder.metric(
-        Event::SpeechDownload,
-        if result.is_ok() { "ok" } else { "error" },
-        Some(started.elapsed()),
-        json!({"model": model.name()}),
-    );
-    result.map_err(|error| {
-        let message = error.to_string();
-        let _ = app.emit(
-            "thalvi://speech-model-progress",
-            SpeechModelProgress::failed(model.name(), message.clone()),
+        .await
+}
+
+/// One download of a catalog speech model's files, with what reports it.
+struct Download<'a> {
+    name: &'static str,
+    assets: &'a SpeechAssets<'a>,
+    store: &'a ModelStore,
+    downloads: &'a SpeechDownloads,
+    recorder: &'a Recorder,
+}
+
+impl Download<'_> {
+    /// Fetches the files the store lacks, telling `emit` each step and a failure, and records the outcome.
+    async fn run(&self, emit: impl Fn(SpeechModelProgress<'static>)) -> Result<(), String> {
+        let started = Instant::now();
+        let result = self
+            .downloads
+            .run(self.name, self.store, self.assets, |progress| {
+                emit(SpeechModelProgress::of(self.name, progress));
+            })
+            .await;
+        if matches!(result, Err(ModelError::AlreadyDownloading { .. })) {
+            return result.map_err(|error| error.to_string());
+        }
+        self.recorder.metric(
+            Event::SpeechDownload,
+            if result.is_ok() { "ok" } else { "error" },
+            Some(started.elapsed()),
+            json!({"model": self.name}),
         );
-        message
-    })
+        result.map_err(|error| {
+            let message = error.to_string();
+            emit(SpeechModelProgress::failed(self.name, message.clone()));
+            message
+        })
+    }
 }
 
 /// Opens a catalog speech model's page in the browser.
@@ -530,9 +551,86 @@ pub fn set_menu_entry(on: bool, state: State<'_, AppState>) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use serde_json::json;
+    use thalvi_desktop::metrics::RecordKinds;
+    use thalvi_desktop::models::{Asset, ModelKind};
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_download_that_fails_tells_the_ui_how_far_it_got_and_why_and_records_the_error() {
+        let dir = std::env::temp_dir().join(format!("thalvi-download-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // A port nothing listens on, so the download fails at once without a network.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let url = format!("http://127.0.0.1:{port}/m.onnx");
+        let file = Asset {
+            kind: ModelKind::Speech,
+            file_name: "m.onnx",
+            url: &url,
+            size: 4,
+            sha256: "00",
+        };
+        let assets = SpeechAssets {
+            encoder: file,
+            encoder_data: None,
+            decoder: file,
+            joiner: file,
+            tokens: file,
+        };
+        let recorder = Recorder::in_dir(
+            RecordKinds {
+                metrics: true,
+                ..RecordKinds::default()
+            },
+            dir.join("records"),
+        )
+        .unwrap();
+        let store = ModelStore::in_dir(dir.join("models"));
+        let downloads = SpeechDownloads::default();
+        let emitted = RefCell::new(Vec::new());
+
+        let result = Download {
+            name: "m",
+            assets: &assets,
+            store: &store,
+            downloads: &downloads,
+            recorder: &recorder,
+        }
+        .run(|progress| emitted.borrow_mut().push(progress))
+        .await;
+
+        let message = result.unwrap_err();
+        assert!(
+            message.starts_with("Could not download the speech model m.onnx"),
+            "{message}"
+        );
+        assert_eq!(
+            *emitted.borrow(),
+            [
+                SpeechModelProgress::of("m", SpeechProgress::Verifying),
+                SpeechModelProgress::failed("m", message),
+            ]
+        );
+        recorder.finish().await;
+        let metrics = std::fs::read_to_string(dir.join("records").join("metrics.jsonl")).unwrap();
+        let line: Value = serde_json::from_str(metrics.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            (&line["event"], &line["outcome"], &line["model"]),
+            (
+                &json!("desktop_speech_download"),
+                &json!("error"),
+                &json!("m")
+            )
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn progress_reaches_the_ui_as_name_percent_and_status() {

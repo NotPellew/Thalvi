@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use thalvi_desktop::device::{
-    Adapters, Device, Export, Fallback, Gpu, Nodes, Placement, Provider, Step,
+    Adapter, Adapters, Device, Export, Fallback, Gpu, Nodes, Placement, Provider, Step,
 };
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::local::{LocalRecognizer, ModelSource, SpeechModel, SpeechStream};
@@ -456,6 +456,49 @@ async fn a_catalog_model_that_cannot_be_provided_fails_with_the_model_errors_own
             .starts_with("Could not save the speech model nemotron_160ms.encoder.int8.onnx in "),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn a_gpu_plan_that_cannot_save_its_files_tries_the_cpu_files_next_and_each_load_checks_the_adapter_once()
+ {
+    let blocker = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("local-gpu-blocker");
+    std::fs::write(&blocker, b"a file where the model folder should be").expect("writes");
+    let checks = Arc::new(AtomicUsize::new(0));
+    let adapters = Adapters::checking({
+        let checks = Arc::clone(&checks);
+        move || {
+            checks.fetch_add(1, Ordering::SeqCst);
+            Adapter::Discrete(Gpu {
+                name: "NVIDIA GeForce RTX 5070 Ti".to_owned(),
+                api: "Vulkan",
+            })
+        }
+    });
+    let source = TransducerSource::new(
+        ModelStore::in_dir(blocker.join("models")),
+        SpeechChoice::Catalog(CatalogSpeech::Unified160ms),
+        &WordList::default(),
+        adapters,
+    );
+    let steps = Mutex::new(Vec::new());
+
+    let error = source
+        .load(|step| steps.lock().expect("steps").push(step))
+        .await
+        .err()
+        .expect("no folder to fetch into");
+
+    assert_eq!(
+        *steps.lock().expect("steps"),
+        [Step::Fetching(Export::Gpu), Step::Fetching(Export::Cpu)]
+    );
+    assert!(
+        error
+            .to_string()
+            .starts_with("Could not save the speech model unified_160ms.encoder.int8.onnx in "),
+        "the error is the CPU files': {error}"
+    );
+    assert_eq!(checks.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
