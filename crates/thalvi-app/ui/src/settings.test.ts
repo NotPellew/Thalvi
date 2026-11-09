@@ -1727,6 +1727,96 @@ describe("writing", () => {
     });
   });
 
+  describe("opening phrases", () => {
+    const saved = { url: endpoint.url, model: endpoint.model, has_key: true };
+    const rows = (): HTMLElement => rowOf("Opening phrases");
+    const addField = (): HTMLInputElement => rows().querySelector<HTMLInputElement>(".add input") as HTMLInputElement;
+    const add = (phrase: string): void => {
+      type(addField(), phrase);
+      (rows().querySelector(".add button") as HTMLElement).click();
+    };
+    const notice = (): string => rows().querySelector(".note:not([hidden])")?.textContent ?? "";
+    const phrases = (): (string | null)[] => Array.from(rows().querySelectorAll(".phrase:not(.add *)"), (node) => node.textContent);
+    const promptOf = (phrase: string): HTMLTextAreaElement =>
+      rows().querySelector(`textarea[aria-label="Prompt for “${phrase}”"]`) as HTMLTextAreaElement;
+    const edit = (area: HTMLTextAreaElement, value: string): void => {
+      area.value = value;
+      area.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+
+    it("adds a rule that starts as a copy of the Writing prompt, edits it, and saves it with the endpoint", async () => {
+      const stub = await open({ ...SETTINGS, writing: { ...saved, prompt: "Be brief." } });
+      goTo("speech");
+      add("  Write me an E-mail, ");
+      expect(phrases()).toEqual(["“write me an e mail”"]);
+      expect(promptOf("write me an e mail").value).toBe("Be brief.");
+      expect(addField().value).toBe("");
+      edit(promptOf("write me an e mail"), "Greeting, body, sign-off.");
+      add("write a message");
+      expect(promptOf("write a message").value).toBe("Be brief.");
+      expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
+      button("Save").click();
+      await settle();
+      expect(sent(stub).writing).toEqual({
+        ...saved,
+        prompt: "Be brief.",
+        openings: [
+          { phrase: "write me an e mail", prompt: "Greeting, body, sign-off." },
+          { phrase: "write a message", prompt: "Be brief." },
+        ],
+      });
+    });
+
+    it("shows saved rules, removes one, and sends no list once the last is gone", async () => {
+      const openings = [
+        { phrase: "write me an email", prompt: "Email." },
+        { phrase: "write a message", prompt: "Message." },
+      ];
+      const stub = await open({ ...SETTINGS, writing: { ...saved, openings } });
+      goTo("speech");
+      expect(phrases()).toEqual(["“write me an email”", "“write a message”"]);
+      expect(promptOf("write a message").value).toBe("Message.");
+      (rows().querySelector('button[aria-label="Remove “write me an email”"]') as HTMLElement).click();
+      button("Save").click();
+      await settle();
+      expect(sent(stub).writing).toEqual({ ...saved, openings: [openings[1]] });
+      (rows().querySelector('button[aria-label="Remove “write a message”"]') as HTMLElement).click();
+      button("Save").click();
+      await settle();
+      expect(stub.backend.saveSettings.mock.calls[1]?.[0].writing).toEqual(saved);
+    });
+
+    it("refuses a phrase that is already there, ignoring case and punctuation, and an empty one", async () => {
+      const stub = await open({ ...SETTINGS, writing: { ...saved, openings: [{ phrase: "write me an email", prompt: "Email." }] } });
+      goTo("speech");
+      add("Write me an email!");
+      expect(notice()).toBe("“write me an email” is already in the list.");
+      expect(addField().value).toBe("Write me an email!");
+      expect(phrases()).toEqual(["“write me an email”"]);
+      expect(promptOf("write me an email").value).toBe("Email.");
+      expect(root.querySelector(".msg")?.textContent).not.toBe("Unsaved changes");
+      add(" ?! ");
+      expect(notice()).toBe("Type the phrase to add first.");
+      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    });
+
+    it("keeps rules while the endpoint is empty and shows the refusal for a blank prompt", async () => {
+      const stub = await open();
+      goTo("speech");
+      add("write me an email");
+      button("Save").click();
+      await settle();
+      expect(sent(stub).writing).toEqual({ url: "", model: "", openings: [{ phrase: "write me an email", prompt: SETTINGS.writing_default_prompt }] });
+
+      stub.backend.saveSettings.mockRejectedValue("writing.openings has a blank prompt for “write me an email”.");
+      edit(promptOf("write me an email"), "  ");
+      button("Save").click();
+      await settle();
+      expect(root.querySelector(".err")?.textContent).toBe("writing.openings has a blank prompt for “write me an email”.");
+      expect(promptOf("write me an email").value).toBe("  ");
+    });
+  });
+
   function sent_writing_fields(): string[] {
     return ["Writing endpoint address", "Writing model", "Writing API key"].map((label) => control(label, "input").value);
   }
