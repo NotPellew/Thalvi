@@ -48,8 +48,9 @@ impl ModelSource for Source {
 
     fn load(
         &self,
-        _step: impl Fn(Step) + Send + Sync,
+        step: impl Fn(Step) + Send + Sync,
     ) -> impl Future<Output = Result<Fake, RecognizerError>> + Send {
+        step(Step::Reading);
         let failing = self
             .failures
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -430,6 +431,17 @@ async fn a_model_that_cannot_be_fetched_is_reported_and_fetched_again_on_the_nex
             ("ok".into(), "fake-model".into())
         ]
     );
+}
+
+#[tokio::test]
+async fn telling_the_step_it_is_already_at_wakes_nobody_watching_the_load() {
+    let rig = rig("steps", dictation, None, 0);
+    let steps = rig.recognizer.steps();
+
+    rig.recognizer.load().await.expect("loads");
+
+    assert!(!steps.has_changed().expect("the recognizer lives"));
+    assert_eq!(*steps.borrow(), Step::Reading);
 }
 
 #[tokio::test]
