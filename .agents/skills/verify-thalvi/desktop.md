@@ -130,7 +130,7 @@ only loopback, so nothing leaves the machine and abstract unix sockets are the r
   and the app records nothing until the cue (250 to 370 ms) has ended and the recognizer is
   connected; a clip started on that word lost its first 250 ms in 1 of 16 trials. With
   `metrics` on, a new `desktop_transcription_ready` line in
-  `$R/home/.local/share/thalvi/recordings/metrics.jsonl` marks the moment (0.3 to 0.55 s after
+  `$R/home/.local/share/thalvi/recordings/metrics.jsonl` marks the moment (0.25 to 0.55 s after
   `hold-start`); `say` right after it kept the whole clip in 16 of 16 trials. Without
   metrics, wait about two seconds after `capturing`. Sound played into the microphone before
   that is lost.
