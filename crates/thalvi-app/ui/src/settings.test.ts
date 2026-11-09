@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry } from "./contract.ts";
+import settingsCss from "./settings.css?raw";
 import { ELSEWHERE_TEXT, mountSettings, SAVED_MICROPHONE_TEXT, SAVED_TEXT } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO } from "./testing.ts";
 
@@ -2050,5 +2051,43 @@ describe("last dictation", () => {
     expect(root.querySelector<HTMLElement>('section[data-page="history"]')?.hidden).toBe(false);
     stub.openPage("nowhere");
     expect(root.querySelector<HTMLElement>('section[data-page="history"]')?.hidden).toBe(false);
+  });
+});
+
+describe("footer", () => {
+  // jsdom does not load the app's stylesheet, and what shows depends on it.
+  beforeEach(() => {
+    document.head.appendChild(document.createElement("style")).textContent = settingsCss;
+  });
+  afterEach(() => {
+    document.head.querySelector("style")?.remove();
+  });
+
+  it.each(["unsaved edit", "change from elsewhere", "save in flight"] as const)("shows %s next to a runtime error instead of hiding it", async (state) => {
+    const stub = await open();
+    stub.emit({ state: "failed", notice: "Could not download the wake model.", headline: "Failed — Settings", causes: [], kind: "other" });
+    if (state !== "save in flight") {
+      goTo("capture");
+      type(control("Quiet before paste", "input"), "1.5");
+    }
+    if (state === "change from elsewhere") {
+      stub.changedElsewhere();
+    } else if (state === "save in flight") {
+      stub.backend.saveSettings.mockImplementationOnce(() => new Promise<void>(() => undefined));
+      button("Save").click();
+    }
+    await settle();
+    const message = root.querySelector<HTMLElement>(".msg") as HTMLElement;
+    const error = root.querySelector<HTMLElement>(".err") as HTMLElement;
+    expect(message.textContent).toBe({ "unsaved edit": "Unsaved changes", "change from elsewhere": ELSEWHERE_TEXT, "save in flight": "Saving…" }[state]);
+    expect(error.textContent).toBe("Could not download the wake model.");
+    expect(getComputedStyle(message).display).not.toBe("none");
+    expect(getComputedStyle(error).display).not.toBe("none");
+  });
+
+  it("leaves the whole bar to an error when there is no status text", async () => {
+    const stub = await open();
+    stub.emit({ state: "failed", notice: "Could not download the wake model.", headline: "Failed — Settings", causes: [], kind: "other" });
+    expect(getComputedStyle(root.querySelector(".msg") as HTMLElement).display).toBe("none");
   });
 });
