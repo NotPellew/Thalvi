@@ -2020,13 +2020,15 @@ struct Pasted {
     notices: Vec<String>,
 }
 
-/// Captures as `capture_task` does, then keeps listening for 20 s the way the app does between
-/// captures, so second passes the paste did not wait for can finish and be recorded.
+/// Captures as `capture_task` does, then spends `busy` ms elsewhere, the way the app does while it
+/// delivers or writes, and keeps listening for 20 s, so second passes the paste did not wait for
+/// can finish and be recorded.
 fn capture_and_listen(
     rig: &Rig,
     mut engine: TestEngine,
     mut frames: FakeFrames,
     cancel_after: bool,
+    busy: u64,
 ) -> JoinHandle<Pasted> {
     let origin = tokio::time::Instant::now() - ms(rig.now());
     let notices = Rc::clone(&rig.notices);
@@ -2043,6 +2045,7 @@ fn capture_and_listen(
         if cancel_after {
             handle.cancel();
         }
+        tokio::time::sleep(ms(busy)).await;
         let _ = tokio::time::timeout(Duration::from_secs(20), engine.listen(&mut frames)).await;
         engine.finish().await;
         pasted
@@ -2074,7 +2077,7 @@ async fn the_first_ticked_entry_that_answers_replaces_the_text_and_the_rest_are_
             ]);
             let recorder = Recorder::in_dir(all, &dir).unwrap();
             let (mut rig, engine, frames) = Rig::recording(&config, recorder);
-            let task = capture_and_listen(&rig, engine, frames, false);
+            let task = capture_and_listen(&rig, engine, frames, false, 0);
             live_words(&mut rig).await;
             assert_eq!(
                 finished(task).await.outcome,
@@ -2376,6 +2379,7 @@ async fn check_order(order: &Order) {
         engine,
         frames,
         matches!(order.cancel, Cancel::AfterPaste),
+        0,
     );
     live_words(&mut rig).await;
     if let Cancel::During(after) = order.cancel {
@@ -2427,6 +2431,41 @@ async fn check_order(order: &Order) {
         text,
         "{name}: text.txt"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recorded_only_entry_records_its_own_latency_however_long_the_engine_was_busy() {
+    LocalSet::new()
+        .run_until(async {
+            let all = RecordKinds {
+                metrics: true,
+                text: false,
+                audio: false,
+            };
+            let dir = record_dir("busy");
+            let (a, _a) = serve(Reply::After(100, A)).await;
+            let (b, _b) = serve(Reply::After(500, B)).await;
+            let config = with_second_passes(&[("A", &a, true), ("B", &b, true)]);
+            let recorder = Recorder::in_dir(all, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording(&config, recorder);
+            // The engine does something else for 5 s after the paste.
+            let task = capture_and_listen(&rig, engine, frames, false, 5000);
+            live_words(&mut rig).await;
+            finished(task).await;
+
+            let took: Vec<_> = read_lines(&dir.join("metrics.jsonl"))
+                .iter()
+                .filter(|line| line["event"] == "desktop_secondary_stt")
+                .map(|line| {
+                    (
+                        line["entry"].as_str().unwrap().to_owned(),
+                        line["duration_ms"].as_f64().unwrap().round(),
+                    )
+                })
+                .collect();
+            assert_eq!(took, [("A".to_owned(), 100.0), ("B".to_owned(), 500.0)]);
+        })
+        .await;
 }
 
 #[tokio::test(start_paused = true)]

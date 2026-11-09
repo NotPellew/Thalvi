@@ -10,12 +10,14 @@ use std::future::{Future, pending};
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use futures_util::future::{FutureExt, LocalBoxFuture};
-use futures_util::stream::{FuturesUnordered, SelectAll, StreamExt};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::watch;
+use tokio::task::{JoinError, JoinSet};
 use tokio::time::Instant;
 
 use crate::audio::{AudioError, Frames, InputGate};
@@ -419,9 +421,10 @@ pub struct Engine<R, W, C> {
     limits: CaptureLimits,
     /// The ticked second-pass entries in list order.
     secondary: Vec<SecondPassEntry>,
-    /// Second-pass requests the paste did not wait for, one set per capture; each is recorded as it
-    /// finishes while a loop of the engine polls this. Quitting drops them.
-    recorded_only: SelectAll<FuturesUnordered<LocalBoxFuture<'static, Answer>>>,
+    /// Second-pass requests the paste did not wait for, one set per capture. Each runs as its own
+    /// task, so its latency is its own, and is recorded when a loop of the engine collects it.
+    /// Dropping the engine aborts them.
+    recorded_only: Vec<JoinSet<Answer>>,
     writing: Option<Writing>,
     speech: SpeechSource,
     http: reqwest::Client,
@@ -666,6 +669,40 @@ struct Judged {
     agreed: Option<String>,
 }
 
+/// The answer of a finished request; a request only ends without one if it panicked, and that
+/// panic is the engine's too.
+fn settled(joined: Result<Answer, JoinError>) -> Option<Answer> {
+    match joined {
+        Ok(answer) => Some(answer),
+        Err(error) => match error.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(_) => None,
+        },
+    }
+}
+
+/// The next answer of a second pass the paste did not wait for; never ready while none is running.
+async fn next_recorded(sets: &mut Vec<JoinSet<Answer>>) -> Answer {
+    std::future::poll_fn(|cx| {
+        let mut at = 0;
+        while let Some(set) = sets.get_mut(at) {
+            match set.poll_join_next(cx) {
+                Poll::Ready(None) => {
+                    sets.swap_remove(at);
+                }
+                Poll::Ready(Some(joined)) => {
+                    if let Some(answer) = settled(joined) {
+                        return Poll::Ready(answer);
+                    }
+                }
+                Poll::Pending => at += 1,
+            }
+        }
+        Poll::Pending
+    })
+    .await
+}
+
 /// Which entry the paste takes, as far as the answers so far say.
 enum Usable {
     /// An earlier entry may still give a usable answer.
@@ -831,7 +868,7 @@ where
             scripts: config.scripts.clone(),
             limits: config.capture_limits,
             secondary: config.stt.entries.ticked().cloned().collect(),
-            recorded_only: SelectAll::new(),
+            recorded_only: Vec::new(),
             writing: config.writing.clone(),
             speech: config.speech_source(),
             http: parts.http,
@@ -881,8 +918,10 @@ where
         std::mem::take(&mut self.ignored)
     }
 
-    /// Writes the recordings still queued; call once at shutdown.
+    /// Writes the recordings still queued and abandons second passes still running; call once at
+    /// shutdown.
     pub async fn finish(self) {
+        drop(self.recorded_only);
         self.recorder.finish().await;
     }
 
@@ -962,7 +1001,7 @@ where
                     }
                     continue;
                 }
-                Some(answer) = self.recorded_only.next() => {
+                answer = next_recorded(&mut self.recorded_only) => {
                     self.record_late(answer);
                     continue;
                 }
@@ -1491,7 +1530,7 @@ where
                 changed = self.key.changed(), if key_open => Step::Key(changed.is_ok()),
                 event = live.session.next_event() => Step::Event(event),
                 frame = frames.next() => Step::Frame(frame),
-                Some(answer) = self.recorded_only.next() => Step::Recorded(answer),
+                answer = next_recorded(&mut self.recorded_only) => Step::Recorded(answer),
                 Some(end) = live.cues.next() => Step::Cue(end),
                 () = until(live.text.ready_at()) => Step::Quiet,
                 () = until(live.watch.as_ref().and_then(Watch::ready_at)) => Step::Disputed,
@@ -2075,8 +2114,11 @@ where
                     }
                     return CaptureOutcome::cancelled_with(request.text);
                 }
-                Some(answer) = self.recorded_only.next() => self.record_late(answer),
-                Some(answer) = running.next() => {
+                answer = next_recorded(&mut self.recorded_only) => self.record_late(answer),
+                Some(joined) = running.join_next() => {
+                    let Some(answer) = settled(joined) else {
+                        continue;
+                    };
                     let judged = self.judge(answer);
                     if let Some(slot) = slots.get_mut(judged.answer.index) {
                         *slot = Some(judged);
@@ -2128,40 +2170,37 @@ where
         }
     }
 
-    /// Sends the capture to every ticked entry at once.
+    /// Sends the capture to every ticked entry at once, each request in a task of its own.
     fn ask_all(
         &self,
         request: &CaptureRequest,
         sent: &[Frame],
         has_endings: bool,
         dictation: &Dictation,
-    ) -> FuturesUnordered<LocalBoxFuture<'static, Answer>> {
-        let sent: Rc<[Frame]> = Rc::from(sent);
-        let running = FuturesUnordered::new();
+    ) -> JoinSet<Answer> {
+        let sent: Arc<[Frame]> = Arc::from(sent);
+        let mut running = JoinSet::new();
         for (index, entry) in self.secondary.iter().enumerate() {
             let (http, entry, sent, dictation) = (
                 self.http.clone(),
                 entry.clone(),
-                Rc::clone(&sent),
+                Arc::clone(&sent),
                 dictation.clone(),
             );
             let route = request.route;
-            running.push(
-                async move {
-                    let asked = Instant::now();
-                    let heard = secondary::transcribe(&http, &entry.settings, &sent).await;
-                    Answer {
-                        index,
-                        entry,
-                        dictation,
-                        route,
-                        has_endings,
-                        heard,
-                        took: asked.elapsed(),
-                    }
+            running.spawn(async move {
+                let asked = Instant::now();
+                let heard = secondary::transcribe(&http, &entry.settings, &sent).await;
+                Answer {
+                    index,
+                    entry,
+                    dictation,
+                    route,
+                    has_endings,
+                    heard,
+                    took: asked.elapsed(),
                 }
-                .boxed_local(),
-            );
+            });
         }
         running
     }
