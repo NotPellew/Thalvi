@@ -37,6 +37,9 @@ areas your change touches. Editing rules are in
   ASR, Thalvi server, on-device and second-pass entries; one live entry is active, ticked second passes run in list
   order and the first that answers wins; `STT_URL` stays for web conversations. Why: switch recognizers with one click,
   no `.env` edit or restart. Rejected: one setting per recognizer, a silent fallback between entries, several live entries (#228).
+- **A fresh install recognizes on this computer.** With no `stt.entries` the one active entry is On this computer
+  with Nemotron Streaming; the first start writes the defaults, opens Settings on Speech and downloads the model.
+  Why: the packaged app ships no server. Rejected: a setup wizard, waiting for a click before downloading.
 - **The self-hosted recognizer computes in fp32.** Why: in fp16 its encoder overflows to NaN, decoded as `⁇`,
   when speech follows seconds of digital silence (#220); fp32 takes 1.25 GB more VRAM (7.7 of 8 GB beside TTS)
   and about 2 ms more per step on the RTX 2080. Rejected: bfloat16 (Turing has none), filling silence with

@@ -166,13 +166,13 @@ pub struct Entries {
 }
 
 impl Default for Entries {
-    /// One Thalvi server entry at the default address, active.
+    /// One On this computer entry with the catalog default model, active.
     fn default() -> Self {
         Self {
             live: vec![LiveEntry {
-                id: THALVI_SERVER_ID.to_owned(),
-                name: THALVI_SERVER_NAME.to_owned(),
-                kind: LiveKind::ThalviServer(ServerUrl::default()),
+                id: ON_DEVICE_ID.to_owned(),
+                name: ON_DEVICE_NAME.to_owned(),
+                kind: LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
             }],
             active: 0,
             second_pass: Vec::new(),
@@ -285,8 +285,20 @@ impl Entries {
             name: THALVI_SERVER_NAME.to_owned(),
             kind: LiveKind::ThalviServer(server),
         };
+        let on_device = |choice: SpeechChoice| LiveEntry {
+            id: ON_DEVICE_ID.to_owned(),
+            name: ON_DEVICE_NAME.to_owned(),
+            kind: LiveKind::OnDevice(choice),
+        };
         let live = match (engine, model) {
-            (None | Some(EngineName::Server), None) => {
+            // No recognizer was ever chosen: the default is on this computer. A saved server
+            // address or an explicit server engine keeps the server, as 0.1.x files always
+            // wrote one of those.
+            (None, None) => match server {
+                Some(server) => vec![server_entry(server)],
+                None => vec![on_device(SpeechChoice::Catalog(CatalogSpeech::ALL[0]))],
+            },
+            (Some(EngineName::Server), None) => {
                 vec![server_entry(server.unwrap_or_default())]
             }
             (None | Some(EngineName::Server), Some(_)) => {
@@ -298,11 +310,7 @@ impl Entries {
                         name: ON_DEVICE_NAME.to_owned(),
                         reason,
                     })?;
-                let mut live = vec![LiveEntry {
-                    id: ON_DEVICE_ID.to_owned(),
-                    name: ON_DEVICE_NAME.to_owned(),
-                    kind: LiveKind::OnDevice(choice),
-                }];
+                let mut live = vec![on_device(choice)];
                 // The server address was a saved setting too; it stays as a server not in use.
                 live.extend(server.map(server_entry));
                 live
@@ -663,17 +671,22 @@ mod tests {
         let cases = [
             (
                 "{}".to_owned(),
+                vec![row("on-device", "on_device", "nemotron_160ms", true)],
+            ),
+            (r#"{"server": "ws://h:1"}"#.to_owned(), vec![server.clone()]),
+            (
+                r#"{"server": "ws://h:1", "stt": {"engine": "server"}}"#.to_owned(),
+                vec![server],
+            ),
+            // A 0.1.x file always wrote its engine, so it keeps its recognizer.
+            (
+                r#"{"stt": {"engine": "server"}}"#.to_owned(),
                 vec![row(
                     "thalvi-server",
                     "thalvi_server",
                     "ws://127.0.0.1:8080",
                     true,
                 )],
-            ),
-            (r#"{"server": "ws://h:1"}"#.to_owned(), vec![server.clone()]),
-            (
-                r#"{"server": "ws://h:1", "stt": {"engine": "server"}}"#.to_owned(),
-                vec![server],
             ),
             (
                 r#"{"stt": {"engine": "local"}}"#.to_owned(),
@@ -694,12 +707,7 @@ mod tests {
             (
                 format!(r#"{{"stt": {{"secondary": {{"enabled": true, {SECOND}}}}}}}"#),
                 vec![
-                    row(
-                        "thalvi-server",
-                        "thalvi_server",
-                        "ws://127.0.0.1:8080",
-                        true,
-                    ),
+                    row("on-device", "on_device", "nemotron_160ms", true),
                     row("second-pass", "second_pass", "http://127.0.0.1:9/v1", true),
                 ],
             ),

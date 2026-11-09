@@ -201,6 +201,15 @@ describe("the overlay in the holo and gunmetal looks", () => {
     expect(line()).toBe("open the calendar");
   });
 
+  it("keeps the download notice scrolling as its percentage changes", async () => {
+    const { emit } = await mount("gunmetal");
+    emit({ state: "loading", notice: "Downloading the speech model, about 650 MB — 10%" });
+    const run = pick(module(), ".tick .run");
+    emit({ state: "loading", notice: "Downloading the speech model, about 650 MB — 11%" });
+    expect(pick(module(), ".tick .run")).toBe(run);
+    expect(run.textContent).toBe("Downloading the speech model, about 650 MB — 11%");
+  });
+
   it("keeps the line single and slides it left only when the words overflow", async () => {
     const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollWidth");
     let wide = 500;

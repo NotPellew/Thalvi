@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Value, json};
 
+use crate::models::SpeechProgress;
+
 #[cfg(target_os = "linux")]
 mod webgpu;
 #[cfg(target_os = "windows")]
@@ -186,8 +188,10 @@ pub enum Export {
 pub enum Step {
     /// Reading the files from disk, checking them as it goes.
     Reading,
-    /// Downloading an export that is not on disk.
+    /// Downloading an export that is not on disk, before the first percent has arrived.
     Fetching(Export),
+    /// A download of an export, with the whole percent of its bytes that have arrived.
+    Downloading(Export, u8),
 }
 
 /// How an attempt to load on the GPU failed.
@@ -214,10 +218,12 @@ pub trait Provider: Sync {
     /// Whether every file of `export` is on disk, without checking its bytes.
     fn cached(&self, export: Export) -> impl Future<Output = bool> + Send;
 
-    /// The files of `export`, checked, and downloaded first where missing or damaged.
+    /// The files of `export`, checked, and downloaded first where missing or damaged; `progress` is told how
+    /// the download goes.
     fn fetch(
         &self,
         export: Export,
+        progress: impl FnMut(SpeechProgress) + Send,
     ) -> impl Future<Output = Result<Self::Files, Self::Error>> + Send;
 
     fn open_gpu(
@@ -237,7 +243,8 @@ pub trait Provider: Sync {
 ///
 /// With the GPU's files on disk the model loads on the GPU; with only the CPU's it loads on the CPU at once; with
 /// neither, the GPU's are downloaded first, and the CPU's if that fails. A GPU session that does not start or does
-/// not take the whole model falls back to the CPU too. `step` is told what each stage does.
+/// not take the whole model falls back to the CPU too. `step` is told what each stage does, a download's percent
+/// included, and goes back to reading once the files are in.
 ///
 /// # Errors
 /// The error of a load that is not about the GPU, or of the CPU load.
@@ -258,7 +265,10 @@ pub async fn load<P: Provider>(
                     } else {
                         Step::Fetching(Export::Gpu)
                     });
-                    match provider.fetch(Export::Gpu).await {
+                    match provider
+                        .fetch(Export::Gpu, downloading(Export::Gpu, &step))
+                        .await
+                    {
                         Ok(files) => match provider.open_gpu(gpu, files).await {
                             Ok(model) => return Ok(model),
                             Err(Attempt::Fallback(reason)) => reason,
@@ -279,8 +289,22 @@ pub async fn load<P: Provider>(
     } else {
         Step::Fetching(Export::Cpu)
     });
-    let files = provider.fetch(Export::Cpu).await?;
+    let files = provider
+        .fetch(Export::Cpu, downloading(Export::Cpu, &step))
+        .await?;
     provider.open_cpu(reason, files).await
+}
+
+/// Turns what a download reports into steps; a download's percent is shown only while it runs.
+fn downloading(
+    export: Export,
+    step: &(impl Fn(Step) + Send + Sync),
+) -> impl FnMut(SpeechProgress) + Send {
+    move |progress| match progress {
+        SpeechProgress::Verifying => {}
+        SpeechProgress::Downloading { percent } => step(Step::Downloading(export, percent)),
+        SpeechProgress::Done => step(Step::Reading),
+    }
 }
 
 /// One of the three networks of a transducer; each is a session of its own.
@@ -459,6 +483,8 @@ mod tests {
         gpu_fetch: Result<(), &'static str>,
         cpu_fetch: Result<(), &'static str>,
         gpu_open: Result<(), Attempt<&'static str>>,
+        /// What every successful fetch reports as it goes.
+        reports: Vec<SpeechProgress>,
         calls: std::sync::Mutex<Vec<&'static str>>,
     }
 
@@ -486,12 +512,16 @@ mod tests {
         fn fetch(
             &self,
             export: Export,
+            mut progress: impl FnMut(SpeechProgress) + Send,
         ) -> impl Future<Output = Result<Export, &'static str>> + Send {
             let (call, answer) = match export {
                 Export::Gpu => ("fetch gpu", self.gpu_fetch),
                 Export::Cpu => ("fetch cpu", self.cpu_fetch),
             };
             self.log(call);
+            if answer.is_ok() {
+                self.reports.iter().for_each(|report| progress(*report));
+            }
             std::future::ready(answer.map(|()| export))
         }
 
@@ -526,6 +556,7 @@ mod tests {
             gpu_fetch: Ok(()),
             cpu_fetch: Ok(()),
             gpu_open: Ok(()),
+            reports: Vec::new(),
             calls: std::sync::Mutex::default(),
         }
     }
@@ -536,6 +567,14 @@ mod tests {
             Self {
                 gpu_cached,
                 cpu_cached,
+                ..self
+            }
+        }
+
+        /// What every successful fetch reports.
+        fn reports(self, reports: &[SpeechProgress]) -> Self {
+            Self {
+                reports: reports.to_vec(),
                 ..self
             }
         }
@@ -727,6 +766,50 @@ mod tests {
             Err("offline"),
             &[Fetching(Cpu)],
             &["fetch cpu"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_download_shows_its_percent_by_export_and_goes_back_to_reading_once_the_files_are_in()
+    {
+        use Export::{Cpu, Gpu as OnGpu};
+        use SpeechProgress::{Done, Downloading, Verifying};
+        let reports = [
+            Verifying,
+            Downloading { percent: 0 },
+            Downloading { percent: 42 },
+            Downloading { percent: 100 },
+            Done,
+        ];
+        check(
+            "the CPU files",
+            Device::Cpu(Fallback::CpuModel),
+            fake().reports(&reports),
+            Ok("cpu of Cpu: this model runs on the CPU"),
+            &[
+                Step::Fetching(Cpu),
+                Step::Downloading(Cpu, 0),
+                Step::Downloading(Cpu, 42),
+                Step::Downloading(Cpu, 100),
+                Step::Reading,
+            ],
+            &["fetch cpu", "open cpu"],
+        )
+        .await;
+        check(
+            "the GPU files",
+            Device::Gpu(rtx()),
+            fake().reports(&reports),
+            Ok("gpu"),
+            &[
+                Step::Fetching(OnGpu),
+                Step::Downloading(OnGpu, 0),
+                Step::Downloading(OnGpu, 42),
+                Step::Downloading(OnGpu, 100),
+                Step::Reading,
+            ],
+            &["fetch gpu", "open gpu"],
         )
         .await;
     }

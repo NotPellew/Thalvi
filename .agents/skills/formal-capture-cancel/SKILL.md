@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `1ed61956272075ad0fe40fdb31303611cdf56d9c`. The recorded file hashes
+Sync commit: `c6fceb90fa4e97d5bdae2e14641d63cd5e9b2f60`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -69,17 +69,12 @@ the same pre-capture boundary; the mapped cancellation functions are unchanged.
 so exact durations and the zero-frame case can be tested. `close_spotting` still
 records it before the ending cue; this metric extraction preserves the control drains and await boundaries.
 An idle failure now picks `NoEnding` or `NoWords` from the kept text; it only chooses the error and leaves every await, control drain and delivery admission as mapped.
-`Engine::reconcile` now stops waiting at the earliest ticked entry, in list order, whose
-answer agrees, and leaves the later requests running as tasks in the engine's `recorded_only`
-sets, which `scan`, `drive` and `reconcile` collect results from and only record. Its one await is still a
-cancellation-first select that also takes the answers (its own requests are aborted when it
-drops them), and it returns without another
-await once the entry is known, so the model's `secondary` stage is unchanged: a pending
-cancel wins that select before an answer can become Accepted. Recorded-only requests
-never feed a capture's outcome and a later cancel does not touch them, so they are
-outside the modeled delivery path.
-`FakeControl::connect_again` in `recognizer.rs` only lets the test fake connect twice; the mapped
-`RecognizerSession` and `ServerSession::close` are untouched.
+The default recognizer became On this computer (#141); a `runner.rs` test now names its server engine
+explicitly. No mapped function changed, so only the hash moved.
+The on-device model's load now reports the steps it takes and a download's percent (`load_speech_model` runs the
+load through `load_showing`, a select over the load and the recognizer's step channel, and `Publisher`
+shows each step as the loading notice). No mapped function changed, so only the `runner.rs` hash moved.
+`Engine::reconcile` now returns after the earliest agreeing ticked entry, keeping later requests as recorded-only tasks. Its cancellation-first select still fences acceptance; these later tasks do not feed the capture outcome. The recognizer change only extends its test fake; the mapped session and close remain unchanged.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

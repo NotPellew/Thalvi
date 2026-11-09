@@ -1605,6 +1605,142 @@ mod tests {
         }
     }
 
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// The loading notice now, and whether the overlay shows.
+    fn loading_now(status: &watch::Receiver<Status>) -> (String, bool) {
+        let status = status.borrow();
+        match &*status {
+            Status::Loading { notice, .. } => (
+                notice.clone(),
+                Visibility::of(&status, true) == Visibility::Show,
+            ),
+            other => panic!("not loading: {other:?}"),
+        }
+    }
+
+    /// Waits for the next status change, then returns [`loading_now`].
+    async fn next_loading(status: &mut watch::Receiver<Status>) -> (String, bool) {
+        tokio::time::timeout(WAIT, status.changed())
+            .await
+            .expect("the status changed")
+            .expect("the publisher lives");
+        loading_now(status)
+    }
+
+    /// Takes the steps it is sent, and loads when the sender is dropped.
+    struct Streamed(std::sync::Mutex<Option<mpsc::UnboundedReceiver<Step>>>);
+
+    impl ModelSource for Streamed {
+        type Model = NoModel;
+
+        async fn load(
+            &self,
+            step: impl Fn(Step) + Send + Sync,
+        ) -> Result<NoModel, thalvi_desktop::recognizer::RecognizerError> {
+            let mut steps = self.0.lock().unwrap().take().unwrap();
+            while let Some(next) = steps.recv().await {
+                step(next);
+            }
+            Ok(NoModel)
+        }
+    }
+
+    /// A load of a model being downloaded, driven by the returned sender, and the status it publishes.
+    fn loading_download() -> (
+        mpsc::UnboundedSender<Step>,
+        Rc<Publisher>,
+        JoinHandle<()>,
+        watch::Receiver<Status>,
+    ) {
+        let (out, mut status) = watch::channel(Status::Paused);
+        let publisher = Publisher::new(out, EndingPauses::default());
+        publisher.mode(Mode::Idle);
+        publisher.loading(Some(Step::Fetching(Export::Cpu)));
+        status.mark_unchanged();
+        let (steps, received) = mpsc::unbounded_channel();
+        let local = Arc::new(LocalRecognizer::new(
+            Streamed(std::sync::Mutex::new(Some(received))),
+            "test",
+            Recorder::disabled().metrics(),
+        ));
+        let load = tokio::task::spawn_local({
+            let publisher = Rc::clone(&publisher);
+            async move { load_showing(&local, &publisher).await }
+        });
+        (steps, publisher, load, status)
+    }
+
+    #[tokio::test]
+    async fn the_loading_notice_follows_a_download_once_per_percent_and_ends_with_the_model_loading()
+     {
+        use Export::{Cpu, Gpu};
+        LocalSet::new()
+            .run_until(async {
+                let (steps, _publisher, load, mut status) = loading_download();
+                let mut shown = vec![loading_now(&status)];
+                for (step, changes) in [
+                    (Step::Downloading(Cpu, 0), true),
+                    (Step::Downloading(Cpu, 0), false),
+                    (Step::Downloading(Cpu, 1), true),
+                    (Step::Downloading(Cpu, 100), true),
+                    (Step::Reading, true),
+                    (Step::Fetching(Gpu), true),
+                    (Step::Downloading(Gpu, 50), true),
+                    (Step::Reading, true),
+                ] {
+                    steps.send(step).unwrap();
+                    if changes {
+                        shown.push(next_loading(&mut status).await);
+                    }
+                }
+                drop(steps);
+                tokio::time::timeout(WAIT, load).await.unwrap().unwrap();
+
+                let download = |text: &str| (text.to_owned(), true);
+                let reading = ("Loading the speech model.".to_owned(), false);
+                assert_eq!(
+                    shown,
+                    [
+                        download("Loading the speech model. Downloading about 650 MB."),
+                        download("Downloading the speech model, about 650 MB \u{2014} 0%"),
+                        download("Downloading the speech model, about 650 MB \u{2014} 1%"),
+                        download("Downloading the speech model, about 650 MB \u{2014} 100%"),
+                        reading.clone(),
+                        download(
+                            "Loading the speech model. Downloading the model for the GPU, about 1.3 GB."
+                        ),
+                        download("Downloading the model for the GPU, about 1.3 GB \u{2014} 50%"),
+                        reading,
+                    ]
+                );
+                assert_eq!(*status.borrow(), Status::Listening);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn switching_away_mid_download_leaves_no_downloading_notice() {
+        LocalSet::new()
+            .run_until(async {
+                let (steps, publisher, load, mut status) = loading_download();
+                steps.send(Step::Downloading(Export::Cpu, 40)).unwrap();
+                assert_eq!(
+                    next_loading(&mut status).await.0,
+                    "Downloading the speech model, about 650 MB \u{2014} 40%"
+                );
+
+                load.abort();
+                assert!(load.await.unwrap_err().is_cancelled());
+                publisher.loading(None);
+                let late = steps.send(Step::Downloading(Export::Cpu, 41));
+
+                assert!(late.is_err(), "the aborted load no longer listens");
+                assert_eq!(*status.borrow(), Status::Listening);
+            })
+            .await;
+    }
+
     #[tokio::test]
     async fn the_overlay_shows_a_wake_download_only_while_a_missing_file_downloads() {
         let config = WakeConfig::default();
@@ -2467,7 +2603,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_switch_of_the_live_server_waits_for_the_end_of_the_running_capture() {
-        let running = DesktopConfig::from_json_str("{}").unwrap();
+        let running = DesktopConfig::from_json_str(r#"{"stt": {"engine": "server"}}"#).unwrap();
         let switched = DesktopConfig::from_json_str(r#"{"stt": {"engine": "local"}}"#).unwrap();
         assert_ne!(
             running.stt.entries.active_live().id,

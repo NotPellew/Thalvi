@@ -48,7 +48,9 @@ export function createTicker(): Ticker {
   }
 
   function notice(text: string): void {
-    const line = fresh();
+    const progress = (value: string): string | undefined => value.match(/^(.* — )\d+%$/)?.[1];
+    const prefix = progress(text);
+    const line = kind === "notice" && run !== null && prefix !== undefined && progress(run.textContent) === prefix ? run : fresh();
     kind = "notice";
     line.textContent = text;
     node.classList.remove("over");

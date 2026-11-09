@@ -687,6 +687,30 @@ async fn a_speech_download_reports_progress_up_to_done() {
     );
     assert!(store.is_cached(&assets).await);
     assert_eq!(leftovers(&dir).len(), 4);
+    assert_eq!(store.path(&assets.encoder), dir.join("m.encoder.onnx"));
+    assert!(store.path(&assets.tokens).is_file());
+}
+
+#[tokio::test]
+async fn a_speech_fetch_of_files_already_on_disk_reports_no_download() {
+    let (address, _server) = serve().await;
+    let dir = dir("speech-intact");
+    let url = format!("http://{address}/good.onnx");
+    let sha = sha256(GOOD);
+    let assets = speech([&url; 4], &sha);
+    let store = ModelStore::in_dir(&dir);
+    store
+        .fetch_speech(&assets, |_| {})
+        .await
+        .expect("downloads");
+
+    let mut events = Vec::new();
+    store
+        .fetch_speech(&assets, |event| events.push(event))
+        .await
+        .expect("finds them");
+
+    assert_eq!(events, [SpeechProgress::Verifying, SpeechProgress::Done]);
 }
 
 #[tokio::test]

@@ -600,6 +600,12 @@ impl ModelStore {
         Self { dir: dir.into() }
     }
 
+    /// Where `asset` is or would be stored; the file is not checked.
+    #[must_use]
+    pub fn path(&self, asset: &Asset<'_>) -> PathBuf {
+        self.dir.join(asset.file_name)
+    }
+
     /// Returns the path of the verified file, downloading it first if it is missing. A stored file
     /// that does not match its checksum is deleted before anything else.
     ///
@@ -809,9 +815,9 @@ impl ModelStore {
             if !matches!(stored(&path, &asset).await, Stored::Intact) {
                 self.fetch_reporting(&asset, |bytes| report(done + bytes))
                     .await?;
+                report(done + asset.size);
             }
             done += asset.size;
-            report(done);
         }
         progress(SpeechProgress::Done);
         Ok(())

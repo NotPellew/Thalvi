@@ -48,8 +48,9 @@ impl ModelSource for Source {
 
     fn load(
         &self,
-        _step: impl Fn(Step) + Send + Sync,
+        step: impl Fn(Step) + Send + Sync,
     ) -> impl Future<Output = Result<Fake, RecognizerError>> + Send {
+        step(Step::Reading);
         let failing = self
             .failures
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -433,6 +434,17 @@ async fn a_model_that_cannot_be_fetched_is_reported_and_fetched_again_on_the_nex
 }
 
 #[tokio::test]
+async fn telling_the_step_it_is_already_at_wakes_nobody_watching_the_load() {
+    let rig = rig("steps", dictation, None, 0);
+    let steps = rig.recognizer.steps();
+
+    rig.recognizer.load().await.expect("loads");
+
+    assert!(!steps.has_changed().expect("the recognizer lives"));
+    assert_eq!(*steps.borrow(), Step::Reading);
+}
+
+#[tokio::test]
 async fn a_catalog_model_that_cannot_be_provided_fails_with_the_model_errors_own_headline() {
     let blocker = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("local-model-blocker");
     std::fs::write(&blocker, b"a file where the model folder should be").expect("writes");
@@ -443,11 +455,14 @@ async fn a_catalog_model_that_cannot_be_provided_fails_with_the_model_errors_own
         Adapters::default(),
     );
 
+    let steps = Mutex::new(Vec::new());
     let error = source
-        .load(|_| {})
+        .load(|step| steps.lock().unwrap().push(step))
         .await
         .err()
         .expect("no folder to fetch into");
+
+    assert_eq!(*steps.lock().unwrap(), [Step::Fetching(Export::Cpu)]);
 
     assert_eq!(error.headline(), "Can't save the model file");
     assert!(
