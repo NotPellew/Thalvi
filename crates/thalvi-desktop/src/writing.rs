@@ -37,7 +37,6 @@ struct RawWriting {
     model: String,
     #[serde(default)]
     api_key: String,
-    #[serde(default)]
     prompt: Option<String>,
 }
 
