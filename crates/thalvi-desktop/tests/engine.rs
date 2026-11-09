@@ -1461,7 +1461,7 @@ async fn a_failed_capture_says_what_happened_keeps_the_text_and_returns_to_liste
     LocalSet::new()
         .run_until(async {
             for (fault, error, recoverable_text, error_cue_at, had_stream) in cases {
-                let (mut rig, engine, frames) = Rig::new("{}");
+                let (mut rig, engine, frames) = Rig::new(r#"{"stt": {"engine": "server"}}"#);
                 let task = capture_task(engine, frames);
                 inflict(&mut rig, &task, fault).await;
                 assert_eq!(
@@ -1863,13 +1863,13 @@ async fn serve(reply: Reply) -> (String, tokio::sync::mpsc::UnboundedReceiver<us
 
 fn with_secondary(url: &str, api: &str) -> String {
     format!(
-        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"secondary": {{"enabled": true, "url": "{url}", "model": "m", "api": "{api}"}}}}}}"#
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"engine": "server", "secondary": {{"enabled": true, "url": "{url}", "model": "m", "api": "{api}"}}}}}}"#
     )
 }
 
 fn with_secondary_off(url: &str) -> String {
     format!(
-        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"secondary": {{"enabled": false, "url": "{url}", "model": "m", "api": "openai"}}}}}}"#
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"engine": "server", "secondary": {{"enabled": false, "url": "{url}", "model": "m", "api": "openai"}}}}}}"#
     )
 }
 
