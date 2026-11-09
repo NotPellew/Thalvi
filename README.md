@@ -519,9 +519,12 @@ Built for the
 
 ## Hackathon provenance
 
-All code in this repository was written during the hackathon; the commit
-history is the record. Pull requests land as merge commits, so the individual
-commits behind each change stay visible, and `main` is never rewritten.
+All code up to the tag
+[`hackathon-submission`](https://github.com/NotPellew/Thalvi/tree/hackathon-submission)
+was written during the hackathon (October 26 – November 4, 2026); later work
+continues in the same open history, and the commit history is the record.
+Pull requests land as merge commits, so the individual commits behind each
+change stay visible, and `main` is never rewritten.
 
 The idea draws on lessons from an earlier, private voice-assistant prototype by
 the same author. Nothing is copied from it or from any other repository;
