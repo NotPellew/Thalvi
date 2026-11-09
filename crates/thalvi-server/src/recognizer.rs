@@ -157,3 +157,23 @@ impl Recognizer for MetaRecognizer {
         self.connection.close().await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_is_accepted_only_when_whole_samples_and_at_most_one_second() {
+        for (len, accepted) in [
+            (0, false),
+            (1, false),
+            (2, true),
+            (MAX_FRAME_BYTES - 1, false),
+            (MAX_FRAME_BYTES, true),
+            (MAX_FRAME_BYTES + 1, false),
+            (MAX_FRAME_BYTES + 2, false),
+        ] {
+            assert_eq!(validate_frame(&vec![0; len]).is_ok(), accepted, "{len}");
+        }
+    }
+}
