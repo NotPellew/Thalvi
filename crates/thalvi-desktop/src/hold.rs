@@ -206,8 +206,21 @@ pub struct KeyState {
     pub kind: HoldKind,
     /// The latest press's release.
     pub release: Cutoff,
-    /// When a key came up while already up: a release that overtook its press.
-    early_release: Option<(HoldKind, Instant)>,
+    /// Each key's own phase, so only a key that is up can hold a release that overtook a press.
+    phases: [KeyPhase; 2],
+}
+
+/// Where one hold key is. A key that is down has no press left for a release to overtake, so only
+/// an up key carries the credit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum KeyPhase {
+    /// Up, with no release waiting for the press it overtook.
+    #[default]
+    Up,
+    /// Down, whether or not it started the hold.
+    Down,
+    /// A release arrived while the key was up: the press it overtook is still to come.
+    Overtaken(Instant),
 }
 
 /// How long after a release that overtook its press that press still counts as released. The
@@ -407,32 +420,43 @@ impl HoldInput {
 
     fn change(&self, kind: HoldKind, down: bool) {
         self.0.send_if_modified(|state| {
+            let index = kind as usize;
+            let phase = state.phases[index];
+            // A press of a tap whose release came first is over already, so it opens no hold.
+            let overtaken =
+                matches!(phase, KeyPhase::Overtaken(at) if at.elapsed() < OVERTAKEN_PRESS);
+            // Every key follows its own events, even while the other key's hold ignores them.
+            state.phases[index] = if down {
+                if overtaken {
+                    KeyPhase::Up
+                } else {
+                    KeyPhase::Down
+                }
+            } else if phase == KeyPhase::Down {
+                KeyPhase::Up
+            } else {
+                KeyPhase::Overtaken(Instant::now())
+            };
             // One hold at a time: the other key means nothing until this one is up.
             if state.down && state.kind != kind {
                 return false;
             }
             if state.down == down {
-                if !down {
-                    state.early_release = Some((kind, Instant::now()));
-                }
                 return false;
             }
             if down {
                 state.presses += 1;
                 state.kind = kind;
                 state.release = Cutoff::default();
-                let overtaken = state
-                    .early_release
-                    .take()
-                    .is_some_and(|(early, at)| early == kind && at.elapsed() < OVERTAKEN_PRESS);
-                if overtaken {
-                    state.release.release();
+                if !overtaken {
+                    state.down = true;
                     return true;
                 }
+                state.release.release();
             } else {
                 state.release.release();
+                state.down = false;
             }
-            state.down = down;
             true
         });
     }
@@ -1111,6 +1135,49 @@ mod tests {
             Some(HoldKind::Dictate),
             "another key's early release does not cancel this press"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_key_released_after_the_other_keys_hold_starts_the_next_hold() {
+        // (the key held first, the key pressed during it and released after it)
+        for (held, touched) in [
+            (HoldKind::Write, HoldKind::Dictate),
+            (HoldKind::Dictate, HoldKind::Write),
+        ] {
+            let (input, state) = HoldInput::new();
+            let mut presses = Presses::new(state);
+            let set = |kind: HoldKind, down: bool| match kind {
+                HoldKind::Dictate => input.set(down),
+                HoldKind::Write => input.set_write(down),
+            };
+            set(held, true);
+            assert_eq!(
+                presses.take().map(|press| press.kind),
+                Some(held),
+                "{held:?}"
+            );
+            set(touched, true);
+            assert_eq!(presses.take().map(|press| press.kind), None, "{held:?}");
+            set(held, false);
+            assert!(presses.is_over(1), "{held:?}: its release ends the hold");
+            set(touched, false);
+            assert_eq!(presses.take().map(|press| press.kind), None, "{held:?}");
+            assert_eq!(presses.take_lost(), 0, "{held:?}");
+            tokio::time::advance(Duration::from_millis(999)).await;
+            set(touched, true);
+            let press = presses.take().expect("the key starts a hold");
+            assert_eq!(press.kind, touched, "{held:?}");
+            assert_eq!(presses.take_lost(), 0, "{held:?}");
+            assert!(
+                !presses.is_over(press.number),
+                "{held:?}: the hold lasts while the key is down"
+            );
+            set(touched, false);
+            assert!(
+                presses.is_over(press.number),
+                "{held:?}: and ends with its release"
+            );
+        }
     }
 
     #[test]
