@@ -1,14 +1,17 @@
 # Conversations and learnings
 
-Conversations with turns are saved; empty ones are not listed. A reload
-rejoins the same one. The Conversations sheet lists saved conversations and lets the user start a new one, reopen,
-rename, or delete one after confirming. Its Learnings section shows durable
+Ordinary conversations with turns are saved; empty ones are not listed. A
+reload rejoins the same one. The Conversations sheet lists saved conversations
+and lets the user start a new one, reopen, rename, or delete one after
+confirming. Private conversations are never saved; see
+[private-conversation.md](./private-conversation.md). Its Learnings section shows durable
 facts the user can read and correct.
 
 ## Sub-features
 
 - `conv-rejoin` brings back the same conversation after a reload.
-- `conv-list` lists saved conversations, newest first, with age.
+- `conv-list` lists saved conversations, most recently updated first, with
+  age.
 - `conv-new` starts an empty conversation and closes the sheet.
 - `conv-preview` shows a saved conversation's turns without joining it, and
   warns when another device has it open.
@@ -32,8 +35,8 @@ facts the user can read and correct.
 Preconditions:
 
 - Baseline from `features/README.md`, page at `idle`.
-- Start a new conversation through `Conversations` → `New conversation`,
-  wait for `idle`, then send `What should I cook with leftover rice`.
+- Start a new conversation: `$V ab $R click 'button[aria-label="Conversations"]'`,
+  `$V ab $R click 'button.o-lib-new'` and `$V state $R idle`, then send `What should I cook with leftover rice`.
   Run `$V reply $R --after "What should I cook with leftover rice"`.
   This seed is required even when other feature recipes ran first.
 
@@ -50,7 +53,7 @@ Steps:
     with `Rename …` and `Delete …` beside it.
   - `curl <URL>sessions` lists the same id and title.
 - **New.** Start a new conversation.
-  - Run `$V ab $R find role button click --name "New conversation"` and
+  - Run `$V ab $R click 'button.o-lib-new'` and
     `$V state $R idle`.
   - The sheet closes and `.o-turns` is empty.
 - **Second conversation.** Send `A second conversation` and run
@@ -87,7 +90,9 @@ Steps:
 - **Delete.** Choose `Delete Rice ideas`, then the confirming `Delete`.
   - Run `$V ab $R click 'button[aria-label="Delete Rice ideas"]'`,
     `$V ab $R click '.o-lib-danger'` and
-    `$V ab $R wait --fn '!document.querySelector(".o-lib-ask")'`.
+    `$V ab $R wait --fn '!document.querySelector(".o-lib-ask") && !document.querySelector("button[aria-label=\"Delete Rice ideas\"]")'`.
+    The question also closes when deletion fails; the row staying is that
+    failure.
   - The row disappears and the sheet stays open.
   - Focus moves to the main button of the row that took the deleted row's
     place, or to `New conversation` when the deleted row was the last.
@@ -108,8 +113,8 @@ Steps:
 
 ## Gotchas
 
-- Fallback titles use the first nonblank user line, normalize whitespace and
-  truncate at 40 characters. The fake run sets no `BG_LLM_*`,
+- Fallback titles use the first nonblank line of the first user turn,
+  normalize whitespace, and cut a longer line to 40 characters plus `…`. The fake run sets no `BG_LLM_*`,
   so background titling is not exercised. Claim it only with a background-model
   stand-in.
 - Reopening the same saved session in another tab takes it over: the old tab
@@ -119,7 +124,10 @@ Steps:
 - Row labels include the age (`just now`, `1 min ago`). Match the
   `aria-label` of `Rename …` and `Delete …`, which carry only the title.
   Earlier recipes leave rows with the same rice title; a selector picks the
-  first, newest row, which is this recipe's seed.
+  first row, the most recently updated one, which is this recipe's seed as
+  long as nothing else touched an older rice conversation since.
+- Use `button.o-lib-new` for the ordinary path. The sheet also has
+  `New private conversation`, so a name-based `find` is ambiguous.
 - While the delete question shows, the row's `Delete …` button is gone, so
   waiting for it to vanish passes before the deletion. Wait for `.o-lib-ask`
   to go instead.
