@@ -9,7 +9,9 @@ use ort::session::builder::SessionBuilder;
 use ort::value::Tensor;
 
 use crate::boosting::{Joiner, PhraseTree, TreeState, greedy};
-use crate::device::{self, Attempt, Device, Fallback};
+use crate::device::{
+    self, Adapters, Attempt, Device, Export, Fallback, Gpu, Nodes, Part, Placement, Provider, Step,
+};
 use crate::fbank::{HOP, LogMel, MEL_BINS, MelFrame, WindowMel};
 use crate::frame::Frame;
 use crate::local::{ModelSource, SpeechModel, SpeechStream};
@@ -105,19 +107,6 @@ pub enum TransducerError {
     Load { file: String, reason: String },
     #[error("The speech model {file} cannot be used here: {reason}")]
     Unsupported { file: String, reason: String },
-    #[error("The speech model could not run on the GPU: {}.", .0.reason())]
-    Gpu(Fallback),
-}
-
-/// A model that opened on the GPU and then failed to load or run is the driver's failure, and the CPU takes over.
-fn on_device(on_gpu: bool, error: TransducerError) -> TransducerError {
-    match error {
-        TransducerError::Load { file, reason } if on_gpu => {
-            tracing::warn!("The speech model {file} failed on the GPU: {reason}");
-            TransducerError::Gpu(Fallback::DriverFailed)
-        }
-        error => error,
-    }
 }
 
 fn load_error(path: &Path, reason: &impl ToString) -> TransducerError {
@@ -233,22 +222,34 @@ pub struct Transducer {
     tokens: Arc<Vec<String>>,
     phrases: Arc<PhraseTree>,
     device: Device,
+    /// Where the GPU put the nodes of each session; absent on the CPU.
+    placement: Option<Placement>,
 }
 
-fn open(path: &Path, threads: usize, on_gpu: bool) -> Result<Session, TransducerError> {
+fn builder(path: &Path, threads: usize) -> Result<SessionBuilder, TransducerError> {
     let environment = runtime::environment().map_err(|reason| load_error(path, &reason))?;
-    let builder = || -> ort::Result<SessionBuilder> {
+    let build = || -> ort::Result<SessionBuilder> {
         Ok(Session::builder(environment)?
             .with_intra_threads(threads)?
             .with_inter_threads(1)?)
     };
-    if on_gpu {
-        let builder = builder().map_err(|error| load_error(path, &error))?;
-        return device::open(builder, path).map_err(TransducerError::Gpu);
-    }
-    builder()
-        .and_then(|mut builder| builder.commit_from_file(path))
+    build().map_err(|error| load_error(path, &error))
+}
+
+fn open_on_cpu(path: &Path, threads: usize) -> Result<Session, TransducerError> {
+    builder(path, threads)?
+        .commit_from_file(path)
         .map_err(|error| load_error(path, &error))
+}
+
+/// Only what `device::open` reports about the GPU session is the GPU's failure; the CPU takes over from it.
+fn open_on_gpu(
+    path: &Path,
+    threads: usize,
+    part: Part,
+) -> Result<(Session, Nodes), Attempt<TransducerError>> {
+    let builder = builder(path, threads)?;
+    device::open(builder, path, part).map_err(Attempt::Fallback)
 }
 
 fn number(session: &Session, path: &Path, key: &str) -> Result<usize, TransducerError> {
@@ -261,40 +262,73 @@ fn number(session: &Session, path: &Path, key: &str) -> Result<usize, Transducer
 }
 
 impl Transducer {
-    /// Loads the model; this reads hundreds of megabytes, so call it off the async loop.
+    /// Loads the model on the CPU; this reads hundreds of megabytes, so call it off the async loop.
     ///
     /// # Errors
     /// Fails when a file cannot be read, is not a streaming `NeMo` transducer, or has features other
     /// than 128 mel bins.
     pub fn load(files: &TransducerFiles, phrases: &WordList) -> Result<Self, TransducerError> {
-        Self::load_on(files, phrases, Device::Cpu(Fallback::CpuModel))
+        Self::load_cpu(files, phrases, Fallback::CpuModel)
     }
 
-    /// Like [`load`](Self::load), on `device`.
+    /// Like [`load`](Self::load), for a CPU that runs the model because of `reason`.
     ///
     /// # Errors
-    /// As [`load`](Self::load); on a GPU also [`TransducerError::Gpu`] when it cannot take the model.
-    pub fn load_on(
+    /// As [`load`](Self::load).
+    pub fn load_cpu(
         files: &TransducerFiles,
         phrases: &WordList,
-        device: Device,
+        reason: Fallback,
     ) -> Result<Self, TransducerError> {
-        let on_gpu = matches!(device, Device::Gpu(_));
-        Self::open_all(files, phrases, device).map_err(|error| on_device(on_gpu, error))
+        let threads = threads();
+        let sessions = Sessions {
+            encoder: open_on_cpu(&files.encoder, threads)?,
+            decoder: open_on_cpu(&files.decoder, 1)?,
+            joiner: open_on_cpu(&files.joiner, 1)?,
+        };
+        Self::assemble(sessions, None, files, phrases, Device::Cpu(reason))
     }
 
-    fn open_all(
+    /// Like [`load`](Self::load), on `gpu`, the files being the fp16 export.
+    ///
+    /// # Errors
+    /// [`Attempt::Fallback`] when a session does not start on the GPU or the GPU does not take the model, else as
+    /// [`load`](Self::load).
+    pub fn load_gpu(
+        files: &TransducerFiles,
+        phrases: &WordList,
+        gpu: Gpu,
+    ) -> Result<Self, Attempt<TransducerError>> {
+        let threads = threads();
+        let (encoder, encoder_nodes) = open_on_gpu(&files.encoder, threads, Part::Encoder)?;
+        let (decoder, decoder_nodes) = open_on_gpu(&files.decoder, 1, Part::Decoder)?;
+        let (joiner, joiner_nodes) = open_on_gpu(&files.joiner, 1, Part::Joiner)?;
+        let placement = Placement {
+            encoder: encoder_nodes,
+            decoder: decoder_nodes,
+            joiner: joiner_nodes,
+        };
+        Self::assemble(
+            Sessions {
+                encoder,
+                decoder,
+                joiner,
+            },
+            Some(placement),
+            files,
+            phrases,
+            Device::Gpu(gpu),
+        )
+        .map_err(Attempt::Failed)
+    }
+
+    fn assemble(
+        mut sessions: Sessions,
+        placement: Option<Placement>,
         files: &TransducerFiles,
         phrases: &WordList,
         device: Device,
     ) -> Result<Self, TransducerError> {
-        let on_gpu = matches!(device, Device::Gpu(_));
-        let threads = std::thread::available_parallelism().map_or(2, |n| n.get().min(4));
-        let mut sessions = Sessions {
-            encoder: open(&files.encoder, threads, on_gpu)?,
-            decoder: open(&files.decoder, 1, on_gpu)?,
-            joiner: open(&files.joiner, 1, on_gpu)?,
-        };
         let path = &files.encoder;
         let count = |sessions: &Sessions, key| number(&sessions.encoder, path, key);
         if count(&sessions, "feat_dim")? != MEL_BINS {
@@ -379,8 +413,13 @@ impl Transducer {
             tokens: Arc::new(tokens),
             phrases: Arc::new(phrases),
             device,
+            placement,
         })
     }
+}
+
+fn threads() -> usize {
+    std::thread::available_parallelism().map_or(2, |n| n.get().min(4))
 }
 
 fn tdt_shape(sessions: &Sessions, shape: &Shape, path: &Path) -> Result<usize, TransducerError> {
@@ -455,6 +494,10 @@ impl SpeechModel for Transducer {
 
     fn device(&self) -> Device {
         self.device.clone()
+    }
+
+    fn placement(&self) -> Option<Placement> {
+        self.placement
     }
 
     fn stream(&self) -> Recognition {
@@ -1226,38 +1269,63 @@ pub struct TransducerSource {
     store: ModelStore,
     choice: SpeechChoice,
     phrases: WordList,
+    adapters: Adapters,
 }
 
 impl TransducerSource {
+    /// `adapters` takes the result of the adapter check that each load makes.
     #[must_use]
-    pub fn new(store: ModelStore, choice: SpeechChoice, phrases: &WordList) -> Self {
+    pub fn new(
+        store: ModelStore,
+        choice: SpeechChoice,
+        phrases: &WordList,
+        adapters: Adapters,
+    ) -> Self {
         Self {
             store,
             choice,
             phrases: phrases.clone(),
+            adapters,
         }
     }
 
-    /// Where the first load will put the model, checked now.
-    pub async fn plan(&self) -> Device {
+    /// Where the load will put the model, checking the adapter now if the model can use a GPU.
+    async fn plan(&self) -> Device {
         let uses_gpu = matches!(&self.choice, SpeechChoice::Catalog(catalog) if catalog.uses_gpu());
-        tokio::task::spawn_blocking(move || Device::plan(uses_gpu, device::adapter))
+        let adapters = self.adapters.clone();
+        tokio::task::spawn_blocking(move || Device::plan(uses_gpu, || adapters.check()))
             .await
             .unwrap_or(Device::Cpu(Fallback::NoUsableGpu))
     }
+}
 
-    /// Whether loading on `plan` needs no download: a model folder, or a catalog model already on disk.
-    pub async fn is_cached(&self, plan: &Device) -> bool {
+/// Runs a blocking load of the model, which reads hundreds of megabytes.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, RecognizerError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| RecognizerError::said("The speech model could not be loaded."))
+}
+
+impl Provider for TransducerSource {
+    type Model = Transducer;
+    type Files = TransducerFiles;
+    type Error = RecognizerError;
+
+    async fn cached(&self, export: Export) -> bool {
         match &self.choice {
-            SpeechChoice::Catalog(catalog) => self.store.is_cached(&catalog.assets_on(plan)).await,
+            SpeechChoice::Catalog(catalog) => {
+                self.store.is_cached(&catalog.assets_of(export)).await
+            }
             SpeechChoice::Folder(_) => true,
         }
     }
 
-    async fn files(&self, plan: &Device) -> Result<TransducerFiles, RecognizerError> {
+    async fn fetch(&self, export: Export) -> Result<TransducerFiles, RecognizerError> {
         match &self.choice {
             SpeechChoice::Catalog(catalog) => {
-                let assets = catalog.assets_on(plan);
+                let assets = catalog.assets_of(export);
                 let fetch = async |asset| {
                     self.store
                         .fetch(&asset)
@@ -1278,45 +1346,37 @@ impl TransducerSource {
         }
     }
 
-    async fn load_on(&self, plan: Device) -> Result<Transducer, Attempt<RecognizerError>> {
-        let files = self.files(&plan).await.map_err(Attempt::Failed)?;
+    async fn open_gpu(
+        &self,
+        gpu: Gpu,
+        files: TransducerFiles,
+    ) -> Result<Transducer, Attempt<RecognizerError>> {
         let phrases = self.phrases.clone();
-        tokio::task::spawn_blocking(move || Transducer::load_on(&files, &phrases, plan))
-            .await
-            .map_err(|_| {
-                Attempt::Failed(RecognizerError::said(
-                    "The speech model could not be loaded.",
-                ))
-            })?
-            .map_err(|error| match error {
-                TransducerError::Gpu(reason) => Attempt::Fallback(reason),
-                error => Attempt::Failed(RecognizerError::said(error.to_string())),
+        blocking(move || Transducer::load_gpu(&files, &phrases, gpu))
+            .await?
+            .map_err(|attempt| match attempt {
+                Attempt::Fallback(reason) => Attempt::Fallback(reason),
+                Attempt::Failed(error) => Attempt::Failed(RecognizerError::said(error.to_string())),
             })
+    }
+
+    async fn open_cpu(
+        &self,
+        reason: Fallback,
+        files: TransducerFiles,
+    ) -> Result<Transducer, RecognizerError> {
+        let phrases = self.phrases.clone();
+        blocking(move || Transducer::load_cpu(&files, &phrases, reason))
+            .await?
+            .map_err(|error| RecognizerError::said(error.to_string()))
     }
 }
 
 impl ModelSource for TransducerSource {
     type Model = Transducer;
 
-    async fn load(&self) -> Result<Transducer, RecognizerError> {
-        let plan = self.plan().await;
-        let model = device::load(
-            plan,
-            |gpu| self.load_on(Device::Gpu(gpu)),
-            |reason| async move {
-                self.load_on(Device::Cpu(reason))
-                    .await
-                    .map_err(|attempt| match attempt {
-                        Attempt::Failed(error) => error,
-                        Attempt::Fallback(reason) => {
-                            RecognizerError::said(TransducerError::Gpu(reason).to_string())
-                        }
-                    })
-            },
-        )
-        .await?;
-        device::loaded(&self.choice.label(), &model.device);
-        Ok(model)
+    async fn load(&self, step: impl Fn(Step) + Send + Sync) -> Result<Transducer, RecognizerError> {
+        device::load(self.plan().await, self, step).await
     }
 }
 
@@ -1350,46 +1410,6 @@ mod tests {
         Err(FolderError::Missing(
             names.iter().map(|name| (*name).to_owned()).collect(),
         ))
-    }
-
-    #[test]
-    fn a_load_failure_is_the_drivers_only_on_the_gpu() {
-        let load = || TransducerError::Load {
-            file: "encoder".to_owned(),
-            reason: "it failed".to_owned(),
-        };
-        let unsupported = || TransducerError::Unsupported {
-            file: "encoder".to_owned(),
-            reason: "it is not a transducer".to_owned(),
-        };
-        for (case, on_gpu, error, expected) in [
-            (
-                "load on the GPU",
-                true,
-                load(),
-                "The speech model could not run on the GPU: the GPU driver failed to start.",
-            ),
-            (
-                "load on the CPU",
-                false,
-                load(),
-                "The speech model encoder could not be loaded: it failed",
-            ),
-            (
-                "unsupported on the GPU",
-                true,
-                unsupported(),
-                "The speech model encoder cannot be used here: it is not a transducer",
-            ),
-            (
-                "placement on the GPU",
-                true,
-                TransducerError::Gpu(Fallback::CannotRunFully),
-                "The speech model could not run on the GPU: the model can't run fully on the GPU.",
-            ),
-        ] {
-            assert_eq!(on_device(on_gpu, error).to_string(), expected, "{case}");
-        }
     }
 
     #[test]

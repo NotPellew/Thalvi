@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use thalvi_desktop::audio::Framer;
+use thalvi_desktop::device::Adapters;
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::local::{ModelSource, SpeechModel, SpeechStream};
 use thalvi_desktop::models::{CatalogSpeech, ModelStore};
@@ -98,12 +99,13 @@ fn load_model() -> Transducer {
                 ModelStore::in_dir(store),
                 SpeechChoice::Catalog(CatalogSpeech::Unified160ms),
                 &WordList::default(),
+                Adapters::default(),
             );
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("runtime")
-                .block_on(source.load())
+                .block_on(source.load(|_| {}))
                 .expect("model loads")
         }
         Err(_) => Transducer::load(

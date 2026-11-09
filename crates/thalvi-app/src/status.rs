@@ -4,11 +4,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::Serialize;
 use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
-use thalvi_desktop::device::Device;
+use thalvi_desktop::device::{Export, Step};
 use thalvi_desktop::engine::EngineState;
-use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::report::{UserError, causes};
-use thalvi_desktop::transducer::TransducerSource;
 
 pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not ready yet.";
 pub const WAKE_DOWNLOAD_NOTICE: &str = "Downloading the wake word model.";
@@ -144,39 +142,14 @@ impl LastError {
     }
 }
 
-/// What the speech model needs before it is ready.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpeechLoad {
-    FromDisk,
-    /// The files of the GPU export are about twice the size of the CPU's.
-    Download {
-        gpu: bool,
-    },
-}
-
-impl SpeechLoad {
-    pub async fn of(local: &LocalRecognizer<TransducerSource>) -> Self {
-        let source = local.source();
-        let plan = source.plan().await;
-        if source.is_cached(&plan).await {
-            Self::FromDisk
-        } else {
-            Self::Download {
-                gpu: matches!(plan, Device::Gpu(_)),
-            }
-        }
-    }
-
-    #[must_use]
-    pub fn notice(self) -> &'static str {
-        match self {
-            Self::FromDisk => "Loading the speech model.",
-            Self::Download { gpu: false } => {
-                "Loading the speech model. The first time it downloads about 650 MB."
-            }
-            Self::Download { gpu: true } => {
-                "Loading the speech model. The first time it downloads about 1.3 GB."
-            }
+/// What the notice says while the speech model loads: from disk, or which download it is waiting for.
+#[must_use]
+pub fn load_notice(step: Step) -> &'static str {
+    match step {
+        Step::Reading => "Loading the speech model.",
+        Step::Fetching(Export::Cpu) => "Loading the speech model. Downloading about 650 MB.",
+        Step::Fetching(Export::Gpu) => {
+            "Loading the speech model. Downloading the model for the GPU, about 1.3 GB."
         }
     }
 }
@@ -213,19 +186,19 @@ pub struct View {
     pub copies: bool,
     pub pauses: EndingPauses,
     /// What the speech model needs, while it loads.
-    pub loading: Option<SpeechLoad>,
+    pub loading: Option<Step>,
 }
 
 impl View {
     #[must_use]
     pub fn status(&self) -> Status {
         let target = self.target.clone();
-        if let (Some(load), EngineState::Listening, Mode::Idle | Mode::Done { .. }) =
+        if let (Some(step), EngineState::Listening, Mode::Idle | Mode::Done { .. }) =
             (self.loading, &self.engine, &self.mode)
         {
             return Status::Loading {
-                notice: load.notice().to_owned(),
-                downloading: matches!(load, SpeechLoad::Download { .. }),
+                notice: load_notice(step).to_owned(),
+                downloading: matches!(step, Step::Fetching(_)),
             };
         }
         match (&self.mode, &self.engine) {
@@ -515,7 +488,7 @@ mod tests {
     fn loading_the_speech_model_shows_until_a_capture_starts_a_failure_or_a_pause() {
         let loading = |mode, engine| {
             let mut view = view(mode, engine);
-            view.loading = Some(SpeechLoad::FromDisk);
+            view.loading = Some(Step::Reading);
             view.status()
         };
         let notice = || "Loading the speech model.".to_owned();

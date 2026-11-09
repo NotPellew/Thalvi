@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::device::Device;
+use crate::device::{Device, Export};
 use crate::report::UserError;
 
 /// The most a download may take besides moving its bytes.
@@ -507,13 +507,22 @@ impl CatalogSpeech {
         })
     }
 
+    /// The files of `export`; a model without a GPU export has only the int8 files.
+    #[must_use]
+    pub fn assets_of(self, export: Export) -> SpeechAssets<'static> {
+        match export {
+            Export::Gpu => self.gpu_assets().unwrap_or_else(|| self.assets()),
+            Export::Cpu => self.assets(),
+        }
+    }
+
     /// The files `device` loads: the GPU export on a GPU, the int8 files otherwise.
     #[must_use]
     pub fn assets_on(self, device: &Device) -> SpeechAssets<'static> {
-        match (device, self.gpu_assets()) {
-            (Device::Gpu(_), Some(gpu)) => gpu,
-            _ => self.assets(),
-        }
+        self.assets_of(match device {
+            Device::Gpu(_) => Export::Gpu,
+            Device::Cpu(_) => Export::Cpu,
+        })
     }
 }
 

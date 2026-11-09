@@ -13,7 +13,6 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 use thalvi_desktop::audio;
 use thalvi_desktop::config::DesktopConfig;
-use thalvi_desktop::device::{self, Adapter, Device};
 use thalvi_desktop::draft::DraftView;
 use thalvi_desktop::entries::{self, LiveKind, Realtime};
 use thalvi_desktop::history::{Entry, HistoryError, Store as History};
@@ -208,31 +207,25 @@ pub async fn download_wake_model(name: String, state: State<'_, AppState>) -> Re
     result.map(|_| ()).map_err(|error| error.to_string())
 }
 
-/// Where each catalog model would load now, from one check of the adapter.
-async fn planned_devices() -> impl Fn(CatalogSpeech) -> Device {
-    let adapter = tauri::async_runtime::spawn_blocking(device::adapter)
-        .await
-        .unwrap_or(Adapter::Unusable);
-    move |model| Device::plan(model.uses_gpu(), || adapter.clone())
-}
-
 /// The catalog speech models and whether each is downloaded; the files counted are those the model loads here.
 #[tauri::command]
-pub async fn list_speech_models() -> Result<Vec<SpeechModelInfo>, String> {
+pub async fn list_speech_models(
+    state: State<'_, AppState>,
+) -> Result<Vec<SpeechModelInfo>, String> {
     let store = ModelStore::per_user().map_err(|error| error.to_string())?;
-    Ok(store.speech_models(planned_devices().await).await)
+    Ok(store
+        .speech_models(state.speech_devices.plans().await)
+        .await)
 }
 
-/// What the Speech section says about the hardware a catalog model runs on: where it is running if it was
-/// loaded in this run, else where it will load.
+/// What the Speech section says about the hardware a catalog model runs on: where it is running if the engine
+/// has it loaded, else where it will load.
 #[tauri::command]
-pub async fn speech_device(name: String) -> Result<String, String> {
+pub async fn speech_device(name: String, state: State<'_, AppState>) -> Result<String, String> {
     let model = CatalogSpeech::named(&name)
         .ok_or_else(|| format!("{name} is not a speech model Thalvi knows."))?;
-    Ok(match device::loaded_on(model.name()) {
-        Some(device) => device.line(true),
-        None => planned_devices().await(model).line(false),
-    })
+    let store = ModelStore::per_user().map_err(|error| error.to_string())?;
+    Ok(state.speech_devices.line(&store, model).await)
 }
 
 /// What `thalvi://speech-model-progress` carries.
@@ -359,7 +352,7 @@ pub async fn download_speech_model(
     let recorder =
         Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
     let started = Instant::now();
-    let assets = model.assets_on(&planned_devices().await(model));
+    let assets = model.assets_on(&state.speech_devices.plans().await(model));
     let result = state
         .speech_downloads
         .run(model.name(), &store, &assets, |progress| {

@@ -27,6 +27,7 @@ pub mod report;
 pub mod runtime;
 pub mod secondary;
 pub mod segments;
+pub mod speech_device;
 pub mod spotter;
 pub mod tasks;
 mod tdt;

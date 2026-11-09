@@ -4,7 +4,7 @@ exclude_globs = [
     "crates/thalvi-desktop/src/host/windows/**",
     # Dawn and ONNX Runtime FFI that needs a GPU, which CI has none of, and its Windows stand-in: the placement rule they apply is tested in device.rs.
     "crates/thalvi-desktop/src/device/webgpu.rs",
-    "crates/thalvi-desktop/src/device/cpu_only.rs",
+    "crates/thalvi-desktop/src/device/windows.rs",
     "crates/thalvi-app/src/menu_entry/windows.rs",
     # Test doubles for the integration tests, not shipped behavior.
     "crates/thalvi-desktop/src/engine/fakes.rs",

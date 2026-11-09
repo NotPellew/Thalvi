@@ -15,6 +15,7 @@ use thalvi_desktop::capture::{CaptureRoute, EndingPauses, Endings};
 use thalvi_desktop::chosen::Chosen;
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::{Bound, Delivery, Finished};
+use thalvi_desktop::device::Step;
 use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
@@ -26,6 +27,7 @@ use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::{self, ModelStore};
 use thalvi_desktop::report::{UserError, causes};
+use thalvi_desktop::speech_device::SpeechDevices;
 use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
 use thalvi_desktop::transducer::TransducerSource;
 use thalvi_desktop::wake::{WakeConfig, WakeEngine};
@@ -33,8 +35,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::status::{
-    Failure, FailureKind, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, SpeechLoad, Status, View,
-    WAKE_DOWNLOAD_NOTICE,
+    Failure, FailureKind, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, Status, View,
+    WAKE_DOWNLOAD_NOTICE, load_notice,
 };
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
@@ -88,6 +90,7 @@ impl EngineLink {
         delivery: Arc<Delivery<Desktop>>,
         history: Arc<History>,
         drafts: Arc<Drafts>,
+        devices: Arc<SpeechDevices>,
     ) -> Result<Self, String> {
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
@@ -130,6 +133,7 @@ impl EngineLink {
                         key: key_state,
                         history,
                         drafts,
+                        devices,
                     },
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
@@ -316,7 +320,7 @@ impl Publisher {
         });
     }
 
-    fn loading(&self, load: Option<SpeechLoad>) {
+    fn loading(&self, load: Option<Step>) {
         self.update(|view| view.loading = load);
     }
 
@@ -423,6 +427,8 @@ struct Shared {
     key: watch::Receiver<KeyState>,
     history: Arc<History>,
     drafts: Arc<Drafts>,
+    /// Where the speech model runs, for Settings.
+    devices: Arc<SpeechDevices>,
 }
 
 struct Runner {
@@ -443,6 +449,7 @@ struct Runner {
     delivery: Arc<Delivery<Desktop>>,
     history: Arc<History>,
     drafts: Arc<Drafts>,
+    devices: Arc<SpeechDevices>,
     http: reqwest::Client,
     /// Loads the current engine's speech model.
     loading: Option<JoinHandle<()>>,
@@ -476,6 +483,7 @@ impl Runner {
             delivery,
             history: shared.history,
             drafts: shared.drafts,
+            devices: shared.devices,
             http: reqwest::Client::new(),
             loading: None,
             key: Presses::new(shared.key.clone()),
@@ -501,7 +509,7 @@ impl Runner {
         match self.build(&config).await {
             Ok(session) => {
                 self.session = Some(session);
-                self.load_speech_model().await;
+                self.load_speech_model();
                 self.open_microphone().await;
             }
             Err(failure) => {
@@ -511,9 +519,9 @@ impl Runner {
         }
     }
 
-    /// Fetches and loads the speech model in the background, and shows that until it is ready.
+    /// Fetches and loads the speech model in the background, and shows what it is doing until it is ready.
     /// A failure is a notice; the app keeps listening and dictation tries again.
-    async fn load_speech_model(&mut self) {
+    fn load_speech_model(&mut self) {
         if let Some(loading) = self.loading.take() {
             loading.abort();
         }
@@ -525,12 +533,24 @@ impl Runner {
             self.publisher.loading(None);
             return;
         };
-        let load = SpeechLoad::of(&local).await;
-        println!("{}", load.notice());
-        self.publisher.loading(Some(load));
+        let mut steps = local.steps();
+        let first = *steps.borrow_and_update();
+        println!("{}", load_notice(first));
+        self.publisher.loading(Some(first));
         let publisher = Rc::clone(&self.publisher);
         self.loading = Some(tokio::task::spawn_local(async move {
-            let loaded = local.load().await;
+            let load = local.load();
+            tokio::pin!(load);
+            let loaded = loop {
+                tokio::select! {
+                    loaded = &mut load => break loaded,
+                    Ok(()) = steps.changed() => {
+                        let step = *steps.borrow_and_update();
+                        println!("{}", load_notice(step));
+                        publisher.loading(Some(step));
+                    }
+                }
+            };
             if let Err(error) = &loaded {
                 println!("{error}");
             }
@@ -587,8 +607,10 @@ impl Runner {
             store,
             metrics.clone(),
             &config.stt.phrases,
+            self.devices.adapters(),
         );
         let local = recognizer.local();
+        self.devices.use_recognizer(local.clone());
         let (engine, handle) = Engine::new(
             Parts {
                 recognizer,
@@ -895,7 +917,7 @@ impl Runner {
                     .update(|view| view.pauses = config.ending_pause);
                 self.take_history(&config);
                 self.config = config;
-                self.load_speech_model().await;
+                self.load_speech_model();
                 self.open_microphone().await;
             }
             Err(failure) => {
@@ -1334,9 +1356,8 @@ mod tests {
     use std::cell::Cell;
     use std::time::Duration;
 
-    use thalvi_desktop::models::{self, CatalogHead, CatalogSpeech};
-    use thalvi_desktop::phrases::WordList;
-    use thalvi_desktop::transducer::SpeechChoice;
+    use thalvi_desktop::device::Export;
+    use thalvi_desktop::models::{self, CatalogHead};
 
     use super::*;
     use crate::overlay::Visibility;
@@ -1415,60 +1436,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_overlay_stays_hidden_while_a_model_on_disk_loads_and_shows_only_a_download() {
-        let catalog = CatalogSpeech::Nemotron160ms;
+    async fn the_overlay_stays_hidden_while_a_model_on_disk_loads_and_shows_each_download_by_name()
+    {
         let cases = [
-            ("downloaded", true, false, false),
-            ("not downloaded", false, false, true),
-            ("model folder", false, true, false),
+            (
+                "from disk",
+                Step::Reading,
+                false,
+                "Loading the speech model.",
+            ),
+            (
+                "the CPU files",
+                Step::Fetching(Export::Cpu),
+                true,
+                "Loading the speech model. Downloading about 650 MB.",
+            ),
+            (
+                "the GPU files",
+                Step::Fetching(Export::Gpu),
+                true,
+                "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.",
+            ),
         ];
-        for (case, on_disk, folder, overlay) in cases {
-            let dir = std::env::temp_dir().join(format!(
-                "thalvi-load-{}-{}",
-                case.replace(' ', "-"),
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            if on_disk {
-                let assets = catalog.assets();
-                for asset in [assets.encoder, assets.decoder, assets.joiner, assets.tokens] {
-                    std::fs::File::create(dir.join(asset.file_name))
-                        .unwrap()
-                        .set_len(asset.size)
-                        .unwrap();
-                }
-            }
-            let choice = if folder {
-                SpeechChoice::Folder(dir.clone())
-            } else {
-                SpeechChoice::Catalog(catalog)
-            };
-            let source =
-                TransducerSource::new(ModelStore::in_dir(&dir), choice, &WordList::default());
-            let local = LocalRecognizer::new(source, "test", Recorder::disabled().metrics());
-            let (out, status) = watch::channel(Status::Paused);
-            let publisher = Publisher::new(out, EndingPauses::default());
-            let shown = || Visibility::of(&status.borrow(), true) == Visibility::Show;
+        let (out, status) = watch::channel(Status::Paused);
+        let publisher = Publisher::new(out, EndingPauses::default());
+        let shown = || Visibility::of(&status.borrow(), true) == Visibility::Show;
 
-            publisher.mode(Mode::Starting);
-            assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}");
-            assert!(!shown(), "{case}: starting the engine");
-            publisher.loading(Some(SpeechLoad::of(&local).await));
-            publisher.mode(Mode::Idle);
+        publisher.mode(Mode::Starting);
+        assert_eq!(title(&status.borrow()), "Thalvi: starting");
+        assert!(!shown(), "starting the engine");
+        publisher.mode(Mode::Idle);
+        for (case, step, overlay, notice) in cases {
+            publisher.loading(Some(step));
             assert_eq!(shown(), overlay, "{case}: loading the model");
             assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}");
             assert_eq!(
-                matches!(&*status.borrow(), Status::Loading { notice, .. } if notice.contains("650 MB")),
-                overlay,
-                "{case}: the download notice"
+                *status.borrow(),
+                Status::Loading {
+                    notice: notice.to_owned(),
+                    downloading: overlay
+                },
+                "{case}: the notice"
             );
-
-            publisher.loading(None);
-            assert!(!shown(), "{case}: loaded");
-            assert_eq!(title(&status.borrow()), "Thalvi: listening", "{case}");
-            std::fs::remove_dir_all(&dir).unwrap();
         }
+
+        publisher.loading(None);
+        assert!(!shown(), "loaded");
+        assert_eq!(title(&status.borrow()), "Thalvi: listening");
     }
 
     #[tokio::test]
