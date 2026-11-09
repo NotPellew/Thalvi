@@ -1828,6 +1828,8 @@ enum Reply {
     Status(u16),
     /// Never answers.
     Stall,
+    /// Answers 200 with this body after this many milliseconds.
+    After(u64, &'static str),
 }
 
 /// A secondary transcription endpoint; reports how many frames each uploaded WAV holds.
@@ -1850,6 +1852,10 @@ async fn serve(reply: Reply) -> (String, tokio::sync::mpsc::UnboundedReceiver<us
                 Reply::Json(json) => (StatusCode::OK, json),
                 Reply::Status(code) => (StatusCode::from_u16(code).unwrap(), "{}"),
                 Reply::Stall => std::future::pending().await,
+                Reply::After(delay, json) => {
+                    tokio::time::sleep(ms(delay)).await;
+                    (StatusCode::OK, json)
+                }
             }
         }
     });
@@ -2005,6 +2011,44 @@ fn with_second_passes(entries: &[(&str, &str, bool)]) -> String {
     )
 }
 
+/// What a capture gave and when, for the tests that watch the second passes after the paste.
+struct Pasted {
+    outcome: CaptureOutcome,
+    /// Milliseconds after the wake word.
+    at: u64,
+    /// The notices the user had been shown by then.
+    notices: Vec<String>,
+}
+
+/// Captures as `capture_task` does, then keeps listening for 20 s the way the app does between
+/// captures, so second passes the paste did not wait for can finish and be recorded.
+fn capture_and_listen(
+    rig: &Rig,
+    mut engine: TestEngine,
+    mut frames: FakeFrames,
+    cancel_after: bool,
+) -> JoinHandle<Pasted> {
+    let origin = tokio::time::Instant::now() - ms(rig.now());
+    let notices = Rc::clone(&rig.notices);
+    let handle = rig.handle.clone();
+    tokio::task::spawn_local(async move {
+        let trigger = engine.listen(&mut frames).await.unwrap();
+        assert_eq!(trigger, WakeTrigger::Capture);
+        let outcome = engine.capture(&mut frames).await;
+        let pasted = Pasted {
+            outcome,
+            at: u64::try_from(origin.elapsed().as_millis()).unwrap(),
+            notices: notices.borrow().clone(),
+        };
+        if cancel_after {
+            handle.cancel();
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(20), engine.listen(&mut frames)).await;
+        engine.finish().await;
+        pasted
+    })
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_first_ticked_entry_that_answers_replaces_the_text_and_the_rest_are_only_recorded() {
     LocalSet::new()
@@ -2019,7 +2063,7 @@ async fn the_first_ticked_entry_that_answers_replaces_the_text_and_the_rest_are_
             let (second, mut second_uploads) =
                 serve(Reply::Json(r#"{"text": "Second words paste that"}"#)).await;
             let (third, mut third_uploads) =
-                serve(Reply::Json(r#"{"text": "Third words paste that"}"#)).await;
+                serve(Reply::After(500, r#"{"text": "Third words paste that"}"#)).await;
             let (unticked, mut unticked_uploads) =
                 serve(Reply::Json(r#"{"text": "Unticked words paste that"}"#)).await;
             let config = with_second_passes(&[
@@ -2030,10 +2074,10 @@ async fn the_first_ticked_entry_that_answers_replaces_the_text_and_the_rest_are_
             ]);
             let recorder = Recorder::in_dir(all, &dir).unwrap();
             let (mut rig, engine, frames) = Rig::recording(&config, recorder);
-            let task = capture_task(engine, frames);
+            let task = capture_and_listen(&rig, engine, frames, false);
             live_words(&mut rig).await;
             assert_eq!(
-                finished(task).await,
+                finished(task).await.outcome,
                 accepted(CaptureRoute::Paste, "Second words")
             );
             assert!(broken_uploads.recv().await.is_some());
@@ -2073,8 +2117,8 @@ async fn the_first_ticked_entry_that_answers_replaces_the_text_and_the_rest_are_
                 std::fs::read_to_string(folder.join("text.txt")).unwrap(),
                 "heard: live words paste that\n\
                  second transcription (Second): Second words paste that\n\
-                 second transcription (Third): Third words paste that\n\
-                 accepted (paste): Second words\n"
+                 accepted (paste): Second words\n\
+                 second transcription (Third): Third words paste that\n"
             );
         })
         .await;
@@ -2100,6 +2144,289 @@ async fn no_ticked_entry_that_answers_keeps_the_live_text_and_names_every_one_th
             );
         })
         .await;
+}
+
+enum Cancel {
+    Never,
+    /// This many milliseconds after the requests went out.
+    During(u64),
+    /// Right after the capture's outcome, while the engine listens again.
+    AfterPaste,
+}
+
+enum Expected {
+    /// Accepted with this text.
+    Text(&'static str),
+    /// Cancelled while the second passes ran.
+    Cancelled,
+}
+
+struct Order {
+    name: &'static str,
+    /// The ticked entries `A`, `B` in list order and how each endpoint answers.
+    passes: [Reply; 2],
+    cancel: Cancel,
+    expected: Expected,
+    /// Milliseconds from the requests going out to the outcome.
+    waited: u64,
+    /// The notices shown when the outcome came.
+    then: &'static [&'static str],
+    /// The notices shown 20 s later.
+    later: &'static [&'static str],
+    /// Each entry's metric in the order written: `(entry, outcome, used)`.
+    metrics: [(&'static str, &'static str, bool); 2],
+    /// The lines of `text.txt` after `heard:`.
+    lines: &'static [&'static str],
+}
+
+/// When the requests go out: the capture ends at 3500 and the accepted cue takes 100 ms.
+const SECOND_PASSES: u64 = 3600;
+
+const A_FAILED: &str = "The second transcription failed for \"A\". Using the answer of \"B\".";
+const B_ONLY_RECORDED: &str = "The second transcription for \"B\" failed; it was only recorded.";
+
+const A: &str = r#"{"text": "A words paste that"}"#;
+const B: &str = r#"{"text": "B words paste that"}"#;
+const DISAGREES: &str = r#"{"text": "words submit"}"#;
+
+const ORDERS: &[Order] = &[
+    Order {
+        name: "a fast entry is pasted at once and a slow one is recorded afterwards",
+        passes: [Reply::After(100, A), Reply::After(8000, B)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("A words"),
+        waited: 100,
+        then: &[],
+        later: &[],
+        metrics: [("A", "ok", true), ("B", "ok", false)],
+        lines: &[
+            "second transcription (A): A words paste that",
+            "accepted (paste): A words",
+            "second transcription (B): B words paste that",
+        ],
+    },
+    Order {
+        name: "an earlier entry wins even when a later one answered first",
+        passes: [Reply::After(1000, A), Reply::After(100, B)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("A words"),
+        waited: 1000,
+        then: &[],
+        later: &[],
+        metrics: [("A", "ok", true), ("B", "ok", false)],
+        lines: &[
+            "second transcription (A): A words paste that",
+            "second transcription (B): B words paste that",
+            "accepted (paste): A words",
+        ],
+    },
+    Order {
+        name: "a failing first entry hands the paste to the second",
+        passes: [Reply::Status(500), Reply::After(300, B)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("B words"),
+        waited: 300,
+        then: &[A_FAILED],
+        later: &[A_FAILED],
+        metrics: [("A", "error", false), ("B", "ok", true)],
+        lines: &[
+            "second transcription (B): B words paste that",
+            "accepted (paste): B words",
+        ],
+    },
+    Order {
+        name: "a first entry that disagrees with the ending hands the paste to the second",
+        passes: [Reply::After(200, DISAGREES), Reply::After(500, B)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("B words"),
+        waited: 500,
+        then: &[A_FAILED],
+        later: &[A_FAILED],
+        metrics: [("A", "error", false), ("B", "ok", true)],
+        lines: &[
+            "second transcription (A): words submit",
+            "second transcription (B): B words paste that",
+            "accepted (paste): B words",
+        ],
+    },
+    Order {
+        name: "a first entry that times out is waited for before the second is used",
+        passes: [Reply::Stall, Reply::After(100, B)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("B words"),
+        waited: 10_000,
+        then: &[A_FAILED],
+        later: &[A_FAILED],
+        metrics: [("A", "timeout", false), ("B", "ok", true)],
+        lines: &[
+            "second transcription (B): B words paste that",
+            "accepted (paste): B words",
+        ],
+    },
+    Order {
+        name: "no usable entry keeps the live text once the last one has answered",
+        passes: [Reply::Status(500), Reply::After(300, DISAGREES)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("live words"),
+        waited: 300,
+        then: &["The second transcription failed for \"A\", \"B\". Using the live transcript."],
+        later: &["The second transcription failed for \"A\", \"B\". Using the live transcript."],
+        metrics: [("A", "error", false), ("B", "error", false)],
+        lines: &[
+            "second transcription (B): words submit",
+            "accepted (paste): live words",
+        ],
+    },
+    Order {
+        name: "a recorded-only entry that fails after the paste says so apart and changes nothing",
+        passes: [Reply::After(100, A), Reply::After(500, "{}")],
+        cancel: Cancel::Never,
+        expected: Expected::Text("A words"),
+        waited: 100,
+        then: &[],
+        later: &[B_ONLY_RECORDED],
+        metrics: [("A", "ok", true), ("B", "error", false)],
+        lines: &[
+            "second transcription (A): A words paste that",
+            "accepted (paste): A words",
+        ],
+    },
+    Order {
+        name: "a recorded-only entry that times out after the paste is recorded as a timeout",
+        passes: [Reply::After(100, A), Reply::Stall],
+        cancel: Cancel::Never,
+        expected: Expected::Text("A words"),
+        waited: 100,
+        then: &[],
+        later: &[B_ONLY_RECORDED],
+        metrics: [("A", "ok", true), ("B", "timeout", false)],
+        lines: &[
+            "second transcription (A): A words paste that",
+            "accepted (paste): A words",
+        ],
+    },
+    Order {
+        name: "a recorded-only entry that failed before the paste is also told apart",
+        passes: [Reply::After(300, A), Reply::Status(500)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("A words"),
+        waited: 300,
+        then: &[B_ONLY_RECORDED],
+        later: &[B_ONLY_RECORDED],
+        metrics: [("A", "ok", true), ("B", "error", false)],
+        lines: &[
+            "second transcription (A): A words paste that",
+            "accepted (paste): A words",
+        ],
+    },
+    Order {
+        name: "cancelling during the wait cancels and records every request",
+        passes: [Reply::After(5000, A), Reply::After(8000, B)],
+        cancel: Cancel::During(1000),
+        expected: Expected::Cancelled,
+        waited: 1000,
+        then: &[],
+        later: &[],
+        metrics: [("A", "cancelled", false), ("B", "cancelled", false)],
+        lines: &["cancelled"],
+    },
+    Order {
+        name: "cancelling after the paste leaves the recorded-only request running",
+        passes: [Reply::After(100, A), Reply::After(8000, B)],
+        cancel: Cancel::AfterPaste,
+        expected: Expected::Text("A words"),
+        waited: 100,
+        then: &[],
+        later: &[],
+        metrics: [("A", "ok", true), ("B", "ok", false)],
+        lines: &[
+            "second transcription (A): A words paste that",
+            "accepted (paste): A words",
+            "second transcription (B): B words paste that",
+        ],
+    },
+];
+
+#[tokio::test(start_paused = true)]
+async fn the_paste_waits_only_for_the_earliest_entry_that_gives_a_usable_answer() {
+    LocalSet::new()
+        .run_until(async {
+            for order in ORDERS {
+                check_order(order).await;
+            }
+        })
+        .await;
+}
+
+async fn check_order(order: &Order) {
+    let name = order.name;
+    let all = RecordKinds {
+        metrics: true,
+        text: true,
+        audio: false,
+    };
+    let dir = record_dir("order");
+    let (a, _a) = serve(order.passes[0]).await;
+    let (b, _b) = serve(order.passes[1]).await;
+    let config = with_second_passes(&[("A", &a, true), ("B", &b, true)]);
+    let recorder = Recorder::in_dir(all, &dir).unwrap();
+    let (mut rig, engine, frames) = Rig::recording(&config, recorder);
+    let task = capture_and_listen(
+        &rig,
+        engine,
+        frames,
+        matches!(order.cancel, Cancel::AfterPaste),
+    );
+    live_words(&mut rig).await;
+    if let Cancel::During(after) = order.cancel {
+        rig.at(SECOND_PASSES + after).await;
+        rig.handle.cancel();
+    }
+    let pasted = finished(task).await;
+
+    let expected = match order.expected {
+        Expected::Text(text) => accepted(CaptureRoute::Paste, text),
+        Expected::Cancelled => CaptureOutcome::Cancelled {
+            dictated: Some("live words".to_owned()),
+        },
+    };
+    assert_eq!(pasted.outcome, expected, "{name}");
+    assert_eq!(
+        pasted.at,
+        SECOND_PASSES + order.waited,
+        "{name}: when it came"
+    );
+    assert_eq!(pasted.notices, order.then, "{name}: notices then");
+    assert_eq!(rig.notices(), order.later, "{name}: notices later");
+
+    let metrics: Vec<_> = read_lines(&dir.join("metrics.jsonl"))
+        .iter()
+        .filter(|line| line["event"] == "desktop_secondary_stt")
+        .map(|line| {
+            (
+                line["entry"].as_str().unwrap().to_owned(),
+                line["outcome"].as_str().unwrap().to_owned(),
+                line["used"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    let expected_metrics: Vec<_> = order
+        .metrics
+        .iter()
+        .map(|(entry, outcome, used)| ((*entry).to_owned(), (*outcome).to_owned(), *used))
+        .collect();
+    assert_eq!(metrics, expected_metrics, "{name}: metrics");
+    let folder = dictation_dirs(&dir).pop().unwrap();
+    let mut text = String::from("heard: live words paste that\n");
+    for line in order.lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    assert_eq!(
+        std::fs::read_to_string(folder.join("text.txt")).unwrap(),
+        text,
+        "{name}: text.txt"
+    );
 }
 
 #[tokio::test(start_paused = true)]

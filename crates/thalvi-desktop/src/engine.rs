@@ -12,8 +12,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::future::{FutureExt, LocalBoxFuture, join_all};
-use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures_util::future::{FutureExt, LocalBoxFuture};
+use futures_util::stream::{FuturesUnordered, SelectAll, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -419,6 +419,9 @@ pub struct Engine<R, W, C> {
     limits: CaptureLimits,
     /// The ticked second-pass entries in list order.
     secondary: Vec<SecondPassEntry>,
+    /// Second-pass requests the paste did not wait for, one set per capture; each is recorded as it
+    /// finishes while a loop of the engine polls this. Quitting drops them.
+    recorded_only: SelectAll<FuturesUnordered<LocalBoxFuture<'static, Answer>>>,
     writing: Option<Writing>,
     speech: SpeechSource,
     http: reqwest::Client,
@@ -640,6 +643,47 @@ enum Step {
     Tail,
     /// The dictation key changed; false when it can no longer change.
     Key(bool),
+    /// A second pass that was not waited for finished.
+    Recorded(Answer),
+}
+
+/// One entry's reply to a capture, with what is needed to judge and record it when it arrives.
+struct Answer {
+    /// The entry's place among the ticked ones.
+    index: usize,
+    entry: SecondPassEntry,
+    dictation: Dictation,
+    route: CaptureRoute,
+    has_endings: bool,
+    heard: Result<String, SecondaryError>,
+    took: Duration,
+}
+
+/// An [`Answer`] with its outcome, and the text it gives when it agrees with the user's ending.
+struct Judged {
+    answer: Answer,
+    outcome: &'static str,
+    agreed: Option<String>,
+}
+
+/// Which entry the paste takes, as far as the answers so far say.
+enum Usable {
+    /// An earlier entry may still give a usable answer.
+    Waiting,
+    Entry(usize),
+    Nobody,
+}
+
+/// The earliest entry that gave a usable answer, once every entry before it has answered.
+fn earliest_usable(slots: &[Option<Judged>]) -> Usable {
+    for (index, slot) in slots.iter().enumerate() {
+        match slot {
+            None => return Usable::Waiting,
+            Some(judged) if judged.agreed.is_some() => return Usable::Entry(index),
+            Some(_) => {}
+        }
+    }
+    Usable::Nobody
 }
 
 /// Whether any of the frames heard after the start cue holds speech.
@@ -787,6 +831,7 @@ where
             scripts: config.scripts.clone(),
             limits: config.capture_limits,
             secondary: config.stt.entries.ticked().cloned().collect(),
+            recorded_only: SelectAll::new(),
             writing: config.writing.clone(),
             speech: config.speech_source(),
             http: parts.http,
@@ -915,6 +960,10 @@ where
                         self.begin_hold(press);
                         return Ok(WakeTrigger::Hold);
                     }
+                    continue;
+                }
+                Some(answer) = self.recorded_only.next() => {
+                    self.record_late(answer);
                     continue;
                 }
                 frame = frames.next() => frame,
@@ -1442,6 +1491,7 @@ where
                 changed = self.key.changed(), if key_open => Step::Key(changed.is_ok()),
                 event = live.session.next_event() => Step::Event(event),
                 frame = frames.next() => Step::Frame(frame),
+                Some(answer) = self.recorded_only.next() => Step::Recorded(answer),
                 Some(end) = live.cues.next() => Step::Cue(end),
                 () = until(live.text.ready_at()) => Step::Quiet,
                 () = until(live.watch.as_ref().and_then(Watch::ready_at)) => Step::Disputed,
@@ -1480,6 +1530,10 @@ where
                     live.last_audio = Instant::now();
                     self.cue_metric(Event::Cue, &end);
                     self.cue_failed(&end, "The capture continues.");
+                    None
+                }
+                Step::Recorded(answer) => {
+                    self.record_late(answer);
                     None
                 }
                 Step::Quiet => self.on_quiet(live),
@@ -1987,8 +2041,9 @@ where
     }
 
     /// Replaces the accepted text with the first ticked entry's second transcription that agrees
-    /// with the ending the user spoke; the others are recorded only. Keeps the live transcript
-    /// when none does, and says so.
+    /// with the ending the user spoke, as soon as that is known: the entries after it are not
+    /// waited for. They run on and are recorded when they finish. Keeps the live transcript when
+    /// none agrees, and says so.
     async fn reconcile(
         &mut self,
         request: CaptureRequest,
@@ -2004,59 +2059,66 @@ where
             route: request.route,
         });
         let started = Instant::now();
-        let heard = tokio::select! {
-            biased;
-            _ = self.cancel.changed() => None,
-            heard = join_all(self.secondary.iter().map(|entry| async {
-                let asked = Instant::now();
-                let heard = secondary::transcribe(&self.http, &entry.settings, sent).await;
-                (heard, asked.elapsed())
-            })) => Some(heard),
-        };
-        let Some(heard) = heard else {
-            for entry in &self.secondary {
-                self.record_second_pass(entry, "cancelled", started.elapsed(), false);
+        let mut running = self.ask_all(&request, sent, has_endings, dictation);
+        let mut slots: Vec<Option<Judged>> = self.secondary.iter().map(|_| None).collect();
+        let winner = loop {
+            match earliest_usable(&slots) {
+                Usable::Waiting => {}
+                Usable::Entry(index) => break Some(index),
+                Usable::Nobody => break None,
             }
-            return CaptureOutcome::cancelled_with(request.text);
-        };
-        let mut winner: Option<&SecondPassEntry> = None;
-        let mut text = None;
-        let mut failed = Vec::new();
-        for (entry, (heard, took)) in self.secondary.iter().zip(heard) {
-            let (outcome, agreed) = match heard {
-                Ok(raw) => {
-                    self.recorder.text(
-                        dictation,
-                        format!("second transcription ({}): {raw}", entry.name),
-                    );
-                    match self.agreed(&raw, request.route, has_endings) {
-                        Some(agreed) => ("ok", Some(agreed)),
-                        None => ("error", None),
+            tokio::select! {
+                biased;
+                _ = self.cancel.changed() => {
+                    for entry in &self.secondary {
+                        self.record_second_pass(entry, "cancelled", started.elapsed(), false);
+                    }
+                    return CaptureOutcome::cancelled_with(request.text);
+                }
+                Some(answer) = self.recorded_only.next() => self.record_late(answer),
+                Some(answer) = running.next() => {
+                    let judged = self.judge(answer);
+                    if let Some(slot) = slots.get_mut(judged.answer.index) {
+                        *slot = Some(judged);
                     }
                 }
-                Err(SecondaryError::Timeout) => ("timeout", None),
-                Err(_) => ("error", None),
-            };
-            let used = agreed.is_some() && winner.is_none();
-            self.record_second_pass(entry, outcome, took, used);
-            if outcome != "ok" {
-                failed.push(format!("\"{}\"", entry.name));
             }
-            if used {
-                winner = Some(entry);
-                text = agreed;
+        };
+        let winner_name = winner
+            .and_then(|index| self.secondary.get(index))
+            .map(|entry| format!("\"{}\"", entry.name));
+        let mut failed = Vec::new();
+        let mut apart = Vec::new();
+        for (index, judged) in slots.iter().enumerate() {
+            let Some(judged) = judged else {
+                continue;
+            };
+            self.record_answer(judged, winner == Some(index));
+            if judged.outcome != "ok" {
+                if winner.is_some_and(|winner| index > winner) {
+                    apart.push(judged.answer.entry.name.as_str());
+                } else {
+                    failed.push(format!("\"{}\"", judged.answer.entry.name));
+                }
             }
         }
         if !failed.is_empty() {
-            let used = winner.map_or_else(
+            let used = winner_name.map_or_else(
                 || "the live transcript".to_owned(),
-                |entry| format!("the answer of \"{}\"", entry.name),
+                |name| format!("the answer of {name}"),
             );
             (self.notice)(&format!(
                 "The second transcription failed for {}. Using {used}.",
                 failed.join(", ")
             ));
         }
+        for name in apart {
+            self.tell_only_recorded(name);
+        }
+        let text = winner
+            .and_then(|index| slots.get_mut(index)?.as_mut())
+            .and_then(|judged| judged.agreed.take());
+        self.recorded_only.push(running);
         match text {
             Some(text) => CaptureOutcome::Accepted(CaptureRequest {
                 route: request.route,
@@ -2064,6 +2126,86 @@ where
             }),
             None => CaptureOutcome::Accepted(request),
         }
+    }
+
+    /// Sends the capture to every ticked entry at once.
+    fn ask_all(
+        &self,
+        request: &CaptureRequest,
+        sent: &[Frame],
+        has_endings: bool,
+        dictation: &Dictation,
+    ) -> FuturesUnordered<LocalBoxFuture<'static, Answer>> {
+        let sent: Rc<[Frame]> = Rc::from(sent);
+        let running = FuturesUnordered::new();
+        for (index, entry) in self.secondary.iter().enumerate() {
+            let (http, entry, sent, dictation) = (
+                self.http.clone(),
+                entry.clone(),
+                Rc::clone(&sent),
+                dictation.clone(),
+            );
+            let route = request.route;
+            running.push(
+                async move {
+                    let asked = Instant::now();
+                    let heard = secondary::transcribe(&http, &entry.settings, &sent).await;
+                    Answer {
+                        index,
+                        entry,
+                        dictation,
+                        route,
+                        has_endings,
+                        heard,
+                        took: asked.elapsed(),
+                    }
+                }
+                .boxed_local(),
+            );
+        }
+        running
+    }
+
+    fn judge(&self, answer: Answer) -> Judged {
+        let (outcome, agreed) = match &answer.heard {
+            Ok(raw) => match self.agreed(raw, answer.route, answer.has_endings) {
+                Some(agreed) => ("ok", Some(agreed)),
+                None => ("error", None),
+            },
+            Err(SecondaryError::Timeout) => ("timeout", None),
+            Err(_) => ("error", None),
+        };
+        Judged {
+            answer,
+            outcome,
+            agreed,
+        }
+    }
+
+    fn record_answer(&self, judged: &Judged, used: bool) {
+        let answer = &judged.answer;
+        if let Ok(raw) = &answer.heard {
+            self.recorder.text(
+                &answer.dictation,
+                format!("second transcription ({}): {raw}", answer.entry.name),
+            );
+        }
+        self.record_second_pass(&answer.entry, judged.outcome, answer.took, used);
+    }
+
+    /// Records a second pass that finished after the paste, and tells the user when it failed.
+    fn record_late(&self, answer: Answer) {
+        let judged = self.judge(answer);
+        self.record_answer(&judged, false);
+        if judged.outcome != "ok" {
+            self.tell_only_recorded(&judged.answer.entry.name);
+        }
+    }
+
+    fn tell_only_recorded(&self, name: &str) {
+        (self.notice)(&format!(
+            "The second transcription for \"{name}\" failed; it was only recorded."
+        ));
     }
 
     /// Has the writing model put `words` into proper text and hands it on as a paste. Nothing is
