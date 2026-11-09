@@ -170,7 +170,8 @@ def run_mic(fifo, queue):
     """Plays each .raw file queued in `queue` into the PipeWire microphone's pipe, in real time.
 
     Samples are 16 kHz mono signed 16-bit. The source reads the pipe only while an app captures, and drops what
-    is written faster than it plays: the pipe is kept to one page and the clock restarts after every wait.
+    is written faster than it plays: the pipe is kept to one page and the clock restarts after every wait and
+    whenever the feeder falls a chunk behind it (after idle time, or a stall), so it never catches up in a burst.
     """
     import fcntl
 
@@ -188,6 +189,8 @@ def run_mic(fifo, queue):
             with open(os.path.join(queue, names[0]), "rb") as f:
                 pending = f.read()
             os.unlink(os.path.join(queue, names[0]))
+        if time.monotonic() > start + (tick + 1) * chunk_ms / 1000:
+            start, tick = time.monotonic(), 0
         try:
             if fd is None:
                 fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)  # fails until an app captures
