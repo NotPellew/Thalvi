@@ -112,8 +112,9 @@ impl Windows {
     pub fn watch_hold_keys(
         keys: &[(HoldKind, HoldKey)],
         on_change: impl Fn(HoldKind, bool) + Send + 'static,
+        _on_problem: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
-        win32::watch_hold_keys(keys.to_vec(), Box::new(on_change)).map(HoldSource::Hook)
+        win32::watch_hold_keys(keys.to_vec(), Box::new(on_change)).map(HoldSource::Watching)
     }
 
     /// The running app's reply to `request`, waiting up to `timeout`; `None` when no app answers.

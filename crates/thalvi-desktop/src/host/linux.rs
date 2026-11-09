@@ -199,7 +199,8 @@ impl Desktop {
         Hyprland::default_hold_keys()
     }
 
-    /// Reports the hold keys as the desktop allows: through binds on Hyprland, not at all on GNOME.
+    /// Reports the hold keys as the desktop allows: through binds Thalvi adds to Hyprland, not at
+    /// all on GNOME. Problems found after this returns go to `on_problem`.
     ///
     /// # Errors
     /// [`HostError::Unsupported`] when this desktop cannot detect a key's release, or is none
@@ -207,10 +208,11 @@ impl Desktop {
     pub fn watch_hold_keys(
         keys: &[(HoldKind, HoldKey)],
         on_change: impl Fn(HoldKind, bool) + Send + 'static,
+        on_problem: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         match Session::detect()? {
-            Session::Hyprland => Hyprland::watch_hold_keys(keys, on_change),
-            Session::Gnome => Gnome::watch_hold_keys(keys, on_change),
+            Session::Hyprland => Hyprland::watch_hold_keys(keys, on_change, on_problem),
+            Session::Gnome => Gnome::watch_hold_keys(keys, on_change, on_problem),
         }
     }
 

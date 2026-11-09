@@ -164,6 +164,15 @@ impl EngineLink {
         let _ = self.control.send(control);
     }
 
+    /// Tells the user about a hold key problem found after the keys were set up, such as binds
+    /// Hyprland dropped.
+    pub fn hold_problems(&self) -> impl Fn(String) + Send + Sync + 'static {
+        let control = self.control.clone();
+        move |notice| {
+            let _ = control.send(Control::HoldKeyFailed(notice));
+        }
+    }
+
     #[must_use]
     pub fn status(&self) -> Status {
         self.status.borrow().clone()

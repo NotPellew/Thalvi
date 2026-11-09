@@ -722,17 +722,20 @@ mod tests {
             "Alt+KeyZ",
             "the keys may swap places"
         );
-        let error = loaded(r#"{"hold_key": "F10"}"#, &HYPRLAND())
-            .unwrap_err()
-            .to_string();
+        let error = loaded(r#"{"hold_key": "F10"}"#, &HYPRLAND()).unwrap_err();
         assert!(error.contains("must differ from the hold key"), "{error}");
     }
 
     #[test]
     fn the_hold_keys_are_the_desktops_defaults_and_are_stored_only_when_they_differ() {
-        type Defaults = fn() -> KeyDefaults;
         // (desktop, stored in the file, in effect, stored again)
-        let cases: [(Defaults, &str, (&str, &str), (Option<&str>, Option<&str>)); 9] = [
+        type Case = (
+            fn() -> KeyDefaults,
+            &'static str,
+            (&'static str, &'static str),
+            (Option<&'static str>, Option<&'static str>),
+        );
+        let cases: [Case; 9] = [
             (HYPRLAND, "{}", ("F9", "F10"), (None, None)),
             (WINDOWS, "{}", ("Alt+KeyZ", "Alt+KeyX"), (None, None)),
             (
