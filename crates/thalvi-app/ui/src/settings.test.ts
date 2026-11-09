@@ -2320,6 +2320,12 @@ describe("last dictation", () => {
     expect(notes()[0]).toContain("Nothing to recover yet.");
   });
 
+  it("opens on the Speech page, where a first start leaves it", async () => {
+    await openDraft();
+    expect(root.querySelector('nav [aria-current="page"]')?.getAttribute("data-page")).toBe("speech");
+    expect(root.querySelector<HTMLElement>('section[data-page="speech"]')?.hidden).toBe(false);
+  });
+
   it("opens on the History page when the tray asks for it", async () => {
     const stub = await openDraft();
     expect(root.querySelector<HTMLElement>('section[data-page="history"]')?.hidden).toBe(true);

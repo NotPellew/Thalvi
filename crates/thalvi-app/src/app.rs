@@ -69,10 +69,10 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Reads the config and starts the engine.
-    fn start(config: Option<std::path::PathBuf>) -> Result<Self, String> {
+    /// Reads the config and starts the engine; also whether this is the first start.
+    fn start(config: Option<std::path::PathBuf>) -> Result<(Self, bool), String> {
         let store = Store::new(config)?;
-        let config = store.load()?;
+        let (config, first_start) = store.start()?;
         let history = Arc::new(history::Store::per_user());
         let drafts = Arc::new(Drafts::default());
         let delivery = Arc::new(Delivery::new(
@@ -85,7 +85,7 @@ impl AppState {
             Arc::clone(&drafts),
         )?;
         let held = watch_hold_keys(&config, &link);
-        Ok(Self {
+        let state = Self {
             link,
             store,
             overlay: Overlay::default(),
@@ -103,7 +103,8 @@ impl AppState {
             request_server: Mutex::new(None),
             hold_watch: Mutex::new(held.watch),
             hold_unavailable: held.unavailable,
-        })
+        };
+        Ok((state, first_start))
     }
 
     #[must_use]
@@ -406,12 +407,15 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
 /// Reads the config and starts the engine, the tray and the windows.
 fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), String> {
     // Only the first instance gets here, so a relaunch never reads the config.
-    let state = AppState::start(config)?;
+    let (state, first_start) = AppState::start(config)?;
     state.restore_login(app);
     state.restore_menu_entry(&menu_entry::System::from_env());
     app.manage(state);
     serve_requests(app);
     create_windows(app).map_err(|error| error.to_string())?;
+    if first_start {
+        show_settings(app);
+    }
     follow_engine(app).map_err(|error| error.to_string())
 }
 

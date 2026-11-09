@@ -34,6 +34,21 @@ impl Store {
         Ok(Self { path, required })
     }
 
+    /// The config to start with, and whether this is the first start: no file at the per-user path.
+    /// A first start writes the defaults as a save with nothing changed would; a path given on the
+    /// command line must exist, so it is never one.
+    ///
+    /// # Errors
+    /// Why the file cannot be read or is not valid, or why the defaults cannot be written.
+    pub fn start(&self) -> Result<(DesktopConfig, bool), String> {
+        let first_start = !self.required && !self.path.exists();
+        let config = self.load()?;
+        if first_start {
+            self.save_switches(&config)?;
+        }
+        Ok((config, first_start))
+    }
+
     /// The config in effect: the file if there is one, else the defaults.
     ///
     /// # Errors
@@ -406,6 +421,61 @@ mod tests {
             (true, false, true)
         );
         assert_eq!(leftovers, ["desktop.json"]);
+    }
+
+    #[test]
+    fn only_a_start_without_a_file_writes_the_defaults_and_is_a_first_start() {
+        let dir = std::env::temp_dir().join(format!("thalvi-app-first-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("desktop.json");
+        let store = Store {
+            path: path.clone(),
+            required: false,
+        };
+
+        let (config, first) = store.start().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let file: Value = serde_json::from_str(&text).unwrap();
+        assert!(first, "no file yet");
+        assert_eq!(
+            file["stt"]["entries"],
+            json!([{"kind": "on_device", "id": "on-device", "name": "On this computer", "active": true, "model": "nemotron_160ms"}])
+        );
+        assert_eq!(
+            file["writing"],
+            Value::Null,
+            "no stored-override field: {text}"
+        );
+        assert!(!text.contains("\"prompt\""), "{text}");
+
+        let (again, first) = store.start().unwrap();
+        assert!(!first, "the written file ends the first start");
+        assert_eq!(again, config);
+
+        let server = r#"{"stt": {"entries": [{"kind": "thalvi_server", "id": "s", "name": "Thalvi server", "active": true, "address": "ws://127.0.0.1:8080"}]}}"#;
+        std::fs::write(&path, server).unwrap();
+        let (kept, first) = store.start().unwrap();
+        assert!(!first);
+        assert!(matches!(
+            kept.stt.entries.active_live().kind,
+            LiveKind::ThalviServer(_)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            server,
+            "an existing file is not rewritten"
+        );
+
+        let required = Store {
+            path: dir.join("missing.json"),
+            required: true,
+        };
+        assert!(
+            required.start().is_err(),
+            "a path given on the command line must exist"
+        );
+        assert!(!dir.join("missing.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
