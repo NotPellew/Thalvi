@@ -1,7 +1,33 @@
-# Compiled only on Windows, or run only with speech model files CI doesn't have: survivors here say nothing.
+# Compiled only on Windows, run only with speech model files CI doesn't have, or run only inside the app: survivors here say nothing.
 exclude_globs = [
     "crates/thalvi-desktop/src/host/windows.rs",
     "crates/thalvi-desktop/src/host/windows/**",
     "crates/thalvi-app/src/menu_entry/windows.rs",
+    # Test doubles for the integration tests, not shipped behavior.
+    "crates/thalvi-desktop/src/engine/fakes.rs",
 ]
-exclude_re = ["approval::", "OnnxJoiner", "TransducerStream::decode", "run_predictor"]
+exclude_re = [
+    "approval::",
+    "OnnxJoiner",
+    "TransducerStream::decode",
+    "run_predictor",
+    # Equivalent mutants: no input can tell them from the code.
+    # Dropping zero samples changes nothing.
+    "replace > with >= in Samples::drop_before",
+    # A bin exactly on a filter's edge has weight zero, and equal terms add the same either way round.
+    "replace [<>] with [<>]= in (kaldi_filters|log_add)",
+    # Bins past Nyquist are in no filter either way.
+    "replace / with \\* in kaldi_filters",
+    # The first sample's pre-emphasis is multiplied by a window that is zero there.
+    "replace (-=|\\*) with (\\+=|\\+) in (LogMel|KaldiFbank)::frame",
+    # The encoder window is 45 samples, which no chunk length divisible by 4 can equal.
+    "replace > with >= in Network::load",
+    # The pinned decoder accepts -1 and 1 alike as the first context token.
+    "delete - in Network::check",
+    # Tauri state and commands, and the keys and clicks of the real desktop, run only inside the app.
+    "AppState::",
+    "impl Running for Live",
+    "watch_hold_keys",
+    "overlay_takes_clicks",
+    "get_hold_key_unavailable",
+]
