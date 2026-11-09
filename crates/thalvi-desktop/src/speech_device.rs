@@ -300,6 +300,8 @@ mod tests {
         let store = ModelStore::in_dir(&dir);
         let checks = Arc::new(AtomicUsize::new(0));
         let devices = devices(&checks);
+        let _ = devices.adapters().check();
+        assert_eq!(checks.load(Ordering::SeqCst), 1, "a load's check");
         let line = async || devices.line(&store, CatalogSpeech::Unified160ms).await;
         let will_gpu = "Will run on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)";
 
@@ -316,14 +318,10 @@ mod tests {
         assert_eq!(line().await, will_gpu, "another model is the active one");
         devices.use_recognizer::<Source>(None);
         assert_eq!(line().await, will_gpu, "no engine model");
-
-        let _ = devices.adapters().check();
-        let before = checks.load(Ordering::SeqCst);
-        let _ = line().await;
         assert_eq!(
             checks.load(Ordering::SeqCst),
-            before,
-            "the check a load made is the one Settings reads"
+            1,
+            "Settings read the check a load made and made none"
         );
     }
 }
