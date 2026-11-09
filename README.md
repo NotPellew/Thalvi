@@ -423,7 +423,7 @@ To abandon a hold, use the `cancel` command: the tray's **Cancel**, or a key
 bound to `thalvi-desktop cancel` (the Hyprland examples bind SUPER+Escape).
 
 - **Hyprland:** F9, with no modifier. Add the `hold-start` and `hold-end` binds
-  from `hyprland-binds.conf`. Hyprland types any modifier you still hold into the
+  from `hyprland-binds.conf`, release bind flags included. Hyprland types any modifier you still hold into the
   pasted text and skips the release when a modifier comes up first, so the key
   must be a single key.
 - **Windows:** Alt and the key left of X (Z on a QWERTY keyboard, Y on QWERTZ).

@@ -139,7 +139,7 @@ areas your change touches. Editing rules are in
   Rejected: single-instance relaunch (no answer), a keyboard listener, TCP, transcript-bearing replies.
 - **Hold to talk.** Holding a key dictates and releasing pastes: F9 without a modifier on Hyprland
   (compositor binds), Alt+KeyZ on Windows (`hold_key`, a swallowing keyboard hook that waits for the
-  key and Alt both up); a second key, `write_key` (F10, Alt+KeyX), releases into the writing model instead; every word of a hold is text, and only `cancel` abandons one. Why: Hyprland 0.53.3 types held modifiers into the paste and drops the release when one comes up first, seen live; `RegisterHotKey` sees no release; the key already ends a dictation, and spoken endings cut off sentences that held them.
+  key and Alt both up); a second key, `write_key` (F10, Alt+KeyX), releases into the writing model instead; every word of a hold is text, and only `cancel` abandons one. Why: Hyprland 0.53.3 types held modifiers into the paste and drops the release when one comes up first, seen live, and drops a plain `bindr` when another key is pressed or a modifier is down during the hold, so the release is `bindrti`; `RegisterHotKey` sees no release; the key already ends a dictation, and spoken endings cut off sentences that held them.
   Rejected: Alt+Y with binds, Ctrl+Z/Y, spoken endings during a hold.
 - **Writing is one direct chat call, words only, paste only.** "write that out" or the write key sends the
   recognized words to an OpenAI-compatible endpoint from Settings and pastes what streams back; no context, no

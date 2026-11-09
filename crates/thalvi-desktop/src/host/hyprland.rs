@@ -345,6 +345,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_shipped_release_binds_survive_other_keys_and_held_modifiers() {
+        let conf = include_str!("../../../../integrations/hyprland/hyprland-binds.conf");
+        let releases: Vec<&str> = conf
+            .lines()
+            .filter(|line| line.ends_with("-end"))
+            .map(|line| line.trim_start_matches('#').trim_start())
+            .collect();
+        assert_eq!(releases.len(), 2, "{releases:?}");
+        for line in releases {
+            assert!(line.starts_with("bindrti "), "{line}");
+        }
+    }
+
     use std::sync::Mutex;
 
     use super::super::command::fakes::FakeRunner;
