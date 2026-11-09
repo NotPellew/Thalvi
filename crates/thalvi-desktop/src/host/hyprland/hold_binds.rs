@@ -957,6 +957,7 @@ mod tests {
         assert_eq!(hypr.bound(), []);
         // The socket was closed from our side, and the reading thread ended silently: every
         // sender of notices went with it.
+        following.hyprland.set_read_timeout(Some(WAIT)).unwrap();
         assert_eq!(following.hyprland.read(&mut [0; 1]).unwrap(), 0);
         assert_eq!(
             following.notices.recv_timeout(WAIT),
@@ -980,15 +981,16 @@ mod tests {
 
         let (reloads, counted) = mpsc::channel();
         let Events { reader, close } = events;
-        let reading = std::thread::spawn(move || {
+        let (ended, ending) = mpsc::channel();
+        std::thread::spawn(move || {
             follow(reader, || reloads.send(()).unwrap());
+            ended.send(()).unwrap();
         });
         assert_eq!(counted.recv_timeout(WAIT), Ok(()));
         assert_eq!(counted.recv_timeout(WAIT), Ok(()));
         // Hyprland sends nothing more and keeps the socket open: only closing it ends the read.
         close();
-        reading.join().unwrap();
-        assert_eq!(counted.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+        assert_eq!(ending.recv_timeout(WAIT), Ok(()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
