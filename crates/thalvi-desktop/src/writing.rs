@@ -486,7 +486,10 @@ mod tests {
         );
         let twice = refused(vec![opening("write me", "a"), opening("Write, me!", "b")]);
         assert_eq!(twice.to_string(), "writing.openings has “write me” twice.");
-        assert!(with_openings(None, Vec::new()).unwrap().openings.is_empty());
+        assert_eq!(
+            with_openings(None, Vec::new()).unwrap().openings,
+            Vec::<Opening>::new()
+        );
     }
 
     fn reply_of(parts: &[&[u8]]) -> Reply {
