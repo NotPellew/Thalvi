@@ -44,14 +44,14 @@ const CHANGED_ELSEWHERE_EVENT: &str = "thalvi://settings-elsewhere";
 
 /// The running config and the file it is saved to. One lock orders every save
 /// from reading the config through writing the file and applying the result.
-struct SyncedConfig {
-    store: Store,
+pub(crate) struct SyncedConfig {
+    pub(crate) store: Store,
     current: Mutex<DesktopConfig>,
     lock: Mutex<()>,
 }
 
 impl SyncedConfig {
-    fn new(store: Store, config: DesktopConfig) -> Self {
+    pub(crate) fn new(store: Store, config: DesktopConfig) -> Self {
         Self {
             store,
             current: Mutex::new(config),
@@ -59,32 +59,38 @@ impl SyncedConfig {
         }
     }
 
-    fn config(&self) -> DesktopConfig {
+    pub(crate) fn config(&self) -> DesktopConfig {
         self.current
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
-    fn set(&self, config: &DesktopConfig) {
+    pub(crate) fn set(&self, config: &DesktopConfig) {
         *self.current.lock().unwrap_or_else(PoisonError::into_inner) = config.clone();
     }
 
-    /// Validates and writes a settings form, then applies it, all under the save lock.
-    /// `apply` installs the config in the running app, as `AppState::apply` does.
-    fn save_form(
+    /// Builds a settings form from the config read under the save lock, then validates, writes and
+    /// applies it, all under that lock. `form` returns the value to hand back and the form to save,
+    /// or `None` to save nothing. `apply` installs the config in the running app, as
+    /// `AppState::apply` does.
+    pub(crate) fn save_form<T>(
         &self,
-        settings: Value,
+        form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
         paused: bool,
         apply: impl FnOnce(&DesktopConfig),
-    ) -> Result<(DesktopConfig, bool), String> {
+    ) -> Result<(T, Option<(DesktopConfig, bool)>), String> {
         let _save = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
-        ensure_microphone_change_allowed(&settings, self.config().microphone.as_deref(), paused)?;
         let current = self.config();
+        let (value, settings) = form(&current)?;
+        let Some(settings) = settings else {
+            return Ok((value, None));
+        };
+        ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
         let config = self.store.save(settings, &current)?;
         let look_changed = config.look != current.look;
         apply(&config);
-        Ok((config, look_changed))
+        Ok((value, Some((config, look_changed))))
     }
 
     fn remember(&self, change: impl FnOnce(&mut DesktopConfig)) -> Result<(), String> {
@@ -174,13 +180,17 @@ impl AppState {
         self.saves.config()
     }
 
-    /// Saves a settings form and takes it into effect, ordered against every other save.
+    /// Builds a settings form from the config now in use, saves it and takes it into effect,
+    /// ordered against every other save; see `SyncedConfig::save_form`.
     ///
     /// # Errors
     /// The plain reason the settings were refused, in which case nothing changed.
-    pub fn save_form(&self, settings: Value) -> Result<(DesktopConfig, bool), String> {
+    pub fn save_form<T>(
+        &self,
+        form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
+    ) -> Result<(T, Option<(DesktopConfig, bool)>), String> {
         self.saves
-            .save_form(settings, self.link.audio().paused, |config| {
+            .save_form(form, self.link.audio().paused, |config| {
                 self.apply(config);
             })
     }
@@ -674,10 +684,15 @@ impl Running for Live {
         self.0.state::<AppState>().config()
     }
 
-    fn save(&self, settings: serde_json::Value) -> Result<DesktopConfig, String> {
-        let config = commands::save(&self.0, &self.0.state::<AppState>(), settings)?;
-        let _ = self.0.emit(CHANGED_ELSEWHERE_EVENT, ());
-        Ok(config)
+    fn save<T>(
+        &self,
+        form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<serde_json::Value>), String>,
+    ) -> Result<T, String> {
+        let (value, saved) = commands::save(&self.0, &self.0.state::<AppState>(), form)?;
+        if saved {
+            let _ = self.0.emit(CHANGED_ELSEWHERE_EVENT, ());
+        }
+        Ok(value)
     }
 
     async fn share_word_list(&self) -> Result<(), String> {
@@ -787,13 +802,17 @@ mod tests {
                     settings["look"] = serde_json::json!(look);
                     let synced = Arc::clone(saves);
                     saves
-                        .save_form(settings, true, move |config| {
-                            synced.set(config);
-                            applied
-                                .lock()
-                                .unwrap_or_else(PoisonError::into_inner)
-                                .push(config.clone());
-                        })
+                        .save_form(
+                            |_| Ok(((), Some(settings))),
+                            true,
+                            move |config| {
+                                synced.set(config);
+                                applied
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .push(config.clone());
+                            },
+                        )
                         .unwrap();
                 }
             })
@@ -813,7 +832,9 @@ mod tests {
                 for _ in 0..50 {
                     let mut settings = crate::settings::settings_json(&saves.config()).unwrap();
                     settings["ending_pause"] = serde_json::json!({"paste": 9});
-                    let error = saves.save_form(settings, true, |_| {}).unwrap_err();
+                    let error = saves
+                        .save_form(|_| Ok(((), Some(settings))), true, |_| {})
+                        .unwrap_err();
                     assert_eq!(
                         error,
                         "The paste pause must be a number of seconds from 0 to 5."
@@ -862,7 +883,7 @@ mod tests {
         let mut applied = false;
 
         let form = saves
-            .save_form(settings, true, |_| applied = true)
+            .save_form(|_| Ok(((), Some(settings))), true, |_| applied = true)
             .unwrap_err();
         let switch = saves
             .remember(|c| c.start_at_login = !start.start_at_login)

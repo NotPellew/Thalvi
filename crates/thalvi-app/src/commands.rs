@@ -63,15 +63,24 @@ pub fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    save(&app, &state, settings).map(drop)
+    save(&app, &state, |_| Ok(((), Some(settings)))).map(drop)
 }
 
 /// Saves and applies what Settings sends, and what an outside program sends in its place.
+/// `form` builds the settings form from the config read under the save lock and returns a value
+/// for the caller with the form, or `None` to save nothing; the flag tells whether one was saved.
 ///
 /// # Errors
 /// The plain reason the settings were refused, in which case nothing changed.
-pub fn save(app: &AppHandle, state: &AppState, settings: Value) -> Result<DesktopConfig, String> {
-    let (config, look_changed) = state.save_form(settings)?;
+pub fn save<T>(
+    app: &AppHandle,
+    state: &AppState,
+    form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
+) -> Result<(T, bool), String> {
+    let (value, saved) = state.save_form(form)?;
+    let Some((_, look_changed)) = saved else {
+        return Ok((value, false));
+    };
     if look_changed {
         // The settings are saved either way; the overlay keeps its old place.
         if let Err(error) = overlay::replace(app, &state.host()) {
@@ -80,7 +89,7 @@ pub fn save(app: &AppHandle, state: &AppState, settings: Value) -> Result<Deskto
     }
     // The overlay window is hidden and idle, so it re-reads the settings when told.
     let _ = app.emit("thalvi://settings", ());
-    Ok(config)
+    Ok((value, true))
 }
 
 #[tauri::command]

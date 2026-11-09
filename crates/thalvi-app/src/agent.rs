@@ -157,8 +157,13 @@ pub trait Running {
     fn show_settings(&self);
     async fn copy_error(&self) -> Result<(), String>;
     fn config(&self) -> DesktopConfig;
-    /// Saves and applies `settings` exactly as a Settings save does.
-    fn save(&self, settings: Value) -> Result<DesktopConfig, String>;
+    /// Saves and applies a settings form exactly as a Settings save does. `form` runs under the
+    /// save lock on the config in use, so a change merged over it cannot undo a save that finished
+    /// first; it returns a value for the caller and the form to save, or `None` to save nothing.
+    fn save<T>(
+        &self,
+        form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
+    ) -> Result<T, String>;
     /// Gives the Thalvi server the stored word list, as Settings does after a save.
     async fn share_word_list(&self) -> Result<(), String>;
     fn set_switch(&self, switch: Switch, on: bool) -> Result<(), String>;
@@ -487,6 +492,12 @@ struct Plan {
 
 /// Merges `change` over the settings now in use and validates the result as Settings does.
 fn plan(running: &impl Running, change: &Value) -> Result<Plan, String> {
+    let paused = running.audio().borrow().paused;
+    plan_over(running.config(), paused, change)
+}
+
+/// Merges `change` over `current` and validates the result as Settings does.
+fn plan_over(current: DesktopConfig, paused: bool, change: &Value) -> Result<Plan, String> {
     let Value::Object(fields) = change else {
         return Err("The settings change must be a JSON object.".to_owned());
     };
@@ -500,10 +511,8 @@ fn plan(running: &impl Running, change: &Value) -> Result<Plan, String> {
             switches.push((switch, on));
         }
     }
-    let current = running.config();
     let mut merged = settings_json(&current)?;
     merge_patch(&mut merged, &Value::Object(fields));
-    let paused = running.audio().borrow().paused;
     let config = judge(merged.clone(), &current, paused)?;
     Ok(Plan {
         merged,
@@ -525,7 +534,13 @@ fn settings_check(running: &impl Running, change: &Value) -> String {
 
 async fn settings_set(running: &impl Running, change: &Value) -> String {
     let secrets = secrets(&running.config(), Some(change));
-    let plan = match plan(running, change) {
+    let plan = running.save(|current| {
+        let paused = running.audio().borrow().paused;
+        let plan = plan_over(current.clone(), paused, change)?;
+        let form = (plan.config != plan.current).then(|| plan.merged.clone());
+        Ok((plan, form))
+    });
+    let plan = match plan {
         Ok(plan) => plan,
         Err(error) => return refused(&scrub(&error, &secrets), json!({"changed": false})),
     };
@@ -538,9 +553,6 @@ async fn settings_set(running: &impl Running, change: &Value) -> String {
     } else {
         "now"
     };
-    if settings_changed && let Err(error) = running.save(plan.merged) {
-        return refused(&scrub(&error, &secrets), json!({"changed": false}));
-    }
     let warning = if settings_changed && plan.config.stt.phrases != plan.current.stt.phrases {
         running
             .share_word_list()
@@ -606,6 +618,7 @@ mod tests {
     use thalvi_desktop::writing::DEFAULT_PROMPT;
 
     use super::*;
+    use crate::app::SyncedConfig;
     use crate::settings::Store;
     use crate::status::FailureKind;
 
@@ -623,8 +636,9 @@ mod tests {
     struct Fake {
         status: watch::Sender<Status>,
         audio: watch::Sender<AudioStatus>,
-        store: Store,
-        config: Mutex<DesktopConfig>,
+        saves: SyncedConfig,
+        /// A Settings save that lands just before the agent's next save.
+        settings_save_first: Mutex<Option<Value>>,
         failure: Mutex<Option<Failure>>,
         sent: Mutex<Vec<String>>,
         switches: Mutex<Vec<(Switch, bool)>>,
@@ -650,8 +664,11 @@ mod tests {
                     paused: false,
                 })
                 .0,
-                store: Store::new(Some(folder.join("desktop.json"))).unwrap(),
-                config: Mutex::new(config),
+                saves: SyncedConfig::new(
+                    Store::new(Some(folder.join("desktop.json"))).unwrap(),
+                    config,
+                ),
+                settings_save_first: Mutex::new(None),
                 failure: Mutex::new(None),
                 sent: Mutex::new(Vec::new()),
                 switches: Mutex::new(Vec::new()),
@@ -756,14 +773,27 @@ mod tests {
         }
 
         fn config(&self) -> DesktopConfig {
-            lock(&self.config).clone()
+            self.saves.config()
         }
 
-        fn save(&self, settings: Value) -> Result<DesktopConfig, String> {
-            let current = self.config();
-            let saved = self.store.save(settings, &current)?;
-            *lock(&self.config) = saved.clone();
-            Ok(saved)
+        fn save<T>(
+            &self,
+            form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
+        ) -> Result<T, String> {
+            let paused = self.audio.borrow().paused;
+            let settings_save = lock(&self.settings_save_first).take();
+            if let Some(settings) = settings_save {
+                self.saves.save_form(
+                    |_| Ok(((), Some(settings))),
+                    paused,
+                    |config| {
+                        self.saves.set(config);
+                    },
+                )?;
+            }
+            self.saves
+                .save_form(form, paused, |config| self.saves.set(config))
+                .map(|(value, _)| value)
         }
 
         fn share_word_list(&self) -> impl Future<Output = Result<(), String>> {
@@ -773,7 +803,9 @@ mod tests {
 
         fn set_switch(&self, switch: Switch, on: bool) -> Result<(), String> {
             lock(&self.switches).push((switch, on));
-            lock(&self.config).start_at_login = on;
+            let mut config = self.saves.config();
+            config.start_at_login = on;
+            self.saves.set(&config);
             Ok(())
         }
 
@@ -906,7 +938,7 @@ mod tests {
             "the key is kept"
         );
         assert_eq!(
-            rig.fake.store.load().unwrap(),
+            rig.fake.saves.store.load().unwrap(),
             config,
             "and written for the next start"
         );
@@ -953,7 +985,7 @@ mod tests {
         let shown = get();
         assert_eq!(shown["settings"]["writing"]["prompt"], "Be brief.");
         assert!(!shown.to_string().contains(SECRET), "{shown}");
-        assert_eq!(rig.fake.store.load().unwrap(), config);
+        assert_eq!(rig.fake.saves.store.load().unwrap(), config);
     }
 
     #[test]
@@ -1022,6 +1054,23 @@ mod tests {
             during,
             json!({"ok": true, "changed": true, "applies": "next_capture"})
         );
+    }
+
+    #[test]
+    fn an_agent_change_keeps_a_settings_save_that_finished_while_it_was_planned() {
+        let rig = Rig::new("lost-update", "{}");
+        assert_eq!(rig.ask(&Request::Pause)["ok"], true);
+        let mut form = settings_json(&rig.fake.config()).unwrap();
+        form["look"] = json!("holo");
+        *lock(&rig.fake.settings_save_first) = Some(form);
+
+        let set = rig.set(json!({"microphone": "USB Mic"}));
+
+        assert_eq!(set["ok"], true, "{set}");
+        let config = rig.fake.config();
+        assert_eq!(config.look, Look::Holo, "the Settings save is kept");
+        assert_eq!(config.microphone.as_deref(), Some("USB Mic"));
+        assert_eq!(rig.fake.saves.store.load().unwrap(), config);
     }
 
     #[test]

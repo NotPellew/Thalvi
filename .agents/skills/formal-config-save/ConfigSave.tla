@@ -7,13 +7,18 @@
 EXTENDS Naturals, Sequences
 
 CONSTANTS FormSaves, SwitchFlips, MainThread,
-          Serialized, SnapshotOutsideLock, ApplyOutsideLock, RenameBeforeWrite
+          Serialized, SnapshotOutsideLock, AgentMergeOutsideLock, ApplyOutsideLock,
+          RenameBeforeWrite
 
 Ops == FormSaves \cup SwitchFlips
 MaxInode == 1 + 3          \* the file at start, then at most one temporary per writer
-Initial == [form |-> "f0", switch |-> FALSE]
-Empty == [form |-> "empty", switch |-> FALSE]   \* created, nothing written yet
-Unused == [form |-> "none", switch |-> FALSE]
+\* The form has one field per form writer; a form save sets its own field and carries the
+\* others over from the config it read (settings.rs `settings_json`, agent.rs `plan_over`).
+Fields == {"look", "mic"}
+FieldOf(o) == IF o = "A" THEN "mic" ELSE "look"   \* the Settings save sets the look, the agent the microphone
+Initial == [form |-> [f \in Fields |-> "f0"], switch |-> FALSE]
+Empty == [form |-> [f \in Fields |-> "empty"], switch |-> FALSE]   \* created, nothing written yet
+Unused == [form |-> [f \in Fields |-> "none"], switch |-> FALSE]
 
 VARIABLES
     pc,         \* index of each writer's next step in Flow(o)
@@ -27,16 +32,20 @@ VARIABLES
     fd,         \* the inode each writer opened
     content,    \* what each writer validated and serialized
     lock,       \* who holds the one lock of the Serialized design, or "nobody"
-    lastForm,   \* the form of the last form save that reported success
+    lastField,   \* per form field, the writer of the last form save that set it and reported success
     lastSwitch  \* the switch of the last switch flip that reported success
 
 vars == <<pc, failed, mem, engine, path, tmp, inodes, nextInode, fd, content,
-          lock, lastForm, lastSwitch>>
+          lock, lastField, lastSwitch>>
+
+\* The agent's `settings_set` plans inside `SyncedConfig::save_form`'s lock; the mutation plans
+\* first, as it did before the repair.
+ReadsBeforeLock(o) == SnapshotOutsideLock \/ (AgentMergeOutsideLock /\ o = "A")
 
 Flow(o) ==
-    (IF Serialized /\ ~SnapshotOutsideLock THEN <<"lock">> ELSE <<>>)
+    (IF Serialized /\ ~ReadsBeforeLock(o) THEN <<"lock">> ELSE <<>>)
     \o <<"snap">>
-    \o (IF Serialized /\ SnapshotOutsideLock THEN <<"lock">> ELSE <<>>)
+    \o (IF Serialized /\ ReadsBeforeLock(o) THEN <<"lock">> ELSE <<>>)
     \o (IF RenameBeforeWrite THEN <<"rmtmp", "create", "rename", "write">>
                              ELSE <<"rmtmp", "create", "write", "rename">>)
     \o (IF Serialized /\ ApplyOutsideLock THEN <<"unlock">> ELSE <<>>)
@@ -72,7 +81,7 @@ Init ==
     /\ fd = [o \in Ops |-> 0]
     /\ content = [o \in Ops |-> Initial]
     /\ lock = "nobody"
-    /\ lastForm = Initial.form
+    /\ lastField = [f \in Fields |-> "f0"]
     /\ lastSwitch = Initial.switch
 
 Lock(o) ==
@@ -81,7 +90,7 @@ Lock(o) ==
     /\ lock' = o
     /\ Advance(o)
     /\ UNCHANGED <<failed, mem, engine, path, tmp, inodes, nextInode, fd, content,
-                   lastForm, lastSwitch>>
+                   lastField, lastSwitch>>
 
 Unlock(o) ==
     /\ MayRun(o)
@@ -89,19 +98,22 @@ Unlock(o) ==
     /\ lock' = "nobody"
     /\ Advance(o)
     /\ UNCHANGED <<failed, mem, engine, path, tmp, inodes, nextInode, fd, content,
-                   lastForm, lastSwitch>>
+                   lastField, lastSwitch>>
 
-\* commands::save reads state.config() for Store::save's `current`; AppState::remember
+\* SyncedConfig::save_form reads the config in use and builds the form from it: the agent
+\* merges its patch over it (`plan_over`), the Settings save sets its field; AppState::remember
 \* reads the whole config and changes its switch.
 Snap(o) ==
     /\ MayRun(o)
     /\ Step(o) = "snap"
     /\ content' = [content EXCEPT ![o] =
-                     IF o \in FormSaves THEN [form |-> o, switch |-> mem.switch]
-                                        ELSE [form |-> mem.form, switch |-> TRUE]]
+                     IF o \in FormSaves
+                     THEN [form |-> [f \in Fields |-> IF f = FieldOf(o) THEN o ELSE mem.form[f]],
+                           switch |-> mem.switch]
+                     ELSE [form |-> mem.form, switch |-> TRUE]]
     /\ Advance(o)
     /\ UNCHANGED <<failed, mem, engine, path, tmp, inodes, nextInode, fd, lock,
-                   lastForm, lastSwitch>>
+                   lastField, lastSwitch>>
 
 \* write_private: `let _ = std::fs::remove_file(path)` on the shared temporary name.
 RmTmp(o) ==
@@ -110,7 +122,7 @@ RmTmp(o) ==
     /\ tmp' = 0
     /\ Advance(o)
     /\ UNCHANGED <<failed, mem, engine, path, inodes, nextInode, fd, content, lock,
-                   lastForm, lastSwitch>>
+                   lastField, lastSwitch>>
 
 \* write_private: open with create_new; it fails if the name exists, and
 \* write_atomically then removes the temporary name, whoever's it is.
@@ -127,7 +139,7 @@ Create(o) ==
        ELSE /\ tmp' = 0
             /\ Fail(o)
             /\ UNCHANGED <<pc, inodes, fd, nextInode>>
-    /\ UNCHANGED <<mem, engine, path, content, lastForm, lastSwitch>>
+    /\ UNCHANGED <<mem, engine, path, content, lastField, lastSwitch>>
 
 \* write_all through the open file: it reaches the inode wherever it is linked now.
 Write(o) ==
@@ -136,7 +148,7 @@ Write(o) ==
     /\ inodes' = [inodes EXCEPT ![fd[o]] = content[o]]
     /\ Advance(o)
     /\ UNCHANGED <<failed, mem, engine, path, tmp, nextInode, fd, content, lock,
-                   lastForm, lastSwitch>>
+                   lastField, lastSwitch>>
 
 \* std::fs::rename(&temporary, path): moves whatever the name holds now.
 Rename(o) ==
@@ -149,7 +161,7 @@ Rename(o) ==
             /\ UNCHANGED <<failed, lock>>
        ELSE /\ Fail(o)
             /\ UNCHANGED <<pc, path, tmp>>
-    /\ UNCHANGED <<mem, engine, inodes, nextInode, fd, content, lastForm, lastSwitch>>
+    /\ UNCHANGED <<mem, engine, inodes, nextInode, fd, content, lastField, lastSwitch>>
 
 \* AppState::apply (form saves) or AppState::remember: `*config = ...` under its lock.
 \* A save that gets here returns Ok.
@@ -157,7 +169,7 @@ Apply(o) ==
     /\ MayRun(o)
     /\ Step(o) = "apply"
     /\ mem' = content[o]
-    /\ lastForm' = IF o \in FormSaves THEN o ELSE lastForm
+    /\ lastField' = IF o \in FormSaves THEN [lastField EXCEPT ![FieldOf(o)] = o] ELSE lastField
     /\ lastSwitch' = IF o \in SwitchFlips THEN content[o].switch ELSE lastSwitch
     /\ Advance(o)
     /\ UNCHANGED <<failed, engine, path, tmp, inodes, nextInode, fd, content, lock>>
@@ -169,7 +181,7 @@ Send(o) ==
     /\ engine' = content[o].form
     /\ Advance(o)
     /\ UNCHANGED <<failed, mem, path, tmp, inodes, nextInode, fd, content, lock,
-                   lastForm, lastSwitch>>
+                   lastField, lastSwitch>>
 
 Quiet == \A o \in Ops : Finished(o)
 
@@ -192,13 +204,15 @@ Spec == Init /\ [][Next]_vars
 File == inodes[path]
 
 \* Store::save "replaces the file in one step": the file is always a whole save.
-FileAlwaysWhole == File.form \notin {"empty", "none"}
+FileAlwaysWhole == \A f \in Fields : File.form[f] \notin {"empty", "none"}
 
 \* Once every save has returned, the running app, its engine and the file agree.
 RunningMatchesFile == Quiet => (File = mem /\ engine = mem.form)
 
-\* Once every save has returned, the file holds the last reported form and the last
+\* Once every save has returned, each form field holds the value of the last reported save
+\* that set it, so a save that sets one field never undoes another's; the switch holds the last
 \* reported switch: a Save never writes the switch, a switch never writes the form
 \* (DECISIONS.md, "Packaged desktop with an OS-held login entry").
-EachFieldKeepsItsLastSave == Quiet => (File.form = lastForm /\ File.switch = lastSwitch)
+EachFieldKeepsItsLastSave ==
+    Quiet => (\A f \in Fields : File.form[f] = lastField[f]) /\ File.switch = lastSwitch
 ================================================================================
