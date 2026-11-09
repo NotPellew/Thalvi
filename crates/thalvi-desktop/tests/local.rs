@@ -2,6 +2,7 @@
 
 #![expect(clippy::expect_used, reason = "a test fails by panicking")]
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -9,10 +10,13 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::Duration;
 
 use serde_json::Value;
+use thalvi_desktop::device::{
+    Adapter, Adapters, Device, Export, Fallback, Gpu, Nodes, Placement, Provider, Step,
+};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::local::{LocalRecognizer, ModelSource, SpeechModel, SpeechStream};
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
-use thalvi_desktop::models::{CatalogSpeech, ModelStore, SpeechProgress};
+use thalvi_desktop::models::{CatalogSpeech, ModelStore};
 use thalvi_desktop::phrases::WordList;
 use thalvi_desktop::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
 use thalvi_desktop::report::UserError;
@@ -25,16 +29,18 @@ type Reply = Result<Vec<RecognizerEvent>, RecognizerError>;
 
 /// Answers frame `n` with `script(n)`; the first frame waits for `gate` when one is given.
 struct Fake {
+    device: Device,
+    placement: Option<Placement>,
     script: fn(usize) -> Reply,
     gate: Mutex<Option<mpsc::Receiver<()>>>,
     seen: Arc<AtomicUsize>,
     done: mpsc::Sender<()>,
 }
 
-/// Fails to load this many times, then provides the [`Fake`] it was given.
+/// Fails to load this many times, then provides the [`Fake`]s it was given, one for each load.
 struct Source {
     failures: AtomicUsize,
-    fake: Mutex<Option<Fake>>,
+    fakes: Mutex<VecDeque<Fake>>,
 }
 
 impl ModelSource for Source {
@@ -42,11 +48,8 @@ impl ModelSource for Source {
 
     fn load(
         &self,
-        mut progress: impl FnMut(SpeechProgress) + Send,
+        _step: impl Fn(Step) + Send + Sync,
     ) -> impl Future<Output = Result<Fake, RecognizerError>> + Send {
-        progress(SpeechProgress::Verifying);
-        progress(SpeechProgress::Downloading { percent: 50 });
-        progress(SpeechProgress::Done);
         let failing = self
             .failures
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -58,11 +61,11 @@ impl ModelSource for Source {
                 "Could not download the speech model.",
             ))
         } else {
-            self.fake
+            self.fakes
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .take()
-                .ok_or_else(|| RecognizerError::said("The fake model loads once."))
+                .pop_front()
+                .ok_or_else(|| RecognizerError::said("The fake source has no model left."))
         })
     }
 }
@@ -76,6 +79,14 @@ struct FakeStream {
 
 impl SpeechModel for Fake {
     type Stream = FakeStream;
+
+    fn device(&self) -> Device {
+        self.device.clone()
+    }
+
+    fn placement(&self) -> Option<Placement> {
+        self.placement
+    }
 
     fn stream(&self) -> FakeStream {
         FakeStream {
@@ -116,10 +127,29 @@ struct Rig {
     dir: PathBuf,
     seen: Arc<AtomicUsize>,
     done: mpsc::Receiver<()>,
+    done_tx: mpsc::Sender<()>,
 }
 
 fn rig(
     name: &str,
+    script: fn(usize) -> Reply,
+    gate: Option<mpsc::Receiver<()>>,
+    failures: usize,
+) -> Rig {
+    rig_on(
+        name,
+        Device::Cpu(Fallback::CpuModel),
+        None,
+        script,
+        gate,
+        failures,
+    )
+}
+
+fn rig_on(
+    name: &str,
+    device: Device,
+    placement: Option<Placement>,
     script: fn(usize) -> Reply,
     gate: Option<mpsc::Receiver<()>>,
     failures: usize,
@@ -134,16 +164,18 @@ fn rig(
     let (done_tx, done) = mpsc::channel();
     let seen = Arc::new(AtomicUsize::new(0));
     let fake = Fake {
+        device,
+        placement,
         script,
         gate: Mutex::new(gate),
         seen: Arc::clone(&seen),
-        done: done_tx,
+        done: done_tx.clone(),
     };
     Rig {
         recognizer: LocalRecognizer::new(
             Source {
                 failures: AtomicUsize::new(failures),
-                fake: Mutex::new(Some(fake)),
+                fakes: Mutex::new(VecDeque::from([fake])),
             },
             "fake-model",
             recorder.metrics(),
@@ -152,10 +184,28 @@ fn rig(
         dir,
         seen,
         done,
+        done_tx,
     }
 }
 
 impl Rig {
+    /// The model that the next load provides, on the CPU.
+    fn then_provide(&self, script: fn(usize) -> Reply) {
+        self.recognizer
+            .source()
+            .fakes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push_back(Fake {
+                device: Device::Cpu(Fallback::CpuModel),
+                placement: None,
+                script,
+                gate: Mutex::new(None),
+                seen: Arc::new(AtomicUsize::new(0)),
+                done: self.done_tx.clone(),
+            });
+    }
+
     /// Waits for the worker to finish and returns every metrics line written.
     async fn metrics(self) -> Vec<Value> {
         let done = self.done;
@@ -228,11 +278,76 @@ async fn partials_and_finals_arrive_in_order_and_the_recognition_is_reported() {
     assert_eq!(metric["event"], "desktop_local_stt");
     assert_eq!(metric["outcome"], "ok");
     assert_eq!(metric["engine"], "local");
-    assert_eq!(metric["device"], "cpu");
     assert_eq!(metric["model"], "fake-model");
     assert_eq!(metric["frames"], 4);
     assert!(metric["duration_ms"].as_f64().is_some());
     assert!(metric["text_late_max_ms"].as_f64().is_some());
+}
+
+#[tokio::test]
+async fn the_load_and_each_recognition_report_the_device_and_any_reason_for_the_cpu() {
+    let rtx = Gpu {
+        name: "NVIDIA GeForce RTX 5070 Ti".to_owned(),
+        api: "Vulkan",
+    };
+    for (name, device, expected) in [
+        (
+            "gpu",
+            Device::Gpu(rtx),
+            serde_json::json!({"device": "gpu", "gpu": "NVIDIA GeForce RTX 5070 Ti", "gpu_api": "Vulkan"}),
+        ),
+        (
+            "no-gpu",
+            Device::Cpu(Fallback::NoUsableGpu),
+            serde_json::json!({"device": "cpu", "fallback": "no_usable_gpu"}),
+        ),
+        (
+            "driver",
+            Device::Cpu(Fallback::DriverFailed),
+            serde_json::json!({"device": "cpu", "fallback": "driver_failed"}),
+        ),
+        (
+            "partial",
+            Device::Cpu(Fallback::CannotRunFully),
+            serde_json::json!({"device": "cpu", "fallback": "cannot_run_fully"}),
+        ),
+        (
+            "gpu-files-missing",
+            Device::Cpu(Fallback::GpuFilesMissing),
+            serde_json::json!({"device": "cpu", "fallback": "gpu_files_missing"}),
+        ),
+        (
+            "cpu-model",
+            Device::Cpu(Fallback::CpuModel),
+            serde_json::json!({"device": "cpu", "fallback": "cpu_model"}),
+        ),
+        (
+            "windows",
+            Device::Cpu(Fallback::WindowsUnsupported),
+            serde_json::json!({"device": "cpu", "fallback": "windows_unsupported"}),
+        ),
+    ] {
+        let rig = rig_on(&format!("device-{name}"), device, None, dictation, None, 0);
+        let mut session = rig.recognizer.connect().await.expect("connects");
+        session.send_frame(&FRAME).await.expect("sends");
+        session.close().await;
+        let lines = rig.metrics().await;
+        for event in ["desktop_speech_load", "desktop_local_stt"] {
+            let line = lines
+                .iter()
+                .find(|line| line["event"] == event)
+                .unwrap_or_else(|| panic!("{name}: no {event} line"));
+            for (key, value) in expected.as_object().expect("object") {
+                assert_eq!(&line[key], value, "{name}: {event} {key}");
+            }
+            let other = if expected.get("fallback").is_some() {
+                "gpu"
+            } else {
+                "fallback"
+            };
+            assert!(line.get(other).is_none(), "{name}: {event} carries {other}");
+        }
+    }
 }
 
 fn fails_on_the_third_frame(n: usize) -> Reply {
@@ -318,26 +433,6 @@ async fn a_model_that_cannot_be_fetched_is_reported_and_fetched_again_on_the_nex
 }
 
 #[tokio::test]
-async fn loading_the_model_tells_how_fetching_its_files_goes() {
-    let rig = rig("progress", dictation, None, 0);
-    let mut events = Vec::new();
-
-    rig.recognizer
-        .load(|event| events.push(event))
-        .await
-        .expect("loads");
-
-    assert_eq!(
-        events,
-        [
-            SpeechProgress::Verifying,
-            SpeechProgress::Downloading { percent: 50 },
-            SpeechProgress::Done,
-        ]
-    );
-}
-
-#[tokio::test]
 async fn a_catalog_model_that_cannot_be_provided_fails_with_the_model_errors_own_headline() {
     let blocker = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("local-model-blocker");
     std::fs::write(&blocker, b"a file where the model folder should be").expect("writes");
@@ -345,16 +440,17 @@ async fn a_catalog_model_that_cannot_be_provided_fails_with_the_model_errors_own
         ModelStore::in_dir(blocker.join("models")),
         SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms),
         &WordList::default(),
+        Adapters::default(),
     );
 
-    let mut events = Vec::new();
+    let steps = Mutex::new(Vec::new());
     let error = source
-        .load(|event| events.push(event))
+        .load(|step| steps.lock().unwrap().push(step))
         .await
         .err()
         .expect("no folder to fetch into");
 
-    assert_eq!(events, [SpeechProgress::Verifying]);
+    assert_eq!(*steps.lock().unwrap(), [Step::Fetching(Export::Cpu)]);
 
     assert_eq!(error.headline(), "Can't save the model file");
     assert!(
@@ -363,4 +459,186 @@ async fn a_catalog_model_that_cannot_be_provided_fails_with_the_model_errors_own
             .starts_with("Could not save the speech model nemotron_160ms.encoder.int8.onnx in "),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn a_gpu_plan_that_cannot_save_its_files_tries_the_cpu_files_next_and_each_load_checks_the_adapter_once()
+ {
+    let blocker = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("local-gpu-blocker");
+    std::fs::write(&blocker, b"a file where the model folder should be").expect("writes");
+    let checks = Arc::new(AtomicUsize::new(0));
+    let adapters = Adapters::checking({
+        let checks = Arc::clone(&checks);
+        move || {
+            checks.fetch_add(1, Ordering::SeqCst);
+            Adapter::Discrete(Gpu {
+                name: "NVIDIA GeForce RTX 5070 Ti".to_owned(),
+                api: "Vulkan",
+            })
+        }
+    });
+    let source = TransducerSource::new(
+        ModelStore::in_dir(blocker.join("models")),
+        SpeechChoice::Catalog(CatalogSpeech::Unified160ms),
+        &WordList::default(),
+        adapters,
+    );
+    let steps = Mutex::new(Vec::new());
+
+    let error = source
+        .load(|step| steps.lock().expect("steps").push(step))
+        .await
+        .err()
+        .expect("no folder to fetch into");
+
+    assert_eq!(
+        *steps.lock().expect("steps"),
+        [Step::Fetching(Export::Gpu), Step::Fetching(Export::Cpu)]
+    );
+    assert!(
+        error
+            .to_string()
+            .starts_with("Could not save the speech model unified_160ms.encoder.int8.onnx in "),
+        "the error is the CPU files': {error}"
+    );
+    assert_eq!(checks.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_catalog_model_is_cached_for_an_export_when_the_files_that_export_loads_are_on_disk() {
+    let model = CatalogSpeech::Unified160ms;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("local-cached");
+    let _ = std::fs::remove_dir_all(&dir);
+    let source = TransducerSource::new(
+        ModelStore::in_dir(&dir),
+        SpeechChoice::Catalog(model),
+        &WordList::default(),
+        Adapters::default(),
+    );
+    let on_disk = |assets: thalvi_desktop::models::SpeechAssets<'_>| {
+        for asset in [
+            Some(assets.encoder),
+            assets.encoder_data,
+            Some(assets.decoder),
+            Some(assets.joiner),
+            Some(assets.tokens),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = dir.join(asset.file_name);
+            std::fs::create_dir_all(path.parent().expect("a folder")).expect("folder");
+            std::fs::File::create(path)
+                .expect("file")
+                .set_len(asset.size)
+                .expect("size");
+        }
+    };
+    let cached = async || {
+        [
+            source.cached(Export::Cpu).await,
+            source.cached(Export::Gpu).await,
+        ]
+    };
+    assert_eq!(cached().await, [false, false], "nothing is on disk");
+    on_disk(model.assets());
+    assert_eq!(
+        cached().await,
+        [true, false],
+        "the int8 files serve only the CPU"
+    );
+    on_disk(model.assets_of(Export::Gpu));
+    assert_eq!(cached().await, [true, true], "the fp16 files serve the GPU");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn fails_at_once(_: usize) -> Reply {
+    Err(RecognizerError::said("The speech model stopped working."))
+}
+
+#[tokio::test]
+async fn a_model_error_drops_the_model_so_the_next_capture_loads_and_plans_again() {
+    let rig = rig("lost", fails_at_once, None, 0);
+    assert_eq!(rig.recognizer.name(), "fake-model");
+    rig.then_provide(dictation);
+    let mut lost = rig.recognizer.connect().await.expect("connects");
+    assert_eq!(
+        rig.recognizer.device(),
+        Some(Device::Cpu(Fallback::CpuModel)),
+        "loaded"
+    );
+    lost.send_frame(&FRAME).await.expect("sends");
+    let error = lost.next_event().await.expect_err("the capture fails");
+    assert_eq!(error.to_string(), "The speech model stopped working.");
+    assert_eq!(rig.recognizer.device(), None, "no model is claimed to run");
+    let _ = rig.done.recv_timeout(WAIT);
+
+    let mut next = rig.recognizer.connect().await.expect("loads again");
+    assert!(rig.recognizer.device().is_some(), "loaded again");
+    next.send_frame(&FRAME).await.expect("sends");
+    next.send_frame(&FRAME).await.expect("sends");
+    assert_eq!(next.next_event().await, Ok(partial("hello")));
+    next.close().await;
+
+    let loads: Vec<Value> = rig
+        .metrics()
+        .await
+        .into_iter()
+        .filter(|line| line["event"] == "desktop_speech_load")
+        .map(|line| line["outcome"].clone())
+        .collect();
+    assert_eq!(loads, ["ok", "ok"]);
+}
+
+#[tokio::test]
+async fn a_failed_reload_leaves_no_model_claimed_to_run() {
+    let rig = rig("reload-fails", fails_at_once, None, 0);
+    let mut lost = rig.recognizer.connect().await.expect("connects");
+    lost.send_frame(&FRAME).await.expect("sends");
+    lost.next_event().await.expect_err("the capture fails");
+
+    let error = rig.recognizer.connect().await.err().expect("no model left");
+    assert_eq!(error.to_string(), "The fake source has no model left.");
+    assert_eq!(rig.recognizer.device(), None);
+}
+
+#[tokio::test]
+async fn the_load_reports_how_many_nodes_of_each_network_the_gpu_took() {
+    let gpu = Gpu {
+        name: "NVIDIA GeForce RTX 5070 Ti".to_owned(),
+        api: "Vulkan",
+    };
+    let nodes = |on_gpu, total| Nodes { on_gpu, total };
+    let placement = Placement {
+        encoder: nodes(4_950, 5_000),
+        decoder: nodes(12, 30),
+        joiner: nodes(6, 6),
+    };
+    let rig = rig_on(
+        "placement",
+        Device::Gpu(gpu),
+        Some(placement),
+        dictation,
+        None,
+        0,
+    );
+    let mut session = rig.recognizer.connect().await.expect("connects");
+    session.send_frame(&FRAME).await.expect("sends");
+    session.close().await;
+
+    let lines = rig.metrics().await;
+    let load = lines
+        .iter()
+        .find(|line| line["event"] == "desktop_speech_load")
+        .expect("a load line");
+    for (key, value) in [
+        ("encoder_nodes_on_gpu", 4_950),
+        ("encoder_nodes", 5_000),
+        ("decoder_nodes_on_gpu", 12),
+        ("decoder_nodes", 30),
+        ("joiner_nodes_on_gpu", 6),
+        ("joiner_nodes", 6),
+    ] {
+        assert_eq!(load[key], value, "{key}");
+    }
 }

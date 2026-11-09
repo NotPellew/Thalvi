@@ -4,11 +4,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::Serialize;
 use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
+use thalvi_desktop::device::{Export, Step};
 use thalvi_desktop::engine::EngineState;
-use thalvi_desktop::local::LocalRecognizer;
-use thalvi_desktop::models::SpeechProgress;
 use thalvi_desktop::report::{UserError, causes};
-use thalvi_desktop::transducer::TransducerSource;
 
 pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not ready yet.";
 pub const WAKE_DOWNLOAD_NOTICE: &str = "Downloading the wake word model.";
@@ -144,59 +142,23 @@ impl LastError {
     }
 }
 
-/// How far the speech model is from ready.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpeechLoad {
-    /// The files are being checked; `download` when they are not all on disk.
-    Checking {
-        download: bool,
-    },
-    Downloading {
-        percent: u8,
-    },
-    /// The files are on disk and the model is loading.
-    Loading,
-}
-
-impl SpeechLoad {
-    pub async fn of(local: &LocalRecognizer<TransducerSource>) -> Self {
-        if local.source().is_cached().await {
-            Self::Loading
-        } else {
-            Self::Checking { download: true }
+/// What the notice says while the speech model loads: from disk, or which download it is waiting for and how far it is.
+#[must_use]
+pub fn load_notice(step: Step) -> String {
+    match step {
+        Step::Reading => "Loading the speech model.".to_owned(),
+        Step::Fetching(Export::Cpu) => {
+            "Loading the speech model. Downloading about 650 MB.".to_owned()
         }
-    }
-
-    /// The state after the model's files report `progress`.
-    #[must_use]
-    pub fn after(self, progress: SpeechProgress) -> Self {
-        match progress {
-            SpeechProgress::Verifying => Self::Checking {
-                download: self == (Self::Checking { download: true }),
-            },
-            SpeechProgress::Downloading { percent } => Self::Downloading { percent },
-            SpeechProgress::Done => Self::Loading,
+        Step::Fetching(Export::Gpu) => {
+            "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.".to_owned()
         }
-    }
-
-    #[must_use]
-    pub fn notice(self) -> String {
-        match self {
-            Self::Checking { .. } => "Checking the speech model files.".to_owned(),
-            Self::Downloading { percent } => {
-                format!("Downloading the speech model \u{2014} {percent}%")
-            }
-            Self::Loading => "Loading the speech model.".to_owned(),
+        Step::Downloading(Export::Cpu, percent) => {
+            format!("Downloading the speech model, about 650 MB \u{2014} {percent}%")
         }
-    }
-
-    /// Files are being downloaded or are about to be.
-    #[must_use]
-    pub fn downloading(self) -> bool {
-        matches!(
-            self,
-            Self::Checking { download: true } | Self::Downloading { .. }
-        )
+        Step::Downloading(Export::Gpu, percent) => {
+            format!("Downloading the model for the GPU, about 1.3 GB \u{2014} {percent}%")
+        }
     }
 }
 
@@ -232,19 +194,19 @@ pub struct View {
     pub copies: bool,
     pub pauses: EndingPauses,
     /// What the speech model needs, while it loads.
-    pub loading: Option<SpeechLoad>,
+    pub loading: Option<Step>,
 }
 
 impl View {
     #[must_use]
     pub fn status(&self) -> Status {
         let target = self.target.clone();
-        if let (Some(load), EngineState::Listening, Mode::Idle | Mode::Done { .. }) =
+        if let (Some(step), EngineState::Listening, Mode::Idle | Mode::Done { .. }) =
             (self.loading, &self.engine, &self.mode)
         {
             return Status::Loading {
-                notice: load.notice(),
-                downloading: load.downloading(),
+                notice: load_notice(step),
+                downloading: matches!(step, Step::Fetching(_) | Step::Downloading(..)),
             };
         }
         match (&self.mode, &self.engine) {
@@ -531,55 +493,42 @@ mod tests {
     }
 
     #[test]
-    fn the_overlay_is_told_of_a_download_only_when_files_are_missing_or_damaged() {
-        let percent = |percent| SpeechProgress::Downloading { percent };
-        // Each case: the state at the start, then (report, notice, downloading) after each report.
-        let cases = [
+    fn the_loading_notice_names_the_download_and_its_percent_and_the_overlay_shows_only_downloads()
+    {
+        use Export::{Cpu, Gpu};
+        for (step, notice, downloading) in [
+            (Step::Reading, "Loading the speech model.", false),
             (
-                SpeechLoad::Loading,
-                vec![
-                    (
-                        SpeechProgress::Verifying,
-                        "Checking the speech model files.",
-                        false,
-                    ),
-                    (SpeechProgress::Done, "Loading the speech model.", false),
-                ],
+                Step::Fetching(Cpu),
+                "Loading the speech model. Downloading about 650 MB.",
+                true,
             ),
             (
-                SpeechLoad::Loading,
-                vec![
-                    (
-                        SpeechProgress::Verifying,
-                        "Checking the speech model files.",
-                        false,
-                    ),
-                    (percent(7), "Downloading the speech model \u{2014} 7%", true),
-                    (SpeechProgress::Done, "Loading the speech model.", false),
-                ],
+                Step::Fetching(Gpu),
+                "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.",
+                true,
             ),
             (
-                SpeechLoad::Checking { download: true },
-                vec![
-                    (
-                        SpeechProgress::Verifying,
-                        "Checking the speech model files.",
-                        true,
-                    ),
-                    (percent(0), "Downloading the speech model \u{2014} 0%", true),
-                ],
+                Step::Downloading(Cpu, 7),
+                "Downloading the speech model, about 650 MB \u{2014} 7%",
+                true,
             ),
-        ];
-        for (start, steps) in cases {
-            let mut load = start;
-            for (report, notice, downloading) in steps {
-                load = load.after(report);
-                assert_eq!(
-                    (load.notice().as_str(), load.downloading()),
-                    (notice, downloading),
-                    "{start:?} then {report:?}"
-                );
-            }
+            (
+                Step::Downloading(Gpu, 100),
+                "Downloading the model for the GPU, about 1.3 GB \u{2014} 100%",
+                true,
+            ),
+        ] {
+            let mut view = view(Mode::Idle, EngineState::Listening);
+            view.loading = Some(step);
+            assert_eq!(
+                view.status(),
+                Status::Loading {
+                    notice: notice.to_owned(),
+                    downloading
+                },
+                "{step:?}"
+            );
         }
     }
 
@@ -587,7 +536,7 @@ mod tests {
     fn loading_the_speech_model_shows_until_a_capture_starts_a_failure_or_a_pause() {
         let loading = |mode, engine| {
             let mut view = view(mode, engine);
-            view.loading = Some(SpeechLoad::Loading);
+            view.loading = Some(Step::Reading);
             view.status()
         };
         let notice = || "Loading the speech model.".to_owned();

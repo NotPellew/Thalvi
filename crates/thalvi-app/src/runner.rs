@@ -15,6 +15,7 @@ use thalvi_desktop::capture::{CaptureRoute, EndingPauses, Endings};
 use thalvi_desktop::chosen::Chosen;
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::{Bound, Delivery, Finished};
+use thalvi_desktop::device::Step;
 use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
@@ -22,10 +23,11 @@ use thalvi_desktop::engine::{
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{Desktop, Host};
-use thalvi_desktop::local::LocalRecognizer;
+use thalvi_desktop::local::{LocalRecognizer, ModelSource};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
-use thalvi_desktop::models::{self, ModelStore, SpeechProgress};
+use thalvi_desktop::models::{self, ModelStore};
 use thalvi_desktop::report::{UserError, causes};
+use thalvi_desktop::speech_device::SpeechDevices;
 use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
 use thalvi_desktop::transducer::TransducerSource;
 use thalvi_desktop::wake::{WakeConfig, WakeEngine};
@@ -33,8 +35,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::status::{
-    Failure, FailureKind, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, SpeechLoad, Status, View,
-    WAKE_DOWNLOAD_NOTICE,
+    Failure, FailureKind, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, Status, View,
+    WAKE_DOWNLOAD_NOTICE, load_notice,
 };
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
@@ -88,6 +90,7 @@ impl EngineLink {
         delivery: Arc<Delivery<Desktop>>,
         history: Arc<History>,
         drafts: Arc<Drafts>,
+        devices: Arc<SpeechDevices>,
     ) -> Result<Self, String> {
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
@@ -130,6 +133,7 @@ impl EngineLink {
                         key: key_state,
                         history,
                         drafts,
+                        devices,
                     },
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
@@ -199,22 +203,6 @@ impl EngineLink {
 fn finish_runtime(runtime: tokio::runtime::Runtime, stopped: &std_mpsc::Sender<()>) {
     drop(runtime);
     let _ = stopped.send(());
-}
-
-/// Runs `load`, showing the speech model's file progress from `reports` until `load` ends.
-async fn load_with_progress<T>(
-    publisher: &Publisher,
-    load: impl Future<Output = T>,
-    mut reports: mpsc::UnboundedReceiver<SpeechProgress>,
-) -> T {
-    let mut load = pin!(load);
-    loop {
-        tokio::select! {
-            biased;
-            Some(report) = reports.recv() => publisher.speech_progress(report),
-            loaded = &mut load => return loaded,
-        }
-    }
 }
 
 /// Loads the wake models, with the status saying so while a file downloads.
@@ -332,13 +320,8 @@ impl Publisher {
         });
     }
 
-    fn loading(&self, load: Option<SpeechLoad>) {
+    fn loading(&self, load: Option<Step>) {
         self.update(|view| view.loading = load);
-    }
-
-    /// The speech model's files report `progress`; nothing is shown once the load has ended.
-    fn speech_progress(&self, progress: SpeechProgress) {
-        self.update(|view| view.loading = view.loading.map(|load| load.after(progress)));
     }
 
     /// Says why a press of the hold key started nothing. A refusal that only repeats an earlier
@@ -370,6 +353,39 @@ impl Publisher {
             }
         })
     }
+}
+
+/// Loads the model, showing each step it takes until it is ready, and a failure as a notice.
+async fn load_showing<S: ModelSource>(local: &LocalRecognizer<S>, publisher: &Publisher) {
+    let mut steps = local.steps();
+    let load = local.load();
+    tokio::pin!(load);
+    let loaded = loop {
+        tokio::select! {
+            loaded = &mut load => break loaded,
+            Ok(()) = steps.changed() => {
+                let step = *steps.borrow_and_update();
+                println!("{}", load_notice(step));
+                publisher.loading(Some(step));
+            }
+        }
+    };
+    if let Err(error) = &loaded {
+        println!("{error}");
+    }
+    publisher.update(|view| {
+        view.loading = None;
+        if let Err(error) = loaded
+            && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
+        {
+            view.mode = Mode::Failed(Failure {
+                kind: FailureKind::Other,
+                notice: format!("{error} Dictation will try again when you start it."),
+                headline: error.headline(),
+                causes: causes(&error),
+            });
+        }
+    });
 }
 
 /// Everything one engine needs; replaced when settings change.
@@ -444,6 +460,8 @@ struct Shared {
     key: watch::Receiver<KeyState>,
     history: Arc<History>,
     drafts: Arc<Drafts>,
+    /// Where the speech model runs, for Settings.
+    devices: Arc<SpeechDevices>,
 }
 
 struct Runner {
@@ -464,6 +482,7 @@ struct Runner {
     delivery: Arc<Delivery<Desktop>>,
     history: Arc<History>,
     drafts: Arc<Drafts>,
+    devices: Arc<SpeechDevices>,
     http: reqwest::Client,
     /// Loads the current engine's speech model.
     loading: Option<JoinHandle<()>>,
@@ -497,6 +516,7 @@ impl Runner {
             delivery,
             history: shared.history,
             drafts: shared.drafts,
+            devices: shared.devices,
             http: reqwest::Client::new(),
             loading: None,
             key: Presses::new(shared.key.clone()),
@@ -522,7 +542,7 @@ impl Runner {
         match self.build(&config).await {
             Ok(session) => {
                 self.session = Some(session);
-                self.load_speech_model().await;
+                self.load_speech_model();
                 self.open_microphone().await;
             }
             Err(failure) => {
@@ -532,9 +552,9 @@ impl Runner {
         }
     }
 
-    /// Fetches and loads the speech model in the background, and shows that until it is ready.
+    /// Fetches and loads the speech model in the background, and shows what it is doing until it is ready.
     /// A failure is a notice; the app keeps listening and dictation tries again.
-    async fn load_speech_model(&mut self) {
+    fn load_speech_model(&mut self) {
         if let Some(loading) = self.loading.take() {
             loading.abort();
         }
@@ -546,36 +566,12 @@ impl Runner {
             self.publisher.loading(None);
             return;
         };
-        let load = SpeechLoad::of(&local).await;
-        println!("{}", load.notice());
-        self.publisher.loading(Some(load));
+        let first = *local.steps().borrow();
+        println!("{}", load_notice(first));
+        self.publisher.loading(Some(first));
         let publisher = Rc::clone(&self.publisher);
-        let (progress, reports) = mpsc::unbounded_channel();
         self.loading = Some(tokio::task::spawn_local(async move {
-            let loaded = load_with_progress(
-                &publisher,
-                local.load(move |report| {
-                    let _ = progress.send(report);
-                }),
-                reports,
-            )
-            .await;
-            if let Err(error) = &loaded {
-                println!("{error}");
-            }
-            publisher.update(|view| {
-                view.loading = None;
-                if let Err(error) = loaded
-                    && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
-                {
-                    view.mode = Mode::Failed(Failure {
-                        kind: FailureKind::Other,
-                        notice: format!("{error} Dictation will try again when you start it."),
-                        headline: error.headline(),
-                        causes: causes(&error),
-                    });
-                }
-            });
+            load_showing(&local, &publisher).await;
         }));
     }
 
@@ -616,8 +612,10 @@ impl Runner {
             store,
             metrics.clone(),
             &config.stt.phrases,
+            self.devices.adapters(),
         );
         let local = recognizer.local();
+        self.devices.use_recognizer(local.clone());
         let (engine, handle) = Engine::new(
             Parts {
                 recognizer,
@@ -924,7 +922,7 @@ impl Runner {
                     .update(|view| view.pauses = config.ending_pause);
                 self.take_history(&config);
                 self.config = config;
-                self.load_speech_model().await;
+                self.load_speech_model();
                 self.open_microphone().await;
             }
             Err(failure) => {
@@ -1363,9 +1361,8 @@ mod tests {
     use std::cell::Cell;
     use std::time::Duration;
 
-    use thalvi_desktop::models::{self, CatalogHead, CatalogSpeech};
-    use thalvi_desktop::phrases::WordList;
-    use thalvi_desktop::transducer::SpeechChoice;
+    use thalvi_desktop::device::Export;
+    use thalvi_desktop::models::{self, CatalogHead};
 
     use super::*;
     use crate::overlay::Visibility;
@@ -1444,63 +1441,167 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_overlay_stays_hidden_while_a_model_on_disk_loads_and_shows_only_a_download() {
-        let catalog = CatalogSpeech::Nemotron160ms;
+    async fn the_overlay_stays_hidden_while_a_model_on_disk_loads_and_shows_each_download_by_name()
+    {
         let cases = [
-            ("downloaded", true, false, false),
-            ("not downloaded", false, false, true),
-            ("model folder", false, true, false),
+            (
+                "from disk",
+                Step::Reading,
+                false,
+                "Loading the speech model.",
+            ),
+            (
+                "the CPU files",
+                Step::Fetching(Export::Cpu),
+                true,
+                "Loading the speech model. Downloading about 650 MB.",
+            ),
+            (
+                "the GPU files",
+                Step::Fetching(Export::Gpu),
+                true,
+                "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.",
+            ),
         ];
-        for (case, on_disk, folder, overlay) in cases {
-            let dir = std::env::temp_dir().join(format!(
-                "thalvi-load-{}-{}",
-                case.replace(' ', "-"),
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            if on_disk {
-                let assets = catalog.assets();
-                for asset in [assets.encoder, assets.decoder, assets.joiner, assets.tokens] {
-                    std::fs::File::create(dir.join(asset.file_name))
-                        .unwrap()
-                        .set_len(asset.size)
-                        .unwrap();
-                }
-            }
-            let choice = if folder {
-                SpeechChoice::Folder(dir.clone())
-            } else {
-                SpeechChoice::Catalog(catalog)
-            };
-            let source =
-                TransducerSource::new(ModelStore::in_dir(&dir), choice, &WordList::default());
-            let local = LocalRecognizer::new(source, "test", Recorder::disabled().metrics());
-            let (out, status) = watch::channel(Status::Paused);
-            let publisher = Publisher::new(out, EndingPauses::default());
-            let shown = || Visibility::of(&status.borrow(), true) == Visibility::Show;
+        let (out, status) = watch::channel(Status::Paused);
+        let publisher = Publisher::new(out, EndingPauses::default());
+        let shown = || Visibility::of(&status.borrow(), true) == Visibility::Show;
 
-            publisher.mode(Mode::Starting);
-            assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}");
-            assert!(!shown(), "{case}: starting the engine");
-            publisher.loading(Some(SpeechLoad::of(&local).await));
-            publisher.mode(Mode::Idle);
+        publisher.mode(Mode::Starting);
+        assert_eq!(title(&status.borrow()), "Thalvi: starting");
+        assert!(!shown(), "starting the engine");
+        publisher.mode(Mode::Idle);
+        for (case, step, overlay, notice) in cases {
+            publisher.loading(Some(step));
             assert_eq!(shown(), overlay, "{case}: loading the model");
             assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}");
-            let expected = if overlay {
-                "Checking the speech model files."
-            } else {
-                "Loading the speech model."
-            };
-            assert!(
-                matches!(&*status.borrow(), Status::Loading { notice, .. } if notice == expected),
+            assert_eq!(
+                *status.borrow(),
+                Status::Loading {
+                    notice: notice.to_owned(),
+                    downloading: overlay
+                },
                 "{case}: the notice"
             );
+        }
 
-            publisher.loading(None);
-            assert!(!shown(), "{case}: loaded");
-            assert_eq!(title(&status.borrow()), "Thalvi: listening", "{case}");
-            std::fs::remove_dir_all(&dir).unwrap();
+        publisher.loading(None);
+        assert!(!shown(), "loaded");
+        assert_eq!(title(&status.borrow()), "Thalvi: listening");
+    }
+
+    /// Takes the steps it is told to, one at a time, and then fails or loads.
+    struct Scripted {
+        gate: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        fails: bool,
+    }
+
+    struct NoModel;
+
+    struct NoStream;
+
+    impl thalvi_desktop::local::SpeechStream for NoStream {
+        fn accept(
+            &mut self,
+            _frame: &thalvi_desktop::frame::Frame,
+        ) -> Result<
+            Vec<thalvi_desktop::recognizer::RecognizerEvent>,
+            thalvi_desktop::recognizer::RecognizerError,
+        > {
+            Ok(Vec::new())
+        }
+    }
+
+    impl thalvi_desktop::local::SpeechModel for NoModel {
+        type Stream = NoStream;
+
+        fn device(&self) -> thalvi_desktop::device::Device {
+            thalvi_desktop::device::Device::Cpu(thalvi_desktop::device::Fallback::CpuModel)
+        }
+
+        fn stream(&self) -> NoStream {
+            NoStream
+        }
+    }
+
+    impl ModelSource for Scripted {
+        type Model = NoModel;
+
+        async fn load(
+            &self,
+            step: impl Fn(Step) + Send + Sync,
+        ) -> Result<NoModel, thalvi_desktop::recognizer::RecognizerError> {
+            step(Step::Fetching(Export::Gpu));
+            let gate = self.gate.lock().unwrap().take().unwrap();
+            let _ = gate.await;
+            step(Step::Fetching(Export::Cpu));
+            if self.fails {
+                Err(thalvi_desktop::recognizer::RecognizerError::said(
+                    "Could not download the speech model.",
+                ))
+            } else {
+                Ok(NoModel)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_load_shows_each_step_it_takes_and_then_nothing_or_its_failure() {
+        for (case, fails, mode, shown) in [
+            ("loads", false, Mode::Idle, Mode::Idle),
+            (
+                "fails",
+                true,
+                Mode::Idle,
+                Mode::Failed(Failure {
+                    kind: FailureKind::Other,
+                    notice: "Could not download the speech model. Dictation will try again when you start it."
+                        .to_owned(),
+                    headline: "Speech recognition failed — Settings",
+                    causes: Vec::new(),
+                }),
+            ),
+            ("fails while paused", true, Mode::Paused, Mode::Paused),
+        ] {
+            let (release, gate) = tokio::sync::oneshot::channel();
+            let local = LocalRecognizer::new(
+                Scripted {
+                    gate: std::sync::Mutex::new(Some(gate)),
+                    fails,
+                },
+                "test",
+                Recorder::disabled().metrics(),
+            );
+            let (out, status) = watch::channel(Status::Paused);
+            let publisher = Publisher::new(out, EndingPauses::default());
+            publisher.mode(mode.clone());
+            let load = load_showing(&local, &publisher);
+            tokio::pin!(load);
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    () = &mut load => panic!("{case}: finished before the GPU download was shown"),
+                    () = async {
+                        while publisher.view.borrow().loading != Some(Step::Fetching(Export::Gpu)) {
+                            tokio::task::yield_now().await;
+                        }
+                    } => {}
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{case}: the GPU download is never shown"));
+            if mode == Mode::Idle {
+                let notice = "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.";
+                assert_eq!(
+                    *status.borrow(),
+                    Status::Loading { notice: notice.to_owned(), downloading: true },
+                    "{case}: the step is shown"
+                );
+            }
+            release.send(()).unwrap();
+            load.await;
+            assert_eq!(publisher.view.borrow().loading, None, "{case}: loading ends");
+            assert_eq!(publisher.view.borrow().mode, shown, "{case}");
         }
     }
 
@@ -1527,56 +1628,93 @@ mod tests {
         loading_now(status)
     }
 
-    fn loading_publisher() -> (Rc<Publisher>, watch::Receiver<Status>) {
+    /// Takes the steps it is sent, and loads when the sender is dropped.
+    struct Streamed(std::sync::Mutex<Option<mpsc::UnboundedReceiver<Step>>>);
+
+    impl ModelSource for Streamed {
+        type Model = NoModel;
+
+        async fn load(
+            &self,
+            step: impl Fn(Step) + Send + Sync,
+        ) -> Result<NoModel, thalvi_desktop::recognizer::RecognizerError> {
+            let mut steps = self.0.lock().unwrap().take().unwrap();
+            while let Some(next) = steps.recv().await {
+                step(next);
+            }
+            Ok(NoModel)
+        }
+    }
+
+    /// A load of a model being downloaded, driven by the returned sender, and the status it publishes.
+    fn loading_download() -> (
+        mpsc::UnboundedSender<Step>,
+        Rc<Publisher>,
+        JoinHandle<()>,
+        watch::Receiver<Status>,
+    ) {
         let (out, mut status) = watch::channel(Status::Paused);
         let publisher = Publisher::new(out, EndingPauses::default());
         publisher.mode(Mode::Idle);
-        publisher.loading(Some(SpeechLoad::Checking { download: true }));
+        publisher.loading(Some(Step::Fetching(Export::Cpu)));
         status.mark_unchanged();
-        (publisher, status)
+        let (steps, received) = mpsc::unbounded_channel();
+        let local = Arc::new(LocalRecognizer::new(
+            Streamed(std::sync::Mutex::new(Some(received))),
+            "test",
+            Recorder::disabled().metrics(),
+        ));
+        let load = tokio::task::spawn_local({
+            let publisher = Rc::clone(&publisher);
+            async move { load_showing(&local, &publisher).await }
+        });
+        (steps, publisher, load, status)
     }
 
     #[tokio::test]
-    async fn the_loading_notice_follows_the_speech_model_files_once_per_percent() {
+    async fn the_loading_notice_follows_a_download_once_per_percent_and_ends_with_the_model_loading()
+     {
+        use Export::{Cpu, Gpu};
         LocalSet::new()
             .run_until(async {
-                let (publisher, mut status) = loading_publisher();
-                let (progress, reports) = mpsc::unbounded_channel();
-                let (finish, finished) = tokio::sync::oneshot::channel::<()>();
-                let load = tokio::task::spawn_local(async move {
-                    load_with_progress(&publisher, finished, reports).await
-                });
-                let percent = |percent| SpeechProgress::Downloading { percent };
+                let (steps, _publisher, load, mut status) = loading_download();
                 let mut shown = vec![loading_now(&status)];
-                for (report, changes) in [
-                    (SpeechProgress::Verifying, false),
-                    (percent(0), true),
-                    (percent(0), false),
-                    (percent(1), true),
-                    (percent(50), true),
-                    (percent(100), true),
-                    (SpeechProgress::Done, true),
+                for (step, changes) in [
+                    (Step::Downloading(Cpu, 0), true),
+                    (Step::Downloading(Cpu, 0), false),
+                    (Step::Downloading(Cpu, 1), true),
+                    (Step::Downloading(Cpu, 100), true),
+                    (Step::Reading, true),
+                    (Step::Fetching(Gpu), true),
+                    (Step::Downloading(Gpu, 50), true),
+                    (Step::Reading, true),
                 ] {
-                    progress.send(report).unwrap();
+                    steps.send(step).unwrap();
                     if changes {
                         shown.push(next_loading(&mut status).await);
                     }
                 }
-                finish.send(()).unwrap();
-                load.await.unwrap().unwrap();
+                drop(steps);
+                tokio::time::timeout(WAIT, load).await.unwrap().unwrap();
 
                 let download = |text: &str| (text.to_owned(), true);
+                let reading = ("Loading the speech model.".to_owned(), false);
                 assert_eq!(
                     shown,
                     [
-                        download("Checking the speech model files."),
-                        download("Downloading the speech model \u{2014} 0%"),
-                        download("Downloading the speech model \u{2014} 1%"),
-                        download("Downloading the speech model \u{2014} 50%"),
-                        download("Downloading the speech model \u{2014} 100%"),
-                        ("Loading the speech model.".to_owned(), false),
+                        download("Loading the speech model. Downloading about 650 MB."),
+                        download("Downloading the speech model, about 650 MB \u{2014} 0%"),
+                        download("Downloading the speech model, about 650 MB \u{2014} 1%"),
+                        download("Downloading the speech model, about 650 MB \u{2014} 100%"),
+                        reading.clone(),
+                        download(
+                            "Loading the speech model. Downloading the model for the GPU, about 1.3 GB."
+                        ),
+                        download("Downloading the model for the GPU, about 1.3 GB \u{2014} 50%"),
+                        reading,
                     ]
                 );
+                assert_eq!(*status.borrow(), Status::Listening);
             })
             .await;
     }
@@ -1585,28 +1723,19 @@ mod tests {
     async fn switching_away_mid_download_leaves_no_downloading_notice() {
         LocalSet::new()
             .run_until(async {
-                let (publisher, mut status) = loading_publisher();
-                let (progress, reports) = mpsc::unbounded_channel();
-                let load = tokio::task::spawn_local({
-                    let publisher = Rc::clone(&publisher);
-                    async move {
-                        load_with_progress(&publisher, std::future::pending::<()>(), reports).await;
-                    }
-                });
-                progress
-                    .send(SpeechProgress::Downloading { percent: 40 })
-                    .unwrap();
+                let (steps, publisher, load, mut status) = loading_download();
+                steps.send(Step::Downloading(Export::Cpu, 40)).unwrap();
                 assert_eq!(
                     next_loading(&mut status).await.0,
-                    "Downloading the speech model \u{2014} 40%"
+                    "Downloading the speech model, about 650 MB \u{2014} 40%"
                 );
 
                 load.abort();
                 assert!(load.await.unwrap_err().is_cancelled());
                 publisher.loading(None);
-                let late = progress.send(SpeechProgress::Downloading { percent: 41 });
+                let late = steps.send(Step::Downloading(Export::Cpu, 41));
 
-                assert!(late.is_err(), "progress still has a listener");
+                assert!(late.is_err(), "the aborted load no longer listens");
                 assert_eq!(*status.borrow(), Status::Listening);
             })
             .await;

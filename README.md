@@ -301,8 +301,9 @@ the first time Thalvi reads it, with nothing to enter again. An API key is shown
 as saved and never again; leave it blank to keep it. A server that cannot be
 reached is named in the error, and Thalvi never falls back to another one.
 
-For the on-device model, Thalvi downloads a missing model when it starts (once),
-and Next dictation shows the download's percent until it is ready. While it
+For the on-device model, Thalvi downloads a missing model when it starts (once:
+about 650 MB, or 1.3 GB for Nemotron Unified's GPU files), and Next dictation
+shows the download's percent until it is ready. While it
 downloads or if it fails, **Use a speech server instead** opens the form to add
 a server, and after a failure **Retry** fetches the model again; Thalvi never
 switches recognizers by itself. After that it works offline. A model you pick applies from the next capture, and
@@ -319,7 +320,7 @@ each).
 | Drop-down entry (config name) | Model | Languages | LibriSpeech | Developer's takes | Notes |
 |---|---|---|---|---|---|
 | Nemotron Streaming (`nemotron_160ms`, default) | Nemotron Speech Streaming 0.6B | English | 3.46% | 7.14% | Lightest on the CPU; text appears soonest. Mostly without punctuation. |
-| Nemotron Unified (`unified_160ms`) | Nemotron Unified ASR 0.6B | 25 European languages | 3.03% | 6.35% | Punctuation and capitals. Re-reads the last 6 s every 160 ms: about 70 ms of work per step on 4 cores of a Ryzen, so it needs a fast CPU, and text appears about 0.5 s later. Our own export, under OpenMDW-1.1. |
+| Nemotron Unified (`unified_160ms`) | Nemotron Unified ASR 0.6B | 25 European languages | 3.03% | 6.35% | Punctuation and capitals. Re-reads the last 6 s every 160 ms: about 70 ms of work per step on 4 cores of a Ryzen, so on the CPU it needs a fast CPU. On Linux with a discrete GPU it runs there instead, through WebGPU and an fp16 export (about 30 ms a step on an RTX 5070 Ti, a 1.3 GB download); Settings says which it uses. Until the GPU files are downloaded it runs on the CPU, and Settings offers the download. Text appears about 0.5 s later. Our own export, under OpenMDW-1.1. |
 | Parakeet TDT (`parakeet_tdt_v3`) | Parakeet TDT 0.6B v3 | 25 European languages | 2.33%* | 4.76%* | Punctuation and capitals. Light on the CPU: about a seventh of real time on 4 cores, against about one for Unified. Not a streaming model: it re-reads the last 2.6 s every 640 ms, so words may change while you speak, and the text is final about a second after you pause. Under CC BY 4.0. |
 
 Nemotron Speech Streaming at 80 ms and 560 ms (3.62% and 3.46% on LibriSpeech)
@@ -532,9 +533,12 @@ Built for the
 
 ## Hackathon provenance
 
-All code in this repository was written during the hackathon; the commit
-history is the record. Pull requests land as merge commits, so the individual
-commits behind each change stay visible, and `main` is never rewritten.
+All code up to the tag
+[`hackathon-submission`](https://github.com/NotPellew/Thalvi/tree/hackathon-submission)
+was written during the hackathon (October 26 – November 4, 2026); later work
+continues in the same open history, and the commit history is the record.
+Pull requests land as merge commits, so the individual commits behind each
+change stay visible, and `main` is never rewritten.
 
 The idea draws on lessons from an earlier, private voice-assistant prototype by
 the same author. Nothing is copied from it or from any other repository;

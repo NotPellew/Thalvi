@@ -9,12 +9,14 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::Delivery;
+use thalvi_desktop::device::Adapters;
 use thalvi_desktop::draft::Drafts;
 use thalvi_desktop::history;
 use thalvi_desktop::hold::HoldKind;
 use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, HostError, RequestServer, refusal};
 use thalvi_desktop::metrics::Recorder;
 use thalvi_desktop::models::SpeechDownloads;
+use thalvi_desktop::speech_device::SpeechDevices;
 use tokio::sync::watch;
 
 use crate::agent::{self, Running, Switch};
@@ -44,6 +46,8 @@ pub struct AppState {
     pub store: Store,
     pub overlay: Overlay,
     pub speech_downloads: SpeechDownloads,
+    /// Where the speech model runs, shared with the engine thread that loads it.
+    pub speech_devices: Arc<SpeechDevices>,
     /// The dictation history, shared with the engine thread that writes it.
     pub history: Arc<history::Store>,
     /// The last dictation, shared with the engine thread that offers each new one.
@@ -78,11 +82,13 @@ impl AppState {
         let delivery = Arc::new(Delivery::new(
             Desktop::detect().map_err(|error| error.to_string())?,
         ));
+        let speech_devices = Arc::new(SpeechDevices::new(Adapters::default()));
         let link = EngineLink::start(
             config.clone(),
             Arc::clone(&delivery),
             Arc::clone(&history),
             Arc::clone(&drafts),
+            Arc::clone(&speech_devices),
         )?;
         let held = watch_hold_keys(&config, &link);
         let state = Self {
@@ -90,6 +96,7 @@ impl AppState {
             store,
             overlay: Overlay::default(),
             speech_downloads: SpeechDownloads::default(),
+            speech_devices,
             history,
             drafts,
             delivery,
@@ -369,6 +376,7 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::validate_wake_model_choices,
             commands::download_wake_model,
             commands::list_speech_models,
+            commands::speech_device,
             commands::download_speech_model,
             commands::open_speech_model_source,
             commands::check_speech_entry,

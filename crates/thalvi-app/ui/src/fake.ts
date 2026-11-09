@@ -127,7 +127,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
     {
       name: "unified_160ms",
       title: "Nemotron Unified",
-      description: "From NVIDIA: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it needs a fast CPU and text appears about half a second later. Exported by Thalvi.",
+      description: "From NVIDIA: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it runs on a discrete GPU on Linux, and otherwise needs a fast CPU. Text appears about half a second later. Exported by Thalvi.",
       size: 646_518_349,
       source: "https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b",
       license: "OpenMDW-1.1",
@@ -306,6 +306,8 @@ export function fakeBackend(params: URLSearchParams): Backend {
         }, 400);
       }),
     onSpeechModelProgress: (listener) => speechListeners.push(listener),
+    speechDevice: (name) =>
+      Promise.resolve(name === "unified_160ms" ? "Will run on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)" : "Will run on the CPU: this model runs on the CPU"),
     openSpeechModelSource: () => Promise.resolve(),
     checkSpeechEntry: (entry) => {
       const wanted = entry.kind === "second_pass" ? /^https?:\/\// : /^wss?:\/\//;

@@ -9,6 +9,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::device::{Device, Export};
 use crate::report::UserError;
 
 /// The most a download may take besides moving its bytes.
@@ -212,20 +213,26 @@ pub enum CatalogSpeech {
 #[derive(Debug, Clone, Copy)]
 pub struct SpeechAssets<'a> {
     pub encoder: Asset<'a>,
+    /// A file the encoder names in its own bytes and finds beside itself.
+    pub encoder_data: Option<Asset<'a>>,
     pub decoder: Asset<'a>,
     pub joiner: Asset<'a>,
     pub tokens: Asset<'a>,
 }
 
 impl<'a> SpeechAssets<'a> {
-    fn all(&self) -> [Asset<'a>; 4] {
-        [self.encoder, self.decoder, self.joiner, self.tokens]
+    fn all(&self) -> impl Iterator<Item = Asset<'a>> {
+        [self.encoder].into_iter().chain(self.encoder_data).chain([
+            self.decoder,
+            self.joiner,
+            self.tokens,
+        ])
     }
 
     /// The bytes of all files together.
     #[must_use]
     pub fn size(&self) -> u64 {
-        self.all().iter().map(|asset| asset.size).sum()
+        self.all().map(|asset| asset.size).sum()
     }
 }
 
@@ -264,6 +271,7 @@ macro_rules! speech_assets {
     ($model:literal, $base:literal, $encoder:tt, $decoder:tt, $joiner:tt, $tokens:tt) => {
         SpeechAssets {
             encoder: speech_assets!(@file $model, $base, "encoder.int8.onnx", $encoder),
+            encoder_data: None,
             decoder: speech_assets!(@file $model, $base, "decoder.int8.onnx", $decoder),
             joiner: speech_assets!(@file $model, $base, "joiner.int8.onnx", $joiner),
             tokens: speech_assets!(@file $model, $base, "tokens.txt", $tokens),
@@ -328,7 +336,7 @@ impl CatalogSpeech {
                 "From NVIDIA: the lightest on the CPU, and text appears soonest. Mostly without punctuation. The default."
             }
             Self::Unified160ms => {
-                "From NVIDIA: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it needs a fast CPU and text appears about half a second later. Exported by Thalvi."
+                "From NVIDIA: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it runs on a discrete GPU on Linux, and otherwise needs a fast CPU. Text appears about half a second later. Exported by Thalvi."
             }
             Self::ParakeetTdtV3 => {
                 "From NVIDIA: light on the CPU, with punctuation and capitals. Text may change while you speak and settles when you pause. More word errors than Nemotron Unified in German and Spanish."
@@ -445,6 +453,76 @@ impl CatalogSpeech {
                 )
             ),
         }
+    }
+}
+
+impl CatalogSpeech {
+    /// Whether a discrete GPU runs this model faster than the CPU (measured on an RTX 5070 Ti; Nemotron
+    /// Streaming and Parakeet TDT were no faster on any GPU).
+    #[must_use]
+    pub fn uses_gpu(self) -> bool {
+        self.gpu_assets().is_some()
+    }
+
+    /// The fp16 export that a GPU runs, kept in a folder of its own so the encoder finds its data file by the
+    /// name written in it. The tokens are the CPU files'. Exported by `speech/asr/export_unified_onnx.py --fp16`.
+    #[must_use]
+    pub fn gpu_assets(self) -> Option<SpeechAssets<'static>> {
+        let Self::Unified160ms = self else {
+            return None;
+        };
+        let file = |file_name, url, size, sha256| Asset {
+            kind: ModelKind::Speech,
+            file_name,
+            url,
+            size,
+            sha256,
+        };
+        Some(SpeechAssets {
+            encoder: file(
+                "unified_160ms.gpu/encoder.fp16.onnx",
+                "https://github.com/NotPellew/Thalvi/releases/download/speech-models-v2/encoder.fp16.onnx",
+                8_431_807,
+                "9a1cb2d08269264c7c6de0f2597c154c0607f7a30d94b97cc63020f721eee135",
+            ),
+            encoder_data: Some(file(
+                "unified_160ms.gpu/encoder.fp16.onnx.data",
+                "https://github.com/NotPellew/Thalvi/releases/download/speech-models-v2/encoder.fp16.onnx.data",
+                1_227_462_144,
+                "4961c570bf80837a1de4289e1673bb465c754961c57ec87b414f349f3fd5a492",
+            )),
+            decoder: file(
+                "unified_160ms.gpu/decoder.fp32.onnx",
+                "https://github.com/NotPellew/Thalvi/releases/download/speech-models-v2/decoder.fp32.onnx",
+                36_745_424,
+                "ad0af5918cae8d29b5fce9c9105bb932d5530f527c5c5b314532df8b21b23fdd",
+            ),
+            joiner: file(
+                "unified_160ms.gpu/joiner.fp32.onnx",
+                "https://github.com/NotPellew/Thalvi/releases/download/speech-models-v2/joiner.fp32.onnx",
+                14_768_803,
+                "955c2b24e16edcf9489c03141fa22c020626c1e1d566150da4113767c903917b",
+            ),
+            tokens: self.assets().tokens,
+        })
+    }
+
+    /// The files of `export`; a model without a GPU export has only the int8 files.
+    #[must_use]
+    pub fn assets_of(self, export: Export) -> SpeechAssets<'static> {
+        match export {
+            Export::Gpu => self.gpu_assets().unwrap_or_else(|| self.assets()),
+            Export::Cpu => self.assets(),
+        }
+    }
+
+    /// The files `device` loads: the GPU export on a GPU, the int8 files otherwise.
+    #[must_use]
+    pub fn assets_on(self, device: &Device) -> SpeechAssets<'static> {
+        self.assets_of(match device {
+            Device::Gpu(_) => Export::Gpu,
+            Device::Cpu(_) => Export::Cpu,
+        })
     }
 }
 
@@ -591,7 +669,9 @@ impl ModelStore {
             file: asset.file_name.to_owned(),
             source,
         };
-        tokio::fs::create_dir_all(&self.dir).await.map_err(io)?;
+        tokio::fs::create_dir_all(path.parent().unwrap_or(&self.dir))
+            .await
+            .map_err(io)?;
         let part = Partial(path.with_extension(format!(
             "{}-{}.part",
             std::process::id(),
@@ -686,11 +766,15 @@ impl ModelStore {
         models
     }
 
-    /// The catalog models with whether each is already downloaded.
-    pub async fn speech_models(&self) -> Vec<SpeechModelInfo> {
+    /// The catalog models with whether each is already downloaded; the files counted are those `device`
+    /// says the model loads.
+    pub async fn speech_models(
+        &self,
+        device: impl Fn(CatalogSpeech) -> Device,
+    ) -> Vec<SpeechModelInfo> {
         let mut models = Vec::new();
         for model in CatalogSpeech::ALL {
-            let assets = model.assets();
+            let assets = model.assets_on(&device(model));
             models.push(SpeechModelInfo {
                 name: model.name(),
                 title: model.title(),
@@ -731,9 +815,9 @@ impl ModelStore {
             if !matches!(stored(&path, &asset).await, Stored::Intact) {
                 self.fetch_reporting(&asset, |bytes| report(done + bytes))
                     .await?;
+                report(done + asset.size);
             }
             done += asset.size;
-            report(done);
         }
         progress(SpeechProgress::Done);
         Ok(())
