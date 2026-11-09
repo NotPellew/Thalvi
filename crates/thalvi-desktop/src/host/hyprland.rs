@@ -69,6 +69,8 @@ const NO_FOCUSED_WINDOW: &str = "The desktop did not identify the focused window
 const INVALID_WINDOW_LIST: &str = "The desktop returned an invalid window list.";
 const INVALID_MONITOR_LIST: &str = "The desktop returned an invalid monitor list.";
 const NOTHING_TYPED: &str = " Nothing was pasted.";
+const PARTIAL: &str =
+    "Pasting or pressing Enter failed or stopped partway. Check the target before retrying.";
 
 /// One window as `hyprctl -j` prints it; any field may be absent, as for no focused window.
 #[derive(Deserialize)]
@@ -139,28 +141,23 @@ const TERMINAL_CLASSES: [&str; 14] = [
     "ptyxis",
 ];
 
-/// The `wtype` arguments that paste what is on the clipboard into `target`, when `paste`, then
-/// press Enter, when `enter`.
-fn paste_keys(target: &Window, paste: bool, enter: bool) -> Vec<&'static str> {
-    let mut keys = Vec::new();
-    if paste {
-        let terminal = TERMINAL_CLASSES.contains(&target.class.to_lowercase().as_str());
-        keys.extend(if terminal {
-            &[
-                "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl",
-            ][..]
-        } else {
-            &["-M", "ctrl", "-k", "v", "-m", "ctrl"][..]
-        });
+/// The modifiers of the paste shortcut for `target`.
+fn paste_modifiers(target: &Window) -> &'static str {
+    if TERMINAL_CLASSES.contains(&target.class.to_lowercase().as_str()) {
+        "CTRL SHIFT"
+    } else {
+        "CTRL"
     }
-    if enter {
-        // Terminal agents read an Enter that arrives right after a paste as a new line.
-        if paste {
-            keys.extend(["-s", "250"]);
+}
+
+/// A failure of a key tool after the window was focused: some keys may have been pressed.
+fn key_failure(error: &CommandError) -> HostError {
+    match error {
+        CommandError::NotInstalled(_) => nothing_typed(tool(error)),
+        CommandError::TimedOut(_) | CommandError::Failed { .. } => {
+            HostError::MaybePartial(PARTIAL.to_owned())
         }
-        keys.extend(["-k", "Return"]);
     }
-    keys
 }
 
 fn key_arguments(shortcut: &Shortcut) -> Vec<&str> {
@@ -256,25 +253,41 @@ impl<R: CommandRunner> Host for Hyprland<R> {
         text: &PasteText,
         enter: bool,
     ) -> Result<Delivered, HostError> {
+        let paste = !text.as_str().is_empty();
         // Copied first, so the text is on the clipboard whatever happens to the window.
-        if !text.as_str().is_empty() {
+        if paste {
             wl_copy(&self.run, text.as_str()).map_err(nothing_typed)?;
         }
         self.focus(target).map_err(nothing_typed)?;
-        let keys = paste_keys(target, !text.as_str().is_empty(), enter);
-        if keys.is_empty() {
-            return Ok(Delivered::InWindow);
+        if paste {
+            // The compositor sends the keys with its own keymap; GTK 3 ignores a Ctrl shortcut
+            // that wtype sends with its own.
+            let shortcut = format!("{},v,address:{}", paste_modifiers(target), target.address);
+            let reply = self
+                .run
+                .run("hyprctl", &["dispatch", "sendshortcut", &shortcut], None)
+                .map_err(|error| key_failure(&error))?;
+            if reply.trim() != "ok" {
+                return Err(HostError::NothingTyped(format!(
+                    "The desktop would not press the paste keys: {}. Nothing was pasted.",
+                    reply.trim().trim_end_matches('.')
+                )));
+            }
         }
-        self.run
-            .run("wtype", &keys, None)
-            .map(|_| Delivered::InWindow)
-            .map_err(|error| match error {
-                CommandError::NotInstalled(_) => nothing_typed(tool(&error)),
-                CommandError::TimedOut(_) | CommandError::Failed { .. } => HostError::MaybePartial(
-                    "Pasting failed or stopped partway. Check the target before retrying."
-                        .to_owned(),
-                ),
-            })
+        if enter {
+            // Terminal agents read an Enter that arrives right after a paste as a new line.
+            let pause: &[&str] = if paste { &["-s", "250"] } else { &[] };
+            let keys: Vec<&str> = pause.iter().copied().chain(["-k", "Return"]).collect();
+            self.run.run("wtype", &keys, None).map_err(|error| {
+                if paste {
+                    // The paste went through, so the text is in the window even if Enter is not.
+                    HostError::MaybePartial(PARTIAL.to_owned())
+                } else {
+                    key_failure(&error)
+                }
+            })?;
+        }
+        Ok(Delivered::InWindow)
     }
 
     fn copy(&self, text: &str) -> Result<(), HostError> {
@@ -446,6 +459,7 @@ mod tests {
                     *focused.lock().unwrap() = focus_lands_on.to_owned();
                     Ok("ok".to_owned())
                 }
+                ["hyprctl", "dispatch", "sendshortcut", _] => Ok("ok\n".to_owned()),
                 _ => Ok(String::new()),
             }
         })
@@ -532,18 +546,13 @@ mod tests {
     #[test]
     fn delivery_copies_then_refocuses_the_original_window_and_presses_the_paste_shortcut() {
         let text = "--help $(not-a-command) `nor-this` café 👋\nsecond line";
-        let ctrl_v = "wtype -M ctrl -k v -m ctrl";
-        let ctrl_shift_v = "wtype -M ctrl -M shift -k v -m shift -m ctrl";
-        for (class, enter, wtype) in [
-            ("browser", false, ctrl_v.to_owned()),
-            ("browser", true, format!("{ctrl_v} -s 250 -k Return")),
-            ("kitty", false, ctrl_shift_v.to_owned()),
-            (
-                "Alacritty",
-                true,
-                format!("{ctrl_shift_v} -s 250 -k Return"),
-            ),
-            ("org.gnome.Console", false, ctrl_shift_v.to_owned()),
+        let enter = "wtype -s 250 -k Return";
+        for (class, submit, shortcut) in [
+            ("browser", false, "CTRL"),
+            ("browser", true, "CTRL"),
+            ("kitty", false, "CTRL SHIFT"),
+            ("Alacritty", true, "CTRL SHIFT"),
+            ("org.gnome.Console", false, "CTRL SHIFT"),
         ] {
             let host = desktop(
                 vec![row("0x1", 1, "other", 0), row("0x2", 2, class, 1)],
@@ -551,20 +560,18 @@ mod tests {
                 "0x2",
             );
             assert_eq!(
-                host.deliver(&window("0x2", 2, class), &paste(text), enter),
+                host.deliver(&window("0x2", 2, class), &paste(text), submit),
                 Ok(Delivered::InWindow)
             );
-            assert_eq!(
-                commands(&host),
-                [
-                    format!("wl-copy --type text/plain;charset=utf-8 <{text}>").as_str(),
-                    "hyprctl -j clients",
-                    "hyprctl dispatch focuswindow address:0x2",
-                    "hyprctl -j activewindow",
-                    wtype.as_str(),
-                ],
-                "{class} enter={enter}"
-            );
+            let mut expected = vec![
+                format!("wl-copy --type text/plain;charset=utf-8 <{text}>"),
+                "hyprctl -j clients".to_owned(),
+                "hyprctl dispatch focuswindow address:0x2".to_owned(),
+                "hyprctl -j activewindow".to_owned(),
+                format!("hyprctl dispatch sendshortcut {shortcut},v,address:0x2"),
+            ];
+            expected.extend(submit.then(|| enter.to_owned()));
+            assert_eq!(commands(&host), expected, "{class} submit={submit}");
         }
     }
 
@@ -582,7 +589,7 @@ mod tests {
         assert!(
             commands(&host)
                 .iter()
-                .all(|command| !command.starts_with("wl-copy"))
+                .all(|command| !command.starts_with("wl-copy") && !command.contains("sendshortcut"))
         );
     }
 
@@ -618,7 +625,8 @@ mod tests {
             assert!(
                 commands(&host)
                     .iter()
-                    .all(|command| !command.starts_with("wtype")),
+                    .all(|command| !command.starts_with("wtype")
+                        && !command.contains("sendshortcut")),
                 "{name}"
             );
             assert_eq!(
@@ -631,50 +639,84 @@ mod tests {
 
     #[test]
     fn a_key_tool_that_fails_after_focus_may_have_pasted_part_of_the_text() {
-        for (error, expected) in [
+        let partial = HostError::MaybePartial(PARTIAL.to_owned());
+        let failed = |program: &str| CommandError::Failed {
+            program: program.to_owned(),
+            reason: None,
+        };
+        for (name, program, reply, submit, expected) in [
             (
-                CommandError::Failed {
-                    program: "wtype".to_owned(),
-                    reason: None,
-                },
-                HostError::MaybePartial(
-                    "Pasting failed or stopped partway. Check the target before retrying."
+                "shortcut tool fails",
+                "hyprctl",
+                Err(failed("hyprctl")),
+                false,
+                partial.clone(),
+            ),
+            (
+                "shortcut tool stuck",
+                "hyprctl",
+                Err(CommandError::TimedOut("hyprctl".to_owned())),
+                false,
+                partial.clone(),
+            ),
+            (
+                "shortcut refused",
+                "hyprctl",
+                Ok("window not found".to_owned()),
+                false,
+                HostError::NothingTyped(
+                    "The desktop would not press the paste keys: window not found. Nothing was pasted."
                         .to_owned(),
                 ),
             ),
             (
-                CommandError::TimedOut("wtype".to_owned()),
-                HostError::MaybePartial(
-                    "Pasting failed or stopped partway. Check the target before retrying."
-                        .to_owned(),
-                ),
+                "enter fails after the paste",
+                "wtype",
+                Err(failed("wtype")),
+                true,
+                partial.clone(),
             ),
             (
-                CommandError::NotInstalled("wtype".to_owned()),
-                HostError::Unsupported(
-                    "Desktop tool wtype is not installed. Nothing was pasted.".to_owned(),
-                ),
+                "enter tool missing after the paste",
+                "wtype",
+                Err(CommandError::NotInstalled("wtype".to_owned())),
+                true,
+                partial,
             ),
         ] {
-            let host = host({
-                let error = error.clone();
-                move |argv, _| match argv[0].as_str() {
-                    "wtype" => Err(error.clone()),
-                    _ if argv.last().is_some_and(|arg| arg == "clients") => {
-                        Ok(format!("[{}]", row("0x1", 1, "a", 0)))
-                    }
-                    _ if argv.last().is_some_and(|arg| arg == "activewindow") => {
-                        Ok(row("0x1", 1, "a", 0))
-                    }
-                    _ => Ok(String::new()),
+            let host = host(move |argv, _| match argv {
+                [tool, ..] if tool == program && (tool == "wtype" || argv[2] == "sendshortcut") => {
+                    reply.clone()
                 }
+                [_, _, query] if query == "clients" => Ok(format!("[{}]", row("0x1", 1, "a", 0))),
+                [_, _, query] if query == "activewindow" => Ok(row("0x1", 1, "a", 0)),
+                [_, _, _, _] if argv[2] == "sendshortcut" => Ok("ok".to_owned()),
+                _ => Ok(String::new()),
             });
             assert_eq!(
-                host.deliver(&window("0x1", 1, "a"), &paste("hi"), false),
+                host.deliver(&window("0x1", 1, "a"), &paste("hi"), submit),
                 Err(expected),
-                "{error:?}"
+                "{name}"
             );
         }
+    }
+
+    #[test]
+    fn a_missing_enter_tool_is_unsupported_when_nothing_was_pasted() {
+        let host = host(|argv, _| match argv[0].as_str() {
+            "wtype" => Err(CommandError::NotInstalled("wtype".to_owned())),
+            _ if argv.last().is_some_and(|arg| arg == "clients") => {
+                Ok(format!("[{}]", row("0x1", 1, "a", 0)))
+            }
+            _ if argv.last().is_some_and(|arg| arg == "activewindow") => Ok(row("0x1", 1, "a", 0)),
+            _ => Ok("ok".to_owned()),
+        });
+        assert_eq!(
+            host.deliver(&window("0x1", 1, "a"), &paste(""), true),
+            Err(HostError::Unsupported(
+                "Desktop tool wtype is not installed. Nothing was pasted.".to_owned()
+            ))
+        );
     }
 
     #[test]

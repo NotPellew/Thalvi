@@ -35,7 +35,7 @@ errors name their entry. `drive` times the recognizer's first words and each fin
 result against the speech heard (`Heard`) for the metrics. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
 The GNOME host (#267) changed `delivery.rs` and `runner.rs` without changing that:
-`Delivery::type_in` returns `Delivered::InWindow` or `Delivered::OnClipboard` from the
+`Delivery::paste_in` (formerly `type_in`) returns `Delivered::InWindow` or `Delivered::OnClipboard` from the
 same `Delivery::finish` admission, so a clipboard-only desktop is another admitted host
 action and a cancelled capture still never reaches it. `Runner::capture` now calls
 `Publisher::woke` before `drive`, which only sets the view's `copies` and `target`.
@@ -54,6 +54,9 @@ copy of the user's words is gated by `ended` like every other host effect. The
 model now keeps second-pass completion and writing completion as separate
 cancellation-first awaits; neither admits a result into delivery. `delivery.rs`
 adds a `Write` arm that pastes.
+Delivery by pasting (#308) renames `type_in` to `paste_in` and drops its post-delivery `copy`, since the host
+now leaves the text on the clipboard; admission through `Delivery::finish`, the `Write` arm and every await
+boundary are unchanged, and `engine.rs` and `runner.rs` changed only in message text and a test.
 The ending spotter adds synchronous bookkeeping in `conclude` before the cue and
 recognizer release, and a `drive` branch that only plays a cue and shows a notice.
 `Runner::build` joins the spotter load with the wake load; capture notices are set
@@ -86,7 +89,7 @@ Matching hashes establish synchronization only, not correctness of the model.
 | Same file: `Engine::conclude`, `Engine::end_cue`, `Engine::end_with` | `CueReturns`, `CloseReturns`; the cue's cancellation-biased select and recognizer release are separate futures joined together. A completed cue retains its bool while close is still Pending. Neither completion is a transaction encompassing the other. |
 | Same file: `Engine::reconcile`, `Engine::write`, `bounded` | `secondary`, `writing`, `SecondaryReturns`, `WritingReturns`; disabled stages are skipped, each enabled stage polls cancellation first before handing the result to the next stage. |
 | `crates/thalvi-desktop/src/recognizer.rs`: `RecognizerSession`, `ServerSession::close` | `CloseReturns` may occur before or after the cue. Network close is awaited under a timeout, so it can remain Pending. |
-| `crates/thalvi-desktop/src/delivery.rs`: `Delivery::finish`, `type_in`, `call` | `delivered` abstracts admission to a valid configured host action. Actual host execution is outside the proof; once admitted it can run via `spawn_blocking`. Other changes to this file are not covered by the model. |
+| `crates/thalvi-desktop/src/delivery.rs`: `Delivery::finish`, `paste_in`, `call` | `delivered` abstracts admission to a valid configured host action. Actual host execution is outside the proof; once admitted it can run via `spawn_blocking`. Other changes to this file are not covered by the model. |
 
 ## Run
 

@@ -119,13 +119,13 @@ areas your change touches. Editing rules are in
 - **A keyword spotter only warns about missed endings.** sherpa-onnx's 3.3M keyword model listens beside the recognizer; when the covering final lacks an ending it heard and the user then stays quiet for that ending's pause, the cancelled cue plays and a notice names the phrase. Nothing is cut, retried or acted on.
   Why: spotted times run 0.2–0.5 s late and finals carry no word times; a recheck by the same recognizer rescued 0 of 12 disputed hits in 62.8 min; the quiet gate keeps false alarms (16 in that time) silent.
   Rejected: cutting at the spotted time, a recheck, acting on the spotter alone, judging on a short timer (24 of 36 finals came late), quoting dictated words.
-- **Delivery is a paste.** Dictation and writing go on the clipboard and the bound window gets Ctrl+V, or Ctrl+Shift+V in a
-  known Linux terminal class; text may hold line breaks and tabs, no other control character. Why: a paste inserts line
-  breaks without pressing Enter, and long text arrives at once. Rejected: typing with Shift+Enter for line breaks, typing
-  single lines and pasting multi-line text (two paths).
+- **Delivery is a paste.** Dictation and writing go on the clipboard and the bound window gets Ctrl+V (Ctrl+Shift+V in a known
+  Linux terminal class), sent on Hyprland by `sendshortcut`; text may hold line breaks and tabs, no other control character.
+  Why: a paste inserts line breaks without Enter and long text at once; GTK 3 ignores Ctrl shortcuts sent by wtype (seen live).
+  Rejected: typing with Shift+Enter for line breaks, typing single lines and pasting multi-line text (two paths), wtype keys.
 - **Check, then paste.** Delivery re-verifies the bound window just before pressing keys,
-  which go to whatever window is focused; a switch in those milliseconds
-  can misdirect them. Why: neither Hyprland nor Windows can address input to one window.
+  which go to whatever window is focused, except Hyprland's paste keys, which are addressed to it. Why: Enter and Windows
+  input cannot be addressed to one window, so a switch in those milliseconds can misdirect them.
   Rejected: per-desktop accessibility or input protocols (much code for a rare race).
 - **Enter waits 250 ms.** On Hyprland, submit waits 250 ms between the paste and Enter.
   Why: Muse Code 1.4.14 read a faster Enter as a new line while the overlay said sent;
