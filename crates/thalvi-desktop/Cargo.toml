@@ -29,6 +29,7 @@ webrtc-vad.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk.workspace = true
+ort = { workspace = true, features = ["webgpu", "api-24", "copy-dylibs"] }
 nix.workspace = true
 rustix.workspace = true
 xkbcommon.workspace = true
