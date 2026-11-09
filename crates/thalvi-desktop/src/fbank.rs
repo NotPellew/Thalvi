@@ -258,10 +258,10 @@ impl LogMel {
     fn frame(&self, number: usize) -> MelFrame {
         let start = (number * SHIFT + SHIFT / 2) as isize - (WINDOW / 2) as isize;
         let mut wave: [f32; WINDOW] = std::array::from_fn(|i| self.samples.at(start + i as isize));
+        // The first sample is not emphasized: the window is zero there.
         for i in (1..WINDOW).rev() {
             wave[i] -= PRE_EMPHASIS * wave[i - 1];
         }
-        wave[0] -= PRE_EMPHASIS * wave[0];
         self.tables.mel(&wave, &self.tables.periodic, |energy| {
             energy.max(f32::EPSILON).ln()
         })
@@ -377,10 +377,10 @@ impl KaldiFbank {
         for value in &mut wave {
             *value -= mean;
         }
+        // The first sample is not emphasized: the window is zero there.
         for i in (1..WINDOW).rev() {
             wave[i] -= PRE_EMPHASIS * wave[i - 1];
         }
-        wave[0] -= PRE_EMPHASIS * wave[0];
         let mut re = [0.0; FFT_SIZE];
         let mut im = [0.0; FFT_SIZE];
         for (i, (value, weight)) in wave.iter().zip(&self.tables.window).enumerate() {
