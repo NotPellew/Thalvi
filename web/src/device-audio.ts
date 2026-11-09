@@ -86,11 +86,16 @@ export class DeviceAudio {
           if (this.micInput) this.controller.micStopped("The microphone stopped working.");
         },
       );
+      if (this.controller.state.link === "ended") {
+        mic.stop();
+        this.releaseUnused();
+        return;
+      }
       this.micInput = { mic, releaseWakeLock: holdWakeLock() };
       this.controller.setVoice(true);
     } catch (error) {
       this.releaseUnused();
-      this.controller.notify(micErrorMessage(error));
+      if (this.controller.state.link !== "ended") this.controller.notify(micErrorMessage(error));
     } finally {
       this.ports.setBusy(null);
     }
