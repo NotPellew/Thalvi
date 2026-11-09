@@ -2333,7 +2333,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_switch_of_the_live_server_waits_for_the_end_of_the_running_capture() {
-        let running = DesktopConfig::from_json_str("{}").unwrap();
+        let running = DesktopConfig::from_json_str(r#"{"stt": {"engine": "server"}}"#).unwrap();
         let switched = DesktopConfig::from_json_str(r#"{"stt": {"engine": "local"}}"#).unwrap();
         assert_ne!(
             running.stt.entries.active_live().id,
