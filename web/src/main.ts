@@ -1,40 +1,26 @@
 import { Connection, privateSessionUrl, sessionUrl } from "./connection.ts";
 import { Controller } from "./controller.ts";
 import { conversationsApi } from "./conversations.ts";
+import { DeviceAudio } from "./device-audio.ts";
 import { Learnings, learningsApi } from "./learnings.ts";
 import { createLearningsView } from "./learnings-view.ts";
 import { Library } from "./library.ts";
 import { createLibraryView } from "./library-view.ts";
-import { micErrorMessage, openMic, type Mic } from "./mic.ts";
-import { Playback } from "./playback.ts";
 import { voiceNameMessage } from "./protocol.ts";
-import { loadSpeed, saveSpeed, type Speed } from "./speed.ts";
+import { loadSpeed, saveSpeed } from "./speed.ts";
 import { createView } from "./view.ts";
 import { VoicePicker, voiceApi } from "./voice.ts";
 import { audioElementPlayer, createVoiceView } from "./voice-view.ts";
-import { holdWakeLock } from "./wake-lock.ts";
 
 const SESSION_KEY = "thalvi.session";
 /** The next connection starts a private conversation; a reload never does. */
 let wantPrivate = false;
 
-interface ReplyAudio {
-  readonly ctx: AudioContext;
-  readonly playback: Playback;
-}
-
-interface MicInput {
-  readonly mic: Mic;
-  readonly releaseWakeLock: () => void;
-}
-
 const appRoot = document.getElementById("app");
 if (!appRoot) throw new Error("#app is missing from index.html");
 const view = createView(appRoot);
-let audio: ReplyAudio | null = null;
-let micInput: MicInput | null = null;
-let currentSpeed: Speed = loadSpeed(localStorage);
-view.setSpeed(currentSpeed);
+const initialSpeed = loadSpeed(localStorage);
+view.setSpeed(initialSpeed);
 
 const controller = new Controller({
   send: (text) => {
@@ -42,10 +28,10 @@ const controller = new Controller({
   },
   playback: {
     enqueue: (bytes) => {
-      audio?.playback.enqueue(bytes);
+      deviceAudio.playback?.enqueue(bytes);
     },
     flush: () => {
-      audio?.playback.flush();
+      deviceAudio.playback?.flush();
     },
   },
   remember: (id) => {
@@ -69,11 +55,26 @@ const controller = new Controller({
     connection.close();
     connection.connect();
   },
-  releaseUnused,
+  releaseUnused: () => {
+    deviceAudio.releaseUnused();
+  },
   onChange: (state) => {
     view.render(state);
   },
 });
+
+const deviceAudio = new DeviceAudio(
+  controller,
+  {
+    setBusy: (busy) => {
+      view.setBusy(busy);
+    },
+    sendFrame: (frame) => {
+      connection.send(frame);
+    },
+  },
+  initialSpeed,
+);
 
 const connection = new Connection(
   () => (wantPrivate ? privateSessionUrl(location) : sessionUrl(location, sessionStorage.getItem(SESSION_KEY))),
@@ -121,85 +122,17 @@ const library = new Library({
 createLibraryView(appRoot, library, () => sessionStorage.getItem(SESSION_KEY));
 createLearningsView(appRoot, new Learnings(learningsApi((input, init) => fetch(input, init))));
 
-function releaseUnused(): void {
-  const { voice, speak } = controller.state;
-  if (!voice && micInput) {
-    micInput.mic.stop();
-    micInput.releaseWakeLock();
-    micInput = null;
-  }
-  if (!voice && !speak && audio) {
-    void audio.ctx.close();
-    audio = null;
-  }
-}
-
-/** Must be called inside the tap's user activation, because it creates the audio context. */
-async function acquireAudio(): Promise<ReplyAudio> {
-  if (audio) return audio;
-  const ctx = new AudioContext({ latencyHint: "interactive" });
-  try {
-    await ctx.resume();
-  } catch (error) {
-    void ctx.close();
-    throw error;
-  }
-  const playback = new Playback(ctx, (playing) => {
-    controller.playing(playing);
-  });
-  playback.setRate(currentSpeed);
-  audio = { ctx, playback };
-  return audio;
-}
-
-async function startVoice(): Promise<void> {
-  view.setBusy("mic");
-  try {
-    const { ctx } = await acquireAudio();
-    const mic = await openMic(
-      ctx,
-      (frame) => {
-        if (controller.state.voice) connection.send(frame);
-      },
-      () => {
-        if (micInput) controller.micStopped("The microphone stopped working.");
-      },
-    );
-    micInput = { mic, releaseWakeLock: holdWakeLock() };
-    controller.setVoice(true);
-  } catch (error) {
-    releaseUnused();
-    controller.notify(micErrorMessage(error));
-  } finally {
-    view.setBusy(null);
-  }
-}
-
-async function startSpeak(): Promise<void> {
-  view.setBusy("audio");
-  try {
-    await acquireAudio();
-    controller.setSpeak(true);
-  } catch {
-    releaseUnused();
-    controller.notify("Couldn't start audio on this device.");
-  } finally {
-    view.setBusy(null);
-  }
-}
-
 view.onSpeed((rate) => {
-  currentSpeed = rate;
   saveSpeed(localStorage, rate);
-  audio?.playback.setRate(rate);
+  deviceAudio.setSpeed(rate);
 });
 view.onVoice(() => {
   if (controller.state.voice) controller.setVoice(false);
-  else void startVoice();
+  else void deviceAudio.startVoice();
 });
 view.onSpeak(() => {
   if (controller.state.speak) controller.setSpeak(false);
-  else void startSpeak();
+  else void deviceAudio.startSpeak();
 });
 view.onDismissNotice(() => {
   controller.dismissNotice();
