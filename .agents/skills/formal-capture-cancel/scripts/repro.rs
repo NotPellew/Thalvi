@@ -16,7 +16,7 @@ use thalvi_desktop::engine::{CaptureOutcome, CuePlayer, Engine, Parts};
 use thalvi_desktop::frame::Frame;
 use thalvi_desktop::history::{Capture, Outcome, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
-use thalvi_desktop::host::{App, Delivered, Host, HostError, TypedText, WebUrl};
+use thalvi_desktop::host::{App, Delivered, Host, HostError, PasteText, WebUrl};
 use thalvi_desktop::metrics::Recorder;
 use thalvi_desktop::recognizer::{
     FakeRecognizer, FakeSession, Recognizer, RecognizerError, RecognizerEvent, RecognizerSession,
@@ -41,7 +41,7 @@ impl Host for RecordingHost {
     fn capture_target(&self) -> Result<String, HostError> {
         Ok("Editor".to_owned())
     }
-    fn deliver(&self, _: &String, _: &TypedText, _: bool) -> Result<Delivered, HostError> {
+    fn deliver(&self, _: &String, _: &PasteText, _: bool) -> Result<Delivered, HostError> {
         self.called("deliver");
         Ok(Delivered::InWindow)
     }
@@ -346,7 +346,7 @@ async fn closing_capture(cancel: bool) {
         if cancel {
             !delivered && calls.is_empty()
         } else {
-            delivered && calls == ["deliver", "copy"]
+            delivered && calls == ["deliver"]
         },
         "CANCEL_REACHED_DELIVERY: a consumed Cancel must prevent host delivery"
     );
