@@ -64,18 +64,21 @@ Steps:
     `localStorage["thalvi.speed"]` is `1.5`.
   - After `$V ab $R reload` and `$V state $R idle`, the chip still reads
     `1.5×`.
-- **Proof.** Keep the screenshot captured immediately after Apply and the
-  `tts_request` lines for the preview and the reply.
+- **Proof.** Keep the screenshot and `snapshot -c` captured immediately after
+  Apply, the `voice_preview` metric, and the `tts_request` lines for the
+  preview and the reply.
 
 ## Gotchas
 
-- The fake speech engine knows only `fake_heart` and `fake_bella`. Other names
-  get HTTP 400, as a real engine does for an unknown voice.
+- The server's preview endpoint rejects a voice outside the run's offered
+  list before calling speech. The fake speech engine itself knows only
+  `fake_heart` and `fake_bella` and answers HTTP 400 for other names.
 - Preview audio plays to a null sink in headless Chromium. `Stop` means the
   UI entered its playing state and attempted playback; `audio.play()` can
   still fail. A successful preview metric proves synthesis, not client playback or audibility.
-- `localStorage` survives `down`/`up` only if the agent-browser session is
-  reused. Each run has a new session, so it starts empty.
+- `localStorage` belongs to the page's origin, and each run has its own app
+  port and browser session, so a new run starts empty. Persistence is proved
+  by `reload` within one run.
 - This recipe proves speed selection and persistence, not audible stretching
   quality. Speed changes the playback rate on the client only. The server and
   `tts_request` lines do not change.

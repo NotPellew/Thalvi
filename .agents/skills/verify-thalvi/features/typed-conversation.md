@@ -11,6 +11,8 @@ model fails, after which the session keeps working.
 - `typed-stop` stops a reply in progress from the reticle.
 - `typed-failure` shows a plain-words notice when the model fails, then
   recovers.
+- `typed-notice-actions` copies the notice text (`Copy` turns to `Copied`) or
+  hides it (`Dismiss`).
 
 ## How to get to it (user POV)
 
@@ -31,9 +33,9 @@ Steps:
   - `#o-message` is empty at once.
 - **Reply.** Wait for the answer.
   - Run `$V reply $R --after "How do I proof bread dough?"`.
-  - It prints the last Thalvi turn,
-    `Fake reply to: How do I proof bread dough?. That is all.`, and the state
-    is `idle`.
+  - It prints the last Thalvi turn with its speaker label,
+    `THALVI\nFake reply to: How do I proof bread dough?. That is all.`, and
+    the state is `idle`.
   - The `.o-turns > .o-user` turn before it reads `How do I proof bread
     dough?`. It appears only once the server echoes it.
   - `R/fakes.jsonl` has an `llm_request` with that `user` text and
@@ -48,14 +50,21 @@ Steps:
   - The recording gains `interrupt` with `reason: cancel` and an interrupted
     reply. `llm_cancelled` may follow if a fake stream write sees the close.
 - **Failure.** Send `Please make it fail`.
-  - Run `$V ab $R wait '.o-notice:not([hidden])'` and
-    `$V ab $R get text '.o-notice'`.
-  - The notice reads `The language model could not reply: the language model
-    returned an error (500 Internal Server Error)`, and the state returns to
-    `idle`.
+  - Run `$V ab $R wait --fn '!document.querySelector(".o-notice").hidden && document.querySelector(".orb-app").dataset.state === "idle"'`
+    and `$V ab $R get text '.o-notice-text'`.
+  - `.o-notice-text` reads `The language model could not reply: the language
+    model returned an error (500 Internal Server Error)`. `.o-notice` also
+    holds the `Copy` and `Dismiss` buttons, so read the text element.
+  - Capture `typed-failure.png` and `typed-failure.aria.txt` now; the next
+    turn clears the notice.
+- **Notice actions.** Choose `Copy`, then `Dismiss`.
+  - Run `$V ab $R click '.o-notice-copy'` and
+    `$V ab $R wait --fn 'document.querySelector(".o-notice-copy").textContent === "Copied"'`.
+  - Run `$V ab $R click 'button[aria-label="Dismiss"]'` and
+    `$V ab $R wait --fn 'document.querySelector(".o-notice").hidden'`.
 - **Recovery.** Send `Are you still there?`.
-  - `$V reply $R --after "Are you still there?"` passes, and `.o-notice` is hidden
-    again.
+  - `$V reply $R --after "Are you still there?"` passes, and `.o-notice` stays
+    hidden.
 - **Proof.** Capture the result.
   - Run `$V ab $R screenshot $R/evidence/typed-final.png` and
     `$V ab $R snapshot -c > $R/evidence/typed-final.aria.txt`.
@@ -63,10 +72,13 @@ Steps:
 
 ## Gotchas
 
-- Any message containing `make it fail`, `long story` or `search for <words>`
-  takes the fake's scripted path. `How long …` is an ordinary echo.
+- The fake matches case-insensitively, in this order: `make it fail`, then a
+  tool result already in the request, then `search for <words>` (only when
+  tools are offered), then `long story`. `How long …` is an ordinary echo.
 - Reply text appears while the state is still `thinking`, and `idle` holds
   before the server answers. Use `reply --after` with a unique prompt to wait
   for this answer. Sending again earlier interrupts the open reply.
 - `Send` is disabled while the composer is empty or the socket is offline.
 - The notice clears on the next turn. Capture it before sending again.
+- Headless Chromium denies clipboard reads, so `Copied` proves the write
+  resolved, not what landed on the clipboard.
