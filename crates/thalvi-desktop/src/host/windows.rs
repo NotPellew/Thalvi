@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    App, Delivered, HoldSource, Host, HostError, Modifier, PasteText, RequestServer, WebUrl,
+    App, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, PasteText, RequestServer,
+    WebUrl,
 };
 use crate::hold::{HoldKey, HoldKind};
 pub use win32::Real;
@@ -179,7 +180,14 @@ impl<A: Win32> Windows<A> {
                 "Windows refused the input. Nothing was pasted.".to_owned(),
             )),
             accepted if accepted == events.len() => Ok(()),
-            _ => Err(HostError::MaybePartial(partial.to_owned())),
+            accepted => {
+                // A key left down would stay pressed for every program, so let go of what was pressed.
+                let stuck = releases(&events[..accepted]);
+                if !stuck.is_empty() {
+                    self.api.send_input(&stuck);
+                }
+                Err(HostError::MaybePartial(partial.to_owned()))
+            }
         }
     }
 }
@@ -224,11 +232,8 @@ impl<A: Win32> Host for Windows<A> {
         if !self.in_front(target.window) {
             return Err(nothing_typed("The window changed. Nothing was pasted."));
         }
-        self.send(
-            &paste_events(paste, enter),
-            "Pasting stopped partway. Some keys may have been pressed.",
-        )
-        .map(|()| Delivered::InWindow)
+        self.send(&paste_events(paste, enter), MAYBE_PASTED)
+            .map(|()| Delivered::InWindow)
     }
 
     fn copy(&self, text: &str) -> Result<(), HostError> {
@@ -344,6 +349,22 @@ fn paste_events(paste: bool, enter: bool) -> Vec<KeyEvent> {
         events.extend(tap(VK_RETURN));
     }
     events
+}
+
+/// Key-ups for every key that `sent` pressed and did not release, the last pressed first.
+fn releases(sent: &[KeyEvent]) -> Vec<KeyEvent> {
+    let mut held: Vec<u16> = Vec::new();
+    for event in sent {
+        if event.release {
+            held.retain(|key| *key != event.key);
+        } else {
+            held.push(event.key);
+        }
+    }
+    held.into_iter()
+        .rev()
+        .map(|key| KeyEvent { key, release: true })
+        .collect()
 }
 
 fn shortcut_events(modifiers: &[Modifier], key: &str) -> Result<Vec<KeyEvent>, HostError> {
@@ -770,21 +791,45 @@ mod tests {
     }
 
     #[test]
-    fn a_paste_that_windows_cut_short_is_reported_once_and_never_retried() {
+    fn a_paste_that_windows_cut_short_is_reported_once_and_releases_the_keys_it_pressed() {
+        let key_up = |key| KeyEvent { key, release: true };
+        // The batch is Ctrl down, V down, V up, Ctrl up, Return down, Return up.
+        for (accepted, released) in [
+            (1, vec![key_up(VK_CONTROL)]),
+            (2, vec![key_up(VK_V), key_up(VK_CONTROL)]),
+            (3, vec![key_up(VK_CONTROL)]),
+            (4, vec![]),
+            (5, vec![key_up(VK_RETURN)]),
+        ] {
+            let desktop = windows(Fake::desktop());
+            let target = desktop.capture_target().unwrap();
+            desktop.api.with(|state| state.accepts = Some(accepted));
+
+            let error = desktop.deliver(&target, &text("hello"), true).unwrap_err();
+
+            assert!(
+                matches!(&error, HostError::MaybePartial(notice) if notice == MAYBE_PASTED),
+                "{accepted}: {error:?}"
+            );
+            let sent = desktop.api.read(|state| state.sent.clone());
+            assert_eq!(
+                sent.len(),
+                1 + usize::from(!released.is_empty()),
+                "{accepted}"
+            );
+            assert_eq!(
+                sent.get(1).cloned().unwrap_or_default(),
+                released,
+                "{accepted}"
+            );
+        }
+
         let desktop = windows(Fake::desktop());
         let target = desktop.capture_target().unwrap();
-        desktop.api.with(|state| state.accepts = Some(3));
-
-        let error = desktop.deliver(&target, &text("hello"), true).unwrap_err();
-
-        assert!(
-            matches!(&error, HostError::MaybePartial(notice) if notice.starts_with("Pasting stopped partway"))
-        );
-        assert_eq!(desktop.api.read(|state| state.sent.len()), 1);
-
         desktop.api.with(|state| state.accepts = Some(0));
         let error = desktop.deliver(&target, &text("hello"), true).unwrap_err();
         assert!(matches!(error, HostError::NothingTyped(_)), "{error:?}");
+        assert_eq!(desktop.api.read(|state| state.sent.len()), 1);
     }
 
     #[test]

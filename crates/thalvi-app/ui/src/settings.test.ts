@@ -1976,7 +1976,7 @@ describe("last dictation", () => {
       ["delivered", "Delivered. Meant for foot."],
       ["cancelled", "You cancelled this one, so nothing was pasted. Meant for foot."],
       ["failed", "This was not delivered. Meant for foot."],
-      ["maybePartial", "Pasting stopped partway: some of this text may already be in the window. Check it there, or use Copy text. Meant for foot."],
+      ["maybePartial", "Thalvi may or may not have pasted this text. Check the window before trying again, or use Copy text. Meant for foot."],
     ] as const) {
       document.body.innerHTML = '<div id="settings"></div>';
       root = document.getElementById("settings") as HTMLElement;

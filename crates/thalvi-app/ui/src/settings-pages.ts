@@ -111,7 +111,7 @@ const DRAFT_OUTCOMES: Record<DraftOutcome, string> = {
   delivered: "Delivered.",
   cancelled: "You cancelled this one, so nothing was pasted.",
   failed: "This was not delivered.",
-  maybePartial: "Pasting stopped partway: some of this text may already be in the window. Check it there, or use Copy text.",
+  maybePartial: "Thalvi may or may not have pasted this text. Check the window before trying again, or use Copy text.",
 };
 /** While one of these runs the status changes with every word; the draft is read again once it ends. */
 const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "working"];

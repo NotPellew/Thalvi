@@ -32,7 +32,7 @@
       ]
     },
     "crates/thalvi-desktop/src/delivery.rs": {
-      "sha256": "172f184d105ef7d7bdecdc26c41fa4cd0cbd46970672442525ab87b6f021742c",
+      "sha256": "491166ce0b635a6f5a2e955fc7251d83a87754cd8ce8e73556a5a289f5148ccb",
       "functions": [
         "Delivery::finish",
         "Delivery::paste_in",

@@ -18,7 +18,7 @@ pub enum DraftOutcome {
     /// The user cancelled; nothing was pasted.
     Cancelled,
     Failed,
-    /// Pasting stopped partway: some of the text may already be in the window.
+    /// It is not known whether the paste reached the window.
     MaybePartial,
 }
 
@@ -229,7 +229,7 @@ mod tests {
                 Some(DraftOutcome::Failed),
             ),
             (
-                "paste stopped partway",
+                "paste may or may not have happened",
                 deliver_fails(HostError::MaybePartial("Partway.".to_owned())),
                 paste_outcome("hello"),
                 Some(DraftOutcome::MaybePartial),

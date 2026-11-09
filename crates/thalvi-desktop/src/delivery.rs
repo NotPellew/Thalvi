@@ -48,7 +48,7 @@ pub fn submit_notice(state: &EngineState, window: &str) -> Option<String> {
 pub struct Finished {
     /// The text reached its destination; otherwise it is kept on the clipboard when possible.
     pub delivered: bool,
-    /// Pasting stopped partway, so some of the text may be in the window; never with `delivered`.
+    /// It is not known whether the paste reached the window, so the text may be in it; never with `delivered`.
     pub maybe_partial: bool,
     /// Says what happened and where the dictated text went.
     pub notice: String,
@@ -552,8 +552,8 @@ mod tests {
                 "The window closed. Nothing was pasted. Captured text is on the clipboard.",
             ),
             (
-                HostError::MaybePartial("Pasting stopped partway.".to_owned()),
-                "Pasting stopped partway. Captured text is on the clipboard.",
+                HostError::MaybePartial("Thalvi may or may not have pasted the text.".to_owned()),
+                "Thalvi may or may not have pasted the text. Captured text is on the clipboard.",
             ),
         ] {
             let (notice, seen) = run(
