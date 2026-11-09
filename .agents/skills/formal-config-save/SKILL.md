@@ -68,7 +68,7 @@ sends two settings requests at once reaches it without the user, because
 
 ## Covers
 
-Sync commit: `a5060554df34d8b99071e7f379376d4e69466f41`. [source.json](source.json)
+Sync commit: `2f4638699c6d928ddf2497b2146aac52febc60d7`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 
@@ -81,6 +81,7 @@ Matching hashes establish synchronization only, not correctness of the model.
 | Same file: `write_private` | `RmTmp` (`remove_file` of the shared name), `Create` (`create_new`; fails if the name exists), `Write` (`write_all` into the opened file, wherever it is linked now). |
 | Same file: `write_atomically` | `Rename` (moves whatever `desktop.json.tmp` names now; fails if it names nothing). On any error it removes the shared name and returns Err. |
 | `crates/thalvi-app/src/app.rs`: `AppState::apply` | `Apply`: `*current = config.clone()` under `AppState::config`'s lock (for `remember`, its own `*self.config.lock() = config`). `Send`: `Control::Apply` to the runner, which takes them in order. |
+| `crates/thalvi-app/src/settings.rs`: `Store::start` (from `AppState::start` in `app.rs`'s `setup`) | Not modeled: a first start writes the defaults through `save_switches` before `setup` registers the state, serves requests or opens Settings, so no other writer exists yet. |
 | `crates/thalvi-desktop/src/host/channel.rs`: `accept`; `windows/pipe.rs`: `accept`, `answer` | Why `A` and `L` run concurrently: one `thalvi-request` thread per connection, up to `MAX_CONNECTIONS`. |
 
 ## Run
