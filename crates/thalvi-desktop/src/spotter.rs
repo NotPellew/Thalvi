@@ -853,10 +853,7 @@ impl OnnxSpotter {
                 bonus = gained;
                 path.state = state;
                 if state == ROOT {
-                    path = Path {
-                        log_prob: path.log_prob,
-                        ..Path::start()
-                    };
+                    path = Path::start();
                 }
             } else {
                 path.trailing_blanks += 1;
