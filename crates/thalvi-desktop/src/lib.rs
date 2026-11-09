@@ -8,6 +8,7 @@ pub mod claim;
 pub mod config;
 pub mod cues;
 pub mod delivery;
+pub mod device;
 pub mod draft;
 pub mod engine;
 pub mod entries;

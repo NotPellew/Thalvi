@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::Serialize;
 use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
+use thalvi_desktop::device::Device;
 use thalvi_desktop::engine::EngineState;
 use thalvi_desktop::local::LocalRecognizer;
 use thalvi_desktop::report::{UserError, causes};
@@ -147,15 +148,22 @@ impl LastError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpeechLoad {
     FromDisk,
-    Download,
+    /// The files of the GPU export are about twice the size of the CPU's.
+    Download {
+        gpu: bool,
+    },
 }
 
 impl SpeechLoad {
     pub async fn of(local: &LocalRecognizer<TransducerSource>) -> Self {
-        if local.source().is_cached().await {
+        let source = local.source();
+        let plan = source.plan().await;
+        if source.is_cached(&plan).await {
             Self::FromDisk
         } else {
-            Self::Download
+            Self::Download {
+                gpu: matches!(plan, Device::Gpu(_)),
+            }
         }
     }
 
@@ -163,7 +171,12 @@ impl SpeechLoad {
     pub fn notice(self) -> &'static str {
         match self {
             Self::FromDisk => "Loading the speech model.",
-            Self::Download => "Loading the speech model. The first time it downloads about 650 MB.",
+            Self::Download { gpu: false } => {
+                "Loading the speech model. The first time it downloads about 650 MB."
+            }
+            Self::Download { gpu: true } => {
+                "Loading the speech model. The first time it downloads about 1.3 GB."
+            }
         }
     }
 }
@@ -212,7 +225,7 @@ impl View {
         {
             return Status::Loading {
                 notice: load.notice().to_owned(),
-                downloading: load == SpeechLoad::Download,
+                downloading: matches!(load, SpeechLoad::Download { .. }),
             };
         }
         match (&self.mode, &self.engine) {

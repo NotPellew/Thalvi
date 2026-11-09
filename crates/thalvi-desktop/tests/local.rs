@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::Duration;
 
 use serde_json::Value;
+use thalvi_desktop::device::{Device, Fallback, Gpu};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::local::{LocalRecognizer, ModelSource, SpeechModel, SpeechStream};
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
@@ -25,6 +26,7 @@ type Reply = Result<Vec<RecognizerEvent>, RecognizerError>;
 
 /// Answers frame `n` with `script(n)`; the first frame waits for `gate` when one is given.
 struct Fake {
+    device: Device,
     script: fn(usize) -> Reply,
     gate: Mutex<Option<mpsc::Receiver<()>>>,
     seen: Arc<AtomicUsize>,
@@ -70,6 +72,10 @@ struct FakeStream {
 
 impl SpeechModel for Fake {
     type Stream = FakeStream;
+
+    fn device(&self) -> Device {
+        self.device.clone()
+    }
 
     fn stream(&self) -> FakeStream {
         FakeStream {
@@ -118,6 +124,22 @@ fn rig(
     gate: Option<mpsc::Receiver<()>>,
     failures: usize,
 ) -> Rig {
+    rig_on(
+        name,
+        Device::Cpu(Fallback::CpuModel),
+        script,
+        gate,
+        failures,
+    )
+}
+
+fn rig_on(
+    name: &str,
+    device: Device,
+    script: fn(usize) -> Reply,
+    gate: Option<mpsc::Receiver<()>>,
+    failures: usize,
+) -> Rig {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("local-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     let kinds = RecordKinds {
@@ -128,6 +150,7 @@ fn rig(
     let (done_tx, done) = mpsc::channel();
     let seen = Arc::new(AtomicUsize::new(0));
     let fake = Fake {
+        device,
         script,
         gate: Mutex::new(gate),
         seen: Arc::clone(&seen),
@@ -222,11 +245,71 @@ async fn partials_and_finals_arrive_in_order_and_the_recognition_is_reported() {
     assert_eq!(metric["event"], "desktop_local_stt");
     assert_eq!(metric["outcome"], "ok");
     assert_eq!(metric["engine"], "local");
-    assert_eq!(metric["device"], "cpu");
     assert_eq!(metric["model"], "fake-model");
     assert_eq!(metric["frames"], 4);
     assert!(metric["duration_ms"].as_f64().is_some());
     assert!(metric["text_late_max_ms"].as_f64().is_some());
+}
+
+#[tokio::test]
+async fn the_load_and_each_recognition_report_the_device_and_any_reason_for_the_cpu() {
+    let rtx = Gpu {
+        name: "NVIDIA GeForce RTX 5070 Ti".to_owned(),
+        api: "Vulkan",
+    };
+    for (name, device, expected) in [
+        (
+            "gpu",
+            Device::Gpu(rtx),
+            serde_json::json!({"device": "gpu", "gpu": "NVIDIA GeForce RTX 5070 Ti", "gpu_api": "Vulkan"}),
+        ),
+        (
+            "no-gpu",
+            Device::Cpu(Fallback::NoUsableGpu),
+            serde_json::json!({"device": "cpu", "fallback": "no_usable_gpu"}),
+        ),
+        (
+            "driver",
+            Device::Cpu(Fallback::DriverFailed),
+            serde_json::json!({"device": "cpu", "fallback": "driver_failed"}),
+        ),
+        (
+            "partial",
+            Device::Cpu(Fallback::CannotRunFully),
+            serde_json::json!({"device": "cpu", "fallback": "cannot_run_fully"}),
+        ),
+        (
+            "cpu-model",
+            Device::Cpu(Fallback::CpuModel),
+            serde_json::json!({"device": "cpu", "fallback": "cpu_model"}),
+        ),
+        (
+            "windows",
+            Device::Cpu(Fallback::WindowsUnsupported),
+            serde_json::json!({"device": "cpu", "fallback": "windows_unsupported"}),
+        ),
+    ] {
+        let rig = rig_on(&format!("device-{name}"), device, dictation, None, 0);
+        let mut session = rig.recognizer.connect().await.expect("connects");
+        session.send_frame(&FRAME).await.expect("sends");
+        session.close().await;
+        let lines = rig.metrics().await;
+        for event in ["desktop_speech_load", "desktop_local_stt"] {
+            let line = lines
+                .iter()
+                .find(|line| line["event"] == event)
+                .unwrap_or_else(|| panic!("{name}: no {event} line"));
+            for (key, value) in expected.as_object().expect("object") {
+                assert_eq!(&line[key], value, "{name}: {event} {key}");
+            }
+            let other = if expected.get("fallback").is_some() {
+                "gpu"
+            } else {
+                "fallback"
+            };
+            assert!(line.get(other).is_none(), "{name}: {event} carries {other}");
+        }
+    }
 }
 
 fn fails_on_the_third_frame(n: usize) -> Reply {
@@ -330,4 +413,58 @@ async fn a_catalog_model_that_cannot_be_provided_fails_with_the_model_errors_own
             .starts_with("Could not save the speech model nemotron_160ms.encoder.int8.onnx in "),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn a_catalog_model_is_cached_for_a_device_when_the_files_that_device_loads_are_on_disk() {
+    let rtx = Device::Gpu(Gpu {
+        name: "NVIDIA GeForce RTX 5070 Ti".to_owned(),
+        api: "Vulkan",
+    });
+    let cpu = Device::Cpu(Fallback::NoUsableGpu);
+    let model = CatalogSpeech::Unified160ms;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("local-cached");
+    let _ = std::fs::remove_dir_all(&dir);
+    let source = TransducerSource::new(
+        ModelStore::in_dir(&dir),
+        SpeechChoice::Catalog(model),
+        &WordList::default(),
+    );
+    let on_disk = |assets: thalvi_desktop::models::SpeechAssets<'_>| {
+        for asset in [
+            Some(assets.encoder),
+            assets.encoder_data,
+            Some(assets.decoder),
+            Some(assets.joiner),
+            Some(assets.tokens),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = dir.join(asset.file_name);
+            std::fs::create_dir_all(path.parent().expect("a folder")).expect("folder");
+            std::fs::File::create(path)
+                .expect("file")
+                .set_len(asset.size)
+                .expect("size");
+        }
+    };
+    assert_eq!(
+        [source.is_cached(&cpu).await, source.is_cached(&rtx).await],
+        [false, false],
+        "nothing is on disk"
+    );
+    on_disk(model.assets());
+    assert_eq!(
+        [source.is_cached(&cpu).await, source.is_cached(&rtx).await],
+        [true, false],
+        "the int8 files serve only the CPU"
+    );
+    on_disk(model.assets_on(&rtx));
+    assert_eq!(
+        [source.is_cached(&cpu).await, source.is_cached(&rtx).await],
+        [true, true],
+        "the fp16 files serve the GPU"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -368,6 +368,7 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::validate_wake_model_choices,
             commands::download_wake_model,
             commands::list_speech_models,
+            commands::speech_device,
             commands::download_speech_model,
             commands::open_speech_model_source,
             commands::check_speech_entry,

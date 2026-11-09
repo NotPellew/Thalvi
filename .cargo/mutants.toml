@@ -2,6 +2,9 @@
 exclude_globs = [
     "crates/thalvi-desktop/src/host/windows.rs",
     "crates/thalvi-desktop/src/host/windows/**",
+    # Dawn and ONNX Runtime FFI that needs a GPU, which CI has none of, and its Windows stand-in: the placement rule they apply is tested in device.rs.
+    "crates/thalvi-desktop/src/device/webgpu.rs",
+    "crates/thalvi-desktop/src/device/cpu_only.rs",
     "crates/thalvi-app/src/menu_entry/windows.rs",
     # Test doubles for the integration tests, not shipped behavior.
     "crates/thalvi-desktop/src/engine/fakes.rs",
@@ -27,5 +30,6 @@ exclude_re = [
     "impl Running for Live",
     "watch_hold_keys",
     "overlay_takes_clicks",
+    "crates/thalvi-app/src/(app|commands).rs.*replace (start|list_speech_models|speech_device|download_speech_model) ->",
     "get_hold_key_unavailable",
 ]

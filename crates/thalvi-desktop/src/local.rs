@@ -10,6 +10,7 @@ use serde_json::json;
 use tokio::sync::OnceCell;
 use tokio::sync::mpsc as events;
 
+use crate::device::Device;
 use crate::frame::Frame;
 use crate::metrics::{Event, Metrics};
 use crate::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
@@ -17,6 +18,9 @@ use crate::recognizer::{Recognizer, RecognizerError, RecognizerEvent, Recognizer
 /// A speech model that can start independent recognition streams.
 pub trait SpeechModel: Send + Sync + 'static {
     type Stream: SpeechStream;
+
+    /// Where the model runs.
+    fn device(&self) -> Device;
 
     /// A stream with fresh state; the model's weights are shared.
     fn stream(&self) -> Self::Stream;
@@ -79,11 +83,15 @@ impl<S: ModelSource> LocalRecognizer<S> {
             .get_or_try_init(|| async {
                 let started = Instant::now();
                 let loaded = self.source.load().await;
+                let fields = json!({"model": self.name});
                 self.metrics.metric(
                     Event::SpeechLoad,
                     if loaded.is_ok() { "ok" } else { "error" },
                     Some(started.elapsed()),
-                    json!({"model": self.name}),
+                    match &loaded {
+                        Ok(model) => model.device().tag(fields),
+                        Err(_) => fields,
+                    },
                 );
                 loaded.map(Arc::new)
             })
@@ -101,6 +109,7 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let work = Work {
             stream: model.stream(),
+            device: model.device(),
             frames: frames_rx,
             events: events_tx,
             cancelled: Arc::clone(&cancelled),
@@ -158,6 +167,7 @@ impl RecognizerSession for LocalSession {
 
 struct Work<S> {
     stream: S,
+    device: Device,
     frames: mpsc::Receiver<(Instant, Frame)>,
     events: events::UnboundedSender<Result<RecognizerEvent, RecognizerError>>,
     cancelled: Arc<AtomicBool>,
@@ -221,15 +231,14 @@ impl<S: SpeechStream> Work<S> {
             Event::LocalStt,
             outcome,
             Some(tally.model),
-            json!({
+            self.device.tag(json!({
                 "engine": "local",
-                "device": "cpu",
                 "model": self.name,
                 "frames": tally.frames,
                 "model_mean_ms": mean.as_secs_f64() * 1000.0,
                 "model_max_ms": tally.slowest.as_secs_f64() * 1000.0,
                 "text_late_max_ms": tally.late.as_secs_f64() * 1000.0,
-            }),
+            })),
         );
     }
 }
