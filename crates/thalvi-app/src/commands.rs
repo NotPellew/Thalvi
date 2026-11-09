@@ -435,7 +435,7 @@ pub fn get_draft(state: State<'_, AppState>) -> Option<DraftView> {
     state.drafts.view()
 }
 
-/// Keeps the edited text. Nothing is recognized, copied or typed.
+/// Keeps the edited text. Nothing is recognized, copied or pasted.
 #[tauri::command]
 pub fn edit_draft(text: String, state: State<'_, AppState>) -> Result<(), String> {
     state.drafts.edit(text).map_err(|error| error.to_string())

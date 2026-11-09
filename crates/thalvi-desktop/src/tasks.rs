@@ -34,7 +34,7 @@ impl UserError for NotConfigured {
 }
 
 /// The refusal for every Discord message: live Discord actions are switched off.
-const DISCORD_OFF: &str = "Discord messages are switched off for now. Nothing was typed or sent.";
+const DISCORD_OFF: &str = "Discord messages are switched off for now. Nothing was pasted or sent.";
 
 /// Chooses the task `text` asks for: a configured phrase, else `open <host>`.
 ///

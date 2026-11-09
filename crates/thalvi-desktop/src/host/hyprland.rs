@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::command::{CommandError, CommandRunner, SystemRunner, tool, wl_copy};
 use super::{
-    App, Delivered, HoldSource, Host, HostError, Modifier, OVERLAY_TITLE, Shortcut, TypedText,
+    App, Delivered, HoldSource, Host, HostError, Modifier, OVERLAY_TITLE, PasteText, Shortcut,
     WebUrl,
 };
 use crate::hold::{HoldKey, HoldKind};
@@ -68,7 +68,7 @@ const BROWSERS: [(&str, &str); 6] = [
 const NO_FOCUSED_WINDOW: &str = "The desktop did not identify the focused window.";
 const INVALID_WINDOW_LIST: &str = "The desktop returned an invalid window list.";
 const INVALID_MONITOR_LIST: &str = "The desktop returned an invalid monitor list.";
-const NOTHING_TYPED: &str = " Nothing was typed.";
+const NOTHING_TYPED: &str = " Nothing was pasted.";
 
 /// One window as `hyprctl -j` prints it; any field may be absent, as for no focused window.
 #[derive(Deserialize)]
@@ -118,6 +118,49 @@ fn nothing_typed(error: HostError) -> HostError {
         HostError::NothingTyped(message) => HostError::NothingTyped(message + NOTHING_TYPED),
         partial @ HostError::MaybePartial(_) => partial,
     }
+}
+
+/// Window classes of terminals, compared ignoring case; Ctrl+V sends these a raw `^V`, so they
+/// paste with Ctrl+Shift+V.
+const TERMINAL_CLASSES: [&str; 14] = [
+    "kitty",
+    "foot",
+    "footclient",
+    "alacritty",
+    "org.wezfurlong.wezterm",
+    "com.mitchellh.ghostty",
+    "org.gnome.console",
+    "org.gnome.terminal",
+    "gnome-terminal-server",
+    "org.kde.konsole",
+    "konsole",
+    "xterm",
+    "org.gnome.ptyxis",
+    "ptyxis",
+];
+
+/// The `wtype` arguments that paste what is on the clipboard into `target`, when `paste`, then
+/// press Enter, when `enter`.
+fn paste_keys(target: &Window, paste: bool, enter: bool) -> Vec<&'static str> {
+    let mut keys = Vec::new();
+    if paste {
+        let terminal = TERMINAL_CLASSES.contains(&target.class.to_lowercase().as_str());
+        keys.extend(if terminal {
+            &[
+                "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl",
+            ][..]
+        } else {
+            &["-M", "ctrl", "-k", "v", "-m", "ctrl"][..]
+        });
+    }
+    if enter {
+        // Terminal agents read an Enter that arrives right after a paste as a new line.
+        if paste {
+            keys.extend(["-s", "250"]);
+        }
+        keys.extend(["-k", "Return"]);
+    }
+    keys
 }
 
 fn key_arguments(shortcut: &Shortcut) -> Vec<&str> {
@@ -210,22 +253,25 @@ impl<R: CommandRunner> Host for Hyprland<R> {
     fn deliver(
         &self,
         target: &Window,
-        text: &TypedText,
+        text: &PasteText,
         enter: bool,
     ) -> Result<Delivered, HostError> {
+        // Copied first, so the text is on the clipboard whatever happens to the window.
+        if !text.as_str().is_empty() {
+            wl_copy(&self.run, text.as_str()).map_err(nothing_typed)?;
+        }
         self.focus(target).map_err(nothing_typed)?;
-        let mut args = vec!["-"];
-        if enter {
-            // Terminal agents read an Enter that arrives right after typed text as a new line.
-            args.extend(["-s", "250", "-k", "Return"]);
+        let keys = paste_keys(target, !text.as_str().is_empty(), enter);
+        if keys.is_empty() {
+            return Ok(Delivered::InWindow);
         }
         self.run
-            .run("wtype", &args, Some(text.as_str()))
+            .run("wtype", &keys, None)
             .map(|_| Delivered::InWindow)
             .map_err(|error| match error {
                 CommandError::NotInstalled(_) => nothing_typed(tool(&error)),
                 CommandError::TimedOut(_) | CommandError::Failed { .. } => HostError::MaybePartial(
-                    "Typing failed or stopped partway. Check the target before retrying."
+                    "Pasting failed or stopped partway. Check the target before retrying."
                         .to_owned(),
                 ),
             })
@@ -405,8 +451,8 @@ mod tests {
         })
     }
 
-    fn typed(text: &str) -> TypedText {
-        TypedText::new(text).unwrap()
+    fn paste(text: &str) -> PasteText {
+        PasteText::new(text).unwrap()
     }
 
     #[test]
@@ -484,72 +530,107 @@ mod tests {
     }
 
     #[test]
-    fn delivery_refocuses_the_original_window_and_sends_the_text_on_stdin_only() {
-        let text = "--help $(not-a-command) `nor-this` café 👋";
-        for (enter, wtype) in [
-            (false, format!("wtype - <{text}>")),
-            (true, format!("wtype - -s 250 -k Return <{text}>")),
+    fn delivery_copies_then_refocuses_the_original_window_and_presses_the_paste_shortcut() {
+        let text = "--help $(not-a-command) `nor-this` café 👋\nsecond line";
+        let ctrl_v = "wtype -M ctrl -k v -m ctrl";
+        let ctrl_shift_v = "wtype -M ctrl -M shift -k v -m shift -m ctrl";
+        for (class, enter, wtype) in [
+            ("browser", false, ctrl_v.to_owned()),
+            ("browser", true, format!("{ctrl_v} -s 250 -k Return")),
+            ("kitty", false, ctrl_shift_v.to_owned()),
+            (
+                "Alacritty",
+                true,
+                format!("{ctrl_shift_v} -s 250 -k Return"),
+            ),
+            ("org.gnome.Console", false, ctrl_shift_v.to_owned()),
         ] {
             let host = desktop(
-                vec![row("0x1", 1, "browser", 0), row("0x2", 2, "terminal", 1)],
+                vec![row("0x1", 1, "other", 0), row("0x2", 2, class, 1)],
                 "0x1",
                 "0x2",
             );
             assert_eq!(
-                host.deliver(&window("0x2", 2, "terminal"), &typed(text), enter),
+                host.deliver(&window("0x2", 2, class), &paste(text), enter),
                 Ok(Delivered::InWindow)
             );
             assert_eq!(
                 commands(&host),
                 [
+                    format!("wl-copy --type text/plain;charset=utf-8 <{text}>").as_str(),
                     "hyprctl -j clients",
                     "hyprctl dispatch focuswindow address:0x2",
                     "hyprctl -j activewindow",
                     wtype.as_str(),
-                ]
+                ],
+                "{class} enter={enter}"
             );
         }
     }
 
     #[test]
-    fn nothing_is_typed_when_the_target_is_gone_reused_or_not_focusable() {
+    fn submitting_nothing_presses_only_enter_and_leaves_the_clipboard_alone() {
+        let host = desktop(vec![row("0x1", 1, "kitty", 0)], "0x1", "0x1");
+        assert_eq!(
+            host.deliver(&window("0x1", 1, "kitty"), &paste(""), true),
+            Ok(Delivered::InWindow)
+        );
+        assert_eq!(
+            commands(&host).last().map(String::as_str),
+            Some("wtype -k Return")
+        );
+        assert!(
+            commands(&host)
+                .iter()
+                .all(|command| !command.starts_with("wl-copy"))
+        );
+    }
+
+    #[test]
+    fn nothing_is_pasted_when_the_target_is_gone_reused_or_not_focusable() {
         for (name, windows, lands_on, message) in [
             (
                 "closed",
                 vec![row("0x1", 1, "browser", 0)],
                 "0x1",
-                "The original window closed. Nothing was typed.",
+                "The original window closed. Nothing was pasted.",
             ),
             (
                 "address reused by another process",
                 vec![row("0x2", 99, "terminal", 0)],
                 "0x2",
-                "The original window closed. Nothing was typed.",
+                "The original window closed. Nothing was pasted.",
             ),
             (
                 "focus did not move",
                 vec![row("0x1", 1, "browser", 0), row("0x2", 2, "terminal", 1)],
                 "0x1",
-                "The target could not be focused. Nothing was typed.",
+                "The target could not be focused. Nothing was pasted.",
             ),
         ] {
             let host = desktop(windows, "0x1", lands_on);
             assert_eq!(
-                host.deliver(&window("0x2", 2, "terminal"), &typed("hi"), true),
+                host.deliver(&window("0x2", 2, "terminal"), &paste("hi"), true),
                 Err(HostError::NothingTyped(message.to_owned())),
                 "{name}"
             );
+            // The text is kept on the clipboard, and no key is pressed.
             assert!(
                 commands(&host)
                     .iter()
                     .all(|command| !command.starts_with("wtype")),
                 "{name}"
             );
+            assert_eq!(
+                commands(&host)[0],
+                "wl-copy --type text/plain;charset=utf-8 <hi>",
+                "{name}"
+            );
         }
     }
 
     #[test]
-    fn a_typing_tool_that_fails_after_focus_may_have_typed_part_of_the_text() {
+    fn a_key_tool_that_fails_after_focus_may_have_pasted_part_of_the_text() {
         for (error, expected) in [
             (
                 CommandError::Failed {
@@ -557,21 +638,21 @@ mod tests {
                     reason: None,
                 },
                 HostError::MaybePartial(
-                    "Typing failed or stopped partway. Check the target before retrying."
+                    "Pasting failed or stopped partway. Check the target before retrying."
                         .to_owned(),
                 ),
             ),
             (
                 CommandError::TimedOut("wtype".to_owned()),
                 HostError::MaybePartial(
-                    "Typing failed or stopped partway. Check the target before retrying."
+                    "Pasting failed or stopped partway. Check the target before retrying."
                         .to_owned(),
                 ),
             ),
             (
                 CommandError::NotInstalled("wtype".to_owned()),
                 HostError::Unsupported(
-                    "Desktop tool wtype is not installed. Nothing was typed.".to_owned(),
+                    "Desktop tool wtype is not installed. Nothing was pasted.".to_owned(),
                 ),
             ),
         ] {
@@ -589,11 +670,29 @@ mod tests {
                 }
             });
             assert_eq!(
-                host.deliver(&window("0x1", 1, "a"), &typed("hi"), false),
+                host.deliver(&window("0x1", 1, "a"), &paste("hi"), false),
                 Err(expected),
                 "{error:?}"
             );
         }
+    }
+
+    #[test]
+    fn nothing_is_pressed_when_the_text_cannot_be_put_on_the_clipboard() {
+        let host = host(|argv, _| match argv[0].as_str() {
+            "wl-copy" => Err(CommandError::NotInstalled("wl-copy".to_owned())),
+            _ => Ok(String::new()),
+        });
+        assert_eq!(
+            host.deliver(&window("0x1", 1, "a"), &paste("hi"), true),
+            Err(HostError::Unsupported(
+                "Desktop tool wl-copy is not installed. Nothing was pasted.".to_owned()
+            ))
+        );
+        assert_eq!(
+            commands(&host),
+            ["wl-copy --type text/plain;charset=utf-8 <hi>"]
+        );
     }
 
     #[test]

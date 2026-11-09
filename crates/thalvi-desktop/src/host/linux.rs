@@ -7,7 +7,7 @@ use std::time::Duration;
 use super::gnome::{self, Clipboard, Gnome};
 use super::hyprland::{Hyprland, Window};
 use super::{
-    App, Delivered, HoldSource, Host, HostError, RequestServer, TypedText, WebUrl, channel,
+    App, Delivered, HoldSource, Host, HostError, PasteText, RequestServer, WebUrl, channel,
 };
 use crate::hold::{HoldKey, HoldKind};
 
@@ -248,7 +248,7 @@ impl Desktop {
 
 /// A target from the other desktop, which the app never hands to this one.
 fn foreign() -> HostError {
-    HostError::NothingTyped("The target belongs to another desktop. Nothing was typed.".to_owned())
+    HostError::NothingTyped("The target belongs to another desktop. Nothing was pasted.".to_owned())
 }
 
 impl Host for Desktop {
@@ -278,7 +278,7 @@ impl Host for Desktop {
     fn deliver(
         &self,
         target: &Target,
-        text: &TypedText,
+        text: &PasteText,
         enter: bool,
     ) -> Result<Delivered, HostError> {
         match (self, target) {
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn a_target_names_its_window_or_the_clipboard_and_belongs_to_one_desktop() {
         let desktop = Desktop::Hyprland(Hyprland::system());
-        let text = TypedText::new("hi").unwrap();
+        let text = PasteText::new("hi").unwrap();
         assert_eq!(Target::Clipboard(Clipboard).to_string(), "the clipboard");
         assert_eq!(
             desktop.deliver(&Target::Clipboard(Clipboard), &text, false),

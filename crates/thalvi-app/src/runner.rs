@@ -307,7 +307,7 @@ impl Publisher {
     }
 
     /// A capture started at the wake: in `window` when one was bound, on a desktop that `copies`
-    /// the text to the clipboard or types it.
+    /// the text to the clipboard or pastes it.
     fn woke(&self, window: Option<String>, copies: bool) {
         self.update(|view| {
             view.copies = copies;
@@ -2042,7 +2042,7 @@ mod tests {
         fn deliver(
             &self,
             _: &String,
-            _: &thalvi_desktop::host::TypedText,
+            _: &thalvi_desktop::host::PasteText,
             _: bool,
         ) -> Result<thalvi_desktop::host::Delivered, thalvi_desktop::host::HostError> {
             self.called("deliver");
@@ -2157,7 +2157,7 @@ mod tests {
             (
                 request(CaptureRoute::Paste, "hello world"),
                 false,
-                vec!["deliver", "copy"],
+                vec!["deliver"],
                 Outcome::Accepted,
                 Some("Editor"),
                 Some(DraftOutcome::Delivered),
@@ -2260,7 +2260,7 @@ mod tests {
         let failure = |notice: &str| Failure {
             kind: FailureKind::Other,
             notice: notice.to_owned(),
-            headline: "Nothing was typed",
+            headline: "Nothing was pasted",
             causes: vec!["cause".to_owned()],
         };
         let done = Mode::Done {

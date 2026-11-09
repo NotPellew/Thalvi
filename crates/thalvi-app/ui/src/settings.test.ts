@@ -1974,9 +1974,9 @@ describe("last dictation", () => {
   it("shows the draft with how it ended and the window it was meant for", async () => {
     for (const [outcome, sentence] of [
       ["delivered", "Delivered. Meant for foot."],
-      ["cancelled", "You cancelled this one, so nothing was typed. Meant for foot."],
+      ["cancelled", "You cancelled this one, so nothing was pasted. Meant for foot."],
       ["failed", "This was not delivered. Meant for foot."],
-      ["maybePartial", "Typing stopped partway: some of this text may already be in the window. Check it there, or use Copy text. Meant for foot."],
+      ["maybePartial", "Pasting stopped partway: some of this text may already be in the window. Check it there, or use Copy text. Meant for foot."],
     ] as const) {
       document.body.innerHTML = '<div id="settings"></div>';
       root = document.getElementById("settings") as HTMLElement;
