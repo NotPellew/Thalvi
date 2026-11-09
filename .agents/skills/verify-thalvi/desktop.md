@@ -144,6 +144,17 @@ only loopback, so nothing leaves the machine and abstract unix sockets are the r
 - `pw-link -l` and `pw-cli ls Node` in `$H sh $R` with `PIPEWIRE_REMOTE=rig-pipewire` show
   that the app reads only `rig-mic`.
 
+## The NVIDIA GPU and the AppImage
+
+- The sandbox binds only the non-NVIDIA render node, so an app sees no NVIDIA GPU. `app-start --nvidia` (not with
+  `--hosted`) binds the NVIDIA device nodes into the app's sandbox and drops the Mesa-only EGL vendor list, which
+  makes NVIDIA's Vulkan driver fail to load.
+- A compositor that renders on the Radeon makes Mesa's device-select layer list the Radeon first, and that is the
+  adapter ONNX Runtime's WebGPU picks. `--env NODEVICE_SELECT=1` restores the RTX as the first device, as on a
+  desktop whose compositor renders on it.
+- An AppImage cannot mount in the sandbox (no FUSE). Extract it with `--appimage-extract` and give `app-start` a
+  wrapper script that `exec`s the extracted `AppRun`; `ctl` runs the same wrapper.
+
 ## GNOME
 
 `$H up --gnome` starts a headless `gnome-shell` instead of kwin and Hyprland, in the

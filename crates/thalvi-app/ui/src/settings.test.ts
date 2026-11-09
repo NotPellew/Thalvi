@@ -1168,6 +1168,77 @@ describe("the speech model catalog", () => {
     expect(download().hidden).toBe(true);
   });
 
+  it("names the hardware an on-device entry runs on in its row, and for a folder of the user's own says nothing", async () => {
+    const stub = stubBackend(local());
+    stub.backend.speechDevice.mockResolvedValue("Runs on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)");
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("speech");
+    const row = (): HTMLElement | null => root.querySelector(".trow.server");
+    expect(stub.backend.speechDevice).toHaveBeenCalledWith("nemotron_160ms");
+    expect(row()?.querySelector(".device")?.textContent).toBe("Runs on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)");
+
+    // The model loads behind the window: when the app's state changes, the row asks again.
+    stub.backend.speechDevice.mockResolvedValue("Runs on the CPU: no usable GPU");
+    stub.emit({ state: "loading", notice: "Loading the speech model." });
+    stub.emit({ state: "listening" });
+    await settle();
+    expect(row()?.querySelector(".device")?.textContent).toBe("Runs on the CPU: no usable GPU");
+
+    // A download finishes without a state change, so its end makes the row ask again too.
+    stub.backend.speechDevice.mockResolvedValue("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
+    stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null });
+    await settle();
+    expect(row()?.querySelector(".device")?.textContent).toBe("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
+
+    root.replaceChildren();
+    const folder = stubBackend(local("/models/mine"));
+    mountSettings(root, folder.backend);
+    await settle();
+    goTo("speech");
+    expect(folder.backend.speechDevice).not.toHaveBeenCalled();
+    expect(row()?.querySelector(".device")).toBeNull();
+  });
+
+  it("names the hardware each picked model runs on and asks again once its download is done", async () => {
+    const stub = stubBackend(local());
+    stub.backend.listSpeechModels.mockResolvedValueOnce([{ ...NEMOTRON }]);
+    stub.backend.speechDevice.mockResolvedValue("Will run on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)");
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("speech");
+    await editLocal();
+    expect(stub.backend.speechDevice).toHaveBeenCalledWith("nemotron_160ms");
+    expect(text(".device")).toBe("Will run on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)");
+
+    stub.backend.speechDevice.mockResolvedValue("Runs on the CPU: no usable GPU");
+    download().click();
+    await settle();
+    expect(text(".device")).toBe("Runs on the CPU: no usable GPU");
+  });
+
+  it("offers the GPU model's download, with its size, to a model that runs on the CPU because it is missing, and says what the next load does after", async () => {
+    const stub = stubBackend(local("unified_160ms"));
+    stub.backend.listSpeechModels.mockResolvedValueOnce([{ ...UNIFIED, size: 1_287_000_000 }]);
+    stub.backend.speechDevice.mockResolvedValue("Runs on the CPU: the GPU model isn't downloaded");
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("speech");
+    await editLocal();
+    expect(text(".unit")).toBe("1.3 GB");
+    expect(text(".badge")).toBe("Not downloaded");
+    expect(text(".device")).toBe("Runs on the CPU: the GPU model isn't downloaded");
+    expect(download().hidden).toBe(false);
+
+    stub.backend.speechDevice.mockResolvedValue("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
+    download().click();
+    await settle();
+    expect(stub.backend.downloadSpeechModel).toHaveBeenCalledWith("unified_160ms");
+    expect(text(".badge")).toBe("Downloaded");
+    expect(download().hidden).toBe(true);
+    expect(text(".device")).toBe("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
+  });
+
   it("shows the download's progress and flips the badge when it is done", async () => {
     const stub = await openCatalog();
     let finish: () => void = () => undefined;

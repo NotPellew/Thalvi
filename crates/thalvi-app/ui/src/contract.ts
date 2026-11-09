@@ -275,6 +275,8 @@ export interface Backend {
   /** Resolves when the model is on disk and verified; rejects with the plain reason it is not. */
   downloadSpeechModel(name: string): Promise<void>;
   onSpeechModelProgress(listener: (progress: SpeechModelProgress) => void): void;
+  /** Where the model runs, or will run when it loads, in plain words: the GPU, or the CPU and why. */
+  speechDevice(name: string): Promise<string>;
   /** Opens the model's page in the browser. */
   openSpeechModelSource(name: string): Promise<void>;
   /** Resolves when the entry's fields can be used; rejects with the plain reason they cannot. */

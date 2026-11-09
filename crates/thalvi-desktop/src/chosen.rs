@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::device::Adapters;
 use crate::entries::{LiveEntry, LiveKind};
 use crate::frame::Frame;
 use crate::local::{LocalRecognizer, LocalSession};
@@ -34,9 +35,15 @@ pub enum ChosenSession {
 
 impl Chosen {
     /// The recognizer for `entry`; nothing is fetched or loaded until [`Self::local`]'s `load`
-    /// or the first dictation.
+    /// or the first dictation. `adapters` keeps what the load's check of the graphics adapter finds.
     #[must_use]
-    pub fn new(entry: &LiveEntry, store: ModelStore, metrics: Metrics, phrases: &WordList) -> Self {
+    pub fn new(
+        entry: &LiveEntry,
+        store: ModelStore,
+        metrics: Metrics,
+        phrases: &WordList,
+        adapters: Adapters,
+    ) -> Self {
         match &entry.kind {
             LiveKind::ThalviServer(server) => {
                 Self::Server(ServerRecognizer::new(&entry.name, server.clone()))
@@ -46,7 +53,7 @@ impl Chosen {
             }
             LiveKind::OnDevice(choice) => Self::Local {
                 recognizer: Arc::new(LocalRecognizer::new(
-                    TransducerSource::new(store, choice.clone(), phrases),
+                    TransducerSource::new(store, choice.clone(), phrases, adapters),
                     choice.label(),
                     metrics,
                 )),

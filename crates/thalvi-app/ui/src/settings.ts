@@ -279,6 +279,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   backend.onAudio(showAudio);
   backend.onSpeechModelProgress((progress) => {
     live.speechModel(progress);
+    if (progress.status === "done") live.refresh();
   });
   backend.onOpenPage(open);
   backend.onSettingsChangedElsewhere(() => {

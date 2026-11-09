@@ -23,6 +23,7 @@ use thalvi_desktop::capture::{
     CaptureSession, Ending, EndingPauses, Endings, FinalStep, has_words,
 };
 use thalvi_desktop::claim::{Effect, Outcome, Resolution, Watch};
+use thalvi_desktop::device::Adapters;
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
 use thalvi_desktop::local::{ModelSource, SpeechModel, SpeechStream};
 use thalvi_desktop::models::{CatalogSpeech, ModelStore};
@@ -481,8 +482,13 @@ async fn speech_model(store: &ModelStore) -> Option<Transducer> {
         || SpeechChoice::Folder(PathBuf::from(&choice)),
         SpeechChoice::Catalog,
     );
-    let source = TransducerSource::new(store.clone(), choice, &WordList::default());
-    Some(source.load().await.expect("speech model loads"))
+    let source = TransducerSource::new(
+        store.clone(),
+        choice,
+        &WordList::default(),
+        Adapters::default(),
+    );
+    Some(source.load(|_| {}).await.expect("speech model loads"))
 }
 
 #[tokio::test]

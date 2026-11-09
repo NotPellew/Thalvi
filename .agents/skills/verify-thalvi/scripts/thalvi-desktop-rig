@@ -14,7 +14,7 @@ up [--size WxH] [--gnome] [--mic] [--offline]
                            start the compositors (or headless GNOME Shell); prints RUN_DIR=<R> last. --mic gives a
                            Hyprland run the private microphone a --gnome run always has; --offline puts every sandbox
                            of the run in a network namespace with only loopback
-app-start R BIN [--config F] [--env K=V]... [--tag NAME] [--trace] [--hosted]
+app-start R BIN [--config F] [--env K=V]... [--tag NAME] [--trace] [--hosted] [--nvidia]
                            start BIN (a thalvi-desktop binary) in its own sandbox; stdout/stderr go to R/out/app-NAME.log;
                            --trace records every socket the app and its children open to R/out/trace-NAME.txt (strace);
                            --hosted starts it from Hyprland, in the compositor's PID namespace, so its windows have
@@ -298,9 +298,9 @@ EOF
 
 cmd_app_start() {
   local r=$1 bin=$2; shift 2
-  local config="" tag trace=0 hosted=0
+  local config="" tag trace=0 hosted=0 nvidia=0
   tag=$(date +%H%M%S)
-  local -a envs=() plain=() wrap=()
+  local -a envs=() plain=() wrap=() gpu=()
   while [ $# -gt 0 ]; do
     case $1 in
       --config) config=$2; shift 2 ;;
@@ -308,10 +308,21 @@ cmd_app_start() {
       --tag) tag=$2; shift 2 ;;
       --trace) trace=1; shift ;;
       --hosted) hosted=1; shift ;;
+      --nvidia) nvidia=1; shift ;;
       *) die "app-start: unknown argument $1" ;;
     esac
   done
   [ -x "$bin" ] || die "no executable $bin"
+  # The app computes on the NVIDIA GPU, which the compositors never touch. NVIDIA's Vulkan driver fails to load
+  # while the Mesa-only EGL vendor list of the sandbox is set.
+  if [ "$nvidia" = 1 ]; then
+    [ "$hosted" = 0 ] || die "app-start: --nvidia does not combine with --hosted"
+    local node
+    gpu+=(--unsetenv __EGL_VENDOR_LIBRARY_FILENAMES)
+    for node in /dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-modeset; do
+      [ ! -e "$node" ] || gpu+=(--dev-bind "$node" "$node")
+    done
+  fi
   [ -z "$config" ] || { mkdir -p "$r/home/.config/thalvi"; cp "$config" "$r/home/.config/thalvi/desktop.json"; }
   local -a args extra
   mapfile -d '' args < <(sandbox_args "$r")
@@ -335,7 +346,7 @@ EOF
     touch "$r/app.hosted"
   else
     rm -f "$r/app.hosted"
-    launch_held "$r/out/app-$tag.log" "$r/app.pid" bwrap "${args[@]}" "${extra[@]}" "${envs[@]}" \
+    launch_held "$r/out/app-$tag.log" "$r/app.pid" bwrap "${args[@]}" "${extra[@]}" "${envs[@]}" "${gpu[@]}" \
       --ro-bind "$bin" /tmp/thalvi-desktop "${wrap[@]}" /tmp/thalvi-desktop
   fi
   echo "$bin" > "$r/app.bin"
