@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry, Status } from "./contract.ts";
 import settingsCss from "./settings.css?raw";
+import settingsLooksCss from "./settings-looks.css?raw";
 import { ELSEWHERE_TEXT, mountSettings, SAVED_MICROPHONE_TEXT, SAVED_TEXT } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO } from "./testing.ts";
 
@@ -2407,6 +2408,24 @@ describe("last dictation", () => {
     expect(root.querySelector<HTMLElement>('section[data-page="history"]')?.hidden).toBe(false);
     stub.openPage("nowhere");
     expect(root.querySelector<HTMLElement>('section[data-page="history"]')?.hidden).toBe(false);
+  });
+});
+
+describe("attached editor contrast", () => {
+  it.each(["gunmetal", "holo"])("uses a dark surface for the %s look", async (look) => {
+    const style = document.head.appendChild(document.createElement("style"));
+    style.textContent = settingsCss + settingsLooksCss;
+    try {
+      await open();
+      root.dataset["look"] = look;
+      goTo("speech");
+      button("Edit").click();
+      const editor = root.querySelector<HTMLElement>(".table > .editor");
+      if (!editor) throw new Error("no attached editor");
+      expect(getComputedStyle(editor).backgroundColor).toBe("rgb(16, 20, 24)");
+    } finally {
+      style.remove();
+    }
   });
 });
 

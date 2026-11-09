@@ -8,6 +8,6 @@ export default defineConfig({
   test: {
     include: ["src/**/*.test.ts"],
     environment: "jsdom",
-    css: { include: [/settings\.css/] },
+    css: { include: [/settings(?:-looks)?\.css/] },
   },
 });
