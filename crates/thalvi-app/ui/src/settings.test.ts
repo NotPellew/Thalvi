@@ -131,7 +131,7 @@ describe("pages", () => {
         groups: {
           "Live dictation": ["speech servers", "word list"],
           "Second pass": ["second-pass servers"],
-          Writing: ["writing endpoint address", "writing model", "writing api key"],
+          Writing: ["writing endpoint address", "writing model", "writing api key", "writing prompt"],
         },
       },
       {
@@ -1331,6 +1331,66 @@ describe("writing", () => {
     button("Save").click();
     await settle();
     expect(stub.backend.saveSettings.mock.calls[1]?.[0].writing).toEqual({ ...writing, model: "updated", api_key: "" });
+  });
+
+  describe("prompt", () => {
+    const fallback = SETTINGS.writing_default_prompt;
+    const area = (): HTMLTextAreaElement => rowOf("Writing prompt").querySelector("textarea") as HTMLTextAreaElement;
+    const restore = (): HTMLButtonElement => button("Restore default prompt");
+    const edit = (value: string): void => {
+      area().value = value;
+      area().dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const saved = { url: endpoint.url, model: endpoint.model, has_key: true };
+
+    it("shows the default, saves an edit with the endpoint, and restores the default", async () => {
+      const stub = await open({ ...SETTINGS, writing: saved });
+      goTo("speech");
+      expect(area().value).toBe(fallback);
+      expect(restore().disabled).toBe(true);
+
+      edit("Write short emails.\nNo greeting.");
+      expect(restore().disabled).toBe(false);
+      button("Save").click();
+      await settle();
+      expect(sent(stub).writing).toEqual({ ...saved, prompt: "Write short emails.\nNo greeting." });
+
+      restore().click();
+      expect(area().value).toBe(fallback);
+      expect(restore().disabled).toBe(true);
+      button("Save").click();
+      await settle();
+      expect(stub.backend.saveSettings.mock.calls[1]?.[0].writing).toEqual(saved);
+    });
+
+    it("shows a saved prompt when Settings is reopened and keeps it through other edits", async () => {
+      const writing = { ...saved, prompt: "Be brief." };
+      const stub = await open({ ...SETTINGS, writing });
+      goTo("speech");
+      expect(area().value).toBe("Be brief.");
+      expect(restore().disabled).toBe(false);
+      type(control("Writing model", "input"), "updated");
+      button("Save").click();
+      await settle();
+      expect(sent(stub).writing).toEqual({ ...writing, model: "updated" });
+    });
+
+    it("does not drop an edited prompt when the endpoint is empty, and shows the refusal for a blank one", async () => {
+      const stub = await open();
+      goTo("speech");
+      edit("Be brief.");
+      button("Save").click();
+      await settle();
+      expect(sent(stub).writing).toEqual({ url: "", model: "", prompt: "Be brief." });
+
+      stub.backend.saveSettings.mockRejectedValue("writing.prompt must not be blank. Restore the default to start over.");
+      edit("  ");
+      button("Save").click();
+      await settle();
+      expect(root.querySelector(".err")?.textContent).toBe("writing.prompt must not be blank. Restore the default to start over.");
+      expect(area().value).toBe("  ");
+      expect(stub.backend.saveSettings.mock.calls[1]?.[0].writing).toEqual({ url: "", model: "", prompt: "  " });
+    });
   });
 
   function sent_writing_fields(): string[] {

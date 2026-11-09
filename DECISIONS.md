@@ -145,6 +145,10 @@ areas your change touches. Editing rules are in
   recognized words to an OpenAI-compatible endpoint from Settings and pastes what streams back; no context, no
   Enter, 15 s at most; any failure pastes nothing and puts the words on the clipboard. Why: dictation then needs
   no server, and text the user did not say is never sent unread. Rejected: the Thalvi server, app-aware tone, write-and-send.
+- **The writing prompt is a stored override of one built-in default.** `writing.prompt` is the system message; it is
+  saved only when it differs from the default, and a blank one is refused where the config loads. Why: users who never
+  edited it get a better default later, and Settings, the agent surface and the file share one check. Rejected:
+  storing the default text, a prompt without an endpoint, one prompt per opening phrase (#291).
 - **Hold release flush.** At release a hold sends 800 ms of generated silence, kept out of the recording, and pastes on the next
   final or after 250 ms. Why: a streaming recognizer emits a word only after audio past it; measured headless on the server
   recognizer, no last word lost in 336 releases (75% before when released on the word's end). Rejected: a fixed 500 ms tail;

@@ -20,6 +20,7 @@ import type {
   SpeechEntry,
   WakeModelInfo,
   SwitchState,
+  WritingSettings,
 } from "./contract.ts";
 import { errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
@@ -122,6 +123,7 @@ export function row(label: string, hint: string | null, control: Field | HTMLEle
   const labelable =
     field.field instanceof HTMLInputElement ||
     field.field instanceof HTMLSelectElement ||
+    field.field instanceof HTMLTextAreaElement ||
     field.field instanceof HTMLButtonElement;
   const name =
     labelable && field.field
@@ -1075,6 +1077,19 @@ function speech(context: PageContext): HTMLElement[] {
   const writingModel = controls.text(writing?.model ?? "", () => { syncWriting(); });
   const writingKey = controls.text(writing?.api_key ?? "", () => { syncWriting(true); }, { type: "password", placeholder: writing?.has_key === true ? "A key is saved" : "" });
   const writingInputs = [writingUrl, writingModel, writingKey].map((field) => field.field as HTMLInputElement);
+  const defaultPrompt = draft.writing_default_prompt;
+  const promptArea = el("textarea", { id: uid("f"), rows: "8", spellcheck: "false" });
+  promptArea.value = writing?.prompt ?? defaultPrompt;
+  const restorePrompt = button("Restore default prompt", () => {
+    promptArea.value = defaultPrompt;
+    syncWriting();
+    controls.touched();
+  }, "quiet");
+  promptArea.addEventListener("input", () => {
+    syncWriting();
+    controls.touched();
+  });
+  const writingPromptField = { node: el("div", { class: "stack wide" }, promptArea, restorePrompt), field: promptArea };
   const clearWritingKey = button("Clear saved writing key", () => {
     const input = writingKey.field as HTMLInputElement;
     input.value = "";
@@ -1086,12 +1101,21 @@ function speech(context: PageContext): HTMLElement[] {
   clearWritingKey.hidden = writing?.has_key !== true;
   const writingKeyField = { node: el("div", { class: "stack" }, writingKey.node, clearWritingKey), field: writingKey.field };
 
+  /** The prompt is sent only when it is not the default, so an unchanged one follows future defaults. */
   function syncWriting(replaceKey = false): void {
     const [urlInput, modelInput, keyInput] = writingInputs;
-    draft.writing = writingInputs.every((input) => input.value.trim() === "")
-      ? null
-      : { ...draft.writing, url: urlInput?.value ?? "", model: modelInput?.value ?? "", ...(replaceKey ? { api_key: keyInput?.value ?? "" } : {}) };
+    const custom = promptArea.value.trim() !== defaultPrompt.trim();
+    restorePrompt.disabled = !custom;
+    if (!custom && writingInputs.every((input) => input.value.trim() === "")) {
+      draft.writing = null;
+      return;
+    }
+    const next: WritingSettings = { ...draft.writing, url: urlInput?.value ?? "", model: modelInput?.value ?? "", ...(replaceKey ? { api_key: keyInput?.value ?? "" } : {}) };
+    if (custom) next.prompt = promptArea.value;
+    else delete next.prompt;
+    draft.writing = next;
   }
+  restorePrompt.disabled = promptArea.value.trim() === defaultPrompt.trim();
 
   const words = wordListTable(draft, controls);
   const wordProblem = note();
@@ -1153,6 +1177,11 @@ function speech(context: PageContext): HTMLElement[] {
     ),
     row("Writing model", "The model the endpoint should use.", writingModel),
     row("Writing API key", "Stored in the desktop config file; unchanged keeps the saved key.", writingKeyField),
+    row(
+      "Writing prompt",
+      "The instructions the writing model gets with every dictation; the words you said go in as the message itself. Blank is not allowed. Saving never calls the model.",
+      writingPromptField,
+    ),
   ];
 }
 
