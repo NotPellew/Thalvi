@@ -1185,6 +1185,12 @@ describe("the speech model catalog", () => {
     await settle();
     expect(row()?.querySelector(".device")?.textContent).toBe("Runs on the CPU: no usable GPU");
 
+    // A download finishes without a state change, so its end makes the row ask again too.
+    stub.backend.speechDevice.mockResolvedValue("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
+    stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null });
+    await settle();
+    expect(row()?.querySelector(".device")?.textContent).toBe("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
+
     root.replaceChildren();
     const folder = stubBackend(local("/models/mine"));
     mountSettings(root, folder.backend);
