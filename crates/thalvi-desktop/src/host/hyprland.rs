@@ -130,28 +130,64 @@ struct Devices {
     keyboards: Vec<Keyboard>,
 }
 
+/// An option as `hyprctl -j getoption` prints it.
+#[derive(Deserialize)]
+struct StringOption {
+    #[serde(default)]
+    str: String,
+    set: bool,
+}
+
+impl StringOption {
+    /// The text the user gave, if any; Hyprland prints `[[EMPTY]]` for an option nobody set.
+    fn value(self) -> Option<String> {
+        Some(self.str).filter(|value| self.set && !value.is_empty() && value != "[[EMPTY]]")
+    }
+}
+
 impl Keyboard {
-    /// The keycode that types `v` on this keyboard: in its first layout, since `sendshortcut`
-    /// sends the key with that layout's group whichever one is active, else in the first other
-    /// layout that has one, since a program matches Ctrl shortcuts against a Latin layout.
-    fn v_keycode(&self) -> Option<u32> {
-        let keymap = xkb::Keymap::new_from_names(
-            &xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
+    fn keymap(&self, context: &xkb::Context) -> Option<xkb::Keymap> {
+        xkb::Keymap::new_from_names(
+            context,
             &self.rules,
             &self.model,
             &self.layout,
             &self.variant,
             Some(self.options.clone()),
             xkb::KEYMAP_COMPILE_NO_FLAGS,
-        )?;
-        (0..keymap.num_layouts()).find_map(|layout| {
-            (keymap.min_keycode().raw()..=keymap.max_keycode().raw()).find(|code| {
-                keymap
-                    .key_get_syms_by_level(Keycode::new(*code), layout, 0)
-                    .contains(&Keysym::v)
-            })
-        })
+        )
     }
+}
+
+/// The keymap in a `kb_file`, which the layout names do not describe; `None` when the file is
+/// not an absolute or home path, cannot be read, or is not a keymap.
+fn keymap_file(context: &xkb::Context, path: &str) -> Option<xkb::Keymap> {
+    let path = match path.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir()?.join(rest),
+        None => Path::new(path).to_path_buf(),
+    };
+    if !path.is_absolute() {
+        return None;
+    }
+    xkb::Keymap::new_from_string(
+        context,
+        std::fs::read_to_string(path).ok()?,
+        xkb::KEYMAP_FORMAT_TEXT_V1,
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )
+}
+
+/// The keycode that types `v` in `keymap`: in its first layout, since `sendshortcut` sends the
+/// key with that layout's group whichever one is active, else in the first other layout that has
+/// one, since a program matches Ctrl shortcuts against a Latin layout.
+fn v_keycode(keymap: &xkb::Keymap) -> Option<u32> {
+    (0..keymap.num_layouts()).find_map(|layout| {
+        (keymap.min_keycode().raw()..=keymap.max_keycode().raw()).find(|code| {
+            keymap
+                .key_get_syms_by_level(Keycode::new(*code), layout, 0)
+                .contains(&Keysym::v)
+        })
+    })
 }
 
 /// States on a failure that nothing reached a window.
@@ -233,20 +269,34 @@ impl<R: CommandRunner> Hyprland<R> {
             .ok_or_else(|| HostError::NothingTyped(NO_FOCUSED_WINDOW.to_owned()))
     }
 
+    /// The keymap the main keyboard types with: the `kb_file` when one is set, else its layout
+    /// names; `None` when Hyprland does not say or the keymap cannot be rebuilt, so a wrong key is
+    /// never guessed from names that do not describe it.
+    fn keymap(&self) -> Option<xkb::Keymap> {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let option = self
+            .run
+            .run("hyprctl", &["-j", "getoption", "input:kb_file"], None)
+            .ok()?;
+        if let Some(path) = serde_json::from_str::<StringOption>(&option).ok()?.value() {
+            return keymap_file(&context, &path);
+        }
+        let mut keyboards = serde_json::from_str::<Devices>(&self.json("devices").ok()?)
+            .ok()?
+            .keyboards;
+        keyboards.sort_by_key(|keyboard| !keyboard.main);
+        keyboards.first()?.keymap(&context)
+    }
+
     /// How `sendshortcut` names the V key. Hyprland resolves a key name once per name, against the
     /// keyboard that last sent a key, so a layout change leaves the old key and a virtual keyboard
     /// such as wtype's fails it with "key not found"; a keycode from the keymap now in use does not.
+    /// With no keymap to read, the name is left to Hyprland: the worst it does is refuse the key.
     fn v_key(&self) -> String {
-        let code = self
-            .json("devices")
-            .ok()
-            .and_then(|devices| serde_json::from_str::<Devices>(&devices).ok())
-            .and_then(|devices| {
-                let mut keyboards = devices.keyboards;
-                keyboards.sort_by_key(|keyboard| !keyboard.main);
-                keyboards.first().and_then(Keyboard::v_keycode)
-            });
-        code.map_or_else(|| "v".to_owned(), |code| format!("code:{code}"))
+        self.keymap()
+            .as_ref()
+            .and_then(v_keycode)
+            .map_or_else(|| "v".to_owned(), |code| format!("code:{code}"))
     }
 
     /// Every window, most recently focused first.
@@ -490,6 +540,31 @@ mod tests {
         )
     }
 
+    /// `hyprctl -j getoption input:kb_file` when nobody set it.
+    const UNSET: &str = r#"{"option": "input:kb_file", "str": "[[EMPTY]]", "set": false }"#;
+
+    fn kb_file(path: &str) -> String {
+        format!(r#"{{"option": "input:kb_file", "str": "{path}", "set": true }}"#)
+    }
+
+    /// A `kb_file` of the given layout, written where the host can read it; returns its path.
+    fn keymap_file(name: &str, layout: &str, variant: &str) -> String {
+        let keymap = xkb::Keymap::new_from_names(
+            &xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
+            "",
+            "",
+            layout,
+            variant,
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .unwrap();
+        let path =
+            std::env::temp_dir().join(format!("thalvi-hyprland-{}-{name}.xkb", std::process::id()));
+        std::fs::write(&path, keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
     /// `hyprctl -j devices` for keyboards given as (layout, variant, active index, main).
     fn keyboards(keyboards: &[(&str, &str, u32, bool)]) -> String {
         let rows: Vec<String> = keyboards
@@ -535,6 +610,7 @@ mod tests {
                     *focused.lock().unwrap() = focus_lands_on.to_owned();
                     Ok("ok".to_owned())
                 }
+                ["hyprctl", "-j", "getoption", "input:kb_file"] => Ok(UNSET.to_owned()),
                 ["hyprctl", "-j", "devices"] => Ok(keyboards(&[("us", "", 0, true)])),
                 ["hyprctl", "dispatch", "sendshortcut", _] => Ok("ok\n".to_owned()),
                 _ => Ok(String::new()),
@@ -645,6 +721,7 @@ mod tests {
                 "hyprctl -j clients".to_owned(),
                 "hyprctl dispatch focuswindow address:0x2".to_owned(),
                 "hyprctl -j activewindow".to_owned(),
+                "hyprctl -j getoption input:kb_file".to_owned(),
                 "hyprctl -j devices".to_owned(),
                 format!("hyprctl dispatch sendshortcut {shortcut},code:55,address:0x2"),
             ];
@@ -653,32 +730,47 @@ mod tests {
         }
     }
 
+    type Reply = Result<String, CommandError>;
+
     #[test]
     fn the_paste_key_is_the_one_that_types_v_in_the_layout_now_in_use() {
-        let paste_key = |devices: Result<String, CommandError>| {
-            let host = host(move |_, _| devices.clone());
-            host.v_key()
-        };
-        for (name, devices, expected) in [
-            ("us", Ok(keyboards(&[("us", "", 0, true)])), "code:55"),
-            ("de", Ok(keyboards(&[("de", "", 0, true)])), "code:55"),
+        let dvorak_file = keymap_file("dvorak", "us", "dvorak");
+        let garbage =
+            std::env::temp_dir().join(format!("thalvi-hyprland-{}-bad.xkb", std::process::id()));
+        std::fs::write(&garbage, "not a keymap").unwrap();
+        let garbage = garbage.to_string_lossy().into_owned();
+        let us = || Ok(keyboards(&[("us", "", 0, true)]));
+        let unset = || Ok(UNSET.to_owned());
+        let failing = || Err(CommandError::TimedOut("hyprctl".to_owned()));
+        let cases: Vec<(&str, Reply, Reply, &str)> = vec![
+            ("us", unset(), us(), "code:55"),
+            (
+                "de",
+                unset(),
+                Ok(keyboards(&[("de", "", 0, true)])),
+                "code:55",
+            ),
             (
                 "dvorak, where V sits elsewhere",
+                unset(),
                 Ok(keyboards(&[("us", "dvorak", 0, true)])),
                 "code:60",
             ),
             (
                 "the first layout, though another is active",
+                unset(),
                 Ok(keyboards(&[("us,de", "dvorak,", 1, true)])),
                 "code:60",
             ),
             (
                 "a first layout without a V falls back to one that has it",
+                unset(),
                 Ok(keyboards(&[("ru,us", "", 0, true)])),
                 "code:55",
             ),
             (
                 "the main keyboard, not a virtual one",
+                unset(),
                 Ok(keyboards(&[
                     ("de", "", 0, false),
                     ("us", "dvorak", 0, true),
@@ -686,20 +778,59 @@ mod tests {
                 "code:60",
             ),
             (
+                "a kb_file, which the layout names do not describe",
+                Ok(kb_file(&dvorak_file)),
+                us(),
+                "code:60",
+            ),
+            (
+                "an option set to nothing is no kb_file",
+                Ok(kb_file("")),
+                us(),
+                "code:55",
+            ),
+            (
+                "a kb_file that is missing",
+                Ok(kb_file("/no/such/keymap.xkb")),
+                us(),
+                "v",
+            ),
+            (
+                "a kb_file that is no keymap",
+                Ok(kb_file(&garbage)),
+                us(),
+                "v",
+            ),
+            (
+                "a kb_file relative to the config",
+                Ok(kb_file("keymap.xkb")),
+                us(),
+                "v",
+            ),
+            ("an option Hyprland does not answer", failing(), us(), "v"),
+            ("an unreadable option", Ok("nope".to_owned()), us(), "v"),
+            (
                 "an unknown layout is left to Hyprland",
+                unset(),
                 Ok(keyboards(&[("no-such-layout", "", 0, true)])),
                 "v",
             ),
-            ("no keyboards", Ok(keyboards(&[])), "v"),
-            ("not json", Ok("nope".to_owned()), "v"),
-            (
-                "hyprctl failing",
-                Err(CommandError::TimedOut("hyprctl".to_owned())),
-                "v",
-            ),
-        ] {
-            assert_eq!(paste_key(devices), expected, "{name}");
+            ("no keyboards", unset(), Ok(keyboards(&[])), "v"),
+            ("not json", unset(), Ok("nope".to_owned()), "v"),
+            ("devices failing", unset(), failing(), "v"),
+        ];
+        for (name, option, devices, expected) in cases {
+            let host = host(move |argv, _| {
+                if argv.iter().any(|arg| arg == "getoption") {
+                    option.clone()
+                } else {
+                    devices.clone()
+                }
+            });
+            assert_eq!(host.v_key(), expected, "{name}");
         }
+        std::fs::remove_file(dvorak_file).unwrap();
+        std::fs::remove_file(garbage).unwrap();
     }
 
     #[test]
