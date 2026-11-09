@@ -183,8 +183,10 @@ impl<A: Win32> Windows<A> {
             accepted => {
                 // A key left down would stay pressed for every program, so let go of what was pressed.
                 let stuck = releases(&events[..accepted]);
-                if !stuck.is_empty() {
-                    self.api.send_input(&stuck);
+                if !stuck.is_empty() && self.api.send_input(&stuck) < stuck.len() {
+                    return Err(HostError::MaybePartial(format!(
+                        "{partial} A key Thalvi pressed may still be held down; tap it to let go."
+                    )));
                 }
                 Err(HostError::MaybePartial(partial.to_owned()))
             }
@@ -448,6 +450,8 @@ mod tests {
         /// Window that `focus` brings to the front; `None` when Windows refuses.
         focus_grants: Option<Hwnd>,
         accepts: Option<usize>,
+        /// How many events of a batch after the first Windows accepts; `accepts` when unset.
+        later_accepts: Option<usize>,
         focused: Vec<Hwnd>,
         sent: Vec<Vec<KeyEvent>>,
         clipboard: Vec<String>,
@@ -508,8 +512,13 @@ mod tests {
         }
         fn send_input(&self, events: &[KeyEvent]) -> usize {
             let mut state = self.0.lock().unwrap();
+            let limit = if state.sent.is_empty() {
+                state.accepts
+            } else {
+                state.later_accepts.or(state.accepts)
+            };
             state.sent.push(events.to_vec());
-            state.accepts.map_or(events.len(), |n| n.min(events.len()))
+            limit.map_or(events.len(), |n| n.min(events.len()))
         }
         fn set_clipboard(&self, text: &str) -> bool {
             let mut state = self.0.lock().unwrap();
@@ -823,6 +832,20 @@ mod tests {
                 "{accepted}"
             );
         }
+
+        // Windows refusing the key-ups too is told, since Ctrl would stay down.
+        let desktop = windows(Fake::desktop());
+        let target = desktop.capture_target().unwrap();
+        desktop.api.with(|state| {
+            state.accepts = Some(2);
+            state.later_accepts = Some(1);
+        });
+        let error = desktop.deliver(&target, &text("hello"), true).unwrap_err();
+        assert!(
+            matches!(&error, HostError::MaybePartial(notice) if notice.starts_with(MAYBE_PASTED) && notice.contains("still be held down")),
+            "{error:?}"
+        );
+        assert_eq!(desktop.api.read(|state| state.sent.len()), 2);
 
         let desktop = windows(Fake::desktop());
         let target = desktop.capture_target().unwrap();
