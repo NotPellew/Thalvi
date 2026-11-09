@@ -1135,7 +1135,7 @@ describe("the next dictation summary and state words", () => {
       ["on this computer, paused", local, { state: "paused" }, []],
       ["a server, loading", several, LOADING, []],
       ["a server, failed", several, FAILED, []],
-    ] as [string, () => Settings, Status, string[]][])("shows %s with %j", async (_name, settings, status, expected) => {
+    ] as [string, () => Settings, Status, string[]][])("offers the right actions for %s", async (_name, settings, status, expected) => {
       const stub = await open(settings());
       goTo("speech");
       await settle();
