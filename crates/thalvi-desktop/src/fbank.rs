@@ -565,6 +565,37 @@ mod tests {
     }
 
     #[test]
+    fn samples_reflect_before_the_stream_repeat_its_last_and_release_what_is_dropped() {
+        let mut samples = Samples {
+            kept: vec![10.0, 11.0, 12.0, 13.0],
+            offset: 0,
+        };
+        for (index, want) in [
+            (-5, 13.0),
+            (-4, 13.0),
+            (-3, 12.0),
+            (-2, 11.0),
+            (-1, 10.0),
+            (0, 10.0),
+            (3, 13.0),
+            (9, 13.0),
+        ] {
+            assert_eq!(samples.at(index), want, "sample {index}");
+        }
+        samples.drop_before(2);
+        assert_eq!(
+            (samples.kept.as_slice(), samples.offset),
+            (&[12.0, 13.0][..], 2)
+        );
+        for (index, want) in [(2, 12.0), (3, 13.0), (9, 13.0)] {
+            assert_eq!(samples.at(index), want, "sample {index} after the drop");
+        }
+        samples.drop_before(1);
+        assert_eq!((samples.kept.len(), samples.offset), (2, 2));
+        assert_eq!(samples.total(), 4);
+    }
+
+    #[test]
     fn whole_buffer_features_match_nemo_and_are_normalized_over_the_speech_alone() {
         // Expected values come from `NeMo`'s FilterbankFeatures with the unified model's
         // preprocessor settings, given this noise followed by silence in a longer buffer.
