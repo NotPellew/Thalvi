@@ -258,10 +258,10 @@ impl LogMel {
     fn frame(&self, number: usize) -> MelFrame {
         let start = (number * SHIFT + SHIFT / 2) as isize - (WINDOW / 2) as isize;
         let mut wave: [f32; WINDOW] = std::array::from_fn(|i| self.samples.at(start + i as isize));
+        // The first sample is not emphasized: the window is zero there.
         for i in (1..WINDOW).rev() {
             wave[i] -= PRE_EMPHASIS * wave[i - 1];
         }
-        wave[0] -= PRE_EMPHASIS * wave[0];
         self.tables.mel(&wave, &self.tables.periodic, |energy| {
             energy.max(f32::EPSILON).ln()
         })
@@ -377,10 +377,10 @@ impl KaldiFbank {
         for value in &mut wave {
             *value -= mean;
         }
+        // The first sample is not emphasized: the window is zero there.
         for i in (1..WINDOW).rev() {
             wave[i] -= PRE_EMPHASIS * wave[i - 1];
         }
-        wave[0] -= PRE_EMPHASIS * wave[0];
         let mut re = [0.0; FFT_SIZE];
         let mut im = [0.0; FFT_SIZE];
         for (i, (value, weight)) in wave.iter().zip(&self.tables.window).enumerate() {
@@ -562,6 +562,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn samples_reflect_before_the_stream_repeat_its_last_and_release_what_is_dropped() {
+        let mut samples = Samples {
+            kept: vec![10.0, 11.0, 12.0, 13.0],
+            offset: 0,
+        };
+        for (index, want) in [
+            (-5, 13.0),
+            (-4, 13.0),
+            (-3, 12.0),
+            (-2, 11.0),
+            (-1, 10.0),
+            (0, 10.0),
+            (3, 13.0),
+            (9, 13.0),
+        ] {
+            assert_eq!(samples.at(index), want, "sample {index}");
+        }
+        samples.drop_before(2);
+        assert_eq!(
+            (samples.kept.as_slice(), samples.offset),
+            (&[12.0, 13.0][..], 2)
+        );
+        for (index, want) in [(2, 12.0), (3, 13.0), (9, 13.0)] {
+            assert_eq!(samples.at(index), want, "sample {index} after the drop");
+        }
+        samples.drop_before(1);
+        assert_eq!((samples.kept.len(), samples.offset), (2, 2));
+        assert_eq!(samples.total(), 4);
     }
 
     #[test]

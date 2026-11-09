@@ -316,7 +316,11 @@ mod tests {
             assert_eq!(result, expected.map(str::to_owned), "{url:?} {model:?}");
         }
         let writing = Writing::new("http://host/v1", "m", "secret".to_owned(), None).unwrap();
-        assert!(!format!("{writing:?}").contains("secret"));
+        assert_eq!(writing.key(), "secret");
+        assert_eq!(
+            format!("{writing:?}"),
+            r#"Writing { url: "http://host/v1", model: "m", .. }"#
+        );
     }
 
     #[test]

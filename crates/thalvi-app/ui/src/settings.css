@@ -86,11 +86,12 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
 .note.why { margin: 4px 0 0; color: var(--amber); }
 .empty { color: var(--mut); }
 
-.bar { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 10px 22px; border-top: 1px solid var(--line); background: var(--surf); }
+.bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; padding: 10px 22px; border-top: 1px solid var(--line); background: var(--surf); }
 .msg { flex: 1; color: var(--mut); font-size: 12px; }
+.msg:empty { display: none; }
 .err { flex: 1; color: var(--warn); font-size: 12px; text-align: right; }
 .err:empty { display: none; }
-.msg:has(+ .err:not(:empty)) { display: none; }
+.msg:has(+ .err:not(:empty)) { flex: 1 0 100%; }
 
 .models { display: flex; flex-direction: column; gap: 6px; }
 .stack.wide > select { width: 100%; min-width: 0; }
@@ -116,8 +117,7 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
   .app > nav, #settings[data-look] .app > nav { width: auto; max-height: 40%; padding: 8px 10px; border-right: 0; border-bottom: 1px solid var(--line); }
   .items { flex-direction: row; flex-wrap: wrap; }
   .pages { padding: 14px 10px; }
-  .bar { flex-wrap: wrap; padding-inline: 10px; }
-  .msg:empty { display: none; }
+  .bar { padding-inline: 10px; }
   .bar .msg, #settings[data-look] .bar .err { flex: 1 0 100%; max-height: 6.5em; overflow-y: auto; overflow-wrap: anywhere; text-align: left; }
   .row { flex-direction: column; align-items: stretch; gap: 8px; }
   .what { max-width: none; }
