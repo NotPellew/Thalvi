@@ -121,7 +121,7 @@ areas your change touches. Editing rules are in
   Rejected: cutting at the spotted time, a recheck, acting on the spotter alone, judging on a short timer (24 of 36 finals came late), quoting dictated words.
 - **Delivery is a paste.** Dictation and writing go on the clipboard and the bound window gets Ctrl+V (Ctrl+Shift+V in a known Linux terminal class); text may hold line breaks and tabs, no other control character. Hyprland sends the keys with `sendshortcut` and the keycode of V from the first layout (libxkbcommon).
   Why: a paste inserts line breaks without Enter; GTK 3 ignores wtype's Ctrl keys, and `sendshortcut` keeps a key name's first keycode across layout changes.
-  Rejected: typing with Shift+Enter for line breaks, typing single lines and pasting multi-line text (two paths), wtype keys.
+  Rejected: typing with Shift+Enter for line breaks, typing single lines and pasting multi-line text (two paths), wtype keys, keeping multi-line text out of terminals (a shell with bracketed paste off runs pasted lines, as the user's own paste does).
 - **Check, then paste.** Delivery re-verifies the bound window just before pressing keys,
   which go to whatever window is focused, except Hyprland's paste keys, which are addressed to it. Why: Enter and Windows
   input cannot be addressed to one window, so a switch in those milliseconds can misdirect them.
