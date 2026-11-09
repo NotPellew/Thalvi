@@ -482,7 +482,7 @@ async fn speech_model(store: &ModelStore) -> Option<Transducer> {
         SpeechChoice::Catalog,
     );
     let source = TransducerSource::new(store.clone(), choice, &WordList::default());
-    Some(source.load().await.expect("speech model loads"))
+    Some(source.load(|_| {}).await.expect("speech model loads"))
 }
 
 #[tokio::test]

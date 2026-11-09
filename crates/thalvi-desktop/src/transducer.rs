@@ -11,7 +11,7 @@ use crate::boosting::{Joiner, PhraseTree, TreeState, greedy};
 use crate::fbank::{HOP, LogMel, MEL_BINS, MelFrame, WindowMel};
 use crate::frame::Frame;
 use crate::local::{ModelSource, SpeechModel, SpeechStream};
-use crate::models::{CatalogSpeech, ModelStore};
+use crate::models::{CatalogSpeech, ModelStore, SpeechProgress};
 use crate::phrases::WordList;
 use crate::recognizer::{RecognizerError, RecognizerEvent};
 use crate::runtime;
@@ -1198,31 +1198,22 @@ impl TransducerSource {
         }
     }
 
-    async fn files(&self) -> Result<TransducerFiles, RecognizerError> {
+    async fn files(
+        &self,
+        progress: impl FnMut(SpeechProgress),
+    ) -> Result<TransducerFiles, RecognizerError> {
         match &self.choice {
             SpeechChoice::Catalog(catalog) => {
                 let assets = catalog.assets();
+                self.store
+                    .fetch_speech(&assets, progress)
+                    .await
+                    .map_err(RecognizerError::from)?;
                 Ok(TransducerFiles {
-                    encoder: self
-                        .store
-                        .fetch(&assets.encoder)
-                        .await
-                        .map_err(RecognizerError::from)?,
-                    decoder: self
-                        .store
-                        .fetch(&assets.decoder)
-                        .await
-                        .map_err(RecognizerError::from)?,
-                    joiner: self
-                        .store
-                        .fetch(&assets.joiner)
-                        .await
-                        .map_err(RecognizerError::from)?,
-                    tokens: self
-                        .store
-                        .fetch(&assets.tokens)
-                        .await
-                        .map_err(RecognizerError::from)?,
+                    encoder: self.store.path(&assets.encoder),
+                    decoder: self.store.path(&assets.decoder),
+                    joiner: self.store.path(&assets.joiner),
+                    tokens: self.store.path(&assets.tokens),
                 })
             }
             SpeechChoice::Folder(dir) => Ok(TransducerFiles::in_folder(dir)),
@@ -1233,8 +1224,11 @@ impl TransducerSource {
 impl ModelSource for TransducerSource {
     type Model = Transducer;
 
-    async fn load(&self) -> Result<Transducer, RecognizerError> {
-        let files = self.files().await?;
+    async fn load(
+        &self,
+        progress: impl FnMut(SpeechProgress) + Send,
+    ) -> Result<Transducer, RecognizerError> {
+        let files = self.files(progress).await?;
         let phrases = self.phrases.clone();
         tokio::task::spawn_blocking(move || Transducer::load(&files, &phrases))
             .await

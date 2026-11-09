@@ -12,7 +12,7 @@ use serde_json::Value;
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::local::{LocalRecognizer, ModelSource, SpeechModel, SpeechStream};
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
-use thalvi_desktop::models::{CatalogSpeech, ModelStore};
+use thalvi_desktop::models::{CatalogSpeech, ModelStore, SpeechProgress};
 use thalvi_desktop::phrases::WordList;
 use thalvi_desktop::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
 use thalvi_desktop::report::UserError;
@@ -40,7 +40,13 @@ struct Source {
 impl ModelSource for Source {
     type Model = Fake;
 
-    fn load(&self) -> impl Future<Output = Result<Fake, RecognizerError>> + Send {
+    fn load(
+        &self,
+        mut progress: impl FnMut(SpeechProgress) + Send,
+    ) -> impl Future<Output = Result<Fake, RecognizerError>> + Send {
+        progress(SpeechProgress::Verifying);
+        progress(SpeechProgress::Downloading { percent: 50 });
+        progress(SpeechProgress::Done);
         let failing = self
             .failures
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -312,6 +318,26 @@ async fn a_model_that_cannot_be_fetched_is_reported_and_fetched_again_on_the_nex
 }
 
 #[tokio::test]
+async fn loading_the_model_tells_how_fetching_its_files_goes() {
+    let rig = rig("progress", dictation, None, 0);
+    let mut events = Vec::new();
+
+    rig.recognizer
+        .load(|event| events.push(event))
+        .await
+        .expect("loads");
+
+    assert_eq!(
+        events,
+        [
+            SpeechProgress::Verifying,
+            SpeechProgress::Downloading { percent: 50 },
+            SpeechProgress::Done,
+        ]
+    );
+}
+
+#[tokio::test]
 async fn a_catalog_model_that_cannot_be_provided_fails_with_the_model_errors_own_headline() {
     let blocker = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("local-model-blocker");
     std::fs::write(&blocker, b"a file where the model folder should be").expect("writes");
@@ -321,7 +347,14 @@ async fn a_catalog_model_that_cannot_be_provided_fails_with_the_model_errors_own
         &WordList::default(),
     );
 
-    let error = source.load().await.err().expect("no folder to fetch into");
+    let mut events = Vec::new();
+    let error = source
+        .load(|event| events.push(event))
+        .await
+        .err()
+        .expect("no folder to fetch into");
+
+    assert_eq!(events, [SpeechProgress::Verifying]);
 
     assert_eq!(error.headline(), "Can't save the model file");
     assert!(

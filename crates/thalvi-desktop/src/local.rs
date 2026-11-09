@@ -12,6 +12,7 @@ use tokio::sync::mpsc as events;
 
 use crate::frame::Frame;
 use crate::metrics::{Event, Metrics};
+use crate::models::SpeechProgress;
 use crate::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
 
 /// A speech model that can start independent recognition streams.
@@ -36,9 +37,14 @@ pub trait SpeechStream: Send + 'static {
 pub trait ModelSource: Send + Sync + 'static {
     type Model: SpeechModel;
 
+    /// `progress` is told how fetching the files goes.
+    ///
     /// # Errors
     /// Fails in plain words when the model cannot be fetched or loaded.
-    fn load(&self) -> impl Future<Output = Result<Self::Model, RecognizerError>> + Send;
+    fn load(
+        &self,
+        progress: impl FnMut(SpeechProgress) + Send,
+    ) -> impl Future<Output = Result<Self::Model, RecognizerError>> + Send;
 }
 
 /// Recognizes speech on this machine, one recognition at a time.
@@ -67,18 +73,25 @@ impl<S: ModelSource> LocalRecognizer<S> {
     }
 
     /// Fetches and loads the model now instead of at the first dictation; later calls are free.
+    /// `progress` is told how fetching the files goes.
     ///
     /// # Errors
     /// Fails in plain words when the model cannot be fetched or loaded; the next call tries again.
-    pub async fn load(&self) -> Result<(), RecognizerError> {
-        self.model().await.map(|_| ())
+    pub async fn load(
+        &self,
+        progress: impl FnMut(SpeechProgress) + Send,
+    ) -> Result<(), RecognizerError> {
+        self.model(progress).await.map(|_| ())
     }
 
-    async fn model(&self) -> Result<&Arc<S::Model>, RecognizerError> {
+    async fn model(
+        &self,
+        progress: impl FnMut(SpeechProgress) + Send,
+    ) -> Result<&Arc<S::Model>, RecognizerError> {
         self.model
             .get_or_try_init(|| async {
                 let started = Instant::now();
-                let loaded = self.source.load().await;
+                let loaded = self.source.load(progress).await;
                 self.metrics.metric(
                     Event::SpeechLoad,
                     if loaded.is_ok() { "ok" } else { "error" },
@@ -95,7 +108,7 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
     type Session = LocalSession;
 
     async fn connect(&self) -> Result<LocalSession, RecognizerError> {
-        let model = self.model().await?;
+        let model = self.model(|_| {}).await?;
         let (frames_tx, frames_rx) = mpsc::channel();
         let (events_tx, events_rx) = events::unbounded_channel();
         let cancelled = Arc::new(AtomicBool::new(false));
