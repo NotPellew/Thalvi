@@ -270,13 +270,16 @@ is needed.
   without spaces. To update, replace the file; settings and models stay.
 
 Start it once and it stays in the tray; starting it again opens Settings. The
-first start downloads the wake models. If Thalvi cannot start, for example
-because its config is broken, a message box names the problem and the file.
+first start writes the default config, opens Settings on Speech, and downloads
+the wake models and, once, the speech model (about 650 MB), so the first "Hey
+Thalvi" works with no setup. If Thalvi cannot start, for example because its
+config is broken, a message box names the problem and the file.
 
 ### Speech recognition
 
-Settings → Speech keeps a list of speech servers. **Live dictation** uses exactly
-one of them, and **Use** switches to another at once; it applies from the next
+Settings → Speech keeps a list of speech servers. A fresh install has one,
+**On this computer**, with Nemotron Streaming, so it recognizes without a
+server; add a server to use one. **Live dictation** uses exactly one of them, and **Use** switches to another at once; it applies from the next
 capture, and a capture already running keeps its recognizer. At the top of
 Live dictation, **Next dictation** names the entry (and, on this computer, the
 model) that will handle the next dictation and whether it is ready. The entry
@@ -288,8 +291,8 @@ under each entry's collapsed **Details**. The kinds are:
   (address, model, API key), with no Thalvi server running.
 - **Through a Thalvi server:** streams to the server's `/transcription`
   (by default `ws://127.0.0.1:8080`), which uses the recognizer in its `.env`.
-- **On this computer:** dictates without the server or a network. Use
-  **Show models for** to filter the list of models (each model recognizes the
+- **On this computer:** dictates without the server or a network; the default.
+  Use **Show models for** to filter the list of models (each model recognizes the
   languages on its card), then pick a model.
 
 Web conversations always use the server's own `STT_URL`. An existing config
@@ -298,8 +301,11 @@ the first time Thalvi reads it, with nothing to enter again. An API key is shown
 as saved and never again; leave it blank to keep it. A server that cannot be
 reached is named in the error, and Thalvi never falls back to another one.
 
-For the on-device model, the first use of a model downloads it (about 650 MB);
-after that it works offline. A model you pick applies from the next capture, and
+For the on-device model, Thalvi downloads a missing model when it starts (about
+650 MB, once), and Next dictation shows that until it is ready. While it
+downloads or if it fails, **Use a speech server instead** opens the form to add
+a server, and after a failure **Retry** fetches the model again; Thalvi never
+switches recognizers by itself. After that it works offline. A model you pick applies from the next capture, and
 a capture already running keeps the model it started with. Settings shows each
 model's description, languages and size, whether it is **Selected** and
 **Downloaded** or **Not downloaded**, and can download it; its ID, source and
