@@ -600,8 +600,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
 
-    #[cfg(target_os = "linux")]
     use thalvi_desktop::config::Look;
+    #[cfg(target_os = "linux")]
     use thalvi_desktop::host::RequestServer;
     use thalvi_desktop::writing::DEFAULT_PROMPT;
 
