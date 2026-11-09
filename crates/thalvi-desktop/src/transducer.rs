@@ -15,7 +15,7 @@ use crate::device::{
 use crate::fbank::{HOP, LogMel, MEL_BINS, MelFrame, WindowMel};
 use crate::frame::Frame;
 use crate::local::{ModelSource, SpeechModel, SpeechStream};
-use crate::models::{CatalogSpeech, ModelStore};
+use crate::models::{CatalogSpeech, ModelStore, SpeechProgress};
 use crate::phrases::WordList;
 use crate::recognizer::{RecognizerError, RecognizerEvent};
 use crate::runtime;
@@ -1322,24 +1322,23 @@ impl Provider for TransducerSource {
         }
     }
 
-    async fn fetch(&self, export: Export) -> Result<TransducerFiles, RecognizerError> {
+    async fn fetch(
+        &self,
+        export: Export,
+        progress: impl FnMut(SpeechProgress) + Send,
+    ) -> Result<TransducerFiles, RecognizerError> {
         match &self.choice {
             SpeechChoice::Catalog(catalog) => {
                 let assets = catalog.assets_of(export);
-                let fetch = async |asset| {
-                    self.store
-                        .fetch(&asset)
-                        .await
-                        .map_err(RecognizerError::from)
-                };
-                if let Some(data) = assets.encoder_data {
-                    fetch(data).await?;
-                }
+                self.store
+                    .fetch_speech(&assets, progress)
+                    .await
+                    .map_err(RecognizerError::from)?;
                 Ok(TransducerFiles {
-                    encoder: fetch(assets.encoder).await?,
-                    decoder: fetch(assets.decoder).await?,
-                    joiner: fetch(assets.joiner).await?,
-                    tokens: fetch(assets.tokens).await?,
+                    encoder: self.store.path(&assets.encoder),
+                    decoder: self.store.path(&assets.decoder),
+                    joiner: self.store.path(&assets.joiner),
+                    tokens: self.store.path(&assets.tokens),
                 })
             }
             SpeechChoice::Folder(dir) => Ok(TransducerFiles::in_folder(dir)),

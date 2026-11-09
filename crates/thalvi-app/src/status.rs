@@ -142,14 +142,22 @@ impl LastError {
     }
 }
 
-/// What the notice says while the speech model loads: from disk, or which download it is waiting for.
+/// What the notice says while the speech model loads: from disk, or which download it is waiting for and how far it is.
 #[must_use]
-pub fn load_notice(step: Step) -> &'static str {
+pub fn load_notice(step: Step) -> String {
     match step {
-        Step::Reading => "Loading the speech model.",
-        Step::Fetching(Export::Cpu) => "Loading the speech model. Downloading about 650 MB.",
+        Step::Reading => "Loading the speech model.".to_owned(),
+        Step::Fetching(Export::Cpu) => {
+            "Loading the speech model. Downloading about 650 MB.".to_owned()
+        }
         Step::Fetching(Export::Gpu) => {
-            "Loading the speech model. Downloading the model for the GPU, about 1.3 GB."
+            "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.".to_owned()
+        }
+        Step::Downloading(Export::Cpu, percent) => {
+            format!("Downloading the speech model, about 650 MB \u{2014} {percent}%")
+        }
+        Step::Downloading(Export::Gpu, percent) => {
+            format!("Downloading the model for the GPU, about 1.3 GB \u{2014} {percent}%")
         }
     }
 }
@@ -197,8 +205,8 @@ impl View {
             (self.loading, &self.engine, &self.mode)
         {
             return Status::Loading {
-                notice: load_notice(step).to_owned(),
-                downloading: matches!(step, Step::Fetching(_)),
+                notice: load_notice(step),
+                downloading: matches!(step, Step::Fetching(_) | Step::Downloading(..)),
             };
         }
         match (&self.mode, &self.engine) {
@@ -481,6 +489,46 @@ mod tests {
         for (mode, engine, expected) in cases {
             let label = format!("{mode:?} {engine:?}");
             assert_eq!(view(mode, engine).status(), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn the_loading_notice_names_the_download_and_its_percent_and_the_overlay_shows_only_downloads()
+    {
+        use Export::{Cpu, Gpu};
+        for (step, notice, downloading) in [
+            (Step::Reading, "Loading the speech model.", false),
+            (
+                Step::Fetching(Cpu),
+                "Loading the speech model. Downloading about 650 MB.",
+                true,
+            ),
+            (
+                Step::Fetching(Gpu),
+                "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.",
+                true,
+            ),
+            (
+                Step::Downloading(Cpu, 7),
+                "Downloading the speech model, about 650 MB \u{2014} 7%",
+                true,
+            ),
+            (
+                Step::Downloading(Gpu, 100),
+                "Downloading the model for the GPU, about 1.3 GB \u{2014} 100%",
+                true,
+            ),
+        ] {
+            let mut view = view(Mode::Idle, EngineState::Listening);
+            view.loading = Some(step);
+            assert_eq!(
+                view.status(),
+                Status::Loading {
+                    notice: notice.to_owned(),
+                    downloading
+                },
+                "{step:?}"
+            );
         }
     }
 

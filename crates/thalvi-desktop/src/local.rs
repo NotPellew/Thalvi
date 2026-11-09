@@ -129,13 +129,12 @@ impl<S: ModelSource> LocalRecognizer<S> {
             return Ok(model);
         }
         let started = Instant::now();
-        self.steps.send_replace(Step::Reading);
-        let loaded = self
-            .source
-            .load(|step| {
-                self.steps.send_replace(step);
-            })
-            .await;
+        let tell = |step| {
+            self.steps
+                .send_if_modified(|current| std::mem::replace(current, step) != step);
+        };
+        tell(Step::Reading);
+        let loaded = self.source.load(tell).await;
         let fields = json!({"model": self.name});
         self.metrics.metric(
             Event::SpeechLoad,

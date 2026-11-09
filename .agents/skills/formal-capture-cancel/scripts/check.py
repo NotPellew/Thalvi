@@ -16,9 +16,9 @@ import urllib.request
 SKILL = Path(__file__).resolve().parents[1]
 ROOT = SKILL.parents[2]
 CACHE = (Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'thalvi-formal').resolve()
-TLC_NAME = 'tla2tools-1.8.0.jar'
-TLC_URL = 'https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar'
-TLC_SHA = 'c57d4d7bbee3ed2c89c32cb9c60cac728f751e80e2570bc4b7368ae39291fc21'
+TLC_NAME = 'tla2tools-1.7.4.jar'
+TLC_URL = 'https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar'
+TLC_SHA = '936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88'
 JRE_NAME = 'temurin-21.0.9+10-jre.tar.gz'
 JRE_URL = ('https://github.com/adoptium/temurin21-binaries/releases/download/'
            'jdk-21.0.9%2B10/OpenJDK21U-jre_x64_linux_hotspot_21.0.9_10.tar.gz')

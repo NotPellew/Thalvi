@@ -3,7 +3,8 @@
 When the model calls the read-only `search_history` tool, the user sees
 Working while it runs unless active voice playback takes precedence. An
 initially collapsed `Task steps` section records the search and its match
-count, and the answer can draw on earlier and past conversations.
+count, and the answer can draw on earlier and past conversations. In a
+private conversation the search covers only that conversation's own turns.
 
 ## Sub-features
 
@@ -30,7 +31,7 @@ Preconditions:
 - One saved conversation that contains `leftover rice`. Create it by sending
   `What should I cook with leftover rice` and running
   `$V reply $R --after "What should I cook with leftover rice"`. Then choose
-  `Conversations` and `New conversation`, and run `$V state $R idle`. Reload
+  `Conversations` and `button.o-lib-new`, and run `$V state $R idle`. Reload
   and wait for `idle` so Task steps starts with its initial collapsed state.
 
 Steps:
@@ -56,9 +57,14 @@ Steps:
   `Search for leftover rice again` and run
   `$V reply $R --after "Search for leftover rice again"`.
   - `.o-tasks` is visible again with `1 step` and `open` is `false`.
+  - This checks the reset, not a repeat match: the fake searches all three
+    words, and `again` appears only in the current turn.
   - Send `Thanks for that` and wait with `reply --after`; `.o-tasks` is
     `hidden`.
-- **Proof.** Screenshot with the steps open, plus the two `llm_request` lines.
+- **Proof.** Screenshot and ARIA snapshot with the steps open, the two
+  `llm_request` lines, and the `tool` metric in
+  `R/data/recordings/<date>/<session>.jsonl` (`tool: search_history`,
+  `outcome: ok`, `matches`).
 
 ## Gotchas
 
@@ -75,3 +81,4 @@ Steps:
 - The fake requests scope `all`; it does not exercise current-only searches or
   invalid tool arguments. The server caps matches at eight.
 - `get text` returns the status as rendered (`DONE`); the DOM text is `Done`.
+  A single result reads `1 match`.

@@ -93,6 +93,8 @@ const APIS: readonly (readonly [SecondaryApi, string])[] = [
   ["meta", "Meta"],
 ];
 const SPEECH_MODEL = "nemotron_160ms";
+/** Like the config, a speech model name with a path separator is a folder of the user's own. */
+const isModelFolder = (name: string): boolean => /[\\/]/.test(name);
 const CUES: readonly (readonly [keyof Settings["cues"], string, string])[] = [
   ["wake", "Wake", "Thalvi heard the wake phrase and is listening."],
   ["provisional", "Ending heard", "An ending phrase was heard; the countdown has begun."],
@@ -516,11 +518,13 @@ interface ModelCard {
   node: HTMLElement;
   /** Shows a download step, from this card's button or any other start. */
   progress: (event: SpeechModelProgress) => void;
+  setSelected: (on: boolean) => void;
 }
 
 /** One catalog speech model: what it is, whether it is downloaded, and how to get it. */
 function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
   const badge = el("span", { class: "badge" });
+  const selected = el("span", { class: "badge", "data-on": "true", hidden: true }, "Selected");
   const source = el("a", { href: info.source, target: "_blank", rel: "noreferrer" }, "Source");
   const meter = el("progress", { max: "100", value: "0", "aria-label": `Download of ${info.title}`, hidden: true });
   const status = el("span", { class: "unit", role: "status" });
@@ -581,22 +585,33 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
   showDevice();
 
   cached(info.cached);
+  const details = el(
+    "details",
+    { class: "model-details" },
+    el("summary", {}, "Details"),
+    el("small", {}, `ID: ${info.name}. License: ${info.license}. Source: ${info.source}. `),
+    source,
+  );
   return {
     node: el(
       "div",
       { class: "model" },
-      el("div", { class: "trow" }, el("span", { class: "unit" }, formatSize(info.size)), badge),
+      el("div", { class: "trow" }, el("span", { class: "phrase" }, info.title), el("span", { class: "unit" }, formatSize(info.size)), badge, selected),
       el("small", {}, info.description),
       el(
         "small",
         { class: "facts" },
-        `License: ${info.license}. Languages: ${info.languages.join(", ")}.${info.languages.length > 1 ? " The language is detected automatically." : ""}`,
+        `Languages: ${info.languages.join(", ")}.${info.languages.length > 1 ? " The language is detected automatically." : ""}`,
       ),
       device,
-      el("div", { class: "trow" }, source, download, meter, status),
+      details,
+      el("div", { class: "trow" }, download, meter, status),
       problem,
     ),
     progress: show,
+    setSelected: (on) => {
+      selected.hidden = !on;
+    },
   };
 }
 
@@ -659,15 +674,15 @@ function blankEntry(kind: SpeechEntry["kind"], name: string): SpeechEntry {
 }
 
 /** The model and folder rows of an On this computer entry; they write into `working`. */
-function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageContext): { rows: HTMLElement[]; validate: () => Promise<void> } {
+function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageContext, sharedModels?: Promise<SpeechModelInfo[]>): { rows: HTMLElement[]; validate: () => Promise<void> } {
   const catalog = new Map<string, ModelCard>();
   const listed: SpeechModelInfo[] = [];
   // Only narrows the model list; it is not saved and does not reach recognition.
   let language = ALL_LANGUAGES;
   let chosen = working.model ?? "";
   const isCatalog = (name: string): boolean => name === SPEECH_MODEL || listed.some((info) => info.name === name);
-  // Like the config, a name with a path separator is a folder. The entry stays picked while its path is still empty.
-  let ownFolderPicked = /[\\/]/.test(chosen);
+  // The entry stays picked while its path is still empty.
+  let ownFolderPicked = isModelFolder(chosen);
   const speechModel = controls.text(
     ownFolderPicked ? chosen : "",
     (value) => {
@@ -679,7 +694,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
   );
   const modelInput = speechModel.field as HTMLInputElement;
   const folderResult = el("p", { class: "note", role: "status", hidden: true });
-  const languagePicker = el("select", { id: uid("f"), "aria-label": "Language" });
+  const languagePicker = el("select", { id: uid("f"), "aria-label": "Show models for" });
   languagePicker.append(el("option", { value: ALL_LANGUAGES }, "All languages"));
   const modelPicker = el("select", { id: uid("f"), "aria-label": "Speech model" });
   modelPicker.append(el("option", { value: "", disabled: true }, "Loading models…"));
@@ -705,7 +720,10 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
     const active = chosen === "" ? SPEECH_MODEL : chosen;
     const own = ownFolderPicked;
     modelPicker.value = own ? OWN_FOLDER : active;
-    for (const [name, card] of catalog) card.node.hidden = own || name !== active;
+    for (const [name, card] of catalog) {
+      card.node.hidden = own || name !== active;
+      card.setSelected(!own && name === active);
+    }
     ownFolder.dataset["active"] = String(own);
   }
 
@@ -734,7 +752,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
     syncModel();
   });
 
-  backend.listSpeechModels().then(
+  (sharedModels ?? backend.listSpeechModels()).then(
     (models) => {
       for (const info of models) {
         listed.push(info);
@@ -798,7 +816,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
 
   return {
     rows: [
-      row("Language", "Narrows the list of models below. It does not change what is recognized.", { node: languagePicker, field: languagePicker }),
+      row("Show models for", "Filters this list. Each model recognizes the languages on its card.", { node: languagePicker, field: languagePicker }),
       row(
         "Speech model",
         `For recognition on this computer. Pick a model; it downloads on first use, or with its Download button. A model you pick applies from the next capture. Or point to your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.`,
@@ -826,6 +844,124 @@ function speech(context: PageContext): HTMLElement[] {
   const secondList = el("div", { class: "table" });
   const editor = el("div", { class: "editor", hidden: true });
   const problem = note();
+  let editingId: string | null = null;
+  let editingSecond = false;
+  let editingAdd = false;
+  const nextDictation = el("p", { class: "next-dictation", role: "status" }, "");
+  const retryProblem = note();
+  const useServer = button("Use a speech server instead", () => {
+    openEditor(null, "realtime");
+  });
+  const retry = button("Retry", retryDownload);
+  const summaryActions = el("div", { class: "trow", hidden: true }, useServer, retry, retryProblem);
+  let currentStatus: Status = { state: "listening" };
+  const modelTitles = new Map<string, string>();
+  const speechModels: Promise<SpeechModelInfo[]> = backend.listSpeechModels();
+  speechModels.then(
+    (models) => {
+      for (const info of models) modelTitles.set(info.name, info.title);
+      render();
+    },
+    () => undefined,
+  );
+  backend.onStatus((status) => {
+    currentStatus = status;
+    updateSummary();
+  });
+  backend.getStatus().then(
+    (status) => {
+      currentStatus = status;
+      updateSummary();
+    },
+    () => undefined,
+  );
+
+  function modelTitleFor(entry: OnDeviceEntry): string {
+    const model = entry.model ?? SPEECH_MODEL;
+    return modelTitles.get(model) ?? model;
+  }
+
+  function summaryEntry(): LiveEntry | undefined {
+    const draftActive = activeLive();
+    const savedActive = savedEntries().filter(isLive).find((entry) => entry.active);
+    if (draftActive === undefined) return savedActive;
+    if (savedActive === undefined) return draftActive;
+    if (draftActive.id !== savedActive.id) return savedActive;
+    return isSaved(draftActive) ? draftActive : savedActive;
+  }
+
+  function statusState(status: Status): string {
+    switch (status.state) {
+      case "listening":
+      case "starting":
+      case "capturing":
+      case "pending":
+      case "writing":
+      case "working":
+      case "done":
+        return "Ready";
+      case "loading":
+        return status.notice;
+      case "paused":
+        return "Paused — resume to dictate";
+      case "failed":
+        return status.headline;
+    }
+  }
+
+  function updateSummary(): void {
+    const entry = summaryEntry();
+    if (entry === undefined) {
+      nextDictation.textContent = "";
+      return;
+    }
+    const modelPart = entry.kind === "on_device" ? ` · ${modelTitleFor(entry)}` : "";
+    nextDictation.textContent = `Next dictation: ${entry.name}${modelPart} — ${statusState(currentStatus)}`;
+    const preparing = entry.kind === "on_device" && (currentStatus.state === "loading" || currentStatus.state === "failed");
+    summaryActions.hidden = !preparing;
+    // Only a catalog model can be downloaded again; a folder of the user's own is fixed on disk.
+    retry.hidden = currentStatus.state !== "failed" || (entry.kind === "on_device" && isModelFolder(entry.model ?? SPEECH_MODEL));
+    if (!preparing) say(retryProblem, "");
+  }
+
+  function retryDownload(): void {
+    const entry = summaryEntry();
+    if (entry?.kind !== "on_device") return;
+    say(retryProblem, "");
+    retry.disabled = true;
+    // The model card's downloader checks every file again and fetches what is missing or corrupt.
+    backend
+      .downloadSpeechModel(entry.model ?? SPEECH_MODEL)
+      .then(() => backend.setListening(true))
+      .catch((error: unknown) => {
+        say(retryProblem, errorText(error));
+      })
+      .finally(() => {
+        retry.disabled = false;
+      });
+  }
+
+  function entryDescription(entry: SpeechEntry): string {
+    switch (entry.kind) {
+      case "realtime":
+        return "Dictation through a realtime speech server.";
+      case "thalvi_server":
+        return "Dictation through a Thalvi server.";
+      case "on_device":
+        return `Recognition with ${modelTitleFor(entry)}.`;
+      case "second_pass":
+        return "Transcribes each accepted capture again.";
+    }
+  }
+
+  function entryDetails(entry: SpeechEntry): HTMLElement {
+    return el(
+      "details",
+      { class: "entry-details" },
+      el("summary", {}, "Details"),
+      el("small", {}, `ID: ${entry.id}. ${summary(entry)}.`),
+    );
+  }
 
   function uniqueName(base: string): string {
     const taken = new Set(entries().map((entry) => entry.name.toLowerCase()));
@@ -883,29 +1019,31 @@ function speech(context: PageContext): HTMLElement[] {
   }
 
   function remove(entry: SpeechEntry): void {
+    if (editingId === entry.id) closeEditor(false);
     draft.stt.entries = entries().filter((known) => known.id !== entry.id);
     controls.touched();
     render();
   }
 
   function badges(entry: SpeechEntry): HTMLElement[] {
-    const found: HTMLElement[] = [el("span", { class: "badge" }, KIND_NAMES[entry.kind])];
-    if (isLive(entry) && entry.active) found.push(el("span", { class: "badge", "data-on": "true" }, "Active"));
+    const found: HTMLElement[] = [];
+    if (KIND_NAMES[entry.kind] !== entry.name) found.push(el("span", { class: "badge" }, KIND_NAMES[entry.kind]));
+    if (isLive(entry) && entry.active) found.push(el("span", { class: "badge", "data-on": "true" }, "In use"));
     if (hasKey(entry)) found.push(el("span", { class: "badge" }, "Key saved"));
     if (!isSaved(entry)) found.push(el("span", { class: "badge", "data-saved": "false" }, "Not saved"));
     return found;
   }
 
   function liveRow(entry: LiveEntry): HTMLElement {
-    const use = button(entry.active ? "In use" : "Use", () => {
+    const use = button("Use", () => {
       useLive(entry.id);
     }, "quiet");
-    use.disabled = entry.active;
     use.setAttribute("aria-label", `Use ${entry.name}`);
     const edit = button("Edit", () => {
       openEditor(entry);
     }, "quiet");
     edit.setAttribute("aria-label", `Edit ${entry.name}`);
+    edit.setAttribute("aria-expanded", String(editingId === entry.id));
     const drop = button("Remove", () => {
       remove(entry);
     }, "quiet");
@@ -917,18 +1055,19 @@ function speech(context: PageContext): HTMLElement[] {
       { class: "trow server", "data-id": entry.id },
       el("span", { class: "phrase" }, entry.name),
       ...badges(entry),
-      el("small", { class: "unit" }, summary(entry)),
+      el("small", { class: "unit" }, entryDescription(entry)),
       ...deviceLine(entry),
-      use,
+      ...(entry.active ? [] : [use]),
       edit,
       drop,
+      entryDetails(entry),
     );
   }
 
   /** Where an on-device catalog model runs; a model folder of the user's own has no line. */
   function deviceLine(entry: LiveEntry): HTMLElement[] {
     const model = entry.kind === "on_device" ? (entry.model ?? SPEECH_MODEL) : "";
-    if (model === "" || /[\\/]/.test(model)) return [];
+    if (model === "" || isModelFolder(model)) return [];
     const line = el("small", { class: "device" });
     backend.speechDevice(model).then(
       (text) => {
@@ -960,6 +1099,7 @@ function speech(context: PageContext): HTMLElement[] {
       openEditor(entry);
     }, "quiet");
     edit.setAttribute("aria-label", `Edit ${entry.name}`);
+    edit.setAttribute("aria-expanded", String(editingId === entry.id));
     const drop = button("Remove", () => {
       remove(entry);
     }, "quiet");
@@ -970,19 +1110,48 @@ function speech(context: PageContext): HTMLElement[] {
       ticked.node,
       el("span", { class: "phrase" }, entry.name),
       ...badges(entry),
-      el("small", { class: "unit" }, summary(entry)),
+      el("small", { class: "unit" }, entryDescription(entry)),
       up,
       down,
       edit,
       drop,
+      entryDetails(entry),
     );
   }
 
+  function editButtonFor(id: string): HTMLButtonElement | null {
+    for (const list of [liveList, secondList]) {
+      const row = list.querySelector<HTMLElement>(`.trow.server[data-id="${id}"]`);
+      const found = row?.querySelector<HTMLButtonElement>('button[aria-label^="Edit "]');
+      if (found) return found;
+    }
+    return null;
+  }
+
   function render(): void {
-    liveList.replaceChildren(...entries().filter(isLive).map(liveRow));
+    if (editingId !== null && !entries().some((entry) => entry.id === editingId)) {
+      editingId = null;
+      editor.hidden = true;
+      editor.replaceChildren();
+    }
+    const liveChildren: HTMLElement[] = [];
+    for (const entry of entries().filter(isLive)) {
+      liveChildren.push(liveRow(entry));
+      if (editingId === entry.id && !editingSecond) liveChildren.push(editor);
+    }
+    if (editingAdd && !editingSecond) liveChildren.push(editor);
     const second = entries().filter((entry): entry is SecondPassEntry => entry.kind === "second_pass");
-    secondList.replaceChildren(...second.map((entry, index) => secondRow(entry, index, second.length)));
-    secondList.hidden = second.length === 0;
+    const secondChildren: HTMLElement[] = [];
+    second.forEach((entry, index) => {
+      secondChildren.push(secondRow(entry, index, second.length));
+      if (editingId === entry.id && editingSecond) secondChildren.push(editor);
+    });
+    if (editingAdd && editingSecond) secondChildren.push(editor);
+    if (!liveChildren.includes(editor) && !secondChildren.includes(editor)) liveChildren.push(editor);
+    liveList.replaceChildren(...liveChildren);
+    secondList.replaceChildren(...secondChildren);
+    secondList.hidden = second.length === 0 && !((editingId !== null && editingSecond) || (editingAdd && editingSecond));
+    updateSummary();
   }
   context.live.saved = render;
   // The model loads behind this long-lived window, so what runs where is asked again when the app's state changes.
@@ -992,13 +1161,28 @@ function speech(context: PageContext): HTMLElement[] {
     render();
   };
 
-  function closeEditor(): void {
+  function closeEditor(returnFocus = true): void {
+    const wasId = editingId;
+    editingId = null;
+    editingAdd = false;
     editor.replaceChildren();
     editor.hidden = true;
     context.live.speechModel = () => undefined;
+    for (const list of [liveList, secondList]) {
+      for (const btn of list.querySelectorAll('button[aria-label^="Edit "]')) btn.setAttribute("aria-expanded", "false");
+    }
+    if (returnFocus && wasId !== null) {
+      editButtonFor(wasId)?.focus();
+      queueMicrotask(() => {
+        editButtonFor(wasId)?.focus();
+      });
+    }
   }
 
   function openEditor(existing: SpeechEntry | null, kind?: SpeechEntry["kind"]): void {
+    editingAdd = existing === null;
+    editingId = existing?.id ?? null;
+    editingSecond = existing ? existing.kind === "second_pass" : kind === "second_pass";
     const working: SpeechEntry = existing ? structuredClone(existing) : blankEntry(kind ?? "realtime", uniqueName(KIND_NAMES[kind ?? "realtime"]));
     const message = note();
     let validate: () => Promise<void> = () => Promise.resolve();
@@ -1045,7 +1229,7 @@ function speech(context: PageContext): HTMLElement[] {
         rows.push(address("The Thalvi server's address. Its own recognizer key stays in the server's .env.", "ws://127.0.0.1:8080"));
         break;
       case "on_device": {
-        const built = onDeviceRows(working, context);
+        const built = onDeviceRows(working, context, speechModels);
         rows.push(...built.rows);
         validate = built.validate;
         break;
@@ -1095,25 +1279,39 @@ function speech(context: PageContext): HTMLElement[] {
           },
         );
     }, "primary");
-    const cancel = button("Cancel", closeEditor, "quiet");
+    const cancel = button("Cancel", () => {
+      closeEditor();
+    }, "quiet");
+    const headingId = uid("editor");
+    const heading = el(
+      "h4",
+      { id: headingId },
+      existing
+        ? `Editing “${existing.name}” · ${existing.kind === "second_pass" ? "second pass" : "live dictation"}`
+        : `Add a ${KIND_NAMES[working.kind].toLowerCase()}`,
+    );
+    editor.setAttribute("aria-labelledby", headingId);
     editor.replaceChildren(
-      el("h4", {}, existing ? `Edit ${existing.name}` : `Add a ${KIND_NAMES[working.kind].toLowerCase()}`),
+      heading,
       ...rows,
       el("div", { class: "trow add" }, done, cancel),
       message,
     );
     editor.hidden = false;
+    render();
+    editor.querySelector<HTMLElement>("input, select, textarea")?.focus();
   }
 
   const kindPicker = controls.select(LIVE_KINDS, "realtime", () => undefined, "Kind of speech server to add");
-  const addLive = button("Add", () => {
+  function addSelected(): void {
     openEditor(null, (kindPicker.field as HTMLSelectElement).value as LiveEntry["kind"]);
-  });
+  }
+  const addLive = button("Add", addSelected);
   addLive.setAttribute("aria-label", "Add a speech server");
   const addSecond = button("Add a second-pass API", () => {
     openEditor(null, "second_pass");
   });
-  const liveBlock = el("div", { class: "stack wide" }, liveList, el("div", { class: "trow add" }, kindPicker.node, addLive));
+  const liveBlock = el("div", { class: "stack wide" }, liveList, problem, el("div", { class: "trow add" }, kindPicker.node, addLive));
   const secondBlock = el("div", { class: "stack wide" }, secondList, addSecond);
 
   const writing = draft.writing;
@@ -1199,6 +1397,8 @@ function speech(context: PageContext): HTMLElement[] {
 
   return [
     group("Live dictation"),
+    nextDictation,
+    summaryActions,
     row(
       "Speech servers",
       "One is in use for dictation. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Conversation mode always uses the Thalvi server's own recognizer.",
@@ -1211,8 +1411,6 @@ function speech(context: PageContext): HTMLElement[] {
       "Ticked servers transcribe each accepted capture again. The first one in this order that answers replaces the live text; the rest are only recorded. Ticking applies at once.",
       secondBlock,
     ),
-    problem,
-    editor,
     group("Writing"),
     row(
       "Writing endpoint address",

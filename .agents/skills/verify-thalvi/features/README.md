@@ -74,6 +74,9 @@ user-visible behavior. It then has exactly four H2 sections, in this order:
   captions, spoken replies, stopping, and barge-in.
 - [Conversations and learnings](./conversations.md) covers rejoin on reload,
   the conversation list, new, reopen, rename, delete, and learnings.
+- [Private conversation](./private-conversation.md) covers starting one, the
+  Private badge, nothing saved, search limited to its own turns, and ending
+  on a lost connection.
 - [History search](./history-search.md) covers the `search_history` tool, the
   Working state, collapsed Task steps, and cross-conversation matches.
 - [Voice picker and speed](./voice-and-speed.md) covers previewing and applying

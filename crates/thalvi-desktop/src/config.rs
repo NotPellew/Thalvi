@@ -623,7 +623,7 @@ mod tests {
         assert_eq!(config.stt, SttConfig::default());
         assert_eq!(
             config.stt.entries.active_live().kind,
-            LiveKind::ThalviServer(ServerUrl::parse("ws://127.0.0.1:8080").unwrap())
+            LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms))
         );
         assert_eq!(config.stt.entries.second_pass(), []);
         assert_eq!(config.wake, WakeConfig::default());

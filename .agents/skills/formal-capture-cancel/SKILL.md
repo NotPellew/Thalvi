@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `8c3a4871da96b6c8e55445667689d1d2ade9d35a`. The recorded file hashes
+Sync commit: `c6fceb90fa4e97d5bdae2e14641d63cd5e9b2f60`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -69,6 +69,12 @@ the same pre-capture boundary; the mapped cancellation functions are unchanged.
 so exact durations and the zero-frame case can be tested. `close_spotting` still
 records it before the ending cue; this metric extraction preserves the control drains and await boundaries.
 An idle failure now picks `NoEnding` or `NoWords` from the kept text; it only chooses the error and leaves every await, control drain and delivery admission as mapped.
+The default recognizer became On this computer (#141); a `runner.rs` test now names its server engine
+explicitly. No mapped function changed, so only the hash moved.
+The on-device model's load now reports the steps it takes and a download's percent (`load_speech_model` runs the
+load through `load_showing`, a select over the load and the recognizer's step channel, and `Publisher`
+shows each step as the loading notice). No mapped function changed, so only the `runner.rs` hash moved.
+`Engine::reconcile` now returns after the earliest agreeing ticked entry, keeping later requests as recorded-only tasks. Its cancellation-first select still fences acceptance; these later tasks do not feed the capture outcome. The recognizer change only extends its test fake; the mapped session and close remain unchanged.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
@@ -99,11 +105,11 @@ From the repository root, with Python 3.12+:
 .agents/skills/formal-capture-cancel/scripts/check.py
 ```
 
-The command installs TLC's `v1.8.0` release artifact into
+The command installs TLC's stable `v1.7.4` release artifact (TLC2 Version 2.19 of 08 August 2024) into
 `${XDG_CACHE_HOME:-~/.cache}/thalvi-formal/` and verifies SHA-256
-`c57d4d7bbee3ed2c89c32cb9c60cac728f751e80e2570bc4b7368ae39291fc21`.
-The artifact identifies itself as TLC `2026.11.02.164701`, revision `dc6a944`;
-the checksum, rather than a moving release URL, pins its contents.
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`.
+It is a published release whose file does not change. The `v1.8.0` pre-release
+is re-uploaded upstream, which broke the old checksum on 2026-11-06.
 [Upstream tool and download instructions](https://github.com/tlaplus/tlaplus).
 
 Use an existing `java` (11+). On Linux x86-64 without Java, the command installs

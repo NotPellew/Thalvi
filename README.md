@@ -270,22 +270,30 @@ is needed.
   without spaces. To update, replace the file; settings and models stay.
 
 Start it once and it stays in the tray; starting it again opens Settings. The
-first start downloads the wake models. If Thalvi cannot start, for example
-because its config is broken, a message box names the problem and the file.
+first start writes the default config, opens Settings on Speech, and downloads
+the wake models and, once, the speech model, so the first "Hey
+Thalvi" works with no setup. If Thalvi cannot start, for example because its
+config is broken, a message box names the problem and the file.
 
 ### Speech recognition
 
-Settings → Speech keeps a list of speech servers. **Live dictation** uses exactly
-one of them, and **Use** switches to another at once; it applies from the next
-capture, and a capture already running keeps its recognizer. The kinds are:
+Settings → Speech keeps a list of speech servers. A fresh install has one,
+**On this computer**, with Nemotron Streaming, so it recognizes without a
+server; add a server to use one. **Live dictation** uses exactly one of them, and **Use** switches to another at once; it applies from the next
+capture, and a capture already running keeps its recognizer. At the top of
+Live dictation, **Next dictation** names the entry (and, on this computer, the
+model) that will handle the next dictation and whether it is ready. The entry
+in use is marked **In use** and has no **Use** button. IDs and addresses are
+under each entry's collapsed **Details**. The kinds are:
 
 - **Realtime speech server:** a recognizer that speaks Meta's realtime ASR
   protocol, such as the self-hosted one below, which the app connects to itself
   (address, model, API key), with no Thalvi server running.
 - **Through a Thalvi server:** streams to the server's `/transcription`
   (by default `ws://127.0.0.1:8080`), which uses the recognizer in its `.env`.
-- **On this computer:** dictates without the server or a network. Pick a
-  language (it only narrows the list of models) and a model.
+- **On this computer:** dictates without the server or a network; the default.
+  Use **Show models for** to filter the list of models (each model recognizes the
+  languages on its card), then pick a model.
 
 Web conversations always use the server's own `STT_URL`. An existing config
 with `stt.engine`, `stt.model`, `stt.secondary` and `server` becomes entries
@@ -293,11 +301,17 @@ the first time Thalvi reads it, with nothing to enter again. An API key is shown
 as saved and never again; leave it blank to keep it. A server that cannot be
 reached is named in the error, and Thalvi never falls back to another one.
 
-For the on-device model, the first use of a model downloads it (about 650 MB, or
-1.3 GB for Nemotron Unified's GPU files); after that it works offline. A model you pick applies from the next capture, and
+For the on-device model, Thalvi downloads a missing model when it starts (once:
+about 650 MB, or 1.3 GB for Nemotron Unified's GPU files), and Next dictation
+shows the download's percent until it is ready. While it
+downloads or if it fails, **Use a speech server instead** opens the form to add
+a server, and after a failure **Retry** fetches the model again; Thalvi never
+switches recognizers by itself. After that it works offline. A model you pick applies from the next capture, and
 a capture already running keeps the model it started with. Settings shows each
-model's size, license and languages in full, whether it is downloaded, and can download
-it, or you can point to your own model folder and check it before saving.
+model's description, languages and size, whether it is **Selected** and
+**Downloaded** or **Not downloaded**, and can download it; its ID, source and
+license are under the card's collapsed **Details**. Or you can point to your
+own model folder and check it before saving.
 Word errors below are on LibriSpeech (120 clips) and on 48 of the developer's
 own takes, int8 on the CPU, language detected automatically. The unified model
 also made 8.38% on German and 7.09% on Spanish (80 Multilingual LibriSpeech clips
@@ -327,9 +341,11 @@ under OpenMDW-1.1, exported to ONNX by Thalvi. Parakeet is NVIDIA's
 **Second-pass transcription** (Settings → Speech → Second pass, none ticked by
 default) sends each accepted capture again to every ticked OpenAI-style or Meta
 transcription API. The first ticked one in list order (move them with the
-arrows) that answers replaces the live text; the others are only recorded, in
-the capture's `text.txt` and the metrics, for comparing later. Unticking keeps
-the address and key.
+arrows) that answers replaces the live text, and Thalvi pastes as soon as that
+one is known: an earlier entry that fails or disagrees is waited for, a later
+one never. The others keep running and are only recorded, in the capture's
+`text.txt` and the metrics, for comparing later; one that fails says so in a
+notice. Unticking keeps the address and key.
 
 ### Microphone
 

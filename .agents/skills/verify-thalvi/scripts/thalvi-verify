@@ -73,8 +73,12 @@ up() {
 
   [[ -d "$REPO/web/node_modules" ]] || npm ci --prefix "$REPO/web" >"$run_dir/build.log" 2>&1
   npm run build --prefix "$REPO/web" -- --outDir "$run_dir/web" --emptyOutDir >>"$run_dir/build.log" 2>&1
-  cargo build --locked --manifest-path "$REPO/Cargo.toml" -p thalvi-server --bin thalvi >>"$run_dir/build.log" 2>&1
-  cp "$REPO/target/debug/thalvi" "$run_dir/thalvi"
+  # Ask cargo where it put the binary, so a CARGO_TARGET_DIR (dev-job) can't leave a stale one in target/.
+  local bin
+  bin="$(cargo build --locked --manifest-path "$REPO/Cargo.toml" -p thalvi-server --bin thalvi \
+    --message-format=json-render-diagnostics 2>>"$run_dir/build.log" \
+    | python3 -I -c 'import json, sys; print([m["executable"] for m in map(json.loads, sys.stdin) if m.get("executable")][-1])')"
+  cp "$bin" "$run_dir/thalvi"
 
   read -r app_port http_port asr_port <<<"$(free_ports)"
   python3 -I "$SCRIPTS/fake_endpoints.py" wav "$run_dir/mic.wav"
