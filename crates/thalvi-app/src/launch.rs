@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::agent::Request;
+use crate::agent::{Catalog, Request};
 use crate::startup::LOGIN_ARG;
 
-const USAGE: &str = "Usage: thalvi-desktop [toggle | pause | resume | cancel | hold-start | hold-end | write-start | write-end | copy-error | state | status | settings get | settings check <json> | settings set <json> | metrics summary | config-file]";
+const USAGE: &str = "Usage: thalvi-desktop [toggle | pause | resume | cancel | hold-start | hold-end | write-start | write-end | copy-error | state | status | show [page] | quit | feed <wav-file> | models | model-download <wake|speech> <name> | speech-check <json> | word-list-push | settings get | settings check <json> | settings set <json> | metrics summary | config-file]";
 
 /// The command line after the program name.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,8 +56,41 @@ impl Launch {
                 settings: change_of(change, stdin)?,
             })),
             ["metrics", "summary"] => Ok(Self::Ask(Request::MetricsSummary)),
+            ["show"] => Ok(Self::Ask(Request::Show { page: None })),
+            ["show", page] => Ok(Self::Ask(Request::Show {
+                page: Some((*page).to_owned()),
+            })),
+            ["quit"] => Ok(Self::Ask(Request::Quit)),
+            ["models"] => Ok(Self::Ask(Request::Models)),
+            ["word-list-push"] => Ok(Self::Ask(Request::WordListPush)),
+            ["feed", file] => Ok(Self::Ask(Request::Feed {
+                // The running app has its own working folder.
+                path: std::path::absolute(file)
+                    .map_err(|error| format!("The audio file's path could not be read: {error}."))?
+                    .to_string_lossy()
+                    .into_owned(),
+            })),
+            ["model-download", kind, name] => {
+                let kind = match *kind {
+                    "wake" => Catalog::Wake,
+                    "speech" => Catalog::Speech,
+                    _ => return Err(USAGE.to_owned()),
+                };
+                Ok(Self::Ask(Request::ModelDownload {
+                    kind,
+                    name: (*name).to_owned(),
+                }))
+            }
+            ["speech-check", entry] => Ok(Self::Ask(Request::SpeechCheck {
+                entry: change_of(entry, stdin)?,
+            })),
             [LOGIN_ARG] => open(true, None),
-            [path] if !matches!(*path, "settings" | "metrics") => {
+            [path]
+                if !matches!(
+                    *path,
+                    "settings" | "metrics" | "feed" | "model-download" | "speech-check"
+                ) =>
+            {
                 open(false, Some(PathBuf::from(path)))
             }
             _ => Err(USAGE.to_owned()),
@@ -108,6 +141,10 @@ mod tests {
             })
         };
         let ask = |request| Ok(Launch::Ask(request));
+        let absolute = std::env::temp_dir()
+            .join("hello.wav")
+            .to_string_lossy()
+            .into_owned();
         for (args, expected) in [
             (&[][..], open(false, None)),
             (&["--login"][..], open(true, None)),
@@ -125,6 +162,55 @@ mod tests {
             (&["state"][..], ask(Request::State)),
             (&["settings", "get"][..], ask(Request::SettingsGet)),
             (&["metrics", "summary"][..], ask(Request::MetricsSummary)),
+            (&["show"][..], ask(Request::Show { page: None })),
+            (
+                &["show", "speech"][..],
+                ask(Request::Show {
+                    page: Some("speech".to_owned()),
+                }),
+            ),
+            (&["quit"][..], ask(Request::Quit)),
+            (&["models"][..], ask(Request::Models)),
+            (&["word-list-push"][..], ask(Request::WordListPush)),
+            (
+                &["feed", &absolute][..],
+                ask(Request::Feed {
+                    path: absolute.clone(),
+                }),
+            ),
+            (
+                &["feed", "hello.wav"][..],
+                ask(Request::Feed {
+                    path: std::path::absolute("hello.wav")
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                }),
+            ),
+            (
+                &["model-download", "speech", "nemotron_160ms"][..],
+                ask(Request::ModelDownload {
+                    kind: Catalog::Speech,
+                    name: "nemotron_160ms".to_owned(),
+                }),
+            ),
+            (
+                &["model-download", "wake", "hey_thalvi"][..],
+                ask(Request::ModelDownload {
+                    kind: Catalog::Wake,
+                    name: "hey_thalvi".to_owned(),
+                }),
+            ),
+            (
+                &["speech-check", r#"{"kind":"realtime"}"#][..],
+                ask(Request::SpeechCheck {
+                    entry: json!({"kind": "realtime"}),
+                }),
+            ),
+            (&["model-download", "other", "x"][..], Err(USAGE.to_owned())),
+            (&["model-download", "wake"][..], Err(USAGE.to_owned())),
+            (&["feed"][..], Err(USAGE.to_owned())),
+            (&["quit", "now"][..], Err(USAGE.to_owned())),
             (
                 &["settings", "check", r#"{"look":"neon"}"#][..],
                 ask(Request::SettingsCheck {
