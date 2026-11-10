@@ -926,7 +926,7 @@ mod tests {
             vec![paste_batch.clone(), enter_batch.clone()]
         );
         assert_eq!(
-            desktop.api.read(|state| state.enter_waits),
+            desktop.api.read(|state| state.enter_waits.clone()),
             vec![ENTER_SUBMIT_WAIT]
         );
 
@@ -943,7 +943,7 @@ mod tests {
         );
         assert_eq!(desktop.api.read(|state| state.sent.len()), 3);
         assert_eq!(
-            desktop.api.read(|state| state.enter_waits),
+            desktop.api.read(|state| state.enter_waits.clone()),
             vec![ENTER_SUBMIT_WAIT]
         );
 
@@ -952,7 +952,7 @@ mod tests {
         desktop.api.with(|state| state.accepts = Some(0));
         let error = desktop.deliver(&target, &text(""), true).unwrap_err();
         assert!(
-            matches!(error, HostError::NothingTyped(notice) if notice == "Windows refused the input. Nothing was pasted."),
+            matches!(&error, HostError::NothingTyped(notice) if notice == "Windows refused the input. Nothing was pasted."),
             "empty submit, enter refused: {error:?}"
         );
         assert_eq!(desktop.api.read(|state| state.enter_waits.len()), 0);
