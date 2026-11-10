@@ -26,7 +26,7 @@ use thalvi_desktop::phrases;
 use thalvi_desktop::recognizer::ServerUrl;
 use thalvi_desktop::report::{Report, System};
 use thalvi_desktop::transducer::check_folder;
-use thalvi_desktop::wake::validate_wake_models;
+use thalvi_desktop::wake::validate_wake_model;
 
 use crate::app::AppState;
 use crate::menu_entry;
@@ -176,12 +176,9 @@ pub async fn list_wake_models() -> Result<Vec<WakeModelInfo>, String> {
 /// # Errors
 /// The plain reason a choice cannot be used.
 #[tauri::command]
-pub async fn validate_wake_model_choices(
-    capture: String,
-    conversation: String,
-) -> Result<(), String> {
+pub async fn validate_wake_model_choices(capture: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        validate_wake_models(&capture, &conversation).map_err(|error| error.to_string())
+        validate_wake_model(&capture).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| format!("The wake models could not be checked: {error}"))?

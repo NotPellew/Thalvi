@@ -1,4 +1,4 @@
-//! Condenses per-frame wake scores into near misses and a per-minute summary of latency and sound.
+//! Condenses the dictation wake score into near misses and a per-minute latency and sound summary.
 
 use std::time::Duration;
 
@@ -45,34 +45,26 @@ impl Head {
     }
 }
 
-/// Follows both heads' scores frame by frame.
+/// Follows the dictation head's score frame by frame.
 pub struct NearMisses {
     capture: Head,
-    conversation: Head,
 }
 
 impl NearMisses {
     #[must_use]
-    pub fn new(capture_threshold: f32, conversation_threshold: f32) -> Self {
-        let head = |name, threshold| Head {
-            name,
-            threshold,
-            peak: None,
-        };
+    pub fn new(capture_threshold: f32) -> Self {
         Self {
-            capture: head("capture", capture_threshold),
-            conversation: head("conversation", conversation_threshold),
+            capture: Head {
+                name: "capture",
+                threshold: capture_threshold,
+                peak: None,
+            },
         }
     }
 
     /// The episodes that this frame ended.
     pub fn observe(&mut self, wake: &WakeFrame) -> impl Iterator<Item = NearMiss> {
-        [
-            self.capture.observe(wake.capture),
-            self.conversation.observe(wake.conversation),
-        ]
-        .into_iter()
-        .flatten()
+        self.capture.observe(wake.capture).into_iter()
     }
 }
 

@@ -64,7 +64,7 @@ export function tauriBackend(): Backend {
     copyLoginLine: () => invoke<undefined>("copy_login_line"),
     validateSpeechModelFolder: (path) => invoke<undefined>("validate_speech_model_folder", { path }),
     listWakeModels: () => invoke<WakeModelInfo[]>("list_wake_models"),
-    validateWakeModels: (capture, conversation) => invoke<undefined>("validate_wake_model_choices", { capture, conversation }),
+    validateWakeModels: (capture) => invoke<undefined>("validate_wake_model_choices", { capture }),
     downloadWakeModel: (name) => invoke<undefined>("download_wake_model", { name }),
     pickWakeModelFile: async () => {
       const picked = await open({

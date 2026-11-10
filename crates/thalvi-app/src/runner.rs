@@ -791,10 +791,6 @@ impl Runner {
             Woke::Trigger(Ok(WakeTrigger::Capture | WakeTrigger::Hold)) => {
                 Box::pin(self.capture()).await
             }
-            Woke::Trigger(Ok(WakeTrigger::Conversation)) => {
-                println!("Conversation wake heard. This build has no conversation.");
-                Flow::Continue
-            }
             Woke::Trigger(Err(error)) => {
                 tracing::warn!(?error, "listening stopped");
                 self.close_microphone();

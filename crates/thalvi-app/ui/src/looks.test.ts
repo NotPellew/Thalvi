@@ -366,7 +366,6 @@ describe("the settings window's look", () => {
     expect(headings("feedback")).toEqual(["Overlay", "Look", "Sounds"]);
     expect(headings("capture")).toEqual([
       "Dictation wake word",
-      "Conversation wake word",
       "Endings",
       "Quiet before acting",
       "Capture limits",

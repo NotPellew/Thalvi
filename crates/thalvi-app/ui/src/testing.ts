@@ -141,12 +141,9 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     copyLoginLine: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     validateSpeechModelFolder: vi.fn<(path: string) => Promise<void>>(() => Promise.resolve()),
     listWakeModels: vi.fn<() => Promise<WakeModelInfo[]>>(() => Promise.resolve(structuredClone(WAKE_MODELS_INFO))),
-    validateWakeModels: vi.fn<(capture: string, conversation: string) => Promise<void>>((capture, conversation) => {
-      if (capture === conversation) return Promise.reject(new Error("The capture and conversation wake models must be different."));
-      for (const model of [capture, conversation]) {
-        if (!WAKE_MODELS_INFO.some((info) => info.name === model) && (model.includes("bad") || model.includes("missing") || !model.endsWith(".onnx"))) {
-          return Promise.reject(new Error(`The wake model ${model} could not be loaded: not a wake model.`));
-        }
+    validateWakeModels: vi.fn<(capture: string) => Promise<void>>((capture) => {
+      if (!WAKE_MODELS_INFO.some((info) => info.name === capture) && (capture.includes("bad") || capture.includes("missing") || !capture.endsWith(".onnx"))) {
+        return Promise.reject(new Error(`The wake model ${capture} could not be loaded: not a wake model.`));
       }
       return Promise.resolve();
     }),
