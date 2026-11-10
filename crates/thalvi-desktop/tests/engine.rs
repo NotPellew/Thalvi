@@ -1759,7 +1759,7 @@ async fn a_dictation_wake_is_reported_and_closes_the_microphone_gate() {
             rig.feed.send(audible(1));
             assert_eq!(finished(task).await.unwrap(), WakeTrigger::Capture);
             assert!(!rig.gate.is_enabled(), "a capture wake closes the gate");
-            assert!(rig.notices().is_empty());
+            assert_eq!(rig.notices(), Vec::<String>::new());
             assert_eq!(rig.wake.resets(), 1);
         })
         .await;
@@ -3189,7 +3189,10 @@ async fn a_dictation_wake_gets_a_folder_with_the_last_two_seconds() {
             assert_eq!(tags.len(), 25);
             assert_eq!(tags[24] - tags[0], 24, "the last 25 frames");
             assert_eq!(usize::try_from(tags[24]).unwrap(), 31);
-            assert!(wake_lines(&dir, "desktop_wake_nothing").is_empty());
+            assert_eq!(
+                wake_lines(&dir, "desktop_wake_nothing"),
+                Vec::<serde_json::Value>::new()
+            );
         })
         .await;
 }
