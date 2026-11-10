@@ -54,14 +54,14 @@ describe("the overlay in the holo and gunmetal looks", () => {
   const pending = (
     waitingForQuiet: boolean,
     pauseMs = 2500,
-    wording: { route: Route; target: string | null; text: string } = { route: "submit", target: "Slack", text: "Call me back" },
-  ): Status => ({ state: "pending", ...wording, waitingForQuiet, pauseMs });
+    wording: { route: Route; target: string | null; text: string; copies?: boolean } = { route: "submit", target: "Slack", text: "Call me back" },
+  ): Status => ({ state: "pending", copies: false, ...wording, waitingForQuiet, pauseMs });
 
   it("wears the look from the settings and follows a change at the next idle moment", async () => {
     const { emit, saved, backend } = await mount("gunmetal");
     expect(root.dataset["look"]).toBe("gunmetal");
 
-    emit({ state: "capturing", target: null, committed: "x", partial: null });
+    emit({ state: "capturing", target: null, committed: "x", partial: null, notice: null });
     backend.getSettings.mockResolvedValue({ ...SETTINGS, look: "holo" });
     saved();
     await settle();
@@ -81,15 +81,42 @@ describe("the overlay in the holo and gunmetal looks", () => {
     { name: "starting", status: { state: "starting", target: "Slack" }, tone: "live", label: "", tag: false, line: "", message: "" },
     {
       name: "speaking",
-      status: { state: "capturing", target: null, committed: "Hello", partial: "wor" },
+      status: { state: "capturing", target: null, committed: "Hello", partial: "wor", notice: null },
       tone: "live",
       label: "",
       tag: false,
       line: "Hello wor",
       message: "",
     },
+    {
+      name: "speaking with a notice the user should read",
+      status: { state: "capturing", target: null, committed: "Hello", partial: null, notice: "Say the ending again." },
+      tone: "live",
+      label: "",
+      tag: false,
+      line: "Say the ending again.",
+      message: "",
+    },
     { name: "waiting for quiet", status: pending(true), tone: "quiet", label: "", tag: false, line: "Call me back", message: "" },
     { name: "countdown", status: pending(false), tone: "pending", label: "SEND TO SLACK IN 3 s", tag: true, line: "Call me back", message: "" },
+    {
+      name: "paste and submit countdown on a desktop that only copies",
+      status: pending(false, 2500, { route: "submit", target: null, text: "Call me back", copies: true }),
+      tone: "pending",
+      label: "COPY IN 3 s",
+      tag: true,
+      line: "Call me back",
+      message: "",
+    },
+    {
+      name: "a task countdown on a desktop that only copies",
+      status: pending(false, 2500, { route: "task", target: "Firefox", text: "open the calendar", copies: true }),
+      tone: "pending",
+      label: "TASK IN 3 s",
+      tag: true,
+      line: "open the calendar",
+      message: "",
+    },
     {
       name: "paste countdown without a target",
       status: pending(false, 700, { route: "paste", target: null, text: "Call me back" }),
@@ -120,11 +147,20 @@ describe("the overlay in the holo and gunmetal looks", () => {
     },
     {
       name: "failed",
-      status: { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:9 (connection refused). Start the Thalvi server, or fix Settings → Speech → Server address.", headline: "Can't reach speech server — Settings", causes: [] },
+      status: { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:9 (connection refused). Start the Thalvi server, or fix Settings → Speech → Server address.", headline: "Can't reach speech server — Settings", causes: [], kind: "other" },
+      tone: "failed",
+      label: "FAILED",
+      tag: true,
+      line: "Can't reach speech server — Settings",
+      message: "",
+    },
+    {
+      name: "failed delivery",
+      status: { state: "failed", notice: "Thalvi could not reach the window that was open when you started.", headline: "Window closed — text on clipboard", causes: [], kind: "delivery" },
       tone: "failed",
       label: "NOT SENT",
       tag: true,
-      line: "Can't reach speech server — Settings",
+      line: "Window closed — text on clipboard",
       message: "",
     },
   ];
@@ -165,6 +201,15 @@ describe("the overlay in the holo and gunmetal looks", () => {
     expect(line()).toBe("open the calendar");
   });
 
+  it("keeps the download notice scrolling as its percentage changes", async () => {
+    const { emit } = await mount("gunmetal");
+    emit({ state: "loading", notice: "Downloading the speech model, about 650 MB — 10%" });
+    const run = pick(module(), ".tick .run");
+    emit({ state: "loading", notice: "Downloading the speech model, about 650 MB — 11%" });
+    expect(pick(module(), ".tick .run")).toBe(run);
+    expect(run.textContent).toBe("Downloading the speech model, about 650 MB — 11%");
+  });
+
   it("keeps the line single and slides it left only when the words overflow", async () => {
     const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollWidth");
     let wide = 500;
@@ -183,22 +228,22 @@ describe("the overlay in the holo and gunmetal looks", () => {
     try {
       const { emit } = await mount();
       const run = () => pick(module(), ".run");
-      emit({ state: "capturing", target: null, committed: "a long line of words", partial: null });
+      emit({ state: "capturing", target: null, committed: "a long line of words", partial: null, notice: null });
       expect(pick(module(), ".tick").classList.contains("over")).toBe(true);
       expect(run().style.transform).toBe("translateX(-200px)");
 
       wide = 120;
-      emit({ state: "capturing", target: null, committed: "short", partial: null });
+      emit({ state: "capturing", target: null, committed: "short", partial: null, notice: null });
       expect(pick(module(), ".tick").classList.contains("over")).toBe(false);
       expect(run().style.transform).toBe("translateX(0px)");
 
       wide = 500;
-      emit({ state: "failed", notice: "A notice.", headline: "A headline longer than the line.", causes: [] });
+      emit({ state: "failed", notice: "A notice.", headline: "A headline longer than the line.", causes: [], kind: "other" });
       expect(run().classList.contains("scroll")).toBe(true);
       expect(run().style.getPropertyValue("--over")).toBe("232px");
 
       wide = 120;
-      emit({ state: "failed", notice: "Short.", headline: "Short.", causes: [] });
+      emit({ state: "failed", notice: "Short.", headline: "Short.", causes: [], kind: "other" });
       expect(run().classList.contains("scroll")).toBe(false);
     } finally {
       if (descriptor) Object.defineProperty(Element.prototype, "scrollWidth", descriptor);
@@ -209,10 +254,10 @@ describe("the overlay in the holo and gunmetal looks", () => {
 
   it("hides the dictated words with overlay.draft off but still tells a failure", async () => {
     const { emit } = await mount("holo", { ...SETTINGS, overlay: { show: true, draft: false } });
-    emit({ state: "capturing", target: "Slack", committed: "secret", partial: null });
+    emit({ state: "capturing", target: "Slack", committed: "secret", partial: null, notice: null });
     expect(line()).toBe("");
     expect(module().dataset["text"]).toBe("false");
-    emit({ state: "failed", notice: "Server unreachable.", headline: "Server unreachable.", causes: [] });
+    emit({ state: "failed", notice: "Server unreachable.", headline: "Server unreachable.", causes: [], kind: "other" });
     expect(line()).toBe("Server unreachable.");
     expect(module().dataset["text"]).toBe("true");
   });
@@ -224,7 +269,7 @@ describe("the overlay in the holo and gunmetal looks", () => {
       emit(status);
       return !cancel().hidden;
     };
-    expect(shown({ state: "capturing", target: null, committed: "", partial: null })).toBe(true);
+    expect(shown({ state: "capturing", target: null, committed: "", partial: null, notice: null })).toBe(true);
     cancel().click();
     expect(backend.cancelCapture).toHaveBeenCalledOnce();
     expect(shown({ state: "working", target: "Slack", route: "task", cancellable: true })).toBe(true);
@@ -241,7 +286,7 @@ describe("the overlay in the holo and gunmetal looks", () => {
 
     it("is drawn on every frame while the voice is live, and rarely once it has settled", async () => {
       const { emit, level, clock } = await mount();
-      emit({ state: "capturing", target: null, committed: "", partial: null });
+      emit({ state: "capturing", target: null, committed: "", partial: null, notice: null });
       level(0.8);
       expect(run(clock, 1000)).toBeGreaterThan(55);
 
@@ -252,13 +297,13 @@ describe("the overlay in the holo and gunmetal looks", () => {
 
     it("is not drawn in the neon look, behind a label, or while the overlay is idle", async () => {
       const neon = await mount("neon");
-      neon.emit({ state: "capturing", target: null, committed: "", partial: null });
+      neon.emit({ state: "capturing", target: null, committed: "", partial: null, notice: null });
       expect(run(neon.clock, 500)).toBe(0);
 
       document.body.innerHTML = '<div id="overlay"></div>';
       root = pick(document.body, "#overlay");
       const { emit, level, clock } = await mount("gunmetal");
-      emit({ state: "capturing", target: null, committed: "", partial: null });
+      emit({ state: "capturing", target: null, committed: "", partial: null, notice: null });
       level(0.8);
       expect(run(clock, 200)).toBeGreaterThan(0);
       emit(pending(false));

@@ -1,11 +1,10 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
-import type { AudioStatus, Backend, Draft, HistoryEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, LiveEntry, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, WakeModelInfo } from "./contract.ts";
 import type { Clock } from "./overlay.ts";
 
 export const SETTINGS: Settings = {
-  server: "ws://127.0.0.1:8080",
   wake: {
     capture: { model: "hey_thalvi", threshold: 0.5 },
     conversation: { model: "hey_mycroft", threshold: 0.5 },
@@ -15,12 +14,13 @@ export const SETTINGS: Settings = {
   capture_limits: { idle: 60, max: 300 },
   endings: {
     "paste that": "paste",
+    "write that out": "write",
     submit: "submit",
     "do that": "task",
     "scratch that": "scratch",
     "never mind": "cancel",
   },
-  stt: { engine: "server", secondary: null },
+  stt: { entries: [{ kind: "thalvi_server", id: "thalvi-server", name: "Thalvi server", active: true, address: "ws://127.0.0.1:8080" }] },
   apps: { slack: { classes: ["Slack"], executables: [], input_keys: ["ctrl", "k"] } },
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com", label: "docs" }],
   overlay: { show: true, draft: true },
@@ -28,15 +28,65 @@ export const SETTINGS: Settings = {
   look: "neon",
   recordings: { metrics: true, text: false, audio: false },
   hold_key: "Alt+KeyZ",
+  write_key: "Alt+KeyX",
+  writing: null,
+  writing_default_prompt: "Write what I dictated as clear text.",
   history: { enabled: true, limit: 200 },
 };
 
+export const WAKE_MODELS_INFO: WakeModelInfo[] = [
+  { name: "hey_thalvi", title: "Hey Thalvi", size: 395_406, cached: true, threshold: 0.7 },
+  { name: "hey_mycroft", title: "Hey Mycroft", size: 857_691, cached: false, threshold: 0.5 },
+  { name: "hey_jarvis", title: "Hey Jarvis", size: 1_271_370, cached: false, threshold: 0.5 },
+];
+
+const UNIFIED_LANGUAGES = [
+  "Bulgarian",
+  "Croatian",
+  "Czech",
+  "Danish",
+  "Dutch",
+  "English",
+  "Estonian",
+  "Finnish",
+  "French",
+  "German",
+  "Greek",
+  "Hungarian",
+  "Italian",
+  "Latvian",
+  "Lithuanian",
+  "Maltese",
+  "Polish",
+  "Portuguese",
+  "Romanian",
+  "Russian",
+  "Slovak",
+  "Slovenian",
+  "Spanish",
+  "Swedish",
+  "Ukrainian",
+];
+
 export const NEMOTRON: SpeechModelInfo = {
   name: "nemotron_160ms",
-  title: "Nemotron Speech Streaming 0.6B",
-  description: "NVIDIA's English streaming recognizer, int8, answering every 160 ms. Runs on the CPU.",
+  title: "Nemotron Streaming",
+  description: "NVIDIA's Nemotron Speech Streaming.",
   size: 661_919_416,
   source: "https://huggingface.co/example/nemotron",
+  license: "NVIDIA Open Model License",
+  languages: ["English"],
+  cached: false,
+};
+
+export const UNIFIED: SpeechModelInfo = {
+  name: "unified_160ms",
+  title: "Nemotron Unified",
+  description: "NVIDIA's Nemotron Unified ASR.",
+  size: 646_518_349,
+  source: "https://huggingface.co/example/unified",
+  license: "OpenMDW-1.1",
+  languages: UNIFIED_LANGUAGES,
   cached: false,
 };
 
@@ -46,6 +96,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
   const levelListeners: ((level: number) => void)[] = [];
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
   const savedListeners: (() => void)[] = [];
+  const elsewhereListeners: (() => void)[] = [];
   const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
   const pageListeners: ((page: string) => void)[] = [];
   let audioState: AudioStatus = {
@@ -64,6 +115,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     getAudio: vi.fn(() => Promise.resolve(structuredClone(audioState))),
     onAudio: vi.fn((listener: (audio: AudioStatus) => void) => audioListeners.push(listener)),
     onSettingsSaved: vi.fn((listener: () => void) => savedListeners.push(listener)),
+    onSettingsChangedElsewhere: vi.fn((listener: () => void) => elsewhereListeners.push(listener)),
     getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
     saveSettings: vi.fn<(settings: Settings) => Promise<void>>(() => Promise.resolve()),
     setListening: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
@@ -81,16 +133,33 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     copyText: vi.fn<(text: string) => Promise<void>>(() => Promise.resolve()),
     discardDraft: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     onOpenPage: vi.fn((listener: (page: string) => void) => pageListeners.push(listener)),
+    getHoldKeyUnavailable: vi.fn<() => Promise<string | null>>(() => Promise.resolve(null)),
     getStartAtLogin: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),
     setStartAtLogin: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
     getMenuEntry: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),
     setMenuEntry: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
     copyLoginLine: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     validateSpeechModelFolder: vi.fn<(path: string) => Promise<void>>(() => Promise.resolve()),
-    listSpeechModels: vi.fn<() => Promise<SpeechModelInfo[]>>(() => Promise.resolve([{ ...NEMOTRON }])),
+    listWakeModels: vi.fn<() => Promise<WakeModelInfo[]>>(() => Promise.resolve(structuredClone(WAKE_MODELS_INFO))),
+    validateWakeModels: vi.fn<(capture: string, conversation: string) => Promise<void>>((capture, conversation) => {
+      if (capture === conversation) return Promise.reject(new Error("The capture and conversation wake models must be different."));
+      for (const model of [capture, conversation]) {
+        if (!WAKE_MODELS_INFO.some((info) => info.name === model) && (model.includes("bad") || model.includes("missing") || !model.endsWith(".onnx"))) {
+          return Promise.reject(new Error(`The wake model ${model} could not be loaded: not a wake model.`));
+        }
+      }
+      return Promise.resolve();
+    }),
+    downloadWakeModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
+    pickWakeModelFile: vi.fn<() => Promise<string | null>>(() => Promise.resolve("/models/custom.onnx")),
+    listSpeechModels: vi.fn<() => Promise<SpeechModelInfo[]>>(() => Promise.resolve([{ ...NEMOTRON }, { ...UNIFIED }])),
     downloadSpeechModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     onSpeechModelProgress: vi.fn((listener: (progress: SpeechModelProgress) => void) => speechListeners.push(listener)),
+    speechDevice: vi.fn<(name: string) => Promise<string>>(() => Promise.resolve("Will run on the CPU: this model runs on the CPU")),
     openSpeechModelSource: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
+    checkSpeechEntry: vi.fn<(entry: SpeechEntry) => Promise<void>>(() => Promise.resolve()),
+    wordListSupport: vi.fn<(entry: LiveEntry) => Promise<boolean>>(() => Promise.resolve(false)),
+    shareWordList: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     appVersion: vi.fn(() => Promise.resolve("1.2.3")),
   } satisfies Backend;
   return {
@@ -119,6 +188,9 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     },
     saved: () => {
       for (const listener of savedListeners) listener();
+    },
+    changedElsewhere: () => {
+      for (const listener of elsewhereListeners) listener();
     },
   };
 }

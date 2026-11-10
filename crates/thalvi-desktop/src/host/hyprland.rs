@@ -1,19 +1,23 @@
 //! Hyprland host: hyprctl, wtype and wl-copy.
 
-mod command;
-mod state;
+mod hold_binds;
 
+use std::ffi::OsString;
 use std::fmt;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 
 use serde::Deserialize;
+use xkbcommon::xkb::{self, Keycode, Keysym};
 
-use self::command::{CommandError, CommandRunner, SystemRunner};
+use super::command::{CommandError, CommandRunner, SystemRunner, tool, wl_copy};
 use super::{
-    App, HoldSource, Host, HostError, Modifier, OVERLAY_TITLE, Shortcut, StateServer, TypedText,
-    WebUrl,
+    App, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, OVERLAY_TITLE, PasteText,
+    Shortcut, WebUrl,
 };
-use crate::hold::HoldKey;
+use crate::hold::{HoldKey, HoldKind};
+use hold_binds::{Events, Installed};
 
 /// The window as Hyprland identifies it; the pid tells a reused address from the original window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,91 +39,59 @@ pub struct Hyprland<R = SystemRunner> {
 }
 
 impl Hyprland {
-    /// # Errors
-    /// [`HostError::Unsupported`] naming this desktop unless Hyprland is running.
-    pub fn detect() -> Result<Self, HostError> {
-        detect_in(
-            std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok().as_deref(),
-            std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
-        )
-        .map(|()| Self { run: SystemRunner })
+    pub(super) fn system() -> Self {
+        Self { run: SystemRunner }
     }
 
-    /// Answers each query on the user's private runtime folder with `state()` until the guard is
-    /// dropped.
-    ///
-    /// # Errors
-    /// [`HostError::Unsupported`] when no private folder is available or another app answers.
-    pub fn serve_state(
-        state: impl Fn() -> String + Send + 'static,
-    ) -> Result<StateServer, HostError> {
-        state::serve(state)
+    /// The keys a config without hold keys gets: the hold key, then the write key. Hyprland takes
+    /// no modifier on them.
+    #[must_use]
+    pub fn default_hold_keys() -> (HoldKey, HoldKey) {
+        (HoldKey::f9(), HoldKey::f10())
     }
 
-    /// The compositor reports the key, through the binds in `hyprland.conf` that run the
-    /// `hold-start` and `hold-end` commands, so there is nothing to watch.
+    /// Binds `keys` in Hyprland to the `hold-*` and `write-*` commands of the running program,
+    /// which report the presses and releases, so `_on_change` is not called. The binds go when the
+    /// watch is dropped, and come back after a config reload. Later problems go to `on_problem`.
     ///
     /// # Errors
-    /// Never fails.
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "the same signature as the Windows host, whose hook can fail"
-    )]
-    pub fn watch_hold_key(
-        _key: &HoldKey,
-        _on_change: impl Fn(bool) + Send + 'static,
+    /// [`HostError::Unsupported`] when a key is not F1 to F12 alone, another bind holds it, or
+    /// Hyprland refuses the binds.
+    pub fn watch_hold_keys(
+        keys: &[(HoldKind, HoldKey)],
+        _on_change: impl Fn(HoldKind, bool) + Send + 'static,
+        on_problem: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
-        Ok(HoldSource::Binds(
-            "On Hyprland the hold key is a bind in hyprland.conf: see integrations/hyprland/hyprland-binds.conf.",
-        ))
-    }
-
-    /// The running app's state line; `None` when no app answers.
-    ///
-    /// # Errors
-    /// [`HostError::Unsupported`] when the answer could not be asked or read.
-    pub fn query_state() -> Result<Option<String>, HostError> {
-        state::query()
-    }
-
-    /// Shows `message` in an error box titled `title` and waits until it is closed. Needs no
-    /// detected desktop, so a failure to detect one can be shown. Does nothing without a display.
-    pub fn show_error(title: &str, message: &str) {
-        use gtk::prelude::Cast;
-
-        if gtk::init().is_err() {
-            return;
-        }
-        let dialog = gtk::MessageDialog::new(
-            None::<&gtk::Window>,
-            gtk::DialogFlags::MODAL,
-            gtk::MessageType::Error,
-            gtk::ButtonsType::Ok,
-            message,
-        );
-        gtk::prelude::GtkWindowExt::set_title(&dialog, title);
-        // So the user can copy the message, such as a path, out of the box.
-        if let Ok(area) =
-            gtk::prelude::MessageDialogExt::message_area(&dialog).downcast::<gtk::Container>()
-        {
-            for child in gtk::prelude::ContainerExt::children(&area) {
-                if let Ok(label) = child.downcast::<gtk::Label>() {
-                    gtk::prelude::LabelExt::set_selectable(&label, true);
-                }
-            }
-        }
-        gtk::prelude::DialogExt::run(&dialog);
+        /// Shared by every watch, since a key change has two at once.
+        static INSTALLED: LazyLock<Installed> = LazyLock::new(Installed::default);
+        let exe = executable(std::env::var_os("APPIMAGE"), std::env::current_exe())?;
+        hold_binds::bind(
+            Arc::new(SystemRunner),
+            INSTALLED.clone(),
+            &exe,
+            keys,
+            Events::system(),
+            on_problem,
+        )
+        .map(HoldSource::Watching)
     }
 }
 
-fn detect_in(signature: Option<&str>, desktop: Option<&str>) -> Result<(), HostError> {
-    if signature.is_some_and(|signature| !signature.is_empty()) {
-        return Ok(());
+/// The program the binds run: the `AppImage` when Thalvi runs from one, since its own path is a
+/// mount that goes away, else the running executable.
+fn executable(
+    appimage: Option<OsString>,
+    current: io::Result<PathBuf>,
+) -> Result<PathBuf, HostError> {
+    match appimage.filter(|path| !path.is_empty()) {
+        Some(path) => Ok(path.into()),
+        None => current.map_err(|_| {
+            HostError::Unsupported(
+                "Thalvi could not find its own program file, so the hold keys cannot be bound."
+                    .to_owned(),
+            )
+        }),
     }
-    let name = desktop.filter(|name| !name.is_empty()).unwrap_or("unknown");
-    Err(HostError::Unsupported(format!(
-        "Thalvi supports Hyprland and Windows for now; this desktop is {name}."
-    )))
 }
 
 /// The default browsers Thalvi can ask for a new tab, by `.desktop` file, and their commands.
@@ -135,7 +107,8 @@ const BROWSERS: [(&str, &str); 6] = [
 const NO_FOCUSED_WINDOW: &str = "The desktop did not identify the focused window.";
 const INVALID_WINDOW_LIST: &str = "The desktop returned an invalid window list.";
 const INVALID_MONITOR_LIST: &str = "The desktop returned an invalid monitor list.";
-const NOTHING_TYPED: &str = " Nothing was typed.";
+const NOTHING_TYPED: &str = " Nothing was pasted.";
+const ENTER_FAILED: &str = "The text was pasted, but Thalvi may not have pressed Enter. Check the window before trying again.";
 
 /// One window as `hyprctl -j` prints it; any field may be absent, as for no focused window.
 #[derive(Deserialize)]
@@ -178,14 +151,81 @@ struct Monitor {
     reserved: [i64; 4],
 }
 
-/// A tool failure before any input was sent: a missing tool means this desktop lacks it.
-fn tool(error: &CommandError) -> HostError {
-    match error {
-        CommandError::NotInstalled(_) => HostError::Unsupported(error.to_string()),
-        CommandError::TimedOut(_) | CommandError::Failed { .. } => {
-            HostError::NothingTyped(error.to_string())
-        }
+/// The keyboard as `hyprctl -j devices` prints it: the names its keymap is compiled from.
+#[derive(Deserialize)]
+struct Keyboard {
+    rules: String,
+    model: String,
+    layout: String,
+    variant: String,
+    options: String,
+    #[serde(default)]
+    main: bool,
+}
+
+#[derive(Deserialize)]
+struct Devices {
+    keyboards: Vec<Keyboard>,
+}
+
+/// An option as `hyprctl -j getoption` prints it.
+#[derive(Deserialize)]
+struct StringOption {
+    #[serde(default)]
+    str: String,
+    set: bool,
+}
+
+impl StringOption {
+    /// The text the user gave, if any; Hyprland prints `[[EMPTY]]` for an option nobody set.
+    fn value(self) -> Option<String> {
+        Some(self.str).filter(|value| self.set && !value.is_empty() && value != "[[EMPTY]]")
     }
+}
+
+impl Keyboard {
+    fn keymap(&self, context: &xkb::Context) -> Option<xkb::Keymap> {
+        xkb::Keymap::new_from_names(
+            context,
+            &self.rules,
+            &self.model,
+            &self.layout,
+            &self.variant,
+            Some(self.options.clone()),
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+    }
+}
+
+/// The keymap in a `kb_file`, which the layout names do not describe; `None` when the file is
+/// not an absolute or home path, cannot be read, or is not a keymap.
+fn keymap_file(context: &xkb::Context, path: &str) -> Option<xkb::Keymap> {
+    let path = match path.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir()?.join(rest),
+        None => Path::new(path).to_path_buf(),
+    };
+    if !path.is_absolute() {
+        return None;
+    }
+    xkb::Keymap::new_from_string(
+        context,
+        std::fs::read_to_string(path).ok()?,
+        xkb::KEYMAP_FORMAT_TEXT_V1,
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )
+}
+
+/// The keycode that types `v` in `keymap`: in its first layout, since `sendshortcut` sends the
+/// key with that layout's group whichever one is active, else in the first other layout that has
+/// one, since a program matches Ctrl shortcuts against a Latin layout.
+fn v_keycode(keymap: &xkb::Keymap) -> Option<u32> {
+    (0..keymap.num_layouts()).find_map(|layout| {
+        (keymap.min_keycode().raw()..=keymap.max_keycode().raw()).find(|code| {
+            keymap
+                .key_get_syms_by_level(Keycode::new(*code), layout, 0)
+                .contains(&Keysym::v)
+        })
+    })
 }
 
 /// States on a failure that nothing reached a window.
@@ -194,6 +234,44 @@ fn nothing_typed(error: HostError) -> HostError {
         HostError::Unsupported(message) => HostError::Unsupported(message + NOTHING_TYPED),
         HostError::NothingTyped(message) => HostError::NothingTyped(message + NOTHING_TYPED),
         partial @ HostError::MaybePartial(_) => partial,
+    }
+}
+
+/// Window classes of terminals, compared ignoring case; Ctrl+V sends these a raw `^V`, so they
+/// paste with Ctrl+Shift+V.
+const TERMINAL_CLASSES: [&str; 14] = [
+    "kitty",
+    "foot",
+    "footclient",
+    "alacritty",
+    "org.wezfurlong.wezterm",
+    "com.mitchellh.ghostty",
+    "org.gnome.console",
+    "org.gnome.terminal",
+    "gnome-terminal-server",
+    "org.kde.konsole",
+    "konsole",
+    "xterm",
+    "org.gnome.ptyxis",
+    "ptyxis",
+];
+
+/// The modifiers of the paste shortcut for `target`.
+fn paste_modifiers(target: &Window) -> &'static str {
+    if TERMINAL_CLASSES.contains(&target.class.to_lowercase().as_str()) {
+        "CTRL SHIFT"
+    } else {
+        "CTRL"
+    }
+}
+
+/// A failure of a key tool after the window was focused: some keys may have been pressed.
+fn key_failure(error: &CommandError) -> HostError {
+    match error {
+        CommandError::NotInstalled(_) => nothing_typed(tool(error)),
+        CommandError::TimedOut(_) | CommandError::Failed { .. } => {
+            HostError::MaybePartial(MAYBE_PASTED.to_owned())
+        }
     }
 }
 
@@ -227,6 +305,36 @@ impl<R: CommandRunner> Hyprland<R> {
             .and_then(Row::window)
             .map(|(_, window)| window)
             .ok_or_else(|| HostError::NothingTyped(NO_FOCUSED_WINDOW.to_owned()))
+    }
+
+    /// The keymap the main keyboard types with: the `kb_file` when one is set, else its layout
+    /// names; `None` when Hyprland does not say or the keymap cannot be rebuilt, so a wrong key is
+    /// never guessed from names that do not describe it.
+    fn keymap(&self) -> Option<xkb::Keymap> {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let option = self
+            .run
+            .run("hyprctl", &["-j", "getoption", "input:kb_file"], None)
+            .ok()?;
+        if let Some(path) = serde_json::from_str::<StringOption>(&option).ok()?.value() {
+            return keymap_file(&context, &path);
+        }
+        let mut keyboards = serde_json::from_str::<Devices>(&self.json("devices").ok()?)
+            .ok()?
+            .keyboards;
+        keyboards.sort_by_key(|keyboard| !keyboard.main);
+        keyboards.first()?.keymap(&context)
+    }
+
+    /// How `sendshortcut` names the V key. Hyprland resolves a key name once per name, against the
+    /// keyboard that last sent a key, so a layout change leaves the old key and a virtual keyboard
+    /// such as wtype's fails it with "key not found"; a keycode from the keymap now in use does not.
+    /// With no keymap to read, the name is left to Hyprland: the worst it does is refuse the key.
+    fn v_key(&self) -> String {
+        self.keymap()
+            .as_ref()
+            .and_then(v_keycode)
+            .map_or_else(|| "v".to_owned(), |code| format!("code:{code}"))
     }
 
     /// Every window, most recently focused first.
@@ -272,44 +380,68 @@ impl<R: CommandRunner> Host for Hyprland<R> {
     type Target = Window;
 
     // Hyprland routes no pointer input to a `no_focus` window, and the overlay must stay one.
-    const OVERLAY_TAKES_CLICKS: bool = false;
+    fn overlay_takes_clicks(&self) -> bool {
+        false
+    }
+
+    fn copies_only(&self) -> bool {
+        false
+    }
 
     fn capture_target(&self) -> Result<Window, HostError> {
         self.active()
     }
 
-    fn deliver(&self, target: &Window, text: &TypedText, enter: bool) -> Result<(), HostError> {
-        self.focus(target).map_err(nothing_typed)?;
-        let mut args = vec!["-"];
-        if enter {
-            // Terminal agents read an Enter that arrives right after typed text as a new line.
-            args.extend(["-s", "250", "-k", "Return"]);
+    fn deliver(
+        &self,
+        target: &Window,
+        text: &PasteText,
+        enter: bool,
+    ) -> Result<Delivered, HostError> {
+        let paste = !text.as_str().is_empty();
+        // Copied first, so the text is on the clipboard whatever happens to the window.
+        if paste {
+            wl_copy(&self.run, text.as_str()).map_err(nothing_typed)?;
         }
-        self.run
-            .run("wtype", &args, Some(text.as_str()))
-            .map(|_| ())
-            .map_err(|error| match error {
-                CommandError::NotInstalled(_) => nothing_typed(tool(&error)),
-                CommandError::TimedOut(_) | CommandError::Failed { .. } => HostError::MaybePartial(
-                    "Typing failed or stopped partway. Check the target before retrying."
-                        .to_owned(),
-                ),
-            })
+        self.focus(target).map_err(nothing_typed)?;
+        if paste {
+            // The compositor sends the keys with its own keymap; GTK 3 ignores a Ctrl shortcut
+            // that wtype sends with its own.
+            let shortcut = format!(
+                "{},{},address:{}",
+                paste_modifiers(target),
+                self.v_key(),
+                target.address
+            );
+            let reply = self
+                .run
+                .run("hyprctl", &["dispatch", "sendshortcut", &shortcut], None)
+                .map_err(|error| key_failure(&error))?;
+            if reply.trim() != "ok" {
+                return Err(HostError::NothingTyped(format!(
+                    "The desktop would not press the paste keys: {}. Nothing was pasted.",
+                    reply.trim().trim_end_matches('.')
+                )));
+            }
+        }
+        if enter {
+            // Terminal agents read an Enter that arrives right after a paste as a new line.
+            let pause: &[&str] = if paste { &["-s", "250"] } else { &[] };
+            let keys: Vec<&str> = pause.iter().copied().chain(["-k", "Return"]).collect();
+            self.run.run("wtype", &keys, None).map_err(|error| {
+                if paste {
+                    // The paste went through, so the text is in the window even if Enter is not.
+                    HostError::MaybePartial(ENTER_FAILED.to_owned())
+                } else {
+                    key_failure(&error)
+                }
+            })?;
+        }
+        Ok(Delivered::InWindow)
     }
 
     fn copy(&self, text: &str) -> Result<(), HostError> {
-        // An empty copy would clear the clipboard instead of keeping anything.
-        if text.is_empty() {
-            return Ok(());
-        }
-        self.run
-            .run(
-                "wl-copy",
-                &["--type", "text/plain;charset=utf-8"],
-                Some(text),
-            )
-            .map(|_| ())
-            .map_err(|error| tool(&error))
+        wl_copy(&self.run, text)
     }
 
     fn focus_app(&self, app: &App) -> Result<Window, HostError> {
@@ -369,22 +501,44 @@ impl<R: CommandRunner> Host for Hyprland<R> {
     fn prepare_overlay(&self, width: f64, height: f64) -> Result<f64, HostError> {
         let monitors: Vec<Monitor> = serde_json::from_str(&self.json("monitors")?)
             .map_err(|_| HostError::NothingTyped(INVALID_MONITOR_LIST.to_owned()))?;
-        // The window opens on the focused monitor. A rule added later wins over earlier ones, and
-        // Hyprland applies `size` and `move` each time the window maps, so a hidden overlay appears
-        // at its new size and place; a client cannot resize its own floating window afterwards.
         let top = monitors
             .iter()
             .find(|monitor| monitor.focused)
             .or(monitors.first())
             .map_or(0, |monitor| monitor.reserved[1].max(0));
-        let rule = format!(
-            "match:title ^({OVERLAY_TITLE})$, float on, pin on, no_initial_focus on, no_focus on, \
-             size {width} {height}, move ((monitor_w*0.5)-({width}*0.5)) {top}, border_size 0, \
-             no_shadow on, no_anim on, no_blur on"
-        );
-        self.run
-            .run("hyprctl", &["keyword", "windowrule", &rule], None)
+        // Named rules can be restored after a config reload without accumulating one per capture.
+        let rules = [
+            ("match:title", format!("^({OVERLAY_TITLE})$")),
+            ("float", "on".to_owned()),
+            ("pin", "on".to_owned()),
+            ("no_initial_focus", "on".to_owned()),
+            ("no_focus", "on".to_owned()),
+            ("size", format!("{width} {height}")),
+            ("move", format!("((monitor_w*0.5)-({width}*0.5)) {top}")),
+            ("border_size", "0".to_owned()),
+            ("no_shadow", "on".to_owned()),
+            ("no_anim", "on".to_owned()),
+            ("no_blur", "on".to_owned()),
+        ];
+        let batch = rules
+            .iter()
+            .map(|(name, value)| format!("keyword windowrule[thalvi-overlay]:{name} {value}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let response = self
+            .run
+            .run("hyprctl", &["--batch", &batch], None)
             .map_err(|error| tool(&error))?;
+        let replies: Vec<_> = response
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if replies.len() != rules.len() || replies.iter().any(|reply| *reply != "ok") {
+            return Err(HostError::NothingTyped(
+                "The desktop could not prepare the status overlay.".to_owned(),
+            ));
+        }
         Ok(f64::from(i32::try_from(top).unwrap_or(0)))
     }
 }
@@ -392,67 +546,84 @@ impl<R: CommandRunner> Host for Hyprland<R> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_hold_key_is_no_failure_on_hyprland_where_binds_report_it() {
-        let source = Hyprland::watch_hold_key(&HoldKey::default(), |_| {});
+    fn the_shipped_binds_leave_the_hold_keys_to_thalvi() {
+        let conf = include_str!("../../../../integrations/hyprland/hyprland-binds.conf");
+        let hand_written: Vec<&str> = conf
+            .lines()
+            .filter(|line| {
+                ["hold-start", "hold-end", "write-start", "write-end"]
+                    .iter()
+                    .any(|command| line.ends_with(command))
+            })
+            .collect();
         assert!(
-            matches!(source, Ok(HoldSource::Binds(reason)) if reason.contains("hyprland.conf"))
+            hand_written.is_empty(),
+            "Thalvi would refuse these binds as its own: {hand_written:?}"
         );
+        assert!(conf.contains("Thalvi binds the hold and write keys itself"));
+    }
+
+    #[test]
+    fn the_binds_run_the_appimage_else_the_running_program() {
+        let missing = || Err(io::ErrorKind::NotFound.into());
+        for (name, appimage, current, expected) in [
+            (
+                "an AppImage",
+                Some("/home/me/Thalvi.AppImage"),
+                Ok("/tmp/.mount_x/usr/bin/thalvi-desktop"),
+                Ok("/home/me/Thalvi.AppImage"),
+            ),
+            (
+                "no AppImage",
+                None,
+                Ok("/usr/bin/thalvi-desktop"),
+                Ok("/usr/bin/thalvi-desktop"),
+            ),
+            (
+                "an empty AppImage variable",
+                Some(""),
+                Ok("/usr/bin/thalvi-desktop"),
+                Ok("/usr/bin/thalvi-desktop"),
+            ),
+            (
+                "an AppImage, whatever the program",
+                Some("/a"),
+                missing(),
+                Ok("/a"),
+            ),
+            (
+                "neither",
+                None,
+                missing(),
+                Err(HostError::Unsupported(
+                    "Thalvi could not find its own program file, so the hold keys cannot be bound."
+                        .to_owned(),
+                )),
+            ),
+        ] {
+            assert_eq!(
+                executable(appimage.map(OsString::from), current.map(PathBuf::from)),
+                expected.map(PathBuf::from),
+                "{name}"
+            );
+        }
     }
 
     use std::sync::Mutex;
 
+    use super::super::command::fakes::FakeRunner;
     use super::*;
-
-    type Reply = Box<dyn Fn(&[String], Option<&str>) -> Result<String, CommandError> + Send + Sync>;
-
-    /// Records every command and answers with `reply`.
-    struct FakeRunner {
-        calls: Mutex<Vec<(Vec<String>, Option<String>)>>,
-        reply: Reply,
-    }
-
-    impl CommandRunner for FakeRunner {
-        fn run(
-            &self,
-            program: &str,
-            args: &[&str],
-            stdin: Option<&str>,
-        ) -> Result<String, CommandError> {
-            let command: Vec<String> = std::iter::once(program)
-                .chain(args.iter().copied())
-                .map(str::to_owned)
-                .collect();
-            let reply = (self.reply)(&command, stdin);
-            self.calls
-                .lock()
-                .unwrap()
-                .push((command, stdin.map(str::to_owned)));
-            reply
-        }
-    }
 
     fn host(
         reply: impl Fn(&[String], Option<&str>) -> Result<String, CommandError> + Send + Sync + 'static,
     ) -> Hyprland<FakeRunner> {
         Hyprland {
-            run: FakeRunner {
-                calls: Mutex::default(),
-                reply: Box::new(reply),
-            },
+            run: FakeRunner::new(reply),
         }
     }
 
     fn commands(host: &Hyprland<FakeRunner>) -> Vec<String> {
-        host.run
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(argv, stdin)| match stdin {
-                Some(stdin) => format!("{} <{stdin}>", argv.join(" ")),
-                None => argv.join(" "),
-            })
-            .collect()
+        host.run.commands()
     }
 
     fn row(address: &str, pid: i64, class: &str, history: i64) -> String {
@@ -460,6 +631,45 @@ mod tests {
             r#"{{"address": "{address}", "mapped": true, "title": "TITLE", "pid": {pid},
                 "class": "{class}", "focusHistoryID": {history}}}"#
         )
+    }
+
+    /// `hyprctl -j getoption input:kb_file` when nobody set it.
+    const UNSET: &str = r#"{"option": "input:kb_file", "str": "[[EMPTY]]", "set": false }"#;
+
+    fn kb_file(path: &str) -> String {
+        format!(r#"{{"option": "input:kb_file", "str": "{path}", "set": true }}"#)
+    }
+
+    /// A `kb_file` of the given layout, written where the host can read it; returns its path.
+    fn keymap_file(name: &str, layout: &str, variant: &str) -> String {
+        let keymap = xkb::Keymap::new_from_names(
+            &xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
+            "",
+            "",
+            layout,
+            variant,
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .unwrap();
+        let path =
+            std::env::temp_dir().join(format!("thalvi-hyprland-{}-{name}.xkb", std::process::id()));
+        std::fs::write(&path, keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// `hyprctl -j devices` for keyboards given as (layout, variant, active index, main).
+    fn keyboards(keyboards: &[(&str, &str, u32, bool)]) -> String {
+        let rows: Vec<String> = keyboards
+            .iter()
+            .map(|(layout, variant, index, main)| {
+                format!(
+                    r#"{{"rules": "", "model": "", "layout": "{layout}", "variant": "{variant}",
+                        "options": "", "active_layout_index": {index}, "main": {main}}}"#
+                )
+            })
+            .collect();
+        format!(r#"{{"keyboards": [{}], "mice": []}}"#, rows.join(","))
     }
 
     fn window(address: &str, pid: u32, class: &str) -> Window {
@@ -493,46 +703,16 @@ mod tests {
                     *focused.lock().unwrap() = focus_lands_on.to_owned();
                     Ok("ok".to_owned())
                 }
+                ["hyprctl", "-j", "getoption", "input:kb_file"] => Ok(UNSET.to_owned()),
+                ["hyprctl", "-j", "devices"] => Ok(keyboards(&[("us", "", 0, true)])),
+                ["hyprctl", "dispatch", "sendshortcut", _] => Ok("ok\n".to_owned()),
                 _ => Ok(String::new()),
             }
         })
     }
 
-    fn typed(text: &str) -> TypedText {
-        TypedText::new(text).unwrap()
-    }
-
-    #[test]
-    fn only_a_hyprland_session_is_detected_and_other_desktops_are_named() {
-        for (signature, desktop, expected) in [
-            (Some("abc"), None, Ok(())),
-            (Some("abc"), Some("GNOME"), Ok(())),
-            (
-                None,
-                Some("GNOME"),
-                Err("Thalvi supports Hyprland and Windows for now; this desktop is GNOME."),
-            ),
-            (
-                Some(""),
-                Some("KDE"),
-                Err("Thalvi supports Hyprland and Windows for now; this desktop is KDE."),
-            ),
-            (
-                None,
-                None,
-                Err("Thalvi supports Hyprland and Windows for now; this desktop is unknown."),
-            ),
-        ] {
-            let result = detect_in(signature, desktop);
-            match expected {
-                Ok(()) => assert_eq!(result, Ok(()), "{signature:?} {desktop:?}"),
-                Err(message) => assert_eq!(
-                    result,
-                    Err(HostError::Unsupported(message.to_owned())),
-                    "{signature:?} {desktop:?}"
-                ),
-            }
-        }
+    fn paste(text: &str) -> PasteText {
+        PasteText::new(text).unwrap()
     }
 
     #[test]
@@ -610,116 +790,309 @@ mod tests {
     }
 
     #[test]
-    fn delivery_refocuses_the_original_window_and_sends_the_text_on_stdin_only() {
-        let text = "--help $(not-a-command) `nor-this` café 👋";
-        for (enter, wtype) in [
-            (false, format!("wtype - <{text}>")),
-            (true, format!("wtype - -s 250 -k Return <{text}>")),
+    fn delivery_copies_then_refocuses_the_original_window_and_presses_the_paste_shortcut() {
+        let text = "--help $(not-a-command) `nor-this` café 👋\nsecond line";
+        let enter = "wtype -s 250 -k Return";
+        for (class, submit, shortcut) in [
+            ("browser", false, "CTRL"),
+            ("browser", true, "CTRL"),
+            ("kitty", false, "CTRL SHIFT"),
+            ("Alacritty", true, "CTRL SHIFT"),
+            ("org.gnome.Console", false, "CTRL SHIFT"),
         ] {
             let host = desktop(
-                vec![row("0x1", 1, "browser", 0), row("0x2", 2, "terminal", 1)],
+                vec![row("0x1", 1, "other", 0), row("0x2", 2, class, 1)],
                 "0x1",
                 "0x2",
             );
             assert_eq!(
-                host.deliver(&window("0x2", 2, "terminal"), &typed(text), enter),
-                Ok(())
+                host.deliver(&window("0x2", 2, class), &paste(text), submit),
+                Ok(Delivered::InWindow)
             );
-            assert_eq!(
-                commands(&host),
-                [
-                    "hyprctl -j clients",
-                    "hyprctl dispatch focuswindow address:0x2",
-                    "hyprctl -j activewindow",
-                    wtype.as_str(),
-                ]
-            );
+            let mut expected = vec![
+                format!("wl-copy --type text/plain;charset=utf-8 <{text}>"),
+                "hyprctl -j clients".to_owned(),
+                "hyprctl dispatch focuswindow address:0x2".to_owned(),
+                "hyprctl -j activewindow".to_owned(),
+                "hyprctl -j getoption input:kb_file".to_owned(),
+                "hyprctl -j devices".to_owned(),
+                format!("hyprctl dispatch sendshortcut {shortcut},code:55,address:0x2"),
+            ];
+            expected.extend(submit.then(|| enter.to_owned()));
+            assert_eq!(commands(&host), expected, "{class} submit={submit}");
         }
     }
 
+    type Reply = Result<String, CommandError>;
+
     #[test]
-    fn nothing_is_typed_when_the_target_is_gone_reused_or_not_focusable() {
+    fn the_paste_key_is_the_one_that_types_v_in_the_layout_now_in_use() {
+        let dvorak_file = keymap_file("dvorak", "us", "dvorak");
+        let garbage =
+            std::env::temp_dir().join(format!("thalvi-hyprland-{}-bad.xkb", std::process::id()));
+        std::fs::write(&garbage, "not a keymap").unwrap();
+        let garbage = garbage.to_string_lossy().into_owned();
+        let us = || Ok(keyboards(&[("us", "", 0, true)]));
+        let unset = || Ok(UNSET.to_owned());
+        let failing = || Err(CommandError::TimedOut("hyprctl".to_owned()));
+        let cases: Vec<(&str, Reply, Reply, &str)> = vec![
+            ("us", unset(), us(), "code:55"),
+            (
+                "de",
+                unset(),
+                Ok(keyboards(&[("de", "", 0, true)])),
+                "code:55",
+            ),
+            (
+                "dvorak, where V sits elsewhere",
+                unset(),
+                Ok(keyboards(&[("us", "dvorak", 0, true)])),
+                "code:60",
+            ),
+            (
+                "the first layout, though another is active",
+                unset(),
+                Ok(keyboards(&[("us,de", "dvorak,", 1, true)])),
+                "code:60",
+            ),
+            (
+                "a first layout without a V falls back to one that has it",
+                unset(),
+                Ok(keyboards(&[("ru,us", "", 0, true)])),
+                "code:55",
+            ),
+            (
+                "the main keyboard, not a virtual one",
+                unset(),
+                Ok(keyboards(&[
+                    ("de", "", 0, false),
+                    ("us", "dvorak", 0, true),
+                ])),
+                "code:60",
+            ),
+            (
+                "a kb_file, which the layout names do not describe",
+                Ok(kb_file(&dvorak_file)),
+                us(),
+                "code:60",
+            ),
+            (
+                "an option set to nothing is no kb_file",
+                Ok(kb_file("")),
+                us(),
+                "code:55",
+            ),
+            (
+                "a kb_file that is missing",
+                Ok(kb_file("/no/such/keymap.xkb")),
+                us(),
+                "v",
+            ),
+            (
+                "a kb_file that is no keymap",
+                Ok(kb_file(&garbage)),
+                us(),
+                "v",
+            ),
+            (
+                "a kb_file relative to the config",
+                Ok(kb_file("keymap.xkb")),
+                us(),
+                "v",
+            ),
+            ("an option Hyprland does not answer", failing(), us(), "v"),
+            ("an unreadable option", Ok("nope".to_owned()), us(), "v"),
+            (
+                "an unknown layout is left to Hyprland",
+                unset(),
+                Ok(keyboards(&[("no-such-layout", "", 0, true)])),
+                "v",
+            ),
+            ("no keyboards", unset(), Ok(keyboards(&[])), "v"),
+            ("not json", unset(), Ok("nope".to_owned()), "v"),
+            ("devices failing", unset(), failing(), "v"),
+        ];
+        for (name, option, devices, expected) in cases {
+            let host = host(move |argv, _| {
+                if argv.iter().any(|arg| arg == "getoption") {
+                    option.clone()
+                } else {
+                    devices.clone()
+                }
+            });
+            assert_eq!(host.v_key(), expected, "{name}");
+        }
+        std::fs::remove_file(dvorak_file).unwrap();
+        std::fs::remove_file(garbage).unwrap();
+    }
+
+    #[test]
+    fn submitting_nothing_presses_only_enter_and_leaves_the_clipboard_alone() {
+        let host = desktop(vec![row("0x1", 1, "kitty", 0)], "0x1", "0x1");
+        assert_eq!(
+            host.deliver(&window("0x1", 1, "kitty"), &paste(""), true),
+            Ok(Delivered::InWindow)
+        );
+        assert_eq!(
+            commands(&host).last().map(String::as_str),
+            Some("wtype -k Return")
+        );
+        assert!(
+            commands(&host)
+                .iter()
+                .all(|command| !command.starts_with("wl-copy") && !command.contains("sendshortcut"))
+        );
+    }
+
+    #[test]
+    fn nothing_is_pasted_when_the_target_is_gone_reused_or_not_focusable() {
         for (name, windows, lands_on, message) in [
             (
                 "closed",
                 vec![row("0x1", 1, "browser", 0)],
                 "0x1",
-                "The original window closed. Nothing was typed.",
+                "The original window closed. Nothing was pasted.",
             ),
             (
                 "address reused by another process",
                 vec![row("0x2", 99, "terminal", 0)],
                 "0x2",
-                "The original window closed. Nothing was typed.",
+                "The original window closed. Nothing was pasted.",
             ),
             (
                 "focus did not move",
                 vec![row("0x1", 1, "browser", 0), row("0x2", 2, "terminal", 1)],
                 "0x1",
-                "The target could not be focused. Nothing was typed.",
+                "The target could not be focused. Nothing was pasted.",
             ),
         ] {
             let host = desktop(windows, "0x1", lands_on);
             assert_eq!(
-                host.deliver(&window("0x2", 2, "terminal"), &typed("hi"), true),
+                host.deliver(&window("0x2", 2, "terminal"), &paste("hi"), true),
                 Err(HostError::NothingTyped(message.to_owned())),
                 "{name}"
             );
+            // The text is kept on the clipboard, and no key is pressed.
             assert!(
                 commands(&host)
                     .iter()
-                    .all(|command| !command.starts_with("wtype")),
+                    .all(|command| !command.starts_with("wtype")
+                        && !command.contains("sendshortcut")),
+                "{name}"
+            );
+            assert_eq!(
+                commands(&host)[0],
+                "wl-copy --type text/plain;charset=utf-8 <hi>",
                 "{name}"
             );
         }
     }
 
     #[test]
-    fn a_typing_tool_that_fails_after_focus_may_have_typed_part_of_the_text() {
-        for (error, expected) in [
+    fn a_key_tool_that_fails_after_focus_may_have_pasted_part_of_the_text() {
+        let partial = HostError::MaybePartial(
+            "Thalvi may or may not have pasted the text. Check the window before trying again."
+                .to_owned(),
+        );
+        let enter_failed = HostError::MaybePartial(
+            "The text was pasted, but Thalvi may not have pressed Enter. Check the window before trying again."
+                .to_owned(),
+        );
+        let failed = |program: &str| CommandError::Failed {
+            program: program.to_owned(),
+            reason: None,
+        };
+        for (name, program, reply, submit, expected) in [
             (
-                CommandError::Failed {
-                    program: "wtype".to_owned(),
-                    reason: None,
-                },
-                HostError::MaybePartial(
-                    "Typing failed or stopped partway. Check the target before retrying."
+                "shortcut tool fails",
+                "hyprctl",
+                Err(failed("hyprctl")),
+                false,
+                partial.clone(),
+            ),
+            (
+                "shortcut tool stuck",
+                "hyprctl",
+                Err(CommandError::TimedOut("hyprctl".to_owned())),
+                false,
+                partial.clone(),
+            ),
+            (
+                "shortcut refused",
+                "hyprctl",
+                Ok("window not found".to_owned()),
+                false,
+                HostError::NothingTyped(
+                    "The desktop would not press the paste keys: window not found. Nothing was pasted."
                         .to_owned(),
                 ),
             ),
             (
-                CommandError::TimedOut("wtype".to_owned()),
-                HostError::MaybePartial(
-                    "Typing failed or stopped partway. Check the target before retrying."
-                        .to_owned(),
-                ),
+                "enter fails after the paste",
+                "wtype",
+                Err(failed("wtype")),
+                true,
+                enter_failed.clone(),
             ),
             (
-                CommandError::NotInstalled("wtype".to_owned()),
-                HostError::Unsupported(
-                    "Desktop tool wtype is not installed. Nothing was typed.".to_owned(),
-                ),
+                "enter tool missing after the paste",
+                "wtype",
+                Err(CommandError::NotInstalled("wtype".to_owned())),
+                true,
+                enter_failed,
             ),
         ] {
-            let host = host({
-                let error = error.clone();
-                move |argv, _| match argv[0].as_str() {
-                    "wtype" => Err(error.clone()),
-                    _ if argv.last().is_some_and(|arg| arg == "clients") => {
-                        Ok(format!("[{}]", row("0x1", 1, "a", 0)))
-                    }
-                    _ if argv.last().is_some_and(|arg| arg == "activewindow") => {
-                        Ok(row("0x1", 1, "a", 0))
-                    }
-                    _ => Ok(String::new()),
+            let host = host(move |argv, _| match argv {
+                [tool, ..] if tool == program && (tool == "wtype" || argv[2] == "sendshortcut") => {
+                    reply.clone()
                 }
+                [_, _, query] if query == "clients" => Ok(format!("[{}]", row("0x1", 1, "a", 0))),
+                [_, _, query] if query == "activewindow" => Ok(row("0x1", 1, "a", 0)),
+                [_, _, _, _] if argv[2] == "sendshortcut" => Ok("ok".to_owned()),
+                _ => Ok(String::new()),
             });
             assert_eq!(
-                host.deliver(&window("0x1", 1, "a"), &typed("hi"), false),
+                host.deliver(&window("0x1", 1, "a"), &paste("hi"), submit),
                 Err(expected),
-                "{error:?}"
+                "{name}"
             );
         }
+    }
+
+    #[test]
+    fn a_missing_enter_tool_is_unsupported_when_nothing_was_pasted() {
+        let host = host(|argv, _| match argv[0].as_str() {
+            "wtype" => Err(CommandError::NotInstalled("wtype".to_owned())),
+            _ if argv.last().is_some_and(|arg| arg == "clients") => {
+                Ok(format!("[{}]", row("0x1", 1, "a", 0)))
+            }
+            _ if argv.last().is_some_and(|arg| arg == "activewindow") => Ok(row("0x1", 1, "a", 0)),
+            _ => Ok("ok".to_owned()),
+        });
+        assert_eq!(
+            host.deliver(&window("0x1", 1, "a"), &paste(""), true),
+            Err(HostError::Unsupported(
+                "Desktop tool wtype is not installed. Nothing was pasted.".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn nothing_is_pressed_when_the_text_cannot_be_put_on_the_clipboard() {
+        let host = host(|argv, _| match argv[0].as_str() {
+            "wl-copy" => Err(CommandError::NotInstalled("wl-copy".to_owned())),
+            _ => Ok(String::new()),
+        });
+        assert_eq!(
+            host.deliver(&window("0x1", 1, "a"), &paste("hi"), true),
+            Err(HostError::Unsupported(
+                "Desktop tool wl-copy is not installed. Nothing was pasted.".to_owned()
+            ))
+        );
+        assert_eq!(
+            commands(&host),
+            ["wl-copy --type text/plain;charset=utf-8 <hi>"]
+        );
     }
 
     #[test]
@@ -858,7 +1231,7 @@ mod tests {
                 Ok(if argv.iter().any(|arg| arg == "monitors") {
                     monitors.clone()
                 } else {
-                    "ok".to_owned()
+                    "ok\n\n".repeat(11)
                 })
             });
             assert_eq!(
@@ -871,10 +1244,18 @@ mod tests {
                 [
                     "hyprctl -j monitors".to_owned(),
                     format!(
-                        "hyprctl keyword windowrule match:title ^(Thalvi overlay)$, float on, \
-                         pin on, no_initial_focus on, no_focus on, \
-                         size 460 200, move ((monitor_w*0.5)-(460*0.5)) {top}, border_size 0, \
-                         no_shadow on, no_anim on, no_blur on"
+                        "hyprctl --batch \
+                         keyword windowrule[thalvi-overlay]:match:title ^(Thalvi overlay)$; \
+                         keyword windowrule[thalvi-overlay]:float on; \
+                         keyword windowrule[thalvi-overlay]:pin on; \
+                         keyword windowrule[thalvi-overlay]:no_initial_focus on; \
+                         keyword windowrule[thalvi-overlay]:no_focus on; \
+                         keyword windowrule[thalvi-overlay]:size 460 200; \
+                         keyword windowrule[thalvi-overlay]:move ((monitor_w*0.5)-(460*0.5)) {top}; \
+                         keyword windowrule[thalvi-overlay]:border_size 0; \
+                         keyword windowrule[thalvi-overlay]:no_shadow on; \
+                         keyword windowrule[thalvi-overlay]:no_anim on; \
+                         keyword windowrule[thalvi-overlay]:no_blur on"
                     )
                 ],
                 "{name}"
@@ -895,6 +1276,26 @@ mod tests {
                 "Desktop tool hyprctl is not installed.".to_owned()
             ))
         );
+
+        for reply in [
+            String::new(),
+            "ok\n".repeat(10),
+            format!("{}invalid field\n", "ok\n".repeat(10)),
+        ] {
+            let rejected = host(move |argv, _| {
+                Ok(if argv.iter().any(|arg| arg == "monitors") {
+                    "[]".to_owned()
+                } else {
+                    reply.clone()
+                })
+            });
+            assert_eq!(
+                rejected.prepare_overlay(460.0, 200.0),
+                Err(HostError::NothingTyped(
+                    "The desktop could not prepare the status overlay.".to_owned()
+                ))
+            );
+        }
     }
 
     #[test]

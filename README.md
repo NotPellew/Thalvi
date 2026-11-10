@@ -21,8 +21,9 @@ The same voice helps whenever typing isn't an option:
 
 Thalvi has two parts:
 
-- **The desktop app** (Hyprland and Windows) listens for "Hey Thalvi" and
-  types what you dictate into the window you are using.
+- **The desktop app** (Hyprland, Windows, and GNOME Wayland with dictation
+  copied to the clipboard) listens for "Hey Thalvi" and pastes what you dictate
+  into the window you are using.
 - **The server and its web client** hold the spoken conversation. Open it in a
   browser, on your phone for example, and talk over it to interrupt.
 
@@ -175,6 +176,41 @@ TTS_BASE_URL=http://127.0.0.1:8011/v1
 TTS_VOICE=af_heart
 ```
 
+**Speech recognition on your own GPU** replaces Meta's recognizer for
+dictation through the server and for conversations. It runs NVIDIA's
+[Nemotron unified ASR 0.6B](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b)
+(OpenMDW licence) live with about 0.56 s of lookahead, finds the language
+itself (English, German, Spanish and 22 more European languages) and
+punctuates. On an RTX 2080 it uses about 3 GB of VRAM next to qwentts.cpp
+and takes about 75 ms for each 0.16 s of audio. Run it from a checkout on the GPU
+machine:
+
+```sh
+speech/nemotron-asr.sh
+systemctl --user enable --now thalvi-asr
+```
+
+It needs `uv`, `curl` and an NVIDIA driver, and downloads about 2.5 GB of
+weights plus NeMo. `SPEECH_DIR`, `HOST`, `PORT` (default `8012`) and
+`ENDPOINT_MS` (silence that ends a stretch of speech, default 600) set where it
+lives, listens and how it cuts. It has no authentication, so keep `HOST` at
+`127.0.0.1` or a private address such as the machine's tailnet IP. It prints
+the `.env` lines:
+
+```sh
+STT_URL=ws://127.0.0.1:8012
+STT_MODEL=nemotron-labs-unified-asr-0.6b
+STT_API_KEY=
+```
+
+With it, Settings → Speech shows a **Word list**: names and terms, one per
+line, whose spelling recognition should favour (such as "Cybrex2"). Saving
+sends the list to the Thalvi server in use, which keeps it and uses it for
+dictation and conversations; a realtime speech server entry gets it at each
+connection. Meta's recognizer doesn't support it, so the field is hidden
+then. Dictation on this computer always uses the list, so the field shows
+whenever speech is recognized there.
+
 ### Voices
 
 `TTS_VOICES` lists the voices the app offers, comma-separated; `TTS_VOICE` is
@@ -197,13 +233,19 @@ Say "Hey Thalvi" in any window, dictate, then end with a phrase:
 
 | Say | Thalvi |
 | --- | --- |
-| "paste that" or "finish dictation" | types the text into the window you were in |
-| "submit" | types it and presses Enter |
-| "do that" | runs a configured action, such as opening a site or focusing an app |
+| "paste that" or "finish dictation" | pastes the text into the window you were in |
+| "write that out" | has the writing model turn the words into proper text, then pastes that ([Write it out](#write-a-dictation-out)) |
+| "submit" | pastes it and presses Enter |
+| "do that" | runs a configured action, such as opening a site or focusing an app; the action also runs without "do that" when the whole capture is the command, for example "open google.com" |
 | "scratch that" | drops the last piece |
 | "never mind" | drops the whole capture |
 
-Delivered text is also put on the clipboard. An overlay at the top of the
+Thalvi puts the text on the clipboard and presses the paste shortcut in the window,
+so line breaks arrive as line breaks and nothing is sent by them; the text stays on
+the clipboard. The shortcut is Ctrl+V, and Ctrl+Shift+V in a known terminal on
+Hyprland (kitty, foot, Alacritty, WezTerm, Ghostty, GNOME Console and Terminal,
+Konsole, Ptyxis, xterm). In another terminal Ctrl+V pastes nothing; paste yourself.
+An overlay at the top of the
 screen shows what Thalvi is doing and never takes focus. The tray pauses,
 cancels, copies the last error and opens Settings.
 
@@ -228,23 +270,82 @@ is needed.
   without spaces. To update, replace the file; settings and models stay.
 
 Start it once and it stays in the tray; starting it again opens Settings. The
-first start downloads the wake models. If Thalvi cannot start, for example
-because its config is broken, a message box names the problem and the file.
+first start writes the default config, opens Settings on Speech, and downloads
+the wake models and, once, the speech model, so the first "Hey
+Thalvi" works with no setup. If Thalvi cannot start, for example because its
+config is broken, a message box names the problem and the file.
 
 ### Speech recognition
 
-By default the app streams your speech to the server's `/transcription` at
-`ws://127.0.0.1:8080` (Settings → Speech → Server address). To dictate without
-the server or a network, choose **On this computer** under Speech. The first
-use downloads about 650 MB; after that it works offline. Its text comes mostly
-without punctuation. Settings shows whether the model is downloaded and can
-download it, or you can point to your own model folder and check it before
-saving. The model is NVIDIA Nemotron Speech Streaming under the
-[NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/).
+Settings → Speech keeps a list of speech servers. A fresh install has one,
+**On this computer**, with Nemotron Streaming, so it recognizes without a
+server; add a server to use one. **Live dictation** uses exactly one of them, and **Use** switches to another at once; it applies from the next
+capture, and a capture already running keeps its recognizer. At the top of
+Live dictation, **Next dictation** names the entry (and, on this computer, the
+model) that will handle the next dictation and whether it is ready. The entry
+in use is marked **In use** and has no **Use** button. IDs and addresses are
+under each entry's collapsed **Details**. The kinds are:
 
-**Second-pass transcription** (Settings → Speech, off by default) sends each
-accepted capture again to the endpoint you set there. Turning it off keeps the
-endpoint and key.
+- **Realtime speech server:** a recognizer that speaks Meta's realtime ASR
+  protocol, such as the self-hosted one below, which the app connects to itself
+  (address, model, API key), with no Thalvi server running.
+- **Through a Thalvi server:** streams to the server's `/transcription`
+  (by default `ws://127.0.0.1:8080`), which uses the recognizer in its `.env`.
+- **On this computer:** dictates without the server or a network; the default.
+  Use **Show models for** to filter the list of models (each model recognizes the
+  languages on its card), then pick a model.
+
+Web conversations always use the server's own `STT_URL`. An existing config
+with `stt.engine`, `stt.model`, `stt.secondary` and `server` becomes entries
+the first time Thalvi reads it, with nothing to enter again. An API key is shown
+as saved and never again; leave it blank to keep it. A server that cannot be
+reached is named in the error, and Thalvi never falls back to another one.
+
+For the on-device model, Thalvi downloads a missing model when it starts (once:
+about 650 MB, or 1.3 GB for Nemotron Unified's GPU files), and Next dictation
+shows the download's percent until it is ready. While it
+downloads or if it fails, **Use a speech server instead** opens the form to add
+a server, and after a failure **Retry** fetches the model again; Thalvi never
+switches recognizers by itself. After that it works offline. A model you pick applies from the next capture, and
+a capture already running keeps the model it started with. Settings shows each
+model's description, languages and size, whether it is **Selected** and
+**Downloaded** or **Not downloaded**, and can download it; its ID, source and
+license are under the card's collapsed **Details**. Or you can point to your
+own model folder and check it before saving.
+Word errors below are on LibriSpeech (120 clips) and on 48 of the developer's
+own takes, int8 on the CPU, language detected automatically. The unified model
+also made 8.38% on German and 7.09% on Spanish (80 Multilingual LibriSpeech clips
+each).
+
+| Drop-down entry (config name) | Model | Languages | LibriSpeech | Developer's takes | Notes |
+|---|---|---|---|---|---|
+| Nemotron Streaming (`nemotron_160ms`, default) | Nemotron Speech Streaming 0.6B | English | 3.46% | 7.14% | Lightest on the CPU; text appears soonest. Mostly without punctuation. |
+| Nemotron Unified (`unified_160ms`) | Nemotron Unified ASR 0.6B | 25 European languages | 3.03% | 6.35% | Punctuation and capitals. Re-reads the last 6 s every 160 ms: about 70 ms of work per step on 4 cores of a Ryzen, so on the CPU it needs a fast CPU. On Linux with a discrete GPU it runs there instead, through WebGPU and an fp16 export (about 30 ms a step on an RTX 5070 Ti, a 1.3 GB download); Settings says which it uses. Until the GPU files are downloaded it runs on the CPU, and Settings offers the download. Text appears about 0.5 s later. Our own export, under OpenMDW-1.1. |
+| Parakeet TDT (`parakeet_tdt_v3`) | Parakeet TDT 0.6B v3 | 25 European languages | 2.33%* | 4.76%* | Punctuation and capitals. Light on the CPU: about a seventh of real time on 4 cores, against about one for Unified. Not a streaming model: it re-reads the last 2.6 s every 640 ms, so words may change while you speak, and the text is final about a second after you pause. Under CC BY 4.0. |
+
+Nemotron Speech Streaming at 80 ms and 560 ms (3.62% and 3.46% on LibriSpeech)
+are left out because they offer no real choice over 160 ms; either works as your
+own model folder. \*Parakeet was measured on 60 of those LibriSpeech clips and 24
+of the takes, where Unified made 2.25% and 4.76%; on 40 clips each it made 12.44% on
+German (Unified 8.32%), 7.95% on Spanish (6.91%) and 9.28% on a German and an
+English speaker joined (12.32%). Nemotron
+3.5 multilingual was rejected because it made 15% word errors on the takes. Nemotron Speech
+Streaming is under the
+[NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/).
+The unified model is NVIDIA's
+[Nemotron unified ASR](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b)
+under OpenMDW-1.1, exported to ONNX by Thalvi. Parakeet is NVIDIA's
+[Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), in sherpa-onnx's int8 export.
+
+**Second-pass transcription** (Settings → Speech → Second pass, none ticked by
+default) sends each accepted capture again to every ticked OpenAI-style or Meta
+transcription API. The first ticked one in list order (move them with the
+arrows) that answers replaces the live text, and Thalvi pastes as soon as that
+one is known: an earlier entry that fails or disagrees is waited for, a later
+one never. The others keep running and are only recorded, in the capture's
+`text.txt` and the metrics, for comparing later; one that fails says so in a
+notice. Unticking keeps the address and key.
 
 ### Microphone
 
@@ -283,8 +384,9 @@ on Linux, `%LOCALAPPDATA%\thalvi` on Windows):
 
 ### Errors
 
-An error stays on the overlay until the next capture, in a short headline.
-Settings shows the full text with **Copy** and **Dismiss**. Copy, the tray's
+An error shows on the overlay for 5 seconds in a short headline, and again if
+it refuses a press of the hold key. The tray icon and Settings keep it until the
+next capture; Settings shows the full text with **Copy** and **Dismiss**. Copy, the tray's
 **Copy last error** and `thalvi-desktop copy-error` all copy the same report:
 the error, its technical cause, time, version, system and relevant settings,
 never API keys.
@@ -293,31 +395,105 @@ never API keys.
 
 `thalvi-desktop toggle`, `pause`, `resume`, `cancel` and `copy-error` control
 the running app (with the AppImage, run it with that word). `status` prints
-Waybar JSON. These commands work on Hyprland; Windows uses the tray. The
+Waybar JSON. They work on Hyprland, GNOME and Windows, and start nothing when
+Thalvi is not running. The
 examples in [`integrations/hyprland/`](integrations/hyprland/) add a Waybar
 microphone button (left click toggles listening without moving focus, right
 click opens Settings) and key bindings in `hyprland-binds.conf`, such as
 `bind = SUPER, E, exec, thalvi-desktop copy-error`. Pausing cancels the
 current capture and closes the microphone.
 
+### For agents
+
+A program you run, such as a coding agent, can read and change the settings, see
+what Thalvi is doing and control it with `thalvi-desktop` commands. Each prints
+one JSON object and exits 0, or non-zero when the answer is `"ok": false`.
+They talk to the running app over a private socket in your runtime folder on
+Linux, or a named pipe only your user can open on Windows; nothing listens on
+the network, and a command never starts the app or the microphone.
+
+| Command | Answer |
+| --- | --- |
+| `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false}`. `state` is `paused`, `loading`, `listening`, `capturing`, `pending`, `transcribing`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}`, and `awaiting_confirmation: true` marks a submit that waits for you. Nothing that was said is in it. |
+| `settings get` | `{"ok": true, "settings": {…}}`, every setting Settings offers plus `start_at_login` and `show_in_menu`. Speech server keys appear only as `"has_key": true/false`. |
+| `settings check '<json>'` | `{"ok": true, "valid": true}`, or `{"ok": false, "valid": false, "error": "…"}` with the message Settings shows. Saves nothing. |
+| `settings set '<json>'` | `{"ok": true, "changed": true, "applies": "now"}`, or `"next_capture"` while a capture runs. A refusal is `{"ok": false, "error": "…", "changed": false}` and changes nothing. A word list the Thalvi server could not take comes back as `"warning"`. |
+| `pause`, `resume`, `toggle`, `cancel`, `hold-start`, `hold-end`, `write-start`, `write-end`, `copy-error` | `{"ok": true, "took_effect": true, "state": "…"}`, or `{"ok": false, "took_effect": false, "error": "…", "state": "…"}`, such as when Thalvi is already paused. `hold-start` starts a dictation that `hold-end` or `cancel` ends; `write-start` and `write-end` do the same with writing on release. |
+| `metrics summary` | `{"ok": true, "enabled": true, "window_hours": 24, "stages": {"connect", "partial_lag", "final", "delivery"}, "captures": {"ok": 3, …}}`; each stage has `count`, `outcomes`, `p50_ms` and `p95_ms`. `"enabled": false` and a message when metrics are off. |
+
+The change given to `settings check` and `settings set` is a JSON merge patch
+over what `settings get` returns: objects merge, `null` removes a key, and a
+list such as `stt.entries` or `stt.phrases` is replaced whole, so read it first
+and send it back with your change. Give `-` instead of the JSON to read it from
+standard input. A speech server entry takes `api_key` to set a key, `""` to
+clear it, and keeps the saved key when `api_key` is absent. The microphone
+changes only while Thalvi is paused.
+
+A confirmation stays with you: no command answers one, and a submit that waits
+for it shows as `awaiting_confirmation` in `state`. Any other failure of a
+command is `{"ok": false, "error": "…"}`; a command with no running app says so
+and exits 1, and one that is not a command exits 2.
+
 ### Hold a key to dictate
 
 Hold a key, speak, and let go: the text is pasted into the window focused when
 you pressed, without the pause countdown and without Enter. A hold shorter than
-a third of a second, or with no words, pastes nothing and says so. Saying "never
-mind" cancels it; any other spoken ending works as after the wake word.
+a third of a second, or with no words, pastes nothing and says so. No spoken
+phrase ends or cancels a hold: words such as "never mind" are dictated as text.
+To abandon a hold, use the `cancel` command: the tray's **Cancel**, or a key
+bound to `thalvi-desktop cancel` (the Hyprland examples bind SUPER+Escape).
 
-- **Hyprland:** F9, with no modifier. Add the `hold-start` and `hold-end` binds
-  from `hyprland-binds.conf`. Hyprland types any modifier you still hold into the
-  pasted text and skips the release when a modifier comes up first, so the key
-  must be a single key.
+- **Hyprland:** F9, with no modifier. Thalvi binds the key in Hyprland itself while
+  it runs and binds it again after `hyprctl reload`, so `hyprland.conf` needs no
+  lines for it. Set another of F1 to F12 as `hold_key` in the config. Hyprland types
+  any modifier you still hold into the pasted text and skips the release when a
+  modifier comes up first, so the key must be a single key. If another bind already
+  uses the key, or `hold-start` lines from an older `hyprland-binds.conf` are still in
+  `hyprland.conf`, Thalvi says so and binds nothing until you remove them or pick
+  another key; a key that cannot be bound keeps the previous one working.
 - **Windows:** Alt and the key left of X (Z on a QWERTY keyboard, Y on QWERTZ).
   The app watches the keyboard itself and keeps the key from the focused app; the
   hold ends when the key and Alt are both up. Set another as `hold_key` in the
   config, such as `Ctrl+Shift+F9`, named by its place on the keyboard (`Alt+KeyZ`,
   `Digit1`, `Space`, `F9`). While an administrator window is focused, Windows
-  shows Thalvi no keys and lets it type nothing, so the key reaches that window
+  shows Thalvi no keys and lets it send no keys, so the key reaches that window
   as usual and no dictation starts.
+
+### Write a dictation out
+
+Say "tell Anna I'm late, sorry, write that out", or hold the write key the way
+you hold the hold key, and Thalvi sends the words you said to a model that turns
+them into proper text in the language you spoke. The overlay says "Writing…" and
+shows the text as it streams in; when the stream ends the text is pasted like any
+other dictation, and **Ctrl+Z** undoes it. Cancel as usual before then and nothing
+is pasted. Without "write that out" or the write key, the words are pasted as
+recognized. There is no write-and-send: press Enter yourself after reading it.
+
+The model is any OpenAI-compatible chat completions endpoint (Glimmer, Baseten, a
+llama.cpp server, Meta), set under **Settings → Speech → Writing** as `writing`
+in the config: `url`, `model` and `api_key`. The model gets the **Writing prompt**
+(`prompt`) as its instructions and the recognized words as the message: no window,
+app or other context. The default prompt follows what you ask for (an email, a tone,
+a wording), invents nothing and keeps line breaks to where the text needs them, such as an
+email; edit it in Settings or restore the default there.
+How closely a model follows it depends on the model. Saving never calls the model.
+If it is not set up, fails, answers with nothing, or takes longer than 15 seconds, nothing is pasted,
+Thalvi says what happened, and your own words go on the clipboard to paste with
+Ctrl+V.
+
+**Opening phrases** (`writing.openings`, under the Writing prompt in Settings) give
+a kind of text its own prompt, such as "write me an email" or "write a message".
+When the words you said begin with a phrase, whole words only and ignoring case and
+punctuation, that rule's prompt is used instead of the Writing prompt, and the
+longest matching phrase wins. The words are sent as said, opening included. No
+match uses the Writing prompt. Rules apply only when you write out with "write that
+out" or the write key. A new rule starts as a copy of the Writing prompt, and a
+rule edited in Settings applies from the next capture.
+
+- **Hyprland:** F10, with no modifier, bound by Thalvi like the hold key
+  (`write_key` in the config).
+- **Windows:** Alt and X (`write_key` in the config), kept from the focused app
+  like the hold key. It must differ from `hold_key`.
 
 ### Config
 
@@ -372,9 +548,12 @@ Built for the
 
 ## Hackathon provenance
 
-All code in this repository was written during the hackathon; the commit
-history is the record. Pull requests land as merge commits, so the individual
-commits behind each change stay visible, and `main` is never rewritten.
+All code up to the tag
+[`hackathon-submission`](https://github.com/NotPellew/Thalvi/tree/hackathon-submission)
+was written during the hackathon (October 26 – November 4, 2026); later work
+continues in the same open history, and the commit history is the record.
+Pull requests land as merge commits, so the individual commits behind each
+change stay visible, and `main` is never rewritten.
 
 The idea draws on lessons from an earlier, private voice-assistant prototype by
 the same author. Nothing is copied from it or from any other repository;

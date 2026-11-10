@@ -75,7 +75,8 @@ directing you.
 - Before calling work done, run the gates and use the change end to end the
   way the user would. Report what you ran and what you could not verify.
   The `verify-thalvi` skill (`.agents/skills/verify-thalvi/`) runs the web
-  client on fake or self-hosted endpoints for this. A desktop PR names each
+  client on fake or self-hosted endpoints for this, and its `desktop.md` runs
+  the real desktop app in a sandboxed nested Hyprland. A desktop PR names each
   desktop it was used on; CI and fixtures are not use.
 
 ## Keep it lean (YAGNI)
@@ -99,39 +100,59 @@ can't break and doesn't slow down the next change.
 
 ## Gates
 
-CI runs exactly these as required checks on `main`. A new component adds its
-pinned toolchain, its commands here, and its CI job; one that ships on Windows
-also runs its gate on `windows-latest`. npm is the package manager; lockfiles
-are committed.
+CI runs these as required checks on `main`. `.github/scripts/gates <component>`
+runs a component's checks exactly as CI does and stops at the first failure.
+Components: `server`, `desktop-windows`, `web`, `desktop-ui`, `speech`,
+`issue-sync`; `all` runs every gate this OS can run and says which it skipped.
+CI jobs call the script after their toolchain setup, so a new check goes in the
+script, and a new component adds its pinned toolchain here, its case in the
+script and its CI job; one that ships on Windows also runs its gate on
+`windows-latest`. npm is the package manager; lockfiles are committed.
 
-- Server and Rust desktop (`crates/`): on Linux, install `libasound2-dev
-  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev`, build the desktop UI
-  first (`npm ci` and `npm run build` in `crates/thalvi-app/ui`, Node pinned in
-  `.node-version`), then `cargo fmt --all -- --check`, `cargo lint`,
-  `cargo test --workspace --locked`, `RUSTDOCFLAGS="-D warnings" cargo docs`, then
-  `npm exec --prefix ui -- tauri build --bundles appimage -- --locked` in
-  `crates/thalvi-app`.
-- Rust desktop on Windows (`windows-latest`): build the desktop UI the same
-  way, then `cargo fmt --all -- --check`, `cargo lint`,
-  `cargo test -p thalvi-desktop -p thalvi-app --locked`, then the same
-  `tauri build` with `--bundles nsis`.
-- Desktop UI (`crates/thalvi-app/ui/`): `npm ci`, `npm run typecheck`,
-  `npm run lint`, `npm test`, `npm run build`.
-- Web (`web/`): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`,
-  `npm run build`.
-- Speech servers (`compose.yaml`, `speech/`): `docker compose --profile kokoro
-  --profile vllm-omni config -q`, `pipx run shellcheck-py==0.11.0.1
-  speech/qwentts.sh`.
+Prerequisites the script does not install:
+
+- Server and Rust desktop (`crates/`): the Rust toolchain; on Linux
+  `libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev`; Node
+  pinned in `.node-version`. `desktop-windows` needs the same toolchains on
+  `windows-latest` and runs from Git Bash. CI then runs
+  `.github/scripts/windows-smoke.ps1` on its installer: it installs and starts
+  the app and opens Settings, and uploads screenshots.
+- Web and desktop UI: Node pinned in `.node-version`.
+- Speech servers: Docker with Compose, `pipx`, and `uv` (Python pinned in
+  `speech/asr/.python-version`).
+- Issue sync: `pipx`.
+
+Two required checks are not in the script:
+
+- Dependencies (`deny.toml`, cargo-deny 0.20.2): `cargo deny --workspace --locked
+  check advisories licenses sources`.
+- Secrets (`.gitleaks.toml`, gitleaks 8.30.1): `gitleaks git --redact --no-banner
+  --verbose --log-opts=HEAD .` on the full history. With gitleaks on `PATH`, the
+  pre-commit hook scans what is staged.
+
+One more check runs on PRs that change Rust but advises rather than gates:
+`cargo mutants --in-place --in-diff <diff>` (cargo-mutants 27.1.0,
+`.cargo/mutants.toml`). A surviving mutant is an annotation: add the missing test,
+or judge it equivalent and record that in `.cargo/mutants.toml` with a one-line
+reason. Locally, run it with no desktop session and a throwaway `HOME`, since it
+runs tests against deliberately broken code.
 
 ## Git and PRs
 
 - Commit in small steps that each say what changed. PRs land as merge
   commits, so a branch's commits stay in the history. Tidying a branch
   before merge is fine; don't squash it into one commit.
-- Branches: `<type>/<slug>`, three hyphenated words or fewer.
+- Branches: `<type>/<slug>`, three hyphenated words or fewer, cut from
+  `development`. PRs target `development`.
+- A release bumps the version on `development` (`chore(desktop): release
+  X.Y.Z`), merges `development` into `main` through a PR, then tags
+  `desktop-vX.Y.Z` on `main`. A fix for a released version branches from
+  `main` and targets it; `main` is then merged back into `development`.
 - The PR title becomes the merge commit's subject. The body states the
   problem, then the fix. Say `Closes #N` when the PR resolves an issue,
-  `Refs #N` when it only touches one.
+  `Refs #N` when it only touches one. The Issues workflow closes those
+  issues when the PR merges into `development`, and reopens them when a
+  merged `Reverts #N` PR takes it back out.
 - Use `.github/pull_request_template.md` for every PR body, including PRs
   created through CLI tools; preserve its headings and remove instructional
   comments.

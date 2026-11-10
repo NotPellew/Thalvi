@@ -1,0 +1,76 @@
+name: Issues
+
+# push, because pull_request_target always runs the default branch's copy of
+# this file.
+on:
+  push:
+    branches: [development]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  sync:
+    name: sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      # gh issue close and reopen skip an issue already in that state without
+      # commenting, but act on PRs too.
+      - name: close the issues merged PRs close, reopen those a reverted PR closed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMITS: ${{ join(github.event.commits.*.id, ' ') }}
+        run: |
+          status=0
+          refs() { .github/scripts/issue-refs.sh "$1" "$GH_REPO"; }
+          issue() {
+            local action=$1 number=$2 pr
+            shift 2
+            pr=$(gh api "repos/$GH_REPO/issues/$number" --jq '.pull_request != null') &&
+              if [[ $pr == false ]]; then gh issue "$action" "$number" "$@"; fi
+          }
+          prs=
+          for sha in $COMMITS; do
+            if ! found=$(gh api "repos/$GH_REPO/commits/$sha/pulls" \
+              --jq '.[] | select(.merged_at != null and .base.ref == "development") | .number'); then
+              echo "::error::could not find the PR of commit $sha"
+              status=1
+              continue
+            fi
+            prs+=$found$'\n'
+          done
+          prs=$(awk 'NF && !seen[$0]++' <<< "$prs")
+          for PR in $prs; do
+            if ! body=$(gh pr view "$PR" --json body --jq .body); then
+              echo "::error::could not read PR #$PR"
+              status=1
+              continue
+            fi
+            closes=$(refs closes <<< "$body")
+            for number in $closes; do
+              issue close "$number" --reason completed --comment "Fixed by #$PR, merged into \`development\`. If #$PR is taken out of \`development\` before it reaches \`main\`, reopen this issue." ||
+                { echo "::error::could not close #$number"; status=1; }
+            done
+            reverts=$(refs reverts <<< "$body")
+            for reverted in $reverts; do
+              if ! reverted_body=$(gh pr view "$reverted" --json body --jq .body); then
+                echo "::error::could not read reverted PR #$reverted"
+                status=1
+                continue
+              fi
+              closes=$(refs closes <<< "$reverted_body")
+              for number in $closes; do
+                issue reopen "$number" --comment "Reopened by #$PR, which reverted #$reverted out of \`development\`." ||
+                  { echo "::error::could not reopen #$number"; status=1; }
+              done
+            done
+          done
+          exit "$status"

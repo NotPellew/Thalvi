@@ -30,22 +30,22 @@ use ::windows::Win32::System::Threading::{
 use ::windows::Win32::UI::HiDpi::GetDpiForSystem;
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
 };
 use ::windows::Win32::UI::Shell::ShellExecuteW;
 use ::windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetMessageW,
     GetWindow, GetWindowLongW, GetWindowThreadProcessId, HC_ACTION, IsIconic, IsWindow,
     IsWindowVisible, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, MB_ICONERROR, MB_OK, MSG,
-    MessageBoxW, PostThreadMessageW, SPI_GETWORKAREA, SW_RESTORE, SW_SHOWNORMAL,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SetWindowsHookExW, ShowWindow,
-    SystemParametersInfoW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WS_EX_TOOLWINDOW,
+    MessageBoxW, PostThreadMessageW, SPI_GETWORKAREA, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE,
+    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SetWindowsHookExW,
+    ShowWindow, SystemParametersInfoW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+    WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WS_EX_TOOLWINDOW,
 };
 use ::windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
-use super::{Hwnd, Identity, Key, KeyEvent, Process, Win32};
-use crate::hold::{self, HoldHook, HoldKey, Verdict};
+use super::{Hwnd, Identity, KeyEvent, Process, Win32};
+use crate::hold::{self, HoldHooks, HoldKey, HoldKind, Verdict};
 use crate::host::{HoldWatch, HostError};
 
 /// The live Windows desktop.
@@ -63,6 +63,13 @@ impl Drop for Owned {
         // SAFETY: the handle came from a successful open call and is closed exactly once, here.
         let _ = unsafe { CloseHandle(self.0) };
     }
+}
+
+/// Shows `window` without activating it, or hides it.
+pub(super) fn set_visible_unfocused(window: Hwnd, visible: bool) {
+    let command = if visible { SW_SHOWNOACTIVATE } else { SW_HIDE };
+    // SAFETY: ShowWindow only acts on a window handle; a stale handle makes it fail harmlessly.
+    let _ = unsafe { ShowWindow(handle(window), command) };
 }
 
 /// Who runs process `pid`, or `None` when it is gone or Windows will not say.
@@ -174,10 +181,7 @@ unsafe extern "system" fn collect_window(window: HWND, windows: LPARAM) -> BOOL 
 }
 
 fn input(event: KeyEvent) -> INPUT {
-    let (code, scan, mut flags) = match event.key {
-        Key::Unicode(unit) => (0, unit, KEYEVENTF_UNICODE),
-        Key::Virtual(code) => (code, 0, KEYBD_EVENT_FLAGS(0)),
-    };
+    let mut flags = KEYBD_EVENT_FLAGS(0);
     if event.release {
         flags |= KEYEVENTF_KEYUP;
     }
@@ -185,8 +189,8 @@ fn input(event: KeyEvent) -> INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(code),
-                wScan: scan,
+                wVk: VIRTUAL_KEY(event.key),
+                wScan: 0,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
@@ -199,11 +203,11 @@ fn input(event: KeyEvent) -> INPUT {
 /// or Win so the focused app does not take that release for a lone press that opens its menu.
 const MASK_KEY: u16 = 0xE8;
 
-type OnChange = Box<dyn Fn(bool) + Send>;
+type OnChange = Box<dyn Fn(HoldKind, bool) + Send>;
 
 /// What the keyboard hook procedure works with; it runs on the thread that installed the hook.
 struct Rules {
-    hook: HoldHook,
+    hooks: HoldHooks,
     on_change: OnChange,
 }
 
@@ -275,13 +279,13 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
             let decision = RULES.with(|rules| {
                 let mut rules = rules.try_borrow_mut().ok()?;
                 let rules = rules.as_mut()?;
-                let decision = rules.hook.on_event(event, physically_down);
-                if let Some(down) = decision.change {
-                    (rules.on_change)(down);
+                let (verdict, changes) = rules.hooks.on_event(event, physically_down);
+                for (kind, down) in changes {
+                    (rules.on_change)(kind, down);
                 }
-                Some(decision)
+                Some(verdict)
             });
-            match decision.map(|decision| decision.verdict) {
+            match decision {
                 Some(Verdict::Swallow) => return LRESULT(1),
                 Some(Verdict::Mask) => {
                     if Verdict::after_mask(mask_release(event.vk, extended)) == Verdict::Swallow {
@@ -312,15 +316,18 @@ impl Drop for HookThread {
     }
 }
 
-/// Starts the keyboard hook for `key` on a thread of its own, reporting each change to `on_change`.
-pub(super) fn watch_hold_key(key: HoldKey, on_change: OnChange) -> Result<HoldWatch, HostError> {
+/// Starts the keyboard hook for `keys` on a thread of its own, reporting each change to `on_change`.
+pub(super) fn watch_hold_keys(
+    keys: Vec<(HoldKind, HoldKey)>,
+    on_change: OnChange,
+) -> Result<HoldWatch, HostError> {
     let (ready_tx, ready) = std::sync::mpsc::channel();
     let join = std::thread::Builder::new()
         .name("thalvi-hold-key".to_owned())
         .spawn(move || {
             RULES.with(|rules| {
                 *rules.borrow_mut() = Some(Rules {
-                    hook: HoldHook::new(key),
+                    hooks: HoldHooks::new(keys),
                     on_change,
                 });
             });
@@ -346,7 +353,8 @@ pub(super) fn watch_hold_key(key: HoldKey, on_change: OnChange) -> Result<HoldWa
             RULES.with(|rules| {
                 if let Some(rules) = rules.borrow_mut().take() {
                     // A key still held when watching ends must not stay down.
-                    (rules.on_change)(false);
+                    (rules.on_change)(HoldKind::Dictate, false);
+                    (rules.on_change)(HoldKind::Write, false);
                 }
             });
         })
@@ -529,5 +537,51 @@ impl Win32 for Real {
         // SAFETY: GetDpiForSystem takes no arguments.
         let dpi = unsafe { GetDpiForSystem() };
         Some(f64::from(area.top) * 96.0 / f64::from(dpi.max(96)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ::windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
+    use ::windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, WS_EX_NOACTIVATE, WS_POPUP,
+    };
+
+    use super::*;
+
+    #[test]
+    fn a_non_activating_window_shows_without_becoming_active() {
+        // SAFETY: STATIC is a system window class, so no module handle or registration is needed.
+        let window = unsafe {
+            CreateWindowExW(
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!("Thalvi test"),
+                WS_POPUP,
+                0,
+                0,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("the test window is created");
+        let window_id = window.0 as Hwnd;
+        // SAFETY: the calls only read the state of the window this test owns.
+        let visible = || unsafe { IsWindowVisible(window).as_bool() };
+        // SAFETY: GetActiveWindow takes no arguments.
+        let active = || unsafe { GetActiveWindow() } == window;
+
+        set_visible_unfocused(window_id, true);
+        let shown = (visible(), active());
+        set_visible_unfocused(window_id, false);
+        let hidden = visible();
+        // SAFETY: the window belongs to this thread and is not used afterwards.
+        unsafe { DestroyWindow(window) }.expect("the test window is destroyed");
+
+        assert_eq!((shown, hidden), ((true, false), false));
     }
 }

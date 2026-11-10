@@ -14,6 +14,8 @@ const ENDPOINT: usize = 4;
 /// Frames between a word being spoken and the model emitting it.
 const LAG: usize = 3;
 const GHOST: usize = 99;
+/// Silence the look-ahead is asked to find words in.
+const LOOKAHEAD: usize = 3_000;
 
 /// Emits each scripted word `LAG` frames after it was spoken; the look-ahead finds the words
 /// spoken but not yet emitted, or a word that never comes when `ghost` is set.
@@ -41,7 +43,12 @@ impl FrameDecoder for Fake {
         ])
     }
 
-    fn lookahead(&self, _silence: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+    fn lookahead(&self, silence: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        assert_eq!(
+            silence.len(),
+            LOOKAHEAD,
+            "the look-ahead is as long as the model needs"
+        );
         let now = self.frame;
         let mut found: Vec<usize> = self
             .spoken
@@ -72,7 +79,7 @@ fn run(spoken: &[(usize, usize)], ghost: bool, frames: usize) -> Vec<(usize, Rec
         ghost,
         frame: 0,
     };
-    let mut segments = Segments::new(fake, pieces, ENDPOINT);
+    let mut segments = Segments::new(fake, pieces, ENDPOINT, LOOKAHEAD);
     let frame: Frame = [0; FRAME_SAMPLES];
     (0..frames)
         .flat_map(|at| {

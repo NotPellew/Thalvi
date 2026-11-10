@@ -1,6 +1,8 @@
 //! Thalvi desktop app: the Tauri tray, overlay and settings window around the capture engine.
 
+mod agent;
 mod app;
+mod client;
 mod commands;
 mod control;
 mod launch;

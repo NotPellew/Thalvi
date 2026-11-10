@@ -10,12 +10,14 @@ use std::future::{Future, pending};
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use futures_util::future::{FutureExt, LocalBoxFuture};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::watch;
+use tokio::task::{JoinError, JoinSet};
 use tokio::time::Instant;
 
 use crate::audio::{AudioError, Frames, InputGate};
@@ -23,19 +25,23 @@ use crate::capture::{
     CaptureFullError, CaptureLimits, CaptureRequest, CaptureRoute, CaptureSession, EndingPauses,
     Endings, FinalStep, QuietWindow, has_words,
 };
-use crate::config::DesktopConfig;
+use crate::claim::{Effect, Resolution, Watch};
+use crate::config::{DesktopConfig, Script};
 use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues};
+use crate::entries::SecondPassEntry;
 use crate::frame::{FRAME_SAMPLES, Frame, Order, Queued};
-use crate::hold::{Cutoff, KeyState, Press, Presses, Refusal};
+use crate::hold::{Cutoff, HoldKind, KeyState, Press, Presses, Refusal};
 use crate::metrics::{Dictation, Event, RecordKinds, Recorder};
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
 };
 use crate::report::UserError;
-use crate::secondary::{self, SecondaryApi, SecondaryError, SecondaryStt};
+use crate::secondary::{self, SecondaryApi, SecondaryError};
+use crate::spotter::KeywordSpotter;
 use crate::vad::VadDetector;
 use crate::wake::{WakeEngine, WakeError, WakeEvent, WakeFrame};
 use crate::wake_stats::{Latency, LatencySummary, NearMisses};
+use crate::writing::{self, Writing, WritingError};
 
 /// How long the recognizer and the wake cue have to be ready before the capture is abandoned.
 const READY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -53,9 +59,16 @@ const CONTINUATION_FRAMES: u8 = 3;
 /// The shortest hold of the dictation key that dictates; a shorter one is a slip of the finger.
 pub const MIN_HOLD: Duration = Duration::from_millis(300);
 
-/// How long after the key is released the recognizer may still return the last words before the
-/// capture ends without them.
-const RELEASE_TAIL: Duration = Duration::from_millis(500);
+/// Silence sent at release, 800 ms: enough for the recognizer to finish the last word and
+/// reach its endpoint, so a final comes without waiting for real audio.
+const RELEASE_SILENCE_FRAMES: usize = 10;
+
+/// How long after the release the engine waits for that final before pasting what has arrived.
+/// Measured on the server recognizer, the last word was in the text by 200 ms in every run.
+const RELEASE_LIMIT: Duration = Duration::from_millis(250);
+
+static RELEASE_SILENCE: [Frame; RELEASE_SILENCE_FRAMES] =
+    [[0i16; FRAME_SAMPLES]; RELEASE_SILENCE_FRAMES];
 
 /// Frames in one wake level window, 2 s.
 const LEVEL_WINDOW: u64 = 25;
@@ -68,6 +81,13 @@ const WAKE_CLIP_FRAMES: usize = 25;
 
 /// The sample peak from which a wake level window counts as activity.
 const ACTIVITY_PEAK: u16 = 1_000;
+
+/// The head's context, 1.28 s: the last frames whose peak a wake must reach.
+const WAKE_FLOOR_FRAMES: usize = 16;
+
+/// The sample peak below which a wake is too quiet to be speech at the microphone. Real wakes
+/// peaked at 2,073 or more and faint false wakes at 1,152 or less.
+const WAKE_FLOOR_PEAK: u16 = 1_500;
 
 /// Microphone frames in order.
 pub trait FrameSource {
@@ -175,6 +195,9 @@ pub enum EngineState {
     Capturing {
         committed: String,
         partial: Option<String>,
+        /// Something the user should know that did not stop the capture; it stays until the next
+        /// words are heard, and holds none of what was said.
+        notice: Option<String>,
     },
     PendingEnding {
         route: CaptureRoute,
@@ -186,6 +209,10 @@ pub enum EngineState {
     TranscribingSecondary {
         route: CaptureRoute,
     },
+    /// The writing model is putting the words into proper text; `text` is what has streamed in.
+    Writing {
+        text: String,
+    },
 }
 
 /// Why a capture failed; `Display` is the plain notice for the user.
@@ -194,7 +221,8 @@ pub enum CaptureError {
     #[error(transparent)]
     Recognizer(#[from] RecognizerError),
     #[error(
-        "{speech} was not ready after {}. Nothing was delivered. {}",
+        "{} was not ready after {}. Nothing was delivered. {}",
+        speech.subject(),
         plain_duration(*waited),
         speech.fix()
     )]
@@ -206,11 +234,15 @@ pub enum CaptureError {
     Audio(#[from] AudioError),
     #[error("Microphone audio stopped. Nothing was delivered.")]
     MicStopped,
-    #[error("The key was released too quickly to dictate. Nothing was typed.")]
+    #[error("{0} Nothing was pasted.")]
+    Writing(WritingError),
+    #[error("The key was released too quickly to dictate. Nothing was pasted.")]
     HoldTooShort,
-    #[error("No words were heard while the key was held. Nothing was typed.")]
+    #[error("No words were heard while the key was held. Nothing was pasted.")]
     NothingHeard,
     #[error("No words heard for {}.", plain_duration(*.0))]
+    NoWords(Duration),
+    #[error("Didn't hear an ending for {}.", plain_duration(*.0))]
     NoEnding(Duration),
     #[error("Capture stopped after {} without an ending.", plain_duration(*.0))]
     TooLong(Duration),
@@ -222,18 +254,16 @@ impl UserError for CaptureError {
     fn headline(&self) -> &'static str {
         match self {
             Self::Recognizer(error) => error.headline(),
-            Self::NotReady {
-                speech: SpeechSource::Server(_),
-                ..
-            } => "Speech server not ready — Settings",
-            Self::NotReady {
-                speech: SpeechSource::Local { .. },
-                ..
-            } => "Speech model not ready — Settings",
+            Self::NotReady { speech, .. } if speech.is_on_device() => {
+                "Speech model not ready — Settings"
+            }
+            Self::NotReady { .. } => "Speech server not ready — Settings",
             Self::Audio(error) => error.headline(),
+            Self::Writing(error) => error.headline(),
             Self::MicStopped => "Microphone stopped mid-capture",
             Self::HoldTooShort => "Key released too soon",
-            Self::NothingHeard | Self::NoEnding(_) => "No words heard",
+            Self::NothingHeard | Self::NoWords(_) => "No words heard",
+            Self::NoEnding(_) => "No ending heard",
             Self::TooLong(_) => "Capture too long — not delivered",
             Self::Full(_) => "Capture full — finish or cancel",
         }
@@ -260,9 +290,10 @@ impl CaptureError {
             Self::NotReady { .. } => "not_ready",
             Self::Audio(_) => "audio",
             Self::MicStopped => "mic_stopped",
+            Self::Writing(_) => "writing",
             Self::HoldTooShort => "hold_too_short",
             Self::NothingHeard => "hold_empty",
-            Self::NoEnding(_) => "no_ending",
+            Self::NoWords(_) | Self::NoEnding(_) => "no_ending",
             Self::TooLong(_) => "too_long",
             Self::Full(_) => "full",
         }
@@ -364,6 +395,16 @@ pub struct Parts<R, W, C> {
     pub hold: watch::Receiver<KeyState>,
     /// Tells the user about something that did not stop the capture.
     pub notice: Box<dyn Fn(&str)>,
+    /// Listens for the ending phrases beside the recognizer; none when it could not be loaded.
+    pub spotter: Option<Box<dyn KeywordSpotter>>,
+    /// Why there is no spotter, for the first capture to tell the user once.
+    pub spotter_off: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListenState {
+    Stopped,
+    Active,
 }
 
 /// Wake listening and capture, owning everything they share.
@@ -376,12 +417,21 @@ pub struct Engine<R, W, C> {
     vad: VadDetector,
     endings: Endings,
     pauses: EndingPauses,
+    scripts: Vec<Script>,
     limits: CaptureLimits,
-    secondary: Option<SecondaryStt>,
+    /// The ticked second-pass entries in list order.
+    secondary: Vec<SecondPassEntry>,
+    /// Second-pass requests the paste did not wait for, one set per capture. Each runs as its own
+    /// task, so its latency is its own, and is recorded when a loop of the engine collects it.
+    /// Dropping the engine aborts them.
+    recorded_only: Vec<JoinSet<Answer>>,
+    writing: Option<Writing>,
     speech: SpeechSource,
     http: reqwest::Client,
     recorder: Recorder,
     notice: Box<dyn Fn(&str)>,
+    spotter: Option<Box<dyn KeywordSpotter>>,
+    spotter_off: Option<String>,
     state: watch::Sender<EngineState>,
     level: watch::Sender<f32>,
     /// Keeps the cancel channel open so waiting on it never ends.
@@ -390,13 +440,16 @@ pub struct Engine<R, W, C> {
     level_frames: u64,
     level_activity: bool,
     ambiguous: bool,
+    /// Whether the previous frame's wake was refused as too quiet.
+    refused: bool,
     /// The capture and conversation thresholds the wake detector runs with.
     thresholds: (f32, f32),
     /// The wake word that opened the next capture.
     woke: Option<Woke>,
-    /// The latest frames scored while listening; filled only while audio is recorded.
+    /// The latest frames scored while listening.
     wake_clip: VecDeque<Frame>,
     key: Presses,
+    listening: ListenState,
     /// The hold that opened the next capture.
     held: Option<Held>,
     /// How the latest hold ended, when the key decided it.
@@ -410,9 +463,20 @@ pub struct Engine<R, W, C> {
 /// A press of the dictation key that opened a capture.
 struct Held {
     press: u64,
+    kind: HoldKind,
     at: Instant,
     /// Where this press was released among the queued frames, however many presses followed.
     release: Cutoff,
+}
+
+impl Held {
+    /// What releasing the key delivers.
+    fn route(&self) -> CaptureRoute {
+        match self.kind {
+            HoldKind::Dictate => CaptureRoute::Paste,
+            HoldKind::Write => CaptureRoute::Write,
+        }
+    }
 }
 
 /// A wake word heard: when, and the folder of its recordings.
@@ -450,11 +514,62 @@ struct Live<S> {
     started: Instant,
     /// When the recognizer last returned words.
     last_words: Instant,
+    heard: Heard,
     cues: FuturesUnordered<LocalBoxFuture<'static, CueEnd>>,
     release: Release,
     /// The release of the hold that opened this capture; frames queued after it are not speech
     /// of the hold.
     cutoff: Option<Cutoff>,
+    /// What the ending spotter's hits mean; none when it does not listen to this capture.
+    watch: Option<Watch>,
+    spot: SpotStats,
+    /// Shown with the capture until the next words are heard.
+    notice: Option<String>,
+}
+
+/// What the ending spotter did during one capture.
+#[derive(Default)]
+struct SpotStats {
+    frames: u64,
+    hits: u32,
+    total: Duration,
+    slowest: Duration,
+}
+
+impl SpotStats {
+    fn record(&self, recorder: &Recorder) {
+        if self.frames > 0 {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a frame count is far below 2^52"
+            )]
+            let mean = millis(self.total) / self.frames as f64;
+            let tenth = |ms: f64| (ms * 1000.0).round() / 1000.0;
+            recorder.metric(
+                Event::EndingSpotter,
+                "ok",
+                Some(self.total),
+                json!({
+                    "call": "capture",
+                    "frames": self.frames,
+                    "hits": self.hits,
+                    "step_mean_ms": tenth(mean),
+                    "step_max_ms": tenth(millis(self.slowest)),
+                }),
+            );
+        }
+    }
+}
+
+/// When speech was heard, to time the recognizer's answers to it.
+#[derive(Default)]
+struct Heard {
+    /// The first speech heard, until the recognizer's first words come.
+    first: Option<Instant>,
+    /// Whether the recognizer has returned words in this capture.
+    words_came: bool,
+    /// The latest speech heard since the recognizer's last final result.
+    last: Option<Instant>,
 }
 
 /// What the dictation key's release does to a capture.
@@ -464,26 +579,25 @@ enum Release {
     Down,
     /// The key came up at this instant; the last words may still arrive.
     Tail(Instant),
-    /// Nothing more comes of the key: the capture is not a hold, or a spoken ending decided it.
+    /// Nothing more comes of the key: the capture is not a hold.
     Over,
 }
 
 impl<S> Live<S> {
     /// Whether a frame queued at `order` came after the key went up and is not the hold's to
-    /// send: a spoken ending already pending keeps the capture open for it.
+    /// send.
     fn after_release(&self, order: Order) -> bool {
-        self.text.pending().is_none()
-            && !matches!(self.release, Release::Over)
+        !matches!(self.release, Release::Over)
             && self
                 .cutoff
                 .as_ref()
                 .is_some_and(|cutoff| cutoff.precedes(order))
     }
 
-    /// When a released hold stops waiting for words; none while a spoken ending is pending.
+    /// When a released hold stops waiting for words.
     fn tail(&self) -> Option<Instant> {
         match self.release {
-            Release::Tail(at) if self.text.pending().is_none() => Some(at + RELEASE_TAIL),
+            Release::Tail(at) => Some(at + RELEASE_LIMIT),
             _ => None,
         }
     }
@@ -524,12 +638,89 @@ enum Step {
     Frame(Result<Queued, AudioError>),
     Cue(CueEnd),
     Quiet,
+    /// The quiet interval of a disputed ending has passed.
+    Disputed,
     Silent,
     Idle,
     TooLong,
     Tail,
     /// The dictation key changed; false when it can no longer change.
     Key(bool),
+    /// A second pass that was not waited for finished.
+    Recorded(Answer),
+}
+
+/// One entry's reply to a capture, with what is needed to judge and record it when it arrives.
+struct Answer {
+    /// The entry's place among the ticked ones.
+    index: usize,
+    entry: SecondPassEntry,
+    dictation: Dictation,
+    route: CaptureRoute,
+    has_endings: bool,
+    heard: Result<String, SecondaryError>,
+    took: Duration,
+}
+
+/// An [`Answer`] with its outcome, and the text it gives when it agrees with the user's ending.
+struct Judged {
+    answer: Answer,
+    outcome: &'static str,
+    agreed: Option<String>,
+}
+
+/// The answer of a finished request; a request only ends without one if it panicked, and that
+/// panic is the engine's too.
+fn settled(joined: Result<Answer, JoinError>) -> Option<Answer> {
+    match joined {
+        Ok(answer) => Some(answer),
+        Err(error) => match error.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(_) => None,
+        },
+    }
+}
+
+/// The next answer of a second pass the paste did not wait for; never ready while none is running.
+async fn next_recorded(sets: &mut Vec<JoinSet<Answer>>) -> Answer {
+    std::future::poll_fn(|cx| {
+        let mut at = 0;
+        while let Some(set) = sets.get_mut(at) {
+            match set.poll_join_next(cx) {
+                Poll::Ready(None) => {
+                    sets.swap_remove(at);
+                }
+                Poll::Ready(Some(joined)) => {
+                    if let Some(answer) = settled(joined) {
+                        return Poll::Ready(answer);
+                    }
+                }
+                Poll::Pending => at += 1,
+            }
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+/// Which entry the paste takes, as far as the answers so far say.
+enum Usable {
+    /// An earlier entry may still give a usable answer.
+    Waiting,
+    Entry(usize),
+    Nobody,
+}
+
+/// The earliest entry that gave a usable answer, once every entry before it has answered.
+fn earliest_usable(slots: &[Option<Judged>]) -> Usable {
+    for (index, slot) in slots.iter().enumerate() {
+        match slot {
+            None => return Usable::Waiting,
+            Some(judged) if judged.agreed.is_some() => return Usable::Entry(index),
+            Some(_) => {}
+        }
+    }
+    Usable::Nobody
 }
 
 /// Whether any of the frames heard after the start cue holds speech.
@@ -563,6 +754,38 @@ fn released_early(pressed: Instant) -> (CaptureError, &'static str) {
     }
 }
 
+/// How a step bounded by cancellation and a deadline ended.
+enum Bounded<T> {
+    Cancelled,
+    TimedOut,
+    Done(T),
+}
+
+impl<T> Bounded<Result<T, WritingError>> {
+    /// The step's value, or why it gave none: its error, a timeout, or `None` for a cancel.
+    fn finish(self) -> Result<T, Option<WritingError>> {
+        match self {
+            Self::Cancelled => Err(None),
+            Self::TimedOut => Err(Some(WritingError::Timeout)),
+            Self::Done(done) => done.map_err(Some),
+        }
+    }
+}
+
+/// Polls `work` unless the user cancels or `deadline` passes first; cancellation wins a tie.
+async fn bounded<T>(
+    cancel: &mut watch::Receiver<u64>,
+    deadline: Instant,
+    work: impl Future<Output = T>,
+) -> Bounded<T> {
+    tokio::select! {
+        biased;
+        _ = cancel.changed() => Bounded::Cancelled,
+        () = tokio::time::sleep_until(deadline) => Bounded::TimedOut,
+        done = work => Bounded::Done(done),
+    }
+}
+
 async fn until(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
@@ -592,6 +815,15 @@ fn nothing_delivered(outcome: &CaptureOutcome) -> Option<&'static str> {
         }
         CaptureOutcome::Cancelled { .. } => Some("cancelled"),
         CaptureOutcome::Failed { error, .. } => Some(error.kind()),
+    }
+}
+
+/// The capture heard no new words for `idle`: words were heard but never their ending, or none at all.
+fn idle_error(idle: Duration, text: &CaptureSession) -> CaptureError {
+    if recoverable(text).is_some() {
+        CaptureError::NoEnding(idle)
+    } else {
+        CaptureError::NoWords(idle)
     }
 }
 
@@ -633,12 +865,17 @@ where
             vad: VadDetector::new(),
             endings: config.endings.clone(),
             pauses: config.ending_pause,
+            scripts: config.scripts.clone(),
             limits: config.capture_limits,
-            secondary: config.stt.secondary.clone(),
+            secondary: config.stt.entries.ticked().cloned().collect(),
+            recorded_only: Vec::new(),
+            writing: config.writing.clone(),
             speech: config.speech_source(),
             http: parts.http,
             recorder,
             notice: parts.notice,
+            spotter: parts.spotter,
+            spotter_off: parts.spotter_off,
             state,
             level,
             _cancel_tx: cancel_tx,
@@ -646,6 +883,7 @@ where
             level_frames: 0,
             level_activity: false,
             ambiguous: false,
+            refused: false,
             thresholds: (
                 config.wake.capture().threshold.get(),
                 config.wake.conversation().threshold.get(),
@@ -653,6 +891,7 @@ where
             woke: None,
             wake_clip: VecDeque::new(),
             key: Presses::new(parts.hold),
+            listening: ListenState::Stopped,
             held: None,
             hold_end: None,
             held_for: None,
@@ -679,13 +918,33 @@ where
         std::mem::take(&mut self.ignored)
     }
 
-    /// Writes the recordings still queued; call once at shutdown.
+    /// Writes the recordings still queued and abandons second passes still running; call once at
+    /// shutdown.
     pub async fn finish(self) {
+        drop(self.recorded_only);
         self.recorder.finish().await;
+    }
+
+    /// Ends listening and hands its unhandled presses to the caller. The next listener ignores
+    /// an already-held key.
+    pub fn stop_listening(&mut self) -> Presses {
+        let mut presses = self.key.clone();
+        if self.listening == ListenState::Stopped {
+            presses.skip();
+        }
+        self.listening = ListenState::Stopped;
+        presses
+    }
+
+    /// Resumes after the caller has accounted for presses while the microphone was closed.
+    pub fn resume_listening(&mut self, presses: Presses) {
+        self.key = presses;
+        self.listening = ListenState::Active;
     }
 
     /// Scores microphone frames until a wake word is heard or the dictation key goes down. A key
     /// already down when listening starts counts for nothing until it is released and pressed again.
+    /// Dropping this future preserves pending presses until listening resumes or `stop_listening`.
     ///
     /// On [`WakeTrigger::Capture`] the microphone gate is already off, so nothing said before
     /// the wake cue reaches the capture; call [`capture`](Self::capture) next.
@@ -697,7 +956,10 @@ where
         frames: &mut impl FrameSource,
     ) -> Result<WakeTrigger, ListenError> {
         self.set_state(EngineState::Listening);
-        self.key.skip();
+        if self.listening == ListenState::Stopped {
+            self.key.skip();
+        }
+        self.listening = ListenState::Active;
         // A capture the caller abandoned before it began leaves its start behind; the next one is
         // not that hold or that wake.
         self.held = None;
@@ -705,11 +967,13 @@ where
         let reset = std::time::Instant::now();
         self.wake.reset();
         self.wake_clip.clear();
+        self.refused = false;
         self.recorder
             .metric(Event::WakeReset, "ok", Some(reset.elapsed()), Value::Null);
         let mut misses = NearMisses::new(self.thresholds.0, self.thresholds.1);
         let mut latency = Latency::default();
         let heard = self.scan(frames, &mut misses, &mut latency).await;
+        self.listening = ListenState::Stopped;
         if let Some(summary) = latency.finish() {
             self.latency_line(summary);
         }
@@ -735,6 +999,10 @@ where
                         self.begin_hold(press);
                         return Ok(WakeTrigger::Hold);
                     }
+                    continue;
+                }
+                answer = next_recorded(&mut self.recorded_only) => {
+                    self.record_late(answer);
                     continue;
                 }
                 frame = frames.next() => frame,
@@ -770,6 +1038,9 @@ where
                 if let Some(summary) = latency.record(Instant::now(), wake.inference) {
                     self.latency_line(summary);
                 }
+            }
+            if self.refuse_quiet(&wake) {
+                continue;
             }
             if wake.event == Some(WakeEvent::Ambiguous) {
                 if !self.ambiguous {
@@ -814,6 +1085,7 @@ where
         let at = Instant::now();
         self.held = Some(Held {
             press: press.number,
+            kind: press.kind,
             at,
             release: press.release,
         });
@@ -842,15 +1114,44 @@ where
         );
     }
 
-    /// Keeps `frame` for the wake clip when audio is recorded.
+    /// Keeps `frame` for the wake level check and, when audio is recorded, the wake clip.
     fn remember(&mut self, frame: &Frame) {
-        if !self.recorder.kinds().audio {
-            return;
-        }
         if self.wake_clip.len() == WAKE_CLIP_FRAMES {
             self.wake_clip.pop_front();
         }
         self.wake_clip.push_back(*frame);
+    }
+
+    /// Whether `wake` is too quiet to be speech and is dropped, recording the first frame of each
+    /// run of refused wakes.
+    fn refuse_quiet(&mut self, wake: &WakeFrame) -> bool {
+        let level = self.wake_peak();
+        let Some(event) = wake.event.filter(|_| level < WAKE_FLOOR_PEAK) else {
+            self.refused = false;
+            return false;
+        };
+        if !self.refused {
+            self.refused = true;
+            let head = match event {
+                WakeEvent::Capture => "capture",
+                WakeEvent::Conversation => "conversation",
+                WakeEvent::Ambiguous => "ambiguous",
+            };
+            let mut fields = scores(wake);
+            fields["level"] = json!(level);
+            fields["floor"] = json!(WAKE_FLOOR_PEAK);
+            self.recorder.metric(Event::WakeRefused, head, None, fields);
+        }
+        true
+    }
+
+    /// The largest sample magnitude over the last [`WAKE_FLOOR_FRAMES`] frames.
+    fn wake_peak(&self) -> u16 {
+        let recent = self.wake_clip.iter().rev().take(WAKE_FLOOR_FRAMES);
+        recent
+            .flat_map(|frame| frame.iter().map(|sample| sample.unsigned_abs()))
+            .max()
+            .unwrap_or(0)
     }
 
     /// Records the frames up to and including the wake frame, oldest first.
@@ -885,10 +1186,32 @@ where
         }
     }
 
+    /// Records how the recognizer's connection ended and how long the wait for it took.
+    fn ready_metric(&self, connection: (&str, Option<Duration>), started: Instant) {
+        self.recorder.metric(
+            Event::TranscriptionReady,
+            connection.0,
+            Some(connection.1.unwrap_or_else(|| started.elapsed())),
+            json!({"entry": self.speech.name()}),
+        );
+    }
+
+    /// Starts the ending spotter on a fresh capture, unless the key holds it: a hold has no
+    /// spoken endings to double-check.
+    fn watch_for(
+        spotter: &mut Option<Box<dyn KeywordSpotter>>,
+        pauses: EndingPauses,
+        held: bool,
+    ) -> Option<Watch> {
+        let spotter = spotter.as_mut().filter(|_| !held)?;
+        spotter.reset();
+        Some(Watch::new(pauses))
+    }
+
     /// Plays the wake cue while the recognizer connects, then takes the user's dictation until
     /// they end it, cancel it, or something fails. After [`WakeTrigger::Hold`] releasing the key
-    /// ends it, pasting what was said at once; a spoken ending still decides it as it does after
-    /// a wake word.
+    /// ends it, pasting what was said at once; no spoken phrase is an ending during a hold, so
+    /// only [`EngineHandle::cancel`] cancels one.
     ///
     /// Call after [`listen`](Self::listen) returned [`WakeTrigger::Capture`] or
     /// [`WakeTrigger::Hold`]. Cancellation through [`EngineHandle::cancel`] applies to this call
@@ -909,7 +1232,13 @@ where
                 Event::HoldStart,
                 "ok",
                 None,
-                json!({"dictation": woke.dictation.to_string()}),
+                json!({
+                    "dictation": woke.dictation.to_string(),
+                    "key": match held.as_ref().map(|held| held.kind) {
+                        Some(HoldKind::Write) => "write",
+                        _ => "hold",
+                    },
+                }),
             );
         }
         let outcome = match self.start(frames, &woke, held.as_ref()).await {
@@ -975,6 +1304,7 @@ where
             None => EngineState::Capturing {
                 committed: live.text.text(),
                 partial: live.partial.clone(),
+                notice: live.notice.clone(),
             },
         });
     }
@@ -1042,6 +1372,16 @@ where
                 self.cue_failed(&end, "The capture continues.");
                 true
             }
+        }
+    }
+
+    /// The transcript a capture accumulates: during a hold every word is text, while a wake
+    /// word's capture honours the spoken endings.
+    fn capture_session(&self, held: bool) -> CaptureSession {
+        if held {
+            CaptureSession::without_endings()
+        } else {
+            CaptureSession::new(self.endings.clone(), self.pauses, self.scripts.clone())
         }
     }
 
@@ -1118,12 +1458,7 @@ where
             }
         };
         let decided = Instant::now();
-        self.recorder.metric(
-            Event::TranscriptionReady,
-            connection.0,
-            Some(connection.1.unwrap_or_else(|| started.elapsed())),
-            Value::Null,
-        );
+        self.ready_metric(connection, started);
         if let Some(done) = stop {
             if let Some(session) = session {
                 session.cancel().await;
@@ -1136,11 +1471,10 @@ where
         let live = Live {
             session,
             dictation: woke.dictation.clone(),
-            text: CaptureSession::new(self.endings.clone(), self.pauses),
+            text: self.capture_session(held.is_some()),
             partial: None,
             sent: Vec::new(),
-            keep_sent: self.secondary.as_ref().is_some_and(SecondaryStt::enabled)
-                || self.recorder.kinds().audio,
+            keep_sent: !self.secondary.is_empty() || self.recorder.kinds().audio,
             held: VecDeque::new(),
             speech_run: 0,
             relayed: false,
@@ -1148,9 +1482,13 @@ where
             last_audio: Instant::now(),
             started: Instant::now(),
             last_words: Instant::now(),
+            heard: Heard::default(),
             cues: FuturesUnordered::new(),
             release: held.map_or(Release::Over, |_| Release::Down),
             cutoff: held.map(|held| held.release.clone()),
+            watch: Self::watch_for(&mut self.spotter, self.pauses, held.is_some()),
+            spot: SpotStats::default(),
+            notice: held.is_none().then(|| self.spotter_off.take()).flatten(),
         };
         self.publish(&live);
         Ok((live, backlog, released))
@@ -1171,9 +1509,10 @@ where
             }
         }
         if let (Some(at), Some(held)) = (released, held) {
-            // The key came up while connecting: the recognizer has what was said, and the last
-            // words get the tail from now.
             self.held_for = Some(at.duration_since(held.at));
+            if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+                return (stop.into(), Instant::now());
+            }
             live.release = Release::Tail(Instant::now());
         }
         let mut key_open = true;
@@ -1191,8 +1530,10 @@ where
                 changed = self.key.changed(), if key_open => Step::Key(changed.is_ok()),
                 event = live.session.next_event() => Step::Event(event),
                 frame = frames.next() => Step::Frame(frame),
+                answer = next_recorded(&mut self.recorded_only) => Step::Recorded(answer),
                 Some(end) = live.cues.next() => Step::Cue(end),
                 () = until(live.text.ready_at()) => Step::Quiet,
+                () = until(live.watch.as_ref().and_then(Watch::ready_at)) => Step::Disputed,
                 () = until(watchdog) => Step::Silent,
                 () = until(tail) => Step::Tail,
                 () = tokio::time::sleep_until(live.last_words + self.limits.idle()) => Step::Idle,
@@ -1204,6 +1545,9 @@ where
                 Step::Event(Ok(RecognizerEvent::Partial(text))) => {
                     if has_words(&text) {
                         live.last_words = Instant::now();
+                        if !std::mem::replace(&mut live.heard.words_came, true) {
+                            self.lag(Event::PartialLag, live.heard.first.take());
+                        }
                     }
                     self.on_partial(live, text);
                     None
@@ -1211,10 +1555,13 @@ where
                 Step::Event(Ok(RecognizerEvent::Final(text))) => {
                     if has_words(&text) {
                         live.last_words = Instant::now();
+                        self.lag(Event::FinalLag, live.heard.last.take());
                     }
                     let done = self.on_final(live, &text);
-                    Self::after_final(live);
-                    done
+                    done.or_else(|| {
+                        matches!(live.release, Release::Tail(_))
+                            .then(|| self.finish_hold(live, held))
+                    })
                 }
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),
                 Step::Frame(Ok(queued)) => self.on_frame(live, &queued).await.err().map(Done::from),
@@ -1224,14 +1571,22 @@ where
                     self.cue_failed(&end, "The capture continues.");
                     None
                 }
+                Step::Recorded(answer) => {
+                    self.record_late(answer);
+                    None
+                }
                 Step::Quiet => self.on_quiet(live),
+                Step::Disputed => {
+                    self.on_disputed(live);
+                    None
+                }
                 Step::Silent => Some(Done::Failed(CaptureError::MicStopped)),
-                Step::Idle => Some(Done::Failed(CaptureError::NoEnding(self.limits.idle()))),
+                Step::Idle => Some(Done::Failed(idle_error(self.limits.idle(), &live.text))),
                 Step::TooLong => Some(Done::Failed(CaptureError::TooLong(self.limits.max()))),
-                Step::Tail => self.finish_hold(live),
+                Step::Tail => Some(self.finish_hold(live, held)),
                 Step::Key(open) => {
                     key_open = open;
-                    self.on_key(live, held)
+                    self.on_key(live, held, frames).await
                 }
             };
             if let Some(done) = done {
@@ -1242,7 +1597,12 @@ where
 
     /// The dictation key changed during a capture: its release ends a hold, and a press during a
     /// dictation by wake word is refused.
-    fn on_key(&mut self, live: &mut Live<R::Session>, held: Option<&Held>) -> Option<Done> {
+    async fn on_key(
+        &mut self,
+        live: &mut Live<R::Session>,
+        held: Option<&Held>,
+        frames: &mut impl FrameSource,
+    ) -> Option<Done> {
         let Some(held) = held else {
             let pressed = u64::from(self.key.take().is_some()) + self.key.take_lost();
             if pressed > 0 {
@@ -1251,58 +1611,67 @@ where
             return None;
         };
         if self.key.is_over(held.press) && matches!(live.release, Release::Down) {
-            return self.on_release(live, held);
+            return self.on_release(live, held, frames).await;
         }
         None
     }
 
-    /// The key came up: a spoken ending already pending keeps deciding the capture; a slip of the
-    /// finger ends it; otherwise the last words get [`RELEASE_TAIL`] to arrive, and no recognizer
-    /// signals that nothing more is coming, so the whole tail is waited out.
-    fn on_release(&mut self, live: &mut Live<R::Session>, held: &Held) -> Option<Done> {
+    /// The key came up: a slip of the finger ends the capture; otherwise pre-release audio is
+    /// drained, silence frames are sent at once to trigger the final, and the engine waits for
+    /// that final bounded by [`RELEASE_LIMIT`].
+    async fn on_release(
+        &mut self,
+        live: &mut Live<R::Session>,
+        held: &Held,
+        frames: &mut impl FrameSource,
+    ) -> Option<Done> {
         let now = Instant::now();
         self.held_for = Some(now.duration_since(held.at));
-        if live.text.pending().is_some() {
-            live.release = Release::Over;
-            return None;
-        }
         if now.duration_since(held.at) < MIN_HOLD {
             self.hold_end = Some("too_short");
             return Some(Done::Failed(CaptureError::HoldTooShort));
         }
-        live.release = Release::Tail(now);
+        let mut queued = Vec::new();
+        if let Err(error) = take_queued_before(frames, &held.release, &mut queued) {
+            return Some(Done::Failed(error.into()));
+        }
+        for frame in &queued {
+            if let Err(stop) = self.on_frame(live, frame).await {
+                return Some(Done::from(stop));
+            }
+        }
+        if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+            return Some(Done::from(stop));
+        }
+        live.release = Release::Tail(Instant::now());
         None
     }
 
-    /// After a final transcript: a spoken ending heard in the last words decides the capture as
-    /// it does after a wake word. Every other final just joins the text; the tail is the wait.
-    fn after_final(live: &mut Live<R::Session>) {
-        if matches!(live.release, Release::Tail(_)) && live.text.pending().is_some() {
-            live.release = Release::Over;
-        }
-    }
-
     /// Ends a released hold: what was said, with the words still being recognized, is pasted.
-    fn finish_hold(&mut self, live: &mut Live<R::Session>) -> Option<Done> {
-        if let Some(partial) = live.partial.take().filter(|text| has_words(text)) {
-            if let Some(done) = self.on_final(live, &partial) {
-                return Some(done);
-            }
-            if live.text.pending().is_some() {
-                live.release = Release::Over;
-                return None;
-            }
+    fn finish_hold(&mut self, live: &mut Live<R::Session>, held: Option<&Held>) -> Done {
+        if let Some(partial) = live.partial.take().filter(|text| has_words(text))
+            && let Some(done) = self.on_final(live, &partial)
+        {
+            return done;
         }
         let text = live.text.text();
         if !has_words(&text) {
             self.hold_end = Some("empty");
-            return Some(Done::Failed(CaptureError::NothingHeard));
+            return Done::Failed(CaptureError::NothingHeard);
         }
         self.hold_end = Some("released");
-        Some(Done::Accepted(CaptureRequest {
-            route: CaptureRoute::Paste,
+        Done::Accepted(CaptureRequest {
+            route: held.map_or(CaptureRoute::Paste, Held::route),
             text,
-        }))
+        })
+    }
+
+    /// Records how long after `since` the recognizer answered, when speech was heard since.
+    fn lag(&self, event: Event, since: Option<Instant>) {
+        if let Some(since) = since {
+            self.recorder
+                .metric(event, "ok", Some(since.elapsed()), Value::Null);
+        }
     }
 
     /// Says that `count` presses of the dictation key started nothing, and why.
@@ -1325,6 +1694,17 @@ where
     }
 
     fn on_partial(&self, live: &mut Live<R::Session>, text: String) {
+        if has_words(&text) {
+            live.notice = None;
+        }
+        if has_words(&text)
+            && let Some(done) = live
+                .watch
+                .as_mut()
+                .and_then(|watch| watch.words(Instant::now()))
+        {
+            self.spot_resolved(&done);
+        }
         if live.text.on_partial(&text) {
             self.ending_state("partial_cancelled");
             self.queue_cue(live, Cue::Cancelled);
@@ -1337,8 +1717,19 @@ where
         self.recorder
             .text(&live.dictation, format!("heard: {text}"));
         live.partial = None;
+        if has_words(text) {
+            live.notice = None;
+        }
         let now = Instant::now();
-        match live.text.on_final(text, now, live.speech) {
+        let before = live.watch.is_some().then(|| live.text.clone());
+        let step = live.text.on_final(text, now, live.speech);
+        if let (Some(before), Some(watch)) = (before, live.watch.as_mut())
+            && let Some(done) =
+                watch.final_arrived(Effect::of(&before, &live.text, &step), now, live.speech)
+        {
+            self.spot_resolved(&done);
+        }
+        match step {
             Err(full) => return Some(Done::Failed(full.into())),
             Ok(FinalStep::Cancelled { dictated }) => return Some(Done::NeverMind(dictated)),
             Ok(FinalStep::Continue { cancelled_pending }) => {
@@ -1354,10 +1745,11 @@ where
                     live.speech_run = 0;
                 }
                 live.last_audio = now;
-                self.ending_state(if pending.window == QuietWindow::WaitingForQuiet {
-                    "waiting_for_quiet"
-                } else {
-                    "pending"
+                self.ending_state(match (pending.window, pending.without_ending) {
+                    (QuietWindow::WaitingForQuiet, false) => "waiting_for_quiet",
+                    (QuietWindow::WaitingForQuiet, true) => "waiting_for_quiet_without_ending",
+                    (QuietWindow::CountingDown { .. }, false) => "pending",
+                    (QuietWindow::CountingDown { .. }, true) => "pending_without_ending",
                 });
                 self.queue_cue(live, Cue::Provisional);
             }
@@ -1369,8 +1761,13 @@ where
     fn on_quiet(&self, live: &mut Live<R::Session>) -> Option<Done> {
         let now = Instant::now();
         let since = live.text.quiet_since();
+        let without_ending = live.text.pending().is_some_and(|p| p.without_ending);
         let request = live.text.poll_ready(now)?;
-        self.ending_state("accepted");
+        self.ending_state(if without_ending {
+            "accepted_without_ending"
+        } else {
+            "accepted"
+        });
         if let Some(since) = since {
             self.recorder.metric(
                 Event::EndingPause,
@@ -1401,7 +1798,21 @@ where
             return Ok(());
         }
         let pending = live.text.pending().is_some();
-        live.speech = self.vad.speech(frame, pending);
+        let disputed = live.watch.as_ref().is_some_and(Watch::disputed);
+        live.speech = self.vad.speech(frame, pending || disputed);
+        if let Some(watch) = live.watch.as_mut() {
+            if live.speech {
+                watch.speaking();
+            } else {
+                watch.quiet_frame(now);
+            }
+        }
+        if live.speech {
+            live.heard.last = Some(now);
+            if !live.heard.words_came {
+                live.heard.first.get_or_insert(now);
+            }
+        }
         if !pending {
             live.speech_run = 0;
             live.relayed = false;
@@ -1445,9 +1856,112 @@ where
         }
     }
 
-    /// Sends `frames`, giving up when the user cancels or a capture limit passes while the
-    /// recognizer is not taking audio.
+    /// Sends `frames` and keeps them as what the user said.
     async fn send(&mut self, live: &mut Live<R::Session>, frames: &[Frame]) -> Result<(), Stop> {
+        self.feed(live, frames).await?;
+        self.spot(live, frames);
+        if live.keep_sent {
+            live.sent.extend_from_slice(frames);
+        }
+        Ok(())
+    }
+
+    /// Gives the ending spotter the frames the recognizer just took. It never changes the
+    /// capture: a hit only starts a comparison with the transcript.
+    fn spot(&mut self, live: &mut Live<R::Session>, frames: &[Frame]) {
+        let (Some(spotter), Some(watch)) = (self.spotter.as_mut(), live.watch.as_mut()) else {
+            return;
+        };
+        let now = Instant::now();
+        let mut resolved = Vec::new();
+        let mut broken = None;
+        for frame in frames {
+            watch.sent(1, now, live.speech);
+            let started = std::time::Instant::now();
+            let heard = spotter.push(frame);
+            let took = started.elapsed();
+            live.spot.frames += 1;
+            live.spot.total += took;
+            live.spot.slowest = live.spot.slowest.max(took);
+            match heard {
+                Ok(Some(hit)) => {
+                    live.spot.hits += 1;
+                    resolved.extend(watch.hit(&hit, now, live.speech));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    broken = Some(error);
+                    break;
+                }
+            }
+        }
+        for done in &resolved {
+            self.spot_resolved(done);
+        }
+        if let Some(error) = broken {
+            live.watch = None;
+            self.recorder.metric(
+                Event::EndingSpotter,
+                "error",
+                None,
+                json!({"call": "capture"}),
+            );
+            live.notice = Some(format!(
+                "Ending phrase detection stopped: {error} Endings still work from the transcript."
+            ));
+            self.publish(live);
+        }
+    }
+
+    /// Records how a heard ending ended; the user hears nothing of it.
+    fn spot_resolved(&self, done: &Resolution) {
+        self.recorder.metric(
+            Event::EndingSpotter,
+            done.outcome.name(),
+            Some(done.since_hit),
+            json!({
+                "call": "hit",
+                "ending": done.ending,
+                "confidence": round3(done.confidence),
+                "covering_after_ms": done.covering_after.map(millis),
+            }),
+        );
+    }
+
+    /// The quiet interval of a disputed ending passed: tells the user, once, that the transcript
+    /// did not take it, on the overlay until the next words. Nothing in the capture changes.
+    fn on_disputed(&self, live: &mut Live<R::Session>) {
+        let Some((notice, done)) = live
+            .watch
+            .as_mut()
+            .and_then(|watch| watch.notice(Instant::now()))
+        else {
+            return;
+        };
+        live.notice = Some(format!(
+            "Heard \u{201c}{}\u{201d}, but the transcript did not end with it. Nothing was removed; say the ending again.",
+            notice.phrase
+        ));
+        self.publish(live);
+        self.queue_cue(live, Cue::Cancelled);
+        self.spot_resolved(&done);
+    }
+
+    /// Settles what the spotter still waits for and records its work on the capture.
+    fn close_spotting(&self, live: &mut Live<R::Session>) {
+        if let Some(done) = live
+            .watch
+            .as_mut()
+            .and_then(|watch| watch.finish(Instant::now()))
+        {
+            self.spot_resolved(&done);
+        }
+        live.spot.record(&self.recorder);
+    }
+
+    /// Sends `frames` to the recognizer only, giving up when the user cancels or a capture limit
+    /// passes while the recognizer is not taking audio.
+    async fn feed(&mut self, live: &mut Live<R::Session>, frames: &[Frame]) -> Result<(), Stop> {
         let limits = self.limits;
         for frame in frames {
             tokio::select! {
@@ -1455,14 +1969,11 @@ where
                 _ = self.cancel.changed() => return Err(Stop::Cancelled),
                 sent = live.session.send_frame(frame) => sent.map_err(|e| Stop::Failed(e.into()))?,
                 () = tokio::time::sleep_until(live.last_words + limits.idle()) => {
-                    return Err(Stop::Failed(CaptureError::NoEnding(limits.idle())));
+                    return Err(Stop::Failed(idle_error(limits.idle(), &live.text)));
                 }
                 () = tokio::time::sleep_until(live.started + limits.max()) => {
                     return Err(Stop::Failed(CaptureError::TooLong(limits.max())));
                 }
-            }
-            if live.keep_sent {
-                live.sent.push(*frame);
             }
         }
         Ok(())
@@ -1473,18 +1984,22 @@ where
         &mut self,
         done: Done,
         decided: Instant,
-        live: Option<Live<R::Session>>,
+        mut live: Option<Live<R::Session>>,
         dictation: &Dictation,
     ) -> CaptureOutcome {
-        let (session, sent, scratched, recoverable_text) = match live {
+        if let Some(live) = live.as_mut() {
+            self.close_spotting(live);
+        }
+        let (session, sent, scratched, recoverable_text, has_endings) = match live {
             // Dropping the rest stops any cue still playing.
             Some(live) => (
                 Some(live.session),
                 live.sent,
                 live.text.scratched(),
                 recoverable(&live.text),
+                live.text.has_endings(),
             ),
-            None => (None, Vec::new(), false, None),
+            None => (None, Vec::new(), false, None, true),
         };
         if !sent.is_empty() {
             self.recorder
@@ -1515,7 +2030,17 @@ where
             Done::Accepted(request) => {
                 self.gate.set_enabled(false);
                 if self.end_with(Cue::Accepted, decided, session, true).await {
-                    self.reconcile(request, &sent, scratched, dictation).await
+                    match self
+                        .reconcile(request, &sent, scratched, has_endings, dictation)
+                        .await
+                    {
+                        CaptureOutcome::Accepted(request)
+                            if request.route == CaptureRoute::Write =>
+                        {
+                            self.write(request.text).await
+                        }
+                        outcome => outcome,
+                    }
                 } else {
                     CaptureOutcome::cancelled_with(request.text)
                 }
@@ -1554,73 +2079,300 @@ where
         completed
     }
 
-    /// Replaces the accepted text with the secondary transcription's when it agrees with the
-    /// ending the user spoke; otherwise keeps the live transcript and says so.
+    /// Replaces the accepted text with the first ticked entry's second transcription that agrees
+    /// with the ending the user spoke, as soon as that is known: the entries after it are not
+    /// waited for. They run on and are recorded when they finish. Keeps the live transcript when
+    /// none agrees, and says so.
     async fn reconcile(
         &mut self,
         request: CaptureRequest,
         sent: &[Frame],
         scratched: bool,
+        has_endings: bool,
         dictation: &Dictation,
     ) -> CaptureOutcome {
-        let Some(settings) = self
-            .secondary
-            .as_ref()
-            .filter(|settings| settings.enabled() && !scratched)
-        else {
+        if self.secondary.is_empty() || scratched {
             return CaptureOutcome::Accepted(request);
-        };
+        }
         self.set_state(EngineState::TranscribingSecondary {
             route: request.route,
         });
         let started = Instant::now();
-        let heard = tokio::select! {
-            biased;
-            _ = self.cancel.changed() => None,
-            heard = secondary::transcribe(&self.http, settings, sent) => Some(heard),
-        };
-        let fields = json!({
-            "model": settings.model(),
-            "api": match settings.api() {
-                SecondaryApi::OpenAi => "openai",
-                SecondaryApi::Meta => "meta",
-            },
-        });
-        let (outcome, replaced) = match heard {
-            None => ("cancelled", None),
-            Some(Ok(raw)) => {
-                self.recorder
-                    .text(dictation, format!("second transcription: {raw}"));
-                match self.agreed(&raw, request.route) {
-                    Some(text) => ("ok", Some(text)),
-                    None => ("error", None),
+        let mut running = self.ask_all(&request, sent, has_endings, dictation);
+        let mut slots: Vec<Option<Judged>> = self.secondary.iter().map(|_| None).collect();
+        let winner = loop {
+            match earliest_usable(&slots) {
+                Usable::Waiting => {}
+                Usable::Entry(index) => break Some(index),
+                Usable::Nobody => break None,
+            }
+            tokio::select! {
+                biased;
+                _ = self.cancel.changed() => {
+                    for entry in &self.secondary {
+                        self.record_second_pass(entry, "cancelled", started.elapsed(), false);
+                    }
+                    return CaptureOutcome::cancelled_with(request.text);
+                }
+                answer = next_recorded(&mut self.recorded_only) => self.record_late(answer),
+                Some(joined) = running.join_next() => {
+                    let Some(answer) = settled(joined) else {
+                        continue;
+                    };
+                    let judged = self.judge(answer);
+                    if let Some(slot) = slots.get_mut(judged.answer.index) {
+                        *slot = Some(judged);
+                    }
                 }
             }
-            Some(Err(SecondaryError::Timeout)) => ("timeout", None),
-            Some(Err(_)) => ("error", None),
         };
-        self.recorder.metric(
-            Event::SecondaryStt,
-            outcome,
-            Some(started.elapsed()),
-            fields,
-        );
-        match (outcome, replaced) {
-            ("cancelled", _) => CaptureOutcome::cancelled_with(request.text),
-            (_, Some(text)) => CaptureOutcome::Accepted(CaptureRequest {
+        let winner_name = winner
+            .and_then(|index| self.secondary.get(index))
+            .map(|entry| format!("\"{}\"", entry.name));
+        let mut failed = Vec::new();
+        let mut apart = Vec::new();
+        for (index, judged) in slots.iter().enumerate() {
+            let Some(judged) = judged else {
+                continue;
+            };
+            self.record_answer(judged, winner == Some(index));
+            if judged.outcome != "ok" {
+                if winner.is_some_and(|winner| index > winner) {
+                    apart.push(judged.answer.entry.name.as_str());
+                } else {
+                    failed.push(format!("\"{}\"", judged.answer.entry.name));
+                }
+            }
+        }
+        if !failed.is_empty() {
+            let used = winner_name.map_or_else(
+                || "the live transcript".to_owned(),
+                |name| format!("the answer of {name}"),
+            );
+            (self.notice)(&format!(
+                "The second transcription failed for {}. Using {used}.",
+                failed.join(", ")
+            ));
+        }
+        for name in apart {
+            self.tell_only_recorded(name);
+        }
+        let text = winner
+            .and_then(|index| slots.get_mut(index)?.as_mut())
+            .and_then(|judged| judged.agreed.take());
+        self.recorded_only.push(running);
+        match text {
+            Some(text) => CaptureOutcome::Accepted(CaptureRequest {
                 route: request.route,
                 text,
             }),
-            _ => {
-                (self.notice)("The second transcription failed. Using the live transcript.");
-                CaptureOutcome::Accepted(request)
-            }
+            None => CaptureOutcome::Accepted(request),
         }
     }
 
+    /// Sends the capture to every ticked entry at once, each request in a task of its own.
+    fn ask_all(
+        &self,
+        request: &CaptureRequest,
+        sent: &[Frame],
+        has_endings: bool,
+        dictation: &Dictation,
+    ) -> JoinSet<Answer> {
+        let sent: Arc<[Frame]> = Arc::from(sent);
+        let mut running = JoinSet::new();
+        for (index, entry) in self.secondary.iter().enumerate() {
+            let (http, entry, sent, dictation) = (
+                self.http.clone(),
+                entry.clone(),
+                Arc::clone(&sent),
+                dictation.clone(),
+            );
+            let route = request.route;
+            running.spawn(async move {
+                let asked = Instant::now();
+                let heard = secondary::transcribe(&http, &entry.settings, &sent).await;
+                Answer {
+                    index,
+                    entry,
+                    dictation,
+                    route,
+                    has_endings,
+                    heard,
+                    took: asked.elapsed(),
+                }
+            });
+        }
+        running
+    }
+
+    fn judge(&self, answer: Answer) -> Judged {
+        let (outcome, agreed) = match &answer.heard {
+            Ok(raw) => match self.agreed(raw, answer.route, answer.has_endings) {
+                Some(agreed) => ("ok", Some(agreed)),
+                None => ("error", None),
+            },
+            Err(SecondaryError::Timeout) => ("timeout", None),
+            Err(_) => ("error", None),
+        };
+        Judged {
+            answer,
+            outcome,
+            agreed,
+        }
+    }
+
+    fn record_answer(&self, judged: &Judged, used: bool) {
+        let answer = &judged.answer;
+        if let Ok(raw) = &answer.heard {
+            self.recorder.text(
+                &answer.dictation,
+                format!("second transcription ({}): {raw}", answer.entry.name),
+            );
+        }
+        self.record_second_pass(&answer.entry, judged.outcome, answer.took, used);
+    }
+
+    /// Records a second pass that finished after the paste, and tells the user when it failed.
+    fn record_late(&self, answer: Answer) {
+        let judged = self.judge(answer);
+        self.record_answer(&judged, false);
+        if judged.outcome != "ok" {
+            self.tell_only_recorded(&judged.answer.entry.name);
+        }
+    }
+
+    fn tell_only_recorded(&self, name: &str) {
+        (self.notice)(&format!(
+            "The second transcription for \"{name}\" failed; it was only recorded."
+        ));
+    }
+
+    /// Has the writing model put `words` into proper text and hands it on as a paste. Nothing is
+    /// pasted unless text came back whole within [`writing::LIMIT`]: otherwise the words are kept
+    /// for the clipboard with the reason, or, when the user cancels meanwhile, as cancelled.
+    async fn write(&mut self, words: String) -> CaptureOutcome {
+        if !has_words(&words) {
+            return CaptureOutcome::Accepted(CaptureRequest {
+                route: CaptureRoute::Paste,
+                text: words,
+            });
+        }
+        let Some(settings) = self.writing.clone() else {
+            return self.not_written(&words, Some(WritingError::NotSetUp), None, None);
+        };
+        self.set_state(EngineState::Writing {
+            text: String::new(),
+        });
+        let started = Instant::now();
+        let deadline = started + writing::LIMIT;
+        let mut first = None;
+        let mut text = String::new();
+        let mut reply = match bounded(
+            &mut self.cancel,
+            deadline,
+            settings.start(&self.http, &words),
+        )
+        .await
+        .finish()
+        {
+            Ok(reply) => reply,
+            Err(stop) => return self.not_written(&words, stop, Some(started), first),
+        };
+        loop {
+            match bounded(&mut self.cancel, deadline, reply.next())
+                .await
+                .finish()
+            {
+                Ok(Some(piece)) => {
+                    first.get_or_insert_with(|| started.elapsed());
+                    text.push_str(&piece);
+                    self.set_state(EngineState::Writing { text: text.clone() });
+                }
+                Ok(None) => break,
+                Err(stop) => return self.not_written(&words, stop, Some(started), first),
+            }
+        }
+        let written = text.trim();
+        if written.is_empty() {
+            return self.not_written(&words, Some(WritingError::Empty), Some(started), first);
+        }
+        self.writing_metric("ok", started, first);
+        CaptureOutcome::Accepted(CaptureRequest {
+            route: CaptureRoute::Paste,
+            text: written.to_owned(),
+        })
+    }
+
+    fn writing_metric(&self, outcome: &str, started: Instant, first: Option<Duration>) {
+        let Some(settings) = &self.writing else {
+            return;
+        };
+        self.recorder.metric(
+            Event::Writing,
+            outcome,
+            Some(started.elapsed()),
+            json!({"model": settings.model(), "first_token_ms": first.map(millis)}),
+        );
+    }
+
+    /// The outcome of a writing call that gave no text: `error`, or a cancel when `None`.
+    fn not_written(
+        &self,
+        words: &str,
+        error: Option<WritingError>,
+        started: Option<Instant>,
+        first: Option<Duration>,
+    ) -> CaptureOutcome {
+        let outcome = error.map_or("cancelled", WritingError::kind);
+        match started {
+            Some(started) => self.writing_metric(outcome, started, first),
+            None => self
+                .recorder
+                .metric(Event::Writing, outcome, None, Value::Null),
+        }
+        match error {
+            None => CaptureOutcome::cancelled_with(words.to_owned()),
+            Some(error) => CaptureOutcome::Failed {
+                error: CaptureError::Writing(error),
+                recoverable_text: Some(words.to_owned()),
+            },
+        }
+    }
+
+    fn record_second_pass(
+        &self,
+        entry: &SecondPassEntry,
+        outcome: &'static str,
+        took: Duration,
+        used: bool,
+    ) {
+        self.recorder.metric(
+            Event::SecondaryStt,
+            outcome,
+            Some(took),
+            json!({
+                "entry": entry.name,
+                "model": entry.settings.model(),
+                "api": match entry.settings.api() {
+                    SecondaryApi::OpenAi => "openai",
+                    SecondaryApi::Meta => "meta",
+                },
+                "used": used,
+            }),
+        );
+    }
+
     /// The secondary transcript without its ending phrase, when it ends the way the user did.
-    fn agreed(&self, raw: &str, route: CaptureRoute) -> Option<String> {
-        let mut parser = CaptureSession::new(self.endings.clone(), self.pauses);
+    /// A capture without endings (a hold) agrees with the whole transcript as dictated text.
+    fn agreed(&self, raw: &str, route: CaptureRoute, has_endings: bool) -> Option<String> {
+        if !has_endings {
+            let mut parser = CaptureSession::without_endings();
+            return match parser.on_final(raw, Instant::now(), false) {
+                Ok(_) => Some(parser.text()).filter(|text| !text.is_empty()),
+                Err(_) => None,
+            };
+        }
+        let mut parser = CaptureSession::new(self.endings.clone(), self.pauses, Vec::new());
         let mut text = match parser.on_final(raw, Instant::now(), false).ok()? {
             FinalStep::Armed(pending) if pending.route == route => pending.text,
             FinalStep::Continue { .. } if !parser.scratched() => {
@@ -1630,7 +2382,7 @@ where
         };
         // A second pass can hear the spoken ending twice ("Yes. Submit. Submit."); every trailing copy is the ending.
         loop {
-            let mut parser = CaptureSession::new(self.endings.clone(), self.pauses);
+            let mut parser = CaptureSession::new(self.endings.clone(), self.pauses, Vec::new());
             match parser.on_final(&text, Instant::now(), false) {
                 Ok(FinalStep::Armed(pending)) if pending.route == route => text = pending.text,
                 _ => break,
@@ -1645,18 +2397,71 @@ mod tests {
     use super::*;
     use crate::recognizer::ServerUrl;
 
+    #[tokio::test]
+    async fn spotter_totals_record_exact_timings_and_nothing_when_no_frame_was_processed() {
+        for frames in [0, 2] {
+            let dir = std::env::temp_dir()
+                .join(format!("thalvi-spot-stats-{}-{frames}", std::process::id()));
+            let recorder = Recorder::in_dir(
+                RecordKinds {
+                    metrics: true,
+                    ..RecordKinds::default()
+                },
+                &dir,
+            )
+            .unwrap();
+            let stats = if frames == 0 {
+                SpotStats::default()
+            } else {
+                SpotStats {
+                    frames,
+                    hits: 1,
+                    total: Duration::from_micros(3456),
+                    slowest: Duration::from_micros(2345),
+                }
+            };
+            stats.record(&recorder);
+            recorder.finish().await;
+            let path = dir.join("metrics.jsonl");
+            if frames == 0 {
+                assert!(!path.exists());
+            } else {
+                let lines = std::fs::read_to_string(&path).unwrap();
+                let rows: Vec<Value> = lines
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                assert_eq!(rows.len(), 1);
+                let row = &rows[0];
+                assert_eq!(row["call"], "capture");
+                assert_eq!(row["frames"], 2);
+                assert_eq!(row["hits"], 1);
+                assert!((row["duration_ms"].as_f64().unwrap() - 3.456).abs() < 1e-9);
+                assert_eq!(row["step_mean_ms"], 1.728);
+                assert_eq!(row["step_max_ms"], 2.345);
+            }
+            if dir.exists() {
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        }
+    }
     #[test]
     fn not_ready_names_what_waited_and_the_setting_to_fix() {
         let cases = [
             (
-                SpeechSource::Server(ServerUrl::parse("ws://127.0.0.1:9").unwrap()),
-                "The speech server at ws://127.0.0.1:9 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix Settings → Speech → Server address.",
+                SpeechSource::thalvi_server(
+                    "Office",
+                    &ServerUrl::parse("ws://127.0.0.1:9").unwrap(),
+                ),
+                "The Thalvi server \"Office\" at ws://127.0.0.1:9 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix its address under Settings → Speech.",
             ),
             (
-                SpeechSource::Local {
-                    model: "nemotron_160ms".to_owned(),
-                },
-                "The speech model nemotron_160ms was not ready after 8 seconds. Nothing was delivered. Wait for it to finish loading, or pick another under Settings → Speech → Speech model.",
+                SpeechSource::direct("Cybrex2", "ws://100.64.0.2:8012".to_owned()),
+                "The speech server \"Cybrex2\" at ws://100.64.0.2:8012 was not ready after 8 seconds. Nothing was delivered. Check that it is running, or fix its address under Settings → Speech.",
+            ),
+            (
+                SpeechSource::on_device("On this computer", "nemotron_160ms".to_owned()),
+                "The speech model \"On this computer\" (nemotron_160ms) was not ready after 8 seconds. Nothing was delivered. Wait for it to finish loading, or pick another under Settings → Speech.",
             ),
         ];
         for (speech, expected) in cases {

@@ -74,13 +74,17 @@ user-visible behavior. It then has exactly four H2 sections, in this order:
   captions, spoken replies, stopping, and barge-in.
 - [Conversations and learnings](./conversations.md) covers rejoin on reload,
   the conversation list, new, reopen, rename, delete, and learnings.
+- [Private conversation](./private-conversation.md) covers starting one, the
+  Private badge, nothing saved, search limited to its own turns, and ending
+  on a lost connection.
 - [History search](./history-search.md) covers the `search_history` tool, the
   Working state, collapsed Task steps, and cross-conversation matches.
 - [Voice picker and speed](./voice-and-speed.md) covers previewing and applying
   a voice, and playback speed.
 
-Recent desktop features are outside this web map: local dictation recognition
-(`crates/thalvi-desktop/src/local.rs`) and native overlay/settings looks
-(`crates/thalvi-app/ui/src/look.ts`). Their prerequisites include a launched
-native app, model files and an actual supported desktop session; these recipes
-do not verify them.
+Desktop features are outside this web map. The overlay, Settings window and
+looks (`crates/thalvi-app/ui/src/look.ts`), model download notices and tray
+commands are driven in a sandboxed nested Hyprland by
+[desktop.md](../desktop.md). Dictation by voice
+(`crates/thalvi-desktop/src/local.rs`) needs a microphone, which that sandbox
+does not have; neither recipe verifies it.

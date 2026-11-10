@@ -2,9 +2,11 @@
 
 use std::fmt;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use crate::frame::Order;
 use crate::host::Modifier;
@@ -63,8 +65,11 @@ const CODES: [(&str, u16); 49] = [
     ("F12", 0x58),
 ];
 
-/// Where `KeyZ` is in [`CODES`].
-const DEFAULT_CODE: usize = 29;
+/// Where `KeyZ`, `KeyX`, `F9` and `F10` are in [`CODES`].
+const KEY_Z: usize = 29;
+const KEY_X: usize = 30;
+const F9: usize = 45;
+const F10: usize = 46;
 
 /// Why a hold key name was refused. Shown as written.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -137,12 +142,42 @@ impl HoldKey {
     }
 }
 
-impl Default for HoldKey {
-    /// Alt with the key left of X.
-    fn default() -> Self {
+impl HoldKey {
+    /// Alt with the key left of X: what every config stored for the hold key before defaults were
+    /// set per desktop, and the default on Windows.
+    #[must_use]
+    pub fn alt_z() -> Self {
         Self {
             modifiers: vec![Modifier::Alt],
-            code: DEFAULT_CODE,
+            code: KEY_Z,
+        }
+    }
+
+    /// Alt with X: what every config stored for the write key before defaults were set per
+    /// desktop, and the default on Windows.
+    #[must_use]
+    pub fn alt_x() -> Self {
+        Self {
+            modifiers: vec![Modifier::Alt],
+            code: KEY_X,
+        }
+    }
+
+    /// F9 alone.
+    #[must_use]
+    pub fn f9() -> Self {
+        Self {
+            modifiers: Vec::new(),
+            code: F9,
+        }
+    }
+
+    /// F10 alone.
+    #[must_use]
+    pub fn f10() -> Self {
+        Self {
+            modifiers: Vec::new(),
+            code: F10,
         }
     }
 }
@@ -171,14 +206,46 @@ impl Serialize for HoldKey {
     }
 }
 
-/// Whether the hold key is down, and how many times it has been pressed.
+/// Which of the two hold keys a hold came from, and so what its release does with the words.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HoldKind {
+    /// The hold key: the words are pasted as dictated.
+    #[default]
+    Dictate,
+    /// The write key: the words are written out as proper text, then pasted.
+    Write,
+}
+
+/// Whether a hold key is down, which one, and how many times a key has been pressed.
 #[derive(Clone, Debug, Default)]
 pub struct KeyState {
     pub presses: u64,
     pub down: bool,
+    /// The key of the latest press.
+    pub kind: HoldKind,
     /// The latest press's release.
     pub release: Cutoff,
+    /// Each key's own phase, so only a key that is up can hold a release that overtook a press.
+    phases: [KeyPhase; 2],
 }
+
+/// Where one hold key is. A key that is down has no press left for a release to overtake, so only
+/// an up key carries the credit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum KeyPhase {
+    /// Up, with no release waiting for the press it overtook.
+    #[default]
+    Up,
+    /// Down, whether or not it started the hold.
+    Down,
+    /// A release arrived while the key was up: the press it overtook is still to come.
+    Overtaken(Instant),
+}
+
+/// How long after a release that overtook its press that press still counts as released. The
+/// Hyprland binds start one process per press and release, and on a quick tap the release's
+/// process can reach the app first.
+const OVERTAKEN_PRESS: Duration = Duration::from_secs(1);
 
 /// Where in the [`Order`] of queued frames one press of the key was first released. The first
 /// release stays however many presses follow, and every clone sees it.
@@ -201,10 +268,12 @@ impl Cutoff {
 #[derive(Clone, Debug)]
 pub struct Press {
     pub number: u64,
+    pub kind: HoldKind,
     pub release: Cutoff,
 }
 
 /// Follows the key so each press is acted on or refused once, however late it is looked at.
+#[derive(Clone)]
 pub struct Presses {
     state: watch::Receiver<KeyState>,
     seen: u64,
@@ -247,6 +316,7 @@ impl Presses {
         self.seen = state.presses;
         fresh.then(|| Press {
             number: state.presses,
+            kind: state.kind,
             release: state.release.clone(),
         })
     }
@@ -345,7 +415,7 @@ impl Refusal {
     }
 }
 
-/// Where the hold key's presses and releases come in, from a compositor bind or the keyboard hook.
+/// Where the hold keys' presses and releases come in, from a compositor bind or the keyboard hook.
 #[derive(Clone)]
 pub struct HoldInput(Arc<watch::Sender<KeyState>>);
 
@@ -356,19 +426,55 @@ impl HoldInput {
         (Self(Arc::new(sender)), receiver)
     }
 
-    /// The key went down or up; a repeat of the state it is in changes nothing, so key
-    /// auto-repeat starts nothing extra.
+    /// The hold key went down or up; a repeated press changes nothing, so key auto-repeat starts
+    /// nothing extra. A release while up is the next press's, which it overtook.
     pub fn set(&self, down: bool) {
+        self.change(HoldKind::Dictate, down);
+    }
+
+    /// The write key went down or up, as [`set`](Self::set) for the hold key.
+    pub fn set_write(&self, down: bool) {
+        self.change(HoldKind::Write, down);
+    }
+
+    fn change(&self, kind: HoldKind, down: bool) {
         self.0.send_if_modified(|state| {
+            let index = kind as usize;
+            let phase = state.phases[index];
+            // A press of a tap whose release came first is over already, so it opens no hold.
+            let overtaken =
+                matches!(phase, KeyPhase::Overtaken(at) if at.elapsed() < OVERTAKEN_PRESS);
+            // Every key follows its own events, even while the other key's hold ignores them.
+            state.phases[index] = if down {
+                if overtaken {
+                    KeyPhase::Up
+                } else {
+                    KeyPhase::Down
+                }
+            } else if phase == KeyPhase::Down {
+                KeyPhase::Up
+            } else {
+                KeyPhase::Overtaken(Instant::now())
+            };
+            // One hold at a time: the other key means nothing until this one is up.
+            if state.down && state.kind != kind {
+                return false;
+            }
             if state.down == down {
                 return false;
             }
-            state.down = down;
             if down {
                 state.presses += 1;
+                state.kind = kind;
                 state.release = Cutoff::default();
+                if !overtaken {
+                    state.down = true;
+                    return true;
+                }
+                state.release.release();
             } else {
                 state.release.release();
+                state.down = false;
             }
             true
         });
@@ -611,8 +717,45 @@ impl HoldHook {
     }
 }
 
+/// Decides, event by event, which keys are the hold keys, one [`HoldHook`] per key. Pure.
+pub struct HoldHooks(Vec<(HoldKind, HoldHook)>);
+
+impl HoldHooks {
+    #[must_use]
+    pub fn new(keys: Vec<(HoldKind, HoldKey)>) -> Self {
+        Self(
+            keys.into_iter()
+                .map(|(kind, key)| (kind, HoldHook::new(key)))
+                .collect(),
+        )
+    }
+
+    /// What every key makes of `event`: the strongest verdict, and the keys that went down or up.
+    #[must_use]
+    pub fn on_event(
+        &mut self,
+        event: KeyEvent,
+        physically_down: impl Fn(u16) -> bool,
+    ) -> (Verdict, Vec<(HoldKind, bool)>) {
+        let mut verdict = Verdict::Pass;
+        let mut changes = Vec::new();
+        for (kind, hook) in &mut self.0 {
+            let decision = hook.on_event(event, &physically_down);
+            verdict = match (verdict, decision.verdict) {
+                (Verdict::Swallow, _) | (_, Verdict::Swallow) => Verdict::Swallow,
+                (Verdict::Mask, _) | (_, Verdict::Mask) => Verdict::Mask,
+                _ => Verdict::Pass,
+            };
+            changes.extend(decision.change.map(|down| (*kind, down)));
+        }
+        (verdict, changes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::{Just, Strategy};
+
     use super::*;
 
     #[test]
@@ -629,7 +772,14 @@ mod tests {
             assert_eq!(key.scan_code(), scan_code, "{name}");
             assert_eq!(key.modifiers().contains(&Modifier::Alt), alt, "{name}");
         }
-        assert_eq!(HoldKey::default().to_string(), "Alt+KeyZ");
+        for (key, name) in [
+            (HoldKey::alt_z(), "Alt+KeyZ"),
+            (HoldKey::alt_x(), "Alt+KeyX"),
+            (HoldKey::f9(), "F9"),
+            (HoldKey::f10(), "F10"),
+        ] {
+            assert_eq!(key, HoldKey::parse(name).unwrap(), "{name}");
+        }
     }
 
     #[test]
@@ -658,11 +808,22 @@ mod tests {
     const ALT: u16 = 0xA4;
     const RIGHT_ALT: u16 = 0xA5;
     const SHIFT: u16 = 0xA0;
+    const RIGHT_SHIFT: u16 = 0xA1;
     const CTRL: u16 = 0xA2;
+    const RIGHT_CTRL: u16 = 0xA3;
     const WIN: u16 = 0x5B;
+    const RIGHT_WIN: u16 = 0x5C;
     const Z: u16 = 0x5A;
     const X: u16 = 0x58;
     const F9: u16 = 0x78;
+    /// A hold key with the keys that can start, prolong or spoil it: picking from every key would
+    /// rarely put down an exact chord.
+    const KEYS_OF_A_HOLD: [(&str, &[u16]); 4] = [
+        ("F9", &[F9, ALT, Z]),
+        ("Alt+KeyZ", &[ALT, RIGHT_ALT, SHIFT, Z, X]),
+        ("Ctrl+Alt+KeyZ", &[CTRL, RIGHT_CTRL, ALT, Z]),
+        ("Shift+Win+KeyX", &[SHIFT, RIGHT_SHIFT, WIN, RIGHT_WIN, X]),
+    ];
 
     fn scan_of(vk: u16) -> u16 {
         match vk {
@@ -767,7 +928,7 @@ mod tests {
 
     #[test]
     fn events_another_program_sent_are_never_the_hold_key() {
-        let mut hook = HoldHook::new(HoldKey::default());
+        let mut hook = HoldHook::new(HoldKey::alt_z());
         let alt_down = |vk| vk == ALT;
         assert_eq!(hook.on_event(event(ALT, true), alt_down), PASS);
         let injected = KeyEvent {
@@ -894,7 +1055,7 @@ mod tests {
 
     #[test]
     fn the_modifier_release_ends_the_hold_even_while_windows_still_reports_the_modifier_down() {
-        let mut hook = HoldHook::new(HoldKey::default());
+        let mut hook = HoldHook::new(HoldKey::alt_z());
         let alt = |vk| vk == ALT;
         let _ = hook.on_event(event(ALT, true), alt);
         let _ = hook.on_event(event(Z, true), alt);
@@ -908,7 +1069,7 @@ mod tests {
 
     #[test]
     fn a_modifier_release_lost_while_the_key_is_up_still_ends_the_hold_on_the_next_event() {
-        let mut hook = HoldHook::new(HoldKey::default());
+        let mut hook = HoldHook::new(HoldKey::alt_z());
         let alt = |vk| vk == ALT;
         assert_eq!(hook.on_event(event(ALT, true), alt), PASS);
         assert_eq!(
@@ -926,7 +1087,7 @@ mod tests {
     #[test]
     fn a_modifier_release_the_hook_never_saw_does_not_keep_the_hold_key_from_working() {
         // Win+L: the lock screen takes Win's release, so the hook only saw it go down.
-        let mut hook = HoldHook::new(HoldKey::default());
+        let mut hook = HoldHook::new(HoldKey::alt_z());
         assert_eq!(hook.on_event(event(WIN, true), |vk| vk == WIN), PASS);
         let keyboard = |vk| vk == ALT;
         assert_eq!(hook.on_event(event(ALT, true), keyboard), PASS);
@@ -935,7 +1096,7 @@ mod tests {
             decision(Verdict::Swallow, Some(true))
         );
         // A modifier the keyboard really holds still spoils the chord.
-        let mut hook = HoldHook::new(HoldKey::default());
+        let mut hook = HoldHook::new(HoldKey::alt_z());
         let with_win = |vk| vk == WIN || vk == ALT;
         assert_eq!(hook.on_event(event(ALT, true), with_win), PASS);
         assert_eq!(hook.on_event(event(Z, true), with_win), PASS);
@@ -964,10 +1125,122 @@ mod tests {
         input.set(true);
         assert_eq!(seen(), (1, true));
         input.set(false);
-        input.set(false);
         assert_eq!(seen(), (1, false));
         input.set(true);
         assert_eq!(seen(), (2, true));
+    }
+
+    #[test]
+    fn a_press_says_which_key_it_was_and_the_other_key_means_nothing_during_a_hold() {
+        let (input, state) = HoldInput::new();
+        let mut presses = Presses::new(state);
+        let kind = |presses: &mut Presses| presses.take().map(|press| press.kind);
+        input.set_write(true);
+        assert_eq!(kind(&mut presses), Some(HoldKind::Write));
+        // The hold key is no hold while the write key is down, and neither is its release.
+        input.set(true);
+        input.set(false);
+        assert!(!presses.is_over(1), "the write hold goes on");
+        assert_eq!(kind(&mut presses), None);
+        assert_eq!(presses.take_lost(), 0);
+        input.set_write(false);
+        assert!(presses.is_over(1));
+        input.set(true);
+        assert_eq!(kind(&mut presses), Some(HoldKind::Dictate));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_release_that_overtook_its_press_belongs_to_the_same_key() {
+        let (input, state) = HoldInput::new();
+        let mut presses = Presses::new(state);
+        input.set_write(false);
+        input.set(true);
+        assert_eq!(
+            presses.take().map(|press| press.kind),
+            Some(HoldKind::Dictate),
+            "another key's early release does not cancel this press"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_key_released_after_the_other_keys_hold_starts_the_next_hold() {
+        // (the key held first, the key pressed during it and released after it)
+        for (held, touched) in [
+            (HoldKind::Write, HoldKind::Dictate),
+            (HoldKind::Dictate, HoldKind::Write),
+        ] {
+            let (input, state) = HoldInput::new();
+            let mut presses = Presses::new(state);
+            let set = |kind: HoldKind, down: bool| match kind {
+                HoldKind::Dictate => input.set(down),
+                HoldKind::Write => input.set_write(down),
+            };
+            set(held, true);
+            assert_eq!(
+                presses.take().map(|press| press.kind),
+                Some(held),
+                "{held:?}"
+            );
+            set(touched, true);
+            assert_eq!(presses.take().map(|press| press.kind), None, "{held:?}");
+            set(held, false);
+            assert!(presses.is_over(1), "{held:?}: its release ends the hold");
+            set(touched, false);
+            assert_eq!(presses.take().map(|press| press.kind), None, "{held:?}");
+            assert_eq!(presses.take_lost(), 0, "{held:?}");
+            tokio::time::advance(Duration::from_millis(999)).await;
+            set(touched, true);
+            let press = presses.take().expect("the key starts a hold");
+            assert_eq!(press.kind, touched, "{held:?}");
+            assert_eq!(presses.take_lost(), 0, "{held:?}");
+            assert!(
+                !presses.is_over(press.number),
+                "{held:?}: the hold lasts while the key is down"
+            );
+            set(touched, false);
+            assert!(
+                presses.is_over(press.number),
+                "{held:?}: and ends with its release"
+            );
+        }
+    }
+
+    #[test]
+    fn two_keys_are_two_holds_and_the_strongest_verdict_wins() {
+        let mut hooks = HoldHooks::new(vec![
+            (HoldKind::Dictate, HoldKey::alt_z()),
+            (HoldKind::Write, HoldKey::alt_x()),
+        ]);
+        let with_alt = |vk| vk == ALT;
+        let step = |hooks: &mut HoldHooks, vk, down, keyboard: &dyn Fn(u16) -> bool| {
+            hooks.on_event(event(vk, down), keyboard)
+        };
+        assert_eq!(
+            step(&mut hooks, ALT, true, &with_alt),
+            (Verdict::Pass, vec![])
+        );
+        assert_eq!(
+            step(&mut hooks, X, true, &with_alt),
+            (Verdict::Swallow, vec![(HoldKind::Write, true)])
+        );
+        assert_eq!(
+            step(&mut hooks, X, false, &with_alt),
+            (Verdict::Swallow, vec![]),
+            "the write hold lasts until Alt is up too"
+        );
+        assert_eq!(
+            step(&mut hooks, Z, true, &with_alt),
+            (Verdict::Swallow, vec![(HoldKind::Dictate, true)])
+        );
+        assert_eq!(
+            step(&mut hooks, ALT, false, &|_| false),
+            (Verdict::Mask, vec![(HoldKind::Write, false)]),
+            "one mask for both keys, and only the write hold is over"
+        );
+        assert_eq!(
+            step(&mut hooks, Z, false, &|_| false),
+            (Verdict::Swallow, vec![(HoldKind::Dictate, false)])
+        );
     }
 
     #[test]
@@ -1003,6 +1276,29 @@ mod tests {
         assert_eq!(presses.take_lost(), 0, "a press dealt with is not lost");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_press_that_arrives_after_its_own_release_opens_nothing() {
+        // (time between the release and the press, whether the press is still down)
+        for (gap, down) in [
+            (Duration::ZERO, false),
+            (Duration::from_millis(999), false),
+            (OVERTAKEN_PRESS, true),
+        ] {
+            let (input, state) = HoldInput::new();
+            let mut presses = Presses::new(state);
+            input.set(false);
+            tokio::time::advance(gap).await;
+            input.set(true);
+            let taken = presses.take();
+            assert_eq!(taken.is_some(), down, "{gap:?}");
+            assert_eq!(presses.take_lost(), u64::from(!down), "{gap:?}");
+            if !down {
+                input.set(true);
+                assert!(presses.take().is_some(), "{gap:?}: the next press opens");
+            }
+        }
+    }
+
     #[test]
     fn a_press_keeps_its_first_release_whatever_presses_follow_before_anyone_looks() {
         let (input, state) = HoldInput::new();
@@ -1025,5 +1321,56 @@ mod tests {
         assert_eq!(presses.take_lost(), 0, "nothing was passed over yet");
         assert!(presses.take().is_none());
         assert_eq!(presses.take_lost(), 1, "the tap is counted once");
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn any_key_order_leaves_one_hold_at_a_time_and_the_program_with_balanced_keys(
+            (key, steps) in proptest::sample::select(&KEYS_OF_A_HOLD[..]).prop_flat_map(|(key, keys)| {
+                let step = (proptest::sample::select(keys), proptest::bool::ANY);
+                (Just(key), proptest::collection::vec(step, 0..40))
+            }),
+            windows_lags in proptest::bool::ANY,
+        ) {
+            let mut hook = HoldHook::new(HoldKey::parse(key).unwrap());
+            let mut keyboard = std::collections::BTreeSet::new();
+            let mut program = std::collections::BTreeSet::new();
+            let mut holding = false;
+            let mut left_down = std::collections::BTreeSet::new();
+            let mut events = Vec::new();
+            for (vk, repeats) in steps {
+                let is_down = left_down.contains(&vk);
+                if !repeats && is_down {
+                    left_down.remove(&vk);
+                    events.push((vk, false));
+                } else if !repeats || is_down {
+                    left_down.insert(vk);
+                    events.push((vk, true));
+                }
+            }
+            events.extend(left_down.into_iter().map(|vk| (vk, false)));
+            for (vk, down) in events {
+                let before = keyboard.clone();
+                if down {
+                    keyboard.insert(vk);
+                } else {
+                    keyboard.remove(&vk);
+                }
+                let seen = if windows_lags { &before } else { &keyboard };
+                let decision = hook.on_event(event(vk, down), |vk| seen.contains(&vk));
+                if let Some(change) = decision.change {
+                    proptest::prop_assert_ne!(change, holding, "a hold starts and ends in turn");
+                    holding = change;
+                }
+                if decision.verdict == Verdict::Swallow {
+                    proptest::prop_assert!(!program.contains(&vk), "the program saw {vk:#x} go down, so it sees it go up");
+                } else if down {
+                    program.insert(vk);
+                } else {
+                    proptest::prop_assert!(program.remove(&vk), "the program never saw {vk:#x} go down");
+                }
+            }
+            proptest::prop_assert!(!holding, "every key is up, so the hold is over");
+        }
     }
 }

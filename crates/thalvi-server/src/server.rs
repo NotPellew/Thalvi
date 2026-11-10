@@ -5,14 +5,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::body::Bytes;
+use axum::extract::Request;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
+use std::time::Duration;
 use tower_http::services::ServeDir;
 use tracing::Instrument;
 
@@ -21,7 +24,8 @@ use crate::config::{Config, TtsApi};
 use crate::learning::LearningStore;
 use crate::learning_api;
 use crate::model::OpenAiChatModel;
-use crate::recognizer::MetaRecognizerFactory;
+use crate::phrases::{PhraseError, PhraseStore};
+use crate::recognizer::{MetaRecognizerFactory, Recognizer, RecognizerFactory};
 use crate::recorder::{RecordingConfig, start_recording, wav_bytes};
 use crate::retirement::{RETIREMENT_SYSTEM_PROMPT, spawn_retirement};
 use crate::session::{
@@ -35,11 +39,14 @@ use crate::tts::{OpenAiTts, Qwen3Tts, Tts};
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
 const PREVIEW_PHRASE: &str = "Hello, this is how I sound.";
+/// How long asking the recognizer whether it boosts phrases may take.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Shared state for the session endpoint.
 #[derive(Clone)]
 pub struct AppState<T> {
     factory: MetaRecognizerFactory,
+    phrases: Arc<PhraseStore>,
     model: Arc<OpenAiChatModel>,
     tts: Arc<T>,
     voices: Arc<[String]>,
@@ -61,6 +68,7 @@ pub fn router(config: &Config) -> Result<Router, String> {
     let learnings = Arc::new(LearningStore::open(
         &config.data_dir.join("learnings.json"),
     )?);
+    let phrases = Arc::new(PhraseStore::open(&config.data_dir.join("phrases.json"))?);
     let base_url = config.tts_base_url.clone();
     let voice = config.tts_voice.clone();
     Ok(match &config.tts_api {
@@ -68,6 +76,7 @@ pub fn router(config: &Config) -> Result<Router, String> {
             config,
             store,
             learnings,
+            Arc::clone(&phrases),
             OpenAiTts::new(base_url, model.clone(), voice, api_key.clone()),
             model.clone(),
         ),
@@ -75,6 +84,7 @@ pub fn router(config: &Config) -> Result<Router, String> {
             config,
             store,
             learnings,
+            Arc::clone(&phrases),
             Qwen3Tts::new(base_url, voice),
             "qwen3-tts".to_string(),
         ),
@@ -85,6 +95,7 @@ fn with_tts<T: Tts + Clone + 'static>(
     config: &Config,
     store: Arc<SessionStore>,
     learnings: Arc<LearningStore>,
+    phrases: Arc<PhraseStore>,
     tts: T,
     tts_model: String,
 ) -> Router {
@@ -119,7 +130,9 @@ fn with_tts<T: Tts + Clone + 'static>(
             config.stt_url.clone(),
             config.stt_model.clone(),
             config.stt_api_key.clone(),
+            Arc::clone(&phrases),
         ),
+        phrases,
         model: Arc::new(OpenAiChatModel::new(
             config.llm_base_url.clone(),
             config.llm_model.clone(),
@@ -151,10 +164,37 @@ fn with_tts<T: Tts + Clone + 'static>(
         .route("/transcription", get(transcription_upgrade::<T>))
         .route("/voices", get(list_voices::<T>))
         .route("/voice/preview", post(preview_voice::<T>))
+        .route("/phrases", get(get_phrases::<T>).put(put_phrases::<T>))
         .with_state(state)
         .merge(api::routes().with_state(store))
         .merge(learning_api::routes().with_state(learnings))
         .fallback_service(ServeDir::new(&config.web_dir))
+        .layer(middleware::from_fn(refuse_other_sites))
+}
+
+/// Refuses requests a browser sends from a page on another site. Browsers apply no
+/// cross-origin check to web sockets; native clients send no `Origin`.
+async fn refuse_other_sites(request: Request, next: Next) -> Response {
+    let headers = request.headers();
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        let origin_host = origin
+            .to_str()
+            .ok()
+            .and_then(|origin| origin.split_once("://"))
+            .map(|(_, host)| host);
+        let host = headers
+            .get(header::HOST)
+            .and_then(|host| host.to_str().ok());
+        if !matches!((origin_host, host), (Some(origin), Some(host)) if origin.eq_ignore_ascii_case(host))
+        {
+            tracing::warn!(?origin, ?host, "refused a request from another site");
+            return plain_error(
+                StatusCode::FORBIDDEN,
+                "Only Thalvi's own page can use this server.",
+            );
+        }
+    }
+    next.run(request).await
 }
 
 async fn transcription_upgrade<T: Tts + Clone + 'static>(
@@ -209,6 +249,73 @@ async fn session_upgrade<T: Tts + Clone + 'static>(
 
 async fn list_voices<T>(State(state): State<AppState<T>>) -> Response {
     axum::Json(json!({"voices": &*state.voices, "default": state.default_voice})).into_response()
+}
+
+/// The word list and whether the recognizer boosts it; `boosting` is null when the recognizer
+/// could not be asked.
+async fn get_phrases<T>(State(state): State<AppState<T>>) -> Response {
+    let boosting = match state.factory.boosts_phrases() {
+        Some(known) => Some(known),
+        None => probe_boosting(&state.factory, &state.recording).await,
+    };
+    axum::Json(json!({"phrases": &*state.phrases.list(), "boosting": boosting})).into_response()
+}
+
+/// Opens and closes one recognizer session to learn whether it boosts phrases.
+async fn probe_boosting(
+    factory: &MetaRecognizerFactory,
+    recording: &RecordingConfig,
+) -> Option<bool> {
+    let started = std::time::Instant::now();
+    let connected = tokio::time::timeout(PROBE_TIMEOUT, factory.connect()).await;
+    let outcome = match connected {
+        Ok(Ok(mut recognizer)) => {
+            recognizer.close().await;
+            "ok"
+        }
+        Ok(Err(_)) => "failed",
+        Err(_) => "timeout",
+    };
+    let recorder = start_recording(recording.clone(), "recognizer-probe".to_string()).recorder;
+    recorder.emit(
+        "recognizer_probe",
+        json!({
+            "model": recorder.stt_model(),
+            "outcome": outcome,
+            "total_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        }),
+    );
+    factory.boosts_phrases()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PhrasesRequest {
+    phrases: Vec<String>,
+}
+
+async fn put_phrases<T>(State(state): State<AppState<T>>, body: Bytes) -> Response {
+    let Ok(PhrasesRequest { phrases }) = serde_json::from_slice(&body) else {
+        return plain_error(
+            StatusCode::BAD_REQUEST,
+            "Send a JSON body like {\"phrases\": [\"...\"]}.",
+        );
+    };
+    let store = Arc::clone(&state.phrases);
+    let result = match tokio::task::spawn_blocking(move || store.replace(&phrases)).await {
+        Ok(result) => result,
+        Err(error) => Err(PhraseError::Disk(error.to_string())),
+    };
+    match result {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error @ (PhraseError::TooMany | PhraseError::Length)) => {
+            plain_error(StatusCode::BAD_REQUEST, &error.to_string())
+        }
+        Err(error @ PhraseError::Disk(_)) => {
+            tracing::warn!(%error, "could not save the word list");
+            plain_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -332,6 +439,7 @@ mod tests {
     use axum::http::StatusCode;
     use axum::routing::post;
     use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 
     use crate::config::Config;
 
@@ -460,6 +568,45 @@ mod tests {
             ["sohee"],
             "only the accepted preview reaches speech"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn only_native_clients_and_pages_from_this_server_get_through() {
+        let dir = scratch("origin");
+        let app =
+            router(&config("http://127.0.0.1:1/v1", &dir, &[])).unwrap_or_else(|e| panic!("{e}"));
+        let base = serve(app).await;
+        let client = reqwest::Client::new();
+        let refused = StatusCode::FORBIDDEN;
+        for (path, upgraded) in [
+            ("/session", StatusCode::SWITCHING_PROTOCOLS),
+            ("/transcription", StatusCode::SWITCHING_PROTOCOLS),
+            ("/voices", StatusCode::OK),
+        ] {
+            for (origin, expected) in [
+                (None, upgraded),
+                (Some(base.as_str()), upgraded),
+                (Some("https://elsewhere.example"), refused),
+                (Some("null"), refused),
+            ] {
+                let mut request = client
+                    .get(format!("{base}{path}"))
+                    .header("connection", "upgrade")
+                    .header("upgrade", "websocket")
+                    .header("sec-websocket-version", "13")
+                    .header("sec-websocket-key", generate_key());
+                if let Some(origin) = origin {
+                    request = request.header("origin", origin);
+                }
+                let status = request
+                    .send()
+                    .await
+                    .unwrap_or_else(|e| panic!("{e}"))
+                    .status();
+                assert_eq!(status, expected, "path={path} origin={origin:?}");
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

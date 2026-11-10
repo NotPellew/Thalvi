@@ -1,165 +1,176 @@
-//! What a launch of the app asks for: a config path at the first start, an action on a relaunch.
+//! What a launch of the app asks for: a question or control for the running app, or the app itself.
 
+use std::io;
 use std::path::PathBuf;
 
+use serde_json::Value;
+
+use crate::agent::Request;
 use crate::startup::LOGIN_ARG;
 
-const USAGE: &str = "Usage: thalvi-desktop [toggle | pause | resume | cancel | hold-start | hold-end | copy-error | status | config-file]";
-
-/// What a relaunch makes the running app do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Command {
-    /// Open the settings window.
-    Show,
-    /// What the login entry asks for: start in the tray, and leave a running app as it is.
-    Login,
-    /// Pause listening, or resume it.
-    Toggle,
-    /// Close the microphone and drop any capture in progress.
-    Pause,
-    /// Open the microphone again; the wake word still starts a capture.
-    Resume,
-    /// Cancel the capture in progress.
-    Cancel,
-    /// The dictation key went down: start a capture that its release ends.
-    HoldStart,
-    /// The dictation key came up.
-    HoldEnd,
-    /// Copy the report of the last error shown, without opening a window.
-    CopyError,
-}
-
-impl Command {
-    /// # Errors
-    /// Why this command may not start the app: only opening it may, the others control a running one.
-    pub fn first_start(self) -> Result<(), String> {
-        match self {
-            Self::Show | Self::Login => Ok(()),
-            _ => Err(
-                "Thalvi is not running, so there is nothing to control. Start Thalvi first."
-                    .to_owned(),
-            ),
-        }
-    }
-}
-
-/// What a second launch, with its full command line, asks the running app to do.
-///
-/// A line that cannot be read still opens the settings.
-#[must_use]
-pub fn relaunch_command(args: &[String]) -> Command {
-    match Launch::parse(args.get(1..).unwrap_or_default()) {
-        Ok(Launch::Run { command, .. }) => command,
-        _ => Command::Show,
-    }
-}
+const USAGE: &str = "Usage: thalvi-desktop [toggle | pause | resume | cancel | hold-start | hold-end | write-start | write-end | copy-error | state | status | settings get | settings check <json> | settings set <json> | metrics summary | config-file]";
 
 /// The command line after the program name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Launch {
-    /// Print the running app's state for a status bar; never starts the app.
-    Status,
-    Run {
-        command: Command,
+    /// Ask the running app and print its reply; never starts the app, the microphone or a window.
+    Ask(Request),
+    /// Open the app, or its settings window when it already runs.
+    Open {
+        /// What the login entry asks for: start in the tray, and leave a running app as it is.
+        login: bool,
         /// A config file to use instead of the per-user one.
         config: Option<PathBuf>,
     },
 }
 
 impl Launch {
+    /// `stdin` is read when a settings change is given as `-`.
+    ///
     /// # Errors
-    /// The usage line when there is more than one argument.
-    pub fn parse(args: &[String]) -> Result<Self, String> {
-        let run = |command, config| Ok(Self::Run { command, config });
-        match args {
-            [] => run(Command::Show, None),
-            [word] => match word.as_str() {
-                "status" => Ok(Self::Status),
-                LOGIN_ARG => run(Command::Login, None),
-                "toggle" => run(Command::Toggle, None),
-                "pause" => run(Command::Pause, None),
-                "resume" => run(Command::Resume, None),
-                "cancel" => run(Command::Cancel, None),
-                "hold-start" => run(Command::HoldStart, None),
-                "hold-end" => run(Command::HoldEnd, None),
-                "copy-error" => run(Command::CopyError, None),
-                path => run(Command::Show, Some(PathBuf::from(path))),
-            },
+    /// The usage line, or why the settings change is no JSON.
+    pub fn parse(
+        args: &[String],
+        stdin: impl FnOnce() -> io::Result<String>,
+    ) -> Result<Self, String> {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let open = |login, config| Ok(Self::Open { login, config });
+        match args.as_slice() {
+            [] => open(false, None),
+            ["status"] => Ok(Self::Ask(Request::Status)),
+            ["state"] => Ok(Self::Ask(Request::State)),
+            ["toggle"] => Ok(Self::Ask(Request::Toggle)),
+            ["pause"] => Ok(Self::Ask(Request::Pause)),
+            ["resume"] => Ok(Self::Ask(Request::Resume)),
+            ["cancel"] => Ok(Self::Ask(Request::Cancel)),
+            ["hold-start"] => Ok(Self::Ask(Request::HoldStart)),
+            ["hold-end"] => Ok(Self::Ask(Request::HoldEnd)),
+            ["write-start"] => Ok(Self::Ask(Request::WriteStart)),
+            ["write-end"] => Ok(Self::Ask(Request::WriteEnd)),
+            ["copy-error"] => Ok(Self::Ask(Request::CopyError)),
+            ["settings", "get"] => Ok(Self::Ask(Request::SettingsGet)),
+            ["settings", "check", change] => Ok(Self::Ask(Request::SettingsCheck {
+                settings: change_of(change, stdin)?,
+            })),
+            ["settings", "set", change] => Ok(Self::Ask(Request::SettingsSet {
+                settings: change_of(change, stdin)?,
+            })),
+            ["metrics", "summary"] => Ok(Self::Ask(Request::MetricsSummary)),
+            [LOGIN_ARG] => open(true, None),
+            [path] if !matches!(*path, "settings" | "metrics") => {
+                open(false, Some(PathBuf::from(path)))
+            }
             _ => Err(USAGE.to_owned()),
         }
     }
 }
 
+/// The JSON change given on the command line, or on standard input for `-`.
+fn change_of(argument: &str, stdin: impl FnOnce() -> io::Result<String>) -> Result<Value, String> {
+    let text = if argument == "-" {
+        stdin().map_err(|error| format!("The settings change could not be read: {error}."))?
+    } else {
+        argument.to_owned()
+    };
+    serde_json::from_str(&text).map_err(|_| "The settings change is not valid JSON.".to_owned())
+}
+
+/// Whether a second launch, with its full command line, asks the running app to open its settings.
+///
+/// A line that cannot be read still opens the settings.
+#[must_use]
+pub fn relaunch_shows_settings(args: &[String]) -> bool {
+    !matches!(
+        Launch::parse(args.get(1..).unwrap_or_default(), || Ok(String::new())),
+        Ok(Launch::Open { login: true, .. } | Launch::Ask(_))
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Launch, String> {
-        Launch::parse(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
+        Launch::parse(
+            &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+            || Ok(r#"{"look": "holo"}"#.to_owned()),
+        )
     }
 
     #[test]
-    fn a_launch_names_a_command_or_a_config_file() {
-        let run = |command, config: Option<&str>| {
-            Ok(Launch::Run {
-                command,
+    fn a_launch_names_a_request_for_the_running_app_or_opens_the_app() {
+        let open = |login, config: Option<&str>| {
+            Ok(Launch::Open {
+                login,
                 config: config.map(PathBuf::from),
             })
         };
+        let ask = |request| Ok(Launch::Ask(request));
         for (args, expected) in [
-            (&[][..], run(Command::Show, None)),
-            (&["toggle"][..], run(Command::Toggle, None)),
-            (&["pause"][..], run(Command::Pause, None)),
-            (&["resume"][..], run(Command::Resume, None)),
-            (&["cancel"][..], run(Command::Cancel, None)),
-            (&["hold-start"][..], run(Command::HoldStart, None)),
-            (&["hold-end"][..], run(Command::HoldEnd, None)),
-            (&["copy-error"][..], run(Command::CopyError, None)),
-            (&["status"][..], Ok(Launch::Status)),
-            (&["--login"][..], run(Command::Login, None)),
+            (&[][..], open(false, None)),
+            (&["--login"][..], open(true, None)),
+            (&["desktop.json"][..], open(false, Some("desktop.json"))),
+            (&["toggle"][..], ask(Request::Toggle)),
+            (&["pause"][..], ask(Request::Pause)),
+            (&["resume"][..], ask(Request::Resume)),
+            (&["cancel"][..], ask(Request::Cancel)),
+            (&["hold-start"][..], ask(Request::HoldStart)),
+            (&["hold-end"][..], ask(Request::HoldEnd)),
+            (&["write-start"][..], ask(Request::WriteStart)),
+            (&["write-end"][..], ask(Request::WriteEnd)),
+            (&["copy-error"][..], ask(Request::CopyError)),
+            (&["status"][..], ask(Request::Status)),
+            (&["state"][..], ask(Request::State)),
+            (&["settings", "get"][..], ask(Request::SettingsGet)),
+            (&["metrics", "summary"][..], ask(Request::MetricsSummary)),
             (
-                &["desktop.json"][..],
-                run(Command::Show, Some("desktop.json")),
+                &["settings", "check", r#"{"look":"neon"}"#][..],
+                ask(Request::SettingsCheck {
+                    settings: json!({"look": "neon"}),
+                }),
+            ),
+            (
+                &["settings", "set", r#"{"look":"neon"}"#][..],
+                ask(Request::SettingsSet {
+                    settings: json!({"look": "neon"}),
+                }),
+            ),
+            (
+                &["settings", "set", "-"][..],
+                ask(Request::SettingsSet {
+                    settings: json!({"look": "holo"}),
+                }),
+            ),
+            (
+                &["settings", "set", "{nope"][..],
+                Err("The settings change is not valid JSON.".to_owned()),
             ),
             (&["a", "b"][..], Err(USAGE.to_owned())),
             (&["toggle", "x"][..], Err(USAGE.to_owned())),
+            (&["settings"][..], Err(USAGE.to_owned())),
+            (&["settings", "get", "x"][..], Err(USAGE.to_owned())),
+            (&["metrics"][..], Err(USAGE.to_owned())),
         ] {
             assert_eq!(parse(args), expected, "{args:?}");
         }
     }
 
     #[test]
-    fn a_relaunch_from_the_menu_opens_settings_but_one_from_login_does_not() {
-        let relaunch = |args: &[&str]| {
-            relaunch_command(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
+    fn a_relaunch_opens_settings_unless_it_is_the_login_entry_or_a_request() {
+        let shows = |args: &[&str]| {
+            relaunch_shows_settings(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
         };
         for (args, expected) in [
-            (&["thalvi-desktop"][..], Command::Show),
-            (&["thalvi-desktop", "--login"][..], Command::Login),
-            (&["thalvi-desktop", "toggle"][..], Command::Toggle),
-            (&["thalvi-desktop", "hold-start"][..], Command::HoldStart),
-            (&["thalvi-desktop", "hold-end"][..], Command::HoldEnd),
-            (&["thalvi-desktop", "a", "b"][..], Command::Show),
-            (&[][..], Command::Show),
+            (&["thalvi-desktop"][..], true),
+            (&["thalvi-desktop", "desktop.json"][..], true),
+            (&["thalvi-desktop", "--login"][..], false),
+            (&["thalvi-desktop", "toggle"][..], false),
+            (&["thalvi-desktop", "a", "b"][..], true),
+            (&[][..], true),
         ] {
-            assert_eq!(relaunch(args), expected, "{args:?}");
-        }
-    }
-
-    #[test]
-    fn only_opening_the_app_may_start_it() {
-        for (command, starts) in [
-            (Command::Show, true),
-            (Command::Login, true),
-            (Command::Toggle, false),
-            (Command::Pause, false),
-            (Command::Resume, false),
-            (Command::Cancel, false),
-            (Command::HoldStart, false),
-            (Command::HoldEnd, false),
-            (Command::CopyError, false),
-        ] {
-            assert_eq!(command.first_start().is_ok(), starts, "{command:?}");
+            assert_eq!(shows(args), expected, "{args:?}");
         }
     }
 }

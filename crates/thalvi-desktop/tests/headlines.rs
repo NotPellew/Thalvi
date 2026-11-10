@@ -16,6 +16,7 @@ use thalvi_desktop::recognizer::{
 use thalvi_desktop::report::{MAX_HEADLINE_CHARS, UserError};
 use thalvi_desktop::tasks::NotConfigured;
 use thalvi_desktop::wake::WakeError;
+use thalvi_desktop::writing::WritingError;
 
 type Cases = Vec<(Box<dyn UserError>, &'static str)>;
 
@@ -30,19 +31,21 @@ fn download() -> reqwest::Error {
         .expect_err("a relative URL is refused")
 }
 
+fn office() -> SpeechSource {
+    SpeechSource::thalvi_server("Office", &ServerUrl::default())
+}
+
 fn unreachable() -> RecognizerError {
     RecognizerError::Unreachable {
-        server: ServerUrl::default(),
+        speech: office(),
         reason: ConnectFailure::Refused,
         detail: Detail("refused".to_owned()),
     }
 }
 
 fn recognition() -> Cases {
-    let server = || SpeechSource::Server(ServerUrl::default());
-    let local = || SpeechSource::Local {
-        model: "nemotron".to_owned(),
-    };
+    let server = office;
+    let local = || SpeechSource::on_device("On this computer", "nemotron".to_owned());
     let seconds = Duration::from_secs(30);
     vec![
         (
@@ -50,20 +53,24 @@ fn recognition() -> Cases {
             "Can't reach speech server — Settings",
         ),
         (
-            Box::new(RecognizerError::Dropped {
-                server: ServerUrl::default(),
-            }),
+            Box::new(RecognizerError::Dropped { speech: office() }),
             "Speech server hung up — Settings",
         ),
         (
-            Box::new(RecognizerError::NotUnderstood {
-                server: ServerUrl::default(),
-            }),
+            Box::new(RecognizerError::NotUnderstood { speech: office() }),
             "Bad speech server reply — Settings",
         ),
         (
             Box::new(RecognizerError::said("No model.")),
             "Speech recognition failed — Settings",
+        ),
+        (
+            Box::new(RecognizerError::from(ModelError::Download {
+                kind: ModelKind::Speech,
+                file: "f".to_owned(),
+                source: download(),
+            })),
+            "Download failed — check internet",
         ),
         (
             Box::new(CaptureError::Recognizer(unreachable())),
@@ -91,7 +98,8 @@ fn recognition() -> Cases {
             Box::new(CaptureError::MicStopped),
             "Microphone stopped mid-capture",
         ),
-        (Box::new(CaptureError::NoEnding(seconds)), "No words heard"),
+        (Box::new(CaptureError::NoEnding(seconds)), "No ending heard"),
+        (Box::new(CaptureError::NoWords(seconds)), "No words heard"),
         (
             Box::new(CaptureError::HoldTooShort),
             "Key released too soon",
@@ -106,6 +114,26 @@ fn recognition() -> Cases {
             "Capture full — finish or cancel",
         ),
     ]
+}
+
+fn writing() -> Cases {
+    [
+        (WritingError::NotSetUp, "Writing not set up — Settings"),
+        (WritingError::Timeout, "Writing took too long"),
+        (WritingError::Unreachable, "Writing model unreachable"),
+        (WritingError::Status(500), "Writing model failed"),
+        (WritingError::BadResponse, "Writing reply unreadable"),
+        (WritingError::Empty, "Writing returned no text"),
+    ]
+    .into_iter()
+    .flat_map(|(error, headline)| {
+        let cases: Cases = vec![
+            (Box::new(error), headline),
+            (Box::new(CaptureError::Writing(error)), headline),
+        ];
+        cases
+    })
+    .collect()
 }
 
 fn microphone() -> Cases {
@@ -231,11 +259,11 @@ fn everything_else() -> Cases {
         ),
         (
             Box::new(HostError::NothingTyped("x".to_owned())),
-            "Nothing was typed — Settings",
+            "Nothing was pasted — Settings",
         ),
         (
             Box::new(HostError::MaybePartial("x".to_owned())),
-            "Some input may have been typed",
+            "Some text may have been pasted",
         ),
         (Box::new(NotConfigured), "That task isn't configured yet"),
     ]
@@ -245,6 +273,7 @@ fn everything_else() -> Cases {
 fn each_error_kind_has_a_headline_that_fits_the_overlay() {
     let cases = recognition()
         .into_iter()
+        .chain(writing())
         .chain(microphone())
         .chain(everything_else());
     for (error, headline) in cases {

@@ -8,19 +8,25 @@
 use std::path::Path;
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 use thalvi_desktop::audio;
+use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::draft::DraftView;
+use thalvi_desktop::entries::{self, LiveKind, Realtime};
 use thalvi_desktop::history::{Entry, HistoryError, Store as History};
-use thalvi_desktop::host::{Desktop, Host, WebUrl};
+use thalvi_desktop::host::{Host, WebUrl};
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{
-    CatalogSpeech, ModelError, ModelStore, SpeechModelInfo, SpeechProgress,
+    CatalogHead, CatalogSpeech, ModelError, ModelStore, SpeechAssets, SpeechDownloads,
+    SpeechModelInfo, SpeechProgress, WakeModelInfo,
 };
+use thalvi_desktop::phrases;
+use thalvi_desktop::recognizer::ServerUrl;
 use thalvi_desktop::report::{Report, System};
 use thalvi_desktop::transducer::check_folder;
+use thalvi_desktop::wake::validate_wake_models;
 
 use crate::app::AppState;
 use crate::menu_entry;
@@ -37,35 +43,13 @@ pub fn get_status(state: State<'_, AppState>) -> Status {
 }
 
 #[tauri::command]
-pub fn overlay_takes_clicks() -> bool {
-    Desktop::OVERLAY_TAKES_CLICKS
+pub fn overlay_takes_clicks(state: State<'_, AppState>) -> bool {
+    state.host().overlay_takes_clicks()
 }
 
 #[tauri::command]
 pub fn get_audio(state: State<'_, AppState>) -> AudioStatus {
     state.link.audio()
-}
-
-/// Refuses a microphone change while listening is not paused, before anything is written.
-///
-/// # Errors
-/// The plain refusal when the saved device would change while the microphone may be open.
-fn ensure_microphone_change_allowed(
-    settings: &Value,
-    current: Option<&str>,
-    paused: bool,
-) -> Result<(), String> {
-    let incoming = match settings.get("microphone") {
-        Some(Value::String(name)) => Some(name.trim().to_owned()),
-        _ => None,
-    };
-    if incoming.as_deref() != current && !paused {
-        return Err(
-            "Pause listening before changing the microphone. Turn listening off, then save again."
-                .to_owned(),
-        );
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -79,23 +63,33 @@ pub fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    ensure_microphone_change_allowed(
-        &settings,
-        state.config().microphone.as_deref(),
-        state.link.audio().paused,
-    )?;
-    let config = state.store.save(settings, &state.config())?;
-    let look = state.config().look;
-    state.apply(&config);
-    if config.look != look {
+    save(&app, &state, |_| Ok(((), Some(settings)))).map(drop)
+}
+
+/// Saves and applies what Settings sends, and what an outside program sends in its place.
+/// `form` builds the settings form from the config read under the save lock and returns a value
+/// for the caller with the form, or `None` to save nothing; the flag tells whether one was saved.
+///
+/// # Errors
+/// The plain reason the settings were refused, in which case nothing changed.
+pub fn save<T>(
+    app: &AppHandle,
+    state: &AppState,
+    form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
+) -> Result<(T, bool), String> {
+    let (value, saved) = state.save_form(form)?;
+    let Some((_, look_changed)) = saved else {
+        return Ok((value, false));
+    };
+    if look_changed {
         // The settings are saved either way; the overlay keeps its old place.
-        if let Err(error) = overlay::replace(&app, &state.host()) {
+        if let Err(error) = overlay::replace(app, &state.host()) {
             eprintln!("The overlay could not be placed again for the new look: {error}");
         }
     }
     // The overlay window is hidden and idle, so it re-reads the settings when told.
     let _ = app.emit("thalvi://settings", ());
-    Ok(())
+    Ok((value, true))
 }
 
 #[tauri::command]
@@ -170,11 +164,70 @@ pub async fn validate_speech_model_folder(path: String) -> Result<(), String> {
     .map_err(|error| format!("The folder could not be checked: {error}"))?
 }
 
-/// The catalog speech models and whether each is downloaded.
+/// The catalog wake heads and whether each is downloaded.
 #[tauri::command]
-pub async fn list_speech_models() -> Result<Vec<SpeechModelInfo>, String> {
+pub async fn list_wake_models() -> Result<Vec<WakeModelInfo>, String> {
     let store = ModelStore::per_user().map_err(|error| error.to_string())?;
-    Ok(store.speech_models().await)
+    Ok(store.wake_models().await)
+}
+
+/// Checks both chosen wake models the way listening will use them, before they are saved.
+///
+/// # Errors
+/// The plain reason a choice cannot be used.
+#[tauri::command]
+pub async fn validate_wake_model_choices(
+    capture: String,
+    conversation: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        validate_wake_models(&capture, &conversation).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("The wake models could not be checked: {error}"))?
+}
+
+/// Downloads one catalog wake head, so its badge can show it ready before first use.
+///
+/// # Errors
+/// The plain reason the download failed.
+#[tauri::command]
+pub async fn download_wake_model(name: String, state: State<'_, AppState>) -> Result<(), String> {
+    let head = CatalogHead::named(&name)
+        .ok_or_else(|| format!("{name} is not a wake model Thalvi can download."))?;
+    let store = ModelStore::per_user().map_err(|error| error.to_string())?;
+    let recorder =
+        Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
+    let started = Instant::now();
+    let result = store.fetch(&head.asset()).await;
+    recorder.metric(
+        Event::WakeLoad,
+        if result.is_ok() { "ok" } else { "error" },
+        Some(started.elapsed()),
+        json!({"model": head.name(), "source": "settings_download"}),
+    );
+    result.map(|_| ()).map_err(|error| error.to_string())
+}
+
+/// The catalog speech models and whether each is downloaded; the files counted are those the model loads here.
+#[tauri::command]
+pub async fn list_speech_models(
+    state: State<'_, AppState>,
+) -> Result<Vec<SpeechModelInfo>, String> {
+    let store = ModelStore::per_user().map_err(|error| error.to_string())?;
+    Ok(store
+        .speech_models(state.speech_devices.plans().await)
+        .await)
+}
+
+/// What the Speech section says about the hardware a catalog model runs on: where it is running if the engine
+/// has it loaded, else where it will load.
+#[tauri::command]
+pub async fn speech_device(name: String, state: State<'_, AppState>) -> Result<String, String> {
+    let model = CatalogSpeech::named(&name)
+        .ok_or_else(|| format!("{name} is not a speech model Thalvi knows."))?;
+    let store = ModelStore::per_user().map_err(|error| error.to_string())?;
+    Ok(state.speech_devices.line(&store, model).await)
 }
 
 /// What `thalvi://speech-model-progress` carries.
@@ -212,6 +265,82 @@ impl<'a> SpeechModelProgress<'a> {
     }
 }
 
+/// Checks one speech server entry where it is added or edited, before it joins the list.
+///
+/// # Errors
+/// The plain reason the entry cannot be used.
+#[tauri::command]
+pub fn check_speech_entry(entry: Value) -> Result<(), String> {
+    entries::check(&entry)
+}
+
+/// The live entries whose recognizer can be asked about a word list.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum Asked {
+    Realtime {
+        id: String,
+        address: String,
+        model: String,
+        /// Absent when the saved key is meant.
+        #[serde(default)]
+        api_key: Option<String>,
+    },
+    ThalviServer {
+        address: String,
+    },
+}
+
+/// Whether the recognizer behind a live entry boosts a word list, so Settings can offer one.
+#[tauri::command]
+pub async fn word_list_support(entry: Value, state: State<'_, AppState>) -> Result<bool, String> {
+    let asked = serde_json::from_value::<Asked>(entry).map_err(|error| error.to_string())?;
+    let recorder =
+        Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
+    match asked {
+        Asked::ThalviServer { address } => {
+            let server = ServerUrl::parse(&address).map_err(|error| error.to_string())?;
+            phrases::server_boosts(&reqwest::Client::new(), &server, &recorder.metrics()).await
+        }
+        Asked::Realtime {
+            id,
+            address,
+            model,
+            api_key,
+        } => {
+            let key = api_key.unwrap_or_else(|| state.config().stt.entries.key_of(&id).to_owned());
+            let realtime = Realtime::new(&address, &model, key)?;
+            phrases::realtime_boosts(&realtime, &recorder.metrics()).await
+        }
+    }
+}
+
+/// Saves the stored word list on the active Thalvi server, which gives it to its recognizer; a
+/// recognizer reached directly is given the list at each connection instead.
+#[tauri::command]
+pub async fn share_word_list(state: State<'_, AppState>) -> Result<(), String> {
+    share(&state).await
+}
+
+/// Gives the active Thalvi server the stored word list; any other recognizer needs none.
+///
+/// # Errors
+/// The plain reason the list could not be saved there.
+pub async fn share(state: &AppState) -> Result<(), String> {
+    let config = state.config();
+    let LiveKind::ThalviServer(server) = &config.stt.entries.active_live().kind else {
+        return Ok(());
+    };
+    let recorder = Recorder::per_user(config.recordings).map_err(|error| error.to_string())?;
+    phrases::share(
+        &reqwest::Client::new(),
+        server,
+        &config.stt.phrases,
+        &recorder.metrics(),
+    )
+    .await
+}
+
 /// Downloads a catalog speech model, telling the UI how far it is.
 #[tauri::command]
 pub async fn download_speech_model(
@@ -224,33 +353,55 @@ pub async fn download_speech_model(
     let store = ModelStore::per_user().map_err(|error| error.to_string())?;
     let recorder =
         Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
-    let started = Instant::now();
-    let result = state
-        .speech_downloads
-        .run(model.name(), &store, &model.assets(), |progress| {
-            let _ = app.emit(
-                "thalvi://speech-model-progress",
-                SpeechModelProgress::of(model.name(), progress),
-            );
+    let assets = model.assets_on(&state.speech_devices.plans().await(model));
+    let download = Download {
+        name: model.name(),
+        assets: &assets,
+        store: &store,
+        downloads: &state.speech_downloads,
+        recorder: &recorder,
+    };
+    download
+        .run(|progress| {
+            let _ = app.emit("thalvi://speech-model-progress", progress);
         })
-        .await;
-    if matches!(result, Err(ModelError::AlreadyDownloading { .. })) {
-        return result.map_err(|error| error.to_string());
-    }
-    recorder.metric(
-        Event::SpeechDownload,
-        if result.is_ok() { "ok" } else { "error" },
-        Some(started.elapsed()),
-        json!({"model": model.name()}),
-    );
-    result.map_err(|error| {
-        let message = error.to_string();
-        let _ = app.emit(
-            "thalvi://speech-model-progress",
-            SpeechModelProgress::failed(model.name(), message.clone()),
+        .await
+}
+
+/// One download of a catalog speech model's files, with what reports it.
+struct Download<'a> {
+    name: &'static str,
+    assets: &'a SpeechAssets<'a>,
+    store: &'a ModelStore,
+    downloads: &'a SpeechDownloads,
+    recorder: &'a Recorder,
+}
+
+impl Download<'_> {
+    /// Fetches the files the store lacks, telling `emit` each step and a failure, and records the outcome.
+    async fn run(&self, emit: impl Fn(SpeechModelProgress<'static>)) -> Result<(), String> {
+        let started = Instant::now();
+        let result = self
+            .downloads
+            .run(self.name, self.store, self.assets, |progress| {
+                emit(SpeechModelProgress::of(self.name, progress));
+            })
+            .await;
+        if matches!(result, Err(ModelError::AlreadyDownloading { .. })) {
+            return result.map_err(|error| error.to_string());
+        }
+        self.recorder.metric(
+            Event::SpeechDownload,
+            if result.is_ok() { "ok" } else { "error" },
+            Some(started.elapsed()),
+            json!({"model": self.name}),
         );
-        message
-    })
+        result.map_err(|error| {
+            let message = error.to_string();
+            emit(SpeechModelProgress::failed(self.name, message.clone()));
+            message
+        })
+    }
 }
 
 /// Opens a catalog speech model's page in the browser.
@@ -322,7 +473,7 @@ pub fn get_draft(state: State<'_, AppState>) -> Option<DraftView> {
     state.drafts.view()
 }
 
-/// Keeps the edited text. Nothing is recognized, copied or typed.
+/// Keeps the edited text. Nothing is recognized, copied or pasted.
 #[tauri::command]
 pub fn edit_draft(text: String, state: State<'_, AppState>) -> Result<(), String> {
     state.drafts.edit(text).map_err(|error| error.to_string())
@@ -343,6 +494,12 @@ pub async fn copy_text(text: String, state: State<'_, AppState>) -> Result<(), S
 #[tauri::command]
 pub fn discard_draft(state: State<'_, AppState>) {
     state.drafts.discard();
+}
+
+/// Why this desktop offers no hold key, or `None` where it does.
+#[tauri::command]
+pub fn get_hold_key_unavailable(state: State<'_, AppState>) -> Option<&'static str> {
+    state.hold_key_unavailable()
 }
 
 #[tauri::command]
@@ -396,9 +553,86 @@ pub fn set_menu_entry(on: bool, state: State<'_, AppState>) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use serde_json::json;
+    use thalvi_desktop::metrics::RecordKinds;
+    use thalvi_desktop::models::{Asset, ModelKind};
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_download_that_fails_tells_the_ui_how_far_it_got_and_why_and_records_the_error() {
+        let dir = std::env::temp_dir().join(format!("thalvi-download-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // A port nothing listens on, so the download fails at once without a network.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let url = format!("http://127.0.0.1:{port}/m.onnx");
+        let file = Asset {
+            kind: ModelKind::Speech,
+            file_name: "m.onnx",
+            url: &url,
+            size: 4,
+            sha256: "00",
+        };
+        let assets = SpeechAssets {
+            encoder: file,
+            encoder_data: None,
+            decoder: file,
+            joiner: file,
+            tokens: file,
+        };
+        let recorder = Recorder::in_dir(
+            RecordKinds {
+                metrics: true,
+                ..RecordKinds::default()
+            },
+            dir.join("records"),
+        )
+        .unwrap();
+        let store = ModelStore::in_dir(dir.join("models"));
+        let downloads = SpeechDownloads::default();
+        let emitted = RefCell::new(Vec::new());
+
+        let result = Download {
+            name: "m",
+            assets: &assets,
+            store: &store,
+            downloads: &downloads,
+            recorder: &recorder,
+        }
+        .run(|progress| emitted.borrow_mut().push(progress))
+        .await;
+
+        let message = result.unwrap_err();
+        assert!(
+            message.starts_with("Could not download the speech model m.onnx"),
+            "{message}"
+        );
+        assert_eq!(
+            *emitted.borrow(),
+            [
+                SpeechModelProgress::of("m", SpeechProgress::Verifying),
+                SpeechModelProgress::failed("m", message),
+            ]
+        );
+        recorder.finish().await;
+        let metrics = std::fs::read_to_string(dir.join("records").join("metrics.jsonl")).unwrap();
+        let line: Value = serde_json::from_str(metrics.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            (&line["event"], &line["outcome"], &line["model"]),
+            (
+                &json!("desktop_speech_download"),
+                &json!("error"),
+                &json!("m")
+            )
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn progress_reaches_the_ui_as_name_percent_and_status() {
@@ -425,41 +659,5 @@ mod tests {
             serde_json::to_value(SpeechModelProgress::failed("m", "No network.".to_owned())).ok(),
             Some(json!({"name": "m", "percent": 0, "status": "failed", "message": "No network."}))
         );
-    }
-
-    #[test]
-    fn a_microphone_change_needs_a_pause_but_other_saves_do_not() {
-        let refusal =
-            "Pause listening before changing the microphone. Turn listening off, then save again.";
-        for (settings, current, paused, expected) in [
-            (json!({"microphone": "USB Mic"}), None, false, Err(refusal)),
-            (
-                json!({"microphone": null}),
-                Some("USB Mic"),
-                false,
-                Err(refusal),
-            ),
-            (json!({"microphone": "USB Mic"}), None, true, Ok(())),
-            (json!({"microphone": null}), Some("USB Mic"), true, Ok(())),
-            (
-                json!({"microphone": "USB Mic"}),
-                Some("USB Mic"),
-                false,
-                Ok(()),
-            ),
-            (json!({"microphone": null}), None, false, Ok(())),
-            (
-                json!({"microphone": " USB Mic "}),
-                Some("USB Mic"),
-                false,
-                Ok(()),
-            ),
-        ] {
-            assert_eq!(
-                ensure_microphone_change_allowed(&settings, current, paused),
-                expected.map_err(str::to_owned),
-                "{settings} current={current:?} paused={paused}"
-            );
-        }
     }
 }

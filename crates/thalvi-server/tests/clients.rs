@@ -12,6 +12,7 @@ use axum::routing::post;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use thalvi_server::model::{ChatEvent, ChatMessage, ChatModel, OpenAiChatModel};
+use thalvi_server::phrases::PhraseStore;
 use thalvi_server::recognizer::{
     MetaRecognizerFactory, Recognizer, RecognizerError, RecognizerEvent, RecognizerFactory,
 };
@@ -19,6 +20,55 @@ use thalvi_server::tts::{OpenAiTts, Qwen3Tts, Tts};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+fn word_list(tag: &str, phrases: &[&str]) -> Arc<PhraseStore> {
+    let dir = std::env::temp_dir().join(format!("thalvi-clients-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = PhraseStore::open(&dir.join("phrases.json")).unwrap();
+    store
+        .replace(&phrases.iter().map(ToString::to_string).collect::<Vec<_>>())
+        .unwrap();
+    Arc::new(store)
+}
+
+#[tokio::test]
+async fn a_recognizer_that_announces_boosting_gets_the_word_list_before_any_audio() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        socket.next().await.unwrap().unwrap();
+        socket
+            .send(WsMessage::Text(
+                r#"{"sessionId":"s","phraseBoosting":true}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let phrases: Value =
+            serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(
+            phrases,
+            json!({"type": "phrases", "phrases": ["Cybrex2", "Thalvi"]})
+        );
+        let audio = socket.next().await.unwrap().unwrap();
+        assert_eq!(audio.into_data(), vec![1_u8, 2]);
+    });
+    let factory = MetaRecognizerFactory::new(
+        format!("ws://{addr}"),
+        "nemotron".to_string(),
+        String::new(),
+        word_list("boosting", &["Cybrex2", "Thalvi"]),
+    );
+    assert_eq!(factory.boosts_phrases(), None);
+    let mut recognizer = factory.connect().await.unwrap();
+    assert_eq!(factory.boosts_phrases(), Some(true));
+    recognizer.send_audio(&[1, 2]).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
 
 #[tokio::test]
 async fn meta_recognizer_handshake_events_audio_and_policy_close() {
@@ -61,15 +111,18 @@ async fn meta_recognizer_handshake_events_audio_and_policy_close() {
             .unwrap();
     });
 
+    // Meta's recognizer doesn't announce boosting, so it must not see the word list.
     let factory = MetaRecognizerFactory::new(
         format!("ws://{addr}"),
         "muse-voice".to_string(),
         "test-key".to_string(),
+        word_list("meta", &["Cybrex2"]),
     );
     let mut recognizer = tokio::time::timeout(Duration::from_secs(5), factory.connect())
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(factory.boosts_phrases(), Some(false));
     let first = recognizer.next_event().await.unwrap().unwrap();
     assert_eq!(
         first,

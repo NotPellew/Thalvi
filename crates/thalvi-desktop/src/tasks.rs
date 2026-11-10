@@ -1,6 +1,6 @@
 //! Scripted task decisions and their execution through the desktop host.
 
-use crate::config::{DesktopConfig, ScriptAction};
+use crate::config::{Script, ScriptAction};
 use crate::host::{App, Host, HostError, WebUrl};
 use crate::report::UserError;
 
@@ -34,15 +34,15 @@ impl UserError for NotConfigured {
 }
 
 /// The refusal for every Discord message: live Discord actions are switched off.
-const DISCORD_OFF: &str = "Discord messages are switched off for now. Nothing was typed or sent.";
+const DISCORD_OFF: &str = "Discord messages are switched off for now. Nothing was pasted or sent.";
 
 /// Chooses the task `text` asks for: a configured phrase, else `open <host>`.
 ///
 /// # Errors
 /// [`NotConfigured`] when the text matches no script and is not a valid `open` request.
-pub fn decide(text: &str, config: &DesktopConfig) -> Result<Task, NotConfigured> {
+pub fn decide(text: &str, scripts: &[Script]) -> Result<Task, NotConfigured> {
     let spoken = normalize(text);
-    for script in &config.scripts {
+    for script in scripts {
         match &script.action {
             ScriptAction::DiscordMessage { destination } => {
                 let prefix = format!("{} ", script.phrase);
@@ -118,7 +118,8 @@ fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> 
     None
 }
 
-/// `open <host>` with a plain web address: letters, digits and hyphens in dotted labels.
+/// `open <host>` with a plain web address: letters, digits and hyphens in dotted labels, the
+/// dots written either as `.` or as the spoken word "dot".
 fn spoken_url(text: &str) -> Option<Task> {
     let text = text.trim();
     let rest = text
@@ -133,8 +134,20 @@ fn spoken_url(text: &str) -> Option<Task> {
     if value.is_empty() {
         return None;
     }
+    let words: Vec<&str> = value.split_whitespace().collect();
+    let is_dot = |word: &&str| word.eq_ignore_ascii_case("dot");
+    let value = match words.iter().rposition(is_dot) {
+        None => value.to_owned(),
+        // A recognizer writes the host as words, "Google dot com"; its case carries no intent.
+        Some(last) if last + 2 == words.len() => words
+            .iter()
+            .map(|word| if is_dot(word) { "." } else { word })
+            .collect::<String>()
+            .to_ascii_lowercase(),
+        Some(_) => return None,
+    };
     let candidate = if value.contains("://") {
-        value.to_owned()
+        value.clone()
     } else {
         format!("https://{value}")
     };
@@ -172,7 +185,7 @@ fn spoken_url(text: &str) -> Option<Task> {
     }
     Some(Task::OpenUrl {
         url: WebUrl::parse(&candidate).ok()?,
-        label: value.to_owned(),
+        label: value,
     })
 }
 
@@ -189,6 +202,7 @@ fn has_bad_percent(candidate: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DesktopConfig;
     use crate::delivery::fakes::FakeHost;
 
     fn config() -> DesktopConfig {
@@ -225,7 +239,7 @@ mod tests {
             ", open the project page",
         ] {
             assert_eq!(
-                decide(spoken, &config),
+                decide(spoken, &config.scripts),
                 Ok(open(
                     "https://github.com/NotPellew/Thalvi",
                     "the project page"
@@ -233,7 +247,7 @@ mod tests {
                 "{spoken}"
             );
         }
-        let focus = decide("Switch to Editor.", &config).unwrap();
+        let focus = decide("Switch to Editor.", &config.scripts).unwrap();
         let Task::FocusApp { app, label } = focus else {
             panic!("expected a focus task");
         };
@@ -299,9 +313,27 @@ mod tests {
             ("opengoogle.com", None),
             ("opens example.com", None),
             ("open\u{7f}example.com", None),
+            (
+                "Open Google dot com.",
+                Some(("https://google.com/", "google.com")),
+            ),
+            (
+                "open stack overflow DOT com",
+                Some(("https://stackoverflow.com/", "stackoverflow.com")),
+            ),
+            (
+                "open Google Dot co dot uk",
+                Some(("https://google.co.uk/", "google.co.uk")),
+            ),
+            ("open example dot com extra", None),
+            ("open dot com", None),
+            ("open Google dot", None),
+            ("open dot", None),
+            ("open Google slash maps", None),
+            ("open my site", None),
         ] {
             let expected = expected.map(|(url, label)| open(url, label));
-            assert_eq!(decide(spoken, &config).ok(), expected, "{spoken:?}");
+            assert_eq!(decide(spoken, &config.scripts).ok(), expected, "{spoken:?}");
         }
     }
 
@@ -314,7 +346,10 @@ mod tests {
             label: "Demo".to_owned(),
         };
         assert_eq!(
-            decide("Message the demo channel saying  Hello There ", &config),
+            decide(
+                "Message the demo channel saying  Hello There ",
+                &config.scripts
+            ),
             Ok(message("Hello There"))
         );
         for spoken in [
@@ -322,7 +357,11 @@ mod tests {
             "message the demo channel saying   ",
             "message the demo channel",
         ] {
-            assert_eq!(decide(spoken, &config), Err(NotConfigured), "{spoken:?}");
+            assert_eq!(
+                decide(spoken, &config.scripts),
+                Err(NotConfigured),
+                "{spoken:?}"
+            );
         }
     }
 
@@ -333,12 +372,12 @@ mod tests {
             execute(&open("https://example.com/", "example.com"), &host).as_deref(),
             Ok("Asked the browser to open example.com.")
         );
-        let focus = decide("switch to editor", &config()).unwrap();
+        let focus = decide("switch to editor", &config().scripts).unwrap();
         assert_eq!(
             execute(&focus, &host).as_deref(),
             Ok("Focused switch to editor.")
         );
-        let discord = decide("message the demo channel saying hi", &config()).unwrap();
+        let discord = decide("message the demo channel saying hi", &config().scripts).unwrap();
         assert!(matches!(
             execute(&discord, &host),
             Err(HostError::Unsupported(_))

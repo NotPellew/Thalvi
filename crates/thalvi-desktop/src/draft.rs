@@ -15,10 +15,10 @@ use crate::history::{Capture, Outcome};
 #[serde(rename_all = "camelCase")]
 pub enum DraftOutcome {
     Delivered,
-    /// The user cancelled; nothing was typed.
+    /// The user cancelled; nothing was pasted.
     Cancelled,
     Failed,
-    /// Typing stopped partway: some of the text may already be in the window.
+    /// It is not known whether the paste reached the window.
     MaybePartial,
 }
 
@@ -55,7 +55,7 @@ pub struct Draft {
 
 impl Draft {
     /// The draft a finished capture leaves, bound to the window it started in. `None` when no
-    /// text was heard, and for tasks, whose text is a command rather than something to type.
+    /// text was heard, and for tasks, whose text is a command rather than something to paste.
     #[must_use]
     pub fn of<T: Display>(
         outcome: &CaptureOutcome,
@@ -223,13 +223,13 @@ mod tests {
                 Some(DraftOutcome::Delivered),
             ),
             (
-                "typing refused",
+                "paste refused",
                 deliver_fails(HostError::NothingTyped("Gone.".to_owned())),
                 paste_outcome("hello"),
                 Some(DraftOutcome::Failed),
             ),
             (
-                "typing stopped partway",
+                "paste may or may not have happened",
                 deliver_fails(HostError::MaybePartial("Partway.".to_owned())),
                 paste_outcome("hello"),
                 Some(DraftOutcome::MaybePartial),

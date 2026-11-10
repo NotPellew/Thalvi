@@ -1,4 +1,5 @@
 //! Replays cancellation after the accepted cue with recognizer close held pending.
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::pin;
 use std::sync::{Arc, Mutex};
@@ -14,13 +15,13 @@ use thalvi_desktop::engine::fakes::{FakeFrames, FakeWake};
 use thalvi_desktop::engine::{CaptureOutcome, CuePlayer, Engine, Parts};
 use thalvi_desktop::frame::Frame;
 use thalvi_desktop::history::{Capture, Outcome, Store as History};
-use thalvi_desktop::hold::{HoldInput, Presses, Refusal};
-use thalvi_desktop::host::{App, Host, HostError, TypedText, WebUrl};
+use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
+use thalvi_desktop::host::{App, Delivered, Host, HostError, PasteText, WebUrl};
 use thalvi_desktop::metrics::Recorder;
 use thalvi_desktop::recognizer::{
     FakeRecognizer, FakeSession, Recognizer, RecognizerError, RecognizerEvent, RecognizerSession,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 #[derive(Clone, Default)]
 struct RecordingHost(Arc<Mutex<Vec<&'static str>>>);
@@ -31,13 +32,18 @@ impl RecordingHost {
 }
 impl Host for RecordingHost {
     type Target = String;
-    const OVERLAY_TAKES_CLICKS: bool = false;
+    fn overlay_takes_clicks(&self) -> bool {
+        false
+    }
+    fn copies_only(&self) -> bool {
+        false
+    }
     fn capture_target(&self) -> Result<String, HostError> {
         Ok("Editor".to_owned())
     }
-    fn deliver(&self, _: &String, _: &TypedText, _: bool) -> Result<(), HostError> {
+    fn deliver(&self, _: &String, _: &PasteText, _: bool) -> Result<Delivered, HostError> {
         self.called("deliver");
-        Ok(())
+        Ok(Delivered::InWindow)
     }
     fn copy(&self, _: &str) -> Result<(), HostError> {
         self.called("copy");
@@ -61,6 +67,120 @@ impl Host for RecordingHost {
 }
 
 // INSERT_RUNNER_SOURCE
+
+struct ReloadEngine {
+    presses: Presses,
+}
+impl ReloadEngine {
+    fn stop_listening(&mut self) -> Presses {
+        self.presses.clone()
+    }
+    fn resume_listening(&mut self, presses: Presses) {
+        self.presses = presses;
+    }
+
+    fn set_recordings(&mut self, _: thalvi_desktop::metrics::RecordKinds) {
+        panic!("this replay changes the server, not the recording switches");
+    }
+}
+struct ReloadSession {
+    engine: ReloadEngine,
+    frames: Option<()>,
+}
+struct ReloadRunner {
+    config: DesktopConfig,
+    session: Option<ReloadSession>,
+    paused: bool,
+    key_state: watch::Receiver<KeyState>,
+    refused: RefCell<Vec<(Refusal, u64)>>,
+    entered: Option<oneshot::Sender<()>>,
+    release: Option<oneshot::Receiver<bool>>,
+}
+impl ReloadRunner {
+    // INSERT_RELOAD_SOURCE
+
+    fn take_history(&self, _: &DesktopConfig) {}
+    fn refuse_press(&self, refusal: Refusal, count: u64) {
+        self.refused.borrow_mut().push((refusal, count));
+    }
+    async fn rebuild(&mut self, config: DesktopConfig) {
+        self.entered.take().unwrap().send(()).unwrap();
+        if self.release.take().unwrap().await.unwrap() {
+            self.config = config;
+        }
+    }
+}
+
+#[tokio::test]
+async fn settings_apply_reports_presses_during_successful_and_failed_rebuilds() {
+    let config = DesktopConfig::from_json_str("{}").unwrap();
+    let next = DesktopConfig::from_json_str(r#"{"server":"ws://127.0.0.1:9012"}"#).unwrap();
+    for rebuilt in [true, false] {
+        for (tapped, before_apply) in [(true, false), (false, false), (true, true), (false, true)] {
+            let (input, key) = HoldInput::new();
+            let mut presses = Presses::new(key.clone());
+            presses.skip();
+            let (entered, started) = oneshot::channel();
+            let (finish, release) = oneshot::channel();
+            let mut runner = ReloadRunner {
+                config: config.clone(),
+                session: Some(ReloadSession {
+                    engine: ReloadEngine { presses },
+                    frames: Some(()),
+                }),
+                paused: false,
+                key_state: key,
+                refused: RefCell::default(),
+                entered: Some(entered),
+                release: Some(release),
+            };
+            if before_apply {
+                input.set(true);
+                if tapped {
+                    input.set(false);
+                }
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(runner.apply(next.clone()), async {
+                    started.await.unwrap();
+                    if !before_apply {
+                        input.set(true);
+                        if tapped {
+                            input.set(false);
+                        }
+                    }
+                    finish.send(rebuilt).unwrap();
+                });
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                *runner.refused.borrow(),
+                [(Refusal::MicrophoneClosed, 1)],
+                "RELOAD_PRESS_SILENTLY_DROPPED: rebuilt={rebuilt}, tapped={tapped}"
+            );
+            assert_eq!(
+                runner.config,
+                if rebuilt {
+                    next.clone()
+                } else {
+                    config.clone()
+                }
+            );
+            let engine = &mut runner.session.as_mut().unwrap().engine;
+            assert_eq!(pressed(&mut engine.presses), 0, "RELOAD_PRESS_RECOUNTED");
+            if !tapped {
+                input.set(false);
+            }
+            input.set(true);
+            assert!(
+                engine.presses.take().is_some(),
+                "RELOAD_FRESH_PRESS_DISCARDED"
+            );
+            assert_eq!(engine.presses.take_lost(), 0);
+        }
+    }
+}
 
 struct ImmediateCues;
 impl CuePlayer for ImmediateCues {
@@ -144,6 +264,8 @@ async fn closing_capture(cancel: bool) {
             http: reqwest::Client::new(),
             hold,
             notice: Box::new(|_| {}),
+            spotter: None,
+            spotter_off: None,
         },
         &config,
         Recorder::disabled(),
@@ -224,7 +346,7 @@ async fn closing_capture(cancel: bool) {
         if cancel {
             !delivered && calls.is_empty()
         } else {
-            delivered && calls == ["deliver", "copy"]
+            delivered && calls == ["deliver"]
         },
         "CANCEL_REACHED_DELIVERY: a consumed Cancel must prevent host delivery"
     );
@@ -257,4 +379,85 @@ async fn closing_capture(cancel: bool) {
         drafts.view().map(|draft| draft.original),
         Some("keep me".to_owned())
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_rebuild_apply_handoff_keeps_holds_and_reports_taps() {
+    let config = DesktopConfig::from_json_str("{}").unwrap();
+    for retune in [false, true] {
+        for tapped in [false, true] {
+            let gate = InputGate::default();
+            let (mut frames, _feed) = FakeFrames::new(&gate);
+            let (wake, wake_control) = FakeWake::new();
+            let (recognizer, _server) = FakeRecognizer::new();
+            let (input, hold) = HoldInput::new();
+            let mut runner = ReloadRunner {
+                config: config.clone(),
+                session: None,
+                paused: false,
+                key_state: hold.clone(),
+                refused: RefCell::default(),
+                entered: None,
+                release: None,
+            };
+            let (mut engine, _) = Engine::new(
+                Parts {
+                    recognizer,
+                    wake,
+                    cues: ImmediateCues,
+                    gate,
+                    http: reqwest::Client::new(),
+                    hold,
+                    notice: Box::new(|_| {}),
+                    spotter: None,
+                    spotter_off: None,
+                },
+                &config,
+                Recorder::disabled(),
+            );
+            let (send, mut control) = mpsc::unbounded_channel::<Control>();
+            let mut first = Box::pin(engine.listen(&mut frames));
+            tokio::select! {
+                biased;
+                result = &mut first => panic!("listener ended: {result:?}"),
+                () = std::future::ready(()) => {}
+            }
+            assert_eq!(wake_control.resets(), 1);
+            let mut next = config.clone();
+            if retune {
+                next.recordings.metrics = !next.recordings.metrics;
+            }
+            send.send(Control::Apply(Box::new(next))).unwrap();
+            let apply = tokio::select! {
+                _ = &mut first => panic!("unexpected trigger"),
+                message = control.recv() => message.unwrap(),
+            };
+            drop(first);
+            input.set(true);
+            if tapped {
+                input.set(false);
+            }
+            if let Control::Apply(config) = apply {
+                runner.apply(*config).await;
+            }
+            assert!(runner.refused.borrow().is_empty());
+            let result =
+                tokio::time::timeout(Duration::from_millis(5), engine.listen(&mut frames)).await;
+            if tapped {
+                assert!(result.is_err(), "a released tap must not capture");
+                assert_eq!(
+                    engine.take_ignored(),
+                    [Refusal::TooQuick],
+                    "HANDOFF_PRESS_SILENTLY_DROPPED"
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap().unwrap(),
+                    thalvi_desktop::engine::WakeTrigger::Hold,
+                    "HANDOFF_PRESS_SILENTLY_DROPPED"
+                );
+                assert!(engine.take_ignored().is_empty());
+            }
+        }
+    }
 }

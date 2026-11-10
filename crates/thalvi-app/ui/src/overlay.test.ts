@@ -25,13 +25,14 @@ function mount(settings = SETTINGS, clicks = true) {
 }
 
 const SENTENCE = "Call me back";
-const pending = (waitingForQuiet: boolean, pauseMs = 2500): Status => ({
+const pending = (waitingForQuiet: boolean, pauseMs = 2500, copies = false): Status => ({
   state: "pending",
   target: "Slack",
   route: "submit",
   text: SENTENCE,
   waitingForQuiet,
   pauseMs,
+  copies,
 });
 
 describe("each status", () => {
@@ -41,7 +42,7 @@ describe("each status", () => {
     { name: "starting", status: { state: "starting", target: "Slack" }, hidden: false, label: "LISTENING", target: "→ Slack", draft: false },
     {
       name: "capturing",
-      status: { state: "capturing", target: null, committed: "Hello", partial: "wor" },
+      status: { state: "capturing", target: null, committed: "Hello", partial: "wor", notice: null },
       hidden: false,
       label: "LISTENING",
       target: "",
@@ -50,10 +51,13 @@ describe("each status", () => {
     { name: "pending, waiting for quiet", status: pending(true), hidden: false, label: "QUIET", target: "→ Slack", draft: true },
     { name: "pending, counting", status: pending(false), hidden: false, label: "SUBMIT IN 2 s", target: "→ Slack", draft: true },
     { name: "pending, short pause", status: pending(false, 700), hidden: false, label: "SUBMIT IN 1 s", target: "→ Slack", draft: true },
+    { name: "pending, copying", status: pending(false, 2500, true), hidden: false, label: "COPY IN 2 s", target: "→ Slack", draft: true },
+    { name: "pending, writing out", status: { state: "pending", target: "Slack", route: "write", text: SENTENCE, waitingForQuiet: false, pauseMs: 700, copies: false }, hidden: false, label: "WRITE IN 1 s", target: "→ Slack", draft: true },
+    { name: "writing", status: { state: "writing", target: "Slack", text: "" }, hidden: false, label: "WRITING…", target: "→ Slack", draft: true },
     { name: "working", status: { state: "working", target: "Slack", route: "task", cancellable: false }, hidden: false, label: "WORKING", target: "→ Slack", draft: false },
     {
       name: "failed shows its headline, not the full notice",
-      status: { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:9 (connection refused). Start the Thalvi server, or fix Settings → Speech → Server address.", headline: "Can't reach speech server — Settings", causes: [] },
+      status: { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:9 (connection refused). Start the Thalvi server, or fix Settings → Speech → Server address.", headline: "Can't reach speech server — Settings", causes: [], kind: "other" },
       hidden: false,
       label: "Can't reach speech server — Settings",
       target: "",
@@ -98,10 +102,37 @@ describe("each status", () => {
 describe("draft", () => {
   it("shows settled text, the live partial and a caret while capturing", () => {
     const { emit } = mount();
-    emit({ state: "capturing", target: null, committed: "Hello there", partial: "wor" });
+    emit({ state: "capturing", target: null, committed: "Hello there", partial: "wor", notice: null });
     expect(pick(".c").textContent).toBe("Hello there");
     expect(pick(".p").textContent).toBe("wor");
     expect(pick(".caret").hidden).toBe(false);
+  });
+
+  it("shows the written text as it streams in, with a caret and no ending", () => {
+    const { emit } = mount();
+    emit({ state: "writing", target: "Slack", text: "Hi Anna, I am" });
+    expect(pick(".c").textContent).toBe("Hi Anna, I am");
+    expect(pick(".p").textContent).toBe("");
+    expect(pick(".end").hidden).toBe(true);
+    expect(pick(".caret").hidden).toBe(false);
+  });
+
+  it("shows a notice in place of the words, even with the draft off, until the next words", async () => {
+    const { emit } = mount({ ...SETTINGS, overlay: { show: true, draft: false } });
+    await settle();
+    const told = "Heard \u201cpaste that\u201d, but the transcript did not end with it. Nothing was removed; say the ending again.";
+    emit({ state: "capturing", target: null, committed: "Hello there", partial: null, notice: told });
+    expect(pick(".draft").hidden).toBe(false);
+    expect(pick(".c").textContent).toBe(told);
+    expect(pick(".p").textContent).toBe("");
+    expect(pick(".caret").hidden).toBe(true);
+    expect(pick(".text").dataset["notice"]).toBe("true");
+    expect(pick(".module .tick").textContent).toBe(told);
+
+    emit({ state: "capturing", target: null, committed: "Hello there and", partial: null, notice: null });
+    expect(pick(".draft").hidden).toBe(true);
+    expect(pick(".text").dataset["notice"]).toBe("false");
+    expect(pick(".c").textContent).toBe("Hello there and");
   });
 
   it("marks the ending when pending", () => {
@@ -115,7 +146,7 @@ describe("draft", () => {
   it("is hidden when overlay.draft is off, leaving the pill", async () => {
     const { emit } = mount({ ...SETTINGS, overlay: { show: true, draft: false } });
     await settle();
-    emit({ state: "capturing", target: "Slack", committed: "secret", partial: null });
+    emit({ state: "capturing", target: "Slack", committed: "secret", partial: null, notice: null });
     expect(pick(".draft").hidden).toBe(true);
     expect(pick(".lbl").textContent).toBe("LISTENING");
   });
@@ -126,7 +157,7 @@ describe("draft", () => {
     backend.getSettings.mockResolvedValue({ ...SETTINGS, overlay: { show: true, draft: false } });
     emit({ state: "listening" });
     await settle();
-    emit({ state: "capturing", target: null, committed: "x", partial: null });
+    emit({ state: "capturing", target: null, committed: "x", partial: null, notice: null });
     expect(pick(".draft").hidden).toBe(true);
   });
 });
@@ -172,7 +203,7 @@ describe("level bars", () => {
   it("rise with the mic level and settle when it ends", async () => {
     const { emit, level, clock } = mount();
     await settle();
-    emit({ state: "capturing", target: null, committed: "", partial: null });
+    emit({ state: "capturing", target: null, committed: "", partial: null, notice: null });
     for (let frame = 0; frame < 10; frame += 1) clock.advance(16);
     const quiet = middle();
     level(1);
@@ -188,7 +219,7 @@ describe("level bars", () => {
   it("go flat during the countdown", async () => {
     const { emit, level, clock } = mount();
     await settle();
-    emit({ state: "capturing", target: null, committed: "", partial: null });
+    emit({ state: "capturing", target: null, committed: "", partial: null, notice: null });
     level(1);
     clock.advance(16);
     emit(pending(false));
@@ -210,7 +241,8 @@ describe("the cancel buttons", () => {
         emit(status);
         return [!pick(".x").hidden, !pick(".mx").hidden];
       };
-      expect(shown({ state: "capturing", target: null, committed: "", partial: null })).toEqual([capturing, capturing]);
+      expect(shown({ state: "capturing", target: null, committed: "", partial: null, notice: null })).toEqual([capturing, capturing]);
+      expect(shown({ state: "writing", target: "Slack", text: "Hi" })).toEqual([working, working]);
       expect(shown({ state: "working", target: "Slack", route: "task", cancellable: true })).toEqual([working, working]);
       expect(shown({ state: "working", target: "Slack", route: "task", cancellable: false })).toEqual([false, false]);
       expect(shown({ state: "done", target: "Slack", route: "task", notice: "Done" })).toEqual([false, false]);

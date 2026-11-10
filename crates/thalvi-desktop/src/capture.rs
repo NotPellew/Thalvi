@@ -8,6 +8,9 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
+use crate::config::Script;
+use crate::tasks::{self, Task};
+
 /// The most characters one capture holds.
 pub const MAX_CAPTURE_CHARS: usize = 20_000;
 
@@ -17,9 +20,10 @@ const ARTIFACT_BODY_MAX: usize = 32;
 /// The most artifacts that may follow an ending phrase.
 const ENDING_ARTIFACTS_MAX: usize = 2;
 
-const DEFAULT_ENDINGS: [(&str, Ending); 6] = [
+const DEFAULT_ENDINGS: [(&str, Ending); 7] = [
     ("paste that", Ending::Paste),
     ("finish dictation", Ending::Paste),
+    ("write that out", Ending::Write),
     ("submit", Ending::Submit),
     ("do that", Ending::Task),
     ("scratch that", Ending::Scratch),
@@ -31,6 +35,8 @@ const DEFAULT_ENDINGS: [(&str, Ending); 6] = [
 #[serde(rename_all = "snake_case")]
 pub enum Ending {
     Paste,
+    /// Paste the words as proper text, written out by the writing model.
+    Write,
     Submit,
     Task,
     Scratch,
@@ -38,8 +44,9 @@ pub enum Ending {
 }
 
 impl Ending {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Paste,
+        Self::Write,
         Self::Submit,
         Self::Task,
         Self::Scratch,
@@ -52,6 +59,8 @@ impl Ending {
 #[serde(rename_all = "snake_case")]
 pub enum CaptureRoute {
     Paste,
+    /// Paste the words as proper text; the engine writes them out and delivers a paste.
+    Write,
     Submit,
     Task,
 }
@@ -62,6 +71,7 @@ impl CaptureRoute {
     pub fn name(self) -> &'static str {
         match self {
             Self::Paste => "paste",
+            Self::Write => "write",
             Self::Submit => "submit",
             Self::Task => "task",
         }
@@ -75,7 +85,7 @@ pub enum EndingsError {
     Empty,
     #[error("Ending phrases must be distinct.")]
     Duplicate,
-    #[error("Configure paste, submit, task, scratch, and cancel endings.")]
+    #[error("Configure paste, write, submit, task, scratch, and cancel endings.")]
     Incomplete,
 }
 
@@ -103,6 +113,17 @@ impl TryFrom<BTreeMap<String, Ending>> for Endings {
                 return Err(EndingsError::Duplicate);
             }
             entries.push((phrase, ending));
+        }
+        // A set saved before the write ending existed gets its default phrase, if that is free.
+        let write_phrase = DEFAULT_ENDINGS
+            .iter()
+            .find_map(|(phrase, ending)| (*ending == Ending::Write).then_some(*phrase));
+        if let Some(write_phrase) = write_phrase
+            && entries
+                .iter()
+                .all(|(phrase, ending)| *ending != Ending::Write && phrase != write_phrase)
+        {
+            entries.push((write_phrase.to_owned(), Ending::Write));
         }
         if Ending::ALL
             .iter()
@@ -136,6 +157,13 @@ impl Default for Endings {
 }
 
 impl Endings {
+    /// Every phrase with its ending, longest phrase first.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, Ending)> {
+        self.0
+            .iter()
+            .map(|(phrase, ending)| (phrase.as_str(), *ending))
+    }
+
     /// Longest first, so "please submit" wins over "submit".
     fn longest_first(mut entries: Vec<(String, Ending)>) -> Self {
         entries.sort_by_key(|(phrase, _)| (Reverse(phrase.chars().count()), phrase.clone()));
@@ -227,7 +255,7 @@ impl EndingPauses {
     #[must_use]
     pub fn get(self, route: CaptureRoute) -> Duration {
         match route {
-            CaptureRoute::Paste => self.paste,
+            CaptureRoute::Paste | CaptureRoute::Write => self.paste,
             CaptureRoute::Submit => self.submit,
             CaptureRoute::Task => self.task,
         }
@@ -331,6 +359,8 @@ pub struct PendingEnding {
     /// What will be delivered: the capture without the ending phrase.
     pub text: String,
     pub window: QuietWindow,
+    /// The whole capture is a task and no ending was spoken.
+    pub without_ending: bool,
 }
 
 /// What a delivered capture asks the caller to do.
@@ -360,11 +390,19 @@ pub enum FinalStep {
 #[error("This capture is full. Finish or cancel it before continuing.")]
 pub struct CaptureFullError;
 
+/// What a wake-word capture listens for; a hold has none of it.
+#[derive(Clone, Debug)]
+struct Spoken {
+    endings: Endings,
+    /// The scripts whose phrase, spoken alone, runs without an ending.
+    scripts: Vec<Script>,
+}
+
 /// One dictation: final transcripts in, an ending delivered after a quiet pause out.
 /// Pure and synchronous; the caller supplies every instant.
 #[derive(Clone, Debug)]
 pub struct CaptureSession {
-    endings: Endings,
+    spoken: Option<Spoken>,
     pauses: EndingPauses,
     pieces: Vec<String>,
     scratched: bool,
@@ -373,14 +411,33 @@ pub struct CaptureSession {
 
 impl CaptureSession {
     #[must_use]
-    pub fn new(endings: Endings, pauses: EndingPauses) -> Self {
+    pub fn new(endings: Endings, pauses: EndingPauses, scripts: Vec<Script>) -> Self {
         Self {
-            endings,
+            spoken: Some(Spoken { endings, scripts }),
             pauses,
             pieces: Vec::new(),
             scratched: false,
             pending: None,
         }
+    }
+
+    /// A capture opened by holding the dictation key: no spoken phrase is an ending, so
+    /// every word is dictated text.
+    #[must_use]
+    pub fn without_endings() -> Self {
+        Self {
+            spoken: None,
+            pauses: EndingPauses::default(),
+            pieces: Vec::new(),
+            scratched: false,
+            pending: None,
+        }
+    }
+
+    /// Whether spoken phrases can end or edit this capture.
+    #[must_use]
+    pub fn has_endings(&self) -> bool {
+        self.spoken.is_some()
     }
 
     /// Everything captured so far; an armed ending's phrase is still in it until delivery.
@@ -440,7 +497,11 @@ impl CaptureSession {
             .collect::<Vec<_>>()
             .join(" ");
         let cancelled_pending = self.pending.is_some();
-        match self.endings.find(&combined) {
+        let ending = self
+            .spoken
+            .as_ref()
+            .and_then(|spoken| spoken.endings.find(&combined));
+        match ending {
             Some((Ending::Cancel, before)) => {
                 self.pieces.clear();
                 self.pending = None;
@@ -459,21 +520,40 @@ impl CaptureSession {
                 Ok(FinalStep::Continue { cancelled_pending })
             }
             Some((Ending::Paste, before)) => {
-                self.arm(CaptureRoute::Paste, before, text, now, speech)
+                self.arm(CaptureRoute::Paste, before, text, now, speech, false)
+            }
+            Some((Ending::Write, before)) => {
+                self.arm(CaptureRoute::Write, before, text, now, speech, false)
             }
             Some((Ending::Submit, before)) => {
-                self.arm(CaptureRoute::Submit, before, text, now, speech)
+                self.arm(CaptureRoute::Submit, before, text, now, speech, false)
             }
-            Some((Ending::Task, before)) => self.arm(CaptureRoute::Task, before, text, now, speech),
+            Some((Ending::Task, before)) => {
+                self.arm(CaptureRoute::Task, before, text, now, speech, false)
+            }
             None => {
                 if combined.chars().count() > MAX_CAPTURE_CHARS {
                     return Err(CaptureFullError);
+                }
+                if self.is_whole_task(&combined) {
+                    return self.arm(CaptureRoute::Task, &combined, text, now, speech, true);
                 }
                 self.pieces.push(text.to_owned());
                 self.pending = None;
                 Ok(FinalStep::Continue { cancelled_pending })
             }
         }
+    }
+
+    /// Whether `text` alone is a task that needs no spoken ending: a configured phrase, else
+    /// `open <host>`, but not a Discord message, which matches on a prefix.
+    fn is_whole_task(&self, text: &str) -> bool {
+        self.spoken.as_ref().is_some_and(|spoken| {
+            matches!(
+                tasks::decide(text, &spoken.scripts),
+                Ok(Task::OpenUrl { .. } | Task::FocusApp { .. })
+            )
+        })
     }
 
     fn arm(
@@ -483,6 +563,7 @@ impl CaptureSession {
         text: &str,
         now: Instant,
         speech: bool,
+        without_ending: bool,
     ) -> Result<FinalStep, CaptureFullError> {
         if before.chars().count() > MAX_CAPTURE_CHARS {
             return Err(CaptureFullError);
@@ -497,6 +578,7 @@ impl CaptureSession {
             route,
             text: before.to_owned(),
             window,
+            without_ending,
         };
         self.pending = Some(pending.clone());
         Ok(FinalStep::Armed(pending))
@@ -682,7 +764,7 @@ mod tests {
     use super::*;
 
     fn session() -> CaptureSession {
-        CaptureSession::new(Endings::default(), EndingPauses::default())
+        CaptureSession::new(Endings::default(), EndingPauses::default(), Vec::new())
     }
 
     fn ms(base: Instant, millis: u64) -> Instant {
@@ -731,6 +813,8 @@ mod tests {
     fn an_ending_delivers_the_capture_only_after_the_whole_pause() {
         for (ending, route, pause) in [
             ("paste that", CaptureRoute::Paste, 700),
+            ("Paste that.", CaptureRoute::Paste, 700),
+            ("write that out", CaptureRoute::Write, 700),
             ("SUBMIT!", CaptureRoute::Submit, 2500),
             ("do that.", CaptureRoute::Task, 2500),
         ] {
@@ -777,6 +861,7 @@ mod tests {
                 route: CaptureRoute::Paste,
                 text: "hello".to_owned(),
                 window: QuietWindow::WaitingForQuiet,
+                without_ending: false,
             })
         );
         assert_eq!(session.ready_at(), None);
@@ -998,6 +1083,24 @@ mod tests {
     }
 
     #[test]
+    fn an_artifact_final_does_not_revive_a_cancelled_whole_text_task() {
+        let scripts = crate::config::DesktopConfig::from_json_str("{}")
+            .unwrap()
+            .scripts;
+        let mut session = CaptureSession::new(Endings::default(), EndingPauses::default(), scripts);
+        let now = Instant::now();
+        let armed = session.on_final("open google.com", now, false).unwrap();
+        assert!(
+            matches!(&armed, FinalStep::Armed(pending) if pending.without_ending),
+            "{armed:?}"
+        );
+        assert!(session.on_partial("and also"));
+        assert_eq!(session.pending(), None);
+        session.on_final("[noise]", now, false).unwrap();
+        assert_eq!(session.pending(), None);
+    }
+
+    #[test]
     fn endings_tolerate_up_to_two_trailing_artifacts() {
         for (ending, route) in [
             ("paste that", CaptureRoute::Paste),
@@ -1051,12 +1154,13 @@ mod tests {
             ("  Send   THIS ", Ending::Submit),
             ("so send this", Ending::Paste),
             ("paste", Ending::Paste),
+            ("write it", Ending::Write),
             ("do it", Ending::Task),
             ("scratch", Ending::Scratch),
             ("cancel", Ending::Cancel),
         ])
         .unwrap();
-        let mut session = CaptureSession::new(custom, EndingPauses::default());
+        let mut session = CaptureSession::new(custom, EndingPauses::default(), Vec::new());
         let now = Instant::now();
         for literal in ["Resend this", "A literal send this inside the sentence"] {
             assert_eq!(
@@ -1139,15 +1243,50 @@ mod tests {
     }
 
     #[test]
+    fn a_session_without_endings_keeps_every_ending_phrase_as_text() {
+        assert!(session().has_endings());
+        for phrase in [
+            "paste that",
+            "finish dictation",
+            "submit",
+            "do that",
+            "scratch that",
+            "never mind",
+        ] {
+            let mut session = CaptureSession::without_endings();
+            assert!(!session.has_endings());
+            let said = format!("fix the bug {phrase}");
+            assert_eq!(
+                session.on_final(&said, Instant::now(), false),
+                Ok(FinalStep::Continue {
+                    cancelled_pending: false
+                }),
+                "{phrase}"
+            );
+            assert_eq!(session.text(), said, "{phrase}");
+            assert_eq!(session.pending(), None, "{phrase}");
+            assert!(!session.scratched(), "{phrase}");
+            assert_eq!(
+                session.poll_ready(Instant::now() + Duration::from_secs(100)),
+                None,
+                "{phrase}"
+            );
+        }
+    }
+
+    #[test]
     fn never_mind_discards_the_capture_and_any_armed_ending() {
-        let mut session = session();
-        feed(&mut session, &["Draft words", "hello submit"]);
-        assert_eq!(
-            feed(&mut session, &["never mind"]),
-            cancelled("Draft words hello submit")
-        );
-        assert_eq!(session.pending(), None);
-        assert_eq!(session.text(), "");
+        for spoken in ["never mind", "Never mind."] {
+            let mut session = session();
+            feed(&mut session, &["Draft words", "hello submit"]);
+            assert_eq!(
+                feed(&mut session, &[spoken]),
+                cancelled("Draft words hello submit"),
+                "{spoken}"
+            );
+            assert_eq!(session.pending(), None);
+            assert_eq!(session.text(), "");
+        }
     }
 
     #[test]
@@ -1198,6 +1337,7 @@ mod tests {
     fn endings_reject_empty_duplicate_and_incomplete_sets() {
         let complete = [
             ("paste", Ending::Paste),
+            ("write", Ending::Write),
             ("send", Ending::Submit),
             ("do it", Ending::Task),
             ("scratch", Ending::Scratch),
@@ -1211,7 +1351,18 @@ mod tests {
         assert!(endings(&complete).is_ok());
         assert_eq!(with(("   ", Ending::Paste)), Err(EndingsError::Empty));
         assert_eq!(with(("Do  IT", Ending::Task)), Err(EndingsError::Duplicate));
-        assert_eq!(endings(&complete[..4]), Err(EndingsError::Incomplete));
+        assert_eq!(endings(&complete[..5]), Err(EndingsError::Incomplete));
+        let without_write: Vec<_> = complete
+            .iter()
+            .copied()
+            .filter(|(_, ending)| *ending != Ending::Write)
+            .collect();
+        let mut filled = without_write.clone();
+        filled.push(("write that out", Ending::Write));
+        assert_eq!(endings(&without_write), endings(&filled));
+        let mut taken = without_write.clone();
+        taken.push(("write that out", Ending::Paste));
+        assert_eq!(endings(&taken), Err(EndingsError::Incomplete));
         assert_eq!(Endings::default(), endings(&DEFAULT_ENDINGS).unwrap());
     }
 
@@ -1238,16 +1389,23 @@ mod tests {
         ] {
             let result = serde_json::from_str::<EndingPauses>(json);
             match (result, expected) {
-                (Ok(pauses), Ok(expected)) => assert_eq!(
-                    [
-                        CaptureRoute::Paste,
-                        CaptureRoute::Submit,
-                        CaptureRoute::Task
-                    ]
-                    .map(|route| pauses.get(route)),
-                    expected,
-                    "{json}"
-                ),
+                (Ok(pauses), Ok(expected)) => {
+                    assert_eq!(
+                        pauses.get(CaptureRoute::Write),
+                        pauses.get(CaptureRoute::Paste),
+                        "{json}: writing waits as long as a paste"
+                    );
+                    assert_eq!(
+                        [
+                            CaptureRoute::Paste,
+                            CaptureRoute::Submit,
+                            CaptureRoute::Task
+                        ]
+                        .map(|route| pauses.get(route)),
+                        expected,
+                        "{json}"
+                    );
+                }
                 (Err(error), Err(expected)) => {
                     assert!(error.to_string().contains(expected), "{json}: {error}");
                 }

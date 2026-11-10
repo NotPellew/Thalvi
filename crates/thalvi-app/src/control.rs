@@ -1,10 +1,10 @@
 //! What status bars and hotkeys reach: the state word the running app shares and how a bar shows it.
 
-use serde_json::json;
+use serde_json::{Value, json};
 use thalvi_desktop::host::HostError;
 use tokio::sync::watch;
 
-use crate::status::{LastError, Status};
+use crate::status::Status;
 use crate::tray::Icon;
 
 /// Every state a bar can show, in the order of the tray icons.
@@ -35,77 +35,55 @@ fn describe(icon: Icon) -> (&'static str, &'static str) {
     }
 }
 
-/// Follows the state word when an error can be copied.
-const COPY_ERROR: &str = "copy-error";
-
-/// The answer to a bar's question: the engine's latest published state, never what was heard,
-/// and whether `copy-error` has a report to copy.
+/// The state word for a bar: the engine's latest published state, never what was heard.
 /// An engine that stopped has no state to confirm, so that reads as an error.
-pub fn answer(
-    status: watch::Receiver<Status>,
-    last_error: LastError,
-) -> impl Fn() -> String + Send + 'static {
-    move || {
-        let word =
-            if matches!(*status.borrow(), Status::Loading { .. }) && status.has_changed().is_ok() {
-                "loading"
-            } else {
-                let icon = if status.has_changed().is_err() {
-                    Icon::Error
-                } else {
-                    Icon::of(&status.borrow())
-                };
-                describe(icon).0
-            };
-        if last_error.get().is_some() {
-            format!("{word} {COPY_ERROR}")
-        } else {
-            word.to_owned()
-        }
+pub fn word(status: &watch::Receiver<Status>) -> &'static str {
+    if matches!(*status.borrow(), Status::Loading { .. }) && status.has_changed().is_ok() {
+        return "loading";
     }
+    let icon = if status.has_changed().is_err() {
+        Icon::Error
+    } else {
+        Icon::of(&status.borrow())
+    };
+    describe(icon).0
 }
 
-/// Whether `copy-error` has a report to copy, from the running app's answer. No app is left to the
-/// caller's "not running" message.
-///
-/// # Errors
-/// The plain reason when the app cannot be asked or has shown no error.
-pub fn check_copy_error(reply: Result<Option<String>, HostError>) -> Result<(), String> {
-    match reply {
-        Err(error) => Err(error.to_string()),
-        Ok(Some(line)) if !line.split(' ').any(|word| word == COPY_ERROR) => {
-            Err("Thalvi has shown no error to copy.".to_owned())
-        }
-        Ok(_) => Ok(()),
-    }
-}
-
-/// The line a Waybar custom module reads: `alt` picks the icon and `class` the style.
+/// The line a Waybar custom module reads: `alt` picks the icon and `class` the style. `reply` is
+/// the running app's answer to a `status` request.
 #[must_use]
 pub fn bar_json(reply: Result<Option<String>, HostError>) -> String {
     let unavailable = |tooltip: &str| json!({"text": "", "alt": "unavailable", "class": "unavailable", "tooltip": tooltip});
     let line = match reply {
         Ok(None) => unavailable("Thalvi is not running."),
         Err(error) => unavailable(&error.to_string()),
-        Ok(Some(line)) if line.split(' ').next() == Some("loading") => json!({
-            "text": "", "alt": "loading", "class": "loading",
-            "tooltip": "Thalvi is starting. Click to pause."
-        }),
-        Ok(Some(line)) => ICONS
-            .into_iter()
-            .map(describe)
-            .find(|(known, _)| line.split(' ').next() == Some(*known))
-            .map_or_else(
-                || unavailable("Thalvi answered with a state this version does not know."),
-                |(word, tooltip)| json!({"text": "", "alt": word, "class": word, "tooltip": tooltip}),
-            ),
+        Ok(Some(line)) => {
+            let reply: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+            let state = reply["state"].as_str();
+            if state == Some("loading") {
+                json!({
+                    "text": "", "alt": "loading", "class": "loading",
+                    "tooltip": "Thalvi is starting. Click to pause."
+                })
+            } else {
+                ICONS
+                    .into_iter()
+                    .map(describe)
+                    .find(|(known, _)| state == Some(*known))
+                    .map_or_else(
+                        || unavailable("Thalvi answered with a state this version does not know."),
+                        |(word, tooltip)| json!({"text": "", "alt": word, "class": word, "tooltip": tooltip}),
+                    )
+            }
+        }
     };
     line.to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
+    use crate::status::FailureKind;
+    use serde_json::json;
 
     use super::*;
 
@@ -113,12 +91,19 @@ mod tests {
         serde_json::from_str(&bar_json(reply)).unwrap()
     }
 
+    /// The bar for what the running app answers a `status` request.
+    fn answered(word: &str, copy_error: bool) -> Value {
+        bar(Ok(Some(
+            json!({"ok": true, "state": word, "copy_error": copy_error}).to_string(),
+        )))
+    }
+
     #[test]
     fn the_bar_shows_the_state_the_app_shares() {
         for icon in ICONS {
             let (word, tooltip) = describe(icon);
             assert_eq!(
-                bar(Ok(Some(word.to_owned()))),
+                answered(word, false),
                 json!({"text": "", "alt": word, "class": word, "tooltip": tooltip}),
             );
         }
@@ -148,15 +133,17 @@ mod tests {
     #[test]
     fn the_shared_state_follows_the_engine_and_never_the_text() {
         let (sender, receiver) = watch::channel(Status::Paused);
-        let state = answer(receiver, LastError::default());
+        let state = || word(&receiver);
         assert_eq!(state(), "paused");
         sender.send_replace(Status::Capturing {
             target: Some("kitty".to_owned()),
             committed: "my password is".to_owned(),
             partial: Some("hunter2".to_owned()),
+            notice: None,
         });
         assert_eq!(state(), "capturing");
         sender.send_replace(Status::Failed {
+            kind: FailureKind::Other,
             notice: "http://user:key@host".to_owned(),
             headline: "Failed",
             causes: Vec::new(),
@@ -164,6 +151,7 @@ mod tests {
         assert_eq!(state(), "error");
         sender.send_replace(Status::Loading {
             notice: "private path".to_owned(),
+            downloading: false,
         });
         assert_eq!(state(), "loading");
         sender.send_replace(Status::Listening);
@@ -173,44 +161,9 @@ mod tests {
     }
 
     #[test]
-    fn copy_error_is_offered_from_the_first_failure_on_and_the_bar_ignores_it() {
-        let failed = Status::Failed {
-            notice: "No.".to_owned(),
-            headline: "No",
-            causes: Vec::new(),
-        };
-        let (sender, receiver) = watch::channel(Status::Listening);
-        let last = LastError::default();
-        let state = answer(receiver, last.clone());
-        assert_eq!(state(), "listening");
-        last.record(&failed);
-        sender.send_replace(Status::Listening);
-        assert_eq!(state(), "listening copy-error");
-        for word in ["paused", "loading"] {
-            assert_eq!(
-                bar(Ok(Some(format!("{word} copy-error")))),
-                bar(Ok(Some(word.to_owned())))
-            );
-        }
-    }
-
-    #[test]
-    fn copy_error_is_refused_before_the_app_is_told_unless_an_error_can_be_copied() {
-        let cases = [
-            (Ok(Some("listening copy-error".to_owned())), Ok(())),
-            (Ok(Some("error copy-error".to_owned())), Ok(())),
-            (
-                Ok(Some("listening".to_owned())),
-                Err("Thalvi has shown no error to copy.".to_owned()),
-            ),
-            (Ok(None), Ok(())),
-            (
-                Err(HostError::Unsupported("No status here.".to_owned())),
-                Err("No status here.".to_owned()),
-            ),
-        ];
-        for (reply, expected) in cases {
-            assert_eq!(check_copy_error(reply.clone()), expected, "{reply:?}");
+    fn the_bar_ignores_whether_an_error_can_be_copied() {
+        for word in ["paused", "loading", "listening"] {
+            assert_eq!(answered(word, true), answered(word, false));
         }
     }
 }

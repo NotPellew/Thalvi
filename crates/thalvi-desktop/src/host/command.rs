@@ -1,9 +1,11 @@
-//! Runs desktop tools as child processes with a time limit; the seam the Hyprland host is tested through.
+//! Runs desktop tools as child processes with a time limit; the seam the Linux hosts are tested through.
 
 use std::io::{ErrorKind, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
+
+use super::HostError;
 
 /// How long one tool may take before it is killed.
 const TIMEOUT: Duration = Duration::from_secs(8);
@@ -36,6 +38,34 @@ fn reason_suffix(reason: Option<&str>) -> String {
     reason.map_or_else(|| ".".to_owned(), |reason| format!(": {reason}."))
 }
 
+/// A tool failure before any input was sent: a missing tool means this desktop lacks it.
+pub fn tool(error: &CommandError) -> HostError {
+    match error {
+        CommandError::NotInstalled(_) => HostError::Unsupported(error.to_string()),
+        CommandError::TimedOut(_) | CommandError::Failed { .. } => {
+            HostError::NothingTyped(error.to_string())
+        }
+    }
+}
+
+/// Puts `text` on the Wayland clipboard; the one place the Linux hosts write it.
+///
+/// # Errors
+/// Why `wl-copy` did not run to success.
+pub fn wl_copy(run: &impl CommandRunner, text: &str) -> Result<(), HostError> {
+    // An empty copy would clear the clipboard instead of keeping anything.
+    if text.is_empty() {
+        return Ok(());
+    }
+    run.run(
+        "wl-copy",
+        &["--type", "text/plain;charset=utf-8"],
+        Some(text),
+    )
+    .map(|_| ())
+    .map_err(|error| tool(&error))
+}
+
 /// Runs one desktop tool to completion.
 pub trait CommandRunner: Send + Sync {
     /// Runs `program` with `args` and `stdin` as its input, and returns what it wrote to stdout.
@@ -49,6 +79,9 @@ pub trait CommandRunner: Send + Sync {
         stdin: Option<&str>,
     ) -> Result<String, CommandError>;
 }
+
+#[cfg(test)]
+pub(super) mod fakes;
 
 /// Runs the real tools.
 pub struct SystemRunner;

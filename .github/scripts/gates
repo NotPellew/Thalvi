@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# Runs a component's gates, the same commands CI runs; stops at the first failure.
+# Toolchains and system packages are installed outside this script (see AGENTS.md).
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
+SHELLCHECK=(pipx run --spec shellcheck-py==0.11.0.1 shellcheck)
+components=(server desktop-windows web desktop-ui speech issue-sync)
+
+step() {
+  printf '\n==> %s\n' "$*"
+  "$@"
+}
+
+in_dir() {
+  local dir=$1
+  shift
+  printf '\n==> (in %s) %s\n' "$dir" "$*"
+  (cd "$dir" && "$@")
+}
+
+desktop_ui() {
+  step npm ci --prefix crates/thalvi-app/ui
+  step npm run build --prefix crates/thalvi-app/ui
+}
+
+node_checks() {
+  local dir=$1
+  in_dir "$dir" npm ci
+  in_dir "$dir" npm run typecheck
+  in_dir "$dir" npm run lint
+  in_dir "$dir" npm test
+  in_dir "$dir" npm run build
+}
+
+gate_server() {
+  desktop_ui
+  step cargo fmt --all -- --check
+  step cargo lint
+  step cargo test --workspace --locked
+  RUSTDOCFLAGS="-D warnings" step cargo docs
+  # linuxdeploy looks for libwebgpu_dawn.so, which the build links into the target folder, on this path.
+  in_dir crates/thalvi-app env LD_LIBRARY_PATH="${CARGO_TARGET_DIR:-$PWD/target}/release" \
+    npm exec --prefix ui -- tauri build --bundles appimage -- --locked
+}
+
+gate_desktop_windows() {
+  desktop_ui
+  step cargo fmt --all -- --check
+  step cargo lint
+  step cargo test -p thalvi-desktop -p thalvi-app --locked
+  in_dir crates/thalvi-app npm exec --prefix ui -- tauri build --bundles nsis -- --locked
+}
+
+gate_web() {
+  node_checks web
+}
+
+gate_desktop_ui() {
+  node_checks crates/thalvi-app/ui
+}
+
+gate_speech() {
+  step docker compose --profile kokoro --profile vllm-omni config -q
+  step "${SHELLCHECK[@]}" speech/qwentts.sh speech/nemotron-asr.sh
+  in_dir speech/asr uv run --frozen ruff check
+  in_dir speech/asr uv run --frozen ruff format --check
+  in_dir speech/asr uv run --frozen pytest
+}
+
+gate_issue_sync() {
+  step "${SHELLCHECK[@]}" .github/scripts/gates .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh
+  step .github/scripts/issue-refs.test.sh
+}
+
+run_component() {
+  case $1 in
+    server) gate_server ;;
+    desktop-windows) gate_desktop_windows ;;
+    web) gate_web ;;
+    desktop-ui) gate_desktop_ui ;;
+    speech) gate_speech ;;
+    issue-sync) gate_issue_sync ;;
+  esac
+}
+
+run_all() {
+  local runnable skipped reason component
+  case $(uname -s) in
+    Linux)
+      runnable=(server web desktop-ui speech issue-sync)
+      skipped=(desktop-windows)
+      reason="needs Windows"
+      ;;
+    MINGW* | MSYS* | CYGWIN*)
+      runnable=(desktop-windows)
+      skipped=(server web desktop-ui speech issue-sync)
+      reason="CI runs it on Linux"
+      ;;
+    *)
+      echo "gates: no gates run on $(uname -s)" >&2
+      exit 1
+      ;;
+  esac
+  for component in "${runnable[@]}"; do
+    printf '\n##### gates %s\n' "$component"
+    run_component "$component"
+  done
+  printf '\n'
+  for component in "${skipped[@]}"; do
+    echo "SKIPPED $component ($reason); it did not run and is not reported as passed"
+  done
+  echo "PASSED ${runnable[*]}"
+}
+
+usage() {
+  echo "usage: gates <component>" >&2
+  echo "components: ${components[*]} all" >&2
+}
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 2
+fi
+
+if [[ $1 == all ]]; then
+  run_all
+  exit 0
+fi
+
+for component in "${components[@]}"; do
+  if [[ $1 == "$component" ]]; then
+    run_component "$component"
+    printf '\nPASSED %s\n' "$component"
+    exit 0
+  fi
+done
+
+echo "gates: unknown component '$1'" >&2
+usage
+exit 2

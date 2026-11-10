@@ -33,22 +33,30 @@ function accents(): string {
 }
 
 /** What the label says while an ending counts down: the action, its target, and whole seconds rounded up. */
-export function countdownLabel(route: Route, target: string | null, ms: number): string {
+export function copiesText(route: Route, copies: boolean): boolean {
+  return copies && route !== "task";
+}
+
+export function countdownLabel(wording: { route: Route; target: string | null; copies: boolean }, ms: number): string {
+  const { route, target } = wording;
   const seconds = String(Math.max(1, Math.ceil(ms / 1000)));
   const named = target?.toUpperCase();
   const to = named === undefined ? null : named.length > MAX_TARGET ? `${named.slice(0, MAX_TARGET - 1)}…` : named;
-  const action = {
-    paste: to === null ? "PASTE" : `PASTE INTO ${to}`,
-    submit: to === null ? "SEND" : `SEND TO ${to}`,
-    task: "TASK",
-  }[route];
+  const action = copiesText(route, wording.copies)
+    ? "COPY"
+    : {
+        paste: to === null ? "PASTE" : `PASTE INTO ${to}`,
+        write: to === null ? "WRITE" : `WRITE FOR ${to}`,
+        submit: to === null ? "SEND" : `SEND TO ${to}`,
+        task: "TASK",
+      }[route];
   return `${action} IN ${seconds} s`;
 }
 
 /** What the slot says once a delivery finished. */
 export function doneMessage(route: Route, target: string | null, notice: string): string {
   if (target === null || route === "task") return `✓ ${notice}`;
-  return `✓ ${route === "paste" ? "Pasted into" : "Sent to"} ${target}. ${notice}`;
+  return `✓ ${route === "paste" || route === "write" ? "Pasted into" : "Sent to"} ${target}. ${notice}`;
 }
 
 export interface Module {
@@ -90,7 +98,7 @@ export function createModule(onCancel: () => void): Module {
   let tone: Tone = "live";
   let drawing = false;
   let hasText = false;
-  let counting: { route: Route; target: string | null } | null = null;
+  let counting: { route: Route; target: string | null; copies: boolean } | null = null;
 
   function show(next: Tone, options: { label?: string; wave?: boolean; motion?: "sweep" | "drain" }): void {
     node.dataset["tone"] = next;
@@ -128,8 +136,9 @@ export function createModule(onCancel: () => void): Module {
         show("live", { wave: true });
         break;
       case "capturing":
-        lines(options.showDraft, () => {
-          ticker.words(status.committed, status.partial ?? "", true);
+        lines(options.showDraft || status.notice !== null, () => {
+          if (status.notice === null) ticker.words(status.committed, status.partial ?? "", true);
+          else ticker.notice(status.notice);
         });
         show("live", { wave: true });
         break;
@@ -140,9 +149,15 @@ export function createModule(onCancel: () => void): Module {
         if (status.waitingForQuiet) {
           show("quiet", { wave: true });
         } else {
-          show("pending", { label: countdownLabel(status.route, status.target, status.pauseMs), motion: "drain" });
-          counting = { route: status.route, target: status.target };
+          show("pending", { label: countdownLabel(status, status.pauseMs), motion: "drain" });
+          counting = { route: status.route, target: status.target, copies: status.copies };
         }
+        break;
+      case "writing":
+        lines(options.showDraft, () => {
+          ticker.words(status.text, "", true);
+        });
+        show("working", { label: "WRITING…", motion: "sweep" });
         break;
       case "working":
         show("working", { label: "WORKING", motion: "sweep" });
@@ -161,14 +176,14 @@ export function createModule(onCancel: () => void): Module {
         lines(true, () => {
           ticker.notice(status.headline);
         });
-        show("failed", { label: "NOT SENT" });
+        show("failed", { label: status.kind === "delivery" ? "NOT SENT" : "FAILED" });
         break;
     }
   }
 
   function countdown(left: number, total: number): void {
     if (counting === null) return;
-    const words = countdownLabel(counting.route, counting.target, left);
+    const words = countdownLabel(counting, left);
     if (label.textContent !== words) label.textContent = words;
     strip.style.transform = `scaleX(${(left / total).toFixed(3)})`;
   }

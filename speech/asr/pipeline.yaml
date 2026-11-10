@@ -1,0 +1,71 @@
+# NeMo's buffered RNNT streaming pipeline (examples/asr/conf/asr_streaming_inference/buffered_rnnt.yaml
+# at the pinned NeMo commit), trimmed to what Thalvi uses. nemo_stream.py fills in the model and endpoint.
+asr:
+  model_name: null
+  device: cuda
+  device_id: 0
+  # fp16 overflows to NaN when speech follows seconds of digital silence (issue #220); the RTX 2080 has no bfloat16.
+  compute_dtype: float32
+  use_amp: false
+  decoding:
+    strategy: greedy_batch
+    preserve_alignments: false
+    fused_batch_size: -1
+    greedy:
+      use_cuda_graph_decoder: true
+      enable_per_stream_biasing: true  # Each connection may bring its own word list.
+      preserve_frame_confidence: false
+      max_symbols: 10
+      ngram_lm_model: null
+      ngram_lm_alpha: 0.0
+      boosting_tree:
+        model_path: null
+        key_phrases_file: null
+        key_phrases_list: null
+        key_phrase_items_list: null
+        source_lang: en
+      boosting_tree_alpha: 0.0
+# Read even with enable_itn off.
+itn:
+  input_case: lower_cased
+  whitelist: null
+  overwrite_cache: false
+  max_number_of_permutations_per_split: 729
+  left_padding_size: 4
+  batch_size: 32
+  n_jobs: 16
+confidence:
+  exclude_blank: true
+  aggregation: mean
+  method_cfg:
+    name: entropy
+    entropy_type: tsallis
+    alpha: 0.5
+    entropy_norm: exp
+endpointing:
+  stop_history_eou: 600
+  residue_tokens_at_end: 2
+# 0.56 s latency, as measured for issue #212: 5.6 s left context, 0.16 s chunk, 0.40 s right context.
+streaming:
+  sample_rate: 16000
+  batch_size: 1
+  left_padding_size: 5.6
+  chunk_size: 0.16
+  right_padding_size: 0.40
+  word_boundary_tolerance: 4
+  request_type: frame
+  flush_size_in_secs: 0.0
+  stateful: true
+  padding_mode: right
+matmul_precision: high
+log_level: 30
+pipeline_type: buffered
+asr_decoding_type: rnnt
+enable_itn: false
+enable_nmt: false
+asr_output_granularity: segment
+cache_dir: null
+# null lets the model detect English, German or Spanish itself.
+lang: null
+# endStream must still return the words in the right context as final text.
+return_tail_result: true

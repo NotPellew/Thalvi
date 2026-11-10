@@ -40,7 +40,9 @@ impl Icon {
             Status::Listening | Status::Done { .. } => Self::Listening,
             Status::Starting { .. } | Status::Capturing { .. } => Self::Capturing,
             Status::Pending { .. } => Self::Pending,
-            Status::Working { .. } | Status::Loading { .. } => Self::Working,
+            Status::Working { .. } | Status::Writing { .. } | Status::Loading { .. } => {
+                Self::Working
+            }
             Status::Failed { .. } => Self::Error,
         }
     }
@@ -138,12 +140,14 @@ pub fn title(status: &Status) -> String {
             "{} pending, {} s",
             match route {
                 CaptureRoute::Paste => "paste",
+                CaptureRoute::Write => "write",
                 CaptureRoute::Submit => "submit",
                 CaptureRoute::Task => "task",
             },
             seconds(*pause_ms)
         ),
         Status::Working { .. } => "working".to_owned(),
+        Status::Writing { .. } => "writing".to_owned(),
         Status::Loading { .. } => "starting".to_owned(),
         Status::Failed { .. } => "something went wrong".to_owned(),
     };
@@ -168,6 +172,7 @@ pub fn can_cancel(status: &Status) -> bool {
         Status::Starting { .. }
             | Status::Capturing { .. }
             | Status::Pending { .. }
+            | Status::Writing { .. }
             | Status::Working {
                 cancellable: true,
                 ..
@@ -286,6 +291,7 @@ impl Tray {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status::FailureKind;
 
     fn kitty() -> String {
         "kitty".to_owned()
@@ -298,6 +304,7 @@ mod tests {
             text: "secret words".to_owned(),
             waiting_for_quiet: false,
             pause_ms,
+            copies: false,
         }
     }
 
@@ -317,6 +324,7 @@ mod tests {
                     target: Some(kitty()),
                     committed: "secret words".to_owned(),
                     partial: Some("more".to_owned()),
+                    notice: None,
                 },
                 Icon::Capturing,
                 "Thalvi: capturing",
@@ -335,6 +343,19 @@ mod tests {
                 pending_status(CaptureRoute::Task, 3000),
                 Icon::Pending,
                 "Thalvi: task pending, 3 s",
+            ),
+            (
+                pending_status(CaptureRoute::Write, 700),
+                Icon::Pending,
+                "Thalvi: write pending, 0.7 s",
+            ),
+            (
+                Status::Writing {
+                    target: Some(kitty()),
+                    text: "secret words".to_owned(),
+                },
+                Icon::Working,
+                "Thalvi: writing",
             ),
             (
                 Status::Working {
@@ -365,6 +386,7 @@ mod tests {
             ),
             (
                 Status::Failed {
+                    kind: FailureKind::Other,
                     notice: "Your text follows: secret words".to_owned(),
                     headline: "Failed",
                     causes: Vec::new(),
@@ -375,6 +397,7 @@ mod tests {
             (
                 Status::Loading {
                     notice: "Loading the speech model.".to_owned(),
+                    downloading: false,
                 },
                 Icon::Working,
                 "Thalvi: starting",
@@ -450,10 +473,18 @@ mod tests {
                 true,
             ),
             (pending_status(CaptureRoute::Paste, 700), true),
+            (
+                Status::Writing {
+                    target: Some(kitty()),
+                    text: String::new(),
+                },
+                true,
+            ),
             (working(true), true),
             (working(false), false),
             (
                 Status::Failed {
+                    kind: FailureKind::Other,
                     notice: String::new(),
                     headline: "Failed",
                     causes: Vec::new(),

@@ -9,12 +9,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use thalvi_desktop::audio::{Frames, InputGate, Microphone};
-use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
+use thalvi_desktop::capture::{CaptureRoute, EndingPauses, Endings};
 use thalvi_desktop::chosen::Chosen;
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::{Bound, Delivery, Finished};
+use thalvi_desktop::device::Step;
 use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
@@ -22,19 +23,21 @@ use thalvi_desktop::engine::{
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{Desktop, Host};
-use thalvi_desktop::local::LocalRecognizer;
+use thalvi_desktop::local::{LocalRecognizer, ModelSource};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
-use thalvi_desktop::models::ModelStore;
+use thalvi_desktop::models::{self, ModelStore};
 use thalvi_desktop::report::{UserError, causes};
+use thalvi_desktop::speech_device::SpeechDevices;
+use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
 use thalvi_desktop::transducer::TransducerSource;
-use thalvi_desktop::wake::WakeEngine;
+use thalvi_desktop::wake::{WakeConfig, WakeEngine};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
-use crate::status::{Failure, Mode, STARTING_NOTICE, Status, View};
-
-/// What the user sees while the speech model downloads or loads.
-const LOADING_NOTICE: &str = "Loading the speech model. The first time it downloads about 650 MB.";
+use crate::status::{
+    Failure, FailureKind, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, Status, View,
+    WAKE_DOWNLOAD_NOTICE, load_notice,
+};
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -87,10 +90,12 @@ impl EngineLink {
         delivery: Arc<Delivery<Desktop>>,
         history: Arc<History>,
         drafts: Arc<Drafts>,
+        devices: Arc<SpeechDevices>,
     ) -> Result<Self, String> {
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
             notice: STARTING_NOTICE.to_owned(),
+            downloading: false,
         });
         let (level_tx, level) = watch::channel(0.0);
         let (audio_tx, audio) = watch::channel(AudioStatus {
@@ -128,6 +133,7 @@ impl EngineLink {
                         key: key_state,
                         history,
                         drafts,
+                        devices,
                     },
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
@@ -156,6 +162,15 @@ impl EngineLink {
     pub fn send(&self, control: Control) {
         // The engine thread is gone only while the app quits or after it failed.
         let _ = self.control.send(control);
+    }
+
+    /// Tells the user about a hold key problem found after the keys were set up, such as binds
+    /// Hyprland dropped.
+    pub fn hold_problems(&self) -> impl Fn(String) + Send + Sync + 'static {
+        let control = self.control.clone();
+        move |notice| {
+            let _ = control.send(Control::HoldKeyFailed(notice));
+        }
     }
 
     #[must_use]
@@ -199,6 +214,68 @@ fn finish_runtime(runtime: tokio::runtime::Runtime, stopped: &std_mpsc::Sender<(
     let _ = stopped.send(());
 }
 
+/// Loads the wake models, with the status saying so while a file downloads.
+async fn load_wake<T>(
+    publisher: &Publisher,
+    config: &WakeConfig,
+    store: &ModelStore,
+    load: impl Future<Output = T>,
+) -> T {
+    let downloads = WakeEngine::needs_download(config, store).await;
+    if !downloads {
+        println!("Loading the wake word models.");
+        return load.await;
+    }
+    println!("{WAKE_DOWNLOAD_NOTICE}");
+    publisher.mode(Mode::WakeDownload);
+    let loaded = load.await;
+    publisher.mode(Mode::Starting);
+    loaded
+}
+
+/// Loads the ending spotter next to the wake models. It only double-checks the transcript, so a
+/// failure is a notice, shown with the first capture, and dictation goes on without it.
+async fn load_spotter(
+    publisher: &Publisher,
+    endings: &Endings,
+    store: &ModelStore,
+    recorder: &Recorder,
+    load: impl Future<Output = Result<Box<dyn KeywordSpotter>, SpotterError>>,
+) -> (Option<Box<dyn KeywordSpotter>>, Option<String>) {
+    let started = Instant::now();
+    let mut downloads = false;
+    for asset in [
+        models::SPOTTER.encoder,
+        models::SPOTTER.decoder,
+        models::SPOTTER.joiner,
+        models::SPOTTER.pieces,
+    ] {
+        downloads |= !store.is_asset_cached(&asset).await;
+    }
+    if downloads {
+        println!("{SPOTTER_DOWNLOAD_NOTICE}");
+        publisher.mode(Mode::SpotterDownload);
+    }
+    let loaded = load.await;
+    if downloads {
+        publisher.mode(Mode::Starting);
+    }
+    recorder.metric(
+        Event::EndingSpotter,
+        if loaded.is_ok() { "ok" } else { "error" },
+        Some(started.elapsed()),
+        json!({"call": "load", "phrases": endings.entries().count(), "downloaded": downloads}),
+    );
+    match loaded {
+        Ok(spotter) => (Some(spotter), None),
+        Err(error) => {
+            let notice = format!("{error} Endings still work from the transcript.");
+            println!("{notice}");
+            (None, Some(notice))
+        }
+    }
+}
+
 /// Derives the status from the view and publishes it when it changes.
 struct Publisher {
     view: RefCell<View>,
@@ -213,6 +290,7 @@ impl Publisher {
                 mode: Mode::Starting,
                 engine: EngineState::Listening,
                 target: None,
+                copies: false,
                 pauses,
                 loading: None,
             }),
@@ -241,8 +319,33 @@ impl Publisher {
         self.update(|view| view.mode = mode);
     }
 
-    fn loading(&self, notice: Option<&str>) {
-        self.update(|view| view.loading = notice.map(str::to_owned));
+    /// A capture started at the wake: in `window` when one was bound, on a desktop that `copies`
+    /// the text to the clipboard or pastes it.
+    fn woke(&self, window: Option<String>, copies: bool) {
+        self.update(|view| {
+            view.copies = copies;
+            // The clipboard is no window to name; the label and the notice say what happens.
+            view.target = window.filter(|_| !copies);
+        });
+    }
+
+    fn loading(&self, load: Option<Step>) {
+        self.update(|view| view.loading = load);
+    }
+
+    /// Says why a press of the hold key started nothing. A refusal that only repeats an earlier
+    /// failure does not hide it, and followers hear of it even when the status is unchanged, so
+    /// an overlay that has hidden the failure shows it again.
+    fn refused(&self, refusal: Refusal) {
+        if refusal == Refusal::Paused || !self.failed() {
+            self.mode(Mode::Failed(Failure {
+                kind: FailureKind::Other,
+                notice: refusal.notice().to_owned(),
+                headline: refusal.headline(),
+                causes: Vec::new(),
+            }));
+        }
+        self.out.send_modify(|_| {});
     }
 
     fn notice_sink(self: &Rc<Self>) -> Box<dyn Fn(&str)> {
@@ -251,6 +354,7 @@ impl Publisher {
             println!("{notice}");
             if !publisher.failed() {
                 publisher.mode(Mode::Failed(Failure {
+                    kind: FailureKind::Other,
                     notice: notice.to_owned(),
                     headline: "Dictation notice",
                     causes: Vec::new(),
@@ -258,6 +362,39 @@ impl Publisher {
             }
         })
     }
+}
+
+/// Loads the model, showing each step it takes until it is ready, and a failure as a notice.
+async fn load_showing<S: ModelSource>(local: &LocalRecognizer<S>, publisher: &Publisher) {
+    let mut steps = local.steps();
+    let load = local.load();
+    tokio::pin!(load);
+    let loaded = loop {
+        tokio::select! {
+            loaded = &mut load => break loaded,
+            Ok(()) = steps.changed() => {
+                let step = *steps.borrow_and_update();
+                println!("{}", load_notice(step));
+                publisher.loading(Some(step));
+            }
+        }
+    };
+    if let Err(error) = &loaded {
+        println!("{error}");
+    }
+    publisher.update(|view| {
+        view.loading = None;
+        if let Err(error) = loaded
+            && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
+        {
+            view.mode = Mode::Failed(Failure {
+                kind: FailureKind::Other,
+                notice: format!("{error} Dictation will try again when you start it."),
+                headline: error.headline(),
+                causes: causes(&error),
+            });
+        }
+    });
 }
 
 /// Everything one engine needs; replaced when settings change.
@@ -282,6 +419,7 @@ impl Session {
     }
 
     fn close_microphone(&mut self) {
+        self.engine.stop_listening();
         self.frames = None;
         if let Some(microphone) = &mut self.microphone {
             microphone.pause();
@@ -298,6 +436,7 @@ impl Session {
         })
         .await
         .map_err(|error| Failure {
+            kind: FailureKind::Other,
             notice: "The microphone's audio thread crashed. Restart Thalvi.".to_owned(),
             headline: "Microphone crashed — restart Thalvi",
             causes: vec![error.to_string()],
@@ -330,6 +469,8 @@ struct Shared {
     key: watch::Receiver<KeyState>,
     history: Arc<History>,
     drafts: Arc<Drafts>,
+    /// Where the speech model runs, for Settings.
+    devices: Arc<SpeechDevices>,
 }
 
 struct Runner {
@@ -350,6 +491,7 @@ struct Runner {
     delivery: Arc<Delivery<Desktop>>,
     history: Arc<History>,
     drafts: Arc<Drafts>,
+    devices: Arc<SpeechDevices>,
     http: reqwest::Client,
     /// Loads the current engine's speech model.
     loading: Option<JoinHandle<()>>,
@@ -383,6 +525,7 @@ impl Runner {
             delivery,
             history: shared.history,
             drafts: shared.drafts,
+            devices: shared.devices,
             http: reqwest::Client::new(),
             loading: None,
             key: Presses::new(shared.key.clone()),
@@ -418,7 +561,7 @@ impl Runner {
         }
     }
 
-    /// Fetches and loads the speech model in the background, and shows that until it is ready.
+    /// Fetches and loads the speech model in the background, and shows what it is doing until it is ready.
     /// A failure is a notice; the app keeps listening and dictation tries again.
     fn load_speech_model(&mut self) {
         if let Some(loading) = self.loading.take() {
@@ -432,26 +575,12 @@ impl Runner {
             self.publisher.loading(None);
             return;
         };
-        println!("{LOADING_NOTICE}");
-        self.publisher.loading(Some(LOADING_NOTICE));
+        let first = *local.steps().borrow();
+        println!("{}", load_notice(first));
+        self.publisher.loading(Some(first));
         let publisher = Rc::clone(&self.publisher);
         self.loading = Some(tokio::task::spawn_local(async move {
-            let loaded = local.load().await;
-            if let Err(error) = &loaded {
-                println!("{error}");
-            }
-            publisher.update(|view| {
-                view.loading = None;
-                if let Err(error) = loaded
-                    && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
-                {
-                    view.mode = Mode::Failed(Failure {
-                        notice: format!("{error} Dictation will try again when you start it."),
-                        headline: error.headline(),
-                        causes: causes(&error),
-                    });
-                }
-            });
+            load_showing(&local, &publisher).await;
         }));
     }
 
@@ -464,9 +593,20 @@ impl Runner {
         let recorder =
             Recorder::per_user(config.recordings).map_err(|error| Failure::of(&error))?;
         let store = ModelStore::per_user().map_err(|error| Failure::of(&error))?;
-        println!("Loading the wake word models.");
         let started = Instant::now();
-        let wake = WakeEngine::load(&config.wake, &store).await;
+        let (wake, (spotter, spotter_off)) = tokio::join!(
+            load_wake(
+                &self.publisher,
+                &config.wake,
+                &store,
+                WakeEngine::load(&config.wake, &store),
+            ),
+            load_spotter(&self.publisher, &config.endings, &store, &recorder, async {
+                OnnxSpotter::load(&config.endings, &store)
+                    .await
+                    .map(|spotter| Box::new(spotter) as Box<dyn KeywordSpotter>)
+            }),
+        );
         recorder.metric(
             Event::WakeLoad,
             if wake.is_ok() { "ok" } else { "error" },
@@ -476,8 +616,15 @@ impl Runner {
         let wake = wake.map_err(|error| Failure::of(&error))?;
         let gate = InputGate::default();
         let metrics = recorder.metrics();
-        let recognizer = Chosen::new(&config.stt.engine, &config.server, store, metrics.clone());
+        let recognizer = Chosen::new(
+            config.stt.entries.active_live(),
+            store,
+            metrics.clone(),
+            &config.stt.phrases,
+            self.devices.adapters(),
+        );
         let local = recognizer.local();
+        self.devices.use_recognizer(local.clone());
         let (engine, handle) = Engine::new(
             Parts {
                 recognizer,
@@ -487,6 +634,8 @@ impl Runner {
                 http: self.http.clone(),
                 hold: self.key_state.clone(),
                 notice: self.publisher.notice_sink(),
+                spotter,
+                spotter_off,
             },
             config,
             recorder,
@@ -498,11 +647,7 @@ impl Runner {
             Arc::clone(&self.level),
             self.audio.subscribe(),
         ));
-        if local.is_some() {
-            println!("Transcribing on this machine.");
-        } else {
-            println!("Transcribing through {}.", config.server);
-        }
+        println!("Transcribing through {}.", config.speech_source());
         Ok(Session {
             engine,
             local,
@@ -618,16 +763,7 @@ impl Runner {
                 }
                 Next::Key => {
                     let pressed = pressed(&mut self.key);
-                    if pressed > 0 {
-                        self.refuse_press(
-                            if self.paused {
-                                Refusal::Paused
-                            } else {
-                                Refusal::MicrophoneClosed
-                            },
-                            pressed,
-                        );
-                    }
+                    self.refuse_unheard(pressed);
                     Flow::Continue
                 }
             };
@@ -672,21 +808,26 @@ impl Runner {
         }
     }
 
-    /// Says that `count` presses of the hold key started nothing, and why. A refusal that only
-    /// repeats an earlier failure does not hide it.
+    /// Refuses `count` presses of the hold key that came while no engine was listening.
+    fn refuse_unheard(&self, count: u64) {
+        if count > 0 {
+            let refusal = if self.paused {
+                Refusal::Paused
+            } else {
+                Refusal::MicrophoneClosed
+            };
+            self.refuse_press(refusal, count);
+        }
+    }
+
+    /// Says that `count` presses of the hold key started nothing, and why.
     fn refuse_press(&self, refusal: Refusal, count: u64) {
         if let Some(session) = &self.session {
             report_refusal(session.engine.recorder(), refusal, count);
         } else {
             println!("{}", refusal.notice());
         }
-        if refusal == Refusal::Paused || !self.publisher.failed() {
-            self.publisher.mode(Mode::Failed(Failure {
-                notice: refusal.notice().to_owned(),
-                headline: refusal.headline(),
-                causes: Vec::new(),
-            }));
-        }
+        self.publisher.refused(refusal);
     }
 
     /// Acts on a control message while nothing is being captured.
@@ -761,6 +902,25 @@ impl Runner {
             self.config = config;
             return;
         }
+        let mut presses = if let Some(session) = self.session.as_mut() {
+            session.engine.stop_listening()
+        } else {
+            let mut presses = Presses::new(self.key_state.clone());
+            presses.skip();
+            presses
+        };
+        self.rebuild(config).await;
+        let count = pressed(&mut presses);
+        if let Some(session) = self.session.as_mut()
+            && session.frames.is_some()
+        {
+            session.engine.resume_listening(presses);
+        }
+        self.refuse_unheard(count);
+    }
+
+    /// Closes the microphone and replaces the engine by one built from `config`.
+    async fn rebuild(&mut self, config: DesktopConfig) {
         self.close_microphone();
         match self.build(&config).await {
             Ok(session) => {
@@ -789,7 +949,8 @@ impl Runner {
             };
             self.delivery.bind(session.engine.recorder()).await
         };
-        self.publisher.update(|view| view.target = bound.window());
+        self.publisher
+            .woke(bound.window(), self.delivery.copies_only());
         let mut requests = Requests::default();
         let (finished, route, ignored) = {
             let Self {
@@ -969,6 +1130,7 @@ fn told(mode: Mode, ignored: &[Refusal]) -> Mode {
             ..failure
         }),
         _ => Mode::Failed(Failure {
+            kind: FailureKind::Other,
             notice: extra,
             headline: first.headline(),
             causes: Vec::new(),
@@ -992,6 +1154,7 @@ fn delivered(finished: Option<Finished>, route: Option<CaptureRoute>) -> Mode {
                 notice: finished.notice,
                 headline: finished.headline,
                 causes: finished.causes,
+                kind: FailureKind::Delivery,
             })
         }
         (None, _) => Mode::Idle,
@@ -1032,6 +1195,7 @@ fn report_refusal(recorder: &Recorder, refusal: Refusal, count: u64) {
 /// The failure that tells the user the hold key is not working.
 fn hold_failure(notice: String) -> Failure {
     Failure {
+        kind: FailureKind::Other,
         causes: vec![notice.clone()],
         notice,
         headline: "Hold key unavailable",
@@ -1184,6 +1348,9 @@ async fn follow(
                     break;
                 }
                 let engine = state.borrow_and_update().clone();
+                if let EngineState::Capturing { notice: Some(notice), .. } = &engine {
+                    println!("{notice}");
+                }
                 publisher.update(|view| view.engine = engine);
             }
             changed = level.changed() => {
@@ -1203,7 +1370,12 @@ mod tests {
     use std::cell::Cell;
     use std::time::Duration;
 
+    use thalvi_desktop::device::Export;
+    use thalvi_desktop::models::{self, CatalogHead};
+
     use super::*;
+    use crate::overlay::Visibility;
+    use crate::tray::title;
 
     #[test]
     fn stopped_is_not_reported_until_background_writes_finish() {
@@ -1231,6 +1403,428 @@ mod tests {
         status.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 
+    #[test]
+    fn a_refused_press_tells_followers_even_when_the_failure_is_already_the_status() {
+        let (out, mut status) = watch::channel(Status::Paused);
+        let publisher = Publisher::new(out, EndingPauses::default());
+        let cases = [
+            (Refusal::Paused, "Paused — key ignored"),
+            (Refusal::Paused, "Paused — key ignored"),
+            (Refusal::MicrophoneClosed, "Paused — key ignored"),
+        ];
+        for (refusal, headline) in cases {
+            status.borrow_and_update();
+            publisher.refused(refusal);
+            assert!(status.has_changed().unwrap(), "{refusal:?}");
+            assert!(
+                matches!(&*status.borrow(), Status::Failed { headline: shown, .. } if *shown == headline),
+                "{refusal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_desktop_that_only_copies_names_no_window_and_labels_the_countdown_a_copy() {
+        for (copies, target) in [(true, None), (false, Some("kitty"))] {
+            let (out, status) = watch::channel(Status::Paused);
+            let publisher = Publisher::new(out, EndingPauses::default());
+            publisher.mode(Mode::Idle);
+            publisher.update(|view| {
+                view.engine = EngineState::PendingEnding {
+                    route: CaptureRoute::Submit,
+                    text: "hi".to_owned(),
+                    waiting_for_quiet: false,
+                };
+            });
+            publisher.woke(Some("kitty".to_owned()), copies);
+            assert!(
+                matches!(
+                    &*status.borrow(),
+                    Status::Pending { target: shown, copies: counted, .. }
+                        if shown.as_deref() == target && *counted == copies
+                ),
+                "{copies}: {:?}",
+                *status.borrow()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_overlay_stays_hidden_while_a_model_on_disk_loads_and_shows_each_download_by_name()
+    {
+        let cases = [
+            (
+                "from disk",
+                Step::Reading,
+                false,
+                "Loading the speech model.",
+            ),
+            (
+                "the CPU files",
+                Step::Fetching(Export::Cpu),
+                true,
+                "Loading the speech model. Downloading about 650 MB.",
+            ),
+            (
+                "the GPU files",
+                Step::Fetching(Export::Gpu),
+                true,
+                "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.",
+            ),
+        ];
+        let (out, status) = watch::channel(Status::Paused);
+        let publisher = Publisher::new(out, EndingPauses::default());
+        let shown = || Visibility::of(&status.borrow(), true) == Visibility::Show;
+
+        publisher.mode(Mode::Starting);
+        assert_eq!(title(&status.borrow()), "Thalvi: starting");
+        assert!(!shown(), "starting the engine");
+        publisher.mode(Mode::Idle);
+        for (case, step, overlay, notice) in cases {
+            publisher.loading(Some(step));
+            assert_eq!(shown(), overlay, "{case}: loading the model");
+            assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}");
+            assert_eq!(
+                *status.borrow(),
+                Status::Loading {
+                    notice: notice.to_owned(),
+                    downloading: overlay
+                },
+                "{case}: the notice"
+            );
+        }
+
+        publisher.loading(None);
+        assert!(!shown(), "loaded");
+        assert_eq!(title(&status.borrow()), "Thalvi: listening");
+    }
+
+    /// Takes the steps it is told to, one at a time, and then fails or loads.
+    struct Scripted {
+        gate: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        fails: bool,
+    }
+
+    struct NoModel;
+
+    struct NoStream;
+
+    impl thalvi_desktop::local::SpeechStream for NoStream {
+        fn accept(
+            &mut self,
+            _frame: &thalvi_desktop::frame::Frame,
+        ) -> Result<
+            Vec<thalvi_desktop::recognizer::RecognizerEvent>,
+            thalvi_desktop::recognizer::RecognizerError,
+        > {
+            Ok(Vec::new())
+        }
+    }
+
+    impl thalvi_desktop::local::SpeechModel for NoModel {
+        type Stream = NoStream;
+
+        fn device(&self) -> thalvi_desktop::device::Device {
+            thalvi_desktop::device::Device::Cpu(thalvi_desktop::device::Fallback::CpuModel)
+        }
+
+        fn stream(&self) -> NoStream {
+            NoStream
+        }
+    }
+
+    impl ModelSource for Scripted {
+        type Model = NoModel;
+
+        async fn load(
+            &self,
+            step: impl Fn(Step) + Send + Sync,
+        ) -> Result<NoModel, thalvi_desktop::recognizer::RecognizerError> {
+            step(Step::Fetching(Export::Gpu));
+            let gate = self.gate.lock().unwrap().take().unwrap();
+            let _ = gate.await;
+            step(Step::Fetching(Export::Cpu));
+            if self.fails {
+                Err(thalvi_desktop::recognizer::RecognizerError::said(
+                    "Could not download the speech model.",
+                ))
+            } else {
+                Ok(NoModel)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_load_shows_each_step_it_takes_and_then_nothing_or_its_failure() {
+        for (case, fails, mode, shown) in [
+            ("loads", false, Mode::Idle, Mode::Idle),
+            (
+                "fails",
+                true,
+                Mode::Idle,
+                Mode::Failed(Failure {
+                    kind: FailureKind::Other,
+                    notice: "Could not download the speech model. Dictation will try again when you start it."
+                        .to_owned(),
+                    headline: "Speech recognition failed — Settings",
+                    causes: Vec::new(),
+                }),
+            ),
+            ("fails while paused", true, Mode::Paused, Mode::Paused),
+        ] {
+            let (release, gate) = tokio::sync::oneshot::channel();
+            let local = LocalRecognizer::new(
+                Scripted {
+                    gate: std::sync::Mutex::new(Some(gate)),
+                    fails,
+                },
+                "test",
+                Recorder::disabled().metrics(),
+            );
+            let (out, status) = watch::channel(Status::Paused);
+            let publisher = Publisher::new(out, EndingPauses::default());
+            publisher.mode(mode.clone());
+            let load = load_showing(&local, &publisher);
+            tokio::pin!(load);
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    () = &mut load => panic!("{case}: finished before the GPU download was shown"),
+                    () = async {
+                        while publisher.view.borrow().loading != Some(Step::Fetching(Export::Gpu)) {
+                            tokio::task::yield_now().await;
+                        }
+                    } => {}
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{case}: the GPU download is never shown"));
+            if mode == Mode::Idle {
+                let notice = "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.";
+                assert_eq!(
+                    *status.borrow(),
+                    Status::Loading { notice: notice.to_owned(), downloading: true },
+                    "{case}: the step is shown"
+                );
+            }
+            release.send(()).unwrap();
+            load.await;
+            assert_eq!(publisher.view.borrow().loading, None, "{case}: loading ends");
+            assert_eq!(publisher.view.borrow().mode, shown, "{case}");
+        }
+    }
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// The loading notice now, and whether the overlay shows.
+    fn loading_now(status: &watch::Receiver<Status>) -> (String, bool) {
+        let status = status.borrow();
+        match &*status {
+            Status::Loading { notice, .. } => (
+                notice.clone(),
+                Visibility::of(&status, true) == Visibility::Show,
+            ),
+            other => panic!("not loading: {other:?}"),
+        }
+    }
+
+    /// Waits for the next status change, then returns [`loading_now`].
+    async fn next_loading(status: &mut watch::Receiver<Status>) -> (String, bool) {
+        tokio::time::timeout(WAIT, status.changed())
+            .await
+            .expect("the status changed")
+            .expect("the publisher lives");
+        loading_now(status)
+    }
+
+    /// Takes the steps it is sent, and loads when the sender is dropped.
+    struct Streamed(std::sync::Mutex<Option<mpsc::UnboundedReceiver<Step>>>);
+
+    impl ModelSource for Streamed {
+        type Model = NoModel;
+
+        async fn load(
+            &self,
+            step: impl Fn(Step) + Send + Sync,
+        ) -> Result<NoModel, thalvi_desktop::recognizer::RecognizerError> {
+            let mut steps = self.0.lock().unwrap().take().unwrap();
+            while let Some(next) = steps.recv().await {
+                step(next);
+            }
+            Ok(NoModel)
+        }
+    }
+
+    /// A load of a model being downloaded, driven by the returned sender, and the status it publishes.
+    fn loading_download() -> (
+        mpsc::UnboundedSender<Step>,
+        Rc<Publisher>,
+        JoinHandle<()>,
+        watch::Receiver<Status>,
+    ) {
+        let (out, mut status) = watch::channel(Status::Paused);
+        let publisher = Publisher::new(out, EndingPauses::default());
+        publisher.mode(Mode::Idle);
+        publisher.loading(Some(Step::Fetching(Export::Cpu)));
+        status.mark_unchanged();
+        let (steps, received) = mpsc::unbounded_channel();
+        let local = Arc::new(LocalRecognizer::new(
+            Streamed(std::sync::Mutex::new(Some(received))),
+            "test",
+            Recorder::disabled().metrics(),
+        ));
+        let load = tokio::task::spawn_local({
+            let publisher = Rc::clone(&publisher);
+            async move { load_showing(&local, &publisher).await }
+        });
+        (steps, publisher, load, status)
+    }
+
+    #[tokio::test]
+    async fn the_loading_notice_follows_a_download_once_per_percent_and_ends_with_the_model_loading()
+     {
+        use Export::{Cpu, Gpu};
+        LocalSet::new()
+            .run_until(async {
+                let (steps, _publisher, load, mut status) = loading_download();
+                let mut shown = vec![loading_now(&status)];
+                for (step, changes) in [
+                    (Step::Downloading(Cpu, 0), true),
+                    (Step::Downloading(Cpu, 0), false),
+                    (Step::Downloading(Cpu, 1), true),
+                    (Step::Downloading(Cpu, 100), true),
+                    (Step::Reading, true),
+                    (Step::Fetching(Gpu), true),
+                    (Step::Downloading(Gpu, 50), true),
+                    (Step::Reading, true),
+                ] {
+                    steps.send(step).unwrap();
+                    if changes {
+                        shown.push(next_loading(&mut status).await);
+                    }
+                }
+                drop(steps);
+                tokio::time::timeout(WAIT, load).await.unwrap().unwrap();
+
+                let download = |text: &str| (text.to_owned(), true);
+                let reading = ("Loading the speech model.".to_owned(), false);
+                assert_eq!(
+                    shown,
+                    [
+                        download("Loading the speech model. Downloading about 650 MB."),
+                        download("Downloading the speech model, about 650 MB \u{2014} 0%"),
+                        download("Downloading the speech model, about 650 MB \u{2014} 1%"),
+                        download("Downloading the speech model, about 650 MB \u{2014} 100%"),
+                        reading.clone(),
+                        download(
+                            "Loading the speech model. Downloading the model for the GPU, about 1.3 GB."
+                        ),
+                        download("Downloading the model for the GPU, about 1.3 GB \u{2014} 50%"),
+                        reading,
+                    ]
+                );
+                assert_eq!(*status.borrow(), Status::Listening);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn switching_away_mid_download_leaves_no_downloading_notice() {
+        LocalSet::new()
+            .run_until(async {
+                let (steps, publisher, load, mut status) = loading_download();
+                steps.send(Step::Downloading(Export::Cpu, 40)).unwrap();
+                assert_eq!(
+                    next_loading(&mut status).await.0,
+                    "Downloading the speech model, about 650 MB \u{2014} 40%"
+                );
+
+                load.abort();
+                assert!(load.await.unwrap_err().is_cancelled());
+                publisher.loading(None);
+                let late = steps.send(Step::Downloading(Export::Cpu, 41));
+
+                assert!(late.is_err(), "the aborted load no longer listens");
+                assert_eq!(*status.borrow(), Status::Listening);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn the_overlay_shows_a_wake_download_only_while_a_missing_file_downloads() {
+        let config = WakeConfig::default();
+        let cached = [
+            models::MELSPECTROGRAM,
+            models::EMBEDDING,
+            CatalogHead::HeyThalvi.asset(),
+            CatalogHead::HeyMycroft.asset(),
+        ];
+        let failed = Mode::Failed(Failure {
+            kind: FailureKind::Other,
+            notice: "Could not download the model.".to_owned(),
+            headline: "Download failed",
+            causes: Vec::new(),
+        });
+        // A retry after a failed download starts from Paused (the tray) or Failed (Settings).
+        let starts = [Mode::Starting, Mode::Idle, Mode::Paused, failed];
+        for (case, files, downloads) in [("cached", cached.len(), false), ("missing one", 3, true)]
+        {
+            let dir = std::env::temp_dir().join(format!(
+                "thalvi-wake-load-{}-{}",
+                case.replace(' ', "-"),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            for asset in &cached[..files] {
+                std::fs::File::create(dir.join(asset.file_name))
+                    .unwrap()
+                    .set_len(asset.size)
+                    .unwrap();
+            }
+            let store = ModelStore::in_dir(&dir);
+            for (start, load_fails) in starts.iter().flat_map(|mode| [(mode, false), (mode, true)])
+            {
+                let case = format!("{case}, from {start:?}, load fails: {load_fails}");
+                let (out, status) = watch::channel(Status::Paused);
+                let publisher = Publisher::new(out, EndingPauses::default());
+                publisher.mode(start.clone());
+                let before = status.borrow().clone();
+                let download = Status::Loading {
+                    notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
+                    downloading: true,
+                };
+
+                let result = load_wake(&publisher, &config, &store, async {
+                    if downloads {
+                        assert_eq!(*status.borrow(), download, "{case}: while loading");
+                        assert_eq!(
+                            Visibility::of(&status.borrow(), true),
+                            Visibility::Show,
+                            "{case}: overlay while loading"
+                        );
+                    } else {
+                        assert_eq!(*status.borrow(), before, "{case}: nothing to announce");
+                    }
+                    if load_fails {
+                        Err("no network")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await;
+
+                assert_eq!(result.is_err(), load_fails, "{case}");
+                if downloads {
+                    assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}: after");
+                } else {
+                    assert_eq!(*status.borrow(), before, "{case}: after");
+                }
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_lost_press_reaches_the_status_without_another_capture() {
         use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeFrames, FakeWake};
@@ -1250,6 +1844,8 @@ mod tests {
                 recognizer, wake, cues, gate, hold,
                 http: reqwest::Client::new(),
                 notice: publisher.notice_sink(),
+                spotter: None,
+                spotter_off: None,
             }, &DesktopConfig::from_json_str("{}").unwrap(), Recorder::disabled());
             let listening = tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -1265,6 +1861,7 @@ mod tests {
             publisher.mode(Mode::Idle);
             publisher.update(|view| view.engine = EngineState::Capturing {
                 committed: "keep speaking".to_owned(), partial: None,
+                notice: None,
             });
             publisher.notice_sink()(Refusal::Capturing.notice());
             assert!(matches!(&*status.borrow(), Status::Capturing { committed, .. } if committed == "keep speaking"));
@@ -1458,6 +2055,79 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_press_refused_after_a_rebuild_does_not_dictate_later_but_a_fresh_press_does() {
+        use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeFrames, FakeWake};
+        use thalvi_desktop::recognizer::FakeRecognizer;
+
+        LocalSet::new()
+            .run_until(async {
+                let (out, _status) = watch::channel(Status::Listening);
+                let publisher = Publisher::new(out, EndingPauses::default());
+                let gate = InputGate::default();
+                let (mut frames, _feed) = FakeFrames::new(&gate);
+                let (wake, wake_control) = FakeWake::new();
+                let (cues, _cue_control) = FakeCuePlayer::new();
+                let (recognizer, _server) = FakeRecognizer::new();
+                let (input, hold) = HoldInput::new();
+                let key = hold.clone();
+                let (mut engine, _) = Engine::new(
+                    Parts {
+                        recognizer,
+                        wake,
+                        cues,
+                        gate,
+                        hold,
+                        http: reqwest::Client::new(),
+                        notice: publisher.notice_sink(),
+                        spotter: None,
+                        spotter_off: None,
+                    },
+                    &DesktopConfig::from_json_str("{}").unwrap(),
+                    Recorder::disabled(),
+                );
+
+                let mut presses = Presses::new(key);
+                presses.skip();
+                input.set(true);
+                assert_eq!(
+                    pressed(&mut presses),
+                    1,
+                    "the press during the rebuild is refused"
+                );
+                engine.resume_listening(presses);
+
+                let listening =
+                    tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while wake_control.resets() == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                for _ in 0..10 {
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    !listening.is_finished(),
+                    "the refused press must not start a dictation"
+                );
+
+                input.set(false);
+                input.set(true);
+                let trigger = tokio::time::timeout(Duration::from_secs(5), listening)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    matches!(trigger, Ok(WakeTrigger::Hold)),
+                    "a fresh press dictates"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_press_and_release_during_a_delivery_is_refused_not_lost() {
         let (input, state) = HoldInput::new();
         let mut key = Presses::new(state);
@@ -1635,7 +2305,14 @@ mod tests {
 
     impl Host for TestHost {
         type Target = String;
-        const OVERLAY_TAKES_CLICKS: bool = false;
+
+        fn copies_only(&self) -> bool {
+            false
+        }
+
+        fn overlay_takes_clicks(&self) -> bool {
+            false
+        }
 
         fn capture_target(&self) -> Result<String, thalvi_desktop::host::HostError> {
             Ok("Editor".to_owned())
@@ -1644,11 +2321,11 @@ mod tests {
         fn deliver(
             &self,
             _: &String,
-            _: &thalvi_desktop::host::TypedText,
+            _: &thalvi_desktop::host::PasteText,
             _: bool,
-        ) -> Result<(), thalvi_desktop::host::HostError> {
+        ) -> Result<thalvi_desktop::host::Delivered, thalvi_desktop::host::HostError> {
             self.called("deliver");
-            Ok(())
+            Ok(thalvi_desktop::host::Delivered::InWindow)
         }
 
         fn copy(&self, _: &str) -> Result<(), thalvi_desktop::host::HostError> {
@@ -1759,7 +2436,7 @@ mod tests {
             (
                 request(CaptureRoute::Paste, "hello world"),
                 false,
-                vec!["deliver", "copy"],
+                vec!["deliver"],
                 Outcome::Accepted,
                 Some("Editor"),
                 Some(DraftOutcome::Delivered),
@@ -1830,10 +2507,39 @@ mod tests {
     }
 
     #[test]
+    fn only_a_capture_that_was_not_delivered_fails_as_a_delivery() {
+        let finished = |delivered| Finished {
+            delivered,
+            maybe_partial: false,
+            notice: "Done.".to_owned(),
+            headline: "Done",
+            causes: Vec::new(),
+            task_target: None,
+        };
+        assert_eq!(
+            delivered(Some(finished(false)), Some(CaptureRoute::Paste)),
+            Mode::Failed(Failure {
+                notice: "Done.".to_owned(),
+                headline: "Done",
+                causes: Vec::new(),
+                kind: FailureKind::Delivery,
+            }),
+        );
+        assert_eq!(
+            delivered(Some(finished(true)), Some(CaptureRoute::Paste)),
+            Mode::Done {
+                route: CaptureRoute::Paste,
+                notice: "Done.".to_owned(),
+            },
+        );
+    }
+
+    #[test]
     fn presses_that_started_nothing_are_told_without_replacing_the_result() {
         let failure = |notice: &str| Failure {
+            kind: FailureKind::Other,
             notice: notice.to_owned(),
-            headline: "Nothing was typed",
+            headline: "Nothing was pasted",
             causes: vec!["cause".to_owned()],
         };
         let done = Mode::Done {
@@ -1863,6 +2569,7 @@ mod tests {
         assert_eq!(
             told(Mode::Failed(failure("It failed.")), &[Refusal::TooQuick]),
             Mode::Failed(Failure {
+                kind: FailureKind::Other,
                 notice: format!("It failed. {}", Refusal::TooQuick.notice()),
                 ..failure("")
             }),
@@ -1870,6 +2577,7 @@ mod tests {
         assert_eq!(
             told(Mode::Idle, &[Refusal::Capturing]),
             Mode::Failed(Failure {
+                kind: FailureKind::Other,
                 notice: Refusal::Capturing.notice().to_owned(),
                 headline: "Dictating — key ignored",
                 causes: Vec::new(),
@@ -1900,6 +2608,54 @@ mod tests {
         )
         .await;
         assert!(requests.listening_off);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn changed_writing_openings_wait_for_the_end_of_the_capture_and_then_rebuild_the_engine()
+    {
+        let with = |openings: &str| {
+            DesktopConfig::from_json_str(&format!(
+                r#"{{"writing": {{"url": "http://127.0.0.1:9/v1", "model": "m", "openings": {openings}}}}}"#
+            ))
+            .unwrap()
+        };
+        let running = with(r#"[{"phrase": "write me an email", "prompt": "Old."}]"#);
+        let changed = with(r#"[{"phrase": "write me an email", "prompt": "New."}]"#);
+        let (outcome, requests, started) = run(
+            vec![],
+            vec![Control::Apply(Box::new(changed.clone())), Control::Cancel],
+        )
+        .await;
+        assert!(started);
+        assert_eq!(outcome, Some("cancelled"));
+        assert_eq!(
+            requests.pending,
+            Some(changed.clone()),
+            "the capture goes on with the rules it started with"
+        );
+        assert!(!retunes_only(&running, &changed));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_switch_of_the_live_server_waits_for_the_end_of_the_running_capture() {
+        let running = DesktopConfig::from_json_str(r#"{"stt": {"engine": "server"}}"#).unwrap();
+        let switched = DesktopConfig::from_json_str(r#"{"stt": {"engine": "local"}}"#).unwrap();
+        assert_ne!(
+            running.stt.entries.active_live().id,
+            switched.stt.entries.active_live().id
+        );
+        let (outcome, requests, started) = run(
+            vec![],
+            vec![Control::Apply(Box::new(switched.clone())), Control::Cancel],
+        )
+        .await;
+        assert!(started);
+        assert_eq!(outcome, Some("cancelled"));
+        assert_eq!(
+            requests.pending,
+            Some(switched),
+            "the new entry is held for the next capture"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2099,5 +2855,80 @@ mod tests {
         drop(state_tx);
         drop(engine_level_tx);
         following.await.unwrap();
+    }
+    #[tokio::test]
+    async fn the_spotter_loader_reports_downloads_and_returns_the_model_or_a_notice() {
+        use thalvi_desktop::engine::fakes::FakeSpotter;
+        use thalvi_desktop::spotter::Unspeakable;
+
+        let assets = [
+            models::SPOTTER.encoder,
+            models::SPOTTER.decoder,
+            models::SPOTTER.joiner,
+            models::SPOTTER.pieces,
+        ];
+        for missing in [None, Some(0), Some(3)] {
+            let dir = std::env::temp_dir().join(format!(
+                "thalvi-spotter-load-{}-{missing:?}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            for (index, asset) in assets.iter().enumerate() {
+                if missing != Some(index) {
+                    std::fs::File::create(dir.join(asset.file_name))
+                        .unwrap()
+                        .set_len(asset.size)
+                        .unwrap();
+                }
+            }
+            let store = ModelStore::in_dir(&dir);
+            for fails in [false, true] {
+                let (out, status) = watch::channel(Status::Paused);
+                let publisher = Publisher::new(out, EndingPauses::default());
+                publisher.mode(Mode::Paused);
+                let recorder = Recorder::disabled();
+                let (spotter, notice) =
+                    load_spotter(&publisher, &Endings::default(), &store, &recorder, async {
+                        assert_eq!(
+                            *status.borrow(),
+                            if missing.is_some() {
+                                Status::Loading {
+                                    notice: SPOTTER_DOWNLOAD_NOTICE.to_owned(),
+                                    downloading: true,
+                                }
+                            } else {
+                                Status::Paused
+                            }
+                        );
+                        if fails {
+                            Err(SpotterError::Phrases(vec![Unspeakable {
+                                phrase: "f\u{fc}ge ein".to_owned(),
+                                characters: "\u{dc}".to_owned(),
+                            }]))
+                        } else {
+                            let (fake, _control) = FakeSpotter::new();
+                            Ok(Box::new(fake) as Box<dyn KeywordSpotter>)
+                        }
+                    })
+                    .await;
+                if fails {
+                    assert!(spotter.is_none());
+                    let notice = notice.unwrap();
+                    assert!(
+                        notice.contains("\"f\u{fc}ge ein\"")
+                            && notice.ends_with("Endings still work from the transcript."),
+                        "{notice}"
+                    );
+                } else {
+                    assert!(spotter.is_some() && notice.is_none());
+                }
+                if missing.is_some() {
+                    assert_eq!(title(&status.borrow()), "Thalvi: starting");
+                } else {
+                    assert_eq!(*status.borrow(), Status::Paused);
+                }
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 }

@@ -11,12 +11,14 @@ use std::time::{Duration, SystemTime};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::http::StatusCode;
+use axum::http::header::USER_AGENT;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
 use sha2::{Digest, Sha256};
+use thalvi_desktop::device::{Device, Fallback, Gpu};
 use thalvi_desktop::models::{
-    Asset, CatalogSpeech, ModelError, ModelKind, ModelStore, SpeechAssets, SpeechDownloads,
-    SpeechProgress,
+    Asset, CatalogSpeech, ModelError, ModelKind, ModelStore, SPOTTER, SpeechAssets,
+    SpeechDownloads, SpeechProgress,
 };
 
 const GOOD: &[u8] = b"pretend this is a model";
@@ -33,8 +35,26 @@ fn sha256(bytes: &[u8]) -> String {
 async fn serve() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let app = Router::new()
         .route("/good.onnx", get(|| async { GOOD }))
+        .route(
+            "/needs-agent.onnx",
+            get(|headers: HeaderMap| async move {
+                if headers.contains_key(USER_AGENT) {
+                    Ok(GOOD)
+                } else {
+                    Err(StatusCode::FORBIDDEN)
+                }
+            }),
+        )
         .route("/other.onnx", get(|| async { "something else entirely" }))
         .route("/gone.onnx", get(|| async { StatusCode::NOT_FOUND }))
+        .route(
+            "/endless.onnx",
+            get(|| async {
+                Body::from_stream(futures_util::stream::repeat_with(|| {
+                    Ok::<_, std::io::Error>(Bytes::from_static(GOOD))
+                }))
+            }),
+        )
         .route(
             "/stalls.onnx",
             get(|| async {
@@ -107,29 +127,53 @@ async fn a_missing_file_is_downloaded_once_and_then_served_from_disk() {
 }
 
 #[tokio::test]
-async fn a_download_with_the_wrong_checksum_is_deleted_and_refused() {
+async fn a_download_names_the_client_for_hosts_that_refuse_anonymous_ones() {
     let (address, _server) = serve().await;
-    let dir = dir("mismatch");
-    let url = format!("http://{address}/other.onnx");
+    let url = format!("http://{address}/needs-agent.onnx");
     let sha = sha256(GOOD);
     let asset = Asset {
-        kind: ModelKind::Wake,
-        file_name: "good.onnx",
+        kind: ModelKind::Spotter,
+        file_name: "needs-agent.onnx",
         url: &url,
         size: GOOD.len() as u64,
         sha256: &sha,
     };
-
-    let error = ModelStore::in_dir(&dir)
+    let path = ModelStore::in_dir(dir("agent"))
         .fetch(&asset)
         .await
+        .expect("downloads");
+    assert_eq!(fs::read(path).expect("saved"), GOOD);
+}
+
+#[tokio::test]
+async fn a_download_that_is_not_the_pinned_file_is_deleted_and_refused() {
+    let (address, _server) = serve().await;
+    for served in ["other.onnx", "endless.onnx"] {
+        let dir = dir(&format!("mismatch-{served}"));
+        let url = format!("http://{address}/{served}");
+        let sha = sha256(GOOD);
+        let asset = Asset {
+            kind: ModelKind::Wake,
+            file_name: "good.onnx",
+            url: &url,
+            size: GOOD.len() as u64,
+            sha256: &sha,
+        };
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            ModelStore::in_dir(&dir).fetch(&asset),
+        )
+        .await
+        .expect("stops on its own")
         .expect_err("refused");
-    assert!(matches!(error, ModelError::Checksum { .. }));
-    assert_eq!(
-        error.to_string(),
-        "The downloaded wake model good.onnx did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
-    );
-    assert_eq!(leftovers(&dir), Vec::<String>::new());
+        assert!(matches!(error, ModelError::Checksum { .. }), "{served}");
+        assert_eq!(
+            error.to_string(),
+            "The downloaded wake model good.onnx did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
+        );
+        assert_eq!(leftovers(&dir), Vec::<String>::new(), "{served}");
+    }
 }
 
 #[tokio::test]
@@ -371,6 +415,7 @@ fn speech<'a>(urls: [&'a str; 4], sha: &'a str) -> SpeechAssets<'a> {
     });
     SpeechAssets {
         encoder,
+        encoder_data: None,
         decoder,
         joiner,
         tokens,
@@ -405,24 +450,213 @@ async fn a_speech_model_is_cached_only_when_every_file_has_its_pinned_size() {
 }
 
 #[tokio::test]
-async fn the_catalog_lists_each_model_with_its_size_source_and_whether_it_is_downloaded() {
-    let models = ModelStore::in_dir(dir("catalog")).speech_models().await;
+async fn the_catalog_lists_each_model_with_its_size_license_languages_source_and_whether_it_is_downloaded()
+ {
+    let models = ModelStore::in_dir(dir("catalog"))
+        .speech_models(|_| Device::Cpu(Fallback::CpuModel))
+        .await;
 
-    let [model] = models.as_slice() else {
-        panic!("one catalog model, got {models:?}");
-    };
-    assert_eq!(model.name, "nemotron_160ms");
-    assert_eq!(model.size, 661_919_416);
+    let listed: Vec<_> = models
+        .iter()
+        .map(|model| {
+            (
+                model.name,
+                model.title,
+                model.size,
+                model.license,
+                model.languages.len(),
+                model.source,
+            )
+        })
+        .collect();
     assert_eq!(
-        model.source,
-        "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25"
+        listed,
+        [
+            (
+                "nemotron_160ms",
+                "Nemotron Streaming",
+                661_919_416,
+                "NVIDIA Open Model License",
+                1,
+                "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25"
+            ),
+            (
+                "unified_160ms",
+                "Nemotron Unified",
+                646_518_349,
+                "OpenMDW-1.1",
+                25,
+                "https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b"
+            ),
+            (
+                "parakeet_tdt_v3",
+                "Parakeet TDT",
+                670_576_784,
+                "CC BY 4.0",
+                25,
+                "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3"
+            ),
+        ]
     );
-    assert!(!model.cached);
+    assert!(models.iter().all(|model| !model.cached));
+    let unified = &models[1].languages;
+    assert!(unified.is_sorted() && unified.contains(&"English") && unified.contains(&"Ukrainian"));
+    assert_eq!(models[0].languages, ["English"]);
+    let mut descriptions: Vec<_> = models.iter().map(|model| model.description).collect();
+    descriptions.sort_unstable();
+    descriptions.dedup();
     assert_eq!(
-        CatalogSpeech::named(model.name),
-        Some(CatalogSpeech::Nemotron160ms)
+        descriptions.len(),
+        models.len(),
+        "each card says its own trade-off"
     );
+    for model in &models {
+        assert!(CatalogSpeech::named(model.name).is_some(), "{}", model.name);
+    }
     assert_eq!(CatalogSpeech::named("elsewhere"), None);
+}
+
+#[test]
+fn catalog_models_keep_their_files_apart_and_pinned() {
+    let mut names = Vec::new();
+    for model in CatalogSpeech::ALL {
+        for assets in std::iter::once(model.assets()).chain(model.gpu_assets()) {
+            let files = [assets.encoder, assets.decoder, assets.joiner, assets.tokens]
+                .into_iter()
+                .chain(assets.encoder_data);
+            for asset in files {
+                assert!(
+                    asset.file_name.starts_with(model.name()),
+                    "{}",
+                    asset.file_name
+                );
+                assert!(asset.url.starts_with("https://"), "{}", asset.url);
+                assert_eq!(asset.sha256.len(), 64, "{}", asset.file_name);
+                names.push(asset.file_name);
+            }
+        }
+    }
+    // The GPU export reads the CPU files' tokens, so those are the one name listed twice.
+    let tokens = CatalogSpeech::Unified160ms.assets().tokens.file_name;
+    names.retain(|name| *name != tokens);
+    let count = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), count);
+}
+
+#[test]
+fn a_discrete_gpu_loads_the_fp16_export_and_every_other_case_the_int8_files() {
+    let rtx = Device::Gpu(Gpu {
+        name: "NVIDIA GeForce RTX 5070 Ti".to_owned(),
+        api: "Vulkan",
+    });
+    let cpu = Device::Cpu(Fallback::NoUsableGpu);
+    for (model, device, encoder, with_data) in [
+        (
+            CatalogSpeech::Unified160ms,
+            &rtx,
+            "unified_160ms.gpu/encoder.fp16.onnx",
+            true,
+        ),
+        (
+            CatalogSpeech::Unified160ms,
+            &cpu,
+            "unified_160ms.encoder.int8.onnx",
+            false,
+        ),
+        (
+            CatalogSpeech::Nemotron160ms,
+            &rtx,
+            "nemotron_160ms.encoder.int8.onnx",
+            false,
+        ),
+        (
+            CatalogSpeech::ParakeetTdtV3,
+            &rtx,
+            "parakeet_tdt_v3.encoder.int8.onnx",
+            false,
+        ),
+    ] {
+        let assets = model.assets_on(device);
+        assert_eq!(assets.encoder.file_name, encoder, "{model:?} on {device:?}");
+        assert_eq!(
+            assets.encoder_data.is_some(),
+            with_data,
+            "{model:?} on {device:?}"
+        );
+        assert_eq!(
+            model.uses_gpu(),
+            model == CatalogSpeech::Unified160ms,
+            "{model:?}"
+        );
+    }
+    let gpu = CatalogSpeech::Unified160ms.assets_on(&rtx);
+    assert_eq!(
+        gpu.encoder_data.map(|data| data.file_name),
+        Some("unified_160ms.gpu/encoder.fp16.onnx.data"),
+        "the encoder finds its data file beside itself"
+    );
+    assert_eq!(
+        gpu.tokens.sha256,
+        CatalogSpeech::Unified160ms.assets().tokens.sha256,
+        "the export's tokens are the CPU files' tokens"
+    );
+}
+
+#[tokio::test]
+async fn a_model_with_a_data_file_in_a_folder_of_its_own_is_cached_only_with_its_data_file() {
+    let (address, _server) = serve().await;
+    let dir = dir("speech-data-file");
+    let url = format!("http://{address}/good.onnx");
+    let sha = sha256(GOOD);
+    let mut assets = speech([&url; 4], &sha);
+    assets.encoder.file_name = "m.gpu/encoder.onnx";
+    assets.encoder_data = Some(Asset {
+        file_name: "m.gpu/encoder.onnx.data",
+        ..assets.encoder
+    });
+    let store = ModelStore::in_dir(&dir);
+    assert_eq!(assets.size(), 5 * GOOD.len() as u64);
+
+    store
+        .fetch_speech(&assets, |_| {})
+        .await
+        .expect("downloads");
+    assert!(store.is_cached(&assets).await);
+    assert_eq!(
+        fs::read(dir.join("m.gpu/encoder.onnx.data")).expect("data file"),
+        GOOD
+    );
+
+    fs::remove_file(dir.join("m.gpu/encoder.onnx.data")).expect("remove");
+    assert!(!store.is_cached(&assets).await, "the data file is missing");
+}
+
+#[test]
+fn the_ending_phrase_model_files_are_pinned_and_apart_from_the_other_models() {
+    let assets = [
+        SPOTTER.encoder,
+        SPOTTER.decoder,
+        SPOTTER.joiner,
+        SPOTTER.pieces,
+    ];
+    let mut names: Vec<&str> = assets.iter().map(|asset| asset.file_name).collect();
+    for asset in assets {
+        assert_eq!(asset.kind, ModelKind::Spotter, "{}", asset.file_name);
+        assert!(asset.url.starts_with("https://"), "{}", asset.url);
+        assert_eq!(asset.sha256.len(), 64, "{}", asset.file_name);
+    }
+    for model in CatalogSpeech::ALL {
+        let speech = model.assets();
+        names.extend(
+            [speech.encoder, speech.decoder, speech.joiner, speech.tokens].map(|a| a.file_name),
+        );
+    }
+    let count = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), count);
 }
 
 #[tokio::test]
@@ -453,6 +687,30 @@ async fn a_speech_download_reports_progress_up_to_done() {
     );
     assert!(store.is_cached(&assets).await);
     assert_eq!(leftovers(&dir).len(), 4);
+    assert_eq!(store.path(&assets.encoder), dir.join("m.encoder.onnx"));
+    assert!(store.path(&assets.tokens).is_file());
+}
+
+#[tokio::test]
+async fn a_speech_fetch_of_files_already_on_disk_reports_no_download() {
+    let (address, _server) = serve().await;
+    let dir = dir("speech-intact");
+    let url = format!("http://{address}/good.onnx");
+    let sha = sha256(GOOD);
+    let assets = speech([&url; 4], &sha);
+    let store = ModelStore::in_dir(&dir);
+    store
+        .fetch_speech(&assets, |_| {})
+        .await
+        .expect("downloads");
+
+    let mut events = Vec::new();
+    store
+        .fetch_speech(&assets, |event| events.push(event))
+        .await
+        .expect("finds them");
+
+    assert_eq!(events, [SpeechProgress::Verifying, SpeechProgress::Done]);
 }
 
 #[tokio::test]

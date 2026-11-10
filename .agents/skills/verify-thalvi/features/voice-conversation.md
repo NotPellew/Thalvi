@@ -37,7 +37,9 @@ Steps:
     `asr_open` with `"mode": "ENDPOINTING", "encoding": "PCM_24KHZ"`.
 - **Caption and turn.** Before the committed turn, assert the live caption:
   - Run `$V ab $R wait --fn 'document.querySelector(".o-live:not([hidden]) .o-live-text")?.textContent.includes("What")'`
-    and capture `voice-caption.png` while it is visible.
+    and capture `voice-caption.png` at once. The caption hides when the turn
+    commits, so look at the image before citing it; the recording keeps it
+    either way.
   - The microphone clip's speech burst becomes the turn within about 11 s.
   - Run `$V ab $R wait --fn '[...document.querySelectorAll(".o-turns .o-user")].some(e => e.textContent.includes("leftover rice"))'`.
   - `asr_speech_start` and `asr_speech_complete` appear in `fakes.jsonl`.
@@ -59,13 +61,16 @@ Steps:
     reply stops, and the recording shows `interrupt` with reason `speech start`.
     Keep the corresponding `asr_speech_start` and any `llm_cancelled` event.
   - `$V reply $R --after "Actually never mind"` passes.
-- **Voice off.** Tap the header toggle.
+- **Voice off.** Once the last reply has settled, tap the header toggle.
+  During a reply the page stays `thinking` or `working` until it ends.
   - Run `$V ab $R click 'button.o-voice'` and `$V state $R idle`.
-  - `aria-pressed="false"`, and `fakes.jsonl` gains `asr_close`.
+  - `aria-pressed="false"`. The recognizer closes asynchronously; wait for
+    it with `timeout 10 sh -c 'until grep -q asr_close "$0"; do sleep 0.2; done' $R/fakes.jsonl`.
 - **Proof.** Record the whole recipe. Start it in place of `open`, before
   voice is on: `$V ab $R record start $R/evidence/voice.webm "$(. $R/run.env; echo $URL)"`
   and `$V state $R idle`. Finish with `$V ab $R record stop`. Keep a
-  screenshot taken during `speaking` and the `fakes.jsonl` lines.
+  screenshot and `snapshot -c` taken during `speaking`, and the `fakes.jsonl`
+  lines.
 
 ## Gotchas
 

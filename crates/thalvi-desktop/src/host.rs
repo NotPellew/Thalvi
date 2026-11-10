@@ -1,7 +1,16 @@
-//! The desktop host interface: bind the window a capture starts in, type into it, and run desktop actions.
+//! The desktop host interface: bind the window a capture starts in, paste into it, and run desktop actions.
 
 #[cfg(target_os = "linux")]
+mod channel;
+#[cfg(target_os = "linux")]
+mod command;
+#[cfg(target_os = "linux")]
+mod gnome;
+#[cfg(target_os = "linux")]
 mod hyprland;
+mod line;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -10,15 +19,30 @@ use std::path::Path;
 
 use crate::report::UserError;
 
+pub use line::{MAX_REQUEST, refusal};
+
 /// The title of the status overlay window, by which a desktop recognises it.
 pub const OVERLAY_TITLE: &str = "Thalvi overlay";
 
 /// The host for the desktop Thalvi runs on.
 #[cfg(target_os = "linux")]
-pub type Desktop = hyprland::Hyprland;
+pub use linux::{Desktop, Session};
 /// The host for the desktop Thalvi runs on.
 #[cfg(target_os = "windows")]
 pub type Desktop = windows::Windows;
+
+/// Where `deliver` left the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivered {
+    /// Pasted into the target window.
+    InWindow,
+    /// Put on the clipboard for the user to paste; the desktop lets nothing paste for them.
+    OnClipboard,
+}
+
+/// What a failed paste says when it is not known whether the text reached the window.
+pub(crate) const MAYBE_PASTED: &str =
+    "Thalvi may or may not have pasted the text. Check the window before trying again.";
 
 /// Why a host action did not complete. The text is the plain notice shown to the user.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -38,27 +62,34 @@ impl UserError for HostError {
     fn headline(&self) -> &'static str {
         match self {
             Self::Unsupported(_) => "Desktop can't do that — Settings",
-            Self::NothingTyped(_) => "Nothing was typed — Settings",
-            Self::MaybePartial(_) => "Some input may have been typed",
+            Self::NothingTyped(_) => "Nothing was pasted — Settings",
+            Self::MaybePartial(_) => "Some text may have been pasted",
         }
     }
 }
 
-/// Text that holds no control characters, so typing it can only insert characters.
+/// Text to paste: line breaks (as `\n`) and tabs, but no other control character, so pasting it
+/// can only insert text and never act in a terminal.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TypedText(String);
+pub struct PasteText(String);
 
-impl TypedText {
+impl PasteText {
+    /// Line endings of any style become `\n`.
+    ///
     /// # Errors
-    /// [`HostError::NothingTyped`] when `text` holds a C0 or C1 control character.
+    /// [`HostError::NothingTyped`] when `text` holds a C0 or C1 control character other than a
+    /// line break or tab.
     pub fn new(text: &str) -> Result<Self, HostError> {
-        if text.chars().any(char::is_control) {
+        if text
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        {
             return Err(HostError::NothingTyped(
-                "The text contains control characters that could press keys. Nothing was typed."
+                "The text contains control characters that could act in the window. Nothing was pasted."
                     .to_owned(),
             ));
         }
-        Ok(Self(text.to_owned()))
+        Ok(Self(text.replace("\r\n", "\n").replace('\r', "\n")))
     }
 
     /// The checked text.
@@ -90,13 +121,13 @@ impl WebUrl {
     }
 }
 
-/// Keeps a desktop answering state queries from other programs, such as a status bar; dropping it
-/// stops. An answer is one short line the app chooses, never anything the user said.
-pub struct StateServer {
+/// Keeps a desktop answering requests from other programs of the same user, such as a status bar or
+/// an agent; dropping it stops. A request and its reply are each one line of JSON.
+pub struct RequestServer {
     _stop_on_drop: Box<dyn Send + Sync>,
 }
 
-impl StateServer {
+impl RequestServer {
     /// Wraps whatever stops the answering when dropped.
     pub fn new(stop_on_drop: impl Send + Sync + 'static) -> Self {
         Self {
@@ -122,11 +153,12 @@ impl HoldWatch {
 
 /// How a desktop reports the hold key.
 pub enum HoldSource {
-    /// The app watches the keyboard until this is dropped.
-    Hook(HoldWatch),
-    /// The compositor reports the key through binds in its own config, as `reason` says: not a
-    /// failure, and nothing for the app to watch.
-    Binds(&'static str),
+    /// The desktop reports the key until this is dropped, to the app's keyboard hook or to binds
+    /// it added to the compositor.
+    Watching(HoldWatch),
+    /// The desktop gives the app no way to see the key, as `reason` says: not a failure, since
+    /// the user did nothing wrong, but the key does nothing and Settings says why.
+    Unavailable(&'static str),
 }
 
 /// A key held while the last key of a [`Shortcut`] is pressed.
@@ -166,7 +198,11 @@ pub trait Host: Send + Sync {
     type Target: Clone + PartialEq + fmt::Debug + fmt::Display + Send + 'static;
 
     /// Whether a click on the overlay reaches it; where it does not, the overlay shows no buttons.
-    const OVERLAY_TAKES_CLICKS: bool;
+    fn overlay_takes_clicks(&self) -> bool;
+
+    /// Whether this desktop can only put dictation on the clipboard, never paste it, so the
+    /// target names no window and the user pastes it themselves.
+    fn copies_only(&self) -> bool;
 
     /// Binds the focused window.
     ///
@@ -174,18 +210,19 @@ pub trait Host: Send + Sync {
     /// Why no window could be bound.
     fn capture_target(&self) -> Result<Self::Target, HostError>;
 
-    /// Types `text` into `target`, then Enter when `enter`, only if `target` is still the window
-    /// that will receive the input.
+    /// Puts `text` on the clipboard and pastes it into `target`, then presses Enter when `enter`,
+    /// only if `target` is still the window that will receive the input; a desktop that cannot
+    /// paste leaves `text` on the clipboard and presses nothing. The text stays on the clipboard.
     ///
     /// # Errors
     /// [`HostError::NothingTyped`] when the target closed, lost focus or refuses input;
-    /// [`HostError::MaybePartial`] when typing stopped partway.
+    /// [`HostError::MaybePartial`] when it is not known whether the paste or Enter reached the window.
     fn deliver(
         &self,
         target: &Self::Target,
-        text: &TypedText,
+        text: &PasteText,
         enter: bool,
-    ) -> Result<(), HostError>;
+    ) -> Result<Delivered, HostError>;
 
     /// Puts `text` on the clipboard.
     ///
@@ -214,7 +251,7 @@ pub trait Host: Send + Sync {
     /// Makes the window titled [`OVERLAY_TITLE`] float, `width` by `height` logical pixels, at the
     /// top centre of the screen area windows may use, above other windows, without ever taking
     /// focus; returns that area's top in logical pixels, below any panel. Call before the window
-    /// first appears and again to re-place it after its size changed.
+    /// first appears and before each remap, since compositor config reloads can discard the rules.
     ///
     /// # Errors
     /// Why the desktop could not be told; the overlay must then stay hidden.
@@ -226,17 +263,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn typed_text_refuses_anything_that_could_press_a_key() {
-        for (text, typable) in [
-            ("äöüß é 👋 plain words", true),
-            ("", true),
-            ("line\nbreak", false),
-            ("tab\there", false),
-            ("escape\u{1b}[A", false),
-            ("delete\u{7f}", false),
-            ("next line\u{85}", false),
+    fn paste_text_keeps_line_breaks_and_tabs_and_refuses_other_control_characters() {
+        for (text, pasted) in [
+            ("äöüß é 👋 plain words", Some("äöüß é 👋 plain words")),
+            ("", Some("")),
+            ("line\nbreak\ttab", Some("line\nbreak\ttab")),
+            ("dos\r\nold mac\rlone\n", Some("dos\nold mac\nlone\n")),
+            ("escape\u{1b}[A", None),
+            ("bell\u{7}", None),
+            ("delete\u{7f}", None),
+            ("next line\u{85}", None),
         ] {
-            assert_eq!(TypedText::new(text).is_ok(), typable, "{text:?}");
+            assert_eq!(
+                PasteText::new(text).ok().as_ref().map(PasteText::as_str),
+                pasted,
+                "{text:?}"
+            );
         }
     }
 
