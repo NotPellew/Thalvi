@@ -2303,7 +2303,7 @@ where
                 .finish()
             {
                 Ok(Some(Piece::Thinking)) => {
-                    if first.reasoning.is_none() && first.text.is_none() {
+                    if first.text.is_none() {
                         self.set_state(EngineState::Thinking);
                     }
                     first.reasoning.get_or_insert_with(|| started.elapsed());
