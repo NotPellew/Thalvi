@@ -194,6 +194,7 @@ fn default_conversation() -> HeadConfig {
 
 impl WakeConfig {
     /// Builds the dictation wake and retains the saved conversation choice.
+    #[must_use]
     pub fn new(capture: HeadConfig, conversation: HeadConfig) -> Self {
         Self {
             capture,

@@ -206,8 +206,14 @@ function wakeHeads(context: PageContext): HTMLElement[] {
   const heads: WakeHead[] = [];
   let latestCheck = 0;
 
-  function validate(target?: WakeHead): Promise<void> {
+  function dictationHead(): WakeHead {
     const head = heads[0];
+    if (!head) throw new Error("The dictation wake picker is not initialized.");
+    return head;
+  }
+
+  function validate(target?: WakeHead): Promise<void> {
+    const head = dictationHead();
     if (head.custom && head.customPath === "") {
       const message = "Pick a wake model file with Browse… first.";
       (target ?? head).sayProblem(message);
@@ -227,7 +233,7 @@ function wakeHeads(context: PageContext): HTMLElement[] {
       },
     );
   }
-  checks.push(() => (heads[0].custom ? validate() : null));
+  checks.push(() => (dictationHead().custom ? validate() : null));
 
   function head(title: string): HTMLElement[] {
     const config = draft.wake.capture;
