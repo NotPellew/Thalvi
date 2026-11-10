@@ -486,6 +486,7 @@ pub fn poll(view: &mut View, clock: f64, tx: &mut Tx) -> bool {
     if let Some(running) = view.countdown.clone() {
         view.label = Some(countdown_label(&running, view.left_ms(&running)));
     }
+    tx.settle();
     tx.wake_after(next);
     true
 }

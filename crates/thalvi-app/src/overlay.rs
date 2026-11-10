@@ -140,6 +140,8 @@ impl Overlay {
         let next = status.clone();
         self.handle.update(move |view, tx| {
             view.set_status(next, tx.clock());
+            // Like the old overlay's styles, a new status lands at once rather than on Rune's springs.
+            tx.settle();
             tx.wake_after(Duration::ZERO);
         });
         self.apply(visibility);
