@@ -132,10 +132,10 @@ areas your change touches. Editing rules are in
   which go to whatever window is focused, except Hyprland's paste keys, which are addressed to it. Why: Enter and Windows
   input cannot be addressed to one window, so a switch in those milliseconds can misdirect them.
   Rejected: per-desktop accessibility or input protocols (much code for a rare race).
-- **Enter waits 250 ms.** On Hyprland, submit waits 250 ms between the paste and Enter.
+- **Enter waits 250 ms.** On Hyprland and Windows, submit waits 250 ms between the paste and Enter.
   Why: Muse Code 1.4.14 read a faster Enter as a new line while the overlay said sent;
-  0 of 15 sent at up to 100 ms, 15 of 15 from 150 ms.
-  Rejected: two wtype calls, a delay per application.
+  0 of 15 sent at up to 100 ms, 15 of 15 from 150 ms; Windows shares that wait without a separate measurement.
+  Rejected: two wtype calls, a delay per application, measuring Windows before shipping.
 - **Musical earcons.** Five two- or three-note cues (wake, provisional ending, cancelled, accepted, error), each switchable under `cues` in the desktop config; the mic drops frames while a cue plays.
   Why: distinct contours tell capture state apart without looking, and the mic never hears them. Rejected: one beep for every state, and a post-delivery cue.
 - **Second-pass transcription is explicitly opt-in.** A second-pass entry runs only

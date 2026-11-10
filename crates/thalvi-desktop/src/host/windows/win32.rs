@@ -46,7 +46,7 @@ use ::windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
 use super::{Hwnd, Identity, KeyEvent, Process, Win32};
 use crate::hold::{self, HoldHooks, HoldKey, HoldKind, Verdict};
-use crate::host::{HoldWatch, HostError};
+use crate::host::{ENTER_SUBMIT_WAIT, HoldWatch, HostError};
 
 /// The live Windows desktop.
 pub struct Real;
@@ -477,6 +477,10 @@ impl Win32 for Real {
         };
         // SAFETY: `inputs` is a valid slice of INPUT structures and `size` is the size of one.
         unsafe { SendInput(&inputs, size) as usize }
+    }
+
+    fn wait_before_enter(&self) {
+        std::thread::sleep(ENTER_SUBMIT_WAIT);
     }
 
     fn set_clipboard(&self, text: &str) -> bool {

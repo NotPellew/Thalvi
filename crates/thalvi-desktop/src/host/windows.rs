@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    App, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, PasteText, RequestServer,
-    WebUrl,
+    App, Delivered, ENTER_FAILED, ENTER_SUBMIT_WAIT, HoldSource, Host, HostError, MAYBE_PASTED,
+    Modifier, PasteText, RequestServer, WebUrl,
 };
 use crate::hold::{HoldKey, HoldKind};
 pub use win32::Real;
@@ -55,6 +55,8 @@ pub trait Win32: Send + Sync {
     fn own_integrity(&self) -> Option<u32>;
     /// How many events Windows accepted.
     fn send_input(&self, events: &[KeyEvent]) -> usize;
+    /// Waits after a paste and before Enter on submit; the fake records the call instead of sleeping.
+    fn wait_before_enter(&self);
     fn set_clipboard(&self, text: &str) -> bool;
     fn open_url(&self, url: &str) -> bool;
     /// The top of the primary monitor's work area, below a taskbar docked there, in logical pixels.
@@ -178,14 +180,22 @@ impl<A: Win32> Windows<A> {
         self.api.foreground() == Some(window)
     }
 
-    fn send(&self, events: &[KeyEvent], partial: &str) -> Result<(), HostError> {
+    fn send(
+        &self,
+        events: &[KeyEvent],
+        partial: &str,
+        refused: &str,
+        refused_partial: bool,
+    ) -> Result<(), HostError> {
         if events.is_empty() {
             return Ok(());
         }
         match self.api.send_input(events) {
-            0 => Err(HostError::NothingTyped(
-                "Windows refused the input. Nothing was pasted.".to_owned(),
-            )),
+            0 => Err(if refused_partial {
+                HostError::MaybePartial(refused.to_owned())
+            } else {
+                HostError::NothingTyped(refused.to_owned())
+            }),
             accepted if accepted == events.len() => Ok(()),
             accepted => {
                 // A key left down would stay pressed for every program, so let go of what was pressed.
@@ -241,8 +251,21 @@ impl<A: Win32> Host for Windows<A> {
         if !self.in_front(target.window) {
             return Err(nothing_typed("The window changed. Nothing was pasted."));
         }
-        self.send(&paste_events(paste, enter), MAYBE_PASTED)
-            .map(|()| Delivered::InWindow)
+        if paste {
+            self.send(
+                &paste_events(true),
+                MAYBE_PASTED,
+                "Windows refused the input. Nothing was pasted.",
+                false,
+            )?;
+        }
+        if enter {
+            if paste {
+                self.api.wait_before_enter();
+            }
+            self.send(&enter_events(), ENTER_FAILED, ENTER_FAILED, true)?;
+        }
+        Ok(Delivered::InWindow)
     }
 
     fn copy(&self, text: &str) -> Result<(), HostError> {
@@ -295,6 +318,8 @@ impl<A: Win32> Host for Windows<A> {
             self.send(
                 &events,
                 "Pressing the shortcut stopped partway. Some keys may have been pressed.",
+                "Windows refused the input. Nothing was pasted.",
+                false,
             )?;
         }
         Ok(Target {
@@ -342,8 +367,8 @@ fn tap(key: u16) -> [KeyEvent; 2] {
     [false, true].map(|release| KeyEvent { key, release })
 }
 
-/// Ctrl+V when `paste`, then Enter when `enter`.
-fn paste_events(paste: bool, enter: bool) -> Vec<KeyEvent> {
+/// Ctrl+V when `paste`.
+fn paste_events(paste: bool) -> Vec<KeyEvent> {
     let ctrl = |release| KeyEvent {
         key: VK_CONTROL,
         release,
@@ -354,10 +379,11 @@ fn paste_events(paste: bool, enter: bool) -> Vec<KeyEvent> {
         events.extend(tap(VK_V));
         events.push(ctrl(true));
     }
-    if enter {
-        events.extend(tap(VK_RETURN));
-    }
     events
+}
+
+fn enter_events() -> Vec<KeyEvent> {
+    tap(VK_RETURN).to_vec()
 }
 
 /// Key-ups for every key that `sent` pressed and did not release, the last pressed first.
@@ -466,6 +492,7 @@ mod tests {
         opened: Vec<String>,
         browser_open: bool,
         work_area_top: Option<f64>,
+        enter_waits: Vec<Duration>,
     }
 
     struct Fake(Mutex<State>);
@@ -526,6 +553,9 @@ mod tests {
             };
             state.sent.push(events.to_vec());
             limit.map_or(events.len(), |n| n.min(events.len()))
+        }
+        fn wait_before_enter(&self) {
+            self.with(|state| state.enter_waits.push(ENTER_SUBMIT_WAIT));
         }
         fn set_clipboard(&self, text: &str) -> bool {
             let mut state = self.0.lock().unwrap();
@@ -630,6 +660,9 @@ mod tests {
             fn send_input(&self, events: &[KeyEvent]) -> usize {
                 self.0.send_input(events)
             }
+            fn wait_before_enter(&self) {
+                self.0.wait_before_enter();
+            }
             fn set_clipboard(&self, text: &str) -> bool {
                 self.0.set_clipboard(text)
             }
@@ -664,31 +697,36 @@ mod tests {
     }
 
     #[test]
-    fn pasting_into_the_bound_foreground_sets_the_clipboard_with_crlf_and_sends_one_batch() {
+    fn pasting_into_the_bound_foreground_sets_the_clipboard_with_crlf_and_batches_paste_and_enter()
+    {
         let return_key = virtual_tap(VK_RETURN).to_vec();
-        for (words, enter, copied, events) in [
+        for (words, enter, copied, batches, waits) in [
             (
                 "aé👋\nline",
                 true,
                 Some("aé👋\r\nline"),
-                [ctrl_v(), return_key.clone()].concat(),
+                vec![ctrl_v(), return_key.clone()],
+                vec![ENTER_SUBMIT_WAIT],
             ),
-            ("hi", false, Some("hi"), ctrl_v()),
-            ("", true, None, return_key),
-            ("", false, None, Vec::new()),
+            ("hi", false, Some("hi"), vec![ctrl_v()], vec![]),
+            ("", true, None, vec![return_key.clone()], vec![]),
+            ("", false, None, Vec::new(), vec![]),
         ] {
             let desktop = windows(Fake::desktop());
             let target = desktop.capture_target().unwrap();
 
             desktop.deliver(&target, &text(words), enter).unwrap();
 
-            let sent = desktop.api.read(|state| state.sent.clone());
-            let expected = if events.is_empty() {
-                vec![]
-            } else {
-                vec![events]
-            };
-            assert_eq!(sent, expected, "{words:?} enter={enter}");
+            assert_eq!(
+                desktop.api.read(|state| state.sent.clone()),
+                batches,
+                "{words:?} enter={enter}"
+            );
+            assert_eq!(
+                desktop.api.read(|state| state.enter_waits.clone()),
+                waits,
+                "{words:?} enter={enter}"
+            );
             assert_eq!(
                 desktop.api.read(|state| state.clipboard.clone()),
                 copied.map(str::to_owned).into_iter().collect::<Vec<_>>(),
@@ -807,15 +845,17 @@ mod tests {
     }
 
     #[test]
-    fn a_paste_that_windows_cut_short_is_reported_once_and_releases_the_keys_it_pressed() {
+    fn submit_notices_paste_failures_enter_failures_and_never_says_nothing_pasted_after_a_landed_paste()
+     {
         let key_up = |key| KeyEvent { key, release: true };
-        // The batch is Ctrl down, V down, V up, Ctrl up, Return down, Return up.
+        let paste_batch = ctrl_v();
+        let enter_batch = virtual_tap(VK_RETURN).to_vec();
+        // The paste batch is Ctrl down, V down, V up, Ctrl up; Enter is a second batch after the wait.
         for (accepted, released) in [
             (1, vec![key_up(VK_CONTROL)]),
             (2, vec![key_up(VK_V), key_up(VK_CONTROL)]),
             (3, vec![key_up(VK_CONTROL)]),
             (4, vec![]),
-            (5, vec![key_up(VK_RETURN)]),
         ] {
             let desktop = windows(Fake::desktop());
             let target = desktop.capture_target().unwrap();
@@ -825,7 +865,7 @@ mod tests {
 
             assert!(
                 matches!(&error, HostError::MaybePartial(notice) if notice == MAYBE_PASTED),
-                "{accepted}: {error:?}"
+                "paste cut short at {accepted}: {error:?}"
             );
             let sent = desktop.api.read(|state| state.sent.clone());
             assert_eq!(
@@ -833,14 +873,18 @@ mod tests {
                 1 + usize::from(!released.is_empty()),
                 "{accepted}"
             );
+            assert_eq!(sent[0], paste_batch, "{accepted}");
             assert_eq!(
                 sent.get(1).cloned().unwrap_or_default(),
                 released,
                 "{accepted}"
             );
+            assert!(
+                desktop.api.read(|state| state.enter_waits.is_empty()),
+                "Enter must not follow a failed paste ({accepted})"
+            );
         }
 
-        // Windows refusing the key-ups too is told, since Ctrl would stay down.
         let desktop = windows(Fake::desktop());
         let target = desktop.capture_target().unwrap();
         desktop.api.with(|state| {
@@ -853,6 +897,7 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(desktop.api.read(|state| state.sent.len()), 2);
+        assert!(desktop.api.read(|state| state.enter_waits.is_empty()));
 
         let desktop = windows(Fake::desktop());
         let target = desktop.capture_target().unwrap();
@@ -860,6 +905,44 @@ mod tests {
         let error = desktop.deliver(&target, &text("hello"), true).unwrap_err();
         assert!(matches!(error, HostError::NothingTyped(_)), "{error:?}");
         assert_eq!(desktop.api.read(|state| state.sent.len()), 1);
+        assert!(desktop.api.read(|state| state.enter_waits.is_empty()));
+
+        let desktop = windows(Fake::desktop());
+        let target = desktop.capture_target().unwrap();
+        desktop
+            .api
+            .with(|state| state.accepts = Some(paste_batch.len()));
+        desktop.api.with(|state| state.later_accepts = Some(0));
+        let error = desktop.deliver(&target, &text("hello"), true).unwrap_err();
+        assert!(
+            matches!(&error, HostError::MaybePartial(notice) if notice == ENTER_FAILED),
+            "enter refused after paste: {error:?}"
+        );
+        assert_eq!(
+            desktop.api.read(|state| state.sent.clone()),
+            vec![paste_batch.clone(), enter_batch.clone()]
+        );
+        assert_eq!(
+            desktop.api.read(|state| state.enter_waits),
+            vec![ENTER_SUBMIT_WAIT]
+        );
+
+        let desktop = windows(Fake::desktop());
+        let target = desktop.capture_target().unwrap();
+        desktop.api.with(|state| {
+            state.accepts = Some(paste_batch.len());
+            state.later_accepts = Some(1);
+        });
+        let error = desktop.deliver(&target, &text("hello"), true).unwrap_err();
+        assert!(
+            matches!(&error, HostError::MaybePartial(notice) if notice == ENTER_FAILED),
+            "enter cut short after paste: {error:?}"
+        );
+        assert_eq!(desktop.api.read(|state| state.sent.len()), 3);
+        assert_eq!(
+            desktop.api.read(|state| state.enter_waits),
+            vec![ENTER_SUBMIT_WAIT]
+        );
     }
 
     #[test]

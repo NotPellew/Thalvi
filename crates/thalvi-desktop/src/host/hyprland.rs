@@ -13,8 +13,8 @@ use xkbcommon::xkb::{self, Keycode, Keysym};
 
 use super::command::{CommandError, CommandRunner, SystemRunner, tool, wl_copy};
 use super::{
-    App, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, OVERLAY_TITLE, PasteText,
-    Shortcut, WebUrl,
+    App, Delivered, ENTER_FAILED, ENTER_SUBMIT_WAIT_MS, HoldSource, Host, HostError, MAYBE_PASTED,
+    Modifier, OVERLAY_TITLE, PasteText, Shortcut, WebUrl,
 };
 use crate::hold::{HoldKey, HoldKind};
 use hold_binds::{Events, Installed};
@@ -108,7 +108,6 @@ const NO_FOCUSED_WINDOW: &str = "The desktop did not identify the focused window
 const INVALID_WINDOW_LIST: &str = "The desktop returned an invalid window list.";
 const INVALID_MONITOR_LIST: &str = "The desktop returned an invalid monitor list.";
 const NOTHING_TYPED: &str = " Nothing was pasted.";
-const ENTER_FAILED: &str = "The text was pasted, but Thalvi may not have pressed Enter. Check the window before trying again.";
 
 /// One window as `hyprctl -j` prints it; any field may be absent, as for no focused window.
 #[derive(Deserialize)]
@@ -426,7 +425,11 @@ impl<R: CommandRunner> Host for Hyprland<R> {
         }
         if enter {
             // Terminal agents read an Enter that arrives right after a paste as a new line.
-            let pause: &[&str] = if paste { &["-s", "250"] } else { &[] };
+            let pause: &[&str] = if paste {
+                &["-s", ENTER_SUBMIT_WAIT_MS]
+            } else {
+                &[]
+            };
             let keys: Vec<&str> = pause.iter().copied().chain(["-k", "Return"]).collect();
             self.run.run("wtype", &keys, None).map_err(|error| {
                 if paste {
@@ -792,7 +795,7 @@ mod tests {
     #[test]
     fn delivery_copies_then_refocuses_the_original_window_and_presses_the_paste_shortcut() {
         let text = "--help $(not-a-command) `nor-this` café 👋\nsecond line";
-        let enter = "wtype -s 250 -k Return";
+        let enter = format!("wtype -s {ENTER_SUBMIT_WAIT_MS} -k Return");
         for (class, submit, shortcut) in [
             ("browser", false, "CTRL"),
             ("browser", true, "CTRL"),
@@ -818,7 +821,7 @@ mod tests {
                 "hyprctl -j devices".to_owned(),
                 format!("hyprctl dispatch sendshortcut {shortcut},code:55,address:0x2"),
             ];
-            expected.extend(submit.then(|| enter.to_owned()));
+            expected.extend(submit.then(|| enter.clone()));
             assert_eq!(commands(&host), expected, "{class} submit={submit}");
         }
     }

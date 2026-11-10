@@ -16,6 +16,7 @@ mod windows;
 
 use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::report::UserError;
 
@@ -43,6 +44,19 @@ pub enum Delivered {
 /// What a failed paste says when it is not known whether the text reached the window.
 pub(crate) const MAYBE_PASTED: &str =
     "Thalvi may or may not have pasted the text. Check the window before trying again.";
+
+/// How long submit waits between paste and Enter on desktops that need it.
+#[cfg_attr(
+    not(target_os = "windows"),
+    expect(dead_code, reason = "the Windows host waits through this constant")
+)]
+pub(crate) const ENTER_SUBMIT_WAIT: Duration = Duration::from_millis(250);
+
+/// The `wtype -s` argument matching [`ENTER_SUBMIT_WAIT`].
+pub(crate) const ENTER_SUBMIT_WAIT_MS: &str = "250";
+
+/// What submit says when the text was pasted but Enter did not go through.
+pub(crate) const ENTER_FAILED: &str = "The text was pasted, but Thalvi may not have pressed Enter. Check the window before trying again.";
 
 /// Why a host action did not complete. The text is the plain notice shown to the user.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
