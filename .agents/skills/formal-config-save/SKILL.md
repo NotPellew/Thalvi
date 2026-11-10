@@ -20,16 +20,22 @@ Three invariants, each one sentence:
   (`Store::save`: "replaces the file in one step").
 - `RunningMatchesFile`: once every save has returned, `AppState::config`, the
   engine's last `Control::Apply` and the file agree.
-- `EachFieldKeepsItsLastSave`: once every save has returned, the file's form
-  settings are those of the last form save that returned Ok, and its switch is
-  that of the last switch save that returned Ok. A Save never writes the
+- `EachFieldKeepsItsLastSave`: once every save has returned, each form setting
+  is that of the last form save that set it and returned Ok (a save that sets
+  one setting never undoes another's), and the switch is that of the last
+  switch save that returned Ok. A Save never writes the
   switch, and a switch never writes the form (DECISIONS.md, "Packaged desktop
   with an OS-held login entry": the preference is "written by the switch alone,
   never by Save").
 
-**Current result: FINDING.** All three are broken on the code as it is. Nothing
-serializes the writers, and they share one temporary name, `desktop.json.tmp`.
-The steps below are the runner's output, in the code's words.
+**Current result: PASS.** `SyncedConfig` in `app.rs` holds one lock from
+reading the config through `Store::save` and `AppState::apply` (for a switch,
+through setting the running config), so the writers cannot interleave and
+share the one temporary name safely. An agent change reads the config, merges
+its patch over it and validates it inside that lock (`settings_set` hands
+`plan_over` to `SyncedConfig::save_form`), so it rebases on a Settings save
+that finished first. The traces below are the runner's output from before the
+fix, in the code's words.
 
 `FileAlwaysWhole`, a Settings save and an agent change at once:
 
@@ -56,6 +62,16 @@ runs the old settings with the switch on. The next start silently loads
 settings the agent was told were refused, and it forgets the switch the user
 turned on.
 
+An agent change that planned outside the lock lost a Settings save
+(`AgentMergeOutsideLock` below, and the Rust test
+`an_agent_change_keeps_a_settings_save_that_finished_while_it_was_planned`):
+
+1. The agent's `settings_set` calls `plan`, which reads the config (look `gunmetal`) and merges `{"microphone": "USB Mic"}` into a whole form.
+2. A Settings save sets the look to `holo` and returns Ok.
+3. The agent's `save` takes the lock and writes its whole form, look `gunmetal` again, and returns Ok.
+
+Both were told they saved; the file and the running app lost the new look.
+
 A plain stale read breaks `EachFieldKeepsItsLastSave` too, without the shared
 temporary name. `remember` reads the config, a Settings save completes, and then
 `remember` writes the old form back with the new switch. The `SnapshotOutsideLock`
@@ -74,11 +90,11 @@ Matching hashes establish synchronization only, not correctness of the model.
 
 | Code | Model action and boundary |
 | --- | --- |
-| `crates/thalvi-app/src/commands.rs`: `save` (from `save_settings`, the Settings window) | Writer `S` on the main thread, one at a time with other main-thread writers. `Snap`: `state.config()` read for `Store::save`'s `current`. |
-| `crates/thalvi-app/src/agent.rs`: `settings_set`, `plan`, via `Live::save` in `app.rs` | Writer `A` on a request thread; the same `commands::save` path. |
-| `crates/thalvi-app/src/app.rs`: `AppState::remember` (from `remember_login`, `remember_menu_entry`, reached by `Live::set_switch`) | Writer `L` on a request thread. `Snap`: reads the whole config and sets the switch; `Store::save_switches` writes it. |
+| `crates/thalvi-app/src/commands.rs`: `save` (from `save_settings`, the Settings window) | Writer `S` on the main thread, one at a time with other main-thread writers. Via `AppState::save_form` into `SyncedConfig::save_form`: `Lock` before `Snap`, `Unlock` after `Send`. `Snap`: the config read for `Store::save`'s `current`, under the lock; the Settings save sets its field (the look). |
+| `crates/thalvi-app/src/agent.rs`: `settings_set`, `plan_over`, via `Live::save` in `app.rs` | Writer `A` on a request thread; the same `commands::save` path. `Snap` is `plan_over` on the config `SyncedConfig::save_form` read under the lock: the patch merged over the whole form, so it sets its own field (the microphone) and carries the others over. `settings check` (`plan`) writes nothing and is not modeled. |
+| `crates/thalvi-app/src/app.rs`: `SyncedConfig::remember` (from `AppState::remember`, reached by `remember_login`, `remember_menu_entry` and `Live::set_switch`) | Writer `L` on a request thread. `Lock` before `Snap`: reads the whole config and sets the switch under the lock; `Store::save_switches` writes it; the running config is set before `Unlock`. |
 | `crates/thalvi-app/src/settings.rs`: `Store::save`, `prepare` | The content each writer validates: a form save keeps `current`'s switches; a switch keeps the form it read. |
-| Same file: `write_private` | `RmTmp` (`remove_file` of the shared name), `Create` (`create_new`; fails if the name exists), `Write` (`write_all` into the opened file, wherever it is linked now). |
+| Same file: `write_private` | `RmTmp` (`remove_file` of the shared name), `Create` (`create_new`; fails if the name exists), `Write` (`write_all` into the opened file). Under the save lock these steps cannot interleave with another writer's. |
 | Same file: `write_atomically` | `Rename` (moves whatever `desktop.json.tmp` names now; fails if it names nothing). On any error it removes the shared name and returns Err. |
 | `crates/thalvi-app/src/app.rs`: `AppState::apply` | `Apply`: `*current = config.clone()` under `AppState::config`'s lock (for `remember`, its own `*self.config.lock() = config`). `Send`: `Control::Apply` to the runner, which takes them in order. |
 | `crates/thalvi-app/src/settings.rs`: `Store::start` (from `AppState::start` in `app.rs`'s `setup`) | Not modeled: a first start writes the defaults through `save_switches` before `setup` registers the state, serves requests or opens Settings, so no other writer exists yet. |
@@ -108,8 +124,8 @@ and keeps TLC's output there, outside the checkout. Each counterexample prints
 as numbered steps naming the writer (Settings save, agent settings change, login
 switch) and the action from the table. Exit 0 prints `PASS`; exit 1 prints
 `COUNTEREXAMPLE <invariant>` for each broken one, then `FAIL`; exit 2 prints
-`BLOCKED` for source drift, a tool error or a timeout. The current result is exit 1
-with all three broken (the finding above). Never turn a failure into a pass.
+`BLOCKED` for source drift, a tool error or a timeout. The current result is exit 0
+(the finding above). Never turn a failure into a pass.
 
 After changing the verification, check that the invariants can pass and fail:
 
@@ -120,12 +136,13 @@ After changing the verification, check that the invariants can pass and fail:
 It first runs `Serialized = TRUE`, one lock held from before `Snap` until
 after `Send`, which must pass every invariant (131 distinct states). This shows
 the finding comes from the missing serialization, not from the model. Then
-three mutations of that design each must break their own invariant:
+four mutations of that design each must break their own invariant:
 
 | Mutation constant | What it breaks in the serialized design | Must break |
 | --- | --- | --- |
 | `SnapshotOutsideLock` | the config is read before taking the lock | `EachFieldKeepsItsLastSave` |
 | `ApplyOutsideLock` | the lock is released before `AppState::apply` | `RunningMatchesFile` |
+| `AgentMergeOutsideLock` | the agent reads and merges its patch before taking the lock, as `plan` did before the repair | `EachFieldKeepsItsLastSave` |
 | `RenameBeforeWrite` | the temporary file is renamed before it is written | `FileAlwaysWhole` |
 
 `SELF-TEST PASS` verifies detection only; it is not a pass of the code as it is.
@@ -172,8 +189,11 @@ checkout is unchanged.
 
 Three writers that each save once: a Settings save on the main thread, and an
 agent settings change and a switch flip on request threads. Every interleaving
-of their file-system calls and locks. Content is abstract: one form value per
-form save, one switch.
+of their file-system calls and locks. Content is abstract: a form of two fields, the look
+that the Settings save sets and the microphone that the agent sets, each save
+carrying the other field over from the config it read, and one switch. The
+Settings window's own view of the fields it did not change is taken to be
+current (its stale state is out of scope).
 
 Assumed: each file-system call is atomic, and `write_all` of a config this size
 lands in one step, so a half-written file is not modeled; validation in `load`
