@@ -5374,6 +5374,48 @@ async fn a_saved_prompt_is_the_system_message_and_the_words_stay_the_user_messag
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_opening_of_the_words_picks_the_system_message_and_the_words_stay_whole() {
+    LocalSet::new()
+        .run_until(async {
+            let openings = json!([
+                {"phrase": "write me an email", "prompt": "EMAIL"},
+                {"phrase": "write me", "prompt": "ME"},
+                {"phrase": "write a message", "prompt": "MESSAGE"},
+            ]);
+            // (how it is asked, the words as recognized, the system message expected)
+            for (ask, words, prompt) in [
+                (Ask::Ending, "Write me an email, tell Anna I'm late", "EMAIL"),
+                (Ask::Key, "Write me an email, tell Anna I'm late", "EMAIL"),
+                (Ask::Ending, "write a message that I am late", "MESSAGE"),
+                (Ask::Key, "write me a poem", "ME"),
+                (Ask::Ending, "please write me an email", "FALLBACK"),
+                (Ask::Key, WORDS, "FALLBACK"),
+            ] {
+                let (url, mut asked, _feed) = chat(Chat::Stream("data: [DONE]\n\n")).await;
+                let config = json!({
+                    "ending_pause": {"paste": 2.5},
+                    "writing": {"url": url, "model": "m", "prompt": "FALLBACK", "openings": openings},
+                })
+                .to_string();
+                let (mut rig, engine, frames) = Rig::new(&config);
+                let task = ask.start(engine, frames);
+                ask.say(&mut rig, words).await;
+                let asked = request(&mut asked).await;
+                finished(task).await;
+                assert_eq!(
+                    asked.body["messages"],
+                    json!([
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": words},
+                    ]),
+                    "{ask:?} {words:?}"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn nothing_is_written_unless_it_is_asked_for() {
     LocalSet::new()
         .run_until(async {
@@ -5390,7 +5432,12 @@ async fn nothing_is_written_unless_it_is_asked_for() {
                 ),
             ] {
                 let (url, mut asked, _feed) = chat(Chat::Live).await;
-                let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
+                // The dictated words begin with an opening phrase, which alone starts nothing.
+                let config = with_writing(&url).replace(
+                    r#""model": "m""#,
+                    r#""model": "m", "openings": [{"phrase": "tell anna", "prompt": "P"}]"#,
+                );
+                let (mut rig, engine, frames) = Rig::new(&config);
                 let task = if name == "hold key" {
                     let task = hold_task(engine, frames);
                     rig.hold().await;

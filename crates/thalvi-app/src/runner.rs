@@ -2602,6 +2602,32 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn changed_writing_openings_wait_for_the_end_of_the_capture_and_then_rebuild_the_engine()
+    {
+        let with = |openings: &str| {
+            DesktopConfig::from_json_str(&format!(
+                r#"{{"writing": {{"url": "http://127.0.0.1:9/v1", "model": "m", "openings": {openings}}}}}"#
+            ))
+            .unwrap()
+        };
+        let running = with(r#"[{"phrase": "write me an email", "prompt": "Old."}]"#);
+        let changed = with(r#"[{"phrase": "write me an email", "prompt": "New."}]"#);
+        let (outcome, requests, started) = run(
+            vec![],
+            vec![Control::Apply(Box::new(changed.clone())), Control::Cancel],
+        )
+        .await;
+        assert!(started);
+        assert_eq!(outcome, Some("cancelled"));
+        assert_eq!(
+            requests.pending,
+            Some(changed.clone()),
+            "the capture goes on with the rules it started with"
+        );
+        assert!(!retunes_only(&running, &changed));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_switch_of_the_live_server_waits_for_the_end_of_the_running_capture() {
         let running = DesktopConfig::from_json_str(r#"{"stt": {"engine": "server"}}"#).unwrap();
         let switched = DesktopConfig::from_json_str(r#"{"stt": {"engine": "local"}}"#).unwrap();

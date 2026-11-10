@@ -969,6 +969,53 @@ mod tests {
     }
 
     #[test]
+    fn writing_openings_are_checked_and_set_like_settings() {
+        let rig = Rig::new(
+            "openings",
+            r#"{"writing": {"url": "http://127.0.0.1:9/v1", "model": "m"}}"#,
+        );
+        let rule = |phrase: &str, prompt: &str| json!({"phrase": phrase, "prompt": prompt});
+        let refusals = [
+            (
+                vec![rule("Write me", "a"), rule("write, me", "b")],
+                "writing.openings has “write me” twice.",
+            ),
+            (
+                vec![rule("write me", " ")],
+                "writing.openings has a blank prompt for “write me”.",
+            ),
+            (
+                vec![rule("", "a")],
+                "writing.openings needs a phrase with at least one word in every rule.",
+            ),
+        ];
+        for (openings, message) in refusals {
+            let change = json!({"writing": {"openings": openings}});
+            let check = rig.ask(&Request::SettingsCheck {
+                settings: change.clone(),
+            });
+            assert_eq!(
+                check,
+                json!({"ok": false, "error": message, "valid": false})
+            );
+            assert_eq!(rig.set(change)["error"], message);
+        }
+
+        let set = rig.set(json!({"writing": {"openings": [rule("Write me an email", "Email.")]}}));
+        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
+        let shown = rig.ask(&Request::SettingsGet);
+        assert_eq!(
+            shown["settings"]["writing"]["openings"],
+            json!([rule("write me an email", "Email.")])
+        );
+        assert_eq!(rig.fake.store.load().unwrap(), rig.fake.config());
+
+        rig.set(json!({"writing": {"openings": []}}));
+        let shown = rig.ask(&Request::SettingsGet);
+        assert!(shown["settings"]["writing"].get("openings").is_none());
+    }
+
+    #[test]
     fn a_refused_change_says_what_settings_says_and_changes_nothing() {
         let rig = Rig::new("refused", "{}");
         let before = rig.fake.config();
