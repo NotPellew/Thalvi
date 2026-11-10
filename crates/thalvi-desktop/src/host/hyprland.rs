@@ -1,7 +1,12 @@
 //! Hyprland host: hyprctl, wtype and wl-copy.
 
+mod hold_binds;
+
+use std::ffi::OsString;
 use std::fmt;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 
 use serde::Deserialize;
 use xkbcommon::xkb::{self, Keycode, Keysym};
@@ -12,6 +17,7 @@ use super::{
     Shortcut, WebUrl,
 };
 use crate::hold::{HoldKey, HoldKind};
+use hold_binds::{Events, Installed};
 
 /// The window as Hyprland identifies it; the pid tells a reused address from the original window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,22 +43,54 @@ impl Hyprland {
         Self { run: SystemRunner }
     }
 
-    /// The compositor reports the key, through the binds in `hyprland.conf` that run the
-    /// `hold-start` and `hold-end` commands, so there is nothing to watch.
+    /// The keys a config without hold keys gets: the hold key, then the write key. Hyprland takes
+    /// no modifier on them.
+    #[must_use]
+    pub fn default_hold_keys() -> (HoldKey, HoldKey) {
+        (HoldKey::f9(), HoldKey::f10())
+    }
+
+    /// Binds `keys` in Hyprland to the `hold-*` and `write-*` commands of the running program,
+    /// which report the presses and releases, so `_on_change` is not called. The binds go when the
+    /// watch is dropped, and come back after a config reload. Later problems go to `on_problem`.
     ///
     /// # Errors
-    /// Never fails.
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "the same signature as the Windows host, whose hook can fail"
-    )]
+    /// [`HostError::Unsupported`] when a key is not F1 to F12 alone, another bind holds it, or
+    /// Hyprland refuses the binds.
     pub fn watch_hold_keys(
-        _keys: &[(HoldKind, HoldKey)],
+        keys: &[(HoldKind, HoldKey)],
         _on_change: impl Fn(HoldKind, bool) + Send + 'static,
+        on_problem: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
-        Ok(HoldSource::Binds(
-            "On Hyprland the hold and write keys are binds in hyprland.conf: see integrations/hyprland/hyprland-binds.conf.",
-        ))
+        /// Shared by every watch, since a key change has two at once.
+        static INSTALLED: LazyLock<Installed> = LazyLock::new(Installed::default);
+        let exe = executable(std::env::var_os("APPIMAGE"), std::env::current_exe())?;
+        hold_binds::bind(
+            Arc::new(SystemRunner),
+            INSTALLED.clone(),
+            &exe,
+            keys,
+            Events::system(),
+            on_problem,
+        )
+        .map(HoldSource::Watching)
+    }
+}
+
+/// The program the binds run: the `AppImage` when Thalvi runs from one, since its own path is a
+/// mount that goes away, else the running executable.
+fn executable(
+    appimage: Option<OsString>,
+    current: io::Result<PathBuf>,
+) -> Result<PathBuf, HostError> {
+    match appimage.filter(|path| !path.is_empty()) {
+        Some(path) => Ok(path.into()),
+        None => current.map_err(|_| {
+            HostError::Unsupported(
+                "Thalvi could not find its own program file, so the hold keys cannot be bound."
+                    .to_owned(),
+            )
+        }),
     }
 }
 
@@ -508,25 +546,66 @@ impl<R: CommandRunner> Host for Hyprland<R> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_hold_key_is_no_failure_on_hyprland_where_binds_report_it() {
-        let source =
-            Hyprland::watch_hold_keys(&[(HoldKind::Dictate, HoldKey::default())], |_, _| {});
+    fn the_shipped_binds_leave_the_hold_keys_to_thalvi() {
+        let conf = include_str!("../../../../integrations/hyprland/hyprland-binds.conf");
+        let hand_written: Vec<&str> = conf
+            .lines()
+            .filter(|line| {
+                ["hold-start", "hold-end", "write-start", "write-end"]
+                    .iter()
+                    .any(|command| line.ends_with(command))
+            })
+            .collect();
         assert!(
-            matches!(source, Ok(HoldSource::Binds(reason)) if reason.contains("hyprland.conf"))
+            hand_written.is_empty(),
+            "Thalvi would refuse these binds as its own: {hand_written:?}"
         );
+        assert!(conf.contains("Thalvi binds the hold and write keys itself"));
     }
 
     #[test]
-    fn the_shipped_release_binds_survive_other_keys_and_held_modifiers() {
-        let conf = include_str!("../../../../integrations/hyprland/hyprland-binds.conf");
-        let releases: Vec<&str> = conf
-            .lines()
-            .filter(|line| line.ends_with("-end"))
-            .map(|line| line.trim_start_matches('#').trim_start())
-            .collect();
-        assert_eq!(releases.len(), 2, "{releases:?}");
-        for line in releases {
-            assert!(line.starts_with("bindrti "), "{line}");
+    fn the_binds_run_the_appimage_else_the_running_program() {
+        let missing = || Err(io::ErrorKind::NotFound.into());
+        for (name, appimage, current, expected) in [
+            (
+                "an AppImage",
+                Some("/home/me/Thalvi.AppImage"),
+                Ok("/tmp/.mount_x/usr/bin/thalvi-desktop"),
+                Ok("/home/me/Thalvi.AppImage"),
+            ),
+            (
+                "no AppImage",
+                None,
+                Ok("/usr/bin/thalvi-desktop"),
+                Ok("/usr/bin/thalvi-desktop"),
+            ),
+            (
+                "an empty AppImage variable",
+                Some(""),
+                Ok("/usr/bin/thalvi-desktop"),
+                Ok("/usr/bin/thalvi-desktop"),
+            ),
+            (
+                "an AppImage, whatever the program",
+                Some("/a"),
+                missing(),
+                Ok("/a"),
+            ),
+            (
+                "neither",
+                None,
+                missing(),
+                Err(HostError::Unsupported(
+                    "Thalvi could not find its own program file, so the hold keys cannot be bound."
+                        .to_owned(),
+                )),
+            ),
+        ] {
+            assert_eq!(
+                executable(appimage.map(OsString::from), current.map(PathBuf::from)),
+                expected.map(PathBuf::from),
+                "{name}"
+            );
         }
     }
 

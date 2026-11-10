@@ -47,6 +47,7 @@ impl Gnome {
     pub fn watch_hold_keys(
         _keys: &[(HoldKind, HoldKey)],
         _on_change: impl Fn(HoldKind, bool) + Send + 'static,
+        _on_problem: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         Ok(HoldSource::Unavailable(
             "GNOME Wayland does not tell Thalvi when a key is let go, so holding a key to dictate or write is unavailable. The wake word still works.",
@@ -279,7 +280,8 @@ mod tests {
 
     #[test]
     fn the_hold_key_is_no_failure_on_gnome_but_says_why_it_does_nothing() {
-        let source = Gnome::watch_hold_keys(&[(HoldKind::Dictate, HoldKey::default())], |_, _| {});
+        let source =
+            Gnome::watch_hold_keys(&[(HoldKind::Dictate, HoldKey::alt_z())], |_, _| {}, drop);
         assert!(matches!(source, Ok(HoldSource::Unavailable(reason)) if reason.contains("let go")));
     }
 }

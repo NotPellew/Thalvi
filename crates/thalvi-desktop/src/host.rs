@@ -153,11 +153,9 @@ impl HoldWatch {
 
 /// How a desktop reports the hold key.
 pub enum HoldSource {
-    /// The app watches the keyboard until this is dropped.
-    Hook(HoldWatch),
-    /// The compositor reports the key through binds in its own config, as `reason` says: not a
-    /// failure, and nothing for the app to watch.
-    Binds(&'static str),
+    /// The desktop reports the key until this is dropped, to the app's keyboard hook or to binds
+    /// it added to the compositor.
+    Watching(HoldWatch),
     /// The desktop gives the app no way to see the key, as `reason` says: not a failure, since
     /// the user did nothing wrong, but the key does nothing and Settings says why.
     Unavailable(&'static str),

@@ -98,6 +98,12 @@ impl Windows {
         pipe::serve(Arc::new(handler))
     }
 
+    /// The keys a config without hold keys gets on this desktop: the hold key, then the write key.
+    #[must_use]
+    pub fn default_hold_keys() -> (HoldKey, HoldKey) {
+        (HoldKey::alt_z(), HoldKey::alt_x())
+    }
+
     /// Reports each press and release of `keys` to `on_change` until the guard is dropped, and
     /// keeps them from the focused app. `on_change` runs inside the keyboard hook: it must not block.
     ///
@@ -106,8 +112,9 @@ impl Windows {
     pub fn watch_hold_keys(
         keys: &[(HoldKind, HoldKey)],
         on_change: impl Fn(HoldKind, bool) + Send + 'static,
+        _on_problem: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
-        win32::watch_hold_keys(keys.to_vec(), Box::new(on_change)).map(HoldSource::Hook)
+        win32::watch_hold_keys(keys.to_vec(), Box::new(on_change)).map(HoldSource::Watching)
     }
 
     /// The running app's reply to `request`, waiting up to `timeout`; `None` when no app answers.

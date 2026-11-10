@@ -65,11 +65,11 @@ const CODES: [(&str, u16); 49] = [
     ("F12", 0x58),
 ];
 
-/// Where `KeyZ` is in [`CODES`].
-const DEFAULT_CODE: usize = 29;
-
-/// Where `KeyX` is in [`CODES`].
-const WRITE_CODE: usize = 30;
+/// Where `KeyZ`, `KeyX`, `F9` and `F10` are in [`CODES`].
+const KEY_Z: usize = 29;
+const KEY_X: usize = 30;
+const F9: usize = 45;
+const F10: usize = 46;
 
 /// Why a hold key name was refused. Shown as written.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -142,23 +142,42 @@ impl HoldKey {
     }
 }
 
-impl Default for HoldKey {
-    /// Alt with the key left of X.
-    fn default() -> Self {
+impl HoldKey {
+    /// Alt with the key left of X: what every config stored for the hold key before defaults were
+    /// set per desktop, and the default on Windows.
+    #[must_use]
+    pub fn alt_z() -> Self {
         Self {
             modifiers: vec![Modifier::Alt],
-            code: DEFAULT_CODE,
+            code: KEY_Z,
         }
     }
-}
 
-impl HoldKey {
-    /// Alt with X: where the write key starts, next to the hold key.
+    /// Alt with X: what every config stored for the write key before defaults were set per
+    /// desktop, and the default on Windows.
     #[must_use]
-    pub fn write_default() -> Self {
+    pub fn alt_x() -> Self {
         Self {
             modifiers: vec![Modifier::Alt],
-            code: WRITE_CODE,
+            code: KEY_X,
+        }
+    }
+
+    /// F9 alone.
+    #[must_use]
+    pub fn f9() -> Self {
+        Self {
+            modifiers: Vec::new(),
+            code: F9,
+        }
+    }
+
+    /// F10 alone.
+    #[must_use]
+    pub fn f10() -> Self {
+        Self {
+            modifiers: Vec::new(),
+            code: F10,
         }
     }
 }
@@ -753,8 +772,14 @@ mod tests {
             assert_eq!(key.scan_code(), scan_code, "{name}");
             assert_eq!(key.modifiers().contains(&Modifier::Alt), alt, "{name}");
         }
-        assert_eq!(HoldKey::default().to_string(), "Alt+KeyZ");
-        assert_eq!(HoldKey::write_default().to_string(), "Alt+KeyX");
+        for (key, name) in [
+            (HoldKey::alt_z(), "Alt+KeyZ"),
+            (HoldKey::alt_x(), "Alt+KeyX"),
+            (HoldKey::f9(), "F9"),
+            (HoldKey::f10(), "F10"),
+        ] {
+            assert_eq!(key, HoldKey::parse(name).unwrap(), "{name}");
+        }
     }
 
     #[test]
@@ -903,7 +928,7 @@ mod tests {
 
     #[test]
     fn events_another_program_sent_are_never_the_hold_key() {
-        let mut hook = HoldHook::new(HoldKey::default());
+        let mut hook = HoldHook::new(HoldKey::alt_z());
         let alt_down = |vk| vk == ALT;
         assert_eq!(hook.on_event(event(ALT, true), alt_down), PASS);
         let injected = KeyEvent {
@@ -1030,7 +1055,7 @@ mod tests {
 
     #[test]
     fn the_modifier_release_ends_the_hold_even_while_windows_still_reports_the_modifier_down() {
-        let mut hook = HoldHook::new(HoldKey::default());
+        let mut hook = HoldHook::new(HoldKey::alt_z());
         let alt = |vk| vk == ALT;
         let _ = hook.on_event(event(ALT, true), alt);
         let _ = hook.on_event(event(Z, true), alt);
@@ -1044,7 +1069,7 @@ mod tests {
 
     #[test]
     fn a_modifier_release_lost_while_the_key_is_up_still_ends_the_hold_on_the_next_event() {
-        let mut hook = HoldHook::new(HoldKey::default());
+        let mut hook = HoldHook::new(HoldKey::alt_z());
         let alt = |vk| vk == ALT;
         assert_eq!(hook.on_event(event(ALT, true), alt), PASS);
         assert_eq!(
@@ -1062,7 +1087,7 @@ mod tests {
     #[test]
     fn a_modifier_release_the_hook_never_saw_does_not_keep_the_hold_key_from_working() {
         // Win+L: the lock screen takes Win's release, so the hook only saw it go down.
-        let mut hook = HoldHook::new(HoldKey::default());
+        let mut hook = HoldHook::new(HoldKey::alt_z());
         assert_eq!(hook.on_event(event(WIN, true), |vk| vk == WIN), PASS);
         let keyboard = |vk| vk == ALT;
         assert_eq!(hook.on_event(event(ALT, true), keyboard), PASS);
@@ -1071,7 +1096,7 @@ mod tests {
             decision(Verdict::Swallow, Some(true))
         );
         // A modifier the keyboard really holds still spoils the chord.
-        let mut hook = HoldHook::new(HoldKey::default());
+        let mut hook = HoldHook::new(HoldKey::alt_z());
         let with_win = |vk| vk == WIN || vk == ALT;
         assert_eq!(hook.on_event(event(ALT, true), with_win), PASS);
         assert_eq!(hook.on_event(event(Z, true), with_win), PASS);
@@ -1183,8 +1208,8 @@ mod tests {
     #[test]
     fn two_keys_are_two_holds_and_the_strongest_verdict_wins() {
         let mut hooks = HoldHooks::new(vec![
-            (HoldKind::Dictate, HoldKey::default()),
-            (HoldKind::Write, HoldKey::write_default()),
+            (HoldKind::Dictate, HoldKey::alt_z()),
+            (HoldKind::Write, HoldKey::alt_x()),
         ]);
         let with_alt = |vk| vk == ALT;
         let step = |hooks: &mut HoldHooks, vk, down, keyboard: &dyn Fn(u16) -> bool| {

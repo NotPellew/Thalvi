@@ -798,13 +798,19 @@ mod tests {
                 self.saves.save_form(
                     |_| Ok(((), Some(settings))),
                     paused,
-                    |config| {
+                    |_, config, write| {
+                        write()?;
                         self.saves.set(config);
+                        Ok(())
                     },
                 )?;
             }
             self.saves
-                .save_form(form, paused, |config| self.saves.set(config))
+                .save_form(form, paused, |_, config, write| {
+                    write()?;
+                    self.saves.set(config);
+                    Ok(())
+                })
                 .map(|(value, _)| value)
         }
 
@@ -1040,7 +1046,7 @@ mod tests {
             shown["settings"]["writing"]["openings"],
             json!([rule("write me an email", "Email.")])
         );
-        assert_eq!(rig.fake.store.load().unwrap(), rig.fake.config());
+        assert_eq!(rig.fake.saves.store.load().unwrap(), rig.fake.config());
 
         rig.set(json!({"writing": {"openings": []}}));
         let shown = rig.ask(&Request::SettingsGet);

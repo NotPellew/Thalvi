@@ -32,6 +32,7 @@ exclude_re = [
     "impl Running for Live",
     "watch_hold_keys",
     "overlay_takes_clicks",
+    "on_menu",
     "replace save_settings ->",
     # Tauri commands that only pass AppState to SpeechDevices, ModelStore and Download, which the tests above them cover.
     # The count of intra-op threads changes speed, not output.
@@ -42,4 +43,6 @@ exclude_re = [
     "Runner::(start|rebuild|load_speech_model)",
     "crates/thalvi-app/src/(app|commands).rs.*replace (start|list_speech_models|speech_device|download_speech_model) ->",
     "get_hold_key_unavailable",
+    # Reads the process environment, which a test cannot set (unsafe_code is denied); the socket path it joins is tested through Events::connect.
+    "delete ! in Events::system",
 ]

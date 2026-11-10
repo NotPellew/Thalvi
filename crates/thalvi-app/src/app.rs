@@ -72,13 +72,18 @@ impl SyncedConfig {
 
     /// Builds a settings form from the config read under the save lock, then validates, writes and
     /// applies it, all under that lock. `form` returns the value to hand back and the form to save,
-    /// or `None` to save nothing. `apply` installs the config in the running app, as
-    /// `AppState::apply` does.
+    /// or `None` to save nothing. `take_effect` gets the config in use, the validated one and
+    /// `write`, which replaces the file; it writes before it installs the config in the running
+    /// app, as `AppState::take_effect` does, and an error from it before writing leaves the file.
     pub(crate) fn save_form<T>(
         &self,
         form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
         paused: bool,
-        apply: impl FnOnce(&DesktopConfig),
+        take_effect: impl FnOnce(
+            &DesktopConfig,
+            &DesktopConfig,
+            &dyn Fn() -> Result<(), String>,
+        ) -> Result<(), String>,
     ) -> Result<(T, Option<(DesktopConfig, bool)>), String> {
         let _save = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         let current = self.config();
@@ -87,9 +92,9 @@ impl SyncedConfig {
             return Ok((value, None));
         };
         ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
-        let config = self.store.save(settings, &current)?;
+        let config = Store::check(settings, &current)?;
+        take_effect(&current, &config, &|| self.store.write(&config))?;
         let look_changed = config.look != current.look;
-        apply(&config);
         Ok((value, Some((config, look_changed))))
     }
 
@@ -152,7 +157,10 @@ impl AppState {
             Arc::clone(&drafts),
             Arc::clone(&speech_devices),
         )?;
-        let held = watch_hold_keys(&config, &link);
+        let mut held = watch_hold_keys(&config, &link, false);
+        if let Some(notice) = held.refusal.take() {
+            link.send(Control::HoldKeyFailed(notice));
+        }
         let state = Self {
             link,
             saves: SyncedConfig::new(store, config.clone()),
@@ -190,9 +198,34 @@ impl AppState {
         form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
     ) -> Result<(T, Option<(DesktopConfig, bool)>), String> {
         self.saves
-            .save_form(form, self.link.audio().paused, |config| {
-                self.apply(config);
+            .save_form(form, self.link.audio().paused, |current, config, write| {
+                self.take_effect(current, config, write)
             })
+    }
+
+    /// Writes `config` and takes it into effect. Changed hold keys are watched before the file is
+    /// written, so a desktop that refuses them leaves the old keys in use and the file as it was.
+    fn take_effect(
+        &self,
+        current: &DesktopConfig,
+        config: &DesktopConfig,
+        write: &dyn Fn() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let keys_changed =
+            (&current.hold_key, &current.write_key) != (&config.hold_key, &config.write_key);
+        let mut watch = self
+            .hold_watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        save_keys(
+            &mut watch,
+            keys_changed,
+            |keeping| watch_hold_keys(config, &self.link, keeping),
+            write,
+        )?;
+        drop(watch);
+        self.apply(config);
+        Ok(())
     }
 
     /// Why this desktop offers no hold key; `None` where it does.
@@ -276,25 +309,10 @@ impl AppState {
     }
 
     /// Takes `config` into effect: the engine applies it between captures.
-    pub fn apply(&self, config: &DesktopConfig) {
+    fn apply(&self, config: &DesktopConfig) {
         self.overlay_shown
             .store(config.overlay.show, Ordering::SeqCst);
-        let key_changed = {
-            let current = self.saves.config();
-            let changed =
-                (&current.hold_key, &current.write_key) != (&config.hold_key, &config.write_key);
-            self.saves.set(config);
-            changed
-        };
-        if key_changed {
-            let mut watch = self
-                .hold_watch
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            // The old hook goes before the new one comes.
-            *watch = None;
-            *watch = watch_hold_keys(config, &self.link).watch;
-        }
+        self.saves.set(config);
         self.link.send(Control::Apply(Box::new(config.clone())));
     }
 }
@@ -305,50 +323,81 @@ struct Held {
     watch: Option<HoldWatch>,
     /// Why this desktop offers no hold key, for Settings.
     unavailable: Option<&'static str>,
+    /// What the user is told when the desktop refused the keys.
+    refusal: Option<String>,
+}
+
+/// Starts watching the changed keys before `write` saves them, so that a desktop that refuses
+/// them leaves the old keys in use and the file as it was; `start` is told whether there is a
+/// watch to keep. Unchanged keys keep their watch.
+fn save_keys<T>(
+    previous: &mut Option<HoldWatch>,
+    keys_changed: bool,
+    start: impl FnOnce(bool) -> Held,
+    write: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let next = if keys_changed {
+        let next = start(previous.is_some());
+        if let Some(refusal) = next.refusal {
+            return Err(refusal);
+        }
+        Some(next.watch)
+    } else {
+        None
+    };
+    let saved = write()?;
+    if let Some(watch) = next {
+        *previous = watch;
+    }
+    Ok(saved)
 }
 
 /// Starts reporting the hold and write keys to the engine where the desktop lets the app see
-/// them. Where binds report them instead, that is only logged; where the desktop offers no hold
-/// key, Settings says so and nothing looks like an error; where the desktop refuses, the user is
-/// told through the status, and the rest of the app goes on.
-fn watch_hold_keys(config: &DesktopConfig, link: &EngineLink) -> Held {
+/// them, by a hook or binds of its own. Where the desktop offers no hold key, Settings says so and
+/// nothing looks like an error; where the desktop refuses, the refusal says so in plain words, and
+/// the rest of the app goes on. `keeping` says that the keys in use stay when the desktop refuses.
+fn watch_hold_keys(config: &DesktopConfig, link: &EngineLink, keeping: bool) -> Held {
     let input = link.hold_input();
     let keys = [
         (HoldKind::Dictate, config.hold_key.clone()),
         (HoldKind::Write, config.write_key.clone()),
     ];
     held(
-        Desktop::watch_hold_keys(&keys, move |kind, down| match kind {
-            HoldKind::Dictate => input.set(down),
-            HoldKind::Write => input.set_write(down),
-        }),
-        |notice| link.send(Control::HoldKeyFailed(notice)),
+        Desktop::watch_hold_keys(
+            &keys,
+            move |kind, down| match kind {
+                HoldKind::Dictate => input.set(down),
+                HoldKind::Write => input.set_write(down),
+            },
+            link.hold_problems(),
+        ),
+        keeping,
     )
 }
 
-fn held(source: Result<HoldSource, HostError>, tell_failure: impl FnOnce(String)) -> Held {
+fn held(source: Result<HoldSource, HostError>, keeping: bool) -> Held {
     match source {
-        Ok(HoldSource::Hook(watch)) => Held {
+        Ok(HoldSource::Watching(watch)) => Held {
             watch: Some(watch),
-            unavailable: None,
+            ..Held::default()
         },
-        Ok(HoldSource::Binds(reason)) => {
-            println!("{reason}");
-            Held::default()
-        }
         Ok(HoldSource::Unavailable(reason)) => {
             println!("{reason}");
             Held {
-                watch: None,
                 unavailable: Some(reason),
+                ..Held::default()
             }
         }
-        Err(error) => {
-            tell_failure(format!(
-                "{error} Dictating by holding a key does not work until Thalvi is restarted or another key is set; the wake word still works."
-            ));
-            Held::default()
-        }
+        Err(error) => Held {
+            refusal: Some(if keeping {
+                format!("{error} The keys that were set before still work.")
+            } else {
+                format!(
+                    "{error} Dictating by holding a key does not work until Thalvi is restarted or another key is set; the wake word still works."
+                )
+            }),
+            ..Held::default()
+        },
     }
 }
 
@@ -745,6 +794,14 @@ pub fn on_menu(app: &AppHandle, id: &str) {
                         .unwrap_or_else(PoisonError::into_inner)
                         .take(),
                 );
+                // Exiting never drops managed state, and Hyprland keeps binds the app added.
+                drop(
+                    state
+                        .hold_watch
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take(),
+                );
                 state.link.quit();
                 app.exit(0);
             });
@@ -805,12 +862,14 @@ mod tests {
                         .save_form(
                             |_| Ok(((), Some(settings))),
                             true,
-                            move |config| {
+                            move |_, config, write| {
+                                write()?;
                                 synced.set(config);
                                 applied
                                     .lock()
                                     .unwrap_or_else(PoisonError::into_inner)
                                     .push(config.clone());
+                                Ok(())
                             },
                         )
                         .unwrap();
@@ -833,7 +892,7 @@ mod tests {
                     let mut settings = crate::settings::settings_json(&saves.config()).unwrap();
                     settings["ending_pause"] = serde_json::json!({"paste": 9});
                     let error = saves
-                        .save_form(|_| Ok(((), Some(settings))), true, |_| {})
+                        .save_form(|_| Ok(((), Some(settings))), true, |_, _, write| write())
                         .unwrap_err();
                     assert_eq!(
                         error,
@@ -883,7 +942,15 @@ mod tests {
         let mut applied = false;
 
         let form = saves
-            .save_form(|_| Ok(((), Some(settings))), true, |_| applied = true)
+            .save_form(
+                |_| Ok(((), Some(settings))),
+                true,
+                |_, _, write| {
+                    write()?;
+                    applied = true;
+                    Ok(())
+                },
+            )
             .unwrap_err();
         let switch = saves
             .remember(|c| c.start_at_login = !start.start_at_login)
@@ -906,6 +973,32 @@ mod tests {
     }
 
     #[test]
+    fn a_change_refused_before_writing_leaves_the_file_and_the_running_config() {
+        let dir = std::env::temp_dir().join(format!("thalvi-app-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("desktop.json");
+        let start = DesktopConfig::from_json_str("{}").unwrap();
+        let saves = SyncedConfig::new(Store::new(Some(path.clone())).unwrap(), start.clone());
+        let mut settings = crate::settings::settings_json(&start).unwrap();
+        settings["hold_key"] = serde_json::json!("F7");
+
+        let error = saves
+            .save_form(
+                |_| Ok(((), Some(settings))),
+                true,
+                |_, _, _| Err("F7 is already bound in Hyprland.".to_owned()),
+            )
+            .unwrap_err();
+        let written = path.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(error, "F7 is already bound in Hyprland.");
+        assert!(!written, "nothing is written");
+        assert_eq!(saves.config(), start, "the running config is unchanged");
+    }
+
+    #[test]
     fn a_save_says_whether_the_look_changed() {
         let dir = std::env::temp_dir().join(format!("thalvi-app-look-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -922,8 +1015,10 @@ mod tests {
                 .save_form(
                     |_| Ok(((), Some(settings))),
                     true,
-                    |config| {
+                    |_, config, write| {
+                        write()?;
                         saves.set(config);
+                        Ok(())
                     },
                 )
                 .unwrap();
@@ -938,38 +1033,128 @@ mod tests {
     }
 
     #[test]
-    fn only_a_refused_hold_key_is_told_as_a_failure() {
-        // (what the desktop said, failure told, watching, why unavailable)
+    fn only_a_refused_hold_key_is_told_as_a_refusal() {
+        const RESTART: &str = "Hook refused. Dictating by holding a key does not work until Thalvi is restarted or another key is set; the wake word still works.";
+        // (what the desktop said, whether keys are in use, refusal told, watching, why unavailable)
         type Case = (
             Result<HoldSource, HostError>,
+            bool,
             Option<&'static str>,
             bool,
             Option<&'static str>,
         );
+        let refused = || Err(HostError::Unsupported("Hook refused.".to_owned()));
         let cases: Vec<Case> = vec![
-            (Ok(HoldSource::Hook(HoldWatch::new(()))), None, true, None),
-            (Ok(HoldSource::Binds("In the config.")), None, false, None),
+            (
+                Ok(HoldSource::Watching(HoldWatch::new(()))),
+                false,
+                None,
+                true,
+                None,
+            ),
             (
                 Ok(HoldSource::Unavailable("No release events.")),
+                false,
                 None,
                 false,
                 Some("No release events."),
             ),
+            (refused(), false, Some(RESTART), false, None),
             (
-                Err(HostError::Unsupported("Hook refused.".to_owned())),
-                Some(
-                    "Hook refused. Dictating by holding a key does not work until Thalvi is restarted or another key is set; the wake word still works.",
-                ),
+                refused(),
+                true,
+                Some("Hook refused. The keys that were set before still work."),
                 false,
                 None,
             ),
         ];
-        for (source, told, watching, unavailable) in cases {
-            let mut failure = None;
-            let held = held(source, |notice| failure = Some(notice));
-            assert_eq!(failure.as_deref(), told);
+        for (source, keeping, told, watching, unavailable) in cases {
+            let held = held(source, keeping);
+            assert_eq!(held.refusal.as_deref(), told);
             assert_eq!(held.watch.is_some(), watching);
             assert_eq!(held.unavailable, unavailable);
+        }
+    }
+
+    /// A watch that logs its name when it is dropped.
+    struct Named(Arc<Mutex<Vec<&'static str>>>, &'static str);
+
+    impl Drop for Named {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push(self.1);
+        }
+    }
+
+    #[test]
+    fn a_refused_key_change_is_not_saved_and_an_accepted_one_is_saved_with_its_watch() {
+        // (keys changed, refusal, write fails, result, writes, watches started, dropped in the end)
+        type Case = (
+            bool,
+            Option<&'static str>,
+            bool,
+            Result<(), &'static str>,
+            usize,
+            usize,
+            &'static [&'static str],
+        );
+        let cases: [Case; 4] = [
+            (
+                true,
+                Some("Hyprland refused F7."),
+                false,
+                Err("Hyprland refused F7."),
+                0,
+                1,
+                &["old"],
+            ),
+            (true, None, false, Ok(()), 1, 1, &["old", "new"]),
+            (false, None, false, Ok(()), 1, 0, &["old"]),
+            (
+                true,
+                None,
+                true,
+                Err("The settings could not be saved."),
+                1,
+                1,
+                &["new", "old"],
+            ),
+        ];
+        for (changed, refusal, write_fails, expected, writes, starts, dropped) in cases {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let mut watch = Some(HoldWatch::new(Named(Arc::clone(&log), "old")));
+            let (mut started, mut written) = (0, 0);
+
+            let result = save_keys(
+                &mut watch,
+                changed,
+                |keeping| {
+                    assert!(keeping, "the old watch is in place when the new starts");
+                    assert!(log.lock().unwrap().is_empty(), "the old go only after");
+                    started += 1;
+                    Held {
+                        watch: refusal
+                            .is_none()
+                            .then(|| HoldWatch::new(Named(Arc::clone(&log), "new"))),
+                        refusal: refusal.map(str::to_owned),
+                        ..Held::default()
+                    }
+                },
+                || {
+                    written += 1;
+                    if write_fails {
+                        Err("The settings could not be saved.".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+
+            let case = format!("{changed} {refusal:?} {write_fails}");
+            assert_eq!(result, expected.map_err(str::to_owned), "{case}");
+            assert_eq!((written, started), (writes, starts), "{case}");
+            assert!(watch.is_some(), "{case}");
+            drop(watch);
+            assert_eq!(*log.lock().unwrap(), dropped, "{case}");
         }
     }
 }
