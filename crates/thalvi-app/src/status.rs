@@ -48,6 +48,10 @@ pub enum Status {
         target: Option<String>,
         text: String,
     },
+    /// The writing model is reasoning and has written no text yet.
+    Thinking {
+        target: Option<String>,
+    },
     /// A second transcription or the delivery is running.
     Working {
         target: Option<String>,
@@ -274,6 +278,7 @@ impl View {
                     target,
                     text: text.clone(),
                 },
+                EngineState::Thinking => Status::Thinking { target },
             },
         }
     }
@@ -383,6 +388,12 @@ mod tests {
                 Status::Writing {
                     target: Some(kitty()),
                     text: "Hello, ".to_owned(),
+                },
+            ),
+            (
+                EngineState::Thinking,
+                Status::Thinking {
+                    target: Some(kitty()),
                 },
             ),
             (

@@ -40,9 +40,10 @@ impl Icon {
             Status::Listening | Status::Done { .. } => Self::Listening,
             Status::Starting { .. } | Status::Capturing { .. } => Self::Capturing,
             Status::Pending { .. } => Self::Pending,
-            Status::Working { .. } | Status::Writing { .. } | Status::Loading { .. } => {
-                Self::Working
-            }
+            Status::Working { .. }
+            | Status::Writing { .. }
+            | Status::Thinking { .. }
+            | Status::Loading { .. } => Self::Working,
             Status::Failed { .. } => Self::Error,
         }
     }
@@ -148,6 +149,7 @@ pub fn title(status: &Status) -> String {
         ),
         Status::Working { .. } => "working".to_owned(),
         Status::Writing { .. } => "writing".to_owned(),
+        Status::Thinking { .. } => "thinking".to_owned(),
         Status::Loading { .. } => "starting".to_owned(),
         Status::Failed { .. } => "something went wrong".to_owned(),
     };
@@ -173,6 +175,7 @@ pub fn can_cancel(status: &Status) -> bool {
             | Status::Capturing { .. }
             | Status::Pending { .. }
             | Status::Writing { .. }
+            | Status::Thinking { .. }
             | Status::Working {
                 cancellable: true,
                 ..
@@ -358,6 +361,11 @@ mod tests {
                 "Thalvi: writing",
             ),
             (
+                Status::Thinking { target: None },
+                Icon::Working,
+                "Thalvi: thinking",
+            ),
+            (
                 Status::Working {
                     target: Some(kitty()),
                     route: CaptureRoute::Task,
@@ -477,6 +485,12 @@ mod tests {
                 Status::Writing {
                     target: Some(kitty()),
                     text: String::new(),
+                },
+                true,
+            ),
+            (
+                Status::Thinking {
+                    target: Some(kitty()),
                 },
                 true,
             ),

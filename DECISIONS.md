@@ -149,10 +149,10 @@ areas your change touches. Editing rules are in
 - **Hold to talk.** Holding a key dictates and releasing pastes: F9 without a modifier on Hyprland (binds Thalvi adds at runtime with its own executable through `hyprctl`, removed on quit and re-added on `configreloaded`), Alt+KeyZ on Windows (a swallowing keyboard hook that waits for the
   key and Alt both up); a second key, `write_key` (F10, Alt+KeyX), releases into the writing model instead; every word of a hold is text, and only `cancel` abandons one. Each desktop supplies its default keys, and `hold_key` and `write_key` are stored only when they differ. Why: Hyprland 0.53.3 types held modifiers into the paste and drops the release when one comes up first, seen live, and drops a plain `bindr` when another key is pressed or a modifier is down during the hold, so the release is `bindrti`; `RegisterHotKey` sees no release; the key already ends a dictation, and spoken endings cut off sentences that held them; binds in the user's config go stale when the executable moves.
   Rejected: Alt+Y with binds, Ctrl+Z/Y, spoken endings during a hold, a managed `thalvi-binds.conf` the user sources, hand-written binds.
-- **Writing is one direct chat call, words only.** "write that out" or the write key sends the
-  recognized words to an OpenAI-compatible endpoint from Settings and pastes what streams back, line breaks included; no
-  context, no Enter, 15 s at most; any failure pastes nothing and puts the words on the clipboard. Why: dictation then needs
-  no server, and text the user did not say is never sent unread. Rejected: the Thalvi server, app-aware tone, write-and-send.
+- **Writing is one direct chat call, words only.** "write that out" or the write key sends the recognized words to an
+  OpenAI-compatible endpoint from Settings and pastes what streams back, line breaks included; no context, no Enter, 15 s at most;
+  reasoning shows as thinking, never pasted, and the request says nothing about thinking; any failure pastes nothing and puts the words
+  on the clipboard. Why: no server needed, unsaid text never sent unread, strict endpoints refuse unknown fields. Rejected: the Thalvi server, app-aware tone, write-and-send, sending `enable_thinking`.
 - **The writing prompt is a stored override of one built-in default.** `writing.prompt` is the system message; it is
   saved only when it differs from the default, and a blank one is refused where the config loads. Why: users who never
   edited it get a better default later, and Settings, the agent surface and the file share one check. Rejected:

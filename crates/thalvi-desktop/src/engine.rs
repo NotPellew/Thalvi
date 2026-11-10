@@ -41,7 +41,7 @@ use crate::spotter::KeywordSpotter;
 use crate::vad::VadDetector;
 use crate::wake::{WakeEngine, WakeError, WakeEvent, WakeFrame};
 use crate::wake_stats::{Latency, LatencySummary, NearMisses};
-use crate::writing::{self, Writing, WritingError};
+use crate::writing::{self, Piece, Writing, WritingError};
 
 /// How long the recognizer and the wake cue have to be ready before the capture is abandoned.
 const READY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -213,6 +213,8 @@ pub enum EngineState {
     Writing {
         text: String,
     },
+    /// The writing model is reasoning and has written no text yet.
+    Thinking,
 }
 
 /// Why a capture failed; `Display` is the plain notice for the user.
@@ -759,6 +761,23 @@ enum Bounded<T> {
     Cancelled,
     TimedOut,
     Done(T),
+}
+
+/// When a writing call's first reasoning and first text arrived, counted from its start.
+#[derive(Clone, Copy, Default)]
+struct FirstPieces {
+    reasoning: Option<Duration>,
+    text: Option<Duration>,
+}
+
+impl FirstPieces {
+    /// A timeout while the model had only reasoned is the model still thinking.
+    fn explain(self, error: WritingError) -> WritingError {
+        match (error, self.reasoning, self.text) {
+            (WritingError::Timeout, Some(_), None) => WritingError::StillThinking,
+            _ => error,
+        }
+    }
 }
 
 impl<T> Bounded<Result<T, WritingError>> {
@@ -2258,14 +2277,14 @@ where
             });
         }
         let Some(settings) = self.writing.clone() else {
-            return self.not_written(&words, Some(WritingError::NotSetUp), None, None);
+            return self.not_written(&words, Some(WritingError::NotSetUp), None);
         };
         self.set_state(EngineState::Writing {
             text: String::new(),
         });
         let started = Instant::now();
         let deadline = started + writing::LIMIT;
-        let mut first = None;
+        let mut first = FirstPieces::default();
         let mut text = String::new();
         let mut reply = match bounded(
             &mut self.cancel,
@@ -2276,25 +2295,34 @@ where
         .finish()
         {
             Ok(reply) => reply,
-            Err(stop) => return self.not_written(&words, stop, Some(started), first),
+            Err(stop) => return self.not_written(&words, stop, Some((started, first))),
         };
         loop {
             match bounded(&mut self.cancel, deadline, reply.next())
                 .await
                 .finish()
             {
-                Ok(Some(piece)) => {
-                    first.get_or_insert_with(|| started.elapsed());
+                Ok(Some(Piece::Thinking)) => {
+                    if first.text.is_none() {
+                        self.set_state(EngineState::Thinking);
+                    }
+                    first.reasoning.get_or_insert_with(|| started.elapsed());
+                }
+                Ok(Some(Piece::Text(piece))) => {
+                    first.text.get_or_insert_with(|| started.elapsed());
                     text.push_str(&piece);
                     self.set_state(EngineState::Writing { text: text.clone() });
                 }
                 Ok(None) => break,
-                Err(stop) => return self.not_written(&words, stop, Some(started), first),
+                Err(stop) => {
+                    let stop = stop.map(|error| first.explain(error));
+                    return self.not_written(&words, stop, Some((started, first)));
+                }
             }
         }
         let written = text.trim();
         if written.is_empty() {
-            return self.not_written(&words, Some(WritingError::Empty), Some(started), first);
+            return self.not_written(&words, Some(WritingError::Empty), Some((started, first)));
         }
         self.writing_metric("ok", started, first);
         CaptureOutcome::Accepted(CaptureRequest {
@@ -2303,7 +2331,7 @@ where
         })
     }
 
-    fn writing_metric(&self, outcome: &str, started: Instant, first: Option<Duration>) {
+    fn writing_metric(&self, outcome: &str, started: Instant, first: FirstPieces) {
         let Some(settings) = &self.writing else {
             return;
         };
@@ -2311,21 +2339,25 @@ where
             Event::Writing,
             outcome,
             Some(started.elapsed()),
-            json!({"model": settings.model(), "first_token_ms": first.map(millis)}),
+            json!({
+                "model": settings.model(),
+                "first_token_ms": first.text.map(millis),
+                "first_reasoning_ms": first.reasoning.map(millis),
+            }),
         );
     }
 
     /// The outcome of a writing call that gave no text: `error`, or a cancel when `None`.
+    /// `call` is when the call started and what had arrived, `None` when none was made.
     fn not_written(
         &self,
         words: &str,
         error: Option<WritingError>,
-        started: Option<Instant>,
-        first: Option<Duration>,
+        call: Option<(Instant, FirstPieces)>,
     ) -> CaptureOutcome {
         let outcome = error.map_or("cancelled", WritingError::kind);
-        match started {
-            Some(started) => self.writing_metric(outcome, started, first),
+        match call {
+            Some((started, first)) => self.writing_metric(outcome, started, first),
             None => self
                 .recorder
                 .metric(Event::Writing, outcome, None, Value::Null),

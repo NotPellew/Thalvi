@@ -5094,8 +5094,44 @@ impl ChatFeed {
             .unwrap();
     }
 
+    /// Streams reasoning, the way llama.cpp sends it.
+    fn thinking(&self, piece: &str) {
+        let event = json!({"choices": [{"delta": {"reasoning_content": piece}}]});
+        self.0
+            .send(format!("data: {event}\n\n").into_bytes())
+            .unwrap();
+    }
+
     fn finish(self) {
         self.0.send(b"data: [DONE]\n\n".to_vec()).unwrap();
+    }
+}
+
+/// What the fake endpoint streams before the test stops feeding it.
+#[derive(Clone, Copy, Debug)]
+enum Streamed {
+    Nothing,
+    Thinking,
+    Text,
+}
+
+impl Streamed {
+    /// Feeds it, unless nothing, and waits until the engine shows it.
+    async fn feed(self, feed: &ChatFeed, rig: &Rig) {
+        match self {
+            Self::Nothing => {}
+            Self::Thinking => {
+                feed.thinking("Anna is late, so");
+                rig.state_is(EngineState::Thinking).await;
+            }
+            Self::Text => {
+                feed.text("Hi Anna, I am");
+                rig.state_is(EngineState::Writing {
+                    text: "Hi Anna, I am".to_owned(),
+                })
+                .await;
+            }
+        }
     }
 }
 
@@ -5269,7 +5305,7 @@ fn writing_failed(error: WritingError, words: &str) -> CaptureOutcome {
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_written_text_streams_into_the_state_and_is_pasted_when_the_stream_ends() {
+async fn the_written_text_streams_into_the_state_after_any_thinking_and_only_it_is_pasted() {
     LocalSet::new()
         .run_until(async {
             for ask in [Ask::Ending, Ask::Key] {
@@ -5282,6 +5318,9 @@ async fn the_written_text_streams_into_the_state_and_is_pasted_when_the_stream_e
                     text: text.to_owned(),
                 };
                 rig.state_is(writing("")).await;
+                feed.thinking("Anna is late, so");
+                rig.state_is(EngineState::Thinking).await;
+                feed.thinking(" an apology.");
                 feed.text("Hi Anna,");
                 rig.state_is(writing("Hi Anna,")).await;
                 feed.text(" I'm late, sorry.\n");
@@ -5547,31 +5586,41 @@ async fn the_user_is_told_in_plain_words_where_to_set_up_writing() {
 async fn writing_that_takes_longer_than_fifteen_seconds_pastes_none_of_what_arrived() {
     LocalSet::new()
         .run_until(async {
-            for (name, stream_first) in [("no reply at all", false), ("a reply that stops", true)] {
-                let reply = if stream_first {
-                    Chat::Live
-                } else {
-                    Chat::Stall
-                };
+            // (name, the reply, what it streams first, the reason given)
+            let cases = [
+                (
+                    "no reply at all",
+                    Chat::Stall,
+                    Streamed::Nothing,
+                    WritingError::Timeout,
+                ),
+                (
+                    "a reply that stops",
+                    Chat::Live,
+                    Streamed::Text,
+                    WritingError::Timeout,
+                ),
+                (
+                    "a model still thinking",
+                    Chat::Live,
+                    Streamed::Thinking,
+                    WritingError::StillThinking,
+                ),
+            ];
+            for (name, reply, streamed, reason) in cases {
                 let (url, mut asked, feed) = chat(reply).await;
                 let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
                 let task = capture_task(engine, frames);
                 Ask::Ending.say(&mut rig, WORDS).await;
                 request(&mut asked).await;
                 let began = rig.now();
-                if stream_first {
-                    feed.text("Hi Anna");
-                    rig.state_is(EngineState::Writing {
-                        text: "Hi Anna".to_owned(),
-                    })
-                    .await;
-                }
+                streamed.feed(&feed, &rig).await;
                 rig.at(began + 14_999).await;
                 assert!(!task.is_finished(), "{name}: still within the 15 s");
                 rig.at(began + 15_000).await;
                 assert_eq!(
                     finished(task).await,
-                    writing_failed(WritingError::Timeout, WORDS),
+                    writing_failed(reason, WORDS),
                     "{name}"
                 );
                 assert_eq!(rig.state(), EngineState::Listening, "{name}");
@@ -5585,21 +5634,18 @@ async fn cancelling_before_the_paste_drops_the_written_text() {
     LocalSet::new()
         .run_until(async {
             for ask in [Ask::Ending, Ask::Key] {
-                for streaming in [false, true] {
-                    let label = format!("{ask:?}, streaming {streaming}");
-                    let (url, mut asked, feed) =
-                        chat(if streaming { Chat::Live } else { Chat::Stall }).await;
+                for streamed in [Streamed::Nothing, Streamed::Thinking, Streamed::Text] {
+                    let label = format!("{ask:?}, {streamed:?}");
+                    let reply = match streamed {
+                        Streamed::Nothing => Chat::Stall,
+                        Streamed::Thinking | Streamed::Text => Chat::Live,
+                    };
+                    let (url, mut asked, feed) = chat(reply).await;
                     let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
                     let task = ask.start(engine, frames);
                     ask.say(&mut rig, WORDS).await;
                     request(&mut asked).await;
-                    if streaming {
-                        feed.text("Hi Anna, I am");
-                        rig.state_is(EngineState::Writing {
-                            text: "Hi Anna, I am".to_owned(),
-                        })
-                        .await;
-                    }
+                    streamed.feed(&feed, &rig).await;
                     rig.handle.cancel();
                     assert_eq!(
                         finished(task).await,
@@ -5617,7 +5663,8 @@ async fn cancelling_before_the_paste_drops_the_written_text() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn each_writing_call_records_its_time_to_first_text_total_time_and_outcome() {
+async fn each_writing_call_records_its_times_to_first_reasoning_and_first_text_total_time_and_outcome()
+ {
     LocalSet::new()
         .run_until(async {
             let all = RecordKinds {
@@ -5625,7 +5672,7 @@ async fn each_writing_call_records_its_time_to_first_text_total_time_and_outcome
                 text: false,
                 audio: false,
             };
-            // (the reply, the outcome recorded, whether a first text arrived)
+            // (the reply, the outcome recorded, whether reasoning and then text arrived)
             let cases = [
                 (Some(Chat::Live), "ok", true),
                 (Some(Chat::Status(503)), "status", false),
@@ -5648,6 +5695,9 @@ async fn each_writing_call_records_its_time_to_first_text_total_time_and_outcome
                 let task = capture_task(engine, frames);
                 Ask::Ending.say(&mut rig, WORDS).await;
                 if let Some(feed) = feed.filter(|_| first) {
+                    feed.thinking("Anna is late");
+                    rig.state_is(EngineState::Thinking).await;
+                    rig.at(rig.now() + 200).await;
                     feed.text("Hi Anna.");
                     rig.state_is(EngineState::Writing {
                         text: "Hi Anna.".to_owned(),
@@ -5670,16 +5720,21 @@ async fn each_writing_call_records_its_time_to_first_text_total_time_and_outcome
                     continue;
                 }
                 assert_eq!(call["model"], "m", "{call}");
-                assert_eq!(call["first_token_ms"].is_f64(), first, "{call}");
-                if first {
-                    let total = call["duration_ms"].as_f64().unwrap();
-                    assert!(
-                        (call["first_token_ms"].as_f64().unwrap() - 0.0).abs() < 50.0,
-                        "{call}"
-                    );
-                    assert!((total - 400.0).abs() < 50.0, "{call}");
+                for field in ["first_reasoning_ms", "first_token_ms"] {
+                    assert_eq!(call[field].is_f64(), first, "{field}: {call}");
                 }
-                for words in [WORDS, "Hi Anna"] {
+                if first {
+                    let near = |field: &str, ms: f64| {
+                        assert!(
+                            (call[field].as_f64().unwrap() - ms).abs() < 50.0,
+                            "{field}: {call}"
+                        );
+                    };
+                    near("first_reasoning_ms", 0.0);
+                    near("first_token_ms", 200.0);
+                    near("duration_ms", 600.0);
+                }
+                for words in [WORDS, "Hi Anna", "Anna is late"] {
                     assert!(
                         !call.to_string().contains(words),
                         "{call}: no text in metrics"

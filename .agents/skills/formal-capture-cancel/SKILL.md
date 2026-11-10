@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `c6fceb90fa4e97d5bdae2e14641d63cd5e9b2f60`. The recorded file hashes
+Sync commit: `15d0fc7b2e8a532f8b5e14940fe2c3c7e127a4a5`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -75,6 +75,11 @@ The on-device model's load now reports the steps it takes and a download's perce
 load through `load_showing`, a select over the load and the recognizer's step channel, and `Publisher`
 shows each step as the loading notice). No mapped function changed, so only the `runner.rs` hash moved.
 `Engine::reconcile` now returns after the earliest agreeing ticked entry, keeping later requests as recorded-only tasks. Its cancellation-first select still fences acceptance; these later tasks do not feed the capture outcome. The recognizer change only extends its test fake; the mapped session and close remain unchanged.
+The Hyprland runtime binds (#337) add `EngineLink::hold_problems`, another sender of the existing
+`Control::HoldKeyFailed`, which `Requests::take` already treats as no ending. A reasoning writing model (#348) adds
+a `Piece::Thinking` arm to `Engine::write` that only sets the Thinking state and records a time, and relabels a
+timeout after reasoning as `WritingError::StillThinking`, still a Failed result; every await is the same `bounded`
+cancel-first call, so the model is unchanged and only the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

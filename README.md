@@ -481,6 +481,13 @@ If it is not set up, fails, answers with nothing, or takes longer than 15 second
 Thalvi says what happened, and your own words go on the clipboard to paste with
 Ctrl+V.
 
+A model that reasons before it answers, such as Qwen3, shows "Thinking…" until its
+text starts; what it reasons is never shown or pasted. The 15 seconds include the
+thinking, and it often takes longer, so turn thinking off on the model server: for a
+llama.cpp server, start `llama-server` with `--reasoning-budget 0`. Thalvi does not
+ask the model itself, because some endpoints refuse a request with a setting they
+don't know.
+
 **Opening phrases** (`writing.openings`, under the Writing prompt in Settings) give
 a kind of text its own prompt, such as "write me an email" or "write a message".
 When the words you said begin with a phrase, whole words only and ignoring case and
