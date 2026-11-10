@@ -13,6 +13,7 @@ pub mod draft;
 pub mod engine;
 pub mod entries;
 pub mod fbank;
+pub mod feed;
 pub mod frame;
 pub mod history;
 pub mod hold;

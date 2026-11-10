@@ -93,6 +93,11 @@ const WAKE_FLOOR_PEAK: u16 = 1_500;
 pub trait FrameSource {
     /// Waits for the next frame; safe to drop and call again.
     fn next(&mut self) -> impl Future<Output = Result<Queued, AudioError>>;
+
+    /// Whether the frames now come from a file rather than a microphone.
+    fn fed(&self) -> bool {
+        false
+    }
 }
 
 impl FrameSource for Frames {
@@ -1238,6 +1243,7 @@ where
     pub async fn capture(&mut self, frames: &mut impl FrameSource) -> CaptureOutcome {
         self.cancel.borrow_and_update();
         self.set_state(EngineState::StartingCapture);
+        let source = if frames.fed() { "file" } else { "microphone" };
         let started = Instant::now();
         let held = self.held.take();
         self.hold_end = None;
@@ -1278,9 +1284,11 @@ where
         self.level.send_replace(0.0);
         self.set_state(EngineState::Listening);
         let (flow, fields) = match &outcome {
-            CaptureOutcome::Accepted(_) => ("ok", Value::Null),
-            CaptureOutcome::Cancelled { .. } => ("cancelled", Value::Null),
-            CaptureOutcome::Failed { error, .. } => ("failed", json!({"reason": error.kind()})),
+            CaptureOutcome::Accepted(_) => ("ok", json!({"source": source})),
+            CaptureOutcome::Cancelled { .. } => ("cancelled", json!({"source": source})),
+            CaptureOutcome::Failed { error, .. } => {
+                ("failed", json!({"reason": error.kind(), "source": source}))
+            }
         };
         self.recorder
             .metric(Event::CaptureFlow, flow, Some(started.elapsed()), fields);

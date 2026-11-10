@@ -54,6 +54,15 @@ impl Framer {
         }
     }
 
+    /// Ends a stream: a partly built frame is completed with silence and emitted.
+    pub fn flush(&mut self, emit: &mut impl FnMut(&Frame)) {
+        if self.len > 0 {
+            self.frame[self.len..].fill(0);
+            emit(&self.frame);
+        }
+        self.reset();
+    }
+
     /// Drops the partly built frame and the partly averaged sample.
     pub fn reset(&mut self) {
         self.sum = 0.0;
@@ -139,6 +148,20 @@ mod tests {
         assert!(out.iter().all(|&s| s == i16::MAX));
         let out = run(16_000, &vec![-1.5; FRAME_SAMPLES]);
         assert!(out.iter().all(|&s| s == i16::MIN));
+    }
+
+    #[test]
+    fn flush_pads_the_partial_frame_with_silence_and_starts_over() {
+        let mut framer = Framer::new(16_000);
+        let mut out = Vec::new();
+        for _ in 0..10 {
+            framer.push(0.5, &mut |_| unreachable!("no frame is complete"));
+        }
+        framer.flush(&mut |frame| out.push(*frame));
+        framer.flush(&mut |frame| out.push(*frame));
+        assert_eq!(out.len(), 1, "an empty framer flushes nothing");
+        assert_eq!(out[0][..10], [16_384; 10]);
+        assert!(out[0][10..].iter().all(|&s| s == 0));
     }
 
     #[test]
