@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `15d0fc7b2e8a532f8b5e14940fe2c3c7e127a4a5`. The recorded file hashes
+Sync commit: `f7417a792e11c79ccaf1ef6bd7860f183acab2fb`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
