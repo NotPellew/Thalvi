@@ -6246,6 +6246,25 @@ async fn a_spoken_capture_is_recorded_as_coming_from_the_microphone() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_fed_frame_is_lost_while_the_microphone_gate_is_off() {
+    LocalSet::new()
+        .run_until(async {
+            let (rig, _engine, frames) = Rig::new("{}");
+            let (feeder, _feeding) = feeder_for(&rig);
+            let mut fed = feeder.wrap(frames);
+            rig.gate.set_enabled(false);
+            let (feed, mut ended) = Feed::new(clip(3));
+            feeder.start(feed);
+            settle().await;
+            rig.at(300).await;
+            assert_eq!(ended.try_recv(), Ok(FeedEnd::Played));
+            let next = tokio::time::timeout(ms(10), fed.next()).await;
+            assert!(next.is_err(), "nothing reached the engine");
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn cancel_stops_the_feed_and_the_capture_it_started_and_a_second_file_waits_its_turn() {
     LocalSet::new()
         .run_until(async {
@@ -6287,15 +6306,18 @@ async fn cancel_stops_the_feed_and_the_capture_it_started_and_a_second_file_wait
                 Ok(900)
             );
 
-            // Cancelled before any wake, a feed stops just the same, and the next one may start.
+            // Cancelled before any wake, a feed stops just the same, and what it had played unread is gone.
             let (unheard, mut unheard_end) = Feed::new(clip(50));
             feeder.start(unheard);
-            settle().await;
+            rig.at(1900).await;
             assert!(*feeding.borrow());
             feeder.cancel();
             settle().await;
             assert_eq!(unheard_end.try_recv(), Ok(FeedEnd::Cancelled));
             assert!(!*feeding.borrow());
+            rig.feed.send(quiet(901));
+            let next = tokio::time::timeout(ms(10), fed.next()).await;
+            assert_eq!(next.unwrap().unwrap().frame[0], 901);
         })
         .await;
 }

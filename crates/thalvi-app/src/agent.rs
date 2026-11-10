@@ -2174,6 +2174,7 @@ mod tests {
             "There is no capture to cancel."
         );
         rig.fake.feeding.send_replace(true);
+        assert_eq!(rig.ask(&Request::State)["feeding"], true);
         rig.fake.ignoring.store(true, Ordering::SeqCst);
         assert_eq!(
             rig.ask(&Request::Cancel),
@@ -2202,13 +2203,15 @@ mod tests {
                 Duration::from_secs(10),
             )
         });
+        let give_up = std::time::Instant::now() + Duration::from_secs(10);
         let state = loop {
             let state = rig.ask(&Request::State);
-            if state["feeding"] == true {
+            if state["feeding"] == true || std::time::Instant::now() > give_up {
                 break state;
             }
             std::thread::yield_now();
         };
+        assert_eq!(state["feeding"], true);
         assert_eq!(state["state"], "listening");
         assert_eq!(rig.ask(&Request::Cancel)["took_effect"], true);
         let reply: Value = serde_json::from_str(&feed.join().unwrap().unwrap().unwrap()).unwrap();
