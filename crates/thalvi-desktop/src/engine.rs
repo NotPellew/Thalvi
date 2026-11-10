@@ -2485,15 +2485,15 @@ mod tests {
                     "Office",
                     &ServerUrl::parse("ws://127.0.0.1:9").unwrap(),
                 ),
-                "The Thalvi server \"Office\" at ws://127.0.0.1:9 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix its address under Settings → Speech.",
+                "The Thalvi server \"Office\" at ws://127.0.0.1:9 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix its address under Settings → Recognition.",
             ),
             (
                 SpeechSource::direct("Cybrex2", "ws://100.64.0.2:8012".to_owned()),
-                "The speech server \"Cybrex2\" at ws://100.64.0.2:8012 was not ready after 8 seconds. Nothing was delivered. Check that it is running, or fix its address under Settings → Speech.",
+                "The speech server \"Cybrex2\" at ws://100.64.0.2:8012 was not ready after 8 seconds. Nothing was delivered. Check that it is running, or fix its address under Settings → Recognition.",
             ),
             (
                 SpeechSource::on_device("On this computer", "nemotron_160ms".to_owned()),
-                "The speech model \"On this computer\" (nemotron_160ms) was not ready after 8 seconds. Nothing was delivered. Wait for it to finish loading, or pick another under Settings → Speech.",
+                "The speech model \"On this computer\" (nemotron_160ms) was not ready after 8 seconds. Nothing was delivered. Wait for it to finish loading, or pick another under Settings → Recognition.",
             ),
         ];
         for (speech, expected) in cases {

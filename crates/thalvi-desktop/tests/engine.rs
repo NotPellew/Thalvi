@@ -5578,7 +5578,7 @@ async fn the_user_is_told_in_plain_words_where_to_set_up_writing() {
     let error = CaptureError::Writing(WritingError::NotSetUp);
     assert_eq!(
         error.to_string(),
-        "No writing model is set up. Add one under Settings → Speech → Writing. Nothing was pasted."
+        "No writing model is set up. Add one under Settings → Chat model. Nothing was pasted."
     );
 }
 

@@ -741,7 +741,7 @@ mod tests {
         assert_eq!(
             notice.as_deref(),
             Some(
-                "The Thalvi server \"Office\" at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix its address under Settings → Speech. Captured text is on the clipboard."
+                "The Thalvi server \"Office\" at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix its address under Settings → Recognition. Captured text is on the clipboard."
             )
         );
         assert_eq!(seen, calls(&["capture_target", "copy:\"so far\""]));
@@ -750,7 +750,7 @@ mod tests {
         assert_eq!(
             notice.as_deref(),
             Some(
-                "The Thalvi server \"Office\" at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix its address under Settings → Speech."
+                "The Thalvi server \"Office\" at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix its address under Settings → Recognition."
             )
         );
         assert_eq!(seen, calls(&["capture_target"]));

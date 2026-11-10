@@ -1,4 +1,4 @@
-//! Owns the list of speech servers in Settings → Speech: their kinds, validation, the one active live entry, the ticked second-pass entries, and the migration from the single-recognizer settings.
+//! Owns the list of speech servers in Settings → Recognition: their kinds, validation, the one active live entry, the ticked second-pass entries, and the migration from the single-recognizer settings.
 
 use std::{fmt, path::PathBuf};
 

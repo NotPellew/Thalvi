@@ -237,7 +237,6 @@ function wakeHeads(context: PageContext): HTMLElement[] {
 
   function head(key: "capture" | "conversation", title: string): HTMLElement[] {
     const config = draft.wake[key];
-    const name = key === "capture" ? "dictation" : "conversation";
     const picker = el("select", { id: uid("f") });
     const badge = el("span", { class: "badge" });
     const problem = note();
@@ -344,16 +343,16 @@ function wakeHeads(context: PageContext): HTMLElement[] {
     };
     return [
       group(title),
-      row(`Wake model (${name})`, "Pick a built-in phrase, or your own .onnx wake model file.", field),
+      row("Wake model", "Pick a built-in phrase, or your own .onnx wake model file.", field),
       row(
-        `Threshold (${name})`,
+        "Threshold",
         "Higher wakes less often by mistake; lower catches quieter speech.",
         threshold,
       ),
     ];
   }
 
-  const nodes = [...head("capture", "Dictation wake word"), ...head("conversation", "Conversation wake word")];
+  const nodes = head("capture", "Wake word");
   function refresh(): void {
     backend.listWakeModels().then(
       (models) => {
@@ -495,7 +494,11 @@ function holdKey({ holdKeyUnavailable }: PageContext): HTMLElement[] {
   ];
 }
 
-function capture(context: PageContext): HTMLElement[] {
+function listening(context: PageContext): HTMLElement[] {
+  return [...microphone(context), ...wakeHeads(context), ...holdKey(context), ...limits(context)];
+}
+
+function commands(context: PageContext): HTMLElement[] {
   const { draft, controls } = context;
   const pause = (key: "paste" | "submit" | "task", label: string): HTMLElement =>
     row(
@@ -506,15 +509,13 @@ function capture(context: PageContext): HTMLElement[] {
       }),
     );
   return [
-    ...wakeHeads(context),
-    ...holdKey(context),
     group("Endings"),
     row("Ending phrases", "Say one to finish a capture. Every action needs at least one phrase.", endingsTable(context)),
     group("Quiet before acting"),
     pause("paste", "Quiet before paste"),
     pause("submit", "Quiet before paste and Enter"),
     pause("task", "Quiet before running a task"),
-    ...limits(context),
+    ...tasks(context),
   ];
 }
 
@@ -843,7 +844,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
   };
 }
 
-function speech(context: PageContext): HTMLElement[] {
+function recognition(context: PageContext): HTMLElement[] {
   const { draft, controls, backend } = context;
   const entries = (): SpeechEntry[] => draft.stt.entries;
   const activeLive = (): LiveEntry | undefined => entries().filter(isLive).find((entry) => entry.active);
@@ -1325,6 +1326,62 @@ function speech(context: PageContext): HTMLElement[] {
   const liveBlock = el("div", { class: "stack wide" }, liveList, problem, el("div", { class: "trow add" }, kindPicker.node, addLive));
   const secondBlock = el("div", { class: "stack wide" }, secondList, addSecond);
 
+  const words = wordListTable(draft, controls);
+  const wordProblem = note();
+  const wordRow = row(
+    "Word list",
+    "Names and terms to spell your way, added one at a time. Recognition on this computer favours them, and so does a recognizer that supports it.",
+    words.node,
+  );
+  words.node.append(wordProblem);
+  let asked = 0;
+  function checkWordList(): void {
+    const ask = (asked += 1);
+    wordRow.classList.add("off");
+    say(wordProblem, "");
+    const active = activeLive();
+    if (active === undefined || active.kind === "on_device") {
+      wordRow.classList.remove("off");
+      words.enable(true);
+      return;
+    }
+    backend
+      .wordListSupport(active)
+      .then((supported) => {
+        if (ask !== asked) return;
+        wordRow.classList.toggle("off", !supported);
+        words.enable(true);
+      })
+      .catch((error: unknown) => {
+        if (ask !== asked) return;
+        wordRow.classList.remove("off");
+        words.enable(false);
+        say(wordProblem, errorText(error));
+      });
+  }
+  render();
+  checkWordList();
+
+  return [
+    group("Live dictation"),
+    nextDictation,
+    summaryActions,
+    row(
+      "Speech servers",
+      "One is in use for dictation. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Conversation mode always uses the Thalvi server's own recognizer.",
+      liveBlock,
+    ),
+    wordRow,
+    group("Second pass"),
+    row(
+      "Second-pass servers",
+      "Ticked servers transcribe each accepted capture again. The first one in this order that answers replaces the live text; the rest are only recorded. Ticking applies at once.",
+      secondBlock,
+    ),
+  ];
+}
+
+function chatModel({ draft, controls }: PageContext): HTMLElement[] {
   const writing = draft.writing;
   const writingUrl = controls.text(writing?.url ?? "", () => { syncWriting(); }, { placeholder: "http://127.0.0.1:8000/v1" });
   const writingModel = controls.text(writing?.model ?? "", () => { syncWriting(); });
@@ -1427,58 +1484,7 @@ function speech(context: PageContext): HTMLElement[] {
     openingProblem,
   );
 
-  const words = wordListTable(draft, controls);
-  const wordProblem = note();
-  const wordRow = row(
-    "Word list",
-    "Names and terms to spell your way, added one at a time. Recognition on this computer favours them, and so does a recognizer that supports it.",
-    words.node,
-  );
-  words.node.append(wordProblem);
-  let asked = 0;
-  function checkWordList(): void {
-    const ask = (asked += 1);
-    wordRow.classList.add("off");
-    say(wordProblem, "");
-    const active = activeLive();
-    if (active === undefined || active.kind === "on_device") {
-      wordRow.classList.remove("off");
-      words.enable(true);
-      return;
-    }
-    backend
-      .wordListSupport(active)
-      .then((supported) => {
-        if (ask !== asked) return;
-        wordRow.classList.toggle("off", !supported);
-        words.enable(true);
-      })
-      .catch((error: unknown) => {
-        if (ask !== asked) return;
-        wordRow.classList.remove("off");
-        words.enable(false);
-        say(wordProblem, errorText(error));
-      });
-  }
-  render();
-  checkWordList();
-
   return [
-    group("Live dictation"),
-    nextDictation,
-    summaryActions,
-    row(
-      "Speech servers",
-      "One is in use for dictation. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Conversation mode always uses the Thalvi server's own recognizer.",
-      liveBlock,
-    ),
-    wordRow,
-    group("Second pass"),
-    row(
-      "Second-pass servers",
-      "Ticked servers transcribe each accepted capture again. The first one in this order that answers replaces the live text; the rest are only recorded. Ticking applies at once.",
-      secondBlock,
-    ),
     group("Writing"),
     row(
       "Writing endpoint address",
@@ -2031,17 +2037,21 @@ function about({ backend }: PageContext): HTMLElement[] {
   ];
 }
 
+function historyAndRecordings(context: PageContext): HTMLElement[] {
+  return [...history(context), ...recordings(context)];
+}
+
 function app(context: PageContext): HTMLElement[] {
-  return [...startup(context), ...recordings(context), ...about(context)];
+  return [...startup(context), ...about(context)];
 }
 
 const PAGES: readonly (readonly [string, string, (context: PageContext) => HTMLElement[]])[] = [
-  ["speech", "Speech", speech],
-  ["microphone", "Microphone", microphone],
-  ["capture", "Capture", capture],
-  ["feedback", "Feedback and appearance", feedback],
-  ["tasks", "Apps & tasks", tasks],
-  ["history", "History", history],
+  ["listening", "Listening", listening],
+  ["recognition", "Recognition", recognition],
+  ["commands", "Commands", commands],
+  ["chat", "Chat model", chatModel],
+  ["overlay", "Overlay & sounds", feedback],
+  ["history", "History & recordings", historyAndRecordings],
   ["app", "App", app],
 ];
 

@@ -147,7 +147,7 @@ describe("the overlay in the holo and gunmetal looks", () => {
     },
     {
       name: "failed",
-      status: { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:9 (connection refused). Start the Thalvi server, or fix Settings → Speech → Server address.", headline: "Can't reach speech server — Settings", causes: [], kind: "other" },
+      status: { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:9 (connection refused). Start the Thalvi server, or fix Settings → Recognition → Address.", headline: "Can't reach speech server — Settings", causes: [], kind: "other" },
       tone: "failed",
       label: "FAILED",
       tag: true,
@@ -336,7 +336,7 @@ describe("the settings window's look", () => {
     return found;
   };
 
-  it("wears the saved look and offers the three looks on the Feedback and appearance page", async () => {
+  it("wears the saved look and offers the three looks on the Overlay & sounds page", async () => {
     await open("gunmetal");
     expect(root.dataset["look"]).toBe("gunmetal");
     expect(Array.from(root.querySelectorAll(".lk")).map((choice) => choice.textContent)).toEqual(["Gunmetal", "Holo", "Neon"]);
@@ -363,20 +363,16 @@ describe("the settings window's look", () => {
     await open();
     const headings = (page: string) =>
       Array.from(root.querySelectorAll(`section[data-page="${page}"] .grp`)).map((group) => group.querySelector("h4")?.textContent ?? "");
-    expect(headings("feedback")).toEqual(["Overlay", "Look", "Sounds"]);
-    expect(headings("capture")).toEqual([
-      "Dictation wake word",
-      "Conversation wake word",
-      "Endings",
-      "Quiet before acting",
-      "Capture limits",
-    ]);
+    expect(headings("overlay")).toEqual(["Overlay", "Look", "Sounds"]);
+    expect(headings("listening")).toEqual(["Right now", "Saved with Save", "Wake word", "Capture limits"]);
+    expect(headings("commands")).toEqual(["Endings", "Quiet before acting", "Apps", "Scripts"]);
     expect(root.querySelectorAll(".grp > .grp, section > .row").length).toBe(0);
   });
 
   it("fills a slider up to its handle", async () => {
     await open();
-    const slider = pick(root, 'section[data-page="capture"] input[type="range"]') as HTMLInputElement;
+    (root.querySelector('nav [data-page="listening"]') as HTMLElement).click();
+    const slider = pick(root, 'section[data-page="listening"] input[type="range"]') as HTMLInputElement;
     expect(slider.style.getPropertyValue("--p")).toBe("0.474");
     slider.value = "1";
     slider.dispatchEvent(new Event("input", { bubbles: true }));

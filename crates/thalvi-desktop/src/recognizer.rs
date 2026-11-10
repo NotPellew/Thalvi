@@ -103,13 +103,13 @@ impl SpeechSource {
     pub(crate) fn fix(&self) -> &'static str {
         match self.place {
             Place::Direct(_) => {
-                "Check that it is running, or fix its address under Settings → Speech."
+                "Check that it is running, or fix its address under Settings → Recognition."
             }
             Place::ThalviServer(_) => {
-                "Start the Thalvi server, or fix its address under Settings → Speech."
+                "Start the Thalvi server, or fix its address under Settings → Recognition."
             }
             Place::OnDevice(_) => {
-                "Wait for it to finish loading, or pick another under Settings → Speech."
+                "Wait for it to finish loading, or pick another under Settings → Recognition."
             }
         }
     }
@@ -191,7 +191,7 @@ pub enum RecognizerError {
     )]
     Dropped { speech: SpeechSource },
     #[error(
-        "{} sent something Thalvi did not understand. Check that its address under Settings → Speech is {}.",
+        "{} sent something Thalvi did not understand. Check that its address under Settings → Recognition is {}.",
         speech.subject(),
         speech.expected()
     )]
@@ -797,7 +797,7 @@ mod tests {
             assert_eq!(
                 failure.to_string(),
                 format!(
-                    "Thalvi could not reach the Thalvi server \"Office\" at ws://127.0.0.1:9 ({words}). Start the Thalvi server, or fix its address under Settings → Speech."
+                    "Thalvi could not reach the Thalvi server \"Office\" at ws://127.0.0.1:9 ({words}). Start the Thalvi server, or fix its address under Settings → Recognition."
                 )
             );
             assert_eq!(

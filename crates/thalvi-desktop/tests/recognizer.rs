@@ -219,7 +219,7 @@ async fn connect_failures_say_why() {
     assert_eq!(
         error.to_string(),
         format!(
-            "Thalvi could not reach the Thalvi server \"Office\" at {refused} (connection refused). Start the Thalvi server, or fix its address under Settings → Speech."
+            "Thalvi could not reach the Thalvi server \"Office\" at {refused} (connection refused). Start the Thalvi server, or fix its address under Settings → Recognition."
         )
     );
 }

@@ -203,7 +203,7 @@ STT_MODEL=nemotron-labs-unified-asr-0.6b
 STT_API_KEY=
 ```
 
-With it, Settings → Speech shows a **Word list**: names and terms, one per
+With it, Settings → Recognition shows a **Word list**: names and terms, one per
 line, whose spelling recognition should favour (such as "Cybrex2"). Saving
 sends the list to the Thalvi server in use, which keeps it and uses it for
 dictation and conversations; a realtime speech server entry gets it at each
@@ -270,14 +270,14 @@ is needed.
   without spaces. To update, replace the file; settings and models stay.
 
 Start it once and it stays in the tray; starting it again opens Settings. The
-first start writes the default config, opens Settings on Speech, and downloads
+first start writes the default config, opens Settings on Listening, and downloads
 the wake models and, once, the speech model, so the first "Hey
 Thalvi" works with no setup. If Thalvi cannot start, for example because its
 config is broken, a message box names the problem and the file.
 
 ### Speech recognition
 
-Settings → Speech keeps a list of speech servers. A fresh install has one,
+Settings → Recognition keeps a list of speech servers. A fresh install has one,
 **On this computer**, with Nemotron Streaming, so it recognizes without a
 server; add a server to use one. **Live dictation** uses exactly one of them, and **Use** switches to another at once; it applies from the next
 capture, and a capture already running keeps its recognizer. At the top of
@@ -338,7 +338,7 @@ under OpenMDW-1.1, exported to ONNX by Thalvi. Parakeet is NVIDIA's
 [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), in sherpa-onnx's int8 export.
 
-**Second-pass transcription** (Settings → Speech → Second pass, none ticked by
+**Second-pass transcription** (Settings → Recognition → Second pass, none ticked by
 default) sends each accepted capture again to every ticked OpenAI-style or Meta
 transcription API. The first ticked one in list order (move them with the
 arrows) that answers replaces the live text, and Thalvi pastes as soon as that
@@ -349,7 +349,7 @@ notice. Unticking keeps the address and key.
 
 ### Microphone
 
-Settings → Microphone has **Listening**, which pauses and resumes right away,
+Settings → Listening has **Listening**, which pauses and resumes right away,
 and the saved device. To change the device, pause first, then choose and Save;
 listening stays paused until you resume it. **Active microphone** names the
 device actually open. If the saved device is missing, Thalvi reports it
@@ -370,7 +370,7 @@ Settings → App → Startup, both off by default and applied right away:
 
 ### Recordings
 
-Settings → App has a switch each for metrics, text and audio recordings, all
+Settings → History & recordings has a switch each for metrics, text and audio recordings, all
 off by default; Save applies them between captures. They stay on this computer.
 **Open folder** opens `recordings/` in the data folder (`~/.local/share/thalvi`
 on Linux, `%LOCALAPPDATA%\thalvi` on Windows):
@@ -470,7 +470,7 @@ is pasted. Without "write that out" or the write key, the words are pasted as
 recognized. There is no write-and-send: press Enter yourself after reading it.
 
 The model is any OpenAI-compatible chat completions endpoint (Glimmer, Baseten, a
-llama.cpp server, Meta), set under **Settings → Speech → Writing** as `writing`
+llama.cpp server, Meta), set under **Settings → Chat model** as `writing`
 in the config: `url`, `model` and `api_key`. The model gets the **Writing prompt**
 (`prompt`) as its instructions and the recognized words as the message: no window,
 app or other context. The default prompt follows what you ask for (an email, a tone,

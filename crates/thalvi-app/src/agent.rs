@@ -592,7 +592,7 @@ async fn metrics_summary(running: &impl Running) -> String {
     if !running.config().recordings.metrics {
         return done(json!({
             "enabled": false,
-            "message": "Metrics are off. Turn them on in Settings → App, or send settings set with {\"recordings\": {\"metrics\": true}}.",
+            "message": "Metrics are off. Turn them on in Settings → History & recordings, or send settings set with {\"recordings\": {\"metrics\": true}}.",
         }));
     }
     let dir = match running.recordings() {

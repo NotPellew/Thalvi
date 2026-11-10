@@ -85,7 +85,7 @@ function script(): Status[] {
     { state: "pending", target: slack, route: "paste", text: "Remind me to call", waitingForQuiet: false, pauseMs: 700, copies: false },
     { state: "done", target: slack, route: "paste", notice: "Pasted" },
     { state: "starting", target: null },
-    { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:8080 (connection refused). Start the Thalvi server, or fix Settings → Speech → Server address.", headline: "Can't reach speech server — Settings", causes: [], kind: "other" },
+    { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:8080 (connection refused). Start the Thalvi server, or fix Settings → Recognition → Address.", headline: "Can't reach speech server — Settings", causes: [], kind: "other" },
     { state: "loading", notice: "Loading the speech model." },
     { state: "starting", target: "Firefox" },
     { state: "capturing", target: "Firefox", committed: "", partial: null, notice: null },
