@@ -906,6 +906,38 @@ mod tests {
     }
 
     #[test]
+    fn a_save_says_whether_the_look_changed() {
+        let dir = std::env::temp_dir().join(format!("thalvi-app-look-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let start = DesktopConfig::from_json_str("{}").unwrap();
+        let saves = SyncedConfig::new(
+            Store::new(Some(dir.join("desktop.json"))).unwrap(),
+            start.clone(),
+        );
+        let changed = |look: &str| {
+            let mut settings = crate::settings::settings_json(&saves.config()).unwrap();
+            settings["look"] = serde_json::json!(look);
+            let ((), result) = saves
+                .save_form(
+                    |_| Ok(((), Some(settings))),
+                    true,
+                    |config| {
+                        saves.set(config);
+                    },
+                )
+                .unwrap();
+            result.map(|(_, look_changed)| look_changed)
+        };
+
+        let results = [changed("holo"), changed("holo")];
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_ne!(start.look, thalvi_desktop::config::Look::Holo);
+        assert_eq!(results, [Some(true), Some(false)]);
+    }
+
+    #[test]
     fn only_a_refused_hold_key_is_told_as_a_failure() {
         // (what the desktop said, failure told, watching, why unavailable)
         type Case = (

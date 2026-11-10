@@ -1083,6 +1083,11 @@ mod tests {
         assert_eq!(config.look, Look::Holo, "the Settings save is kept");
         assert_eq!(config.microphone.as_deref(), Some("USB Mic"));
         assert_eq!(rig.fake.saves.store.load().unwrap(), config);
+        assert_eq!(
+            rig.fake.shared.load(Ordering::SeqCst),
+            0,
+            "an unchanged word list is not shared"
+        );
     }
 
     #[test]
