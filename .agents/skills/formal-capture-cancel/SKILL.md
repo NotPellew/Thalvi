@@ -80,6 +80,11 @@ The Hyprland runtime binds (#337) add `EngineLink::hold_problems`, another sende
 a `Piece::Thinking` arm to `Engine::write` that only sets the Thinking state and records a time, and relabels a
 timeout after reasoning as `WritingError::StillThinking`, still a Failed result; every await is the same `bounded`
 cancel-first call, so the model is unchanged and only the hashes moved.
+A file fed in place of the microphone (#350) adds `Control::Feed`, which `Requests::ends` answers
+by refusing the file and ending nothing, so like `Apply` it has no cancellation effect; `Runner::capture` hands
+`drive` a cancel callback that also stops the feed, and `Engine::capture` notes whether its frames come from a file
+for the capture metric. No mapped await boundary, control drain or delivery admission changed, so the model is
+unchanged and only the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
