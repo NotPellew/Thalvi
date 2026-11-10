@@ -286,13 +286,14 @@ function wakeHeads(context: PageContext): HTMLElement[] {
     });
     const customRow = el("div", { class: "trow file" }, el("span", { class: "unit" }, "Custom model"), browse, chosenFile);
     state.render = () => {
-      const other = heads.find((candidate) => candidate.key !== key);
+      const otherKey = key === "capture" ? "conversation" : "capture";
+      const otherModel = draft.wake[otherKey].model;
       picker.replaceChildren(
         ...WAKE_MODELS.map(([model, label]) => {
           const info = infos.get(model);
           const status = downloading.has(model) ? "Downloading…" : info ? (info.cached ? "Ready" : "Not downloaded") : "";
           const option = el("option", { value: model }, status === "" ? label : `${label} — ${status}`);
-          option.disabled = other !== undefined && draft.wake[other.key].model === model && config.model !== model;
+          option.disabled = otherModel === model && config.model !== model;
           return option;
         }),
         el("option", { value: CUSTOM_MODEL }, "Custom model…"),

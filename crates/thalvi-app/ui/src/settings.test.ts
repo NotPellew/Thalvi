@@ -496,6 +496,14 @@ describe("the wake word picker", () => {
     expect(control("Wake model", "select").options[0]).toBe(option);
   });
 
+  it("prevents choosing the conversation wake word's phrase", async () => {
+    await openListening();
+    const picker = control("Wake model", "select");
+    expect(picker.querySelector<HTMLOptionElement>('option[value="hey_mycroft"]')?.disabled).toBe(true);
+    expect(picker.querySelector<HTMLOptionElement>('option[value="hey_thalvi"]')?.disabled).toBe(false);
+    expect(picker.querySelector<HTMLOptionElement>('option[value="hey_jarvis"]')?.disabled).toBe(false);
+  });
+
   it("moves the threshold to the chosen catalog phrase's default and saves it", async () => {
     const stub = await openListening({ ...SETTINGS, wake: { ...SETTINGS.wake, capture: { model: "hey_thalvi", threshold: 0.9 } } });
     const shown = (): string => rowOf("Threshold").querySelector("output")?.textContent ?? "";

@@ -100,8 +100,8 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
 - A screenshot right after a key can show the previous frame. Wait for the change
   to appear before keeping it as evidence.
 - There is no pointer, so Settings is keyboard-driven. The first `Tab` focuses the
-  search box, then the sidebar pages in order (Speech, Microphone, Capture,
-  Feedback and appearance, Apps & tasks, History, App); `Return` opens the page.
+  search box, then the sidebar pages in order (Listening, Recognition, Commands,
+  Chat model, Overlay & sounds, History & recordings, App); `Return` opens the page.
   The page's fields follow, and `Shift+Tab` from the search box wraps to the
   footer. Take a screenshot after each step to see where the focus ring is
   rather than counting: the footer's order is Copy, ×, Revert, Save, and a long
