@@ -54,6 +54,7 @@ describe("each status", () => {
     { name: "pending, copying", status: pending(false, 2500, true), hidden: false, label: "COPY IN 2 s", target: "→ Slack", draft: true },
     { name: "pending, writing out", status: { state: "pending", target: "Slack", route: "write", text: SENTENCE, waitingForQuiet: false, pauseMs: 700, copies: false }, hidden: false, label: "WRITE IN 1 s", target: "→ Slack", draft: true },
     { name: "writing", status: { state: "writing", target: "Slack", text: "" }, hidden: false, label: "WRITING…", target: "→ Slack", draft: true },
+    { name: "thinking", status: { state: "thinking", target: "Slack" }, hidden: false, label: "THINKING…", target: "→ Slack", draft: false },
     { name: "working", status: { state: "working", target: "Slack", route: "task", cancellable: false }, hidden: false, label: "WORKING", target: "→ Slack", draft: false },
     {
       name: "failed shows its headline, not the full notice",
@@ -242,6 +243,7 @@ describe("the cancel buttons", () => {
         return [!pick(".x").hidden, !pick(".mx").hidden];
       };
       expect(shown({ state: "capturing", target: null, committed: "", partial: null, notice: null })).toEqual([capturing, capturing]);
+      expect(shown({ state: "thinking", target: "Slack" })).toEqual([working, working]);
       expect(shown({ state: "writing", target: "Slack", text: "Hi" })).toEqual([working, working]);
       expect(shown({ state: "working", target: "Slack", route: "task", cancellable: true })).toEqual([working, working]);
       expect(shown({ state: "working", target: "Slack", route: "task", cancellable: false })).toEqual([false, false]);

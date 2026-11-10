@@ -28,6 +28,7 @@ export type Status =
       copies: boolean;
     }
   | { state: "writing"; target: string | null; text: string } // the writing model is at work; text is what has come in so far; cancellable until the paste
+  | { state: "thinking"; target: string | null } // the writing model is reasoning and has written no text yet; cancellable
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
   | { state: "done"; target: string | null; route: Route; notice: string }
   | { state: "failed"; notice: string; headline: string; causes: string[]; kind: FailureKind } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report

@@ -110,7 +110,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
   }
 
   function cancellable(): boolean {
-    return clickable && (live() || status.state === "writing" || (status.state === "working" && status.cancellable));
+    return clickable && (live() || status.state === "writing" || status.state === "thinking" || (status.state === "working" && status.cancellable));
   }
 
   function schedule(): void {
@@ -183,6 +183,9 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
         committed.textContent = next.text;
         partial.textContent = "";
         caret.hidden = false;
+        break;
+      case "thinking":
+        pillView("working", "THINKING…", next.target);
         break;
       case "working":
         pillView("working", "WORKING", next.target);

@@ -81,6 +81,7 @@ impl Visibility {
             | Status::Capturing { .. }
             | Status::Pending { .. }
             | Status::Writing { .. }
+            | Status::Thinking { .. }
             | Status::Working { .. }
             | Status::Loading {
                 downloading: true, ..
@@ -355,6 +356,12 @@ mod tests {
                 Status::Writing {
                     target: target.clone(),
                     text: String::new(),
+                },
+                Visibility::Show,
+            ),
+            (
+                Status::Thinking {
+                    target: target.clone(),
                 },
                 Visibility::Show,
             ),

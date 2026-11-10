@@ -117,7 +117,7 @@ const DRAFT_OUTCOMES: Record<DraftOutcome, string> = {
   maybePartial: "Thalvi may or may not have pasted this text. Check the window before trying again, or use Copy text.",
 };
 /** While one of these runs the status changes with every word; the draft is read again once it ends. */
-const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "working"];
+const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working"];
 const WHEN = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 export function row(label: string, hint: string | null, control: Field | HTMLElement): HTMLElement {
@@ -907,6 +907,7 @@ function speech(context: PageContext): HTMLElement[] {
       case "capturing":
       case "pending":
       case "writing":
+      case "thinking":
       case "working":
       case "done":
         return "Ready";

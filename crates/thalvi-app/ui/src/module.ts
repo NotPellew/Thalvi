@@ -159,6 +159,10 @@ export function createModule(onCancel: () => void): Module {
         });
         show("working", { label: "WRITING…", motion: "sweep" });
         break;
+      case "thinking":
+        lines(false);
+        show("working", { label: "THINKING…", motion: "sweep" });
+        break;
       case "working":
         show("working", { label: "WORKING", motion: "sweep" });
         break;

@@ -269,7 +269,7 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
             cancellable: true, ..
         } => "transcribing",
         Status::Working { .. } => "delivering",
-        Status::Writing { .. } => "writing",
+        Status::Writing { .. } | Status::Thinking { .. } => "writing",
         Status::Loading { .. } => "loading",
         Status::Failed { .. } => "failed",
     }
@@ -313,6 +313,7 @@ fn capturing(status: &Status) -> bool {
             | Status::Capturing { .. }
             | Status::Pending { .. }
             | Status::Writing { .. }
+            | Status::Thinking { .. }
             | Status::Working {
                 cancellable: true,
                 ..
@@ -1288,6 +1289,12 @@ mod tests {
                 Status::Writing {
                     target: Some("kitty".to_owned()),
                     text: "my password is hunter2".to_owned(),
+                },
+                "writing",
+            ),
+            (
+                Status::Thinking {
+                    target: Some("kitty".to_owned()),
                 },
                 "writing",
             ),
