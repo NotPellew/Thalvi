@@ -31,7 +31,7 @@ pub enum FeedError {
     Unreadable(String),
     #[error("The file is not a WAV file.")]
     NotWav,
-    #[error("Only 16-bit PCM WAV files at 8 to 192 kHz can be fed.")]
+    #[error("Only mono or stereo 16-bit PCM WAV files at 8 to 192 kHz can be fed.")]
     Format,
     #[error("The audio file holds no audio.")]
     Empty,
@@ -182,7 +182,8 @@ fn read_header(reader: &mut impl Read) -> Result<(Format, u32), FeedError> {
                 let channels = u16::from_le_bytes([fields[2], fields[3]]);
                 let rate = u32::from_le_bytes([fields[4], fields[5], fields[6], fields[7]]);
                 let bits = u16::from_le_bytes([fields[14], fields[15]]);
-                if tag != 1 || bits != 16 || channels == 0 || !RATES.contains(&rate) {
+                if tag != 1 || bits != 16 || !(1..=2).contains(&channels) || !RATES.contains(&rate)
+                {
                     return Err(FeedError::Format);
                 }
                 format = Some(Format { channels, rate });
@@ -495,6 +496,11 @@ mod tests {
             (
                 "no channels",
                 wav(1, 0, 16_000, 16, &[], &ok),
+                Some(FeedError::Format),
+            ),
+            (
+                "three channels",
+                wav(1, 3, 16_000, 16, &[], &ok),
                 Some(FeedError::Format),
             ),
             (
