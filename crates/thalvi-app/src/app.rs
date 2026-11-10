@@ -141,7 +141,7 @@ pub struct AppState {
 
 impl AppState {
     /// Reads the config and starts the engine; also whether this is the first start.
-    fn start(config: Option<std::path::PathBuf>) -> Result<(Self, bool), String> {
+    fn start(config: Option<std::path::PathBuf>, overlay: Overlay) -> Result<(Self, bool), String> {
         let store = Store::new(config)?;
         let (config, first_start) = store.start()?;
         let history = Arc::new(history::Store::per_user());
@@ -164,7 +164,7 @@ impl AppState {
         let state = Self {
             link,
             saves: SyncedConfig::new(store, config.clone()),
-            overlay: Overlay::default(),
+            overlay,
             speech_downloads: SpeechDownloads::default(),
             speech_devices,
             history,
@@ -455,10 +455,31 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
     } {
         return Ok(());
     }
-    // GTK's backend is fixed when it starts, which the builder below does.
+    let (ui, overlay) = overlay::prepare();
+    // Rune's event loop must own the main thread on Linux and Windows; Tauri's runs beside it.
+    let tauri = std::thread::Builder::new()
+        .name("tauri".to_owned())
+        .spawn(move || {
+            if let Err(message) = run_tauri(config, overlay) {
+                report_failure(&message);
+                std::process::exit(1);
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = ui.try_run() {
+        println!("The status overlay could not start: {error}. It stays off.");
+    }
+    // Tauri ends the process when it quits.
+    let _ = tauri.join();
+    Ok(())
+}
+
+fn run_tauri(config: Option<std::path::PathBuf>, overlay: Overlay) -> Result<(), String> {
+    // GTK's backend is fixed when it starts, which the builder below does on this thread.
     #[cfg(target_os = "linux")]
     Desktop::prepare_toolkit().map_err(|error| error.to_string())?;
     let app = tauri::Builder::default()
+        .any_thread()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if relaunch_shows_settings(&args) {
                 show_settings(app);
@@ -510,7 +531,7 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
         ])
         .setup(move |app| {
             // Tauri turns an error from this hook into a panic, so it is reported here instead.
-            if let Err(message) = setup(app.handle(), config) {
+            if let Err(message) = setup(app.handle(), config, overlay) {
                 report_failure(&message);
                 std::process::exit(1);
             }
@@ -531,9 +552,13 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
 }
 
 /// Reads the config and starts the engine, the tray and the windows.
-fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), String> {
+fn setup(
+    app: &AppHandle,
+    config: Option<std::path::PathBuf>,
+    overlay: Overlay,
+) -> Result<(), String> {
     // Only the first instance gets here, so a relaunch never reads the config.
-    let (state, first_start) = AppState::start(config)?;
+    let (state, first_start) = AppState::start(config, overlay)?;
     state.restore_login(app);
     state.restore_menu_entry(&menu_entry::System::from_env());
     app.manage(state);
@@ -568,15 +593,6 @@ fn serve_requests(app: &AppHandle) {
 }
 
 fn create_windows(app: &AppHandle) -> tauri::Result<()> {
-    let state = app.state::<AppState>();
-    match overlay::create(app, &state.host) {
-        Ok(_) => {}
-        Err(error) => {
-            // An overlay the desktop cannot keep unfocused would take focus from the user's app.
-            println!("{error} The status overlay stays off.");
-            state.overlay_shown.store(false, Ordering::SeqCst);
-        }
-    }
     let settings =
         WebviewWindowBuilder::new(app, SETTINGS, WebviewUrl::App("settings.html".into()))
             .title("Thalvi settings")
@@ -657,7 +673,7 @@ fn show(app: &AppHandle, status: &Status) {
     }
     let _ = app.emit("thalvi://status", status);
     let enabled = state.overlay_shown.load(Ordering::SeqCst);
-    state.overlay.apply(app, Visibility::of(status, enabled));
+    state.overlay.show(status, Visibility::of(status, enabled));
 }
 
 /// Opens the settings window; only an explicit user action calls this.

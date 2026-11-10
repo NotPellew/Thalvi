@@ -32,6 +32,8 @@ ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "
 proptest = { version = "1.12", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 rtrb = "0.4"
+# Pre-release; upstream asks consumers to pin a revision (2026-11-10, #242).
+rune = { git = "https://github.com/anomalyco/rune", rev = "ba5e7c8069a24c36f95ca90a3058083cd468fcd1", default-features = false, features = ["accessibility"] }
 nix = { version = "0.31", default-features = false, features = ["socket"] }
 rustix = { version = "1", default-features = false, features = ["std", "process"] }
 serde = { version = "1", features = ["derive"] }

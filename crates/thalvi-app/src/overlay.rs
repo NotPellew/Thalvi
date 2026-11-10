@@ -1,52 +1,16 @@
-//! When the overlay window is shown, and the window itself.
+//! When the overlay is shown, and the Rune overlay surface that draws it.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tauri::{AppHandle, LogicalPosition, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
-use thalvi_desktop::host::{Desktop, Host, OVERLAY_TITLE};
+use rune::{Align, App, AppSpec, Cx, El, OverlayHandle, OverlaySpec, ScreenEdge};
+use thalvi_desktop::host::OVERLAY_TITLE;
 
 use crate::status::Status;
 
-pub const LABEL: &str = "overlay";
-
-const WIDTH: f64 = 460.0;
-/// Room for the neon pill under its gap and for the holo and gunmetal module with its shadow.
-/// A fixed-size GTK window is never lower than this, and a mapped one cannot be resized, so every
-/// look uses the one size.
-const HEIGHT: f64 = 200.0;
-
-/// Where the overlay window goes, in logical pixels.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Frame {
-    left: f64,
-    top: f64,
-}
-
-impl Frame {
-    /// The window centred on a screen `screen_width` wide and `top` below its top edge.
-    #[must_use]
-    pub fn new(screen_width: f64, top: f64) -> Self {
-        Self {
-            left: ((screen_width - WIDTH) / 2.0).max(0.0),
-            top,
-        }
-    }
-
-    /// The frame on the primary monitor, below whatever the desktop reserves at its top.
-    fn on_screen(app: &AppHandle, host: &Desktop) -> Result<Self, String> {
-        let top = host
-            .prepare_overlay(WIDTH, HEIGHT)
-            .map_err(|error| error.to_string())?;
-        let screen_width = app
-            .primary_monitor()
-            .map_err(|error| error.to_string())?
-            .map_or(0.0, |monitor| {
-                f64::from(monitor.size().width) / monitor.scale_factor()
-            });
-        Ok(Self::new(screen_width, top))
-    }
-}
+const WIDTH: f32 = 460.0;
+const HEIGHT: f32 = 200.0;
 
 /// How long a delivery's confirmation stays on screen.
 const DONE_FOR: Duration = Duration::from_secs(1);
@@ -92,68 +56,89 @@ impl Visibility {
     }
 }
 
-/// Creates the hidden overlay window; the desktop keeps it unfocused (see `Host::prepare_overlay`).
-///
-/// # Errors
-/// Why the desktop could not place the window or why it could not be created.
-pub fn create(app: &AppHandle, host: &Desktop) -> Result<WebviewWindow, String> {
-    let frame = Frame::on_screen(app, host)?;
-    let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("overlay.html".into()))
-        .title(OVERLAY_TITLE)
-        .inner_size(WIDTH, HEIGHT)
-        .position(frame.left, frame.top)
-        .decorations(false)
-        .transparent(true)
-        .shadow(false)
-        .resizable(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .focusable(false)
-        .focused(false)
-        .visible(false)
-        .build()
-        .map_err(|error| error.to_string())?;
-    // Before the window is first mapped, while it is hidden: the desktop decides focus at map.
-    #[cfg(target_os = "linux")]
-    host.settle_overlay_window(&window.gtk_window().map_err(|error| error.to_string())?);
-    Ok(window)
+/// What the overlay draws.
+struct View {
+    status: Status,
 }
 
-/// Places the overlay window again, below whatever the desktop reserves at the top now.
-///
-/// # Errors
-/// Why the desktop could not place the window or why it could not be moved; it then stays as it was.
-pub fn replace(app: &AppHandle, host: &Desktop) -> Result<(), String> {
-    let Some(window) = app.get_webview_window(LABEL) else {
-        return Ok(());
-    };
-    let frame = Frame::on_screen(app, host)?;
-    window
-        .set_position(LogicalPosition::new(frame.left, frame.top))
-        .map_err(|error| error.to_string())
+fn view(view: &View, _: &mut Cx<View>) -> El {
+    let label = format!("{:?}", view.status);
+    rune::row().key("overlay").w_full().h_full().center().child(
+        rune::el()
+            .key("box")
+            .px(14.0)
+            .py(8.0)
+            .radius(8.0)
+            .fill(rune::oklch(0.2, 0.0, 0.0))
+            .child(rune::text(label).key("label").color(rune::Color::WHITE)),
+    )
 }
 
-/// Shows and hides the overlay window as the status asks.
-#[derive(Default)]
+/// The Rune app that runs the overlay's event loop; it owns the thread that calls `try_run`.
+pub type Ui = App<()>;
+
+/// The windowless Rune app with the hidden overlay, and the handle that feeds it from any thread.
+#[must_use]
+pub fn prepare() -> (Ui, Overlay) {
+    let mut app = App::new(AppSpec::new(
+        OVERLAY_TITLE,
+        (1.0, 1.0),
+        || (),
+        |(), _| rune::el(),
+    ))
+    .windowless()
+    .args(Vec::new());
+    let handle = app.overlay(
+        OverlaySpec {
+            name: OVERLAY_TITLE,
+            size: (WIDTH, HEIGHT),
+            edge: ScreenEdge::Top,
+            margin: 0.0,
+            align: Align::Center,
+            inset: 0.0,
+            interactive: false,
+            view,
+        },
+        View {
+            status: Status::Paused,
+        },
+    );
+    (
+        app,
+        Overlay {
+            handle,
+            generation: Arc::default(),
+        },
+    )
+}
+
+/// Shows and hides the overlay as the status asks.
 pub struct Overlay {
+    handle: OverlayHandle<View>,
     /// Bumped by every change, so a delayed hide that was overtaken does nothing.
-    generation: AtomicU64,
+    generation: Arc<AtomicU64>,
 }
 
 impl Overlay {
-    pub fn apply(&self, app: &AppHandle, visibility: Visibility) {
+    pub fn show(&self, status: &Status, visibility: Visibility) {
+        let next = status.clone();
+        self.handle.update(move |view, _| view.status = next);
+        self.apply(visibility);
+    }
+
+    pub fn apply(&self, visibility: Visibility) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         match visibility {
-            Visibility::Show => set_visible(app, true, generation),
-            Visibility::Hide => set_visible(app, false, generation),
+            Visibility::Show => self.handle.show(),
+            Visibility::Hide => self.handle.hide(),
             Visibility::ShowFor(delay) => {
-                set_visible(app, true, generation);
-                let app = app.clone();
+                self.handle.show();
+                let handle = self.handle.clone();
+                let current = Arc::clone(&self.generation);
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(delay).await;
-                    let overlay = app.state::<crate::app::AppState>();
-                    if overlay.overlay.generation.load(Ordering::SeqCst) == generation {
-                        set_visible(&app, false, generation);
+                    if current.load(Ordering::SeqCst) == generation {
+                        handle.hide();
                     }
                 });
             }
@@ -161,164 +146,13 @@ impl Overlay {
     }
 }
 
-fn set_visible(app: &AppHandle, visible: bool, generation: u64) {
-    if let Some(window) = app.get_webview_window(LABEL)
-        && let Err(error) = change_visibility(&window, visible, || {
-            app.state::<crate::app::AppState>()
-                .overlay
-                .generation
-                .load(Ordering::SeqCst)
-                == generation
-        })
-    {
-        eprintln!("The status overlay could not be shown or hidden: {error}");
-    }
-}
-
-trait OverlayWindow {
-    fn is_visible(&self) -> Result<bool, String>;
-    fn place(&self) -> Result<(), String>;
-    fn set_visible(&self, visible: bool) -> Result<(), String>;
-}
-
-impl OverlayWindow for WebviewWindow {
-    fn is_visible(&self) -> Result<bool, String> {
-        self.is_visible().map_err(|error| error.to_string())
-    }
-
-    fn place(&self) -> Result<(), String> {
-        let app = self.app_handle();
-        replace(app, &app.state::<crate::app::AppState>().host())
-    }
-
-    fn set_visible(&self, visible: bool) -> Result<(), String> {
-        set_window_visible(self, visible)
-    }
-}
-
-/// Windows shows it without activating it, which tao's `show` does.
-#[cfg(windows)]
-fn set_window_visible(window: &WebviewWindow, visible: bool) -> Result<(), String> {
-    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
-    Desktop::set_overlay_visible(hwnd.0 as isize, visible);
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn set_window_visible(window: &WebviewWindow, visible: bool) -> Result<(), String> {
-    if visible {
-        window.show()
-    } else {
-        window.hide()
-    }
-    .map_err(|error| error.to_string())
-}
-
-fn change_visibility(
-    window: &impl OverlayWindow,
-    visible: bool,
-    still_current: impl Fn() -> bool,
-) -> Result<(), String> {
-    if visible && !window.is_visible()? {
-        window.place()?;
-    }
-    if still_current() {
-        window.set_visible(visible)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-
     use thalvi_desktop::capture::CaptureRoute;
 
     use crate::status::FailureKind;
 
     use super::*;
-
-    #[derive(Default)]
-    struct Window {
-        visible: Cell<bool>,
-        placed: Cell<bool>,
-        preparations: Cell<usize>,
-        fail_placement: bool,
-    }
-
-    impl OverlayWindow for Window {
-        fn is_visible(&self) -> Result<bool, String> {
-            Ok(self.visible.get())
-        }
-
-        fn place(&self) -> Result<(), String> {
-            if self.fail_placement {
-                return Err("The desktop is unavailable.".to_owned());
-            }
-            self.placed.set(true);
-            self.preparations.set(self.preparations.get() + 1);
-            Ok(())
-        }
-
-        fn set_visible(&self, visible: bool) -> Result<(), String> {
-            if visible {
-                assert!(
-                    self.placed.get(),
-                    "the overlay mapped without a placement rule"
-                );
-            }
-            self.visible.set(visible);
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn each_remap_restores_placement_but_visible_status_updates_do_not() {
-        let window = Window::default();
-        for capture in 1..=3 {
-            change_visibility(&window, true, || true).unwrap();
-            assert!(window.visible.get());
-            assert_eq!(window.preparations.get(), capture);
-            change_visibility(&window, true, || true).unwrap();
-            assert_eq!(window.preparations.get(), capture);
-            change_visibility(&window, false, || true).unwrap();
-            window.placed.set(false); // A compositor config reload discards the rule.
-        }
-    }
-
-    #[test]
-    fn a_failed_placement_keeps_the_overlay_hidden() {
-        let window = Window {
-            fail_placement: true,
-            ..Window::default()
-        };
-        assert_eq!(
-            change_visibility(&window, true, || true),
-            Err("The desktop is unavailable.".to_owned())
-        );
-        assert!(!window.visible.get());
-        change_visibility(&window, false, || true).unwrap();
-    }
-
-    #[test]
-    fn a_hide_that_overtakes_placement_does_not_let_the_overlay_reappear() {
-        let window = Window::default();
-        change_visibility(&window, true, || {
-            assert!(window.placed.get());
-            false
-        })
-        .unwrap();
-        assert!(!window.visible.get());
-    }
-
-    #[test]
-    fn the_frame_is_centred_and_hangs_below_the_panel() {
-        for top in [0.0, 40.0] {
-            assert_eq!(Frame::new(2048.0, top), Frame { left: 794.0, top });
-        }
-        // A screen narrower than the window starts at its left edge.
-        assert_eq!(Frame::new(300.0, 0.0).left, 0.0);
-    }
 
     #[test]
     fn the_overlay_shows_from_the_wake_word_and_hides_after_a_confirmation_or_a_failure() {
