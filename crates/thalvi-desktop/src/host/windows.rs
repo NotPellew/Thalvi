@@ -136,6 +136,11 @@ impl Windows {
     ///
     /// # Errors
     /// Never on Windows; the signature matches the Linux desktops'.
+    #[expect(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "one signature for every desktop's host"
+    )]
     pub fn overlay_margin(&self) -> Result<f64, HostError> {
         Ok(0.0)
     }
