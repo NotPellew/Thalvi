@@ -673,7 +673,8 @@ fn ticker(line: &Line, blink_on: bool) -> El {
             partial,
             caret,
         } => {
-            let long = committed.chars().count() + partial.chars().count() > 34;
+            // Rune gives a view no text width; about 40 characters of 14 px text fill the line.
+            let long = committed.chars().count() + partial.chars().count() > 40;
             let gap = if committed.is_empty() || partial.is_empty() {
                 ""
             } else {
