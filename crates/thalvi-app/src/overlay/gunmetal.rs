@@ -366,6 +366,12 @@ impl View {
                 self.label = Some("WRITING…".to_owned());
                 self.sweep = true;
             }
+            Status::Thinking { .. } => {
+                self.line = Line::None;
+                self.tone = Tone::Working;
+                self.label = Some("THINKING…".to_owned());
+                self.sweep = true;
+            }
             Status::Working { .. } => {
                 self.tone = Tone::Working;
                 self.label = Some("WORKING".to_owned());
@@ -456,6 +462,7 @@ impl View {
                     | Status::Capturing { .. }
                     | Status::Pending { .. }
                     | Status::Writing { .. }
+                    | Status::Thinking { .. }
                     | Status::Working {
                         cancellable: true,
                         ..
