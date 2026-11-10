@@ -97,8 +97,8 @@ impl Clip {
             u64::from(declared)
         });
         let mut framer = Framer::new(format.rate);
-        let mut frames = Vec::new();
-        let mut emit = |frame: &Frame| frames.push(*frame);
+        let mut audio = Vec::new();
+        let mut emit = |frame: &Frame| audio.push(*frame);
         let mut block = vec![0_u8; BLOCK / width * width];
         let mut total = 0_u64;
         loop {
@@ -110,8 +110,10 @@ impl Clip {
             }
             for samples in block[..whole].chunks_exact(width) {
                 let mono = samples
-                    .chunks_exact(2)
-                    .map(|pair| f32::from(i16::from_le_bytes([pair[0], pair[1]])) / 32_768.0)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&pair| f32::from(i16::from_le_bytes(pair)) / 32_768.0)
                     .sum::<f32>()
                     / f32::from(format.channels);
                 framer.push(mono, &mut emit);
@@ -121,10 +123,10 @@ impl Clip {
             }
         }
         framer.flush(&mut emit);
-        if frames.is_empty() {
+        if audio.is_empty() {
             return Err(FeedError::Empty);
         }
-        Ok(Self { frames })
+        Ok(Self { frames: audio })
     }
 }
 
@@ -142,7 +144,7 @@ fn fill(reader: &mut impl Read, block: &mut [u8]) -> Result<usize, FeedError> {
     Ok(filled)
 }
 
-fn not_wav(error: io::Error) -> FeedError {
+fn not_wav(error: &io::Error) -> FeedError {
     if error.kind() == io::ErrorKind::UnexpectedEof {
         FeedError::NotWav
     } else {
@@ -153,14 +155,18 @@ fn not_wav(error: io::Error) -> FeedError {
 /// Reads up to the audio of a WAV file: its format and the declared length of its data.
 fn read_header(reader: &mut impl Read) -> Result<(Format, u32), FeedError> {
     let mut riff = [0_u8; 12];
-    reader.read_exact(&mut riff).map_err(not_wav)?;
+    reader
+        .read_exact(&mut riff)
+        .map_err(|error| not_wav(&error))?;
     if &riff[..4] != b"RIFF" || &riff[8..] != b"WAVE" {
         return Err(FeedError::NotWav);
     }
     let mut format = None;
     loop {
         let mut head = [0_u8; 8];
-        reader.read_exact(&mut head).map_err(not_wav)?;
+        reader
+            .read_exact(&mut head)
+            .map_err(|error| not_wav(&error))?;
         let size = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
         match &head[..4] {
             b"fmt " => {
@@ -168,7 +174,9 @@ fn read_header(reader: &mut impl Read) -> Result<(Format, u32), FeedError> {
                     return Err(FeedError::NotWav);
                 }
                 let mut fields = [0_u8; 16];
-                reader.read_exact(&mut fields).map_err(not_wav)?;
+                reader
+                    .read_exact(&mut fields)
+                    .map_err(|error| not_wav(&error))?;
                 skip(reader, u64::from(size - 16) + u64::from(size & 1))?;
                 let tag = u16::from_le_bytes([fields[0], fields[1]]);
                 let channels = u16::from_le_bytes([fields[2], fields[3]]);
@@ -189,7 +197,8 @@ fn read_header(reader: &mut impl Read) -> Result<(Format, u32), FeedError> {
 }
 
 fn skip(reader: &mut impl Read, bytes: u64) -> Result<(), FeedError> {
-    let skipped = io::copy(&mut reader.take(bytes), &mut io::sink()).map_err(not_wav)?;
+    let skipped =
+        io::copy(&mut reader.take(bytes), &mut io::sink()).map_err(|error| not_wav(&error))?;
     if skipped == bytes {
         Ok(())
     } else {

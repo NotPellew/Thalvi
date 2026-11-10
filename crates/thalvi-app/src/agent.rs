@@ -1144,19 +1144,18 @@ mod tests {
 
         async fn feed(&self, clip: Clip) -> FeedEnd {
             lock(&self.fed).push(format!("{clip:?}"));
-            let (release, held) = tokio::sync::oneshot::channel();
-            let hold = self.holding.swap(false, Ordering::SeqCst);
-            if !hold {
+            if !self.holding.swap(false, Ordering::SeqCst) {
                 return *lock(&self.feed_ending);
             }
+            let (release, ended) = tokio::sync::oneshot::channel();
             *lock(&self.feed_release) = Some(release);
             self.feeding.send_replace(true);
-            let end = held.await.unwrap_or(FeedEnd::Cancelled);
+            let end = ended.await.unwrap_or(FeedEnd::Cancelled);
             self.feeding.send_replace(false);
             end
         }
 
-        async fn models(&self) -> Result<Vec<ModelRow>, String> {
+        fn models(&self) -> impl Future<Output = Result<Vec<ModelRow>, String>> {
             let wake = WakeModelInfo {
                 name: "hey_thalvi",
                 title: "Hey Thalvi",
@@ -1174,22 +1173,28 @@ mod tests {
                 languages: &["en"],
                 cached: false,
             };
-            Ok(vec![
+            std::future::ready(Ok(vec![
                 ModelRow::wake(&wake),
                 ModelRow::speech(
                     &speech,
                     "Will run on the CPU".to_owned(),
                     Some(SpeechProgress::Downloading { percent: 42 }),
                 ),
-            ])
+            ]))
         }
 
-        async fn download_model(&self, kind: Catalog, name: &str) -> Result<(), String> {
+        fn download_model(
+            &self,
+            kind: Catalog,
+            name: &str,
+        ) -> impl Future<Output = Result<(), String>> {
             if name == "nope" {
-                return Err("nope is not a speech model Thalvi can download.".to_owned());
+                return std::future::ready(Err(
+                    "nope is not a speech model Thalvi can download.".to_owned()
+                ));
             }
             lock(&self.downloaded).push((kind, name.to_owned()));
-            Ok(())
+            std::future::ready(Ok(()))
         }
 
         fn overlay_on(&self) -> bool {
@@ -1646,16 +1651,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn state_names_what_thalvi_is_doing_and_never_what_was_said() {
-        let rig = Rig::new(
-            "state",
-            &format!(
-                r#"{{"stt": {{"entries": [{}]}}}}"#,
-                entry("live", "realtime", true, Some(SECRET))
-            ),
-        );
-        let words = [
+    /// Each status with what `state` says of it: its word, the overlay's and the recognizer's.
+    fn state_words() -> Vec<(Status, &'static str, &'static str, &'static str)> {
+        vec![
             (
                 Status::Writing {
                     target: Some("kitty".to_owned()),
@@ -1750,7 +1748,19 @@ mod tests {
                 "loading",
                 "loading",
             ),
-        ];
+        ]
+    }
+
+    #[test]
+    fn state_names_what_thalvi_is_doing_and_never_what_was_said() {
+        let rig = Rig::new(
+            "state",
+            &format!(
+                r#"{{"stt": {{"entries": [{}]}}}}"#,
+                entry("live", "realtime", true, Some(SECRET))
+            ),
+        );
+        let words = state_words();
         for (status, word, overlay, recognizer) in words {
             rig.fake.set_status(status);
             let state = rig.ask(&Request::State);
@@ -2000,11 +2010,8 @@ mod tests {
 
     #[test]
     fn a_file_is_fed_when_listening_with_no_capture_and_otherwise_refused_in_plain_words() {
-        let rig = Rig::new("feed", r#"{"capture_limits": {"max": 60}}"#);
+        let rig = Rig::new("feed", "{}");
         let two_frames = rig.fake.file("two.wav", &wav(16_000, 2 * 1_280));
-        let text = rig.fake.file("text.wav", b"not audio at all");
-        let long = rig.fake.file("long.wav", &wav(8_000, 61 * 8_000));
-        let missing = rig.fake.folder.join("missing.wav");
         let feed = |path: &str| Request::Feed {
             path: path.to_owned(),
         };
@@ -2066,36 +2073,6 @@ mod tests {
                     "loading",
                 ),
             ),
-            (
-                "no such file",
-                Status::Listening,
-                feed(&missing.to_string_lossy()),
-                missed(
-                    &format!("There is no audio file at {}.", missing.display()),
-                    "listening",
-                ),
-            ),
-            (
-                "not a WAV file",
-                Status::Listening,
-                feed(&text),
-                missed("The file is not a WAV file.", "listening"),
-            ),
-            (
-                "past the capture limit",
-                Status::Listening,
-                feed(&long),
-                missed(
-                    "The audio is longer than the 60 seconds a capture may take.",
-                    "listening",
-                ),
-            ),
-            (
-                "a path relative to nothing",
-                Status::Listening,
-                feed("two.wav"),
-                missed("The path of the audio file must be absolute.", "listening"),
-            ),
         ] {
             rig.fake.set_status(status);
             assert_eq!(rig.ask(&request), expected, "{case}");
@@ -2105,8 +2082,63 @@ mod tests {
             ["Clip(2 frames)"],
             "only the good file"
         );
+    }
 
-        // A feed that does not finish says how it ended.
+    #[test]
+    fn a_file_that_cannot_be_fed_is_refused_with_the_reason() {
+        let rig = Rig::new("feed-files", r#"{"capture_limits": {"max": 60}}"#);
+        let text = rig.fake.file("text.wav", b"not audio at all");
+        let long = rig.fake.file("long.wav", &wav(8_000, 61 * 8_000));
+        let just_fits = rig.fake.file("fits.wav", &wav(8_000, 60 * 8_000));
+        let missing = rig.fake.folder.join("missing.wav");
+        let feed = |path: &str| Request::Feed {
+            path: path.to_owned(),
+        };
+        let missed = |error: &str| json!({"ok": false, "took_effect": false, "error": error, "state": "listening"});
+        for (case, request, expected) in [
+            (
+                "no such file",
+                feed(&missing.to_string_lossy()),
+                missed(&format!("There is no audio file at {}.", missing.display())),
+            ),
+            (
+                "not a WAV file",
+                feed(&text),
+                missed("The file is not a WAV file."),
+            ),
+            (
+                "past the capture limit",
+                feed(&long),
+                missed("The audio is longer than the 60 seconds a capture may take."),
+            ),
+            (
+                "a path relative to nothing",
+                feed("two.wav"),
+                missed("The path of the audio file must be absolute."),
+            ),
+            (
+                "exactly the capture limit",
+                feed(&just_fits),
+                json!({"ok": true, "took_effect": true, "state": "listening"}),
+            ),
+        ] {
+            assert_eq!(rig.ask(&request), expected, "{case}");
+        }
+        assert_eq!(
+            *lock(&rig.fake.fed),
+            ["Clip(750 frames)"],
+            "only the good file"
+        );
+    }
+
+    #[test]
+    fn a_feed_that_does_not_finish_says_how_it_ended_and_one_playing_is_told_apart() {
+        let rig = Rig::new("feed-ends", "{}");
+        let two_frames = rig.fake.file("two.wav", &wav(16_000, 2 * 1_280));
+        let feed = |path: &str| Request::Feed {
+            path: path.to_owned(),
+        };
+        let missed = |error: &str, state: &str| json!({"ok": false, "took_effect": false, "error": error, "state": state});
         rig.fake.set_status(Status::Listening);
         for (end, error) in [
             (

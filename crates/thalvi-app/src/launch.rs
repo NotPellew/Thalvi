@@ -141,10 +141,6 @@ mod tests {
             })
         };
         let ask = |request| Ok(Launch::Ask(request));
-        let absolute = std::env::temp_dir()
-            .join("hello.wav")
-            .to_string_lossy()
-            .into_owned();
         for (args, expected) in [
             (&[][..], open(false, None)),
             (&["--login"][..], open(true, None)),
@@ -162,6 +158,46 @@ mod tests {
             (&["state"][..], ask(Request::State)),
             (&["settings", "get"][..], ask(Request::SettingsGet)),
             (&["metrics", "summary"][..], ask(Request::MetricsSummary)),
+            (
+                &["settings", "check", r#"{"look":"neon"}"#][..],
+                ask(Request::SettingsCheck {
+                    settings: json!({"look": "neon"}),
+                }),
+            ),
+            (
+                &["settings", "set", r#"{"look":"neon"}"#][..],
+                ask(Request::SettingsSet {
+                    settings: json!({"look": "neon"}),
+                }),
+            ),
+            (
+                &["settings", "set", "-"][..],
+                ask(Request::SettingsSet {
+                    settings: json!({"look": "holo"}),
+                }),
+            ),
+            (
+                &["settings", "set", "{nope"][..],
+                Err("The settings change is not valid JSON.".to_owned()),
+            ),
+            (&["a", "b"][..], Err(USAGE.to_owned())),
+            (&["toggle", "x"][..], Err(USAGE.to_owned())),
+            (&["settings"][..], Err(USAGE.to_owned())),
+            (&["settings", "get", "x"][..], Err(USAGE.to_owned())),
+            (&["metrics"][..], Err(USAGE.to_owned())),
+        ] {
+            assert_eq!(parse(args), expected, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_launch_names_the_commands_that_feed_audio_and_set_the_app_up() {
+        let ask = |request| Ok(Launch::Ask(request));
+        let absolute = std::env::temp_dir()
+            .join("hello.wav")
+            .to_string_lossy()
+            .into_owned();
+        for (args, expected) in [
             (&["show"][..], ask(Request::Show { page: None })),
             (
                 &["show", "speech"][..],
@@ -211,33 +247,6 @@ mod tests {
             (&["model-download", "wake"][..], Err(USAGE.to_owned())),
             (&["feed"][..], Err(USAGE.to_owned())),
             (&["quit", "now"][..], Err(USAGE.to_owned())),
-            (
-                &["settings", "check", r#"{"look":"neon"}"#][..],
-                ask(Request::SettingsCheck {
-                    settings: json!({"look": "neon"}),
-                }),
-            ),
-            (
-                &["settings", "set", r#"{"look":"neon"}"#][..],
-                ask(Request::SettingsSet {
-                    settings: json!({"look": "neon"}),
-                }),
-            ),
-            (
-                &["settings", "set", "-"][..],
-                ask(Request::SettingsSet {
-                    settings: json!({"look": "holo"}),
-                }),
-            ),
-            (
-                &["settings", "set", "{nope"][..],
-                Err("The settings change is not valid JSON.".to_owned()),
-            ),
-            (&["a", "b"][..], Err(USAGE.to_owned())),
-            (&["toggle", "x"][..], Err(USAGE.to_owned())),
-            (&["settings"][..], Err(USAGE.to_owned())),
-            (&["settings", "get", "x"][..], Err(USAGE.to_owned())),
-            (&["metrics"][..], Err(USAGE.to_owned())),
         ] {
             assert_eq!(parse(args), expected, "{args:?}");
         }

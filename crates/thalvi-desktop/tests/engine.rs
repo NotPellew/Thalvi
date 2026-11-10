@@ -6288,13 +6288,13 @@ async fn cancel_stops_the_feed_and_the_capture_it_started_and_a_second_file_wait
             );
 
             // Cancelled before any wake, a feed stops just the same, and the next one may start.
-            let (feed, mut ended) = Feed::new(clip(50));
-            feeder.start(feed);
+            let (unheard, mut unheard_end) = Feed::new(clip(50));
+            feeder.start(unheard);
             settle().await;
             assert!(*feeding.borrow());
             feeder.cancel();
             settle().await;
-            assert_eq!(ended.try_recv(), Ok(FeedEnd::Cancelled));
+            assert_eq!(unheard_end.try_recv(), Ok(FeedEnd::Cancelled));
             assert!(!*feeding.borrow());
         })
         .await;

@@ -788,7 +788,11 @@ async fn a_speech_model_is_downloaded_once_at_a_time() {
 
     first.abort();
     assert!(first.await.expect_err("cancelled").is_cancelled());
-    assert_eq!(downloads.progress("m"), None, "a cancelled download is not shown");
+    assert_eq!(
+        downloads.progress("m"),
+        None,
+        "a cancelled download is not shown"
+    );
     downloads
         .run("m", &store, &assets, |_| {})
         .await
