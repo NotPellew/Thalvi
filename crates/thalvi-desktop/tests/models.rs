@@ -769,6 +769,8 @@ async fn a_speech_model_is_downloaded_once_at_a_time() {
     tokio::time::timeout(Duration::from_secs(5), started.recv())
         .await
         .expect("the first download starts");
+    assert_eq!(downloads.progress("m"), Some(SpeechProgress::Verifying));
+    assert_eq!(downloads.progress("other"), None);
 
     let assets = speech([&good; 4], &sha);
     let refused = downloads
@@ -786,6 +788,7 @@ async fn a_speech_model_is_downloaded_once_at_a_time() {
 
     first.abort();
     assert!(first.await.expect_err("cancelled").is_cancelled());
+    assert_eq!(downloads.progress("m"), None, "a cancelled download is not shown");
     downloads
         .run("m", &store, &assets, |_| {})
         .await
