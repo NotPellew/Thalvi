@@ -715,6 +715,14 @@ pub fn on_menu(app: &AppHandle, id: &str) {
                         .unwrap_or_else(PoisonError::into_inner)
                         .take(),
                 );
+                // Exiting never drops managed state, and Hyprland keeps binds the app added.
+                drop(
+                    state
+                        .hold_watch
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take(),
+                );
                 state.link.quit();
                 app.exit(0);
             });
