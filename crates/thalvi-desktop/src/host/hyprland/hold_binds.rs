@@ -707,6 +707,11 @@ mod tests {
                 thalvi("F10"),
             ),
             (
+                "another program's bind that ends in a word like the hold commands",
+                vec![row("F9", false, "exec", "obs hold-start")],
+                taken("F9"),
+            ),
+            (
                 "a hand-written Thalvi bind next to another program's on another key",
                 vec![
                     row("F9", false, "exec", "thalvi-desktop hold-start"),
@@ -841,6 +846,49 @@ mod tests {
         );
         drop(new);
         assert_eq!(hypr.bound(), [("F7".to_owned(), false, "obs".to_owned())]);
+    }
+
+    #[test]
+    fn a_refused_bind_keeps_the_keys_an_earlier_watch_relies_on() {
+        let installed = Installed::default();
+        let hypr = Compositor::new(Vec::new());
+        let (_earlier, _) = bind_keys(&hypr, &installed, EXE, &[hold("F9")]);
+        // A reload dropped its binds before the watch could put them back.
+        hypr.binds.lock().unwrap().clear();
+        *hypr.refuses.lock().unwrap() = Some("F10");
+
+        let (later, _) = bind_keys(&hypr, &installed, EXE, &defaults());
+        assert_eq!(
+            later.err(),
+            Some(HostError::NothingTyped(
+                "Hyprland would not bind the hold keys: invalid dispatcher.".to_owned()
+            ))
+        );
+        assert_eq!(hypr.bound(), bound_by_thalvi(EXE, &[("F9", "hold")]));
+        assert_eq!(
+            hypr.commands().last().map(String::as_str),
+            Some("hyprctl --batch keyword unbind , F10")
+        );
+    }
+
+    #[test]
+    fn dropping_a_watch_unbinds_its_keys_whichever_watch_goes_first() {
+        for (first, second) in [(0, 1), (1, 0)] {
+            let installed = Installed::default();
+            let hypr = Compositor::new(Vec::new());
+            let (dictation, _) = bind_keys(&hypr, &installed, EXE, &[hold("F9")]);
+            let (writing, _) = bind_keys(&hypr, &installed, EXE, &[write("F8")]);
+            let mut watches = [dictation.ok(), writing.ok()];
+            drop(watches[first].take());
+            let left = [("F9", "hold"), ("F8", "write")][second];
+            assert_eq!(
+                hypr.bound(),
+                bound_by_thalvi(EXE, &[left]),
+                "{first} dropped first"
+            );
+            drop(watches[second].take());
+            assert_eq!(hypr.bound(), [], "{second} dropped last");
+        }
     }
 
     struct Following {
