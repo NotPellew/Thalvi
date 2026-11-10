@@ -113,23 +113,36 @@ fn wanted(exe: &Path, keys: &[(HoldKind, HoldKey)]) -> Result<Vec<Bind>, HostErr
 /// holds a key, or a hold bind that Thalvi did not add does. A bind identical to a wanted one is
 /// adopted, so it is neither added again nor in the way.
 fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Vec<&'a Bind>, String> {
-    let mut notices = Vec::new();
     let mut keys: Vec<&str> = wanted.iter().map(|bind| bind.key.as_str()).collect();
     keys.dedup();
+    let (mut doubled, mut taken) = (Vec::new(), Vec::new());
     for key in keys {
         let strangers: Vec<&Row> = rows
             .iter()
             .filter(|row| row.on(key) && !wanted.iter().any(|bind| bind.is(row)))
             .collect();
         if strangers.iter().any(|row| row.is_thalvi_hold()) {
-            notices.push(format!(
-                "Hyprland already has a Thalvi hold bind on {key} that Thalvi did not add. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf or run hyprctl reload, so one press does not start two holds."
-            ));
+            doubled.push(key);
         } else if !strangers.is_empty() {
-            notices.push(format!(
-                "{key} is already bound in Hyprland. Pick another key or remove that bind."
-            ));
+            taken.push(key);
         }
+    }
+    let mut notices = Vec::new();
+    if !doubled.is_empty() {
+        notices.push(format!(
+            "Hyprland already binds {} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf. If it has none, a Thalvi that did not quit left them, and hyprctl reload clears them.",
+            doubled.join(" and ")
+        ));
+    }
+    match taken[..] {
+        [] => {}
+        [key] => notices.push(format!(
+            "{key} is already bound in Hyprland. Pick another key or remove that bind."
+        )),
+        _ => notices.push(format!(
+            "{} are already bound in Hyprland. Pick other keys or remove those binds.",
+            taken.join(" and ")
+        )),
     }
     if !notices.is_empty() {
         return Err(notices.join(" "));
@@ -659,9 +672,9 @@ mod tests {
         let taken = |key: &str| {
             format!("{key} is already bound in Hyprland. Pick another key or remove that bind.")
         };
-        let thalvi = |key: &str| {
+        let thalvi = |keys: &str| {
             format!(
-                "Hyprland already has a Thalvi hold bind on {key} that Thalvi did not add. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf or run hyprctl reload, so one press does not start two holds."
+                "Hyprland already binds {keys} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf. If it has none, a Thalvi that did not quit left them, and hyprctl reload clears them."
             )
         };
         let cases = [
@@ -686,7 +699,16 @@ mod tests {
                     row("F9", false, "exec", "x"),
                     row("F10", false, "exec", "y"),
                 ],
-                format!("{} {}", taken("F9"), taken("F10")),
+                "F9 and F10 are already bound in Hyprland. Pick other keys or remove those binds."
+                    .to_owned(),
+            ),
+            (
+                "hand-written Thalvi binds on both keys",
+                vec![
+                    row("F9", false, "exec", "thalvi-desktop hold-start"),
+                    row("F10", false, "exec", "thalvi-desktop write-start"),
+                ],
+                thalvi("F9 and F10"),
             ),
             (
                 "hand-written Thalvi binds",
