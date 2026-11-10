@@ -330,12 +330,6 @@ describe("the settings window's look", () => {
   }
 
   const radio = (look: Look) => pick(root, `[data-choice="${look}"] input`) as HTMLInputElement;
-  const button = (name: string) => {
-    const found = Array.from(root.querySelectorAll("button")).find((candidate) => candidate.textContent === name);
-    if (!found) throw new Error(`no button ${name}`);
-    return found;
-  };
-
   it("wears the saved look and offers the three looks on the Feedback and appearance page", async () => {
     await open("gunmetal");
     expect(root.dataset["look"]).toBe("gunmetal");
@@ -343,20 +337,12 @@ describe("the settings window's look", () => {
     expect(radio("gunmetal").checked).toBe(true);
   });
 
-  it("switches at once when picked, saves with the other settings, and goes back on revert", async () => {
+  it("switches at once when picked and saves immediately", async () => {
     const stub = await open();
     radio("holo").click();
+    await settle();
     expect(root.dataset["look"]).toBe("holo");
-    expect(pick(root, ".msg").textContent).toBe("Unsaved changes");
-
-    button("Save").click();
     expect(stub.backend.saveSettings).toHaveBeenCalledWith({ ...SETTINGS, look: "holo" });
-    await settle();
-
-    radio("gunmetal").click();
-    button("Revert").click();
-    await settle();
-    expect(root.dataset["look"]).toBe("neon");
   });
 
   it("puts each heading and the rows after it in one group the looks can frame", async () => {

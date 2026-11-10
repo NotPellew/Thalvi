@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry, Status } from "./contract.ts";
 import settingsCss from "./settings.css?raw";
 import settingsLooksCss from "./settings-looks.css?raw";
-import { ELSEWHERE_TEXT, mountSettings, SAVED_MICROPHONE_TEXT, SAVED_TEXT } from "./settings.ts";
+import { APPLIED_NEXT_CAPTURE, APPLIED_TEXT, mountSettings } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO } from "./testing.ts";
 
 let root: HTMLElement;
@@ -66,8 +66,30 @@ function goTo(page: string): void {
   (root.querySelector(`nav [data-page="${page}"]`) as HTMLElement).click();
 }
 
-function sent(stub: Awaited<ReturnType<typeof open>>): Settings {
-  const call = stub.backend.saveSettings.mock.calls[0];
+
+function applied(row: string): string {
+  return rowOf(row).querySelector<HTMLElement>(".note.ok")?.textContent ?? "";
+}
+
+async function commit(label: string): Promise<void> {
+  const input = control(label, "input");
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  input.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+  await settle();
+}
+
+async function commitWriting(): Promise<void> {
+  for (const label of ["Writing endpoint address", "Writing model", "Writing API key"]) {
+    await commit(label);
+  }
+  const prompt = root.querySelector<HTMLTextAreaElement>('textarea[id^="f"]');
+  prompt?.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+  await settle();
+}
+
+function sent(stub: Awaited<ReturnType<typeof open>>, which: "first" | "last" = "last"): Settings {
+  const calls = stub.backend.saveSettings.mock.calls;
+  const call = which === "first" ? calls[0] : calls[calls.length - 1];
   if (!call) throw new Error("nothing was saved");
   return call[0];
 }
@@ -140,8 +162,7 @@ describe("pages", () => {
         id: "microphone",
         title: "Microphone",
         groups: {
-          "Right now": ["listening", "active microphone", "level"],
-          "Saved with Save": ["saved device"],
+          "Right now": ["listening", "active microphone", "level", "microphone"],
         },
       },
       {
@@ -192,157 +213,78 @@ describe("pages", () => {
   });
 });
 
-describe("save", () => {
-  it("sends the settings unchanged when nothing was edited", async () => {
-    const stub = await open();
-    button("Save").click();
-    expect(sent(stub)).toEqual(SETTINGS);
-    await settle();
-    expect(root.querySelector(".msg")?.textContent).toBe(SAVED_TEXT);
-  });
-
-  it.each<[string, boolean, boolean, boolean, string]>([
-    ["only a non-microphone setting changed", false, true, false, "Saved — applies after the current capture"],
-    ["the microphone changed and has not opened", true, false, false, "Saved — applies after the current capture; the saved microphone is not active until it opens"],
-    ["the microphone changed and opens after the save", true, false, true, "Saved — applies after the current capture"],
-    ["the microphone and another setting changed", true, true, false, "Saved — applies after the current capture; the saved microphone is not active until it opens"],
-  ])("says only what applies to the change saved: %s", async (_case, microphone, other, opens, footer) => {
-    const stub = await open();
-    if (other) {
-      goTo("capture");
+describe("apply", () => {
+  it.each([
+    ["toggle", "feedback", () => { flip(control("Show the draft", "input")); }, (stub: Awaited<ReturnType<typeof open>>) => {
+      expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
+      expect(stub.backend.saveSettings.mock.calls[0]?.[0].overlay.draft).toBe(false);
+    }],
+    ["slider", "capture", () => {
+      const slider = control("Threshold (dictation)", "input");
+      slider.value = "0.8";
+      slider.dispatchEvent(new Event("input", { bubbles: true }));
+      slider.dispatchEvent(new Event("change", { bubbles: true }));
+    }, (stub: Awaited<ReturnType<typeof open>>) => {
+      expect(stub.backend.saveSettings.mock.calls.at(-1)?.[0].wake.capture.threshold).toBe(0.8);
+    }],
+    ["number on blur", "capture", async () => {
       type(control("Quiet before paste", "input"), "1.5");
-    }
-    if (microphone) {
-      goTo("microphone");
-      stub.emit({ state: "paused" });
-      choose(control("Saved device", "select"), "USB Microphone");
-    }
-    button("Save").click();
+      await commit("Quiet before paste");
+    }, (stub: Awaited<ReturnType<typeof open>>) => {
+      expect(stub.backend.saveSettings.mock.calls.at(-1)?.[0].ending_pause.paste).toBe(1.5);
+    }],
+    ["select", "microphone", () => { choose(control("Microphone", "select"), "USB Microphone"); }, (stub: Awaited<ReturnType<typeof open>>) => {
+      expect(stub.backend.saveSettings.mock.calls.at(-1)?.[0].microphone).toBe("USB Microphone");
+    }],
+  ] as const)("each control kind applies on its trigger: %s", async (_kind, page, act, check) => {
+    const stub = await open();
+    goTo(page);
+    await act();
     await settle();
-    if (opens) stub.audio({ selected: "USB Microphone", active: "USB Microphone", paused: false });
-    expect(root.querySelector(".msg")?.textContent).toBe(footer);
+    check(stub);
   });
 
-  it("sends exactly the edits", async () => {
+  it("shows a reason and does not save an invalid value", async () => {
     const stub = await open();
-    goTo("speech");
-    edit("Thalvi server");
-    type(control("Address", "input"), "wss://thalvi.example");
-    await saveServer();
+    stub.backend.saveSettings.mockRejectedValue("The paste pause must be a number of seconds from 0 to 5.");
     goTo("capture");
-    type(control("Quiet before paste", "input"), "1.5");
-    type(control("Threshold (dictation)", "input"), "0.8");
-    choose(control("Wake model (conversation)", "select"), "hey_jarvis");
+    type(control("Quiet before paste", "input"), "9");
+    await commit("Quiet before paste");
+    expect(stub.backend.saveSettings).toHaveBeenCalled();
+    expect(root.querySelector(".err")?.textContent).toContain("paste pause");
+    expect(control("Quiet before paste", "input").value).toBe(String(SETTINGS.ending_pause.paste));
+  });
+
+  it("restores a typed value on Escape", async () => {
+    await open();
+    goTo("capture");
+    type(control("Quiet before paste", "input"), "2");
+    const input = control("Quiet before paste", "input");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle();
+    expect(input.value).toBe(String(SETTINGS.ending_pause.paste));
+  });
+
+  it("says from the next dictation during a capture", async () => {
+    const stub = await open();
+    stub.emit({ state: "capturing", target: "app", committed: "", partial: "hi", notice: null });
     goTo("feedback");
-    flip(control("Show the draft", "input"));
-    flip(control("Wake sound", "input"));
+    flip(control("Show the overlay", "input"));
+    await settle();
+    expect(applied("Show the overlay")).toBe(APPLIED_NEXT_CAPTURE);
+  });
+
+  it("refreshes applied values on an outside change but not a field being typed in", async () => {
+    const stub = await open();
     goTo("capture");
-    type(control("Stop after", "input"), "120");
-    goTo("microphone");
-    stub.emit({ state: "paused" });
-    choose(control("Saved device", "select"), "USB Microphone");
-    button("Save").click();
-    const expected = structuredClone(SETTINGS);
-    expected.stt.entries = [{ ...SERVER, address: "wss://thalvi.example" } as SpeechEntry];
-    expected.ending_pause.paste = 1.5;
-    expected.wake.capture.threshold = 0.8;
-    expected.wake.conversation.model = "hey_jarvis";
-    expected.overlay.draft = false;
-    expected.cues.wake = false;
-    expected.capture_limits.max = 120;
-    expected.microphone = "USB Microphone";
-    expect(sent(stub)).toEqual(expected);
-  });
-
-  it("shows the rejection inline and keeps the draft", async () => {
-    const stub = await open();
-    stub.backend.saveSettings.mockRejectedValue("The desktop config is not valid: bad server.");
-    button("Save").click();
+    type(control("Quiet before paste", "input"), "1.2");
+    const changed = structuredClone(SETTINGS);
+    changed.ending_pause.paste = 0.1;
+    stub.backend.getSettings.mockImplementation(() => Promise.resolve(structuredClone(changed)));
+    stub.changedElsewhere();
     await settle();
-    expect(root.querySelector(".err")?.textContent).toBe("The desktop config is not valid: bad server.");
-    expect(root.querySelector(".msg")?.textContent).toBe("");
-  });
-
-  it("marks unsaved edits and clears the mark on revert", async () => {
-    const stub = await open();
-    goTo("speech");
-    edit("Thalvi server");
-    type(control("Address", "input"), "ws://other");
-    await saveServer();
-    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
-    button("Revert").click();
-    await settle();
-    expect(stub.backend.getSettings).toHaveBeenCalledTimes(2);
-    expect(root.querySelector(".trow.server")?.textContent).toContain("ws://127.0.0.1:8080");
-    expect(root.querySelector(".msg")?.textContent).toBe("");
-  });
-
-  describe("when an agent changes the saved settings behind an open window", () => {
-    async function openChanged() {
-      const stub = await open(several());
-      const changed = several();
-      changed.stt.entries = changed.stt.entries.map((entry) => ({ ...entry, active: entry.id === "cybrex2" }));
-      stub.backend.getSettings.mockImplementation(() => Promise.resolve(structuredClone(changed)));
-      goTo("speech");
-      return stub;
-    }
-    const activeNames = (): (string | null)[] =>
-      Array.from(root.querySelectorAll(".trow.server")).filter((row) => row.textContent.includes("In use")).map((row) => row.querySelector(".phrase")?.textContent ?? null);
-
-    it("loads the new settings and stays on the current page when nothing is unsaved", async () => {
-      const stub = await openChanged();
-      expect(activeNames()).toEqual(["Thalvi server"]);
-      stub.changedElsewhere();
-      await settle();
-      expect(activeNames()).toEqual(["Cybrex2"]);
-      expect(root.querySelector('nav [aria-current="page"]')?.getAttribute("data-page")).toBe("speech");
-      expect(root.querySelector(".msg")?.textContent).toBe("");
-    });
-
-    it.each([
-      ["revert", "Quiet before paste"],
-      ["save", "Quiet before paste"],
-      ["revert", "Threshold (dictation)"],
-    ] as const)("keeps unsaved edits and says so until the user chooses to %s (edit of %s)", async (action, edited) => {
-      const stub = await openChanged();
-      goTo("capture");
-      type(control(edited, "input"), edited === "Threshold (dictation)" ? "0.8" : "1.5");
-      goTo("speech");
-      stub.changedElsewhere();
-      await settle();
-      expect(activeNames()).toEqual(["Thalvi server"]);
-      expect(stub.backend.getSettings).toHaveBeenCalledTimes(1);
-      expect(root.querySelector(".msg")?.textContent).toBe(ELSEWHERE_TEXT);
-      button(action === "revert" ? "Revert" : "Save").click();
-      await settle();
-      if (action === "revert") {
-        expect(activeNames()).toEqual(["Cybrex2"]);
-      } else {
-        expect(activeNames()).toEqual(["Thalvi server"]);
-        expect(sent(stub).stt.entries.find((entry) => entry.active)?.id).toBe(SERVER.id);
-      }
-      expect(root.querySelector(".msg")?.textContent).toBe(action === "revert" ? "" : SAVED_TEXT);
-    });
-  });
-
-  it.each(["edit", "apply failure"] as const)("keeps a later %s visible when an in-flight save completes", async (event) => {
-    const stub = await open();
-    let complete = (): void => { throw new Error("Save has not started"); };
-    stub.backend.saveSettings.mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }));
-    goTo("tasks");
-    button("Save").click();
-    expect(button("Revert").disabled).toBe(true);
-    if (event === "edit") {
-      type(root.querySelector<HTMLInputElement>('input[aria-label="Label of script 1"]') as HTMLInputElement, "new label");
-    } else {
-      stub.emit({ state: "failed", notice: "The new settings could not be applied.", headline: "Failed — Settings", causes: [], kind: "other" });
-    }
-    complete();
-    await settle();
-    expect(button("Revert").disabled).toBe(false);
-    expect(sent(stub).scripts[0]?.label).toBe("docs");
-    expect(root.querySelector(".msg")?.textContent).toBe(event === "edit" ? "Unsaved changes" : "");
-    if (event === "apply failure") expect(root.querySelector(".err")?.textContent).toBe("The new settings could not be applied.");
+    expect(control("Quiet before paste", "input").value).toBe("1.2");
+    expect(control("Quiet before paste", "input").value).toBe("1.2");
   });
 });
 
@@ -354,11 +296,12 @@ describe("tables", () => {
     type(add.querySelector<HTMLInputElement>(".add input") as HTMLInputElement, "  Send   It ");
     choose(add.querySelector<HTMLSelectElement>(".add select") as HTMLSelectElement, "submit");
     (add.querySelector(".add button") as HTMLElement).click();
+    await settle();
     const phrases = Array.from(add.querySelectorAll(".table .phrase"), (node) => node.textContent);
     expect(phrases.at(-1)).toBe("“send it”");
     expect(add.querySelector(".table")?.nextElementSibling).toBe(add.querySelector(".trow.add"));
     root.querySelector<HTMLElement>('button[aria-label="Remove “never mind”"]')?.click();
-    button("Save").click();
+    await settle();
     const expected = structuredClone(SETTINGS);
     expected.endings = {
       "paste that": "paste",
@@ -402,13 +345,11 @@ describe("tables", () => {
       expect(field.value).toBe(typed);
       expect(picker.value).toBe(ending);
       expect(phrases()).toEqual(before);
-      expect(root.querySelector(".msg")?.textContent).not.toBe("Unsaved changes");
     } else {
       expect(notice()).toBe("");
       expect(field.value).toBe("");
       expect(phrases()).toEqual([...before, "“hold on”"]);
       expect(table.querySelector<HTMLSelectElement>('select[aria-label="Action for “hold on”"]')?.value).toBe("submit");
-      expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
     }
   });
 
@@ -416,12 +357,20 @@ describe("tables", () => {
     const stub = await open();
     goTo("tasks");
     type(root.querySelector<HTMLInputElement>('input[aria-label="Executables of slack"]') as HTMLInputElement, "slack, slack.exe");
+    root.querySelector<HTMLInputElement>('input[aria-label="Executables of slack"]')?.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    await settle();
     type(root.querySelector<HTMLInputElement>('input[aria-label="Label of script 1"]') as HTMLInputElement, "");
+    root.querySelector<HTMLInputElement>('input[aria-label="Label of script 1"]')?.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    await settle();
     button("Add script").click();
+    await settle();
     type(root.querySelector<HTMLInputElement>('input[aria-label="Phrase of script 2"]') as HTMLInputElement, "focus slack");
+    root.querySelector<HTMLInputElement>('input[aria-label="Phrase of script 2"]')?.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
     choose(root.querySelector<HTMLSelectElement>('select[aria-label="Action of script 2"]') as HTMLSelectElement, "focus_app");
+  await settle();
     type(root.querySelector<HTMLInputElement>('input[aria-label="Destination of script 2"]') as HTMLInputElement, "slack");
-    button("Save").click();
+    root.querySelector<HTMLInputElement>('input[aria-label="Destination of script 2"]')?.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    await settle();
     const saved = sent(stub);
     expect(saved.apps["slack"]?.executables).toEqual(["slack", "slack.exe"]);
     expect(saved.scripts).toEqual([
@@ -510,10 +459,11 @@ describe("the wake word picker", () => {
     const shown = (): string => rowOf("Threshold (dictation)").querySelector("output")?.textContent ?? "";
     expect(shown()).toBe("0.90");
     choose(control("Wake model (dictation)", "select"), "hey_jarvis");
+    await settle();
     expect(shown()).toBe("0.50");
     choose(control("Wake model (dictation)", "select"), "hey_thalvi");
+    await settle();
     expect(shown()).toBe("0.70");
-    button("Save").click();
     await settle();
     expect(sent(stub).wake.capture).toEqual({ model: "hey_thalvi", threshold: 0.7 });
   });
@@ -521,11 +471,11 @@ describe("the wake word picker", () => {
   it("shows the picked custom file name and saves its path", async () => {
     const stub = await openCapture();
     choose(control("Wake model (dictation)", "select"), "__custom");
+    await settle();
     within(rowOf("Wake model (dictation)"), "Browse…").click();
     await settle();
     expect(stub.backend.pickWakeModelFile).toHaveBeenCalledTimes(1);
     expect(rowOf("Wake model (dictation)").textContent).toContain("custom.onnx");
-    button("Save").click();
     await settle();
     expect(stub.backend.validateWakeModels).toHaveBeenCalledWith("/models/custom.onnx", "hey_mycroft");
     expect(sent(stub).wake.capture.model).toBe("/models/custom.onnx");
@@ -535,26 +485,23 @@ describe("the wake word picker", () => {
     const stub = await openCapture();
     stub.backend.pickWakeModelFile.mockResolvedValue("/models/bad.onnx");
     choose(control("Wake model (dictation)", "select"), "__custom");
+    await settle();
     within(rowOf("Wake model (dictation)"), "Browse…").click();
     await settle();
     expect(problem("Wake model (dictation)")).toBe("The wake model /models/bad.onnx could not be loaded: not a wake model.");
-    button("Save").click();
     await settle();
-    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
     expect(root.querySelector(".err")?.textContent).toBe("The wake model /models/bad.onnx could not be loaded: not a wake model.");
   });
 
   it("does not save the same custom file for both wake words", async () => {
-    const stub = await openCapture();
+    await openCapture();
     for (const label of ["Wake model (dictation)", "Wake model (conversation)"] as const) {
       choose(control(label, "select"), "__custom");
       within(rowOf(label), "Browse…").click();
       await settle();
     }
     expect(problem("Wake model (conversation)")).toBe("The capture and conversation wake models must be different.");
-    button("Save").click();
     await settle();
-    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
   });
 
   it("shows a saved custom file by name when Settings opens", async () => {
@@ -623,7 +570,6 @@ describe("a custom speech model folder", () => {
     await saveServer();
     expect(stub.backend.validateSpeechModelFolder).toHaveBeenCalledWith("/models/mine");
     expect(root.querySelector(".editor")?.hasAttribute("hidden")).toBe(true);
-    button("Save").click();
     await settle();
     expect(deviceOf(sent(stub)).model).toBe("/models/mine");
   });
@@ -637,7 +583,7 @@ describe("a custom speech model folder", () => {
     expect(root.querySelector(".editor")?.hasAttribute("hidden")).toBe(false);
     expect(result()?.textContent).toBe("There is no folder at /models/gone.");
     expect(editorNote()).toBe("There is no folder at /models/gone.");
-    expect(root.querySelector(".msg")?.textContent).toBe("");
+    expect(root.querySelector(".err")?.textContent).toBe("");
   });
 
   it.each([
@@ -672,10 +618,11 @@ describe("the word list", () => {
     return Array.from(rowOf("Word list").querySelectorAll(".chip > span")).map((chip) => chip.textContent);
   }
 
-  function add(word: string, by: "plus" | "enter" = "plus"): void {
+  async function add(word: string, by: "plus" | "enter" = "plus"): Promise<void> {
     type(box(), word);
     if (by === "enter") box().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     else (rowOf("Word list").querySelector('button[aria-label="Add the word"]') as HTMLButtonElement).click();
+    await settle();
   }
 
   function offered(): boolean {
@@ -708,21 +655,19 @@ describe("the word list", () => {
 
   it("adds a typed word by + or Enter, refuses a blank or repeated one, and shares the list once per change", async () => {
     const stub = await openWith("server", () => Promise.resolve(true));
-    add("  Cybrex2 ");
-    add("Thalvi", "enter");
+    await add("  Cybrex2 ");
+    await add("Thalvi", "enter");
     expect(chips()).toEqual(["Cybrex2", "Thalvi"]);
     expect(box().value).toBe("");
     const problem = (): string => Array.from(rowOf("Word list").querySelectorAll(".note")).map((note) => note.textContent).join("");
-    add("  ");
+    await add("  ");
     expect(problem()).toBe("Type the word to add first.");
-    add("Cybrex2");
+    await add("Cybrex2");
     expect(problem()).toBe("Cybrex2 is already in the list.");
     expect(chips()).toEqual(["Cybrex2", "Thalvi"]);
-    button("Save").click();
     await settle();
     expect(sent(stub).stt.phrases).toEqual(["Cybrex2", "Thalvi"]);
     expect(stub.backend.shareWordList).toHaveBeenCalledTimes(1);
-    button("Save").click();
     await settle();
     expect(stub.backend.shareWordList).toHaveBeenCalledTimes(1);
   });
@@ -730,12 +675,10 @@ describe("the word list", () => {
   it("says when the server could not take the list, and the save stands", async () => {
     const stub = await openWith("server", () => Promise.resolve(true));
     stub.backend.shareWordList.mockRejectedValue("The word list is saved here, but Thalvi could not reach the server.");
-    add("Cybrex2");
-    button("Save").click();
+    await add("Cybrex2");
     await settle();
     expect(root.querySelector(".err")?.textContent).toBe("The word list is saved here, but Thalvi could not reach the server.");
     expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
-    expect(root.querySelector(".msg")?.textContent).not.toBe("Unsaved changes");
   });
 
   it("shows a saved list as chips and removes a word", async () => {
@@ -743,7 +686,6 @@ describe("the word list", () => {
     expect(chips()).toEqual(["Cybrex2", "Thalvi"]);
     (rowOf("Word list").querySelector('button[aria-label="Remove Cybrex2"]') as HTMLButtonElement).click();
     expect(chips()).toEqual(["Thalvi"]);
-    button("Save").click();
     await settle();
     expect(sent(stub).stt.phrases).toEqual(["Thalvi"]);
   });
@@ -860,7 +802,7 @@ describe("the speech server list", () => {
     expect((root.querySelector('button[aria-label="Remove Thalvi server"]') as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("switches the live server with one click, saving only that and nothing else that is unsaved", async () => {
+  it("switches the live server with one click, without changing other settings", async () => {
     const stub = await openSeveral();
     goTo("capture");
     type(control("Quiet before paste", "input"), "1.5");
@@ -880,7 +822,6 @@ describe("the speech server list", () => {
     expect(badgesOf("Cybrex2")).toContain("In use");
     expect(badgesOf("Thalvi server")).not.toContain("In use");
     expect(root.querySelector('button[aria-label="Use Cybrex2"]')).toBeNull();
-    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
   });
 
   it("keeps the server in use when the switch is refused, and says why", async () => {
@@ -893,7 +834,7 @@ describe("the speech server list", () => {
     expect(badgesOf("Cybrex2")).not.toContain("In use");
   });
 
-  it("adds a server once its fields are accepted, shown as not saved until Save", async () => {
+  it("adds a server once its fields are accepted, applies once its fields are accepted", async () => {
     const stub = await openSeveral();
     await addServer("realtime");
     expect(root.querySelector(".editor h4")?.textContent).toBe("Add a realtime speech server");
@@ -908,11 +849,7 @@ describe("the speech server list", () => {
     expect(checked).toMatchObject({ kind: "realtime", name: "Office GPU", address: "ws://10.0.0.5:8012", model: "nemotron", api_key: "sk-new", active: false });
     expect(checked).not.toHaveProperty("has_key");
     expect(root.querySelector(".editor")?.hasAttribute("hidden")).toBe(true);
-    expect(badgesOf("Office GPU")).toEqual(["Realtime speech server", "Key saved", "Not saved"]);
-    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
-    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
-
-    button("Save").click();
+    expect(badgesOf("Office GPU")).toEqual(["Realtime speech server", "Key saved", ]);
     await settle();
     expect(sent(stub).stt.entries.find((entry) => entry.name === "Office GPU")).toMatchObject({ active: false, api_key: "sk-new" });
     expect(badgesOf("Office GPU")).toEqual(["Realtime speech server", "Key saved"]);
@@ -927,7 +864,7 @@ describe("the speech server list", () => {
     expect(editorNote()).toBe('Speech server "Realtime speech server": the address must be a ws or wss URL.');
     expect(root.querySelector(".editor")?.hasAttribute("hidden")).toBe(false);
     expect(names(lists()[0] as HTMLElement)).toEqual(["Thalvi server", "Cybrex2", "On this computer"]);
-    expect(root.querySelector(".msg")?.textContent).toBe("");
+    expect(root.querySelector(".err")?.textContent).toBe("");
   });
 
   it("keeps every name distinct before asking the app", async () => {
@@ -948,8 +885,6 @@ describe("the speech server list", () => {
     await saveServer();
     expect(names(lists()[0] as HTMLElement)).toEqual(["Thalvi server", "Cybrex2 GPU", "On this computer"]);
     expect(entryNamed("Cybrex2 GPU").querySelector("details")?.textContent).toContain("ws://100.64.0.3:8012 · nemotron");
-    expect(badgesOf("Cybrex2 GPU")).toContain("Not saved");
-
     edit("Cybrex2 GPU");
     type(control("Name", "input"), "Dropped");
     button("Cancel").click();
@@ -971,7 +906,6 @@ describe("the speech server list", () => {
     expect(control("API key", "input").placeholder).toBe("Saved — leave blank to keep it");
     act(within(rowOf("API key"), "Clear saved key"));
     await saveServer();
-    button("Save").click();
     await settle();
     const entry = sent(stub).stt.entries.find((known) => known.id === "cybrex2");
     expect(entry && "api_key" in entry ? entry.api_key : undefined).toBe(sentKey);
@@ -1008,7 +942,6 @@ describe("second-pass servers", () => {
     await settle();
     const unticked = stub.backend.saveSettings.mock.calls[1]?.[0].stt.entries.find((entry) => entry.id === "openai");
     expect(unticked).toMatchObject({ active: false, address: "https://api.openai.com/v1", model: "whisper-1", has_key: true });
-    expect(root.querySelector(".msg")?.textContent).not.toBe("Unsaved changes");
   });
 
   it("shows a tick that was refused as still off", async () => {
@@ -1020,18 +953,16 @@ describe("second-pass servers", () => {
     expect(root.querySelector(".err")?.textContent).toBe("The settings could not be saved.");
   });
 
-  it("tries them in list order, which the arrows change and Save keeps", async () => {
+  it("tries them in list order, which the arrows change and applies at once", async () => {
     const stub = await openSeveral();
     expect((entryNamed("OpenAI").querySelector('button[aria-label="Move OpenAI up"]') as HTMLButtonElement).disabled).toBe(true);
     (entryNamed("Meta").querySelector('button[aria-label="Move Meta up"]') as HTMLButtonElement).click();
     expect(names(lists()[1] as HTMLElement)).toEqual(["Meta", "OpenAI"]);
-    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
-    button("Save").click();
     await settle();
     expect(sent(stub).stt.entries.filter((entry) => entry.kind === "second_pass").map((entry) => entry.name)).toEqual(["Meta", "OpenAI"]);
   });
 
-  it("adds a second-pass API, ticks it in the draft only, and saves it with Save", async () => {
+  it("adds a second-pass API, ticks it in the draft only, and applies it at once", async () => {
     const stub = await openSeveral();
     button("Add a second-pass API").click();
     await settle();
@@ -1045,11 +976,8 @@ describe("second-pass servers", () => {
     expect(stub.backend.checkSpeechEntry).toHaveBeenLastCalledWith(
       expect.objectContaining({ kind: "second_pass", address: "http://127.0.0.1:9000/v1", model: "whisper", api: "meta", api_key: "k" }),
     );
-    expect(badgesOf("Second pass")).toContain("Not saved");
     flip(tickOf("Second pass"));
     await settle();
-    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
-    button("Save").click();
     await settle();
     expect(sent(stub).stt.entries.at(-1)).toMatchObject({ name: "Second pass", active: true, api: "meta", api_key: "k" });
   });
@@ -1153,7 +1081,6 @@ describe("the next dictation summary and state words", () => {
     choose(control("Speech model", "select"), "unified_160ms");
     await saveServer();
     expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Streaming — Ready");
-    button("Save").click();
     await settle();
     expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Unified — Ready");
     expect(stub.backend.saveSettings).toHaveBeenCalled();
@@ -1199,7 +1126,6 @@ describe("the next dictation summary and state words", () => {
       button("Use a speech server instead").click();
       expect((root.querySelector(".editor") as HTMLElement).hidden).toBe(false);
       expect(root.querySelector(".editor h4")?.textContent).toBe("Add a realtime speech server");
-      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
       expect(stub.backend.downloadSpeechModel).not.toHaveBeenCalled();
     });
 
@@ -1218,8 +1144,7 @@ describe("the next dictation summary and state words", () => {
       await settle();
       expect(root.querySelector(".next-dictation + div .note")?.textContent).toBe("The download of Nemotron Streaming failed: offline.");
       expect(stub.backend.setListening).toHaveBeenCalledTimes(1);
-      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
-    });
+      });
   });
 
   it("follows Use to a server entry", async () => {
@@ -1343,14 +1268,11 @@ describe("the speech model catalog", () => {
 
   it("moves the selection to the first model of a language the selected one lacks, unsaved until Save", async () => {
     const stub = await openCatalog();
-    expect(root.querySelector(".msg")?.textContent).toBe("");
+    expect(root.querySelector(".err")?.textContent).toBe("");
     choose(languages(), "Dutch");
     expect(picker().value).toBe("unified_160ms");
     expect(card().querySelector("details")?.textContent).toContain("OpenMDW-1.1");
-    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
     await saveServer();
-    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
-    button("Save").click();
     await settle();
     expect(deviceOf(sent(stub)).model).toBe("unified_160ms");
     expect(JSON.stringify(sent(stub))).not.toContain("Dutch");
@@ -1366,7 +1288,6 @@ describe("the speech model catalog", () => {
     choose(languages(), "");
     expect(picker().value).toBe("unified_160ms");
     await saveServer();
-    button("Save").click();
     await settle();
     expect(deviceOf(sent(stub)).model).toBe("unified_160ms");
   });
@@ -1390,7 +1311,6 @@ describe("the speech model catalog", () => {
     choose(picker(), "__folder");
     type(control("Speech model", "input"), "/models/mine");
     await saveServer();
-    button("Save").click();
     await settle();
     expect(deviceOf(sent(stub)).model).toBe("/models/mine");
   });
@@ -1586,7 +1506,6 @@ describe("the speech model catalog", () => {
     );
     expect(text(".unit")).toBe("647 MB");
     await saveServer();
-    button("Save").click();
     await settle();
     expect(stub.backend.validateSpeechModelFolder).not.toHaveBeenCalled();
     expect(deviceOf(sent(stub)).model).toBe("unified_160ms");
@@ -1632,16 +1551,10 @@ describe("writing", () => {
     type(control("Writing endpoint address", "input"), endpoint.url);
     type(control("Writing model", "input"), endpoint.model);
     type(control("Writing API key", "input"), endpoint.api_key);
+    await commitWriting();
     expect(control("Writing API key", "input").type).toBe("password");
-    const calls = () => Object.entries(stub.backend).map(([name, call]) => [name, call.mock.calls.length]);
-    const before = calls();
-    button("Save").click();
-    await settle();
+    expect(stub.backend.saveSettings).toHaveBeenCalled();
     expect(sent(stub).writing).toEqual(endpoint);
-    const grew = calls()
-      .filter(([, count], index) => count !== before[index]?.[1])
-      .map(([name]) => name);
-    expect(grew).toEqual(["saveSettings"]);
   });
 
   it("shows a saved endpoint and saves nothing for one that was cleared", async () => {
@@ -1650,7 +1563,7 @@ describe("writing", () => {
     expect(sent_writing_fields()).toEqual([endpoint.url, endpoint.model, ""]);
     expect(control("Writing API key", "input").placeholder).toBe("A key is saved");
     for (const label of ["Writing endpoint address", "Writing model", "Writing API key"]) type(control(label, "input"), "");
-    button("Save").click();
+    await commitWriting();
     expect(sent(stub).writing).toBeNull();
   });
 
@@ -1659,11 +1572,9 @@ describe("writing", () => {
     const stub = await open({ ...SETTINGS, writing });
     goTo("speech");
     type(control("Writing model", "input"), "updated");
-    button("Save").click();
     await settle();
     expect(sent(stub).writing).toEqual({ ...writing, model: "updated" });
     button("Clear saved writing key").click();
-    button("Save").click();
     await settle();
     expect(stub.backend.saveSettings.mock.calls[1]?.[0].writing).toEqual({ ...writing, model: "updated", api_key: "" });
   });
@@ -1686,14 +1597,12 @@ describe("writing", () => {
 
       edit("Write short emails.\nNo greeting.");
       expect(restore().disabled).toBe(false);
-      button("Save").click();
       await settle();
       expect(sent(stub).writing).toEqual({ ...saved, prompt: "Write short emails.\nNo greeting." });
 
       restore().click();
       expect(area().value).toBe(fallback);
       expect(restore().disabled).toBe(true);
-      button("Save").click();
       await settle();
       expect(stub.backend.saveSettings.mock.calls[1]?.[0].writing).toEqual(saved);
     });
@@ -1705,7 +1614,6 @@ describe("writing", () => {
       expect(area().value).toBe("Be brief.");
       expect(restore().disabled).toBe(false);
       type(control("Writing model", "input"), "updated");
-      button("Save").click();
       await settle();
       expect(sent(stub).writing).toEqual({ ...writing, model: "updated" });
     });
@@ -1714,13 +1622,11 @@ describe("writing", () => {
       const stub = await open();
       goTo("speech");
       edit("Be brief.");
-      button("Save").click();
       await settle();
       expect(sent(stub).writing).toEqual({ url: "", model: "", prompt: "Be brief." });
 
       stub.backend.saveSettings.mockRejectedValue("writing.prompt must not be blank. Restore the default to start over.");
       edit("  ");
-      button("Save").click();
       await settle();
       expect(root.querySelector(".err")?.textContent).toBe("writing.prompt must not be blank. Restore the default to start over.");
       expect(area().value).toBe("  ");
@@ -1732,9 +1638,10 @@ describe("writing", () => {
     const saved = { url: endpoint.url, model: endpoint.model, has_key: true };
     const rows = (): HTMLElement => rowOf("Opening phrases");
     const addField = (): HTMLInputElement => rows().querySelector<HTMLInputElement>(".add input") as HTMLInputElement;
-    const add = (phrase: string): void => {
+    const add = async (phrase: string): Promise<void> => {
       type(addField(), phrase);
       (rows().querySelector(".add button") as HTMLElement).click();
+      await settle();
     };
     const notice = (): string => rows().querySelector(".note:not([hidden])")?.textContent ?? "";
     const phrases = (): (string | null)[] => Array.from(rows().querySelectorAll(".phrase:not(.add *)"), (node) => node.textContent);
@@ -1748,15 +1655,13 @@ describe("writing", () => {
     it("adds a rule that starts as a copy of the Writing prompt, edits it, and saves it with the endpoint", async () => {
       const stub = await open({ ...SETTINGS, writing: { ...saved, prompt: "Be brief." } });
       goTo("speech");
-      add("  Write me an E-mail, ");
+      await add("  Write me an E-mail, ");
       expect(phrases()).toEqual(["“write me an e mail”"]);
       expect(promptOf("write me an e mail").value).toBe("Be brief.");
       expect(addField().value).toBe("");
       edit(promptOf("write me an e mail"), "Greeting, body, sign-off.");
-      add("write a message");
+      await add("write a message");
       expect(promptOf("write a message").value).toBe("Be brief.");
-      expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
-      button("Save").click();
       await settle();
       expect(sent(stub).writing).toEqual({
         ...saved,
@@ -1778,40 +1683,34 @@ describe("writing", () => {
       expect(phrases()).toEqual(["“write me an email”", "“write a message”"]);
       expect(promptOf("write a message").value).toBe("Message.");
       (rows().querySelector('button[aria-label="Remove “write me an email”"]') as HTMLElement).click();
-      button("Save").click();
       await settle();
       expect(sent(stub).writing).toEqual({ ...saved, openings: [openings[1]] });
       (rows().querySelector('button[aria-label="Remove “write a message”"]') as HTMLElement).click();
-      button("Save").click();
       await settle();
       expect(stub.backend.saveSettings.mock.calls[1]?.[0].writing).toEqual(saved);
     });
 
     it("refuses a phrase that is already there, ignoring case and punctuation, and an empty one", async () => {
-      const stub = await open({ ...SETTINGS, writing: { ...saved, openings: [{ phrase: "write me an email", prompt: "Email." }] } });
+      await open({ ...SETTINGS, writing: { ...saved, openings: [{ phrase: "write me an email", prompt: "Email." }] } });
       goTo("speech");
-      add("Write me an email!");
+      await add("Write me an email!");
       expect(notice()).toBe("“write me an email” is already in the list.");
       expect(addField().value).toBe("Write me an email!");
       expect(phrases()).toEqual(["“write me an email”"]);
       expect(promptOf("write me an email").value).toBe("Email.");
-      expect(root.querySelector(".msg")?.textContent).not.toBe("Unsaved changes");
-      add(" ?! ");
+      await add(" ?! ");
       expect(notice()).toBe("Type the phrase to add first.");
-      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
     });
 
     it("keeps rules while the endpoint is empty and shows the refusal for a blank prompt", async () => {
       const stub = await open();
       goTo("speech");
-      add("write me an email");
-      button("Save").click();
+      await add("write me an email");
       await settle();
       expect(sent(stub).writing).toEqual({ url: "", model: "", openings: [{ phrase: "write me an email", prompt: SETTINGS.writing_default_prompt }] });
 
       stub.backend.saveSettings.mockRejectedValue("writing.openings has a blank prompt for “write me an email”.");
       edit(promptOf("write me an email"), "  ");
-      button("Save").click();
       await settle();
       expect(root.querySelector(".err")?.textContent).toBe("writing.openings has a blank prompt for “write me an email”.");
       expect(promptOf("write me an email").value).toBe("  ");
@@ -1868,8 +1767,6 @@ describe("live controls", () => {
     await settle();
     expect(stub.backend.setStartAtLogin).toHaveBeenLastCalledWith(true);
     expect(toggle.checked).toBe(true);
-    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
-
     stub.backend.getStartAtLogin.mockResolvedValue({ kind: "available", on: true, problem: null });
     document.body.innerHTML = '<div id="settings"></div>';
     root = document.getElementById("settings") as HTMLElement;
@@ -1972,8 +1869,6 @@ describe("live controls", () => {
     await settle();
     expect(stub.backend.setMenuEntry).toHaveBeenLastCalledWith(true);
     expect(toggle.checked).toBe(true);
-    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
-
     stub.backend.getMenuEntry.mockResolvedValue({ kind: "available", on: true, problem: null });
     stub.backend.setMenuEntry.mockRejectedValue("Thalvi could not remove Thalvi from the app menu: read-only folder");
     flip(toggle);
@@ -2008,15 +1903,13 @@ describe("live controls", () => {
 
     goTo("microphone");
     const toggle = control("Listening", "input");
-    const picker = control("Saved device", "select");
-    expect(picker.disabled).toBe(true);
+    const picker = control("Microphone", "select");
+    expect(picker.disabled).toBe(false);
     flip(toggle);
     expect(stub.backend.setListening).toHaveBeenLastCalledWith(false);
     stub.emit({ state: "paused" });
-    expect(picker.disabled).toBe(false);
 
     choose(picker, "USB Microphone");
-    button("Save").click();
     await settle();
     expect(sent(stub).microphone).toBe("USB Microphone");
     expect(toggle.checked).toBe(false);
@@ -2040,49 +1933,27 @@ describe("live controls", () => {
 
   it("lists the microphones and keeps a saved device that is gone", async () => {
     await open({ ...SETTINGS, microphone: "Old Mic" });
-    const options = Array.from(control("Saved device", "select").options).map((option) => option.textContent);
+    const options = Array.from(control("Microphone", "select").options).map((option) => option.textContent);
     expect(options).toEqual(["System default", "USB Microphone", "Built-in", "Old Mic (not found)"]);
   });
 
-  it("disables the saved-device picker until listening is paused, and says why beside it", async () => {
-    const stub = await open();
-    const why = () => rowOf("Saved device").querySelector<HTMLElement>(".note.why") as HTMLElement;
-    goTo("microphone");
-    expect(control("Saved device", "select").disabled).toBe(true);
-    expect(why().hidden).toBe(false);
-    expect(why().textContent).toBe("Pause listening above to change the microphone.");
-    expect(control("Saved device", "select").getAttribute("aria-describedby")).toBe(why().id);
-    stub.emit({ state: "paused" });
-    expect(control("Saved device", "select").disabled).toBe(false);
-    expect(why().hidden).toBe(true);
-    stub.audio({ selected: null, active: "Built-in", paused: false });
-    expect(control("Saved device", "select").disabled).toBe(true);
-    expect(why().hidden).toBe(false);
-  });
-
-  it("shows the active microphone separately from the saved choice and stays paused after saving while paused", async () => {
+  it("lets the microphone change while listening and shows active separately from the choice", async () => {
     const stub = await open();
     goTo("microphone");
+    expect(control("Microphone", "select").disabled).toBe(false);
     expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe("Built-in");
-    stub.emit({ state: "paused" });
-    expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe("None — no microphone is open");
-    choose(control("Saved device", "select"), "USB Microphone");
-    button("Save").click();
+    choose(control("Microphone", "select"), "USB Microphone");
     await settle();
     expect(sent(stub).microphone).toBe("USB Microphone");
-    expect(control("Saved device", "select").value).toBe("USB Microphone");
-    expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe("None — no microphone is open");
-    expect(control("Listening", "input").checked).toBe(false);
-    expect(root.querySelector(".msg")?.textContent).toBe(SAVED_MICROPHONE_TEXT);
+    expect(applied("Microphone")).toBe(APPLIED_TEXT);
   });
 
-  it("shows a failed apply plainly and clears the saved message", async () => {
+  it("shows a failed apply plainly in the footer", async () => {
     const stub = await open();
-    button("Save").click();
+    goTo("microphone");
+    choose(control("Microphone", "select"), "USB Microphone");
     await settle();
-    expect(root.querySelector(".msg")?.textContent).toBe(SAVED_TEXT);
     stub.emit({ state: "failed", notice: "The saved microphone could not be opened.", headline: "Failed — Settings", causes: [], kind: "other" });
-    expect(root.querySelector(".msg")?.textContent).toBe("");
     expect(root.querySelector(".err")?.textContent).toBe("The saved microphone could not be opened.");
   });
 
@@ -2105,13 +1976,11 @@ describe("live controls", () => {
       "a rejected save",
       async (stub) => {
         stub.backend.saveSettings.mockRejectedValueOnce("The server address must start with ws://.");
-        button("Save").click();
         await settle();
       },
       "The server address must start with ws://.",
       [],
       async () => {
-        button("Save").click();
         await settle();
       },
       0,
@@ -2148,12 +2017,12 @@ describe("live controls", () => {
     stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: [], kind: "other" });
     button("Copy").click();
     await settle();
-    expect(root.querySelector(".msg")?.textContent).toBe("Could not copy: No clipboard tool is installed.");
+    expect(root.querySelector(".err")?.textContent).toBe("Could not copy: No clipboard tool is installed.");
     expect(button("Copy").hidden).toBe(false);
     button("Copy").click();
     await settle();
     expect(button("Copied").hidden).toBe(false);
-    expect(root.querySelector(".msg")?.textContent).toBe("");
+    expect(root.querySelector(".err")?.textContent).toBe("");
   });
 
   it("resets the microphone meter when listening pauses", async () => {
@@ -2172,24 +2041,19 @@ describe("live controls", () => {
     stub.audio({ selected: null, active: paused ? null : "Built-in", paused });
     stub.emit({ state: "failed", notice: "The last operation failed.", headline: "Failed — Settings", causes: [], kind: "other" });
     expect(control("Listening", "input").checked).toBe(!paused);
-    expect(control("Saved device", "select").disabled).toBe(!paused);
+    expect(control("Microphone", "select").disabled).toBe(false);
   });
 
-  it.each(["save", "revert", "edit"])("retains a runtime problem through %s and clears it on recovery", async (action) => {
+  it("keeps a runtime problem visible until recovery", async () => {
     const stub = await open();
     stub.emit({ state: "failed", notice: "The chosen microphone is unavailable.", headline: "Failed — Settings", causes: [], kind: "other" });
-    if (action === "save") button("Save").click();
-    else if (action === "revert") button("Revert").click();
-    else {
-      goTo("capture");
-      type(control("Quiet before paste", "input"), "1.5");
-    }
+    goTo("capture");
+    type(control("Quiet before paste", "input"), "1.5");
+    await commit("Quiet before paste");
     await settle();
     expect(root.querySelector(".err")?.textContent).toBe("The chosen microphone is unavailable.");
-    expect(root.querySelector(".msg")?.textContent).toBe(action === "edit" ? "Unsaved changes" : "");
     stub.emit({ state: "listening" });
     expect(root.querySelector(".err")?.textContent).toBe("");
-    if (action === "edit") expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
   });
 
   it("opens the recordings folder", async () => {
@@ -2202,7 +2066,7 @@ describe("live controls", () => {
     ["Metrics recording", "metrics", false],
     ["Text recording", "text", true],
     ["Audio recording", "audio", true],
-  ] as const)("shows %s as a switch and sends it with Save", async (label, kind, turnedOn) => {
+  ] as const)("shows %s as a switch and sends it at once", async (label, kind, turnedOn) => {
     const stub = await open();
     const switches = ["Metrics recording", "Text recording", "Audio recording"].map(
       (name) => control(name, "input").checked,
@@ -2212,7 +2076,6 @@ describe("live controls", () => {
     expect(rowOf(label).textContent).not.toContain("THALVI_RECORD");
 
     flip(control(label, "input"));
-    button("Save").click();
     const expected = structuredClone(SETTINGS);
     expected.recordings[kind] = turnedOn;
     expect(sent(stub)).toEqual(expected);
@@ -2340,7 +2203,7 @@ describe("history", () => {
     expect(cards()).toHaveLength(1);
   });
 
-  it("saves the switch and the limit with Save, and says that turning it off keeps what is there", async () => {
+  it("saves the switch and the limit at once, and says that turning it off keeps what is there", async () => {
     const stub = await open();
     expect(control("Keep a history", "input").checked).toBe(true);
     expect(control("Entries to keep", "input").value).toBe("200");
@@ -2348,8 +2211,9 @@ describe("history", () => {
     expect(rowOf("Keep a history").textContent).toContain("deletes none");
 
     flip(control("Keep a history", "input"));
+    await settle();
     type(control("Entries to keep", "input"), "50");
-    button("Save").click();
+    await commit("Entries to keep");
     const expected = structuredClone(SETTINGS);
     expected.history = { enabled: false, limit: 50 };
     expect(sent(stub)).toEqual(expected);
@@ -2422,8 +2286,7 @@ describe("last dictation", () => {
     expect(area().value).toBe(DRAFT.original);
     expect(stub.backend.editDraft).toHaveBeenLastCalledWith(DRAFT.original);
     expect(stub.backend.copyText).not.toHaveBeenCalled();
-    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
-  });
+    });
 
   it("offers no Copy for an empty edit", async () => {
     await openDraft();
@@ -2562,40 +2425,3 @@ describe("attached editor contrast", () => {
   });
 });
 
-describe("footer", () => {
-  // jsdom does not load the app's stylesheet, and what shows depends on it.
-  beforeEach(() => {
-    document.head.appendChild(document.createElement("style")).textContent = settingsCss;
-  });
-  afterEach(() => {
-    document.head.querySelector("style")?.remove();
-  });
-
-  it.each(["unsaved edit", "change from elsewhere", "save in flight"] as const)("shows %s next to a runtime error instead of hiding it", async (state) => {
-    const stub = await open();
-    stub.emit({ state: "failed", notice: "Could not download the wake model.", headline: "Failed — Settings", causes: [], kind: "other" });
-    if (state !== "save in flight") {
-      goTo("capture");
-      type(control("Quiet before paste", "input"), "1.5");
-    }
-    if (state === "change from elsewhere") {
-      stub.changedElsewhere();
-    } else if (state === "save in flight") {
-      stub.backend.saveSettings.mockImplementationOnce(() => new Promise<void>(() => undefined));
-      button("Save").click();
-    }
-    await settle();
-    const message = root.querySelector<HTMLElement>(".msg") as HTMLElement;
-    const error = root.querySelector<HTMLElement>(".err") as HTMLElement;
-    expect(message.textContent).toBe({ "unsaved edit": "Unsaved changes", "change from elsewhere": ELSEWHERE_TEXT, "save in flight": "Saving…" }[state]);
-    expect(error.textContent).toBe("Could not download the wake model.");
-    expect(getComputedStyle(message).display).not.toBe("none");
-    expect(getComputedStyle(error).display).not.toBe("none");
-  });
-
-  it("leaves the whole bar to an error when there is no status text", async () => {
-    const stub = await open();
-    stub.emit({ state: "failed", notice: "Could not download the wake model.", headline: "Failed — Settings", causes: [], kind: "other" });
-    expect(getComputedStyle(root.querySelector(".msg") as HTMLElement).display).toBe("none");
-  });
-});

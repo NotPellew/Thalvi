@@ -1,4 +1,4 @@
-// Form controls that write into the settings draft and report each edit.
+// Form controls that apply settings when valid and report reasons when they are not.
 
 import { el } from "./dom.ts";
 
@@ -15,17 +15,28 @@ export interface NumberRange {
   unit?: string;
 }
 
+export interface ControlContext {
+  typing: Set<HTMLElement>;
+}
+
 let counter = 0;
 export function uid(prefix: string): string {
   counter += 1;
   return `${prefix}-${String(counter)}`;
 }
 
-export function createControls(changed: () => void) {
+export function createControls(context: ControlContext) {
   function text(
     value: string,
     set: (value: string) => void,
-    options: { type?: string; placeholder?: string; list?: string; label?: string } = {},
+    options: {
+      type?: string;
+      placeholder?: string;
+      list?: string;
+      label?: string;
+      apply?: (value: string) => Promise<void>;
+      applied?: () => string;
+    } = {},
   ): Field {
     const input = el("input", {
       id: uid("f"),
@@ -37,14 +48,56 @@ export function createControls(changed: () => void) {
     if (options.list) input.setAttribute("list", options.list);
     if (options.label) input.setAttribute("aria-label", options.label);
     input.value = value;
-    input.addEventListener("input", () => {
-      set(input.value);
-      changed();
-    });
+    const restore = (): void => {
+      const applied = options.applied?.() ?? value;
+      input.value = applied;
+      set(applied);
+    };
+    const commit = (): void => {
+      if (!options.apply) {
+        set(input.value);
+        return;
+      }
+      void options.apply(input.value).catch(restore);
+    };
+    if (options.apply) {
+      input.addEventListener("focus", () => {
+        context.typing.add(input);
+      });
+      input.addEventListener("input", () => {
+        set(input.value);
+      });
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+          input.blur();
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          restore();
+          input.blur();
+        }
+      });
+      input.addEventListener("blur", () => {
+        context.typing.delete(input);
+        commit();
+      });
+    } else {
+      input.addEventListener("input", () => {
+        set(input.value);
+      });
+    }
     return { node: input, field: input };
   }
 
-  function number(value: number, range: NumberRange, set: (value: number) => void): Field {
+  function number(
+    value: number,
+    range: NumberRange,
+    set: (value: number) => void,
+    apply?: (value: number) => Promise<void>,
+    applied?: () => number,
+  ): Field {
     const input = el("input", {
       id: uid("f"),
       type: "number",
@@ -53,17 +106,41 @@ export function createControls(changed: () => void) {
       step: String(range.step),
     });
     input.value = String(value);
+    const restore = (): void => {
+      const from = applied?.() ?? value;
+      input.value = String(from);
+      set(from);
+    };
     input.addEventListener("input", () => {
-      if (Number.isFinite(input.valueAsNumber)) {
-        set(input.valueAsNumber);
-        changed();
-      }
+      if (!Number.isFinite(input.valueAsNumber)) return;
+      if (!apply) set(input.valueAsNumber);
     });
+    input.addEventListener("change", () => {
+      if (!Number.isFinite(input.valueAsNumber)) return;
+      const next = input.valueAsNumber;
+      if (apply) void apply(next).catch(restore);
+      else set(next);
+    });
+    if (apply) {
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          restore();
+          input.blur();
+        }
+      });
+    }
     const node = el("span", { class: "num" }, input, range.unit ? el("span", { class: "unit" }, range.unit) : "");
     return { node, field: input };
   }
 
-  function slider(value: number, range: NumberRange, set: (value: number) => void): Field {
+  function slider(
+    value: number,
+    range: NumberRange,
+    set: (value: number) => void,
+    apply?: (value: number) => Promise<void>,
+    applied?: () => number,
+  ): Field {
     const input = el("input", {
       id: uid("f"),
       type: "range",
@@ -78,21 +155,43 @@ export function createControls(changed: () => void) {
     };
     fill();
     const shown = el("output", { class: "val", for: input.id }, value.toFixed(2));
+    const restore = (): void => {
+      const from = applied?.() ?? value;
+      input.value = String(from);
+      fill();
+      shown.textContent = from.toFixed(2);
+      set(from);
+    };
     input.addEventListener("input", () => {
       fill();
-      set(input.valueAsNumber);
       shown.textContent = input.valueAsNumber.toFixed(2);
-      changed();
+      if (!apply) set(input.valueAsNumber);
+    });
+    input.addEventListener("change", () => {
+      if (!apply) return;
+      void apply(input.valueAsNumber).catch(restore);
     });
     return { node: el("span", { class: "slider" }, input, shown), field: input };
   }
 
-  function toggle(value: boolean, set: (value: boolean) => void): Field {
+  function toggle(
+    value: boolean,
+    set: (value: boolean) => void,
+    apply?: (value: boolean) => Promise<void>,
+    applied?: () => boolean,
+  ): Field {
     const input = el("input", { id: uid("f"), type: "checkbox", role: "switch" });
     input.checked = value;
     input.addEventListener("change", () => {
-      set(input.checked);
-      changed();
+      const next = input.checked;
+      set(next);
+      if (apply) {
+        void apply(next).catch(() => {
+          const from = applied?.() ?? value;
+          input.checked = from;
+          set(from);
+        });
+      }
     });
     return { node: input, field: input };
   }
@@ -102,6 +201,8 @@ export function createControls(changed: () => void) {
     value: T,
     set: (value: T) => void,
     label?: string,
+    apply?: (value: T) => Promise<void>,
+    applied?: () => T,
   ): Field {
     const input = el("select", { id: uid("f") });
     if (label) input.setAttribute("aria-label", label);
@@ -112,15 +213,21 @@ export function createControls(changed: () => void) {
     }
     input.addEventListener("change", () => {
       const chosen = options.find(([optionValue]) => optionValue === input.value);
-      if (chosen) {
-        set(chosen[0]);
-        changed();
+      if (!chosen) return;
+      const next = chosen[0];
+      set(next);
+      if (apply) {
+        void apply(next).catch(() => {
+          const from = applied?.() ?? value;
+          input.value = from;
+          set(from);
+        });
       }
     });
     return { node: input, field: input };
   }
 
-  return { text, number, slider, toggle, select, touched: changed };
+  return { text, number, slider, toggle, select };
 }
 
 export type Controls = ReturnType<typeof createControls>;

@@ -63,8 +63,15 @@ export interface PageContext {
   checks: (() => Promise<void> | null)[];
   /** The settings as last saved, or null before they are read. */
   saved: () => Settings | null;
-  /** Saves the last saved settings with `change` applied, leaving other unsaved edits in the draft; says why in the footer when it fails. */
-  applyNow: (change: (settings: Settings) => void) => Promise<void>;
+  /** Whether a capture is running or work is in progress, so a change applies from the next one. */
+  capturing: () => boolean;
+  /** Inputs the user is still typing in; outside reloads leave their text. */
+  typing: Set<HTMLElement>;
+  /** Saves the applied settings with `change` merged in as one whole form. */
+  apply: (
+    change: (settings: Settings) => void,
+    options?: { check?: () => Promise<void> | null; confirm?: HTMLElement },
+  ) => Promise<void>;
 }
 
 /** An OS switch as read, or why it could not be. */
@@ -117,7 +124,7 @@ const DRAFT_OUTCOMES: Record<DraftOutcome, string> = {
   maybePartial: "Thalvi may or may not have pasted this text. Check the window before trying again, or use Copy text.",
 };
 /** While one of these runs the status changes with every word; the draft is read again once it ends. */
-const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working"];
+export const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working"];
 const WHEN = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 export function row(label: string, hint: string | null, control: Field | HTMLElement): HTMLElement {
@@ -163,6 +170,83 @@ function say(target: HTMLElement, message: string): void {
   target.hidden = message === "";
 }
 
+function appliedNote(): HTMLElement {
+  return el("p", { class: "note ok", role: "status", hidden: true });
+}
+
+function appliedOf<T>(context: PageContext, read: (settings: Settings) => T): () => T {
+  return () => read(context.saved() ?? context.draft);
+}
+
+function applyField<T>(
+  context: PageContext,
+  write: (settings: Settings, value: T) => void,
+  confirm?: HTMLElement,
+): (value: T) => Promise<void> {
+  return (value) => {
+    write(context.draft, value);
+    const options = confirm ? { confirm } : {};
+    return context.apply((settings) => {
+      write(settings, value);
+    }, options);
+  };
+}
+
+function bindToggle(
+  context: PageContext,
+  read: (settings: Settings) => boolean,
+  write: (settings: Settings, value: boolean) => void,
+): Field {
+  const confirm = appliedNote();
+  const field = context.controls.toggle(
+    read(context.draft),
+    (value) => {
+      write(context.draft, value);
+    },
+    applyField(context, write, confirm),
+    appliedOf(context, read),
+  );
+  return { node: el("span", { class: "stack" }, field.node, confirm), field: field.field };
+}
+
+function bindNumber(
+  context: PageContext,
+  read: (settings: Settings) => number,
+  write: (settings: Settings, value: number) => void,
+  range: import("./controls.ts").NumberRange,
+): Field {
+  const confirm = appliedNote();
+  const field = context.controls.number(
+    read(context.draft),
+    range,
+    (value) => {
+      write(context.draft, value);
+    },
+    applyField(context, write, confirm),
+    appliedOf(context, read),
+  );
+  return { node: el("span", { class: "stack" }, field.node, confirm), field: field.field };
+}
+
+function bindSlider(
+  context: PageContext,
+  read: (settings: Settings) => number,
+  write: (settings: Settings, value: number) => void,
+  range: import("./controls.ts").NumberRange,
+): Field {
+  const confirm = appliedNote();
+  const field = context.controls.slider(
+    read(context.draft),
+    range,
+    (value) => {
+      write(context.draft, value);
+    },
+    applyField(context, write, confirm),
+    appliedOf(context, read),
+  );
+  return { node: el("span", { class: "stack" }, field.node, confirm), field: field.field };
+}
+
 function listText(values: string[]): string {
   return values.join(", ");
 }
@@ -201,7 +285,7 @@ interface WakeHead {
 
 /** Both wake pickers: catalog phrases with download badges, or a custom `.onnx` file. */
 function wakeHeads(context: PageContext): HTMLElement[] {
-  const { draft, controls, backend, checks, live } = context;
+  const { draft, backend, checks, live } = context;
   const infos = new Map<string, WakeModelInfo>();
   const downloading = new Set<string>();
   const heads: WakeHead[] = [];
@@ -275,10 +359,15 @@ function wakeHeads(context: PageContext): HTMLElement[] {
         (path) => {
           if (path === null) return;
           state.customPath = path;
-          config.model = path;
-          controls.touched();
-          for (const other of heads) other.render();
-          validate(state).catch(() => undefined);
+          void context
+            .apply((settings) => {
+              settings.wake[key].model = path;
+            }, { check: () => validate(state) })
+            .then(() => {
+              config.model = path;
+              for (const other of heads) other.render();
+            })
+            .catch(() => undefined);
         },
         (error: unknown) => {
           state.sayProblem(errorText(error));
@@ -322,21 +411,39 @@ function wakeHeads(context: PageContext): HTMLElement[] {
         if (state.customPath === "") state.sayProblem("Pick a wake model file with Browse… first.");
       } else {
         state.custom = false;
-        config.model = picker.value;
-        const start = infos.get(picker.value)?.threshold;
-        if (start !== undefined) {
-          const slider = threshold.field as HTMLInputElement;
-          slider.value = String(start);
-          slider.dispatchEvent(new Event("input"));
-        }
-        state.sayProblem("");
+        const model = picker.value;
+        void context
+          .apply((settings) => {
+            settings.wake[key].model = model;
+            const start = infos.get(model)?.threshold;
+            if (start !== undefined) settings.wake[key].threshold = start;
+          }, { check: () => validate(state) })
+          .then(() => {
+            config.model = model;
+            const start = infos.get(model)?.threshold;
+            if (start !== undefined) {
+              const slider = threshold.field as HTMLInputElement;
+              slider.value = String(start);
+              slider.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+            state.sayProblem("");
+            for (const other of heads) other.render();
+          })
+          .catch(() => {
+            picker.value = state.custom ? CUSTOM_MODEL : config.model;
+          });
+        return;
       }
-      controls.touched();
       for (const other of heads) other.render();
     });
-    const threshold = controls.slider(config.threshold, { min: 0.05, max: 1, step: 0.05 }, (value) => {
-      config.threshold = value;
-    });
+    const threshold = bindSlider(
+      context,
+      (settings) => settings.wake[key].threshold,
+      (settings, value) => {
+        settings.wake[key].threshold = value;
+      },
+      { min: 0.05, max: 1, step: 0.05 },
+    );
     heads.push(state);
     const field: Field = {
       node: el("div", { class: "stack wide" }, el("div", { class: "trow pick" }, picker, badge, download), customRow, problem),
@@ -377,7 +484,8 @@ function wakeHeads(context: PageContext): HTMLElement[] {
   return nodes;
 }
 
-function endingsTable({ draft, controls }: PageContext): HTMLElement {
+function endingsTable(context: PageContext): HTMLElement {
+  const { draft, controls } = context;
   const list = el("div", { class: "table" });
   const problem = note();
   const phrase = controls.text("", () => undefined, { label: "New ending phrase", placeholder: "new phrase" });
@@ -389,13 +497,24 @@ function endingsTable({ draft, controls }: PageContext): HTMLElement {
   function render(): void {
     list.replaceChildren(
       ...Object.entries(draft.endings).map(([words, ending]) => {
-        const picker = controls.select(ENDINGS, ending, (value) => {
-          draft.endings[words] = value;
-        }, `Action for “${words}”`);
+        const picker = controls.select(
+          ENDINGS,
+          ending,
+          (value) => {
+            draft.endings[words] = value;
+          },
+          `Action for “${words}”`,
+          (value) =>
+            context.apply((settings) => {
+              settings.endings[words] = value;
+            }),
+        );
         const remove = button("Remove", () => {
-          draft.endings = Object.fromEntries(Object.entries(draft.endings).filter(([known]) => known !== words));
-          controls.touched();
-          render();
+          void context
+            .apply((settings) => {
+              settings.endings = Object.fromEntries(Object.entries(settings.endings).filter(([known]) => known !== words));
+            })
+            .then(render);
         }, "quiet");
         remove.setAttribute("aria-label", `Remove “${words}”`);
         return el("div", { class: "trow" }, el("span", { class: "phrase" }, `“${words}”`), picker.node, remove);
@@ -414,16 +533,22 @@ function endingsTable({ draft, controls }: PageContext): HTMLElement {
       return;
     }
     say(problem, "");
-    draft.endings[words] = chosen;
-    (phrase.field as HTMLInputElement).value = "";
-    controls.touched();
-    render();
+    void context
+      .apply((settings) => {
+        settings.endings[words] = chosen;
+      })
+      .then(() => {
+        draft.endings[words] = chosen;
+        (phrase.field as HTMLInputElement).value = "";
+        render();
+      });
   });
   return el("div", { class: "stack wide" }, list, el("div", { class: "trow add phrase-add" }, phrase.node, action.node, add), problem);
 }
 
 /** The word list as chips with a remove button each, and one box whose + (or Enter) adds its word. */
-function wordListTable(draft: Settings, controls: Controls): { node: HTMLElement; enable: (on: boolean) => void } {
+function wordListTable(context: PageContext): { node: HTMLElement; enable: (on: boolean) => void } {
+  const { draft, controls } = context;
   const chips = el("div", { class: "chips" });
   const problem = note();
   const entry = controls.text("", () => undefined, { label: "New word", placeholder: "Add a name or term" });
@@ -435,9 +560,11 @@ function wordListTable(draft: Settings, controls: Controls): { node: HTMLElement
     chips.replaceChildren(
       ...words.map((word) => {
         const remove = button("×", () => {
-          draft.stt.phrases = (draft.stt.phrases ?? []).filter((kept) => kept !== word);
-          controls.touched();
-          render();
+          void context
+            .apply((settings) => {
+              settings.stt.phrases = (settings.stt.phrases ?? []).filter((kept) => kept !== word);
+            })
+            .then(render);
         }, "quiet");
         remove.setAttribute("aria-label", `Remove ${word}`);
         remove.disabled = !enabled;
@@ -458,11 +585,16 @@ function wordListTable(draft: Settings, controls: Controls): { node: HTMLElement
       return;
     }
     say(problem, "");
-    draft.stt.phrases = [...words, word];
-    input.value = "";
-    controls.touched();
-    render();
-    input.focus();
+    void context
+      .apply((settings) => {
+        settings.stt.phrases = [...(settings.stt.phrases ?? []), word];
+      })
+      .then(() => {
+        draft.stt.phrases = [...words, word];
+        input.value = "";
+        render();
+        input.focus();
+      });
   }
 
   const add = button("+", addWord);
@@ -496,14 +628,13 @@ function holdKey({ holdKeyUnavailable }: PageContext): HTMLElement[] {
 }
 
 function capture(context: PageContext): HTMLElement[] {
-  const { draft, controls } = context;
   const pause = (key: "paste" | "submit" | "task", label: string): HTMLElement =>
     row(
       label,
       "Time to keep talking or cancel, 0 to 5 s.",
-      controls.number(draft.ending_pause[key], { min: 0, max: 5, step: 0.1, unit: "s" }, (value) => {
-        draft.ending_pause[key] = value;
-      }),
+      bindNumber(context, (settings) => settings.ending_pause[key], (settings, value) => {
+        settings.ending_pause[key] = value;
+      }, { min: 0, max: 5, step: 0.1, unit: "s" }),
     );
   return [
     ...wakeHeads(context),
@@ -982,24 +1113,18 @@ function speech(context: PageContext): HTMLElement[] {
     }
   }
 
-  /** Changes a saved entry's flag at once, as one click; an entry not saved yet changes in the draft only. */
+  /** Changes an entry's flag at once, as one click. */
   function flag(id: string, change: (list: SpeechEntry[]) => void, after: () => void = () => undefined): void {
-    const savedAlready = savedEntries().some((known) => known.id === id);
-    if (!savedAlready) {
-      change(entries());
-      controls.touched();
-      render();
-      after();
-      return;
-    }
-    context.applyNow((settings) => {
-      change(settings.stt.entries);
-    }).then(() => {
-      render();
-      after();
-    }, () => {
-      render();
-    });
+    void context
+      .apply((settings) => {
+        change(settings.stt.entries);
+      })
+      .then(() => {
+        render();
+        after();
+      }, () => {
+        render();
+      });
   }
 
   function useLive(id: string): void {
@@ -1025,15 +1150,31 @@ function speech(context: PageContext): HTMLElement[] {
     if (moved === undefined || swapped === undefined) return;
     list[here] = swapped;
     list[there] = moved;
-    controls.touched();
-    render();
+    void context
+      .apply((settings) => {
+        const ordered = settings.stt.entries;
+        const at = ordered.findIndex((item) => item.id === id);
+        let other = at + by;
+        while (other >= 0 && other < ordered.length && ordered[other]?.kind !== "second_pass") other += by;
+        const one = ordered[at];
+        const two = ordered[other];
+        if (one && two) {
+          ordered[at] = two;
+          ordered[other] = one;
+        }
+      })
+      .then(render);
   }
 
   function remove(entry: SpeechEntry): void {
     if (editingId === entry.id) closeEditor(false);
-    draft.stt.entries = entries().filter((known) => known.id !== entry.id);
-    controls.touched();
-    render();
+    void context
+      .apply((settings) => {
+        settings.stt.entries = settings.stt.entries.filter((known) => known.id !== entry.id);
+      })
+      .then(() => {
+        render();
+      });
   }
 
   function badges(entry: SpeechEntry): HTMLElement[] {
@@ -1041,7 +1182,6 @@ function speech(context: PageContext): HTMLElement[] {
     if (KIND_NAMES[entry.kind] !== entry.name) found.push(el("span", { class: "badge" }, KIND_NAMES[entry.kind]));
     if (isLive(entry) && entry.active) found.push(el("span", { class: "badge", "data-on": "true" }, "In use"));
     if (hasKey(entry)) found.push(el("span", { class: "badge" }, "Key saved"));
-    if (!isSaved(entry)) found.push(el("span", { class: "badge", "data-saved": "false" }, "Not saved"));
     return found;
   }
 
@@ -1277,13 +1417,18 @@ function speech(context: PageContext): HTMLElement[] {
         .then(() => backend.checkSpeechEntry(sent))
         .then(
           () => {
-            const index = entries().findIndex((known) => known.id === entry.id);
-            if (index >= 0) entries()[index] = entry;
-            else entries().push(entry);
-            controls.touched();
-            closeEditor();
-            render();
-            checkWordList();
+            void context
+              .apply((settings) => {
+                const list = settings.stt.entries;
+                const index = list.findIndex((known) => known.id === entry.id);
+                if (index >= 0) list[index] = entry;
+                else list.push(entry);
+              })
+              .then(() => {
+                closeEditor();
+                render();
+                checkWordList();
+              });
           },
           (error: unknown) => {
             say(message, errorText(error));
@@ -1325,10 +1470,29 @@ function speech(context: PageContext): HTMLElement[] {
   const liveBlock = el("div", { class: "stack wide" }, liveList, problem, el("div", { class: "trow add" }, kindPicker.node, addLive));
   const secondBlock = el("div", { class: "stack wide" }, secondList, addSecond);
 
+  function applyWriting(replaceKey = false): Promise<void> {
+    syncWriting(replaceKey);
+    return context.apply((settings) => {
+      settings.writing = draft.writing;
+    });
+  }
+  const appliedWriting = (): WritingSettings | null => context.saved()?.writing ?? null;
   const writing = draft.writing;
-  const writingUrl = controls.text(writing?.url ?? "", () => { syncWriting(); }, { placeholder: "http://127.0.0.1:8000/v1" });
-  const writingModel = controls.text(writing?.model ?? "", () => { syncWriting(); });
-  const writingKey = controls.text(writing?.api_key ?? "", () => { syncWriting(true); }, { type: "password", placeholder: writing?.has_key === true ? "A key is saved" : "" });
+  const writingUrl = controls.text(writing?.url ?? "", () => { syncWriting(); }, {
+    placeholder: "http://127.0.0.1:8000/v1",
+    apply: () => applyWriting(),
+    applied: () => appliedWriting()?.url ?? "",
+  });
+  const writingModel = controls.text(writing?.model ?? "", () => { syncWriting(); }, {
+    apply: () => applyWriting(),
+    applied: () => appliedWriting()?.model ?? "",
+  });
+  const writingKey = controls.text(writing?.api_key ?? "", () => { syncWriting(true); }, {
+    type: "password",
+    placeholder: writing?.has_key === true ? "A key is saved" : "",
+    apply: () => applyWriting(true),
+    applied: () => "",
+  });
   const writingInputs = [writingUrl, writingModel, writingKey].map((field) => field.field as HTMLInputElement);
   const defaultPrompt = draft.writing_default_prompt;
   const promptArea = el("textarea", { id: uid("f"), rows: "8", spellcheck: "false" });
@@ -1336,20 +1500,35 @@ function speech(context: PageContext): HTMLElement[] {
   const restorePrompt = button("Restore default prompt", () => {
     promptArea.value = defaultPrompt;
     syncWriting();
-    controls.touched();
+    void applyWriting();
   }, "quiet");
   promptArea.addEventListener("input", () => {
     syncWriting();
-    controls.touched();
+  });
+  promptArea.addEventListener("focus", () => {
+    context.typing.add(promptArea);
+  });
+  promptArea.addEventListener("blur", () => {
+    context.typing.delete(promptArea);
+    void applyWriting();
+  });
+  promptArea.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      const saved = appliedWriting();
+      promptArea.value = saved?.prompt ?? defaultPrompt;
+      syncWriting();
+      promptArea.blur();
+    }
   });
   const writingPromptField = { node: el("div", { class: "stack wide" }, promptArea, restorePrompt), field: promptArea };
   const clearWritingKey = button("Clear saved writing key", () => {
     const input = writingKey.field as HTMLInputElement;
     input.value = "";
-    input.placeholder = "Cleared on Save";
-    syncWriting(true);
-    clearWritingKey.hidden = true;
-    controls.touched();
+    input.placeholder = "Cleared when applied";
+    void applyWriting(true).then(() => {
+      clearWritingKey.hidden = true;
+    });
   });
   clearWritingKey.hidden = writing?.has_key !== true;
   const writingKeyField = { node: el("div", { class: "stack" }, writingKey.node, clearWritingKey), field: writingKey.field };
@@ -1375,13 +1554,21 @@ function speech(context: PageContext): HTMLElement[] {
   const openingPhrase = controls.text("", () => undefined, { label: "New opening phrase", placeholder: "write me an email" });
 
   function setOpenings(openings: WritingOpening[]): void {
-    const next: WritingSettings = { url: "", model: "", ...draft.writing };
-    if (openings.length > 0) next.openings = openings;
-    else delete next.openings;
-    draft.writing = next;
-    syncWriting();
-    controls.touched();
-    renderOpenings();
+    void context
+      .apply((settings) => {
+        const next: WritingSettings = { url: "", model: "", ...settings.writing };
+        if (openings.length > 0) next.openings = openings;
+        else delete next.openings;
+        settings.writing = next;
+      })
+      .then(() => {
+        const next: WritingSettings = { url: "", model: "", ...draft.writing };
+        if (openings.length > 0) next.openings = openings;
+        else delete next.openings;
+        draft.writing = next;
+        syncWriting();
+        renderOpenings();
+      });
   }
 
   function renderOpenings(): void {
@@ -1392,7 +1579,6 @@ function speech(context: PageContext): HTMLElement[] {
         prompt.value = opening.prompt;
         prompt.addEventListener("input", () => {
           opening.prompt = prompt.value;
-          controls.touched();
         });
         const remove = button("Remove", () => {
           setOpenings(openings.filter((known) => known !== opening));
@@ -1427,7 +1613,7 @@ function speech(context: PageContext): HTMLElement[] {
     openingProblem,
   );
 
-  const words = wordListTable(draft, controls);
+  const words = wordListTable(context);
   const wordProblem = note();
   const wordRow = row(
     "Word list",
@@ -1500,31 +1686,41 @@ function speech(context: PageContext): HTMLElement[] {
   ];
 }
 
-function microphone({ draft, backend, controls, microphones, live, audio }: PageContext): HTMLElement[] {
+function microphone(context: PageContext): HTMLElement[] {
+  const { draft, backend, controls, microphones, live, audio } = context;
   const names = Array.isArray(microphones) ? microphones : [];
-  const saved = draft.microphone;
+  const chosen = draft.microphone;
   const options: (readonly [string, string])[] = [
     ["", "System default"],
     ...names.map((name) => [name, name] as const),
   ];
-  if (saved !== null && !names.includes(saved)) options.push([saved, `${saved} (not found)`]);
-  const picker = controls.select(options, saved ?? "", (value) => {
-    draft.microphone = value === "" ? null : value;
-  });
-  const pickerInput = picker.field as HTMLSelectElement;
-  const whyLocked = el("p", { class: "note why", id: uid("n") }, "Pause listening above to change the microphone.");
-  pickerInput.setAttribute("aria-describedby", whyLocked.id);
+  if (chosen !== null && !names.includes(chosen)) options.push([chosen, `${chosen} (not found)`]);
+  const confirm = appliedNote();
+  const picker = controls.select(
+    options,
+    chosen ?? "",
+    (value) => {
+      draft.microphone = value === "" ? null : value;
+    },
+    "Microphone",
+    (value) =>
+      context.apply((settings) => {
+        settings.microphone = value === "" ? null : value;
+      }, { confirm }),
+    appliedOf(context, (settings) => settings.microphone ?? ""),
+  );
   const active = el("output", { class: "badge" }, "");
   const showAudio = (next: AudioStatus): void => {
-    pickerInput.disabled = !next.paused;
-    whyLocked.hidden = next.paused;
     active.textContent = next.active ?? "None — no microphone is open";
     active.dataset["on"] = String(next.active !== null);
   };
   showAudio(audio);
   live.audio = showAudio;
-  const savedDevice = row("Saved device", Array.isArray(microphones) ? "Saving writes this choice; it does not prove a microphone opened." : null, picker);
-  savedDevice.querySelector(".what")?.append(whyLocked);
+  const deviceRow = row(
+    "Microphone",
+    Array.isArray(microphones) ? "The device Thalvi listens on. Choosing one opens it when it can, or after the current capture." : null,
+    { node: el("span", { class: "stack" }, picker.node, confirm), field: picker.field },
+  );
   const meter = el("b");
   live.level = (level) => {
     meter.style.transform = `scaleX(${Math.min(1, Math.max(0, level)).toFixed(3)})`;
@@ -1545,11 +1741,11 @@ function microphone({ draft, backend, controls, microphones, live, audio }: Page
   };
   const rows = [
     group("Right now"),
-    row("Listening", "Turns the microphone on or off now; this is not part of Save.", {
+    row("Listening", "Turns the microphone on or off now.", {
       node: el("span", { class: "stack" }, listening.node, problem),
       field: listeningInput,
     }),
-    row("Active microphone", "The device actually open now. This is different from the saved choice below.", {
+    row("Active microphone", "The device actually open now.", {
       node: active,
       field: el("span", { id: uid("f") }),
     }),
@@ -1557,8 +1753,7 @@ function microphone({ draft, backend, controls, microphones, live, audio }: Page
       node: el("span", { class: "meter", role: "meter", "aria-valuemin": "0", "aria-valuemax": "1" }, meter),
       field: el("span", { id: uid("f") }),
     }),
-    group("Saved with Save"),
-    savedDevice,
+    deviceRow,
   ];
   if (!Array.isArray(microphones)) {
     rows.unshift(el("p", { class: "note", role: "alert" }, `Microphones could not be listed: ${microphones.error}`));
@@ -1566,36 +1761,47 @@ function microphone({ draft, backend, controls, microphones, live, audio }: Page
   return rows;
 }
 
-function overlay({ draft, controls }: PageContext): HTMLElement[] {
+function overlay(context: PageContext): HTMLElement[] {
   return [
     group("Overlay"),
     row("Show the overlay", "A small pill at the top of the screen while Thalvi is capturing.",
-      controls.toggle(draft.overlay.show, (value) => {
-        draft.overlay.show = value;
+      bindToggle(context, (settings) => settings.overlay.show, (settings, value) => {
+        settings.overlay.show = value;
       })),
     row("Show the draft", "The text so far, under the pill.",
-      controls.toggle(draft.overlay.draft, (value) => {
-        draft.overlay.draft = value;
+      bindToggle(context, (settings) => settings.overlay.draft, (settings, value) => {
+        settings.overlay.draft = value;
       })),
   ];
 }
 
-function look({ draft, controls, root }: PageContext): HTMLElement[] {
+function look(context: PageContext): HTMLElement[] {
+  const { draft, root } = context;
+  const confirm = appliedNote();
   return [
     group("Look"),
-    row("Look", "How the overlay and this window look. The overlay changes after the current capture.",
-      lookPicker(draft.look, (next) => {
-        draft.look = next;
-        applyLook(root, next);
-        controls.touched();
-      })),
+    row("Look", "How the overlay and this window look. The overlay changes after the current capture.", {
+      node: el(
+        "span",
+        { class: "stack" },
+        lookPicker(draft.look, (next) => {
+          draft.look = next;
+          applyLook(root, next);
+          void context.apply((settings) => {
+            settings.look = next;
+          }, { confirm });
+        }),
+        confirm,
+      ),
+      field: el("span", { id: uid("f") }),
+    }),
   ];
 }
 
-function sounds({ draft, controls }: PageContext): HTMLElement[] {
+function sounds(context: PageContext): HTMLElement[] {
   return [group("Sounds"), ...CUES.map(([key, label, hint]) =>
-    row(`${label} sound`, hint, controls.toggle(draft.cues[key], (value) => {
-      draft.cues[key] = value;
+    row(`${label} sound`, hint, bindToggle(context, (settings) => settings.cues[key], (settings, value) => {
+      settings.cues[key] = value;
     })),
   )];
 }
@@ -1604,7 +1810,8 @@ function feedback(context: PageContext): HTMLElement[] {
   return [...overlay(context), ...look(context), ...sounds(context)];
 }
 
-function appsTable({ draft, controls }: PageContext, onApps: () => void): HTMLElement {
+function appsTable(context: PageContext, onApps: () => void): HTMLElement {
+  const { draft, controls } = context;
   const list = el("div", { class: "cards" });
   const problem = note();
   const name = controls.text("", () => undefined, { label: "New app name", placeholder: "app name" });
@@ -1613,16 +1820,27 @@ function appsTable({ draft, controls }: PageContext, onApps: () => void): HTMLEl
     list.replaceChildren(
       ...Object.entries(draft.apps).map(([appName, app]) => {
         const remove = button("Remove", () => {
-          draft.apps = Object.fromEntries(Object.entries(draft.apps).filter(([known]) => known !== appName));
-          controls.touched();
-          render();
-          onApps();
+          void context
+            .apply((settings) => {
+              settings.apps = Object.fromEntries(Object.entries(settings.apps).filter(([known]) => known !== appName));
+            })
+            .then(() => {
+              draft.apps = Object.fromEntries(Object.entries(draft.apps).filter(([known]) => known !== appName));
+              render();
+              onApps();
+            });
         }, "quiet");
         remove.setAttribute("aria-label", `Remove ${appName}`);
         const edit = (label: string, values: string[], set: (next: string[]) => void): HTMLElement =>
           miniField(label, controls.text(listText(values), (value) => {
             set(parseList(value));
-          }, { label: `${label} of ${appName}` }));
+          }, {
+            label: `${label} of ${appName}`,
+            apply: () =>
+              context.apply((settings) => {
+                settings.apps[appName] = structuredClone(app);
+              }),
+          }));
         return el(
           "fieldset",
           { class: "card" },
@@ -1647,34 +1865,49 @@ function appsTable({ draft, controls }: PageContext, onApps: () => void): HTMLEl
       return;
     }
     say(problem, "");
-    draft.apps[appName] = { classes: [], executables: [], input_keys: [] };
-    (name.field as HTMLInputElement).value = "";
-    controls.touched();
-    render();
-    onApps();
+    void context
+      .apply((settings) => {
+        settings.apps[appName] = { classes: [], executables: [], input_keys: [] };
+      })
+      .then(() => {
+        draft.apps[appName] = { classes: [], executables: [], input_keys: [] };
+        (name.field as HTMLInputElement).value = "";
+        render();
+        onApps();
+      });
   });
   return el("div", { class: "stack wide" }, list, el("div", { class: "trow add" }, name.node, add), problem);
 }
 
-function scriptsTable({ draft, controls }: PageContext, appNames: HTMLElement): HTMLElement {
+function scriptsTable(context: PageContext, appNames: HTMLElement): HTMLElement {
+  const { draft, controls } = context;
   const list = el("div", { class: "cards" });
 
   function render(): void {
     list.replaceChildren(
       ...draft.scripts.map((script, index) => {
         const remove = button("Remove", () => {
-          draft.scripts.splice(index, 1);
-          controls.touched();
-          render();
+          void context
+            .apply((settings) => {
+              settings.scripts.splice(index, 1);
+            })
+            .then(() => {
+              draft.scripts.splice(index, 1);
+              render();
+            });
         }, "quiet");
         remove.setAttribute("aria-label", `Remove script ${String(index + 1)}`);
+        const applyScript = (): Promise<void> =>
+          context.apply((settings) => {
+            settings.scripts[index] = structuredClone(script);
+          });
         return el(
           "div",
           { class: "card" },
-          miniField("Phrase", controls.text(script.phrase, (value) => { script.phrase = value; }, { label: `Phrase of script ${String(index + 1)}` })),
-          miniField("Action", controls.select(SCRIPT_ACTIONS, script.action, (value) => { script.action = value; }, `Action of script ${String(index + 1)}`)),
-          miniField("Destination", controls.text(script.destination, (value) => { script.destination = value; }, { list: appNames.id, label: `Destination of script ${String(index + 1)}` })),
-          miniField("Label", controls.text(script.label ?? "", (value) => { script.label = value === "" ? null : value; }, { label: `Label of script ${String(index + 1)}` })),
+          miniField("Phrase", controls.text(script.phrase, (value) => { script.phrase = value; }, { label: `Phrase of script ${String(index + 1)}`, apply: applyScript })),
+          miniField("Action", controls.select(SCRIPT_ACTIONS, script.action, (value) => { script.action = value; }, `Action of script ${String(index + 1)}`, applyScript)),
+          miniField("Destination", controls.text(script.destination, (value) => { script.destination = value; }, { list: appNames.id, label: `Destination of script ${String(index + 1)}`, apply: applyScript })),
+          miniField("Label", controls.text(script.label ?? "", (value) => { script.label = value === "" ? null : value; }, { label: `Label of script ${String(index + 1)}`, apply: applyScript })),
           remove,
         );
       }),
@@ -1682,9 +1915,14 @@ function scriptsTable({ draft, controls }: PageContext, appNames: HTMLElement): 
   }
   render();
   const add = button("Add script", () => {
-    draft.scripts.push({ phrase: "", action: "open_url", destination: "", label: null });
-    controls.touched();
-    render();
+    void context
+      .apply((settings) => {
+        settings.scripts.push({ phrase: "", action: "open_url", destination: "", label: null });
+      })
+      .then(() => {
+        draft.scripts.push({ phrase: "", action: "open_url", destination: "", label: null });
+        render();
+      });
   });
   return el("div", { class: "stack wide" }, list, el("div", { class: "trow add" }, add));
 }
@@ -1704,17 +1942,17 @@ function tasks(context: PageContext): HTMLElement[] {
   ];
 }
 
-function limits({ draft, controls }: PageContext): HTMLElement[] {
+function limits(context: PageContext): HTMLElement[] {
   return [
     group("Capture limits"),
     row("Stop after silence", "Stops a capture that hears no words for this long, 10 to 600 s.",
-      controls.number(draft.capture_limits.idle, { min: 10, max: 600, step: 1, unit: "s" }, (value) => {
-        draft.capture_limits.idle = value;
-      })),
+      bindNumber(context, (settings) => settings.capture_limits.idle, (settings, value) => {
+        settings.capture_limits.idle = value;
+      }, { min: 10, max: 600, step: 1, unit: "s" })),
     row("Stop after", "Stops any capture that runs this long, 60 to 3600 s.",
-      controls.number(draft.capture_limits.max, { min: 60, max: 3600, step: 1, unit: "s" }, (value) => {
-        draft.capture_limits.max = value;
-      })),
+      bindNumber(context, (settings) => settings.capture_limits.max, (settings, value) => {
+        settings.capture_limits.max = value;
+      }, { min: 60, max: 3600, step: 1, unit: "s" })),
   ];
 }
 
@@ -1795,7 +2033,8 @@ function startup({ backend, controls, startAtLogin, menuEntry }: PageContext): H
   ];
 }
 
-function recordings({ draft, backend, controls }: PageContext): HTMLElement[] {
+function recordings(context: PageContext): HTMLElement[] {
+  const { backend } = context;
   const kinds = [
     ["Metrics", "metrics", "When each wake, capture and model call happened, how long it took and how it ended. No words or audio."],
     ["Text", "text", "The words you dictated and what Thalvi did with them."],
@@ -1812,12 +2051,12 @@ function recordings({ draft, backend, controls }: PageContext): HTMLElement[] {
     group("Recordings"),
     ...kinds.map(([label, kind, hint]) =>
       row(`${label} recording`, `${hint} Kept on this computer only. Off unless you turn it on.`,
-        controls.toggle(draft.recordings[kind], (value) => {
-          draft.recordings[kind] = value;
+        bindToggle(context, (settings) => settings.recordings[kind], (settings, value) => {
+          settings.recordings[kind] = value;
         })),
     ),
     group("Right now"),
-    row("Recordings folder", "Everything is stored on this computer. Opening it is not part of Save.", {
+    row("Recordings folder", "Everything is stored on this computer. Opening it does not change settings.", {
       node: el("span", { class: "stack" }, open, problem),
       field: open,
     }),
@@ -1963,7 +2202,7 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
 }
 
 function history(context: PageContext): HTMLElement[] {
-  const { draft, backend, controls, live } = context;
+  const { backend, live } = context;
   const last = lastDictation(context);
   const list = el("div", { class: "entries" });
   const problem = note();
@@ -1999,13 +2238,13 @@ function history(context: PageContext): HTMLElement[] {
     ...last.nodes,
     group("Keeping"),
     row("Keep a history", "What you dictate, when, where it went and how it ended; never audio. Kept on this computer only, never uploaded. Turning this off stops new entries and deletes none: delete them below.",
-      controls.toggle(draft.history.enabled, (value) => {
-        draft.history.enabled = value;
+      bindToggle(context, (settings) => settings.history.enabled, (settings, value) => {
+        settings.history.enabled = value;
       })),
     row("Entries to keep", "The oldest entries go first past this number, 1 to 1000.",
-      controls.number(draft.history.limit, { min: 1, max: 1000, step: 1 }, (value) => {
-        draft.history.limit = value;
-      })),
+      bindNumber(context, (settings) => settings.history.limit, (settings, value) => {
+        settings.history.limit = value;
+      }, { min: 1, max: 1000, step: 1 })),
     group("Kept so far"),
     row("Recent dictations", "Newest first. Deleting takes effect at once; it is not part of Save.", el("div", { class: "stack wide" }, problem, list)),
     row("Clear history", "Deletes every entry for good, and a damaged history file with them.",
