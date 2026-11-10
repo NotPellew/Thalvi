@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -545,8 +545,8 @@ async fn wait_save_failed(save_error: &mut watch::Receiver<bool>) {
 }
 
 const MAX_TEXT_CHARS: usize = 20_000;
-/// How long a client that is being let go may hold up the end of its session.
-const ENDED_SEND_WAIT: Duration = Duration::from_secs(2);
+/// How long one send to the browser may take before it counts as gone.
+const BROWSER_SEND_WAIT: Duration = Duration::from_secs(2);
 
 /// Runs one client session until its socket closes.
 #[expect(
@@ -569,7 +569,43 @@ pub async fn handle_session<F, M, T>(
     M: ChatModel + 'static,
     T: Tts + 'static,
 {
-    let (mut sink, mut stream) = socket.split();
+    let (sink, stream) = socket.split();
+    run_session(
+        sink,
+        stream,
+        factory,
+        model,
+        tts,
+        retention,
+        recording_config,
+        ack_enabled,
+        audio_input,
+        voices,
+    )
+    .await;
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session state is passed explicitly rather than bundled into a context type"
+)]
+async fn run_session<F, M, T>(
+    mut sink: impl SinkExt<Message> + Unpin,
+    mut stream: impl Stream<Item = Result<Message, axum::Error>> + Unpin,
+    factory: F,
+    model: Arc<M>,
+    tts: Arc<T>,
+    retention: Retention<M>,
+    recording_config: RecordingConfig,
+    ack_enabled: bool,
+    audio_input: bool,
+    voices: VoiceChoices,
+) where
+    F: RecognizerFactory + Send + Sync + 'static,
+    F::Rec: Send + 'static,
+    M: ChatModel + 'static,
+    T: Tts + 'static,
+{
     let factory = Arc::new(factory);
     let session_started = Instant::now();
     let Opened {
@@ -976,7 +1012,7 @@ async fn close_session<M: ChatModel + 'static>(
     persistence.finish(history, next_turn, recorder);
     tracing::info!("session closed");
     if let Some(reason) = detached {
-        let _ = tokio::time::timeout(ENDED_SEND_WAIT, send_ended(sink, reason)).await;
+        let _ = tokio::time::timeout(BROWSER_SEND_WAIT, send_ended(sink, reason)).await;
     }
 }
 
