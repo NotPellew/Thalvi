@@ -849,11 +849,9 @@ mod tests {
     }
 
     #[test]
-    fn submit_notices_paste_failures_enter_failures_and_never_says_nothing_pasted_after_a_landed_paste()
-     {
+    fn submit_notices_a_cut_short_paste_and_never_sends_enter() {
         let key_up = |key| KeyEvent { key, release: true };
         let paste_batch = ctrl_v();
-        let enter_batch = virtual_tap(VK_RETURN).to_vec();
         // The paste batch is Ctrl down, V down, V up, Ctrl up; Enter is a second batch after the wait.
         for (accepted, released) in [
             (1, vec![key_up(VK_CONTROL)]),
@@ -909,6 +907,12 @@ mod tests {
         assert!(matches!(error, HostError::NothingTyped(_)), "{error:?}");
         assert_eq!(desktop.api.read(|state| state.sent.len()), 1);
         assert!(desktop.api.read(|state| state.enter_waits.is_empty()));
+    }
+
+    #[test]
+    fn submit_notices_enter_failures_after_a_landed_paste_and_empty_submit() {
+        let paste_batch = ctrl_v();
+        let enter_batch = virtual_tap(VK_RETURN).to_vec();
 
         let desktop = windows(Fake::desktop());
         let target = desktop.capture_target().unwrap();
