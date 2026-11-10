@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    App, Delivered, ENTER_FAILED, ENTER_SUBMIT_WAIT, HoldSource, Host, HostError, MAYBE_PASTED,
-    Modifier, PasteText, RequestServer, WebUrl,
+    App, Delivered, ENTER_FAILED, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, PasteText,
+    RequestServer, WebUrl,
 };
 use crate::hold::{HoldKey, HoldKind};
 pub use win32::Real;
@@ -253,7 +253,7 @@ impl<A: Win32> Host for Windows<A> {
         }
         if paste {
             self.send(
-                &paste_events(true),
+                &paste_events(),
                 MAYBE_PASTED,
                 "Windows refused the input. Nothing was pasted.",
                 false,
@@ -262,8 +262,15 @@ impl<A: Win32> Host for Windows<A> {
         if enter {
             if paste {
                 self.api.wait_before_enter();
+                self.send(&enter_events(), ENTER_FAILED, ENTER_FAILED, true)?;
+            } else {
+                self.send(
+                    &enter_events(),
+                    MAYBE_PASTED,
+                    "Windows refused the input. Nothing was pasted.",
+                    false,
+                )?;
             }
-            self.send(&enter_events(), ENTER_FAILED, ENTER_FAILED, true)?;
         }
         Ok(Delivered::InWindow)
     }
@@ -367,18 +374,15 @@ fn tap(key: u16) -> [KeyEvent; 2] {
     [false, true].map(|release| KeyEvent { key, release })
 }
 
-/// Ctrl+V when `paste`.
-fn paste_events(paste: bool) -> Vec<KeyEvent> {
+fn paste_events() -> Vec<KeyEvent> {
     let ctrl = |release| KeyEvent {
         key: VK_CONTROL,
         release,
     };
     let mut events = Vec::new();
-    if paste {
-        events.push(ctrl(false));
-        events.extend(tap(VK_V));
-        events.push(ctrl(true));
-    }
+    events.push(ctrl(false));
+    events.extend(tap(VK_V));
+    events.push(ctrl(true));
     events
 }
 
@@ -450,7 +454,7 @@ fn virtual_key(name: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::Shortcut;
+    use crate::host::{ENTER_SUBMIT_WAIT, Shortcut};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -855,7 +859,6 @@ mod tests {
             (1, vec![key_up(VK_CONTROL)]),
             (2, vec![key_up(VK_V), key_up(VK_CONTROL)]),
             (3, vec![key_up(VK_CONTROL)]),
-            (4, vec![]),
         ] {
             let desktop = windows(Fake::desktop());
             let target = desktop.capture_target().unwrap();
@@ -942,6 +945,25 @@ mod tests {
         assert_eq!(
             desktop.api.read(|state| state.enter_waits),
             vec![ENTER_SUBMIT_WAIT]
+        );
+
+        let desktop = windows(Fake::desktop());
+        let target = desktop.capture_target().unwrap();
+        desktop.api.with(|state| state.accepts = Some(0));
+        let error = desktop.deliver(&target, &text(""), true).unwrap_err();
+        assert!(
+            matches!(error, HostError::NothingTyped(notice) if notice == "Windows refused the input. Nothing was pasted."),
+            "empty submit, enter refused: {error:?}"
+        );
+        assert_eq!(desktop.api.read(|state| state.enter_waits.len()), 0);
+
+        let desktop = windows(Fake::desktop());
+        let target = desktop.capture_target().unwrap();
+        desktop.api.with(|state| state.accepts = Some(1));
+        let error = desktop.deliver(&target, &text(""), true).unwrap_err();
+        assert!(
+            matches!(&error, HostError::MaybePartial(notice) if notice == MAYBE_PASTED),
+            "empty submit, enter cut short: {error:?}"
         );
     }
 

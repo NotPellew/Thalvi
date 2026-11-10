@@ -47,12 +47,16 @@ pub(crate) const MAYBE_PASTED: &str =
 
 /// How long submit waits between paste and Enter on desktops that need it.
 #[cfg_attr(
-    not(target_os = "windows"),
+    not(any(target_os = "windows", test)),
     expect(dead_code, reason = "the Windows host waits through this constant")
 )]
 pub(crate) const ENTER_SUBMIT_WAIT: Duration = Duration::from_millis(250);
 
 /// The `wtype -s` argument matching [`ENTER_SUBMIT_WAIT`].
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(dead_code, reason = "Hyprland passes this to wtype")
+)]
 pub(crate) const ENTER_SUBMIT_WAIT_MS: &str = "250";
 
 /// What submit says when the text was pasted but Enter did not go through.

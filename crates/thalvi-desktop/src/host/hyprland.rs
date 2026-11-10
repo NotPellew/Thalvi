@@ -719,6 +719,15 @@ mod tests {
     }
 
     #[test]
+    fn enter_submit_wait_constants_match() {
+        use crate::host::{ENTER_SUBMIT_WAIT, ENTER_SUBMIT_WAIT_MS};
+        use std::time::Duration;
+
+        assert_eq!(ENTER_SUBMIT_WAIT_MS, "250");
+        assert_eq!(ENTER_SUBMIT_WAIT, Duration::from_millis(250));
+    }
+
+    #[test]
     fn the_focused_window_is_bound_by_address_pid_and_class() {
         let host = desktop(vec![row("0x1f", 42, "kitty", 0)], "0x1f", "0x1f");
         assert_eq!(host.capture_target(), Ok(window("0x1f", 42, "kitty")));
