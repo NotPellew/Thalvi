@@ -157,6 +157,10 @@ areas your change touches. Editing rules are in
   saved only when it differs from the default, and a blank one is refused where the config loads. Why: users who never
   edited it get a better default later, and Settings, the agent surface and the file share one check. Rejected:
   storing the default text, a prompt without an endpoint.
+- **Opening phrases pick the writing prompt.** `writing.openings` maps a normalized phrase to a prompt; the words the writing call sends,
+  when they start with a phrase as whole words, get its prompt (longest wins), else `writing.prompt`; the words go as said, opening included.
+  Only an explicit write uses them. Why: small models follow one long prompt unevenly, and local matching adds no call. Rejected: dropping
+  the opening from the message, a switch per rule, a routing model call, inferring the target app, one prompt with a section per kind.
 - **Hold release flush.** At release a hold sends 800 ms of generated silence, kept out of the recording, and pastes on the next
   final or after 250 ms. Why: a streaming recognizer emits a word only after audio past it; measured headless on the server
   recognizer, no last word lost in 336 releases (75% before when released on the word's end). Rejected: a fixed 500 ms tail;

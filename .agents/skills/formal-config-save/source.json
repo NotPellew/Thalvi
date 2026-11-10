@@ -2,10 +2,12 @@
   "sync_commit": "2f4638699c6d928ddf2497b2146aac52febc60d7",
   "files": {
     "crates/thalvi-app/src/settings.rs": {
-      "sha256": "dcbeaf41fcbee85c1626125c3f23fbbbccc08c6b9ef12b733fe1ea0bf22d7f6c",
+      "sha256": "f20f38b9d5e60f00ed1cff28831a250cb58c625b7d98fdef659f2b34495bf60d",
       "functions": [
         "Store::start",
         "Store::save",
+        "Store::check",
+        "Store::write",
         "Store::save_switches",
         "prepare",
         "write_atomically",
@@ -13,20 +15,24 @@
       ]
     },
     "crates/thalvi-app/src/commands.rs": {
-      "sha256": "f1230635afe63ebe21bcd53c5c10c46fde310aeb0789bd1329af9c05ff23063e",
+      "sha256": "9e524e998de8ae235271a1d006be068aa95cf86ee3e7f4488708775a919b5a7c",
       "functions": [
         "save_settings",
         "save"
       ]
     },
     "crates/thalvi-app/src/app.rs": {
-      "sha256": "0cc62e1e31cbd847056fd8faa27565fa922db6897a089b7e64e5d4b3c9adbb63",
+      "sha256": "23bd6d60a231efadb6c4bc26557b5fa7abc983a6e5d44fd5107508ac7276c8ef",
       "functions": [
         "setup",
         "AppState::config",
+        "AppState::save_form",
+        "SyncedConfig::save_form",
+        "SyncedConfig::remember",
         "AppState::remember",
         "AppState::remember_login",
         "AppState::remember_menu_entry",
+        "AppState::take_effect",
         "AppState::apply",
         "serve_requests",
         "Live::save",
@@ -34,9 +40,10 @@
       ]
     },
     "crates/thalvi-app/src/agent.rs": {
-      "sha256": "7bdd911e2f6be64ca800f62251c219001aa6df6a40550a4ec3a11430f3237656",
+      "sha256": "daf94337fb4442b1c137e8652d9d32f9f1e98a5deb32bea9103fe8438450ac8d",
       "functions": [
         "plan",
+        "plan_over",
         "settings_set"
       ]
     },

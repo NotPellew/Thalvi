@@ -96,6 +96,12 @@ export interface SecondPassEntry extends EntryBase {
   has_key?: boolean;
 }
 
+/** A Writing prompt for dictations that begin with `phrase`, which the desktop stores normalized. */
+export interface WritingOpening {
+  phrase: string;
+  prompt: string;
+}
+
 export interface WritingSettings {
   url: string;
   model: string;
@@ -103,6 +109,8 @@ export interface WritingSettings {
   has_key?: boolean;
   /** Set only when it differs from `Settings.writing_default_prompt`; Settings shows the prompt in effect. */
   prompt?: string;
+  /** Absent when there are none. */
+  openings?: WritingOpening[];
 }
 export type LiveEntry = RealtimeEntry | ThalviServerEntry | OnDeviceEntry;
 export type SpeechEntry = LiveEntry | SecondPassEntry;

@@ -481,6 +481,15 @@ If it is not set up, fails, answers with nothing, or takes longer than 15 second
 Thalvi says what happened, and your own words go on the clipboard to paste with
 Ctrl+V.
 
+**Opening phrases** (`writing.openings`, under the Writing prompt in Settings) give
+a kind of text its own prompt, such as "write me an email" or "write a message".
+When the words you said begin with a phrase, whole words only and ignoring case and
+punctuation, that rule's prompt is used instead of the Writing prompt, and the
+longest matching phrase wins. The words are sent as said, opening included. No
+match uses the Writing prompt. Rules apply only when you write out with "write that
+out" or the write key. A new rule starts as a copy of the Writing prompt, and a
+rule edited in Settings applies from the next capture.
+
 - **Hyprland:** F10, with no modifier, bound by Thalvi like the hold key
   (`write_key` in the config).
 - **Windows:** Alt and X (`write_key` in the config), kept from the focused app

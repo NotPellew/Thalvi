@@ -20,6 +20,7 @@ import type {
   SpeechEntry,
   WakeModelInfo,
   SwitchState,
+  WritingOpening,
   WritingSettings,
 } from "./contract.ts";
 import { errorText } from "./contract.ts";
@@ -175,6 +176,11 @@ function parseList(value: string): string[] {
 
 function normalize(phrase: string): string {
   return phrase.toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+}
+
+/** Reads a phrase the way the desktop does: lowercase, runs of anything but letters and digits one space. */
+function openingWords(phrase: string): string {
+  return phrase.toLowerCase().split(/[^\p{Alphabetic}\p{N}]+/u).filter(Boolean).join(" ");
 }
 
 function miniField(label: string, field: Field): HTMLElement {
@@ -1352,7 +1358,7 @@ function speech(context: PageContext): HTMLElement[] {
     const [urlInput, modelInput, keyInput] = writingInputs;
     const custom = promptArea.value.trim() !== defaultPrompt.trim();
     restorePrompt.disabled = !custom;
-    if (!custom && writingInputs.every((input) => input.value.trim() === "")) {
+    if (!custom && writingInputs.every((input) => input.value.trim() === "") && (draft.writing?.openings ?? []).length === 0) {
       draft.writing = null;
       return;
     }
@@ -1362,6 +1368,63 @@ function speech(context: PageContext): HTMLElement[] {
     draft.writing = next;
   }
   restorePrompt.disabled = promptArea.value.trim() === defaultPrompt.trim();
+
+  const openingsList = el("div", { class: "stack wide" });
+  const openingProblem = note();
+  const openingPhrase = controls.text("", () => undefined, { label: "New opening phrase", placeholder: "write me an email" });
+
+  function setOpenings(openings: WritingOpening[]): void {
+    const next: WritingSettings = { url: "", model: "", ...draft.writing };
+    if (openings.length > 0) next.openings = openings;
+    else delete next.openings;
+    draft.writing = next;
+    syncWriting();
+    controls.touched();
+    renderOpenings();
+  }
+
+  function renderOpenings(): void {
+    const openings = draft.writing?.openings ?? [];
+    openingsList.replaceChildren(
+      ...openings.map((opening) => {
+        const prompt = el("textarea", { id: uid("f"), rows: "5", spellcheck: "false", "aria-label": `Prompt for “${opening.phrase}”` });
+        prompt.value = opening.prompt;
+        prompt.addEventListener("input", () => {
+          opening.prompt = prompt.value;
+          controls.touched();
+        });
+        const remove = button("Remove", () => {
+          setOpenings(openings.filter((known) => known !== opening));
+        }, "quiet");
+        remove.setAttribute("aria-label", `Remove “${opening.phrase}”`);
+        return el("div", { class: "stack wide" }, el("div", { class: "trow" }, el("span", { class: "phrase" }, `“${opening.phrase}”`), remove), prompt);
+      }),
+    );
+  }
+  renderOpenings();
+  const addOpening = button("Add", () => {
+    const input = openingPhrase.field as HTMLInputElement;
+    const phrase = openingWords(input.value);
+    if (phrase === "") {
+      say(openingProblem, "Type the phrase to add first.");
+      return;
+    }
+    const openings = draft.writing?.openings ?? [];
+    if (openings.some((known) => known.phrase === phrase)) {
+      say(openingProblem, `“${phrase}” is already in the list.`);
+      return;
+    }
+    say(openingProblem, "");
+    input.value = "";
+    setOpenings([...openings, { phrase, prompt: promptArea.value }]);
+  });
+  const openingsField = el(
+    "div",
+    { class: "stack wide" },
+    openingsList,
+    el("div", { class: "trow add phrase-add" }, openingPhrase.node, addOpening),
+    openingProblem,
+  );
 
   const words = wordListTable(draft, controls);
   const wordProblem = note();
@@ -1427,6 +1490,11 @@ function speech(context: PageContext): HTMLElement[] {
       "Writing prompt",
       "The instructions the writing model gets with every dictation; the words you said go in as the message itself. Blank is not allowed. Saving never calls the model.",
       writingPromptField,
+    ),
+    row(
+      "Opening phrases",
+      "When a dictation you write out begins with one of these phrases, its prompt is used instead of the Writing prompt; the longest matching phrase wins. A new rule starts as a copy of the Writing prompt. Case and punctuation are ignored. Saving never calls the model.",
+      openingsField,
     ),
   ];
 }

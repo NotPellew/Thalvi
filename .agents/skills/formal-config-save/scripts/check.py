@@ -31,6 +31,7 @@ FIXED = ['Serialized']
 # Each mutation breaks the serialized design one way, and the invariant it must break.
 MUTATIONS = [
     ('SnapshotOutsideLock', 'EachFieldKeepsItsLastSave'),
+    ('AgentMergeOutsideLock', 'EachFieldKeepsItsLastSave'),
     ('ApplyOutsideLock', 'RunningMatchesFile'),
     ('RenameBeforeWrite', 'FileAlwaysWhole'),
 ]

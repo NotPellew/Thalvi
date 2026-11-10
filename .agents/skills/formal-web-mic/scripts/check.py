@@ -26,10 +26,10 @@ JRE_URL = ('https://github.com/adoptium/temurin21-binaries/releases/download/'
            'jdk-21.0.9%2B10/OpenJDK21U-jre_x64_linux_hotspot_21.0.9_10.tar.gz')
 JRE_SHA = 'aeab55d064a1a27a3744b0880b9b414077b4ed2b1790817eea3df60aec946431'
 PROPERTIES = ['NoOrphanMic', 'MicOnlyWithVoice', 'NoMicAfterEnd']
-# A design that stops the tracks on every openMic failure and drops a mic nobody wants; it must pass.
-FIXED = ['GuardedOpen']
 # Each mutation breaks a guard the code has, and the invariant it must break.
 MUTATIONS = [
+    ('OpenMicLeaksTracks', 'NoOrphanMic'),
+    ('KeepsMicAfterEnd', 'NoMicAfterEnd'),
     ('ReleaseKeepsMic', 'MicOnlyWithVoice'),
     ('MicStoppedKeepsVoice', 'MicOnlyWithVoice'),
 ]
@@ -122,7 +122,7 @@ def run(java, jar, evidence, label, flags=(), invariants=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--self-test', action='store_true',
-                        help='check the guarded design and the mutations')
+                        help='check that the mutations are caught')
     args = parser.parse_args()
     source_check()
     jar = fetch(TLC_NAME, TLC_URL, TLC_SHA)
@@ -130,13 +130,13 @@ def main():
     evidence = Path(tempfile.mkdtemp(prefix='thalvi-formal-web-mic-', dir='/var/tmp'))
     print(f'EVIDENCE={evidence}', flush=True)
     if args.self_test:
-        if run(java, jar, evidence, 'guarded', FIXED):
-            raise RuntimeError('the guarded design should pass every invariant')
+        if run(java, jar, evidence, 'faithful'):
+            raise RuntimeError('the code as it is should pass every invariant')
         for mutation, invariant in MUTATIONS:
             caught = run(java, jar, evidence, mutation, [mutation], [invariant])
             if caught != invariant:
                 raise RuntimeError(f'{mutation} should break {invariant}, got {caught or "a pass"}')
-        print('SELF-TEST PASS: the guarded design passed and every mutation broke its '
+        print('SELF-TEST PASS: the code as it is passed and every mutation broke its '
               'invariant. Run without --self-test for the verdict on the code as it is.')
         return 0
     broken = [p for p in PROPERTIES if run(java, jar, evidence, f'faithful-{p}', invariants=[p])]

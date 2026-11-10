@@ -26,7 +26,9 @@ use crate::launch::{Launch, relaunch_shows_settings};
 use crate::menu_entry::{self, MenuEntry};
 use crate::overlay::{self, Overlay, Visibility};
 use crate::runner::{AudioStatus, Control, EngineLink};
-use crate::settings::Store;
+use serde_json::Value;
+
+use crate::settings::{Store, ensure_microphone_change_allowed};
 use crate::startup::{self, APP_NAME, LOGIN_ARG, Registration};
 use crate::status::{Failure, FailureKind, LastError, Status};
 use crate::tray::{self, CopyItem, Tray};
@@ -40,10 +42,76 @@ const OPEN_PAGE_EVENT: &str = "thalvi://open-page";
 /// Sent when an agent changes what the open settings window shows; the window's own saves never send it.
 const CHANGED_ELSEWHERE_EVENT: &str = "thalvi://settings-elsewhere";
 
+/// The running config and the file it is saved to. One lock orders every save
+/// from reading the config through writing the file and applying the result.
+pub(crate) struct SyncedConfig {
+    pub(crate) store: Store,
+    current: Mutex<DesktopConfig>,
+    lock: Mutex<()>,
+}
+
+impl SyncedConfig {
+    pub(crate) fn new(store: Store, config: DesktopConfig) -> Self {
+        Self {
+            store,
+            current: Mutex::new(config),
+            lock: Mutex::new(()),
+        }
+    }
+
+    pub(crate) fn config(&self) -> DesktopConfig {
+        self.current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn set(&self, config: &DesktopConfig) {
+        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = config.clone();
+    }
+
+    /// Builds a settings form from the config read under the save lock, then validates, writes and
+    /// applies it, all under that lock. `form` returns the value to hand back and the form to save,
+    /// or `None` to save nothing. `take_effect` gets the config in use, the validated one and
+    /// `write`, which replaces the file; it writes before it installs the config in the running
+    /// app, as `AppState::take_effect` does, and an error from it before writing leaves the file.
+    pub(crate) fn save_form<T>(
+        &self,
+        form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
+        paused: bool,
+        take_effect: impl FnOnce(
+            &DesktopConfig,
+            &DesktopConfig,
+            &dyn Fn() -> Result<(), String>,
+        ) -> Result<(), String>,
+    ) -> Result<(T, Option<(DesktopConfig, bool)>), String> {
+        let _save = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let current = self.config();
+        let (value, settings) = form(&current)?;
+        let Some(settings) = settings else {
+            return Ok((value, None));
+        };
+        ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
+        let config = Store::check(settings, &current)?;
+        take_effect(&current, &config, &|| self.store.write(&config))?;
+        let look_changed = config.look != current.look;
+        Ok((value, Some((config, look_changed))))
+    }
+
+    fn remember(&self, change: impl FnOnce(&mut DesktopConfig)) -> Result<(), String> {
+        let _save = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut config = self.config();
+        change(&mut config);
+        self.store.save_switches(&config)?;
+        self.set(&config);
+        Ok(())
+    }
+}
+
 /// What the commands and the tray menu reach.
 pub struct AppState {
     pub link: EngineLink,
-    pub store: Store,
+    saves: SyncedConfig,
     pub overlay: Overlay,
     pub speech_downloads: SpeechDownloads,
     /// Where the speech model runs, shared with the engine thread that loads it.
@@ -59,7 +127,6 @@ pub struct AppState {
     /// Set once the engine's first status is in; the tray menu and the commands update it.
     tray: OnceLock<Tray>,
     host: Arc<Desktop>,
-    config: Mutex<DesktopConfig>,
     overlay_shown: AtomicBool,
     /// Why the login entry could not be put back on start, for the switch to show.
     login_problem: Mutex<Option<String>>,
@@ -96,7 +163,7 @@ impl AppState {
         }
         let state = Self {
             link,
-            store,
+            saves: SyncedConfig::new(store, config.clone()),
             overlay: Overlay::default(),
             speech_downloads: SpeechDownloads::default(),
             speech_devices,
@@ -109,7 +176,6 @@ impl AppState {
             overlay_shown: AtomicBool::new(config.overlay.show),
             login_problem: Mutex::new(None),
             menu_problem: Mutex::new(None),
-            config: Mutex::new(config),
             request_server: Mutex::new(None),
             hold_watch: Mutex::new(held.watch),
             hold_unavailable: held.unavailable,
@@ -119,10 +185,47 @@ impl AppState {
 
     #[must_use]
     pub fn config(&self) -> DesktopConfig {
-        self.config
+        self.saves.config()
+    }
+
+    /// Builds a settings form from the config now in use, saves it and takes it into effect,
+    /// ordered against every other save; see `SyncedConfig::save_form`.
+    ///
+    /// # Errors
+    /// The plain reason the settings were refused, in which case nothing changed.
+    pub fn save_form<T>(
+        &self,
+        form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
+    ) -> Result<(T, Option<(DesktopConfig, bool)>), String> {
+        self.saves
+            .save_form(form, self.link.audio().paused, |current, config, write| {
+                self.take_effect(current, config, write)
+            })
+    }
+
+    /// Writes `config` and takes it into effect. Changed hold keys are watched before the file is
+    /// written, so a desktop that refuses them leaves the old keys in use and the file as it was.
+    fn take_effect(
+        &self,
+        current: &DesktopConfig,
+        config: &DesktopConfig,
+        write: &dyn Fn() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let keys_changed =
+            (&current.hold_key, &current.write_key) != (&config.hold_key, &config.write_key);
+        let mut watch = self
+            .hold_watch
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .unwrap_or_else(PoisonError::into_inner);
+        save_keys(
+            &mut watch,
+            keys_changed,
+            |keeping| watch_hold_keys(config, &self.link, keeping),
+            write,
+        )?;
+        drop(watch);
+        self.apply(config);
+        Ok(())
     }
 
     /// Why this desktop offers no hold key; `None` where it does.
@@ -202,43 +305,14 @@ impl AppState {
     }
 
     fn remember(&self, change: impl FnOnce(&mut DesktopConfig)) -> Result<(), String> {
-        let mut config = self.config();
-        change(&mut config);
-        self.store.save_switches(&config)?;
-        *self.config.lock().unwrap_or_else(PoisonError::into_inner) = config;
-        Ok(())
-    }
-
-    /// Saves `settings` and takes them into effect: the engine applies them between captures.
-    ///
-    /// # Errors
-    /// Why the settings were refused or the file could not be written, in which case nothing
-    /// changed: a desktop that refuses new hold keys leaves the old keys in use.
-    pub fn save(&self, settings: serde_json::Value) -> Result<DesktopConfig, String> {
-        let current = self.config();
-        let config = Store::check(settings, &current)?;
-        let keys_changed =
-            (&current.hold_key, &current.write_key) != (&config.hold_key, &config.write_key);
-        let mut watch = self
-            .hold_watch
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        save_keys(
-            &mut watch,
-            keys_changed,
-            |keeping| watch_hold_keys(&config, &self.link, keeping),
-            || self.store.write(&config),
-        )?;
-        drop(watch);
-        self.apply(&config);
-        Ok(config)
+        self.saves.remember(change)
     }
 
     /// Takes `config` into effect: the engine applies it between captures.
     fn apply(&self, config: &DesktopConfig) {
         self.overlay_shown
             .store(config.overlay.show, Ordering::SeqCst);
-        *self.config.lock().unwrap_or_else(PoisonError::into_inner) = config.clone();
+        self.saves.set(config);
         self.link.send(Control::Apply(Box::new(config.clone())));
     }
 }
@@ -659,10 +733,15 @@ impl Running for Live {
         self.0.state::<AppState>().config()
     }
 
-    fn save(&self, settings: serde_json::Value) -> Result<DesktopConfig, String> {
-        let config = commands::save(&self.0, &self.0.state::<AppState>(), settings)?;
-        let _ = self.0.emit(CHANGED_ELSEWHERE_EVENT, ());
-        Ok(config)
+    fn save<T>(
+        &self,
+        form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<serde_json::Value>), String>,
+    ) -> Result<T, String> {
+        let (value, saved) = commands::save(&self.0, &self.0.state::<AppState>(), form)?;
+        if saved {
+            let _ = self.0.emit(CHANGED_ELSEWHERE_EVENT, ());
+        }
+        Ok(value)
     }
 
     async fn share_word_list(&self) -> Result<(), String> {
@@ -733,9 +812,225 @@ pub fn on_menu(app: &AppHandle, id: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Barrier;
 
     use super::*;
+
+    fn writer(
+        saves: &Arc<SyncedConfig>,
+        applied: &Arc<Mutex<Vec<DesktopConfig>>>,
+        line: &Arc<Barrier>,
+        body: impl FnOnce(&Arc<SyncedConfig>, &Arc<Mutex<Vec<DesktopConfig>>>) + Send + 'static,
+    ) -> std::thread::JoinHandle<()> {
+        let saves = Arc::clone(saves);
+        let applied = Arc::clone(applied);
+        let line = Arc::clone(line);
+        std::thread::spawn(move || {
+            line.wait();
+            body(&saves, &applied);
+        })
+    }
+
+    #[test]
+    fn overlapping_saves_leave_the_file_and_the_running_config_agreeing() {
+        let dir = std::env::temp_dir().join(format!("thalvi-app-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::new(Some(dir.join("desktop.json"))).unwrap();
+        let start = DesktopConfig::from_json_str("{}").unwrap();
+        store.save_switches(&start).unwrap();
+        let saves = Arc::new(SyncedConfig::new(store, start));
+        let applied: Arc<Mutex<Vec<DesktopConfig>>> = Arc::new(Mutex::new(Vec::new()));
+        let line = Arc::new(Barrier::new(5));
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let saves = Arc::clone(&saves);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    saves.store.load().expect("the file is always whole");
+                    std::thread::yield_now();
+                }
+            })
+        };
+        let form = |look: &'static str| {
+            writer(&saves, &applied, &line, move |saves, applied| {
+                for _ in 0..50 {
+                    let mut settings = crate::settings::settings_json(&saves.config()).unwrap();
+                    settings["look"] = serde_json::json!(look);
+                    let synced = Arc::clone(saves);
+                    saves
+                        .save_form(
+                            |_| Ok(((), Some(settings))),
+                            true,
+                            move |_, config, write| {
+                                write()?;
+                                synced.set(config);
+                                applied
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .push(config.clone());
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                }
+            })
+        };
+        let handles = [
+            form("holo"),
+            form("neon"),
+            writer(&saves, &applied, &line, |saves, _| {
+                for round in 0..50 {
+                    saves
+                        .remember(|c| c.start_at_login = round % 2 == 0)
+                        .unwrap();
+                }
+                saves.remember(|c| c.start_at_login = true).unwrap();
+            }),
+            writer(&saves, &applied, &line, |saves, _| {
+                for _ in 0..50 {
+                    let mut settings = crate::settings::settings_json(&saves.config()).unwrap();
+                    settings["ending_pause"] = serde_json::json!({"paste": 9});
+                    let error = saves
+                        .save_form(|_| Ok(((), Some(settings))), true, |_, _, write| write())
+                        .unwrap_err();
+                    assert_eq!(
+                        error,
+                        "The paste pause must be a number of seconds from 0 to 5."
+                    );
+                }
+            }),
+        ];
+        line.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        stop.store(true, Ordering::SeqCst);
+        reader.join().unwrap();
+        let (running, file) = (saves.config(), saves.store.load().unwrap());
+        let applied = applied.lock().unwrap_or_else(PoisonError::into_inner);
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(file, running, "the running config matches the file");
+        assert_eq!(applied.last(), Some(&running), "the engine got it last");
+        assert!(file.start_at_login, "the last switch save is kept");
+        assert!(
+            matches!(
+                file.look,
+                thalvi_desktop::config::Look::Holo | thalvi_desktop::config::Look::Neon
+            ),
+            "the file holds a reported form: {:?}",
+            file.look
+        );
+        assert_eq!(leftovers, ["desktop.json"], "no temporary file is left");
+    }
+
+    #[test]
+    fn a_save_the_file_system_refuses_is_reported_and_changes_nothing() {
+        let dir = std::env::temp_dir().join(format!("thalvi-app-refused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("block"), b"not a directory").unwrap();
+        let store = Store::new(Some(dir.join("block").join("desktop.json"))).unwrap();
+        let start = DesktopConfig::from_json_str("{}").unwrap();
+        let saves = SyncedConfig::new(store, start.clone());
+        let mut settings = crate::settings::settings_json(&start).unwrap();
+        settings["look"] = serde_json::json!("holo");
+        let mut applied = false;
+
+        let form = saves
+            .save_form(
+                |_| Ok(((), Some(settings))),
+                true,
+                |_, _, write| {
+                    write()?;
+                    applied = true;
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        let switch = saves
+            .remember(|c| c.start_at_login = !start.start_at_login)
+            .unwrap_err();
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for error in [form, switch] {
+            assert!(
+                error.starts_with("The settings could not be saved to "),
+                "{error}"
+            );
+        }
+        assert!(!applied, "a refused form is not applied");
+        assert_eq!(saves.config(), start, "the running config is unchanged");
+        assert_eq!(leftovers, ["block"], "nothing is written");
+    }
+
+    #[test]
+    fn a_change_refused_before_writing_leaves_the_file_and_the_running_config() {
+        let dir = std::env::temp_dir().join(format!("thalvi-app-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("desktop.json");
+        let start = DesktopConfig::from_json_str("{}").unwrap();
+        let saves = SyncedConfig::new(Store::new(Some(path.clone())).unwrap(), start.clone());
+        let mut settings = crate::settings::settings_json(&start).unwrap();
+        settings["hold_key"] = serde_json::json!("F7");
+
+        let error = saves
+            .save_form(
+                |_| Ok(((), Some(settings))),
+                true,
+                |_, _, _| Err("F7 is already bound in Hyprland.".to_owned()),
+            )
+            .unwrap_err();
+        let written = path.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(error, "F7 is already bound in Hyprland.");
+        assert!(!written, "nothing is written");
+        assert_eq!(saves.config(), start, "the running config is unchanged");
+    }
+
+    #[test]
+    fn a_save_says_whether_the_look_changed() {
+        let dir = std::env::temp_dir().join(format!("thalvi-app-look-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let start = DesktopConfig::from_json_str("{}").unwrap();
+        let saves = SyncedConfig::new(
+            Store::new(Some(dir.join("desktop.json"))).unwrap(),
+            start.clone(),
+        );
+        let changed = |look: &str| {
+            let mut settings = crate::settings::settings_json(&saves.config()).unwrap();
+            settings["look"] = serde_json::json!(look);
+            let ((), result) = saves
+                .save_form(
+                    |_| Ok(((), Some(settings))),
+                    true,
+                    |_, config, write| {
+                        write()?;
+                        saves.set(config);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            result.map(|(_, look_changed)| look_changed)
+        };
+
+        let results = [changed("holo"), changed("holo")];
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_ne!(start.look, thalvi_desktop::config::Look::Holo);
+        assert_eq!(results, [Some(true), Some(false)]);
+    }
 
     #[test]
     fn only_a_refused_hold_key_is_told_as_a_refusal() {

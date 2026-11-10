@@ -838,6 +838,18 @@ mod tests {
                 r#"{"writing": {"url": "http://x", "model": "m", "tone": 1}}"#,
                 "unknown field `tone`",
             ),
+            (
+                r#"{"writing": {"url": "http://x", "model": "m", "openings": [{"phrase": "?!", "prompt": "p"}]}}"#,
+                "writing.openings needs a phrase",
+            ),
+            (
+                r#"{"writing": {"url": "http://x", "model": "m", "openings": [{"phrase": "a b", "prompt": " "}]}}"#,
+                "writing.openings has a blank prompt for “a b”",
+            ),
+            (
+                r#"{"writing": {"url": "http://x", "model": "m", "openings": [{"phrase": "A b", "prompt": "p"}, {"phrase": "a, B!", "prompt": "q"}]}}"#,
+                "writing.openings has “a b” twice.",
+            ),
         ] {
             let error = writing(json).unwrap_err().to_string();
             assert!(error.contains(expected), "{json}: {error}");
@@ -860,6 +872,30 @@ mod tests {
         assert_eq!(
             stored("  Be brief.\n"),
             ("Be brief.".to_owned(), Some(json!("Be brief.")))
+        );
+    }
+
+    #[test]
+    fn writing_openings_round_trip_normalized_and_an_empty_list_is_not_written() {
+        let endpoint = json!({"url": "http://x", "model": "m"});
+        let written = |openings: serde_json::Value| {
+            let mut writing = endpoint.clone();
+            writing["openings"] = openings;
+            let config = parse(&json!({"writing": writing}).to_string()).unwrap();
+            let written = serde_json::to_value(&config).unwrap();
+            assert_eq!(parse(&written.to_string()).unwrap(), config);
+            written["writing"].clone()
+        };
+        assert_eq!(
+            written(json!([{"phrase": "Write me an e-mail", "prompt": " Short. "}]))["openings"],
+            json!([{"phrase": "write me an e mail", "prompt": "Short."}])
+        );
+        assert!(written(json!([])).get("openings").is_none());
+        let plain = parse(&json!({"writing": endpoint}).to_string()).unwrap();
+        assert!(
+            serde_json::to_value(&plain).unwrap()["writing"]
+                .get("openings")
+                .is_none()
         );
     }
 
