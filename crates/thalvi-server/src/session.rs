@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -366,12 +366,12 @@ const PRIVATE_RESUME_REFUSAL: &str =
 /// so it never lands in a saved conversation by accident.
 pub async fn refuse_private_resume(socket: WebSocket) {
     let (mut sink, _) = socket.split();
-    send_json(
+    let _ = send_json(
         &mut sink,
         &json!({"type": "ended", "reason": "private", "message": PRIVATE_RESUME_REFUSAL}),
     )
     .await;
-    let _ = sink.send(Message::Close(None)).await;
+    let _ = send(&mut sink, Message::Close(None)).await;
 }
 
 impl<M> Retention<M> {
@@ -525,16 +525,19 @@ impl<M: ChatModel + 'static> Saved<M> {
     }
 }
 
-async fn send_save_notice(sink: &mut (impl SinkExt<Message> + Unpin), sent: &mut bool) {
+async fn send_save_notice(
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    sent: &mut bool,
+) -> Result<(), BrowserGone> {
     if *sent {
-        return;
+        return Ok(());
     }
     *sent = true;
     send_json(
         sink,
         &json!({"type": "error", "message": "This conversation couldn't be saved"}),
     )
-    .await;
+    .await
 }
 
 async fn wait_save_failed(save_error: &mut watch::Receiver<bool>) {
@@ -545,8 +548,8 @@ async fn wait_save_failed(save_error: &mut watch::Receiver<bool>) {
 }
 
 const MAX_TEXT_CHARS: usize = 20_000;
-/// How long a client that is being let go may hold up the end of its session.
-const ENDED_SEND_WAIT: Duration = Duration::from_secs(2);
+/// How long one send to the browser may take before the browser counts as gone.
+const BROWSER_SEND_WAIT: Duration = Duration::from_secs(2);
 
 /// Runs one client session until its socket closes.
 #[expect(
@@ -569,7 +572,43 @@ pub async fn handle_session<F, M, T>(
     M: ChatModel + 'static,
     T: Tts + 'static,
 {
-    let (mut sink, mut stream) = socket.split();
+    let (sink, stream) = socket.split();
+    run_session(
+        sink,
+        stream,
+        factory,
+        model,
+        tts,
+        retention,
+        recording_config,
+        ack_enabled,
+        audio_input,
+        voices,
+    )
+    .await;
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session state is passed explicitly rather than bundled into a context type"
+)]
+async fn run_session<F, M, T>(
+    mut sink: impl SinkExt<Message> + Unpin,
+    mut stream: impl Stream<Item = Result<Message, axum::Error>> + Unpin,
+    factory: F,
+    model: Arc<M>,
+    tts: Arc<T>,
+    retention: Retention<M>,
+    recording_config: RecordingConfig,
+    ack_enabled: bool,
+    audio_input: bool,
+    voices: VoiceChoices,
+) where
+    F: RecognizerFactory + Send + Sync + 'static,
+    F::Rec: Send + 'static,
+    M: ChatModel + 'static,
+    T: Tts + 'static,
+{
     let factory = Arc::new(factory);
     let session_started = Instant::now();
     let Opened {
@@ -591,8 +630,9 @@ pub async fn handle_session<F, M, T>(
     turn_log
         .recorder
         .emit("session_open", json!({"resumed": resumed}));
-    send_session_opening(&mut sink, &session_id, &history, private).await;
-    send_state(&mut sink, "idle").await;
+    let mut browser_gone = send_session_opening(&mut sink, &session_id, &history, private)
+        .await
+        .err();
     tracing::info!("session opened");
 
     let mut settings = ReplySettings::new(ack_enabled, voices, past, session_id.clone());
@@ -605,7 +645,7 @@ pub async fn handle_session<F, M, T>(
     let mut detached = None;
     let (mut save_error, mut save_notice_sent) = (persistence.save_error_receiver(), false);
 
-    loop {
+    while browser_gone.is_none() {
         persistence.sync(&history, turn_log.next_turn, &turn_log.recorder);
         let reply_event = async {
             match &mut reply_rx {
@@ -624,14 +664,14 @@ pub async fn handle_session<F, M, T>(
                 detached = Some(reason);
                 break;
             }
-            () = wait_save_failed(&mut save_error), if !save_notice_sent => send_save_notice(&mut sink, &mut save_notice_sent).await,
+            () = wait_save_failed(&mut save_error), if !save_notice_sent => browser_gone = send_save_notice(&mut sink, &mut save_notice_sent).await.err(),
             client_message = stream.next() => {
                 match client_message {
                     Some(Ok(Message::Binary(audio))) => {
                         forward_mic(&audio, recognizer.as_ref(), &mut turn_log);
                     }
                     Some(Ok(Message::Text(text))) => {
-                        handle_client_text(&text, &mut sink, &mut recognizer, &mut rec_rx, &factory, &mut choices, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut turn_log, &mut settings).await;
+                        browser_gone = handle_client_text(&text, &mut sink, &mut recognizer, &mut rec_rx, &factory, &mut choices, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut turn_log, &mut settings).await.err();
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
@@ -642,18 +682,19 @@ pub async fn handle_session<F, M, T>(
                 }
             }
             recognizer_message = recognizer_event => {
-                handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut rec_rx, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut choices, &mut turn_log, &settings).await;
+                browser_gone = handle_recognizer_message(recognizer_message, &mut sink, &mut recognizer, &mut rec_rx, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut choices, &mut turn_log, &settings).await.err();
             }
             event = reply_event => {
                 let Some(event) = event else {
                     reply_rx = None;
                     continue;
                 };
-                handle_reply_event(event, &mut sink, &mut history, &mut reply, &mut reply_rx, &mut client_audio, choices.snapshot(recognizer.as_ref()), &mut turn_log).await;
+                browser_gone = handle_reply_event(event, &mut sink, &mut history, &mut reply, &mut reply_rx, &mut client_audio, choices.snapshot(recognizer.as_ref()), &mut turn_log).await.err();
             }
         }
     }
 
+    browser_gone.inspect(|gone| tracing::warn!(%gone, "browser gone; ending the session"));
     cut_off_reply(&mut history, &mut reply, &mut reply_rx, &turn_log);
     recognizer.take().inspect(|handle| handle.task.abort());
     close_session(
@@ -690,7 +731,8 @@ async fn handle_client_text<F, M, T>(
     tts: &Arc<T>,
     turn_log: &mut TurnLog,
     settings: &mut ReplySettings,
-) where
+) -> Result<(), BrowserGone>
+where
     F: RecognizerFactory + Send + Sync + 'static,
     F::Rec: Send + 'static,
     M: ChatModel + 'static,
@@ -708,9 +750,12 @@ async fn handle_client_text<F, M, T>(
                 "cancel",
                 turn_log,
             )
-            .await;
+            .await
         }
-        ClientText::Played(bytes) => client_audio.played(bytes),
+        ClientText::Played(bytes) => {
+            client_audio.played(bytes);
+            Ok(())
+        }
         ClientText::Input(source) => {
             set_input(
                 source,
@@ -722,20 +767,19 @@ async fn handle_client_text<F, M, T>(
                 reply.is_some(),
                 turn_log,
             )
-            .await;
+            .await
         }
-        ClientText::ReplyAudio(on) => {
-            set_reply_audio(on, sink, choices, reply, client_audio).await;
-        }
+        ClientText::ReplyAudio(on) => set_reply_audio(on, sink, choices, reply, client_audio).await,
         ClientText::VoiceName(name) => {
             if settings.offered.contains(&name) {
                 settings.context.voice_name = name;
+                Ok(())
             } else {
                 send_json(
                     sink,
                     &json!({"type": "error", "message": "That voice isn't offered, so the voice was not changed."}),
                 )
-                .await;
+                .await
             }
         }
         ClientText::Text(raw) => match validate_text(&raw) {
@@ -756,18 +800,17 @@ async fn handle_client_text<F, M, T>(
                     turn_log,
                     settings,
                 )
-                .await;
+                .await?;
                 let mut fields = json!({"turn": turn, "source": "text"});
                 if turn_log.recorder.text_enabled() {
                     fields["text"] = json!(text);
                 }
                 turn_log.recorder.emit("turn", fields);
+                Ok(())
             }
-            Err(message) => {
-                send_json(sink, &json!({"type": "error", "message": message})).await;
-            }
+            Err(message) => send_json(sink, &json!({"type": "error", "message": message})).await,
         },
-        ClientText::Other => {}
+        ClientText::Other => Ok(()),
     }
 }
 
@@ -789,7 +832,8 @@ async fn handle_recognizer_message<M, T>(
     choices: &mut Choices,
     turn_log: &mut TurnLog,
     settings: &ReplySettings,
-) where
+) -> Result<(), BrowserGone>
+where
     M: ChatModel + 'static,
     T: Tts + 'static,
 {
@@ -815,16 +859,17 @@ async fn handle_recognizer_message<M, T>(
                 "speech start",
                 turn_log,
             )
-            .await;
+            .await
         }
         Some(RecognizerMessage::Event(RecognizerEvent::SpeechEnd {
             turn_id,
             audio_processed_ms,
         })) => {
             turn_log.pending.entry(turn_id).or_default().end_ms = audio_processed_ms;
+            Ok(())
         }
         Some(RecognizerMessage::Event(RecognizerEvent::Partial { text })) => {
-            send_json(sink, &json!({"type": "partial", "text": text})).await;
+            send_json(sink, &json!({"type": "partial", "text": text})).await
         }
         Some(RecognizerMessage::Event(RecognizerEvent::SpeechComplete { turn_id, text })) => {
             if !text.trim().is_empty() {
@@ -845,35 +890,37 @@ async fn handle_recognizer_message<M, T>(
                     turn_log,
                     settings,
                 )
-                .await;
+                .await?;
                 record_voice_turn(turn_log, turn, &pending, &text, clip);
             }
+            Ok(())
         }
         Some(RecognizerMessage::Event(RecognizerEvent::Error { message })) => {
             send_json(
                 sink,
                 &json!({"type": "error", "message": plain_recognizer_error(&message)}),
             )
-            .await;
+            .await
         }
         Some(RecognizerMessage::Disconnected { message, fatal }) => {
             let replying = reply.is_some();
             recognizer_disconnected(
                 &message, fatal, sink, recognizer, rec_rx, choices, replying, turn_log,
             )
-            .await;
+            .await
         }
         Some(RecognizerMessage::Ready) => {
             turn_log.reset_mic();
             if let Some(handle) = recognizer {
                 handle.ready = true;
             }
-            send_input(sink, InputSource::Mic, true).await;
+            send_input(sink, InputSource::Mic, true).await?;
             if reply.is_none() {
-                send_state(sink, "listening").await;
+                send_state(sink, "listening").await?;
             }
+            Ok(())
         }
-        None => {}
+        None => Ok(()),
     }
 }
 
@@ -891,7 +938,7 @@ async fn recognizer_disconnected(
     choices: &mut Choices,
     replying: bool,
     turn_log: &mut TurnLog,
-) {
+) -> Result<(), BrowserGone> {
     if let Some(handle) = recognizer {
         handle.ready = false;
     }
@@ -903,15 +950,16 @@ async fn recognizer_disconnected(
     } else {
         plain_recognizer_error(message)
     };
-    send_json(sink, &json!({"type": "error", "message": message})).await;
+    send_json(sink, &json!({"type": "error", "message": message})).await?;
     if fatal {
-        send_input(sink, InputSource::Text, true).await;
-        stop_input(sink, choices, recognizer, rec_rx, replying, turn_log).await;
+        send_input(sink, InputSource::Text, true).await?;
+        stop_input(sink, choices, recognizer, rec_rx, replying, turn_log).await
     } else {
-        send_input(sink, InputSource::Mic, false).await;
+        send_input(sink, InputSource::Mic, false).await?;
         if !replying {
-            send_state(sink, "starting").await;
+            send_state(sink, "starting").await?;
         }
+        Ok(())
     }
 }
 
@@ -976,12 +1024,15 @@ async fn close_session<M: ChatModel + 'static>(
     persistence.finish(history, next_turn, recorder);
     tracing::info!("session closed");
     if let Some(reason) = detached {
-        let _ = tokio::time::timeout(ENDED_SEND_WAIT, send_ended(sink, reason)).await;
+        let _ = tokio::time::timeout(BROWSER_SEND_WAIT, send_ended(sink, reason)).await;
     }
 }
 
 /// Tells the client why its conversation was taken away, then closes its socket.
-async fn send_ended(sink: &mut (impl SinkExt<Message> + Unpin), reason: Detach) {
+async fn send_ended(
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    reason: Detach,
+) -> Result<(), BrowserGone> {
     let (reason, message) = match reason {
         Detach::Moved => ("moved", "This conversation continued on another device."),
         Detach::Deleted => ("deleted", "This conversation was deleted."),
@@ -990,8 +1041,8 @@ async fn send_ended(sink: &mut (impl SinkExt<Message> + Unpin), reason: Detach) 
         sink,
         &json!({"type": "ended", "reason": reason, "message": message}),
     )
-    .await;
-    let _ = sink.send(Message::Close(None)).await;
+    .await?;
+    send(sink, Message::Close(None)).await
 }
 
 async fn send_session_opening(
@@ -999,7 +1050,7 @@ async fn send_session_opening(
     session_id: &str,
     history: &[ChatMessage],
     private: bool,
-) {
+) -> Result<(), BrowserGone> {
     let turns: Vec<serde_json::Value> = history
         .iter()
         .map(|message| json!({"role": message.role, "text": message.content}))
@@ -1008,7 +1059,8 @@ async fn send_session_opening(
     if private {
         opening["private"] = json!(true);
     }
-    send_json(sink, &opening).await;
+    send_json(sink, &opening).await?;
+    send_state(sink, "idle").await
 }
 
 fn spawn_recognizer<F>(
@@ -1047,13 +1099,14 @@ async fn set_input<F>(
     choices: &mut Choices,
     replying: bool,
     turn_log: &mut TurnLog,
-) where
+) -> Result<(), BrowserGone>
+where
     F: RecognizerFactory + Send + Sync + 'static,
     F::Rec: Send + 'static,
 {
     match source {
         InputSource::Text => {
-            stop_input(sink, choices, recognizer, rec_rx, replying, turn_log).await;
+            stop_input(sink, choices, recognizer, rec_rx, replying, turn_log).await
         }
         InputSource::Mic => {
             choices.input = InputSource::Mic;
@@ -1061,11 +1114,12 @@ async fn set_input<F>(
                 let (handle, receiver) = spawn_recognizer(factory, turn_log.recorder.clone());
                 *recognizer = Some(handle);
                 *rec_rx = Some(receiver);
-                send_input(sink, InputSource::Mic, false).await;
+                send_input(sink, InputSource::Mic, false).await?;
                 if !replying {
-                    send_state(sink, "starting").await;
+                    send_state(sink, "starting").await?;
                 }
             }
+            Ok(())
         }
     }
 }
@@ -1078,17 +1132,19 @@ async fn stop_input(
     rec_rx: &mut Option<mpsc::Receiver<RecognizerMessage>>,
     replying: bool,
     turn_log: &mut TurnLog,
-) {
+) -> Result<(), BrowserGone> {
     choices.input = InputSource::Text;
     let Some(handle) = recognizer.take() else {
-        return;
+        return Ok(());
     };
     handle.task.abort();
     *rec_rx = None;
     turn_log.pending.clear();
     turn_log.reset_mic();
-    if !replying {
-        send_state(sink, "idle").await;
+    if replying {
+        Ok(())
+    } else {
+        send_state(sink, "idle").await
     }
 }
 
@@ -1099,7 +1155,7 @@ async fn set_reply_audio(
     choices: &Choices,
     reply: &mut Option<ActiveReply>,
     client_audio: &mut ClientAudio,
-) {
+) -> Result<(), BrowserGone> {
     choices.reply_audio.send_replace(on);
     if !on {
         client_audio.clear();
@@ -1107,15 +1163,19 @@ async fn set_reply_audio(
             active.spoken_throughout = false;
         }
     }
-    send_json(sink, &json!({"type": "reply_audio", "on": on})).await;
+    send_json(sink, &json!({"type": "reply_audio", "on": on})).await
 }
 
-async fn send_input(sink: &mut (impl SinkExt<Message> + Unpin), source: InputSource, ready: bool) {
+async fn send_input(
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    source: InputSource,
+    ready: bool,
+) -> Result<(), BrowserGone> {
     send_json(
         sink,
         &json!({"type": "input", "source": source.as_str(), "ready": ready}),
     )
-    .await;
+    .await
 }
 
 enum ClientText {
@@ -1194,7 +1254,7 @@ async fn begin_turn<M, T>(
     clip: &[u8],
     turn_log: &mut TurnLog,
     settings: &ReplySettings,
-) -> u64
+) -> Result<u64, BrowserGone>
 where
     M: ChatModel + 'static,
     T: Tts + 'static,
@@ -1210,14 +1270,12 @@ where
         "new turn",
         turn_log,
     )
-    .await;
+    .await?;
     turn_log.next_turn += 1;
     let turn = turn_log.next_turn;
     let audio = (turn_log.audio_input && !clip.is_empty()).then(|| clip.to_vec());
     let caption = audio.is_some().then(|| text.clone());
     history.push(ChatMessage::user(text.clone()));
-    send_json(sink, &json!({"type": "user", "text": text})).await;
-    send_state(sink, "thinking").await;
     let (active, events_rx) = start_reply(
         Arc::clone(model),
         Arc::clone(tts),
@@ -1230,7 +1288,9 @@ where
     );
     *reply = Some(active);
     *reply_rx = Some(events_rx);
-    turn
+    send_json(sink, &json!({"type": "user", "text": text})).await?;
+    send_state(sink, "thinking").await?;
+    Ok(turn)
 }
 
 #[expect(
@@ -1304,12 +1364,13 @@ async fn handle_reply_event(
     client_audio: &mut ClientAudio,
     state: Mode,
     turn_log: &mut TurnLog,
-) {
+) -> Result<(), BrowserGone> {
     match event {
         ReplyEvent::Misheard => {
             if let Some(active) = reply {
                 active.misheard = true;
             }
+            Ok(())
         }
         ReplyEvent::Delta(text) => {
             if let Some(active) = reply {
@@ -1318,12 +1379,13 @@ async fn handle_reply_event(
                 }
                 active.text.push_str(&text);
             }
-            send_json(sink, &json!({"type": "reply", "text": text})).await;
+            send_json(sink, &json!({"type": "reply", "text": text})).await
         }
         ReplyEvent::ReplyLoopFinished(at) => {
             if let Some(active) = reply {
                 active.reply_loop_finished_at = Some(at);
             }
+            Ok(())
         }
         ReplyEvent::FirstSentence(at) => {
             if let Some(active) = reply
@@ -1331,13 +1393,15 @@ async fn handle_reply_event(
             {
                 active.first_sentence_at = Some(at);
             }
+            Ok(())
         }
         ReplyEvent::Sentence(sentence) => {
             if let Some(active) = reply {
                 active.sent_sentences.push(sentence);
             }
+            Ok(())
         }
-        ReplyEvent::AckAudio(_) | ReplyEvent::Audio(_) if !state.reply_audio => {}
+        ReplyEvent::AckAudio(_) | ReplyEvent::Audio(_) if !state.reply_audio => Ok(()),
         ReplyEvent::AckAudio(audio) => {
             if let Some(active) = reply {
                 active.speaking_sent = true;
@@ -1346,7 +1410,7 @@ async fn handle_reply_event(
                 }
             }
             client_audio.sent(audio.len());
-            let _ = sink.send(Message::Binary(audio)).await;
+            send(sink, Message::Binary(audio)).await
         }
         ReplyEvent::Audio(audio) => {
             if let Some(active) = reply {
@@ -1357,7 +1421,7 @@ async fn handle_reply_event(
                 active.audio_bytes += audio.len();
             }
             client_audio.sent(audio.len());
-            let _ = sink.send(Message::Binary(audio)).await;
+            send(sink, Message::Binary(audio)).await
         }
         ReplyEvent::Finished => {
             if let Some(active) = reply.take() {
@@ -1374,12 +1438,10 @@ async fn handle_reply_event(
                 emit_reply_record(&turn_log.recorder, &active, "done", None);
             }
             *reply_rx = None;
-            send_json(sink, &json!({"type": "reply_end"})).await;
-            send_state(sink, state.resting_state()).await;
+            send_json(sink, &json!({"type": "reply_end"})).await?;
+            send_state(sink, state.resting_state()).await
         }
-        ReplyEvent::Task(step) => {
-            send_task_step(sink, &step).await;
-        }
+        ReplyEvent::Task(step) => send_task_step(sink, &step).await,
         ReplyEvent::Failed(message) => {
             tracing::warn!("reply failed");
             if let Some(active) = reply.take() {
@@ -1387,26 +1449,29 @@ async fn handle_reply_event(
                 emit_reply_record(&turn_log.recorder, &active, "failed", Some(&message));
             }
             *reply_rx = None;
-            send_json(sink, &json!({"type": "reply_end"})).await;
-            send_json(sink, &json!({"type": "error", "message": message})).await;
-            send_state(sink, state.resting_state()).await;
+            send_json(sink, &json!({"type": "reply_end"})).await?;
+            send_json(sink, &json!({"type": "error", "message": message})).await?;
+            send_state(sink, state.resting_state()).await
         }
     }
 }
 
 /// Shows a task step, then the state the reply is in around it.
-async fn send_task_step(sink: &mut (impl SinkExt<Message> + Unpin), step: &TaskStep) {
+async fn send_task_step(
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    step: &TaskStep,
+) -> Result<(), BrowserGone> {
     let mut fields = json!({"id": step.id, "label": step.label, "status": step.status.as_str()});
     if let Some(detail) = &step.detail {
         fields["detail"] = json!(detail);
     }
-    send_json(sink, &json!({"type": "task", "step": fields})).await;
+    send_json(sink, &json!({"type": "task", "step": fields})).await?;
     let state = if step.status == TaskStatus::Running {
         "working"
     } else {
         "thinking"
     };
-    send_state(sink, state).await;
+    send_state(sink, state).await
 }
 
 fn reply_loop_ms(
@@ -1487,9 +1552,9 @@ async fn interrupt(
     state: Mode,
     reason: &'static str,
     turn_log: &mut TurnLog,
-) {
+) -> Result<(), BrowserGone> {
     if reply.is_none() && !client_audio.pending {
-        return;
+        return Ok(());
     }
     let (turn, audio_bytes) = match reply.as_ref() {
         Some(active) => (active.turn, active.audio_bytes),
@@ -1506,8 +1571,8 @@ async fn interrupt(
     cut_off_reply(history, reply, reply_rx, turn_log);
     client_audio.clear();
     tracing::info!(reason, "reply interrupted");
-    send_json(sink, &json!({"type": "interrupted"})).await;
-    send_state(sink, state.resting_state()).await;
+    send_json(sink, &json!({"type": "interrupted"})).await?;
+    send_state(sink, state.resting_state()).await
 }
 
 /// Aborts the running reply, if any, and keeps what it produced so far in history.
@@ -1549,12 +1614,46 @@ fn plain_recognizer_error(message: &str) -> String {
     }
 }
 
-async fn send_state(sink: &mut (impl SinkExt<Message> + Unpin), state: &str) {
-    send_json(sink, &json!({"type": "state", "state": state})).await;
+async fn send_state(
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    state: &str,
+) -> Result<(), BrowserGone> {
+    send_json(sink, &json!({"type": "state", "state": state})).await
 }
 
-async fn send_json(sink: &mut (impl SinkExt<Message> + Unpin), value: &serde_json::Value) {
-    let _ = sink.send(Message::Text(value.to_string().into())).await;
+async fn send_json(
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    value: &serde_json::Value,
+) -> Result<(), BrowserGone> {
+    send(sink, Message::Text(value.to_string().into())).await
+}
+
+/// Why the browser can no longer be written to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserGone {
+    TimedOut,
+    Failed,
+}
+
+impl std::fmt::Display for BrowserGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TimedOut => "a send timed out",
+            Self::Failed => "a send failed",
+        })
+    }
+}
+
+/// Sends one message to the browser, giving up after [`BROWSER_SEND_WAIT`].
+async fn send(
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    message: Message,
+) -> Result<(), BrowserGone> {
+    match tokio::time::timeout(BROWSER_SEND_WAIT, sink.send(message)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(BrowserGone::Failed),
+        Err(_) => Err(BrowserGone::TimedOut),
+    }
 }
 
 struct AbortOnDrop {
@@ -2474,6 +2573,7 @@ mod tests {
     use crate::recorder::{RecordKinds, RecordingConfig, start_recording};
     use crate::store::SessionStore;
     use crate::tts::{AudioStream, Tts, TtsError};
+    use axum::extract::ws::Message;
     use bytes::Bytes;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -3637,5 +3737,125 @@ mod tests {
             saved, 1,
             "the history was not saved while the send was stalled"
         );
+    }
+
+    struct DropSignal(Arc<Notify>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    /// Streams one delta, then never finishes; `dropped` fires when the stream is dropped.
+    struct HangingModel {
+        dropped: Arc<Notify>,
+    }
+
+    impl ChatModel for HangingModel {
+        fn stream_reply(
+            &self,
+            _history: &[ChatMessage],
+            _audio: Option<&[u8]>,
+        ) -> impl std::future::Future<Output = Result<DeltaStream, ModelError>> + Send {
+            let signal = DropSignal(Arc::clone(&self.dropped));
+            let stream: DeltaStream = Box::pin(futures_util::stream::unfold(
+                (signal, false),
+                |(signal, sent)| async move {
+                    if sent {
+                        std::future::pending().await
+                    } else {
+                        Some((Ok("Hello there. ".to_string()), (signal, true)))
+                    }
+                },
+            ));
+            std::future::ready(Ok(stream))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_browser_that_stops_receiving_ends_the_session_within_one_deadline() {
+        for (hangs, ends_at) in [(true, super::BROWSER_SEND_WAIT), (false, Duration::ZERO)] {
+            let attempts = Arc::new(Mutex::new(Vec::<String>::new()));
+            let log = Arc::clone(&attempts);
+            let sink = Box::pin(futures_util::sink::unfold(
+                (),
+                move |(), message: Message| {
+                    let log = Arc::clone(&log);
+                    async move {
+                        let text = match &message {
+                            Message::Text(text) => text.as_str().to_string(),
+                            _ => String::new(),
+                        };
+                        log.lock().unwrap().push(text.clone());
+                        if text.contains(r#""type":"reply""#) {
+                            if hangs {
+                                std::future::pending::<()>().await;
+                            }
+                            return Err(());
+                        }
+                        Ok(())
+                    }
+                },
+            ));
+            let (client_tx, client_rx) = mpsc::unbounded_channel::<Message>();
+            let stream = Box::pin(futures_util::stream::unfold(
+                client_rx,
+                |mut client_rx| async move {
+                    client_rx
+                        .recv()
+                        .await
+                        .map(|message| (Ok(message), client_rx))
+                },
+            ));
+            let dropped = Arc::new(Notify::new());
+            client_tx
+                .send(Message::Text(r#"{"type":"text","text":"hi"}"#.into()))
+                .unwrap();
+            let started = Instant::now();
+            let session = super::run_session(
+                sink,
+                stream,
+                FailingFactory {
+                    calls: AtomicUsize::new(0),
+                    during_connect: false,
+                    marker: "",
+                },
+                Arc::new(HangingModel {
+                    dropped: Arc::clone(&dropped),
+                }),
+                Arc::new(FakeTts {
+                    spoken: Arc::default(),
+                    entered: Arc::default(),
+                    release: Arc::default(),
+                    block_first: AtomicBool::new(false),
+                }),
+                super::Retention::Private {
+                    id: "private-deadline".to_string(),
+                },
+                RecordingConfig::disabled(),
+                false,
+                false,
+                super::VoiceChoices {
+                    default: "af_heart".to_string(),
+                    offered: ["af_heart".to_string()].into(),
+                },
+            );
+            tokio::time::timeout(super::BROWSER_SEND_WAIT * 2, session)
+                .await
+                .expect("the session must end once a send to the browser stalls or fails");
+            assert_eq!(started.elapsed(), ends_at, "hangs: {hangs}");
+            tokio::time::timeout(Duration::from_secs(5), dropped.notified())
+                .await
+                .expect("the model stream must be dropped when the session ends");
+            let attempts = attempts.lock().unwrap();
+            assert!(
+                attempts
+                    .last()
+                    .is_some_and(|text| text.contains(r#""type":"reply""#)),
+                "nothing may be sent after the stalled message, got {attempts:?}"
+            );
+            drop(client_tx);
+        }
     }
 }

@@ -134,7 +134,7 @@ Read(c) ==
     /\ UNCHANGED <<exists, stored, nextVer, liveOwner, livePreds, dead, released, prev,
                    preds, order, nextOrder, unsaved, turns, killed, expired, stale, clobbered, gone>>
 
-\* handle_session: a turn adds to the in-memory history.
+\* run_session: a turn adds to the in-memory history.
 Turn(c) ==
     /\ pc[c] = "attached"
     /\ turns[c] < MaxTurns
@@ -144,7 +144,7 @@ Turn(c) ==
                    prev, preds, order, nextOrder, base, killed, expired, returned,
                    stale, clobbered, gone>>
 
-\* handle_session loop top: Persistence::sync.
+\* run_session loop top: Persistence::sync.
 Sync(c) ==
     /\ pc[c] = "attached"
     /\ unsaved[c]
@@ -152,7 +152,7 @@ Sync(c) ==
     /\ UNCHANGED <<liveOwner, livePreds, dead, released, pc, prev, preds, order,
                    nextOrder, turns, killed, expired, returned, gone>>
 
-\* The loop ends: detached (Moved or Deleted) or the client went away.
+\* The loop ends: detached, client went away, or a browser send failed or timed out.
 Close(c) ==
     /\ pc[c] = "attached"
     /\ pc' = [pc EXCEPT ![c] = IF ReleaseBeforeLastSave THEN "releasing" ELSE "closing"]
