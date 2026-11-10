@@ -1,16 +1,18 @@
 //! When the overlay is shown, and the Rune overlay surface that draws it.
 
+mod gunmetal;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use rune::{Align, App, AppSpec, Cx, El, OverlayHandle, OverlaySpec, ScreenEdge};
+use rune::{
+    Align, App, AppSpec, OverlayHandle, OverlayInput, OverlayOptions, OverlaySpec, ScreenEdge,
+};
 use thalvi_desktop::host::OVERLAY_TITLE;
 
 use crate::status::Status;
-
-const WIDTH: f32 = 460.0;
-const HEIGHT: f32 = 200.0;
+use gunmetal::View;
 
 /// How long a delivery's confirmation stays on screen.
 const DONE_FOR: Duration = Duration::from_secs(1);
@@ -56,30 +58,13 @@ impl Visibility {
     }
 }
 
-/// What the overlay draws.
-struct View {
-    status: Status,
-}
-
-fn view(view: &View, _: &mut Cx<View>) -> El {
-    let label = format!("{:?}", view.status);
-    rune::row().key("overlay").w_full().h_full().center().child(
-        rune::el()
-            .key("box")
-            .px(14.0)
-            .py(8.0)
-            .radius(8.0)
-            .fill(rune::oklch(0.2, 0.0, 0.0))
-            .child(rune::text(label).key("label").color(rune::Color::WHITE)),
-    )
-}
-
 /// The Rune app that runs the overlay's event loop; it owns the thread that calls `try_run`.
 pub type Ui = App<()>;
 
 /// The windowless Rune app with the hidden overlay, and the handle that feeds it from any thread.
+/// `takes_clicks` lets the cancel button take the pointer; everything else passes clicks through.
 #[must_use]
-pub fn prepare() -> (Ui, Overlay) {
+pub fn prepare(takes_clicks: bool) -> (Ui, Overlay) {
     let mut app = App::new(AppSpec::new(
         OVERLAY_TITLE,
         (1.0, 1.0),
@@ -88,20 +73,28 @@ pub fn prepare() -> (Ui, Overlay) {
     ))
     .windowless()
     .args(Vec::new());
+    let spec = OverlaySpec {
+        name: OVERLAY_TITLE,
+        size: (gunmetal::WIDTH, gunmetal::HEIGHT),
+        edge: ScreenEdge::Top,
+        margin: 0.0,
+        align: Align::Center,
+        inset: 0.0,
+        interactive: false,
+        view: gunmetal::view,
+    };
+    let options = OverlayOptions {
+        input: if takes_clicks {
+            OverlayInput::Regions
+        } else {
+            OverlayInput::None
+        },
+        xwayland_input: takes_clicks,
+        ..OverlayOptions::default()
+    };
     let handle = app.overlay(
-        OverlaySpec {
-            name: OVERLAY_TITLE,
-            size: (WIDTH, HEIGHT),
-            edge: ScreenEdge::Top,
-            margin: 0.0,
-            align: Align::Center,
-            inset: 0.0,
-            interactive: false,
-            view,
-        },
-        View {
-            status: Status::Paused,
-        },
+        spec.options(options).poll(gunmetal::poll),
+        View::new(takes_clicks),
     );
     (
         app,
@@ -120,9 +113,35 @@ pub struct Overlay {
 }
 
 impl Overlay {
+    /// Moves the overlay `margin` points below the top of the screen.
+    pub fn place(&self, margin: f64) {
+        #[expect(clippy::cast_possible_truncation, reason = "a panel height in points")]
+        self.handle.place(ScreenEdge::Top, margin as f32);
+    }
+
+    pub fn on_cancel(&self, cancel: impl Fn() + Send + Sync + 'static) {
+        let cancel: Arc<dyn Fn() + Send + Sync> = Arc::new(cancel);
+        self.handle.update(move |view, _| view.on_cancel(cancel));
+    }
+
+    pub fn show_draft(&self, show: bool) {
+        self.handle.update(move |view, _| view.set_draft(show));
+    }
+
+    /// The microphone's loudness, 0 to 1; the wave picks it up on its next frame.
+    pub fn level(&self, level: f32) {
+        self.handle.update_if(move |view, _| {
+            view.set_level(level);
+            false
+        });
+    }
+
     pub fn show(&self, status: &Status, visibility: Visibility) {
         let next = status.clone();
-        self.handle.update(move |view, _| view.status = next);
+        self.handle.update(move |view, tx| {
+            view.set_status(next, tx.clock());
+            tx.wake_after(Duration::ZERO);
+        });
         self.apply(visibility);
     }
 

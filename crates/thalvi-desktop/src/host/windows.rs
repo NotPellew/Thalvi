@@ -131,6 +131,15 @@ impl Windows {
         win32::message_box(title, message);
     }
 
+    /// How far below the work area's top the overlay surface goes; Rune places it inside the
+    /// work area itself.
+    ///
+    /// # Errors
+    /// Never on Windows; the signature matches the Linux desktops'.
+    pub fn overlay_margin(&self) -> Result<f64, HostError> {
+        Ok(0.0)
+    }
+
     /// Shows or hides the overlay window `window` without activating it, which Tauri's `show`
     /// would.
     pub fn set_overlay_visible(window: Hwnd, visible: bool) {

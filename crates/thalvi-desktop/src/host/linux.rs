@@ -138,6 +138,19 @@ impl Desktop {
         )
     }
 
+    /// How far below the screen's top edge the overlay surface goes, in logical pixels.
+    ///
+    /// # Errors
+    /// Why GNOME did not say where its top panel ends.
+    pub fn overlay_margin(&self) -> Result<f64, HostError> {
+        match self {
+            // A layer-shell surface already keeps clear of the bars.
+            Self::Hyprland(_) => Ok(0.0),
+            // The XWayland surface is placed from the screen's edge, under the top panel.
+            Self::Gnome(host) => host.prepare_overlay(0.0, 0.0),
+        }
+    }
+
     /// Settles a window's platform hints before it first appears, so it never takes focus.
     pub fn settle_overlay_window(&self, window: &gtk::ApplicationWindow) {
         match self {

@@ -13,7 +13,9 @@ use thalvi_desktop::device::Adapters;
 use thalvi_desktop::draft::Drafts;
 use thalvi_desktop::history;
 use thalvi_desktop::hold::HoldKind;
-use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, HostError, RequestServer, refusal};
+use thalvi_desktop::host::{
+    Desktop, HoldSource, HoldWatch, Host, HostError, RequestServer, refusal,
+};
 use thalvi_desktop::metrics::Recorder;
 use thalvi_desktop::models::SpeechDownloads;
 use thalvi_desktop::speech_device::SpeechDevices;
@@ -312,6 +314,7 @@ impl AppState {
     fn apply(&self, config: &DesktopConfig) {
         self.overlay_shown
             .store(config.overlay.show, Ordering::SeqCst);
+        self.overlay.show_draft(config.overlay.draft);
         self.saves.set(config);
         self.link.send(Control::Apply(Box::new(config.clone())));
     }
@@ -455,7 +458,8 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
     } {
         return Ok(());
     }
-    let (ui, overlay) = overlay::prepare();
+    let takes_clicks = Desktop::detect().is_ok_and(|host| host.overlay_takes_clicks());
+    let (ui, overlay) = overlay::prepare(takes_clicks);
     // Rune's event loop must own the main thread on Linux and Windows; Tauri's runs beside it.
     let tauri = std::thread::Builder::new()
         .name("tauri".to_owned())
@@ -561,6 +565,7 @@ fn setup(
     let (state, first_start) = AppState::start(config, overlay)?;
     state.restore_login(app);
     state.restore_menu_entry(&menu_entry::System::from_env());
+    prepare_overlay(app, &state);
     app.manage(state);
     serve_requests(app);
     create_windows(app).map_err(|error| error.to_string())?;
@@ -568,6 +573,19 @@ fn setup(
         show_settings(app);
     }
     follow_engine(app).map_err(|error| error.to_string())
+}
+
+/// Places the overlay below the desktop's top bar and lets its cancel button reach the engine.
+fn prepare_overlay(app: &AppHandle, state: &AppState) {
+    match state.host.overlay_margin() {
+        Ok(margin) => state.overlay.place(margin),
+        Err(error) => println!("{error} The status overlay may cover the top bar."),
+    }
+    state.overlay.show_draft(state.config().overlay.draft);
+    let handle = app.clone();
+    state
+        .overlay
+        .on_cancel(move || handle.state::<AppState>().link.send(Control::Cancel));
 }
 
 /// Starts answering requests from outside. The app works without; status bars then report Thalvi
@@ -659,6 +677,7 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
     tauri::async_runtime::spawn(async move {
         while level.changed().await.is_ok() {
             let level = *level.borrow_and_update();
+            handle.state::<AppState>().overlay.level(level);
             let _ = handle.emit("thalvi://level", Level { level });
         }
     });
