@@ -90,6 +90,7 @@ pub fn prepare(takes_clicks: bool) -> (Ui, Overlay) {
             OverlayInput::None
         },
         xwayland_input: takes_clicks,
+        prewarm: true,
         ..OverlayOptions::default()
     };
     let handle = app.overlay(
