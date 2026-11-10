@@ -6253,11 +6253,11 @@ async fn a_fed_frame_is_lost_while_the_microphone_gate_is_off() {
             let (feeder, _feeding) = feeder_for(&rig);
             let mut fed = feeder.wrap(frames);
             rig.gate.set_enabled(false);
-            let (feed, mut ended) = Feed::new(clip(3));
-            feeder.start(feed);
+            let (lost, mut lost_end) = Feed::new(clip(3));
+            feeder.start(lost);
             settle().await;
             rig.at(300).await;
-            assert_eq!(ended.try_recv(), Ok(FeedEnd::Played));
+            assert_eq!(lost_end.try_recv(), Ok(FeedEnd::Played));
             let next = tokio::time::timeout(ms(10), fed.next()).await;
             assert!(next.is_err(), "nothing reached the engine");
         })
