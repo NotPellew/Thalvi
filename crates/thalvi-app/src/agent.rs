@@ -18,7 +18,7 @@ use tokio::sync::watch;
 use crate::control;
 use crate::runner::{AudioStatus, Control};
 use crate::settings::{judge, merge_patch, settings_json};
-use crate::status::{Failure, Status};
+use crate::status::{Failure, FailureKind, Status};
 
 /// How long a control is given to show in the engine's state before it is said to have had no effect.
 pub const EFFECT_WAIT: Duration = Duration::from_secs(3);
@@ -458,9 +458,17 @@ fn state(running: &impl Running) -> String {
     });
     match &*status.borrow() {
         Status::Failed {
-            notice, headline, ..
+            notice,
+            headline,
+            kind,
+            ..
         } => {
-            reply["failure"] = json!({"headline": headline, "reason": scrub(notice, &secrets)});
+            reply["failure"] = match kind {
+                FailureKind::Delivery => json!({"headline": headline}),
+                FailureKind::Other => {
+                    json!({"headline": headline, "reason": scrub(notice, &secrets)})
+                }
+            };
             if running.overlay_on() {
                 reply["overlay"]["headline"] = json!(headline);
             }
@@ -2493,6 +2501,12 @@ mod tests {
                 target: Some("kitty".to_owned()),
                 route: CaptureRoute::Paste,
                 notice: "Pasted into kitty.".to_owned(),
+            },
+            Status::Failed {
+                notice: "Nothing was delivered. Clipboard recovery failed: No clipboard. Your text follows:\nmy password is hunter2".to_owned(),
+                headline: "Clipboard failed — text in Settings",
+                causes: Vec::new(),
+                kind: FailureKind::Delivery,
             },
         ];
         for status in statuses {
