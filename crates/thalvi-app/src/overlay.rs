@@ -62,7 +62,7 @@ impl Visibility {
 pub type Ui = App<()>;
 
 /// The windowless Rune app with the hidden overlay, and the handle that feeds it from any thread.
-/// `takes_clicks` lets the cancel button take the pointer; everything else passes clicks through.
+/// `takes_clicks` lets the overlay take the pointer, so its cancel button can be clicked.
 #[must_use]
 pub fn prepare(takes_clicks: bool) -> (Ui, Overlay) {
     let mut app = App::new(AppSpec::new(
@@ -85,7 +85,7 @@ pub fn prepare(takes_clicks: bool) -> (Ui, Overlay) {
     };
     let options = OverlayOptions {
         input: if takes_clicks {
-            OverlayInput::Regions
+            OverlayInput::All
         } else {
             OverlayInput::None
         },

@@ -788,7 +788,6 @@ fn cancel_button(view: &View) -> El {
         .radius(2.0)
         .gradient(srgb(0x5c, 0x5c, 0x60), srgb(0x3a, 0x3a, 0x3d))
         .border(1.0, srgb(0x6e, 0x6e, 0x72))
-        .hit()
         .on_press(move |_: &mut View| {
             if let Some(cancel) = &cancel {
                 cancel();
