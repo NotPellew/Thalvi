@@ -102,11 +102,12 @@ impl Config {
             .filter(|value| !value.is_empty());
         let bg_llm = parse_bg_llm(&lookup)?;
         let stt_url = required(&lookup, "STT_URL", false)?;
-        if !stt_url.starts_with("ws://") && !stt_url.starts_with("wss://") {
-            return Err(format!(
-                "STT_URL must be a ws:// or wss:// URL: {stt_url:?}"
-            ));
-        }
+        let stt_url = endpoint_url(&stt_url, &["ws", "wss"])
+            .map(|_| stt_url.trim().to_string())
+            .ok_or_else(|| {
+                "STT_URL must be a ws:// or wss:// URL with a host and no credentials, query or fragment."
+                    .to_string()
+            })?;
         let stt_model = required(&lookup, "STT_MODEL", false)?;
         let stt_api_key = required(&lookup, "STT_API_KEY", true)?;
         let tts_base_url = http_base(&lookup, "TTS_BASE_URL")?;
@@ -263,12 +264,24 @@ fn required(
 
 fn http_base(lookup: &impl Fn(&str) -> Option<String>, name: &str) -> Result<String, String> {
     let value = required(lookup, name, false)?;
-    if !value.starts_with("http://") && !value.starts_with("https://") {
-        return Err(format!(
-            "{name} must be an http:// or https:// URL: {value:?}"
-        ));
-    }
-    Ok(value.trim_end_matches('/').to_string())
+    endpoint_url(&value, &["http", "https"])
+        .map(|url| url.as_str().trim_end_matches('/').to_string())
+        .ok_or_else(|| {
+            format!(
+                "{name} must be an http:// or https:// URL with a host and no credentials, query or fragment."
+            )
+        })
+}
+
+fn endpoint_url(value: &str, schemes: &[&str]) -> Option<reqwest::Url> {
+    let url = reqwest::Url::parse(value.trim()).ok()?;
+    (schemes.contains(&url.scheme())
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none())
+    .then_some(url)
 }
 
 #[cfg(test)]
@@ -309,6 +322,80 @@ mod tests {
                 None
             ))
         );
+    }
+
+    #[test]
+    fn endpoint_urls_reject_forbidden_parts_and_accept_valid_values() {
+        let http_bad = [
+            "https://user:secret@host.invalid/v1",
+            "https://host.invalid/v1?key=x",
+            "https://host.invalid/v1#frag",
+            "http://?key=x",
+        ];
+        let stt_bad = [
+            "wss://user:secret@host.invalid/asr",
+            "wss://host.invalid/asr?key=x",
+            "wss://host.invalid/asr#frag",
+            "wss://?key=x",
+        ];
+        let http_valid = ["http://127.0.0.1:8080", "https://host.invalid/v1"];
+        let stt_valid = ["ws://127.0.0.1:8080/asr", " wss://host.invalid "];
+        let endpoints = [
+            ("LLM_BASE_URL", &http_bad[..], &http_valid[..]),
+            ("TTS_BASE_URL", &http_bad[..], &http_valid[..]),
+            ("BG_LLM_BASE_URL", &http_bad[..], &http_valid[..]),
+            ("STT_URL", &stt_bad[..], &stt_valid[..]),
+        ];
+
+        for (name, forbidden, accepted) in endpoints {
+            for value in forbidden {
+                let mut vars = full();
+                if name == "BG_LLM_BASE_URL" {
+                    vars.extend([
+                        ("BG_LLM_BASE_URL", "https://bg.invalid/v1".to_string()),
+                        ("BG_LLM_MODEL", "m".to_string()),
+                        ("BG_LLM_API_KEY", String::new()),
+                    ]);
+                }
+                vars.insert(name, (*value).to_string());
+                let err = Config::from_lookup(|key| vars.get(key).cloned())
+                    .expect_err("invalid endpoint URL should be refused");
+                assert!(err.contains(name), "error should name {name}: {err}");
+                assert!(!err.contains(value), "error should not echo URL: {err}");
+                if value.contains("user:secret") {
+                    assert!(
+                        !err.contains("user"),
+                        "error should not echo username: {err}"
+                    );
+                    assert!(
+                        !err.contains("secret"),
+                        "error should not echo password: {err}"
+                    );
+                }
+            }
+
+            for value in accepted {
+                let mut vars = full();
+                if name == "BG_LLM_BASE_URL" {
+                    vars.extend([
+                        ("BG_LLM_BASE_URL", "https://bg.invalid/v1".to_string()),
+                        ("BG_LLM_MODEL", "m".to_string()),
+                        ("BG_LLM_API_KEY", String::new()),
+                    ]);
+                }
+                vars.insert(name, (*value).to_string());
+                let config = Config::from_lookup(|key| vars.get(key).cloned())
+                    .expect("valid endpoint URL should be accepted");
+                let actual = match name {
+                    "LLM_BASE_URL" => config.llm_base_url,
+                    "TTS_BASE_URL" => config.tts_base_url,
+                    "BG_LLM_BASE_URL" => config.bg_llm.expect("background model").base_url,
+                    "STT_URL" => config.stt_url,
+                    _ => unreachable!(),
+                };
+                assert_eq!(actual, value.trim(), "{name}");
+            }
+        }
     }
 
     #[test]
