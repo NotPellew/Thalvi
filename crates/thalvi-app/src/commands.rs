@@ -76,9 +76,8 @@ pub fn save(app: &AppHandle, state: &AppState, settings: Value) -> Result<Deskto
         state.config().microphone.as_deref(),
         state.link.audio().paused,
     )?;
-    let config = state.store.save(settings, &state.config())?;
     let look = state.config().look;
-    state.apply(&config);
+    let config = state.save(settings)?;
     if config.look != look {
         // The settings are saved either way; the overlay keeps its old place.
         if let Err(error) = overlay::replace(app, &state.host()) {

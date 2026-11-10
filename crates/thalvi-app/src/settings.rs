@@ -69,22 +69,34 @@ impl Store {
     /// # Errors
     /// The loader's message when the settings are invalid, in which case nothing is written; or
     /// why the file could not be written.
-    pub fn save(
-        &self,
-        mut settings: Value,
-        current: &DesktopConfig,
-    ) -> Result<DesktopConfig, String> {
+    pub fn save(&self, settings: Value, current: &DesktopConfig) -> Result<DesktopConfig, String> {
+        let config = Self::check(settings, current)?;
+        self.write(&config)?;
+        Ok(config)
+    }
+
+    /// Validates `settings` as [`Store::save`] does, without writing anything.
+    ///
+    /// # Errors
+    /// The loader's message when the settings are invalid.
+    pub fn check(mut settings: Value, current: &DesktopConfig) -> Result<DesktopConfig, String> {
         prepare(&mut settings, current);
-        let config = load(&settings)?;
-        let json = serde_json::to_string_pretty(&config)
+        load(&settings)
+    }
+
+    /// Replaces the file with `config` in one step.
+    ///
+    /// # Errors
+    /// Why the file could not be written.
+    pub fn write(&self, config: &DesktopConfig) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(config)
             .map_err(|error| format!("The settings could not be written: {error}"))?;
         write_atomically(&self.path, &json).map_err(|error| {
             format!(
                 "The settings could not be saved to {}: {error}",
                 self.path.display()
             )
-        })?;
-        Ok(config)
+        })
     }
 
     /// Writes `config` again, including its OS switches' preferences.

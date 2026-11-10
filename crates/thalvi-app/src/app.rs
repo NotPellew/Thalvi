@@ -90,7 +90,10 @@ impl AppState {
             Arc::clone(&drafts),
             Arc::clone(&speech_devices),
         )?;
-        let held = watch_hold_keys(&config, &link, false);
+        let mut held = watch_hold_keys(&config, &link, false);
+        if let Some(notice) = held.refusal.take() {
+            link.send(Control::HoldKeyFailed(notice));
+        }
         let state = Self {
             link,
             store,
@@ -206,26 +209,36 @@ impl AppState {
         Ok(())
     }
 
+    /// Saves `settings` and takes them into effect: the engine applies them between captures.
+    ///
+    /// # Errors
+    /// Why the settings were refused or the file could not be written, in which case nothing
+    /// changed: a desktop that refuses new hold keys leaves the old keys in use.
+    pub fn save(&self, settings: serde_json::Value) -> Result<DesktopConfig, String> {
+        let current = self.config();
+        let config = Store::check(settings, &current)?;
+        let keys_changed =
+            (&current.hold_key, &current.write_key) != (&config.hold_key, &config.write_key);
+        let mut watch = self
+            .hold_watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        save_keys(
+            &mut watch,
+            keys_changed,
+            |keeping| watch_hold_keys(&config, &self.link, keeping),
+            || self.store.write(&config),
+        )?;
+        drop(watch);
+        self.apply(&config);
+        Ok(config)
+    }
+
     /// Takes `config` into effect: the engine applies it between captures.
-    pub fn apply(&self, config: &DesktopConfig) {
+    fn apply(&self, config: &DesktopConfig) {
         self.overlay_shown
             .store(config.overlay.show, Ordering::SeqCst);
-        let key_changed = {
-            let mut current = self.config.lock().unwrap_or_else(PoisonError::into_inner);
-            let changed =
-                (&current.hold_key, &current.write_key) != (&config.hold_key, &config.write_key);
-            *current = config.clone();
-            changed
-        };
-        if key_changed {
-            let mut watch = self
-                .hold_watch
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            rewatch(&mut watch, |keeping| {
-                watch_hold_keys(config, &self.link, keeping)
-            });
-        }
+        *self.config.lock().unwrap_or_else(PoisonError::into_inner) = config.clone();
         self.link.send(Control::Apply(Box::new(config.clone())));
     }
 }
@@ -236,23 +249,38 @@ struct Held {
     watch: Option<HoldWatch>,
     /// Why this desktop offers no hold key, for Settings.
     unavailable: Option<&'static str>,
-    /// Whether the desktop refused the keys.
-    refused: bool,
+    /// What the user is told when the desktop refused the keys.
+    refusal: Option<String>,
 }
 
-/// Replaces the watch in `previous` with the one `start` begins, which is told whether there is a
-/// watch to keep. The new keys are set up before the old go, so that where the desktop refuses
-/// them the old keep working.
-fn rewatch(previous: &mut Option<HoldWatch>, start: impl FnOnce(bool) -> Held) {
-    let next = start(previous.is_some());
-    if !next.refused {
-        *previous = next.watch;
+/// Starts watching the changed keys before `write` saves them, so that a desktop that refuses
+/// them leaves the old keys in use and the file as it was; `start` is told whether there is a
+/// watch to keep. Unchanged keys keep their watch.
+fn save_keys<T>(
+    previous: &mut Option<HoldWatch>,
+    keys_changed: bool,
+    start: impl FnOnce(bool) -> Held,
+    write: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let next = if keys_changed {
+        let next = start(previous.is_some());
+        if let Some(refusal) = next.refusal {
+            return Err(refusal);
+        }
+        Some(next.watch)
+    } else {
+        None
+    };
+    let saved = write()?;
+    if let Some(watch) = next {
+        *previous = watch;
     }
+    Ok(saved)
 }
 
 /// Starts reporting the hold and write keys to the engine where the desktop lets the app see
 /// them, by a hook or binds of its own. Where the desktop offers no hold key, Settings says so and
-/// nothing looks like an error; where the desktop refuses, the user is told through the status, and
+/// nothing looks like an error; where the desktop refuses, the refusal says so in plain words, and
 /// the rest of the app goes on. `keeping` says that the keys in use stay when the desktop refuses.
 fn watch_hold_keys(config: &DesktopConfig, link: &EngineLink, keeping: bool) -> Held {
     let input = link.hold_input();
@@ -270,15 +298,10 @@ fn watch_hold_keys(config: &DesktopConfig, link: &EngineLink, keeping: bool) -> 
             link.hold_problems(),
         ),
         keeping,
-        |notice| link.send(Control::HoldKeyFailed(notice)),
     )
 }
 
-fn held(
-    source: Result<HoldSource, HostError>,
-    keeping: bool,
-    tell_failure: impl FnOnce(String),
-) -> Held {
+fn held(source: Result<HoldSource, HostError>, keeping: bool) -> Held {
     match source {
         Ok(HoldSource::Watching(watch)) => Held {
             watch: Some(watch),
@@ -291,19 +314,16 @@ fn held(
                 ..Held::default()
             }
         }
-        Err(error) => {
-            tell_failure(if keeping {
+        Err(error) => Held {
+            refusal: Some(if keeping {
                 format!("{error} The keys that were set before still work.")
             } else {
                 format!(
                     "{error} Dictating by holding a key does not work until Thalvi is restarted or another key is set; the wake word still works."
                 )
-            });
-            Held {
-                refused: true,
-                ..Held::default()
-            }
-        }
+            }),
+            ..Held::default()
+        },
     }
 }
 
@@ -710,9 +730,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_refused_hold_key_is_told_as_a_failure() {
+    fn only_a_refused_hold_key_is_told_as_a_refusal() {
         const RESTART: &str = "Hook refused. Dictating by holding a key does not work until Thalvi is restarted or another key is set; the wake word still works.";
-        // (what the desktop said, whether keys are in use, failure told, watching, why unavailable)
+        // (what the desktop said, whether keys are in use, refusal told, watching, why unavailable)
         type Case = (
             Result<HoldSource, HostError>,
             bool,
@@ -746,61 +766,92 @@ mod tests {
             ),
         ];
         for (source, keeping, told, watching, unavailable) in cases {
-            let mut failure = None;
-            let held = held(source, keeping, |notice| failure = Some(notice));
-            assert_eq!(failure.as_deref(), told);
+            let held = held(source, keeping);
+            assert_eq!(held.refusal.as_deref(), told);
             assert_eq!(held.watch.is_some(), watching);
             assert_eq!(held.unavailable, unavailable);
-            assert_eq!(held.refused, told.is_some());
         }
     }
 
-    /// A watch that logs when it is dropped.
-    struct Marked(Arc<Mutex<Vec<&'static str>>>);
+    /// A watch that logs its name when it is dropped.
+    struct Named(Arc<Mutex<Vec<&'static str>>>, &'static str);
 
-    impl Drop for Marked {
+    impl Drop for Named {
         fn drop(&mut self) {
-            self.0.lock().unwrap().push("old watch dropped");
+            self.0.lock().unwrap().push(self.1);
         }
     }
 
     #[test]
-    fn new_keys_are_set_up_before_the_old_go_and_a_refusal_keeps_the_old() {
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let started = |log: &Arc<Mutex<Vec<&'static str>>>, refused: bool| {
-            let log = Arc::clone(log);
-            move |keeping: bool| {
-                assert!(
-                    keeping,
-                    "the old watch is still in place when the new starts"
-                );
-                log.lock().unwrap().push("new watch started");
-                Held {
-                    watch: (!refused).then(|| HoldWatch::new(())),
-                    refused,
-                    ..Held::default()
-                }
-            }
-        };
-
-        let mut watch = Some(HoldWatch::new(Marked(Arc::clone(&log))));
-        rewatch(&mut watch, started(&log, true));
-        assert!(watch.is_some());
-        assert_eq!(
-            *log.lock().unwrap(),
-            ["new watch started"],
-            "kept on a refusal"
+    fn a_refused_key_change_is_not_saved_and_an_accepted_one_is_saved_with_its_watch() {
+        // (keys changed, refusal, write fails, result, writes, watches started, dropped in the end)
+        type Case = (
+            bool,
+            Option<&'static str>,
+            bool,
+            Result<(), &'static str>,
+            usize,
+            usize,
+            &'static [&'static str],
         );
+        let cases: [Case; 4] = [
+            (
+                true,
+                Some("Hyprland refused F7."),
+                false,
+                Err("Hyprland refused F7."),
+                0,
+                1,
+                &["old"],
+            ),
+            (true, None, false, Ok(()), 1, 1, &["old", "new"]),
+            (false, None, false, Ok(()), 1, 0, &["old"]),
+            (
+                true,
+                None,
+                true,
+                Err("The settings could not be saved."),
+                1,
+                1,
+                &["new", "old"],
+            ),
+        ];
+        for (changed, refusal, write_fails, expected, writes, starts, dropped) in cases {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let mut watch = Some(HoldWatch::new(Named(Arc::clone(&log), "old")));
+            let (mut started, mut written) = (0, 0);
 
-        rewatch(&mut watch, started(&log, false));
-        assert_eq!(
-            *log.lock().unwrap(),
-            [
-                "new watch started",
-                "new watch started",
-                "old watch dropped"
-            ]
-        );
-        assert!(watch.is_some());
+            let result = save_keys(
+                &mut watch,
+                changed,
+                |keeping| {
+                    assert!(keeping, "the old watch is in place when the new starts");
+                    assert!(log.lock().unwrap().is_empty(), "the old go only after");
+                    started += 1;
+                    Held {
+                        watch: refusal
+                            .is_none()
+                            .then(|| HoldWatch::new(Named(Arc::clone(&log), "new"))),
+                        refusal: refusal.map(str::to_owned),
+                        ..Held::default()
+                    }
+                },
+                || {
+                    written += 1;
+                    if write_fails {
+                        Err("The settings could not be saved.".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+
+            let case = format!("{changed} {refusal:?} {write_fails}");
+            assert_eq!(result, expected.map_err(str::to_owned), "{case}");
+            assert_eq!((written, started), (writes, starts), "{case}");
+            assert!(watch.is_some(), "{case}");
+            drop(watch);
+            assert_eq!(*log.lock().unwrap(), dropped, "{case}");
+        }
     }
 }
