@@ -28,7 +28,7 @@ use crate::overlay::{self, Overlay, Visibility};
 use crate::runner::{AudioStatus, Control, EngineLink};
 use serde_json::Value;
 
-use crate::settings::{Store, ensure_microphone_change_allowed};
+use crate::settings::Store;
 use crate::startup::{self, APP_NAME, LOGIN_ARG, Registration};
 use crate::status::{Failure, FailureKind, LastError, Status};
 use crate::tray::{self, CopyItem, Tray};
@@ -78,7 +78,7 @@ impl SyncedConfig {
     pub(crate) fn save_form<T>(
         &self,
         form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
-        paused: bool,
+        _paused: bool,
         take_effect: impl FnOnce(
             &DesktopConfig,
             &DesktopConfig,
@@ -91,7 +91,6 @@ impl SyncedConfig {
         let Some(settings) = settings else {
             return Ok((value, None));
         };
-        ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
         let config = Store::check(settings, &current)?;
         take_effect(&current, &config, &|| self.store.write(&config))?;
         let look_changed = config.look != current.look;

@@ -1102,15 +1102,10 @@ mod tests {
     }
 
     #[test]
-    fn the_microphone_changes_only_while_paused_and_a_change_waits_for_a_capture_to_end() {
+    fn the_microphone_changes_while_listening_and_a_change_waits_for_a_capture_to_end() {
         let rig = Rig::new("microphone", "{}");
-        let refusal =
-            "Pause listening before changing the microphone. Turn listening off, then save again.";
         let mic = json!({"microphone": "USB Mic"});
-        let refused = rig.set(mic.clone());
-        assert_eq!(refused["error"], refusal);
-        assert_eq!(rig.ask(&Request::Pause)["ok"], true);
-        assert_eq!(rig.set(mic)["ok"], true);
+        assert_eq!(rig.set(mic.clone())["ok"], true);
         assert_eq!(rig.fake.config().microphone.as_deref(), Some("USB Mic"));
 
         rig.fake.pause_audio(false);

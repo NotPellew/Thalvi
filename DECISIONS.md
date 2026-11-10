@@ -165,13 +165,14 @@ areas your change touches. Editing rules are in
   final or after 250 ms. Why: a streaming recognizer emits a word only after audio past it; measured headless on the server
   recognizer, no last word lost in 336 releases (75% before when released on the word's end). Rejected: a fixed 500 ms tail;
   an end-of-stream message through the server (11% lost at the word's end, a protocol change).
-- **Packaged desktop with an OS-held login entry.** AppImage on Linux, per-user NSIS on Windows, released from `desktop-vX.Y.Z` tags that match the Cargo version; login startup is the OS entry (`tauri-plugin-autostart`, run with `--login`), and the config keeps the preference (`start_at_login`, written by the switch alone, never by Save) so each start restores an entry an upgrade removed. Hyprland runs no XDG autostart unless `xdg-desktop-autostart.target` is up (uwsm starts it), so otherwise the row shows an `exec-once` line to copy and no entry is written. The AppImage's app menu entry is Thalvi's own file (`show_in_menu`, same pattern); a startup failure shows a GTK or `MessageBoxW` box when stderr is no terminal (`gtk` is Tauri's own).
+- **Packaged desktop with an OS-held login entry.** AppImage on Linux, per-user NSIS on Windows, released from `desktop-vX.Y.Z` tags that match the Cargo version; login startup is the OS entry (`tauri-plugin-autostart`, run with `--login`), and the config keeps the preference (`start_at_login`, written by the switch alone) so each start restores an entry an upgrade removed. Hyprland runs no XDG autostart unless `xdg-desktop-autostart.target` is up (uwsm starts it), so otherwise the row shows an `exec-once` line to copy and no entry is written. The AppImage's app menu entry is Thalvi's own file (`show_in_menu`, same pattern); a startup failure shows a GTK or `MessageBoxW` box when stderr is no terminal (`gtk` is Tauri's own).
   Why: both formats suit the updater (#137), the plugin is Tauri's own, the switch reads the OS back, and the NSIS uninstall hook cannot tell an upgrade from an uninstall.
   Rejected: deb and MSI as well, a hand-written login `.desktop` and `Run` key writer, restoring over a Thalvi entry the user turned off in Windows (read from `StartupApproved` with `windows-registry`).
-- **Pause before changing microphones.** Save device changes only while paused;
-  enabling opens the selected device and status names the open stream separately.
-  Why: choosing a microphone must not start recording or redirect a capture.
-  Rejected: applying a device change automatically after an active capture.
+- **Microphone applies at once.** Choosing a device in Settings saves and opens it
+  when listening is not in a capture, or after the current capture when one is
+  running; a failure shows why and the previous device stays open.
+  Why: the user should not pause dictation just to switch hardware.
+  Rejected: requiring a pause before every device change.
 - **Errors stay in the tray and Settings, not on the overlay.** Each says what failed, why and which setting to fix; its short headline shows on the
   overlay for 5 s, and again when it refuses a hold key press. Copy (settings, tray, `copy-error`) puts a report (causes, version, system, no secrets)
   on the clipboard through the host. Why: on Hyprland `no_focus` makes the overlay click-through, so a headline that stayed covered the screen with no way

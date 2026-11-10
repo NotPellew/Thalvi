@@ -137,28 +137,6 @@ fn load(settings: &Value) -> Result<DesktopConfig, String> {
     })
 }
 
-/// Refuses a microphone change while listening is not paused, before anything is written.
-///
-/// # Errors
-/// The plain refusal when the saved device would change while the microphone may be open.
-pub fn ensure_microphone_change_allowed(
-    settings: &Value,
-    current: Option<&str>,
-    paused: bool,
-) -> Result<(), String> {
-    let incoming = match settings.get("microphone") {
-        Some(Value::String(name)) => Some(name.trim().to_owned()),
-        _ => None,
-    };
-    if incoming.as_deref() != current && !paused {
-        return Err(
-            "Pause listening before changing the microphone. Turn listening off, then save again."
-                .to_owned(),
-        );
-    }
-    Ok(())
-}
-
 /// Applies a JSON merge patch (RFC 7386) to `target`: objects merge, `null` removes a key, and
 /// anything else, an array included, replaces.
 pub fn merge_patch(target: &mut Value, patch: &Value) {
@@ -189,9 +167,8 @@ pub fn merge_patch(target: &mut Value, patch: &Value) {
 pub fn judge(
     mut settings: Value,
     current: &DesktopConfig,
-    paused: bool,
+    _paused: bool,
 ) -> Result<DesktopConfig, String> {
-    ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
     prepare(&mut settings, current);
     let config = load(&settings)?;
     let mut before = serde_json::to_value(current).map_err(|error| error.to_string())?;
@@ -788,42 +765,6 @@ mod tests {
             "The paste pause must be a number of seconds from 0 to 5."
         );
         assert!(!exists, "nothing is created for invalid settings");
-    }
-
-    #[test]
-    fn a_microphone_change_needs_a_pause_but_other_saves_do_not() {
-        let refusal =
-            "Pause listening before changing the microphone. Turn listening off, then save again.";
-        for (settings, current, paused, expected) in [
-            (json!({"microphone": "USB Mic"}), None, false, Err(refusal)),
-            (
-                json!({"microphone": null}),
-                Some("USB Mic"),
-                false,
-                Err(refusal),
-            ),
-            (json!({"microphone": "USB Mic"}), None, true, Ok(())),
-            (json!({"microphone": null}), Some("USB Mic"), true, Ok(())),
-            (
-                json!({"microphone": "USB Mic"}),
-                Some("USB Mic"),
-                false,
-                Ok(()),
-            ),
-            (json!({"microphone": null}), None, false, Ok(())),
-            (
-                json!({"microphone": " USB Mic "}),
-                Some("USB Mic"),
-                false,
-                Ok(()),
-            ),
-        ] {
-            assert_eq!(
-                ensure_microphone_change_allowed(&settings, current, paused),
-                expected.map_err(str::to_owned),
-                "{settings} current={current:?} paused={paused}"
-            );
-        }
     }
 
     #[test]

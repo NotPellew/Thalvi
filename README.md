@@ -350,9 +350,9 @@ notice. Unticking keeps the address and key.
 ### Microphone
 
 Settings → Microphone has **Listening**, which pauses and resumes right away,
-and the saved device. To change the device, pause first, then choose and Save;
-listening stays paused until you resume it. **Active microphone** names the
-device actually open. If the saved device is missing, Thalvi reports it
+and **Microphone**, which applies as soon as you choose a device and opens it
+when it can (or after the current capture). **Active microphone** names the
+device actually open. If the chosen device is missing, Thalvi reports it
 instead of using another one.
 
 ### Start at login and app menu
@@ -371,7 +371,7 @@ Settings → App → Startup, both off by default and applied right away:
 ### Recordings
 
 Settings → App has a switch each for metrics, text and audio recordings, all
-off by default; Save applies them between captures. They stay on this computer.
+off by default; each applies as soon as you change it. They stay on this computer.
 **Open folder** opens `recordings/` in the data folder (`~/.local/share/thalvi`
 on Linux, `%LOCALAPPDATA%\thalvi` on Windows):
 
