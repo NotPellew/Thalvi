@@ -92,9 +92,10 @@ areas your change touches. Editing rules are in
   `reply_audio` (on or off); only `mic` opens a recognizer, only reply audio calls speech
   synthesis. Web: Voice sets both, Speak replies only reply audio. Why: typed or locally
   recognized input can get spoken replies. Rejected: one `voice` switch, a compat message.
-- **Desktop wake.** The desktop runs only the dictation head until desktop conversations exist.
-  Why: a head with no handler dropped dictation wakes when both crossed and recorded wakes for nothing.
-  Rejected: hiding it in Settings only.
+- **Two wake entries, endings select the capture route.** Trained capture and conversation heads;
+  the desktop runs only capture until it has conversations. A capture whose whole text is an
+  `open_url`/`focus_app` phrase or `open <host>` runs as a task with no ending. Why: a ready command
+  needs no ending; a head with no handler dropped wakes. Rejected: one phrase; hiding it in Settings.
 - **Wake context.** Both trained heads use 16 embedding frames. Why: this
   supports first-frame inference with upstream startup and reset history.
   Rejected: accepting longer contexts that need additional warm-up history.
