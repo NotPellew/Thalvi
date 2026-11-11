@@ -25,6 +25,8 @@ use crate::tts::Tts;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 const ACK_DELAY: Duration = Duration::from_millis(500);
+/// The web client clears this notice when the recognizer is ready again, so both sides must match.
+const RECOGNIZER_RETRY_NOTICE: &str = "Can't reach speech recognition. Trying again…";
 /// Audio kept on both sides of a spoken turn, as the recognizer's boundaries are tight.
 const CLIP_PADDING_MS: u64 = 300;
 const ACK_LINES: [&str; 3] = [
@@ -270,10 +272,17 @@ struct TurnLog {
     last_reply_audio_bytes: usize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecognizerState {
+    Connecting,
+    Ready,
+    Retrying,
+}
+
 struct RecognizerHandle {
     audio_tx: mpsc::Sender<Vec<u8>>,
     task: JoinHandle<()>,
-    ready: bool,
+    state: RecognizerState,
 }
 
 /// Where the user's turns come from; only `Mic` has a recognizer.
@@ -309,27 +318,28 @@ impl Choices {
     fn snapshot(&self, recognizer: Option<&RecognizerHandle>) -> Mode {
         Mode {
             input: self.input,
-            ready: recognizer.is_some_and(|handle| handle.ready),
+            recognizer: recognizer.map_or(RecognizerState::Connecting, |handle| handle.state),
             reply_audio: *self.reply_audio.borrow(),
         }
     }
 }
 
-/// `Choices` at one moment, with whether the recognizer can hear the user.
+/// `Choices` at one moment, with the recognizer's current condition.
 #[derive(Clone, Copy)]
 struct Mode {
     input: InputSource,
-    ready: bool,
+    recognizer: RecognizerState,
     reply_audio: bool,
 }
 
 impl Mode {
     /// The state to report when no reply is running.
     fn resting_state(self) -> &'static str {
-        match (self.input, self.ready) {
+        match (self.input, self.recognizer) {
             (InputSource::Text, _) => "idle",
-            (InputSource::Mic, true) => "listening",
-            (InputSource::Mic, false) => "starting",
+            (InputSource::Mic, RecognizerState::Ready) => "listening",
+            (InputSource::Mic, RecognizerState::Retrying) => "recognizer_retrying",
+            (InputSource::Mic, RecognizerState::Connecting) => "starting",
         }
     }
 }
@@ -912,7 +922,7 @@ where
         Some(RecognizerMessage::Ready) => {
             turn_log.reset_mic();
             if let Some(handle) = recognizer {
-                handle.ready = true;
+                handle.state = RecognizerState::Ready;
             }
             send_input(sink, InputSource::Mic, true).await?;
             if reply.is_none() {
@@ -939,25 +949,25 @@ async fn recognizer_disconnected(
     replying: bool,
     turn_log: &mut TurnLog,
 ) -> Result<(), BrowserGone> {
-    if let Some(handle) = recognizer {
-        handle.ready = false;
-    }
     tracing::warn!(fatal, "recognizer disconnected");
     let message = if fatal {
         format!(
             "Speech recognition stopped and won't retry: {message}. Check the speech settings, then tap Start again."
         )
     } else {
-        plain_recognizer_error(message)
+        RECOGNIZER_RETRY_NOTICE.to_string()
     };
     send_json(sink, &json!({"type": "error", "message": message})).await?;
     if fatal {
         send_input(sink, InputSource::Text, true).await?;
         stop_input(sink, choices, recognizer, rec_rx, replying, turn_log).await
     } else {
+        if let Some(handle) = recognizer {
+            handle.state = RecognizerState::Retrying;
+        }
         send_input(sink, InputSource::Mic, false).await?;
         if !replying {
-            send_state(sink, "starting").await?;
+            send_state(sink, "recognizer_retrying").await?;
         }
         Ok(())
     }
@@ -969,8 +979,9 @@ fn forward_mic(audio: &[u8], recognizer: Option<&RecognizerHandle>, turn_log: &m
         tracing::debug!(bytes = audio.len(), reason, "mic frame refused");
         return;
     }
-    let forwarded = recognizer
-        .is_some_and(|handle| handle.ready && handle.audio_tx.try_send(audio.to_vec()).is_ok());
+    let forwarded = recognizer.is_some_and(|handle| {
+        handle.state == RecognizerState::Ready && handle.audio_tx.try_send(audio.to_vec()).is_ok()
+    });
     if !forwarded {
         tracing::debug!("mic frame dropped");
         return;
@@ -1080,7 +1091,7 @@ where
         RecognizerHandle {
             audio_tx,
             task,
-            ready: false,
+            state: RecognizerState::Connecting,
         },
         rec_rx,
     )

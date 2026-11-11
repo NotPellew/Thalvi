@@ -1,4 +1,4 @@
-export type Phase = "idle" | "starting" | "listening" | "thinking" | "working";
+export type Phase = "idle" | "starting" | "recognizer_retrying" | "listening" | "thinking" | "working";
 
 export interface Turn {
   readonly role: "user" | "assistant";
@@ -56,7 +56,7 @@ export function textMessage(text: string): string {
   return JSON.stringify({ type: "text", text });
 }
 
-const PHASES: readonly unknown[] = ["idle", "starting", "listening", "thinking", "working"];
+const PHASES: readonly unknown[] = ["idle", "starting", "recognizer_retrying", "listening", "thinking", "working"];
 
 export function parseTurns(value: unknown): Turn[] | null {
   if (!Array.isArray(value)) return null;
