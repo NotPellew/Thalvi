@@ -28,9 +28,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/development' }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: target/tmp/models
-          key: wake-models-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
-          enableCrossOsArchive: true
+          path: ~/.cache/thalvi/test-models
+          key: spotter-models-${{ runner.os }}-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -59,9 +58,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/development' }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: target/tmp/models
-          key: wake-models-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
-          enableCrossOsArchive: true
+          path: ~/AppData/Local/thalvi/test-models
+          key: spotter-models-${{ runner.os }}-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
