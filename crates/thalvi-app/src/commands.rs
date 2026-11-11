@@ -79,7 +79,7 @@ pub fn save<T>(
     form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
 ) -> Result<(T, bool), String> {
     let (value, saved) = state.save_form(form)?;
-    if saved.is_none() {
+    if !saved {
         return Ok((value, false));
     }
     // The overlay window is hidden and idle, so it re-reads the settings when told.

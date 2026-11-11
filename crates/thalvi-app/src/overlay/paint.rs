@@ -129,6 +129,10 @@ impl Canvas {
         Transform::from_scale(self.scale, self.scale)
     }
 
+    pub fn clear(&mut self) {
+        self.pixmap.fill(Color::TRANSPARENT);
+    }
+
     /// Starts over from `background`, a canvas of the same size.
     pub fn copy(&mut self, background: &Self) {
         self.pixmap
@@ -142,6 +146,15 @@ impl Canvas {
             let mut mask = Mask::new(self.pixmap.width(), self.pixmap.height())?;
             let path = PathBuilder::from_rect(tiny_skia::Rect::from_xywh(x, y, w, h)?);
             mask.fill_path(&path, FillRule::Winding, false, self.transform());
+            Some(mask)
+        });
+    }
+
+    /// Keeps what follows inside the polygon through `points`, until `clip(None)`.
+    pub fn clip_to(&mut self, points: &[(f32, f32)]) {
+        self.clip = polyline(points, true).and_then(|path| {
+            let mut mask = Mask::new(self.pixmap.width(), self.pixmap.height())?;
+            mask.fill_path(&path, FillRule::Winding, true, self.transform());
             Some(mask)
         });
     }
@@ -366,10 +379,12 @@ pub struct Style {
     pub tracking: f32,
 }
 
-/// Where a run of text sits: one line from its left edge, or wrapped and centred in a width.
+/// Where a run of text sits: one line from its left edge, or wrapped in a width, each line from
+/// its left edge or centred.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Layout {
     Line,
+    Wrapped { width: f32 },
     Centred { width: f32 },
 }
 
@@ -454,7 +469,7 @@ impl Text {
             // Lines are centred when drawn; cosmic-text's own centring spreads the words apart.
             let width = match layout {
                 Layout::Line => None,
-                Layout::Centred { width } => Some(width * scale),
+                Layout::Wrapped { width } | Layout::Centred { width } => Some(width * scale),
             };
             buffer.set_wrap(if width.is_some() {
                 Wrap::Word
@@ -496,6 +511,20 @@ impl Text {
     }
 
     /// The width of `spans` set on one line, and its line count's height when wrapped, in points.
+    /// The width of each line `spans` are set in, in points.
+    pub fn line_widths(
+        &mut self,
+        spans: &[(&str, Rgba)],
+        style: Style,
+        layout: Layout,
+        scale: f32,
+    ) -> Vec<f32> {
+        self.shape(spans, style, layout, scale)
+            .layout_runs()
+            .map(|run| run.line_w / scale)
+            .collect()
+    }
+
     pub fn measure(
         &mut self,
         spans: &[(&str, Rgba)],
@@ -531,7 +560,7 @@ impl Text {
         };
         for run in buffer.layout_runs() {
             let indent = match layout {
-                Layout::Line => 0.0,
+                Layout::Line | Layout::Wrapped { .. } => 0.0,
                 Layout::Centred { width } => ((width * scale - run.line_w) / 2.0).max(0.0),
             };
             for glyph in run.glyphs {

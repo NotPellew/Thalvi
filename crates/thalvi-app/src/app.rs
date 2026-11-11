@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use semver::Version;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    AppHandle, Emitter, Manager, RunEvent, Theme, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::Delivery;
 use thalvi_desktop::device::Adapters;
@@ -84,8 +86,8 @@ impl SyncedConfig {
     }
 
     /// Builds a settings form from the config read under the save lock, then validates, writes and
-    /// applies it, all under that lock. `form` returns the value to hand back and the form to save,
-    /// or `None` to save nothing. `take_effect` gets the config in use, the validated one and
+    /// applies it, all under that lock; whether it saved. `form` returns the value to hand back and
+    /// the form to save, or `None` to save nothing. `take_effect` gets the config in use, the validated one and
     /// `write`, which replaces the file; it writes before it installs the config in the running
     /// app, as `AppState::take_effect` does, and an error from it before writing leaves the file.
     pub(crate) fn save_form<T>(
@@ -97,18 +99,17 @@ impl SyncedConfig {
             &DesktopConfig,
             &dyn Fn() -> Result<(), String>,
         ) -> Result<(), String>,
-    ) -> Result<(T, Option<(DesktopConfig, bool)>), String> {
+    ) -> Result<(T, bool), String> {
         let _save = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         let current = self.config();
         let (value, settings) = form(&current)?;
         let Some(settings) = settings else {
-            return Ok((value, None));
+            return Ok((value, false));
         };
         ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
         let config = Store::check(settings, &current)?;
         take_effect(&current, &config, &|| self.store.write(&config))?;
-        let look_changed = config.look != current.look;
-        Ok((value, Some((config, look_changed))))
+        Ok((value, true))
     }
 
     fn remember(&self, change: impl FnOnce(&mut DesktopConfig)) -> Result<(), String> {
@@ -238,7 +239,7 @@ impl AppState {
     pub fn save_form<T>(
         &self,
         form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
-    ) -> Result<(T, Option<(DesktopConfig, bool)>), String> {
+    ) -> Result<(T, bool), String> {
         self.saves
             .save_form(form, self.link.audio().paused, |current, config, write| {
                 self.take_effect(current, config, write)
@@ -355,6 +356,7 @@ impl AppState {
         self.overlay_shown
             .store(config.overlay.show, Ordering::SeqCst);
         self.overlay.show_draft(config.overlay.draft);
+        self.overlay.set_look(config.look);
         self.saves.set(config);
         self.link.send(Control::Apply(Box::new(config.clone())));
         self.updates.config_changed();
@@ -748,7 +750,9 @@ fn start_overlay(app: &AppHandle, state: &AppState) {
             return;
         }
     };
-    state.overlay.show_draft(state.config().overlay.draft);
+    let config = state.config();
+    state.overlay.show_draft(config.overlay.draft);
+    state.overlay.set_look(config.look);
     let handle = app.clone();
     state
         .overlay
@@ -766,12 +770,25 @@ fn create_windows(app: &AppHandle) -> tauri::Result<()> {
             // Built at start, when a login start may hold the foreground; `show_settings` focuses it.
             .focused(false)
             .build()?;
-    let window = settings.clone();
-    settings.on_window_event(move |event| {
-        if let WindowEvent::CloseRequested { api, .. } = event {
+    // The overlay follows the system's theme as the settings window sees it, as the web views did.
+    if let Ok(theme) = settings.theme() {
+        app.state::<AppState>()
+            .overlay
+            .set_dark(theme == Theme::Dark);
+    }
+    let (window, handle) = (settings.clone(), app.clone());
+    settings.on_window_event(move |event| match event {
+        WindowEvent::CloseRequested { api, .. } => {
             api.prevent_close();
             let _ = window.hide();
         }
+        WindowEvent::ThemeChanged(theme) => {
+            handle
+                .state::<AppState>()
+                .overlay
+                .set_dark(*theme == Theme::Dark);
+        }
+        _ => {}
     });
     Ok(())
 }
@@ -1248,40 +1265,6 @@ mod tests {
         assert_eq!(error, "F7 is already bound in Hyprland.");
         assert!(!written, "nothing is written");
         assert_eq!(saves.config(), start, "the running config is unchanged");
-    }
-
-    #[test]
-    fn a_save_says_whether_the_look_changed() {
-        let dir = std::env::temp_dir().join(format!("thalvi-app-look-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let start = DesktopConfig::from_json_str("{}").unwrap();
-        let saves = SyncedConfig::new(
-            Store::new(Some(dir.join("desktop.json"))).unwrap(),
-            start.clone(),
-        );
-        let changed = |look: &str| {
-            let mut settings = crate::settings::settings_json(&saves.config()).unwrap();
-            settings["look"] = serde_json::json!(look);
-            let ((), result) = saves
-                .save_form(
-                    |_| Ok(((), Some(settings))),
-                    true,
-                    |_, config, write| {
-                        write()?;
-                        saves.set(config);
-                        Ok(())
-                    },
-                )
-                .unwrap();
-            result.map(|(_, look_changed)| look_changed)
-        };
-
-        let results = [changed("holo"), changed("holo")];
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert_ne!(start.look, thalvi_desktop::config::Look::Holo);
-        assert_eq!(results, [Some(true), Some(false)]);
     }
 
     #[test]

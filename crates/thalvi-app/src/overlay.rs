@@ -1,17 +1,24 @@
 //! The status overlay: when it shows, and its own thread, which draws it on the CPU and hands each
 //! frame to the desktop's overlay surface.
 
-mod gunmetal;
+mod module;
+mod neon;
 mod paint;
+mod painter;
+mod view;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
-use thalvi_desktop::host::{OverlayEvent, OverlayPlan, OverlaySurface, OverlayWaker};
+use thalvi_desktop::config::Look;
+use thalvi_desktop::host::{
+    HostError, OverlayEvent, OverlayFrame, OverlayPlan, OverlaySurface, OverlayWaker,
+};
 
 use crate::status::Status;
-use gunmetal::{Painter, View};
+use painter::Painter;
+use view::View;
 
 /// How long a delivery's confirmation stays on screen.
 const DONE_FOR: Duration = Duration::from_secs(1);
@@ -63,6 +70,9 @@ enum Message {
     Status(Box<Status>, Visibility),
     Visibility(Visibility),
     Draft(bool),
+    Look(Look),
+    /// Whether the system's theme is dark.
+    Theme(bool),
 }
 
 /// Feeds the overlay's thread from any thread. What it is told before the thread starts waits.
@@ -121,6 +131,15 @@ impl Overlay {
         self.send(Message::Draft(show));
     }
 
+    pub fn set_look(&self, look: Look) {
+        self.send(Message::Look(look));
+    }
+
+    /// Follows the system's theme: dark, or light.
+    pub fn set_dark(&self, dark: bool) {
+        self.send(Message::Theme(dark));
+    }
+
     /// The microphone's loudness, 0 to 1; the wave picks it up on its next frame.
     pub fn level(&self, level: f32) {
         self.level.store(level.to_bits(), Ordering::Relaxed);
@@ -143,7 +162,7 @@ fn run(
     level: &AtomicU32,
     cancel: &dyn Fn(),
 ) {
-    let mut surface = match plan.open(gunmetal::WIDTH, gunmetal::HEIGHT, takes_clicks) {
+    let mut surface = match plan.open(view::WIDTH, view::HEIGHT, takes_clicks) {
         Ok(surface) => surface,
         Err(error) => {
             println!("{error} The status overlay stays off.");
@@ -152,29 +171,47 @@ fn run(
     };
     *waker.lock().unwrap_or_else(PoisonError::into_inner) = Some(surface.waker());
     // Fonts load here, before the first show, so no show waits for them.
-    let Some(mut painter) = Painter::new(surface.scale()) else {
+    let Some(mut painter) = Painter::new(surface.scale(), Look::default(), true) else {
         println!("The status overlay could not be drawn at this scale. It stays off.");
         return;
     };
-    let mut overlay = Overlaying::new(takes_clicks);
+    let mut overlay = Overlaying::new(takes_clicks, Instant::now());
     loop {
         while let Ok(message) = messages.try_recv() {
-            overlay.take(message);
+            overlay.take(message, Instant::now());
         }
-        overlay.settle(
-            &mut surface,
-            &mut painter,
-            f32::from_bits(level.load(Ordering::Relaxed)),
-        );
+        let level = f32::from_bits(level.load(Ordering::Relaxed));
+        overlay.settle(&mut surface, &mut painter, level, Instant::now());
         match surface.wait(overlay.deadline()) {
             OverlayEvent::Woken => {}
             OverlayEvent::Press { x, y } => {
-                if overlay.visible && overlay.view.cancels(x, y) {
+                if overlay.cancels(&painter, x, y) {
                     cancel();
                 }
             }
-            OverlayEvent::Due => overlay.due(),
+            OverlayEvent::Due => overlay.due(Instant::now()),
         }
+    }
+}
+
+/// What the overlay's thread asks of its surface: the desktop's, or a test's.
+trait Surface {
+    fn show(&mut self, frame: &OverlayFrame) -> Result<(), HostError>;
+    fn present(&mut self, frame: &OverlayFrame) -> Result<(), HostError>;
+    fn hide(&mut self);
+}
+
+impl Surface for OverlaySurface {
+    fn show(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
+        Self::show(self, frame)
+    }
+
+    fn present(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
+        Self::present(self, frame)
+    }
+
+    fn hide(&mut self) {
+        Self::hide(self);
     }
 }
 
@@ -194,59 +231,75 @@ struct Overlaying {
     stale: bool,
     /// The last failure to show, reported once.
     failure: Option<String>,
+    /// The look, and whether the system's theme is dark.
+    style: (Look, bool),
 }
 
 impl Overlaying {
-    fn new(takes_clicks: bool) -> Self {
+    fn new(takes_clicks: bool, now: Instant) -> Self {
         Self {
             view: View::new(takes_clicks),
-            started: Instant::now(),
+            started: now,
             visible: false,
             wanted: false,
             hide_at: None,
             frame_at: None,
             stale: false,
             failure: None,
+            style: (Look::default(), true),
         }
     }
 
-    fn clock(&self) -> f64 {
-        self.started.elapsed().as_secs_f64()
+    fn clock(&self, now: Instant) -> f64 {
+        now.saturating_duration_since(self.started).as_secs_f64()
     }
 
-    fn take(&mut self, message: Message) {
+    fn take(&mut self, message: Message, now: Instant) {
         match message {
             Message::Status(status, visibility) => {
-                self.view.set_status(*status, self.clock());
+                self.view.set_status(*status, self.clock(now));
                 self.stale = true;
-                self.want(visibility);
+                self.want(visibility, now);
             }
-            Message::Visibility(visibility) => self.want(visibility),
+            Message::Visibility(visibility) => self.want(visibility, now),
             Message::Draft(show) => {
                 self.view.set_draft(show);
                 self.stale = true;
             }
+            Message::Look(look) => {
+                self.style.0 = look;
+                self.stale = true;
+            }
+            Message::Theme(dark) => {
+                self.style.1 = dark;
+                self.stale = true;
+            }
         }
     }
 
-    fn want(&mut self, visibility: Visibility) {
+    fn want(&mut self, visibility: Visibility, now: Instant) {
         let (wanted, hide_at) = match visibility {
             Visibility::Show => (true, None),
             Visibility::Hide => (false, None),
-            Visibility::ShowFor(time) => (true, Some(Instant::now() + time)),
+            Visibility::ShowFor(time) => (true, Some(now + time)),
         };
         self.wanted = wanted;
         self.hide_at = hide_at;
     }
 
     /// A deadline passed: hide once shown long enough, or draw the next frame.
-    fn due(&mut self) {
-        if self.hide_at.is_some_and(|at| Instant::now() >= at) {
+    fn due(&mut self, now: Instant) {
+        if self.hide_at.is_some_and(|at| now >= at) {
             self.wanted = false;
             self.hide_at = None;
-        } else if self.frame_at.is_some_and(|at| Instant::now() >= at) {
+        } else if self.frame_at.is_some_and(|at| now >= at) {
             self.stale = true;
         }
+    }
+
+    /// Whether a press at `(x, y)` points cancels: only on a shown overlay's cancel button.
+    fn cancels(&self, painter: &Painter, x: f32, y: f32) -> bool {
+        self.visible && painter.cancels(&self.view, x, y)
     }
 
     fn deadline(&self) -> Option<Instant> {
@@ -257,7 +310,13 @@ impl Overlaying {
     }
 
     /// Brings the surface in line with what is wanted, drawing a frame when the view moved.
-    fn settle(&mut self, surface: &mut OverlaySurface, painter: &mut Painter, level: f32) {
+    fn settle(
+        &mut self,
+        surface: &mut impl Surface,
+        painter: &mut Painter,
+        level: f32,
+        now: Instant,
+    ) {
         if !self.wanted {
             if self.visible {
                 surface.hide();
@@ -269,8 +328,13 @@ impl Overlaying {
         if self.visible && !self.stale {
             return;
         }
-        let next = self.view.poll(self.clock(), level);
-        let frame = painter.draw(&self.view);
+        let clock = self.clock(now);
+        painter.restyle(self.style.0, self.style.1);
+        let next = match (self.view.poll(clock, level), painter.motion(clock)) {
+            (Some(view), Some(look)) => Some(view.min(look)),
+            (view, look) => view.or(look),
+        };
+        let frame = painter.draw(&self.view, clock);
         let drawn = if self.visible {
             surface.present(frame)
         } else {
@@ -290,7 +354,7 @@ impl Overlaying {
             }
         }
         self.stale = false;
-        self.frame_at = next.map(|wait| Instant::now() + wait);
+        self.frame_at = next.map(|wait| now + wait);
     }
 }
 
@@ -303,6 +367,128 @@ mod tests {
     use crate::status::FailureKind;
 
     use super::*;
+
+    /// Records what the overlay's thread asked of it; refuses to show while `refuse` is set.
+    #[derive(Default)]
+    struct Fake {
+        calls: Vec<&'static str>,
+        refuse: bool,
+    }
+
+    impl Surface for Fake {
+        fn show(&mut self, _: &OverlayFrame) -> Result<(), HostError> {
+            self.calls.push("show");
+            if self.refuse {
+                return Err(HostError::Unsupported("The desktop said no.".to_owned()));
+            }
+            Ok(())
+        }
+
+        fn present(&mut self, _: &OverlayFrame) -> Result<(), HostError> {
+            self.calls.push("present");
+            Ok(())
+        }
+
+        fn hide(&mut self) {
+            self.calls.push("hide");
+        }
+    }
+
+    fn capturing() -> Status {
+        Status::Capturing {
+            target: None,
+            committed: "hello".to_owned(),
+            partial: None,
+            notice: None,
+        }
+    }
+
+    #[test]
+    fn the_surface_shows_once_redraws_what_changed_and_hides_when_told_or_when_its_time_is_up() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut painter = Painter::new(1.0, Look::Gunmetal, true).unwrap();
+        let (mut surface, mut overlay) = (Fake::default(), Overlaying::new(false, start));
+        let mut step = |message: Option<Message>, due: bool, now: Instant| {
+            if let Some(message) = message {
+                overlay.take(message, now);
+            }
+            if due {
+                overlay.due(now);
+            }
+            overlay.settle(&mut surface, &mut painter, 0.5, now);
+            overlay.deadline()
+        };
+        step(
+            Some(Message::Status(Box::new(capturing()), Visibility::Show)),
+            false,
+            at(0),
+        );
+        // Nothing changed and no frame is due: the surface is left alone.
+        step(None, false, at(10));
+        // The wave asks for its next frame.
+        step(None, true, at(40));
+        let done = Box::new(Status::Done {
+            target: None,
+            route: CaptureRoute::Paste,
+            notice: "Delivered.".to_owned(),
+        });
+        let deadline = step(
+            Some(Message::Status(
+                done,
+                Visibility::ShowFor(Duration::from_secs(1)),
+            )),
+            false,
+            at(100),
+        );
+        assert_eq!(
+            deadline,
+            Some(at(1100)),
+            "the confirmation's time is the only deadline"
+        );
+        step(None, true, at(1100));
+        step(
+            Some(Message::Status(Box::new(capturing()), Visibility::Show)),
+            false,
+            at(2000),
+        );
+        step(Some(Message::Visibility(Visibility::Hide)), false, at(2100));
+        assert_eq!(
+            surface.calls,
+            ["show", "present", "present", "hide", "show", "hide"]
+        );
+    }
+
+    #[test]
+    fn a_surface_that_refuses_to_show_leaves_the_overlay_hidden_and_the_next_status_tries_again() {
+        let start = Instant::now();
+        let mut painter = Painter::new(1.0, Look::Gunmetal, true).unwrap();
+        let mut surface = Fake {
+            refuse: true,
+            ..Fake::default()
+        };
+        let mut overlay = Overlaying::new(true, start);
+        overlay.take(
+            Message::Status(Box::new(capturing()), Visibility::Show),
+            start,
+        );
+        overlay.settle(&mut surface, &mut painter, 0.0, start);
+        assert!(
+            !overlay.cancels(&painter, 386.0, 17.0),
+            "a hidden overlay cancels nothing"
+        );
+        surface.refuse = false;
+        overlay.take(
+            Message::Status(Box::new(capturing()), Visibility::Show),
+            start,
+        );
+        overlay.settle(&mut surface, &mut painter, 0.0, start);
+        assert_eq!(surface.calls, ["show", "show"]);
+        assert!(
+            overlay.cancels(&painter, 386.0, 17.0),
+            "a shown overlay's button cancels"
+        );
+    }
 
     #[test]
     fn the_overlay_shows_from_the_wake_word_and_hides_after_a_confirmation_or_a_failure() {
