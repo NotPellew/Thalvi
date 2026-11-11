@@ -1245,30 +1245,37 @@ mod tests {
         })
     }
 
-    async fn network_fixture() -> (Files, usize) {
-        let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
-        let store = ModelStore::in_dir(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .join(target)
-                .join("tmp/models"),
-        );
-        let files = Files {
-            encoder: store.fetch(&models::SPOTTER.encoder).await.unwrap(),
-            decoder: store.fetch(&models::SPOTTER.decoder).await.unwrap(),
-            joiner: store.fetch(&models::SPOTTER.joiner).await.unwrap(),
-        };
-        let pieces = read_pieces(
-            &std::fs::read(store.fetch(&models::SPOTTER.pieces).await.unwrap()).unwrap(),
-        )
-        .unwrap();
-        (files, pieces.count)
+    /// The real spotter files, fetched once per test process into a per-user cache that outlives
+    /// target dirs, so a clean build reuses what this machine already downloaded.
+    async fn network_fixture() -> (&'static Files, usize) {
+        static FIXTURE: tokio::sync::OnceCell<(Files, usize)> = tokio::sync::OnceCell::const_new();
+        let (files, vocab) = FIXTURE
+            .get_or_init(|| async {
+                let store = ModelStore::in_dir(
+                    dirs::cache_dir()
+                        .unwrap()
+                        .join("thalvi")
+                        .join("test-models"),
+                );
+                let files = Files {
+                    encoder: store.fetch(&models::SPOTTER.encoder).await.unwrap(),
+                    decoder: store.fetch(&models::SPOTTER.decoder).await.unwrap(),
+                    joiner: store.fetch(&models::SPOTTER.joiner).await.unwrap(),
+                };
+                let pieces = read_pieces(
+                    &std::fs::read(store.fetch(&models::SPOTTER.pieces).await.unwrap()).unwrap(),
+                )
+                .unwrap();
+                (files, pieces.count)
+            })
+            .await;
+        (files, *vocab)
     }
 
     #[tokio::test]
     async fn a_completed_phrase_requires_two_blanks_and_includes_the_exact_confidence_boundary() {
         let (files, vocab) = network_fixture().await;
-        let mut network = Network::load(&files, vocab).unwrap();
+        let mut network = Network::load(files, vocab).unwrap();
         let caches = network.layouts.iter().map(Layout::zeros).collect();
         let (activations, _) = network
             .encode(vec![0.0; network.window * KALDI_BINS], caches)
@@ -1349,7 +1356,7 @@ mod tests {
     #[tokio::test]
     async fn equally_likely_completed_phrases_keep_the_beams_original_order() {
         let (files, vocab) = network_fixture().await;
-        let mut network = Network::load(&files, vocab).unwrap();
+        let mut network = Network::load(files, vocab).unwrap();
         let caches = network.layouts.iter().map(Layout::zeros).collect();
         let (activations, _) = network
             .encode(vec![0.0; network.window * KALDI_BINS], caches)
@@ -1406,7 +1413,7 @@ mod tests {
     #[tokio::test]
     async fn beam_paths_that_fall_back_to_the_root_forget_their_tokens_and_merge() {
         let (files, vocab) = network_fixture().await;
-        let mut network = Network::load(&files, vocab).unwrap();
+        let mut network = Network::load(files, vocab).unwrap();
         let caches = network.layouts.iter().map(Layout::zeros).collect();
         let (activations, _) = network
             .encode(vec![0.0; network.window * KALDI_BINS], caches)
@@ -1434,7 +1441,7 @@ mod tests {
     #[tokio::test]
     async fn encoder_chunks_must_be_nonzero_whole_steps_that_fit_the_window() {
         let (files, vocab) = network_fixture().await;
-        let network = Network::load(&files, vocab).unwrap();
+        let network = Network::load(files, vocab).unwrap();
         let oversized = (network.window / SUBSAMPLING + 1) * SUBSAMPLING;
         let dir =
             std::env::temp_dir().join(format!("thalvi-spotter-chunks-{}", std::process::id()));
@@ -1496,7 +1503,7 @@ mod tests {
     #[tokio::test]
     async fn the_network_normalizes_scores_and_refuses_inconsistent_models_before_capture() {
         let (files, vocab) = network_fixture().await;
-        let mut network = Network::load(&files, vocab).unwrap();
+        let mut network = Network::load(files, vocab).unwrap();
         let caches = network.layouts.iter().map(Layout::zeros).collect();
         let (activations, _) = network
             .encode(vec![0.0; network.window * KALDI_BINS], caches)
