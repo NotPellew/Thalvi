@@ -18,14 +18,14 @@ areas your change touches. Editing rules are in
   the clipboard only: it exposes neither the focused window nor focus by ID.
   Why: the desktops we can qualify. Rejected: KDE, X11 and macOS until needed,
   and claiming untested platform parity.
-- **Rust desktop app with a Tauri UI.** One process runs engine, tray, a top overlay and a settings window; the overlay never takes
-  focus (Hyprland window rules via the host, a non-activating window on Windows, an XWayland window on GNOME, where the app runs on GTK's X11 backend).
-  Why: one TypeScript UI, no IPC; on GNOME's Mutter a Wayland window and `wl-copy` each take focus, an X11 window and clipboard do not (measured).
-  Rejected: layer-shell webview (blank), GTK-only overlay, egui, native Wayland GTK on GNOME.
+- **Rust desktop app; Tauri settings, CPU-drawn overlay.** One process runs engine, tray, a Tauri settings window and an overlay drawn on its own thread with tiny-skia onto each desktop's surface: a layer surface on Hyprland, an override-redirect XWayland window on GNOME (GTK's X11 backend), a layered non-activating window on Windows; it never takes focus.
+  Why: no IPC; the overlay holds no WebView or GPU device (Windows GPU memory 27–33 → 0 MiB, binary +4 MB, #384); on GNOME's Mutter a Wayland window and `wl-copy` each take focus, an X11 window and clipboard do not (measured).
+  Rejected: WebView overlay (per-desktop focus tricks; a layer-shell WebView is blank), Rune (#367: +116 MiB GPU on Windows, +28.6 MB, pre-release, takes no pull requests),
+  GTK-only overlay, egui, native Wayland GTK on GNOME.
 - **Three looks for the desktop UI.** `look` picks gunmetal (default), holo or neon for the overlay
   and settings window; the overlay hangs from the top of the usable screen area, one 460 × 200 size
-  for all looks. Why: the developer chose gunmetal, the others stay as options; resizing re-centres it
-  on Hyprland. Rejected: dropping the neon pill, y = 0 (a bar covers it), a window size per look.
+  for all looks, and neon follows the system's light or dark theme. Why: the developer chose gunmetal,
+  the others stay as options. Rejected: dropping the neon pill, y = 0 (a bar covers it), a size per look.
 - **Local recognition in the desktop app.** `stt.engine: local` runs a catalog model on `ort`, picked in Settings from a Language drop-down (filters only, not saved) and a Model drop-down: Nemotron Streaming (0.6B, 160 ms, default), Nemotron Unified (0.6B, buffered) or Parakeet TDT v3 (0.6B, offline, re-read every 640 ms). Why: offline; a model is listed for a real trade-off, not only for the fewest errors; word errors on
   LibriSpeech and the developer's takes 3.46/7.14% and 3.03/6.35%, Unified also 8.38% German, 7.09% Spanish; Parakeet about 0.15× real time against Unified's 1×, at 2.33/4.76% (Unified 2.25/4.76% on those clips), 12.44% German, 7.95% Spanish. Rejected: Moonshine (7.4%), Zipformer
   (28%), Nemotron 3.5 (15%), the 80 and 560 ms exports (no real choice; 3.62 and 3.46% on LibriSpeech).
@@ -178,7 +178,7 @@ areas your change touches. Editing rules are in
   Rejected: applying a device change automatically after an active capture.
 - **Errors stay in the tray and Settings, not on the overlay.** Each says what failed, why and which setting to fix; its short headline shows on the
   overlay for 5 s, and again when it refuses a hold key press. Copy (settings, tray, `copy-error`) puts a report (causes, version, system, no secrets)
-  on the clipboard through the host. Why: on Hyprland `no_focus` makes the overlay click-through, so a headline that stayed covered the screen with no way
+  on the clipboard through the host. Why: on Hyprland the overlay takes no clicks, so a headline that stayed covered the screen with no way
   to close it. Rejected: keeping errors on the overlay, a focusable overlay, a duration per error, the WebView clipboard.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
   browser and app actions; execution receives a typed action. Why: a later model
