@@ -32,14 +32,14 @@
       ]
     },
     "web/src/session.ts": {
-      "sha256": "4e938f4496b7e35454b5cf73b114e865c0b43848452bbb823860af34c914aa85",
+      "sha256": "d7c3d56bed52f1cc386902211a56e5ad82e7782913610efe52658cb7f5eefb5f",
       "functions": [
         "reduce",
         "endedState"
       ]
     },
     "web/src/view.ts": {
-      "sha256": "073640977378cd7f9bd9c3609b354a4a0fa88ba65d3598a7a185e470f97275e9",
+      "sha256": "c49ab2910720908623607f297152c6418901db4c215a0df3dae8f9036efb6c18",
       "functions": [
         "render (voice.disabled)"
       ]

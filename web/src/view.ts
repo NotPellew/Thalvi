@@ -9,6 +9,7 @@ const STATES: Record<DisplayState, { label: string; hint: string }> = {
   ended: { label: "Stopped", hint: "Start a new conversation, or open one from the list." },
   idle: { label: "Idle", hint: "Tap the reticle to start talking, or type below." },
   starting: { label: "Starting", hint: "Getting ready to listen." },
+  recognizer_retrying: { label: "Reconnecting speech", hint: "Can't reach speech recognition. Trying again." },
   listening: { label: "Listening", hint: "Go ahead, I am listening." },
   thinking: { label: "Thinking", hint: "Working on your answer. Tap the reticle to stop." },
   working: { label: "Working", hint: "Using a tool. Tap the reticle to stop." },
@@ -45,7 +46,7 @@ export interface CollapseInput {
   readonly latestTall: boolean;
 }
 
-const LIVE_DISPLAYS: readonly DisplayState[] = ["starting", "listening", "thinking", "working", "speaking"];
+const LIVE_DISPLAYS: readonly DisplayState[] = ["starting", "recognizer_retrying", "listening", "thinking", "working", "speaking"];
 
 /** The big orb stays only for a live voice exchange read at the bottom; anything else collapses it. */
 export function shouldCollapse(input: CollapseInput): boolean {
@@ -120,6 +121,7 @@ function coreIcon(display: DisplayState): IconName {
   switch (display) {
     case "connecting":
     case "reconnecting":
+    case "recognizer_retrying":
       return "wait";
     case "ended":
       return "alert";

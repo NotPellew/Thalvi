@@ -48,6 +48,7 @@ export const INITIAL: SessionState = {
 };
 
 export const UNREACHABLE_NOTICE = "Can't reach the server. Trying again…";
+export const RECOGNIZER_RETRY_NOTICE = "Can't reach speech recognition. Trying again…";
 export const PRIVATE_LOST_NOTICE =
   "This private conversation ended when the connection dropped, and can't be resumed. Start a new conversation.";
 
@@ -126,7 +127,8 @@ function reduceServer(s: SessionState, m: ServerMessage): SessionState {
       return { ...s, turns, replyOpen: true };
     }
     case "input":
-      return m.source === "text" ? { ...s, voice: false, partial: "" } : s;
+      if (m.source === "text") return { ...s, voice: false, partial: "" };
+      return m.ready && s.notice === RECOGNIZER_RETRY_NOTICE ? { ...s, notice: null } : s;
     case "reply_audio":
       return { ...s, replyAudio: m.on };
     case "interrupted":

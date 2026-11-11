@@ -56,6 +56,34 @@ describe("Controller", () => {
     expect(shown()).toBe("listening");
   });
 
+  it("shows recognizer retrying until ready clears its notice, and Voice can still stop", () => {
+    const { controller, calls, server, shown } = online();
+    const notice = "Can't reach speech recognition. Trying again…";
+    controller.setVoice(true);
+    server({ type: "error", message: notice });
+    server({ type: "state", state: "recognizer_retrying" });
+
+    expect(shown()).toBe("recognizer_retrying");
+    expect(controller.state.notice).toBe(notice);
+
+    server({ type: "input", source: "mic", ready: true });
+    expect(controller.state.notice).toBeNull();
+    server({ type: "state", state: "listening" });
+    expect(shown()).toBe("listening");
+
+    server({ type: "error", message: "The reply failed." });
+    server({ type: "input", source: "mic", ready: true });
+    expect(controller.state.notice).toBe("The reply failed.");
+
+    server({ type: "error", message: notice });
+    server({ type: "state", state: "recognizer_retrying" });
+    calls.length = 0;
+    controller.setVoice(false);
+    expect(calls).toEqual([INPUT_TEXT, AUDIO_OFF, "flush", "release"]);
+    expect(shown()).toBe("idle");
+    expect(controller.state.notice).toBeNull();
+  });
+
   it("shows a spoken turn: transcript, reply text, and Speaking until local audio ends", () => {
     const { controller, calls, server, shown } = online();
     controller.setVoice(true);
