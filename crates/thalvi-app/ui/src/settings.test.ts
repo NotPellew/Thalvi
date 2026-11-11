@@ -149,7 +149,6 @@ describe("pages", () => {
         title: "Capture",
         groups: {
           "Dictation wake word": ["wake model (dictation)", "threshold (dictation)"],
-          "Conversation wake word": ["wake model (conversation)", "threshold (conversation)"],
           Endings: ["ending phrases"],
           "Quiet before acting": ["quiet before paste", "quiet before paste and enter", "quiet before running a task"],
           "Capture limits": ["stop after silence", "stop after"],
@@ -232,7 +231,6 @@ describe("save", () => {
     goTo("capture");
     type(control("Quiet before paste", "input"), "1.5");
     type(control("Threshold (dictation)", "input"), "0.8");
-    choose(control("Wake model (conversation)", "select"), "hey_jarvis");
     goTo("feedback");
     flip(control("Show the draft", "input"));
     flip(control("Wake sound", "input"));
@@ -246,7 +244,6 @@ describe("save", () => {
     expected.stt.entries = [{ ...SERVER, address: "wss://thalvi.example" } as SpeechEntry];
     expected.ending_pause.paste = 1.5;
     expected.wake.capture.threshold = 0.8;
-    expected.wake.conversation.model = "hey_jarvis";
     expected.overlay.draft = false;
     expected.cues.wake = false;
     expected.capture_limits.max = 120;
@@ -449,10 +446,9 @@ describe("the wake word picker", () => {
   const problem = (label: string): string =>
     rowOf(label).querySelector<HTMLElement>(".note:not([hidden])")?.textContent ?? "";
 
-  it("shows each catalog phrase with whether it is ready or not downloaded", async () => {
+  it("shows catalog phrases and downloads the selected dictation head", async () => {
     const stub = await openCapture();
     expect(badge("Wake model (dictation)")).toBe("Ready");
-    expect(badge("Wake model (conversation)")).toBe("Not downloaded");
     const dictation = control("Wake model (dictation)", "select");
     expect(Array.from(dictation.options).map((option) => option.textContent)).toEqual([
       "Hey Thalvi — Ready",
@@ -462,27 +458,32 @@ describe("the wake word picker", () => {
     ]);
     let finish = (): void => { throw new Error("download has not started"); };
     stub.backend.downloadWakeModel.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
-    within(rowOf("Wake model (conversation)"), "Download").click();
-    expect(badge("Wake model (conversation)")).toBe("Downloading…");
+    choose(dictation, "hey_mycroft");
+    within(rowOf("Wake model (dictation)"), "Download").click();
+    expect(badge("Wake model (dictation)")).toBe("Downloading…");
     finish();
     await settle();
     expect(stub.backend.downloadWakeModel).toHaveBeenCalledWith("hey_mycroft");
-    expect(badge("Wake model (conversation)")).toBe("Ready");
+    expect(badge("Wake model (dictation)")).toBe("Ready");
   });
 
-  it("shows models a retry downloaded while the window stayed open, and still flags the rest", async () => {
-    const stub = await openCapture();
-    expect(badge("Wake model (conversation)")).toBe("Not downloaded");
+  it("shows a dictation model downloaded while the window stayed open", async () => {
+    const settings = {
+      ...SETTINGS,
+      wake: { ...SETTINGS.wake, capture: { model: "hey_jarvis", threshold: 0.5 } },
+    };
+    const stub = await openCapture(settings);
+    expect(badge("Wake model (dictation)")).toBe("Not downloaded");
     stub.backend.listWakeModels.mockResolvedValueOnce(
-      WAKE_MODELS_INFO.map((info) => ({ ...info, cached: info.name !== "hey_jarvis" })),
+      WAKE_MODELS_INFO.map((info) => ({ ...info, cached: info.cached || info.name === "hey_jarvis" })),
     );
     stub.emit({ state: "loading", notice: "Downloading the wake word model." });
     await settle();
-    expect(badge("Wake model (conversation)")).toBe("Ready");
+    expect(badge("Wake model (dictation)")).toBe("Ready");
     expect(Array.from(control("Wake model (dictation)", "select").options).map((option) => option.textContent)).toEqual([
       "Hey Thalvi — Ready",
-      "Hey Mycroft — Ready",
-      "Hey Jarvis — Not downloaded",
+      "Hey Mycroft — Not downloaded",
+      "Hey Jarvis — Ready",
       "Custom model…",
     ]);
   });
@@ -496,13 +497,10 @@ describe("the wake word picker", () => {
     expect(control("Wake model (dictation)", "select").options[0]).toBe(option);
   });
 
-  it("prevents choosing the other wake word's phrase", async () => {
+  it("shows catalog choices in the dictation picker", async () => {
     await openCapture();
     const dictation = control("Wake model (dictation)", "select");
-    const conversation = control("Wake model (conversation)", "select");
-    expect(dictation.querySelector<HTMLOptionElement>('option[value="hey_mycroft"]')?.disabled).toBe(true);
-    expect(conversation.querySelector<HTMLOptionElement>('option[value="hey_thalvi"]')?.disabled).toBe(true);
-    expect(dictation.querySelector<HTMLOptionElement>('option[value="hey_thalvi"]')?.disabled).toBe(false);
+    expect(Array.from(dictation.options).filter((option) => option.disabled)).toEqual([]);
   });
 
   it("moves the threshold to the chosen catalog phrase's default and saves it", async () => {
@@ -527,7 +525,7 @@ describe("the wake word picker", () => {
     expect(rowOf("Wake model (dictation)").textContent).toContain("custom.onnx");
     button("Save").click();
     await settle();
-    expect(stub.backend.validateWakeModels).toHaveBeenCalledWith("/models/custom.onnx", "hey_mycroft");
+    expect(stub.backend.validateWakeModels).toHaveBeenCalledWith("/models/custom.onnx");
     expect(sent(stub).wake.capture.model).toBe("/models/custom.onnx");
   });
 
@@ -544,17 +542,13 @@ describe("the wake word picker", () => {
     expect(root.querySelector(".err")?.textContent).toBe("The wake model /models/bad.onnx could not be loaded: not a wake model.");
   });
 
-  it("does not save the same custom file for both wake words", async () => {
-    const stub = await openCapture();
-    for (const label of ["Wake model (dictation)", "Wake model (conversation)"] as const) {
-      choose(control(label, "select"), "__custom");
-      within(rowOf(label), "Browse…").click();
-      await settle();
-    }
-    expect(problem("Wake model (conversation)")).toBe("The capture and conversation wake models must be different.");
+  it("preserves the saved conversation wake choice when other settings are saved", async () => {
+    const conversation = { model: "hey_jarvis", threshold: 0.65 };
+    const stub = await openCapture({ ...SETTINGS, wake: { ...SETTINGS.wake, conversation } });
+    type(control("Quiet before paste", "input"), "1.5");
     button("Save").click();
     await settle();
-    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    expect(sent(stub).wake.conversation).toEqual(conversation);
   });
 
   it("shows a saved custom file by name when Settings opens", async () => {

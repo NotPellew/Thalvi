@@ -31,20 +31,20 @@ const MEL_LEAD_IN: usize = 480;
 const WARM_UP_FRAMES: usize = 5;
 const SEED_SAMPLES: usize = 64_000;
 
-/// Which head crossed its threshold.
+/// The dictation head crossed its threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WakeEvent {
     Capture,
-    Conversation,
-    /// Both heads crossed on the same frame.
-    Ambiguous,
+}
+
+pub(crate) fn dictation_event(score: f32, threshold: f32) -> Option<WakeEvent> {
+    (score >= threshold).then_some(WakeEvent::Capture)
 }
 
 /// What one frame produced.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WakeFrame {
     pub capture: f32,
-    pub conversation: f32,
     /// Real time spent on this frame, for the opt-in metrics.
     pub inference: Duration,
     pub event: Option<WakeEvent>,
@@ -59,8 +59,6 @@ pub enum ConfigError {
     UnknownModel(String),
     #[error("A wake threshold must be above 0 and at most 1.")]
     Threshold,
-    #[error("The capture and conversation wake models must be different.")]
-    SameModel,
 }
 
 /// A head chosen by catalog name or by the path of a local `.onnx` file.
@@ -169,7 +167,7 @@ fn default_head(head: CatalogHead) -> HeadConfig {
     HeadConfig::from_model(HeadModel::Catalog(head))
 }
 
-/// Both heads, validated once when read: the two models differ.
+/// Dictation wake configuration and the saved conversation choice for future desktop conversations.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(try_from = "RawWakeConfig")]
 pub struct WakeConfig {
@@ -195,18 +193,13 @@ fn default_conversation() -> HeadConfig {
 }
 
 impl WakeConfig {
-    /// Builds both heads, refusing the same model for both.
-    ///
-    /// # Errors
-    /// [`ConfigError::SameModel`] when both heads use the same model.
-    pub fn new(capture: HeadConfig, conversation: HeadConfig) -> Result<Self, ConfigError> {
-        if capture.model == conversation.model {
-            return Err(ConfigError::SameModel);
-        }
-        Ok(Self {
+    /// Builds the dictation wake and retains the saved conversation choice.
+    #[must_use]
+    pub fn new(capture: HeadConfig, conversation: HeadConfig) -> Self {
+        Self {
             capture,
             conversation,
-        })
+        }
     }
 }
 
@@ -214,7 +207,7 @@ impl TryFrom<RawWakeConfig> for WakeConfig {
     type Error = ConfigError;
 
     fn try_from(raw: RawWakeConfig) -> Result<Self, ConfigError> {
-        Self::new(raw.capture, raw.conversation)
+        Ok(Self::new(raw.capture, raw.conversation))
     }
 }
 
@@ -239,25 +232,17 @@ impl WakeConfig {
     }
 }
 
-/// Checks two chosen wake models the way listening will use them: each catalog name must be
-/// known, each local file must load as a wake head, and the two must differ. Catalog heads are
-/// not downloaded here; they download on first use, as before.
+/// Checks the chosen dictation wake model. Catalog heads are not downloaded here; they download
+/// on first use, as before.
 ///
 /// # Errors
-/// The plain reason a choice cannot be used: an unknown name, a file that cannot be loaded as
-/// a head, or the same model chosen for both.
-pub fn validate_wake_models(capture: &str, conversation: &str) -> Result<(), WakeError> {
+/// The plain reason a choice cannot be used: an unknown name or a file that cannot be loaded as
+/// a head.
+pub fn validate_wake_model(capture: &str) -> Result<(), WakeError> {
     let capture = HeadModel::try_from(capture.trim().to_owned())?;
-    let conversation = HeadModel::try_from(conversation.trim().to_owned())?;
-    for model in [&capture, &conversation] {
-        if let HeadModel::File(path) = model {
-            open_head(path, default_threshold(model))?;
-        }
+    if let HeadModel::File(path) = &capture {
+        open_head(path, default_threshold(&capture))?;
     }
-    WakeConfig::new(
-        HeadConfig::from_model(capture),
-        HeadConfig::from_model(conversation),
-    )?;
     Ok(())
 }
 
@@ -301,7 +286,6 @@ pub struct WakeEngine {
     mel: Session,
     embedding: Session,
     capture: Head,
-    conversation: Head,
     tail: Vec<f32>,
     mel_rows: VecDeque<[f32; MEL_BINS]>,
     features: VecDeque<[f32; EMBEDDING_DIM]>,
@@ -313,9 +297,7 @@ impl WakeEngine {
     /// Whether [`load`](Self::load) would download a file: any pinned file it fetches that is
     /// not on disk. A head given as a local path never downloads.
     pub async fn needs_download(config: &WakeConfig, store: &ModelStore) -> bool {
-        let heads = [config.capture(), config.conversation()]
-            .into_iter()
-            .filter_map(head_asset);
+        let heads = [config.capture()].into_iter().filter_map(head_asset);
         for asset in [models::MELSPECTROGRAM, models::EMBEDDING]
             .into_iter()
             .chain(heads)
@@ -336,12 +318,10 @@ impl WakeEngine {
         let mel = store.fetch(&models::MELSPECTROGRAM).await?;
         let embedding = store.fetch(&models::EMBEDDING).await?;
         let capture = head_path(config.capture(), store).await?;
-        let conversation = head_path(config.conversation(), store).await?;
         let mut engine = Self {
             mel: open(&mel)?,
             embedding: open(&embedding)?,
             capture: open_head(&capture, config.capture().threshold)?,
-            conversation: open_head(&conversation, config.conversation().threshold)?,
             tail: Vec::new(),
             mel_rows: VecDeque::new(),
             features: VecDeque::new(),
@@ -361,7 +341,7 @@ impl WakeEngine {
         self.frames = 0;
     }
 
-    /// Scores one 80 ms frame with both heads.
+    /// Scores one 80 ms frame with the dictation head.
     ///
     /// # Errors
     /// Fails when a model returns something other than the documented shapes or a score outside
@@ -382,28 +362,16 @@ impl WakeEngine {
         let excess = self.features.len().saturating_sub(HEAD_CONTEXT);
         self.features.drain(..excess);
 
-        let (capture, conversation) = if self.frames < WARM_UP_FRAMES {
-            (0.0, 0.0)
+        let capture = if self.frames < WARM_UP_FRAMES {
+            0.0
         } else {
             let context: Vec<f32> = self.features.iter().flatten().copied().collect();
-            (
-                score(&mut self.capture.session, &context)?,
-                score(&mut self.conversation.session, &context)?,
-            )
+            score(&mut self.capture.session, &context)?
         };
         self.frames = self.frames.saturating_add(1);
-        let event = match (
-            capture >= self.capture.threshold,
-            conversation >= self.conversation.threshold,
-        ) {
-            (true, true) => Some(WakeEvent::Ambiguous),
-            (true, false) => Some(WakeEvent::Capture),
-            (false, true) => Some(WakeEvent::Conversation),
-            (false, false) => None,
-        };
+        let event = dictation_event(capture, self.capture.threshold);
         Ok(WakeFrame {
             capture,
-            conversation,
             inference: started.elapsed(),
             event,
         })
@@ -795,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_wake_models_checks_catalog_files_and_sameness() {
+    fn validate_wake_model_checks_only_the_dictation_catalog_or_file() {
         let dir = std::env::temp_dir().join(format!("thalvi-wake-validate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
@@ -810,34 +778,29 @@ mod tests {
         let not_model = not_model.display().to_string();
         let missing = missing.display().to_string();
         let wrong = wrong.display().to_string();
-        // (capture, conversation, expected message part; empty means valid)
-        let cases: [(&str, &str, &str); 8] = [
-            ("hey_thalvi", "hey_mycroft", ""),
-            (valid.as_str(), "hey_mycroft", ""),
-            (missing.as_str(), "hey_mycroft", "could not be loaded"),
-            (not_model.as_str(), "hey_mycroft", "could not be loaded"),
-            (wrong.as_str(), "hey_mycroft", "wake head"),
-            ("hey_siri", "hey_mycroft", "Unknown wake model"),
-            ("hey_thalvi", "hey_thalvi", "must be different"),
-            (valid.as_str(), valid.as_str(), "must be different"),
+        // (capture, expected message part; empty means valid)
+        let cases: [(&str, &str); 6] = [
+            ("hey_thalvi", ""),
+            (valid.as_str(), ""),
+            (missing.as_str(), "could not be loaded"),
+            (not_model.as_str(), "could not be loaded"),
+            (wrong.as_str(), "wake head"),
+            ("hey_siri", "Unknown wake model"),
         ];
-        for (capture, conversation, expected) in cases {
-            let result = validate_wake_models(capture, conversation);
+        for (capture, expected) in cases {
+            let result = validate_wake_model(capture);
             if expected.is_empty() {
-                assert!(result.is_ok(), "{capture} / {conversation}: {result:?}");
+                assert!(result.is_ok(), "{capture}: {result:?}");
             } else {
                 let error = result.expect_err("must refuse").to_string();
-                assert!(
-                    error.contains(expected),
-                    "{capture} / {conversation}: {error}"
-                );
+                assert!(error.contains(expected), "{capture}: {error}");
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_fresh_config_wakes_hey_thalvi_at_seven_tenths_and_hey_mycroft_at_one_half() {
+    fn a_fresh_config_defaults_to_thalvi_and_preserves_the_conversation_choice() {
         assert_eq!(read("{}").expect("valid"), WakeConfig::default());
         let config = WakeConfig::default();
         assert_eq!(
@@ -892,21 +855,13 @@ mod tests {
     }
 
     #[test]
-    fn config_that_cannot_work_is_refused_in_plain_words() {
+    fn invalid_capture_choices_and_thresholds_are_refused_in_plain_words() {
         let cases = [
             (
                 r#"{"capture":{"model":"hey_siri"}}"#,
                 "Unknown wake model \"hey_siri\"",
             ),
             (r#"{"capture":{"model":"model.txt"}}"#, "Unknown wake model"),
-            (
-                r#"{"capture":{"model":"hey_mycroft"}}"#,
-                "must be different",
-            ),
-            (
-                r#"{"capture":{"model":"a.onnx"},"conversation":{"model":"a.onnx"}}"#,
-                "must be different",
-            ),
             (
                 r#"{"capture":{"model":"hey_thalvi","threshold":0}}"#,
                 "above 0 and at most 1",
@@ -936,37 +891,26 @@ mod tests {
         let mel = models::MELSPECTROGRAM;
         let embedding = models::EMBEDDING;
         let thalvi = CatalogHead::HeyThalvi.asset();
-        let mycroft = CatalogHead::HeyMycroft.asset();
         let jarvis = CatalogHead::HeyJarvis.asset();
         let files =
             r#"{"capture":{"model":"/a/mine.onnx"},"conversation":{"model":"/a/yours.onnx"}}"#;
         // (case, config, files on disk, downloads)
         let cases = [
             ("nothing on disk", "{}", vec![], true),
-            (
-                "every file",
-                "{}",
-                vec![mel, embedding, thalvi, mycroft],
-                false,
-            ),
-            (
-                "no melspectrogram",
-                "{}",
-                vec![embedding, thalvi, mycroft],
-                true,
-            ),
-            ("no embedding", "{}", vec![mel, thalvi, mycroft], true),
-            ("no capture head", "{}", vec![mel, embedding, mycroft], true),
+            ("every file", "{}", vec![mel, embedding, thalvi], false),
+            ("no melspectrogram", "{}", vec![embedding, thalvi], true),
+            ("no embedding", "{}", vec![mel, thalvi], true),
+            ("no capture head", "{}", vec![mel, embedding], true),
             (
                 "no conversation head",
                 "{}",
                 vec![mel, embedding, thalvi],
-                true,
+                false,
             ),
             (
                 "a head not chosen is not needed",
                 r#"{"capture":{"model":"hey_jarvis"}}"#,
-                vec![mel, embedding, jarvis, mycroft],
+                vec![mel, embedding, jarvis],
                 false,
             ),
             (
@@ -977,10 +921,10 @@ mod tests {
             ),
             ("local heads, no features", files, vec![], true),
             (
-                "a local head and a missing catalog head",
+                "a local dictation head and the saved conversation head is missing",
                 r#"{"capture":{"model":"/a/mine.onnx"}}"#,
                 vec![mel, embedding],
-                true,
+                false,
             ),
         ];
         for (case, config, on_disk, downloads) in cases {

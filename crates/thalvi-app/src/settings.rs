@@ -6,7 +6,7 @@ use serde_json::Value;
 use thalvi_desktop::config::{ConfigError, DesktopConfig};
 use thalvi_desktop::entries::{self, LiveKind};
 use thalvi_desktop::transducer::{SpeechChoice, check_folder};
-use thalvi_desktop::wake::validate_wake_models;
+use thalvi_desktop::wake::validate_wake_model;
 use thalvi_desktop::writing::{DEFAULT_PROMPT, Writing};
 
 /// Where the config lives.
@@ -216,16 +216,12 @@ pub fn judge(
             check_folder(folder).map_err(|error| error.to_string())?;
         }
     }
-    if settings.get("wake") != before.get("wake") {
-        let model = |head: &str| {
-            settings
-                .pointer(&format!("/wake/{head}/model"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
-        };
-        validate_wake_models(&model("capture"), &model("conversation"))
-            .map_err(|error| error.to_string())?;
+    if settings.pointer("/wake/capture") != before.pointer("/wake/capture") {
+        let model = settings
+            .pointer("/wake/capture/model")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        validate_wake_model(model).map_err(|error| error.to_string())?;
     }
     Ok(config)
 }
@@ -415,6 +411,7 @@ mod tests {
         settings["microphone"] = json!("USB Mic");
         settings["look"] = json!("holo");
         settings["recordings"] = json!({"metrics": true, "text": false, "audio": true});
+        settings["wake"]["conversation"] = json!({"model": "hey_jarvis", "threshold": 0.65});
 
         let saved = store.save(settings, &store_defaults()).unwrap();
         let reloaded = store.load().unwrap();
@@ -427,6 +424,13 @@ mod tests {
         assert!(!saved.overlay.draft);
         assert_eq!(saved.microphone.as_deref(), Some("USB Mic"));
         assert_eq!(saved.look, Look::Holo);
+        assert_eq!(
+            saved.wake.conversation().model,
+            thalvi_desktop::wake::HeadModel::Catalog(
+                thalvi_desktop::models::CatalogHead::HeyJarvis
+            )
+        );
+        assert_eq!(saved.wake.conversation().threshold.get(), 0.65);
         assert_eq!(reloaded, saved);
         assert_eq!(
             (
@@ -893,13 +897,15 @@ mod tests {
         config = DesktopConfig::from_json_str(&form.to_string()).unwrap();
         assert!(judged(&config, &json!({"look": "neon"}), true).is_ok());
 
-        let mut equal = settings_json(&store_defaults()).unwrap();
-        let head = equal["wake"]["capture"]["model"].clone();
-        equal["wake"]["conversation"]["model"] = head;
-        let wake = judge(equal, &store_defaults(), true).unwrap_err();
+        let mut saved_conversation = settings_json(&store_defaults()).unwrap();
+        saved_conversation["wake"]["conversation"]["model"] = json!("hey_jarvis");
+        saved_conversation["look"] = json!("neon");
+        let config = judge(saved_conversation, &store_defaults(), true).unwrap();
         assert_eq!(
-            wake,
-            "The capture and conversation wake models must be different."
+            config.wake.conversation().model,
+            thalvi_desktop::wake::HeadModel::Catalog(
+                thalvi_desktop::models::CatalogHead::HeyJarvis
+            )
         );
 
         let loose = json!({"kind": "second_pass", "id": "p", "name": "P", "active": false,

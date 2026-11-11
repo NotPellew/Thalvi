@@ -37,8 +37,8 @@ Matching hashes establish synchronization only, not correctness of the model.
 | `SessionStore::save` | `Sync` and `FinalSave` through `DoSave`: one lock; a dead attachment changes nothing, otherwise the entry is created or replaced (`entry().or_insert_with`). |
 | `SessionStore::release` | `Release`: removes the `Live` entry only if this connection still owns it, then fires `released`. One lock. |
 | `write_loop`, `DiskOp::Remove` (from `SessionStore::delete`) | `Delete`: one lock across the file removal; marks the owner and every predecessor dead. |
-| `crates/thalvi-server/src/session.rs`: `handle_session` loop top, `Persistence::sync`, `Saved::sync` | `Turn` and `Sync`: a save happens only when the history grew. |
-| Same file: `handle_session` loop exit on `persistence.detached()` or the client leaving, then `close_session` → `Persistence::finish` | `Close`, `FinalSave`, `Release`: the last sync, then release, before `ended` is sent. |
+| `crates/thalvi-server/src/session.rs`: `run_session` loop top, `Persistence::sync`, `Saved::sync` | `Turn` and `Sync`: a save happens only when the history grew. |
+| Same file: `run_session` loop exit on `persistence.detached()`, the client leaving, or a browser send timing out or failing, then `close_session` → `Persistence::finish` | `Close`, `FinalSave`, `Release`: the last sync, then release, before `ended` is sent. |
 
 Not covered in these files: `retire`, `rename`, `set_model_title`, `snapshot`,
 `search_history`, the private conversation path, and the order of disk writes in

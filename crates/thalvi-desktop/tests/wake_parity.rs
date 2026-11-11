@@ -1,4 +1,4 @@
-//! Scores from the real models match Python openwakeword 0.6.0 and pick the right wake event.
+//! Dictation wake scores match Python openwakeword 0.6.0 and ignore the saved conversation choice.
 
 #![expect(clippy::expect_used, reason = "a test fails by panicking")]
 
@@ -114,7 +114,7 @@ fn max_error(expected: &[f32], actual: impl Iterator<Item = f32>) -> f32 {
 }
 
 #[tokio::test]
-async fn scores_match_openwakeword_for_every_catalog_head_and_a_path_head() {
+async fn dictation_scores_match_openwakeword_for_catalog_and_path_heads() {
     let reference: Reference =
         serde_json::from_str(include_str!("fixtures/wake_reference.json")).expect("fixture");
     let thalvi = store()
@@ -123,7 +123,7 @@ async fn scores_match_openwakeword_for_every_catalog_head_and_a_path_head() {
         .expect("hey_thalvi downloads");
     let by_name = "{}";
     let by_path = format!(
-        r#"{{"capture":{{"model":"hey_jarvis"}},"conversation":{{"model":{:?}}}}}"#,
+        r#"{{"capture":{{"model":{:?}}}}}"#,
         thalvi.display().to_string()
     );
     let inputs = [
@@ -135,28 +135,25 @@ async fn scores_match_openwakeword_for_every_catalog_head_and_a_path_head() {
         let mut default = engine(by_name).await;
         let ran = run(&mut default, input, &scenario.reset_before);
         let capture = &scenario.scores["hey_thalvi_v0.0.14"];
-        let conversation = &scenario.scores["hey_mycroft_v0.1"];
         let capture = max_error(capture, ran.iter().map(|f| f.capture));
-        let conversation = max_error(conversation, ran.iter().map(|f| f.conversation));
 
-        let mut swapped = engine(&by_path).await;
-        let ran = run(&mut swapped, input, &scenario.reset_before);
+        let mut jarvis_engine = engine(r#"{"capture":{"model":"hey_jarvis"}}"#).await;
+        let ran = run(&mut jarvis_engine, input, &scenario.reset_before);
         let jarvis = max_error(
             &scenario.scores["hey_jarvis_v0.1"],
             ran.iter().map(|f| f.capture),
         );
+
+        let mut path_engine = engine(&by_path).await;
+        let ran = run(&mut path_engine, input, &scenario.reset_before);
         let path_thalvi = max_error(
             &scenario.scores["hey_thalvi_v0.0.14"],
-            ran.iter().map(|f| f.conversation),
+            ran.iter().map(|f| f.capture),
         );
         eprintln!(
-            "{name}: max abs error thalvi {capture:e}, mycroft {conversation:e}, jarvis {jarvis:e}, thalvi by path {path_thalvi:e}"
+            "{name}: max abs error thalvi {capture:e}, jarvis {jarvis:e}, thalvi by path {path_thalvi:e}"
         );
-        worst = worst
-            .max(capture)
-            .max(conversation)
-            .max(jarvis)
-            .max(path_thalvi);
+        worst = worst.max(capture).max(jarvis).max(path_thalvi);
     }
     assert!(
         worst <= TOLERANCE,
@@ -165,7 +162,7 @@ async fn scores_match_openwakeword_for_every_catalog_head_and_a_path_head() {
 }
 
 #[tokio::test]
-async fn each_head_crossing_its_threshold_wakes_its_own_route() {
+async fn the_desktop_only_wakes_for_its_selected_dictation_head() {
     let input = clip_frames().await;
     let events = |frames: Vec<WakeFrame>| -> Vec<WakeEvent> {
         frames.into_iter().filter_map(|f| f.event).collect()
@@ -174,8 +171,8 @@ async fn each_head_crossing_its_threshold_wakes_its_own_route() {
     let mut default = engine("{}").await;
     let conversation = events(run(&mut default, &input, &[]));
     assert!(
-        !conversation.is_empty() && conversation.iter().all(|e| *e == WakeEvent::Conversation),
-        "hey_mycroft clip should only wake the conversation route, got {conversation:?}"
+        conversation.is_empty(),
+        "the saved hey_mycroft conversation choice must not wake the desktop, got {conversation:?}"
     );
 
     let mut swapped =
@@ -189,7 +186,7 @@ async fn each_head_crossing_its_threshold_wakes_its_own_route() {
 }
 
 #[tokio::test]
-async fn a_score_wakes_only_at_or_above_its_threshold() {
+async fn only_the_dictation_threshold_controls_wakes() {
     // hey_mycroft peaks at 0.528 on this signal, at frame 51 (see the reference fixture).
     let input = formula_frames(80);
     let woken = |frames: Vec<WakeFrame>| -> Vec<(usize, WakeEvent)> {
@@ -200,18 +197,21 @@ async fn a_score_wakes_only_at_or_above_its_threshold() {
             .collect()
     };
 
-    let mut at_half = engine("{}").await;
+    let mut default = engine("{}").await;
+    assert_eq!(woken(run(&mut default, &input, &[40])), []);
+
+    let mut at_half = engine(r#"{"capture":{"model":"hey_mycroft","threshold":0.5}}"#).await;
     assert_eq!(
         woken(run(&mut at_half, &input, &[40])),
-        [(51, WakeEvent::Conversation)]
+        [(51, WakeEvent::Capture)]
     );
 
-    let mut at_sixty = engine(r#"{"conversation":{"model":"hey_mycroft","threshold":0.6}}"#).await;
+    let mut at_sixty = engine(r#"{"capture":{"model":"hey_mycroft","threshold":0.6}}"#).await;
     assert_eq!(woken(run(&mut at_sixty, &input, &[40])), []);
 }
 
 #[tokio::test]
-async fn both_heads_crossing_together_is_ambiguous() {
+async fn a_dictation_crossing_wakes_with_a_saved_conversation_head() {
     let input = clip_frames().await;
     let mut both = engine(
         r#"{"capture":{"model":"hey_mycroft","threshold":0.5},"conversation":{"model":"hey_jarvis","threshold":0.000001}}"#,
@@ -222,7 +222,7 @@ async fn both_heads_crossing_together_is_ambiguous() {
         .iter()
         .find(|f| f.capture >= 0.5)
         .expect("hey_mycroft crosses");
-    assert_eq!(crossing.event, Some(WakeEvent::Ambiguous));
+    assert_eq!(crossing.event, Some(WakeEvent::Capture));
 }
 
 #[tokio::test]
@@ -232,9 +232,7 @@ async fn a_start_or_reset_scores_zero_for_five_frames_then_real_scores() {
     let ran = run(&mut engine, &formula_frames(50), &[40]);
     for first in [0, 40] {
         assert!(
-            ran[first..first + 5]
-                .iter()
-                .all(|f| f.capture == 0.0 && f.conversation == 0.0),
+            ran[first..first + 5].iter().all(|f| f.capture == 0.0),
             "frames {first}..{} should score zero",
             first + 5
         );
@@ -252,8 +250,6 @@ async fn reset_forgets_the_clip_so_the_next_run_scores_like_a_fresh_start() {
     let mut engine = engine("{}").await;
     let first = run(&mut engine, &input, &[]);
     let again = run(&mut engine, &input, &[0]);
-    let scores = |frames: &[WakeFrame]| -> Vec<(f32, f32)> {
-        frames.iter().map(|f| (f.capture, f.conversation)).collect()
-    };
+    let scores = |frames: &[WakeFrame]| -> Vec<f32> { frames.iter().map(|f| f.capture).collect() };
     assert_eq!(scores(&first), scores(&again));
 }

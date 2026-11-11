@@ -272,12 +272,9 @@ export function fakeBackend(params: URLSearchParams): Backend {
     validateSpeechModelFolder: (path) =>
       path.includes("missing") ? Promise.reject(new Error("Missing required file: tokens.txt")) : Promise.resolve(),
     listWakeModels: () => Promise.resolve(structuredClone(wakeModels)),
-    validateWakeModels: (capture, conversation) => {
-      if (capture === conversation) return Promise.reject(new Error("The capture and conversation wake models must be different."));
-      for (const model of [capture, conversation]) {
-        if (!wakeModels.some((info) => info.name === model) && (model.includes("bad") || model.includes("missing") || !model.endsWith(".onnx"))) {
-          return Promise.reject(new Error(`The wake model ${model} could not be loaded: not a wake model.`));
-        }
+    validateWakeModels: (capture) => {
+      if (!wakeModels.some((info) => info.name === capture) && (capture.includes("bad") || capture.includes("missing") || !capture.endsWith(".onnx"))) {
+        return Promise.reject(new Error(`The wake model ${capture} could not be loaded: not a wake model.`));
       }
       return Promise.resolve();
     },

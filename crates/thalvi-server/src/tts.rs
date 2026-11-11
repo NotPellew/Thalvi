@@ -3,7 +3,7 @@
 use std::pin::Pin;
 
 use bytes::{Buf, Bytes, BytesMut};
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use serde_json::{Value, json};
 
 /// A speech synthesis failure.
@@ -102,7 +102,12 @@ impl Tts for OpenAiTts {
             request = request.bearer_auth(&self.api_key);
         }
         let stream = send(request).await?.bytes_stream().map(|item| {
-            item.map_err(|error| TtsError(format!("speech synthesis stream failed: {error}")))
+            item.map_err(|error| {
+                TtsError(format!(
+                    "speech synthesis stream failed: {}",
+                    error.without_url()
+                ))
+            })
         });
         Ok(Box::pin(stream))
     }
@@ -146,7 +151,12 @@ impl Tts for Qwen3Tts {
             .client
             .post(&url)
             .json(&json!({"input": text, "voice": voice}));
-        let body = Box::pin(send(request).await?.bytes_stream());
+        let body = Box::pin(
+            send(request)
+                .await?
+                .bytes_stream()
+                .map_err(reqwest::Error::without_url),
+        );
         let frames =
             futures_util::stream::unfold(Some((body, BytesMut::new())), |state| async move {
                 let (mut body, mut buffer) = state?;
@@ -180,10 +190,12 @@ impl Tts for Qwen3Tts {
 }
 
 async fn send(request: reqwest::RequestBuilder) -> Result<reqwest::Response, TtsError> {
-    let response = request
-        .send()
-        .await
-        .map_err(|error| TtsError(format!("speech synthesis could not be reached: {error}")))?;
+    let response = request.send().await.map_err(|error| {
+        TtsError(format!(
+            "speech synthesis could not be reached: {}",
+            error.without_url()
+        ))
+    })?;
     if !response.status().is_success() {
         let status = response.status();
         let _ = response.text().await;
@@ -221,6 +233,29 @@ mod tests {
         assert_eq!(body["input"], "Hello there.");
         assert_eq!(body["response_format"], "pcm");
         assert_eq!(body["stream_format"], "audio");
+    }
+
+    #[tokio::test]
+    async fn synthesis_transport_errors_do_not_include_the_endpoint_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let port = listener.local_addr().expect("listener address").port();
+        drop(listener);
+
+        let tts = OpenAiTts::new(
+            format!("http://127.0.0.1:{port}/v1"),
+            "kokoro".to_string(),
+            "af_heart".to_string(),
+            String::new(),
+        );
+        let Err(error) = tts.synthesize("Hello.").await else {
+            panic!("closed local port should fail");
+        };
+        let message = error.to_string();
+        assert!(message.contains("could not be reached"), "{message}");
+        assert!(!message.contains("127.0.0.1"), "{message}");
+        assert!(!message.contains(&port.to_string()), "{message}");
     }
 
     type Bodies = Arc<Mutex<Vec<Value>>>;
