@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `15d0fc7b2e8a532f8b5e14940fe2c3c7e127a4a5`. The recorded file hashes
+Sync commit: `33206a4fdc84505023c72b600bd402e2f89dded4`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -80,6 +80,9 @@ The Hyprland runtime binds (#337) add `EngineLink::hold_problems`, another sende
 a `Piece::Thinking` arm to `Engine::write` that only sets the Thinking state and records a time, and relabels a
 timeout after reasoning as `WritingError::StillThinking`, still a Failed result; every await is the same `bounded`
 cancel-first call, so the model is unchanged and only the hashes moved.
+Listening for the dictation wake alone (#342) removes the conversation and ambiguous wake branches from `listen`,
+`scan` and `refuse_quiet`, and the runner's conversation arm in `Runner::step`; no mapped function changed, so only
+the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

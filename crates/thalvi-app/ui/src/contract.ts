@@ -274,8 +274,8 @@ export interface Backend {
   /** Resolves when the folder holds a speech model; rejects with the plain reason it does not. */
   validateSpeechModelFolder(path: string): Promise<void>;
   listWakeModels(): Promise<WakeModelInfo[]>;
-  /** Resolves when both wake choices can be used and differ; rejects with the plain reason they cannot. */
-  validateWakeModels(capture: string, conversation: string): Promise<void>;
+  /** Resolves when the dictation wake choice can be used; rejects with the plain reason it cannot. */
+  validateWakeModels(capture: string): Promise<void>;
   /** Resolves when the catalog wake head is on disk and verified; rejects with the plain reason it is not. */
   downloadWakeModel(name: string): Promise<void>;
   /** The `.onnx` file the user picked, or null when they cancelled. */

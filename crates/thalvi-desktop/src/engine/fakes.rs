@@ -13,7 +13,7 @@ use crate::capture::Ending;
 use crate::cues::{Cue, CueError, CueTiming};
 use crate::frame::{FRAME_SAMPLES, Frame, Queued};
 use crate::spotter::{KeywordSpotter, SpotterError, SpotterHit};
-use crate::wake::{WakeError, WakeEvent, WakeFrame};
+use crate::wake::{self, WakeError, WakeEvent, WakeFrame};
 
 /// Microphone frames a test feeds in, dropped while the gate is off or from before it changed,
 /// as the capture callback does.
@@ -75,7 +75,7 @@ impl FrameSource for FakeFrames {
 /// A wake detector that reports the event a test sets for the next frame.
 pub struct FakeWake {
     next: Rc<Cell<Option<Result<WakeEvent, ()>>>>,
-    scores: Rc<Cell<(f32, f32)>>,
+    score: Rc<Cell<f32>>,
     inference: Rc<Cell<Duration>>,
     resets: Rc<Cell<u32>>,
 }
@@ -83,7 +83,7 @@ pub struct FakeWake {
 /// Test-side handle of [`FakeWake`].
 pub struct WakeControl {
     next: Rc<Cell<Option<Result<WakeEvent, ()>>>>,
-    scores: Rc<Cell<(f32, f32)>>,
+    score: Rc<Cell<f32>>,
     inference: Rc<Cell<Duration>>,
     resets: Rc<Cell<u32>>,
 }
@@ -92,19 +92,19 @@ impl FakeWake {
     #[must_use]
     pub fn new() -> (Self, WakeControl) {
         let next = Rc::new(Cell::new(None));
-        let scores = Rc::new(Cell::new((0.0, 0.0)));
+        let score = Rc::new(Cell::new(0.0));
         let inference = Rc::new(Cell::new(Duration::ZERO));
         let resets = Rc::new(Cell::new(0));
         (
             Self {
                 next: Rc::clone(&next),
-                scores: Rc::clone(&scores),
+                score: Rc::clone(&score),
                 inference: Rc::clone(&inference),
                 resets: Rc::clone(&resets),
             },
             WakeControl {
                 next,
-                scores,
+                score,
                 inference,
                 resets,
             },
@@ -118,9 +118,16 @@ impl WakeControl {
         self.next.set(Some(Ok(event)));
     }
 
-    /// The frames scored from now on get these head scores.
-    pub fn score(&self, capture: f32, conversation: f32) {
-        self.scores.set((capture, conversation));
+    /// The frames scored from now on get this dictation score.
+    pub fn score(&self, score: f32) {
+        self.score.set(score);
+    }
+
+    /// Scores a frame and lets the dictation threshold decide whether it wakes.
+    pub fn score_and_detect(&self, score: f32, threshold: f32) {
+        self.score.set(score);
+        self.next
+            .set(wake::dictation_event(score, threshold).map(Ok));
     }
 
     /// The frames scored from now on report taking `took`.
@@ -147,10 +154,9 @@ impl WakeDetector for FakeWake {
             Some(Ok(event)) => Some(event),
             None => None,
         };
-        let (capture, conversation) = self.scores.get();
+        let capture = self.score.get();
         Ok(WakeFrame {
             capture,
-            conversation,
             inference: self.inference.get(),
             event,
         })

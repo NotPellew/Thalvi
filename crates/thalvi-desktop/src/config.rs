@@ -1361,10 +1361,6 @@ mod tests {
                 "unknown field `capture_model`",
             ),
             (
-                r#"{"wake": {"capture": {"model": "hey_mycroft"}}}"#.to_owned(),
-                "wake models must be different",
-            ),
-            (
                 r#"{"wake": {"conversation": {"model": "hey_jarvis", "threshold": 0}}}"#.to_owned(),
                 "A wake threshold must be above 0",
             ),

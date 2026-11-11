@@ -169,9 +169,9 @@ fn round3(score: f32) -> f64 {
     (f64::from(score) * 1000.0).round() / 1000.0
 }
 
-/// Both heads' scores for one frame, to three decimals.
+/// The dictation head's score for one frame, to three decimals.
 fn scores(wake: &WakeFrame) -> Value {
-    json!({"capture": round3(wake.capture), "conversation": round3(wake.conversation)})
+    json!({"capture": round3(wake.capture)})
 }
 
 /// What the engine does with a wake word, for the caller to act on.
@@ -179,8 +179,6 @@ fn scores(wake: &WakeFrame) -> Value {
 pub enum WakeTrigger {
     /// The caller binds its capture target, then calls [`Engine::capture`].
     Capture,
-    /// The caller starts a conversation.
-    Conversation,
     /// The dictation key went down: the caller binds its capture target, then calls
     /// [`Engine::capture`], which ends with the key's release.
     Hold,
@@ -441,11 +439,9 @@ pub struct Engine<R, W, C> {
     cancel: watch::Receiver<u64>,
     level_frames: u64,
     level_activity: bool,
-    ambiguous: bool,
+    capture_threshold: f32,
     /// Whether the previous frame's wake was refused as too quiet.
     refused: bool,
-    /// The capture and conversation thresholds the wake detector runs with.
-    thresholds: (f32, f32),
     /// The wake word that opened the next capture.
     woke: Option<Woke>,
     /// The latest frames scored while listening.
@@ -901,12 +897,8 @@ where
             cancel,
             level_frames: 0,
             level_activity: false,
-            ambiguous: false,
+            capture_threshold: config.wake.capture().threshold.get(),
             refused: false,
-            thresholds: (
-                config.wake.capture().threshold.get(),
-                config.wake.conversation().threshold.get(),
-            ),
             woke: None,
             wake_clip: VecDeque::new(),
             key: Presses::new(parts.hold),
@@ -989,7 +981,7 @@ where
         self.refused = false;
         self.recorder
             .metric(Event::WakeReset, "ok", Some(reset.elapsed()), Value::Null);
-        let mut misses = NearMisses::new(self.thresholds.0, self.thresholds.1);
+        let mut misses = NearMisses::new(self.capture_threshold);
         let mut latency = Latency::default();
         let heard = self.scan(frames, &mut misses, &mut latency).await;
         self.listening = ListenState::Stopped;
@@ -1061,20 +1053,6 @@ where
             if self.refuse_quiet(&wake) {
                 continue;
             }
-            if wake.event == Some(WakeEvent::Ambiguous) {
-                if !self.ambiguous {
-                    (self.notice)("Wake was ambiguous; still listening.");
-                    let dictation = self.recorder.begin();
-                    self.clip_wake(&dictation);
-                    let mut fields = scores(&wake);
-                    fields["dictation"] = json!(dictation.to_string());
-                    self.recorder
-                        .metric(Event::WakeNothing, "ambiguous", None, fields);
-                }
-                self.ambiguous = true;
-                continue;
-            }
-            self.ambiguous = false;
             match wake.event {
                 Some(WakeEvent::Capture) => {
                     let dictation = self.recorder.begin();
@@ -1087,13 +1065,7 @@ where
                     self.level.send_replace(0.0);
                     return Ok(WakeTrigger::Capture);
                 }
-                Some(WakeEvent::Conversation) => {
-                    let dictation = self.recorder.begin();
-                    self.clip_wake(&dictation);
-                    self.level.send_replace(0.0);
-                    return Ok(WakeTrigger::Conversation);
-                }
-                Some(WakeEvent::Ambiguous) | None => {}
+                None => {}
             }
         }
     }
@@ -1145,21 +1117,17 @@ where
     /// run of refused wakes.
     fn refuse_quiet(&mut self, wake: &WakeFrame) -> bool {
         let level = self.wake_peak();
-        let Some(event) = wake.event.filter(|_| level < WAKE_FLOOR_PEAK) else {
+        if wake.event.is_none() || level >= WAKE_FLOOR_PEAK {
             self.refused = false;
             return false;
-        };
+        }
         if !self.refused {
             self.refused = true;
-            let head = match event {
-                WakeEvent::Capture => "capture",
-                WakeEvent::Conversation => "conversation",
-                WakeEvent::Ambiguous => "ambiguous",
-            };
             let mut fields = scores(wake);
             fields["level"] = json!(level);
             fields["floor"] = json!(WAKE_FLOOR_PEAK);
-            self.recorder.metric(Event::WakeRefused, head, None, fields);
+            self.recorder
+                .metric(Event::WakeRefused, "capture", None, fields);
         }
         true
     }
@@ -2427,7 +2395,43 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recognizer::ServerUrl;
+    use crate::engine::fakes::{FakeCuePlayer, FakeFrames, FakeWake};
+    use crate::hold::KeyState;
+    use crate::recognizer::{FakeRecognizer, ServerUrl};
+
+    #[tokio::test]
+    async fn dictation_wakes_when_its_score_crosses() {
+        let config = DesktopConfig::from_json_str("{}").expect("default config");
+        let gate = InputGate::default();
+        let (mut frames, feed) = FakeFrames::new(&gate);
+        let (wake, control) = FakeWake::new();
+        control.score_and_detect(0.8, config.wake.capture().threshold.get());
+        let (recognizer, _) = FakeRecognizer::new();
+        let (cues, _) = FakeCuePlayer::new();
+        let (_hold_tx, hold) = watch::channel(KeyState::default());
+        let (mut engine, _) = Engine::new(
+            Parts {
+                recognizer,
+                wake,
+                cues,
+                gate,
+                http: reqwest::Client::new(),
+                hold,
+                notice: Box::new(|_| {}),
+                spotter: None,
+                spotter_off: None,
+            },
+            &config,
+            Recorder::disabled(),
+        );
+        feed.send([2_000; FRAME_SAMPLES]);
+        feed.fail(AudioError::Closed);
+
+        assert!(matches!(
+            engine.listen(&mut frames).await,
+            Ok(WakeTrigger::Capture)
+        ));
+    }
 
     #[tokio::test]
     async fn spotter_totals_record_exact_timings_and_nothing_when_no_frame_was_processed() {

@@ -791,10 +791,6 @@ impl Runner {
             Woke::Trigger(Ok(WakeTrigger::Capture | WakeTrigger::Hold)) => {
                 Box::pin(self.capture()).await
             }
-            Woke::Trigger(Ok(WakeTrigger::Conversation)) => {
-                println!("Conversation wake heard. This build has no conversation.");
-                Flow::Continue
-            }
             Woke::Trigger(Err(error)) => {
                 tracing::warn!(?error, "listening stopped");
                 self.close_microphone();
@@ -1757,7 +1753,6 @@ mod tests {
             models::MELSPECTROGRAM,
             models::EMBEDDING,
             CatalogHead::HeyThalvi.asset(),
-            CatalogHead::HeyMycroft.asset(),
         ];
         let failed = Mode::Failed(Failure {
             kind: FailureKind::Other,
@@ -1767,8 +1762,14 @@ mod tests {
         });
         // A retry after a failed download starts from Paused (the tray) or Failed (Settings).
         let starts = [Mode::Starting, Mode::Idle, Mode::Paused, failed];
-        for (case, files, downloads) in [("cached", cached.len(), false), ("missing one", 3, true)]
-        {
+        for (case, files, downloads) in [
+            (
+                "cached dictation assets with saved conversation head missing",
+                cached.len(),
+                false,
+            ),
+            ("missing dictation head", cached.len() - 1, true),
+        ] {
             let dir = std::env::temp_dir().join(format!(
                 "thalvi-wake-load-{}-{}",
                 case.replace(' ', "-"),

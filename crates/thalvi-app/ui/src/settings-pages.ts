@@ -192,14 +192,13 @@ function fileName(path: string): string {
 }
 
 interface WakeHead {
-  key: "capture" | "conversation";
   custom: boolean;
   customPath: string;
   render: () => void;
   sayProblem: (message: string) => void;
 }
 
-/** Both wake pickers: catalog phrases with download badges, or a custom `.onnx` file. */
+/** The dictation wake picker: catalog phrases with download badges, or a custom `.onnx` file. */
 function wakeHeads(context: PageContext): HTMLElement[] {
   const { draft, controls, backend, checks, live } = context;
   const infos = new Map<string, WakeModelInfo>();
@@ -207,43 +206,43 @@ function wakeHeads(context: PageContext): HTMLElement[] {
   const heads: WakeHead[] = [];
   let latestCheck = 0;
 
+  function dictationHead(): WakeHead {
+    const head = heads[0];
+    if (!head) throw new Error("The dictation wake picker is not initialized.");
+    return head;
+  }
+
   function validate(target?: WakeHead): Promise<void> {
-    for (const head of heads) {
-      if (head.custom && head.customPath === "") {
-        const message = "Pick a wake model file with Browse… first.";
-        (target ?? head).sayProblem(message);
-        return Promise.reject(new Error(message));
-      }
+    const head = dictationHead();
+    if (head.custom && head.customPath === "") {
+      const message = "Pick a wake model file with Browse… first.";
+      (target ?? head).sayProblem(message);
+      return Promise.reject(new Error(message));
     }
     const check = ++latestCheck;
-    return backend.validateWakeModels(draft.wake.capture.model, draft.wake.conversation.model).then(
+    return backend.validateWakeModels(draft.wake.capture.model).then(
       () => {
-        if (check === latestCheck) for (const head of heads) head.sayProblem("");
+        if (check === latestCheck) head.sayProblem("");
       },
       (error: unknown) => {
         if (check === latestCheck) {
           if (target) target.sayProblem(errorText(error));
-          else for (const head of heads) head.sayProblem(errorText(error));
+          else head.sayProblem(errorText(error));
         }
         throw error;
       },
     );
   }
-  // Catalog choices are known-good names and the picker disables the other head's phrase, so
-  // only a custom file or an equal pair needs the Rust check before Save.
-  checks.push(() =>
-    heads.some((head) => head.custom) || draft.wake.capture.model === draft.wake.conversation.model ? validate() : null,
-  );
+  checks.push(() => (dictationHead().custom ? validate() : null));
 
-  function head(key: "capture" | "conversation", title: string): HTMLElement[] {
-    const config = draft.wake[key];
-    const name = key === "capture" ? "dictation" : "conversation";
+  function head(title: string): HTMLElement[] {
+    const config = draft.wake.capture;
+    const name = "dictation";
     const picker = el("select", { id: uid("f") });
     const badge = el("span", { class: "badge" });
     const problem = note();
     const chosenFile = el("span", { class: "unit" });
     const state: WakeHead = {
-      key,
       custom: !WAKE_MODELS.some(([model]) => model === config.model),
       customPath: "",
       render: () => undefined,
@@ -287,13 +286,11 @@ function wakeHeads(context: PageContext): HTMLElement[] {
     });
     const customRow = el("div", { class: "trow file" }, el("span", { class: "unit" }, "Custom model"), browse, chosenFile);
     state.render = () => {
-      const other = heads.find((candidate) => candidate.key !== key);
       picker.replaceChildren(
         ...WAKE_MODELS.map(([model, label]) => {
           const info = infos.get(model);
           const status = downloading.has(model) ? "Downloading…" : info ? (info.cached ? "Ready" : "Not downloaded") : "";
           const option = el("option", { value: model }, status === "" ? label : `${label} — ${status}`);
-          option.disabled = other !== undefined && draft.wake[other.key].model === model && config.model !== model;
           return option;
         }),
         el("option", { value: CUSTOM_MODEL }, "Custom model…"),
@@ -353,7 +350,7 @@ function wakeHeads(context: PageContext): HTMLElement[] {
     ];
   }
 
-  const nodes = [...head("capture", "Dictation wake word"), ...head("conversation", "Conversation wake word")];
+  const nodes = head("Dictation wake word");
   function refresh(): void {
     backend.listWakeModels().then(
       (models) => {

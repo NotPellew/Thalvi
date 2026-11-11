@@ -92,10 +92,10 @@ areas your change touches. Editing rules are in
   `reply_audio` (on or off); only `mic` opens a recognizer, only reply audio calls speech
   synthesis. Web: Voice sets both, Speak replies only reply audio. Why: typed or locally
   recognized input can get spoken replies. Rejected: one `voice` switch, a compat message.
-- **Two wake entries, endings select the capture route.** One local inference pipeline
-  runs separate trained capture and conversation wake heads; a wake capture whose whole text is
-  an `open_url`/`focus_app` phrase or `open <host>` runs as a task with no ending. Why: defer the
-  action choice until an ending, yet a ready command needs none. Rejected: one phrase for both flows.
+- **Two wake entries, endings select the capture route.** Trained capture and conversation heads;
+  the desktop runs only capture until it has conversations. A capture whose whole text is an
+  `open_url`/`focus_app` phrase or `open <host>` runs as a task with no ending. Why: a ready command
+  needs no ending; a head with no handler dropped wakes. Rejected: one phrase; hiding it in Settings.
 - **Wake context.** Both trained heads use 16 embedding frames. Why: this
   supports first-frame inference with upstream startup and reset history.
   Rejected: accepting longer contexts that need additional warm-up history.
