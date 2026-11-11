@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::gnome::{self, Clipboard, Gnome};
+use super::gnome::{Clipboard, Gnome};
 use super::hyprland::{Hyprland, Window};
 use super::{
     App, Delivered, HoldSource, Host, HostError, OverlayEvent, OverlayFrame, PasteText,
@@ -143,15 +143,6 @@ impl Desktop {
         )
     }
 
-    /// Settles a window's platform hints before it first appears, so it never takes focus.
-    pub fn settle_overlay_window(&self, window: &gtk::ApplicationWindow) {
-        match self {
-            // Hyprland's window rules from `prepare_overlay` do this.
-            Self::Hyprland(_) => {}
-            Self::Gnome(_) => gnome::keep_unfocused(window),
-        }
-    }
-
     /// Where the status overlay's surface goes. Call on the toolkit's thread.
     ///
     /// # Errors
@@ -161,7 +152,7 @@ impl Desktop {
             // The compositor keeps a layer surface clear of the bars.
             Self::Hyprland(_) => Ok(OverlayPlan::Layer),
             Self::Gnome(host) => Ok(OverlayPlan::Xwayland {
-                top: host.prepare_overlay(0.0, 0.0)?,
+                top: host.overlay_top()?,
             }),
         }
     }
@@ -355,13 +346,6 @@ impl Host for Desktop {
         match self {
             Self::Hyprland(host) => host.open_folder(path),
             Self::Gnome(host) => host.open_folder(path),
-        }
-    }
-
-    fn prepare_overlay(&self, width: f64, height: f64) -> Result<f64, HostError> {
-        match self {
-            Self::Hyprland(host) => host.prepare_overlay(width, height),
-            Self::Gnome(host) => host.prepare_overlay(width, height),
         }
     }
 }

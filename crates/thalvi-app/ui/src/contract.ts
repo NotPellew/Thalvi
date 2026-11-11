@@ -253,16 +253,11 @@ export interface Backend {
   onLevel(listener: (level: number) => void): void;
   getAudio(): Promise<AudioStatus>;
   onAudio(listener: (audio: AudioStatus) => void): void;
-  /** Settings were saved, from any window. */
-  onSettingsSaved(listener: () => void): void;
   /** An agent changed the saved settings or a switch the window reads from the OS; the window's own saves never fire this. */
   onSettingsChangedElsewhere(listener: () => void): void;
   getSettings(): Promise<Settings>;
   saveSettings(settings: Settings): Promise<void>;
   setListening(on: boolean): Promise<void>;
-  cancelCapture(): Promise<void>;
-  /** Whether a click on the overlay reaches it; Hyprland gives a window that never takes focus no clicks. */
-  overlayTakesClicks(): Promise<boolean>;
   /** The user dismissed the latest error; the overlay stops showing it. */
   dismissError(): Promise<void>;
   /** Puts an error report for `message` on the clipboard; rejects with the plain reason it could not. */

@@ -272,15 +272,6 @@ pub trait Host: Send + Sync {
     /// # Errors
     /// Why the file manager could not be asked.
     fn open_folder(&self, path: &Path) -> Result<(), HostError>;
-
-    /// Makes the window titled [`OVERLAY_TITLE`] float, `width` by `height` logical pixels, at the
-    /// top centre of the screen area windows may use, above other windows, without ever taking
-    /// focus; returns that area's top in logical pixels, below any panel. Call before the window
-    /// first appears and before each remap, since compositor config reloads can discard the rules.
-    ///
-    /// # Errors
-    /// Why the desktop could not be told; the overlay must then stay hidden.
-    fn prepare_overlay(&self, width: f64, height: f64) -> Result<f64, HostError>;
 }
 
 #[cfg(test)]

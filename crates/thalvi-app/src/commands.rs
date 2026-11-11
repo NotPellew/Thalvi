@@ -44,11 +44,6 @@ pub fn get_status(state: State<'_, AppState>) -> Status {
 }
 
 #[tauri::command]
-pub fn overlay_takes_clicks(state: State<'_, AppState>) -> bool {
-    state.host().overlay_takes_clicks()
-}
-
-#[tauri::command]
 pub fn get_audio(state: State<'_, AppState>) -> AudioStatus {
     state.link.audio()
 }
@@ -59,12 +54,8 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn save_settings(
-    settings: Value,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    save(&app, &state, |_| Ok(((), Some(settings)))).map(drop)
+pub fn save_settings(settings: Value, state: State<'_, AppState>) -> Result<(), String> {
+    save(&state, |_| Ok(((), Some(settings)))).map(drop)
 }
 
 /// Saves and applies what Settings sends, and what an outside program sends in its place.
@@ -74,17 +65,10 @@ pub fn save_settings(
 /// # Errors
 /// The plain reason the settings were refused, in which case nothing changed.
 pub fn save<T>(
-    app: &AppHandle,
     state: &AppState,
     form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
 ) -> Result<(T, bool), String> {
-    let (value, saved) = state.save_form(form)?;
-    if !saved {
-        return Ok((value, false));
-    }
-    // The overlay window is hidden and idle, so it re-reads the settings when told.
-    let _ = app.emit("thalvi://settings", ());
-    Ok((value, true))
+    state.save_form(form)
 }
 
 /// What the update is doing, for a window that opens after the events were sent.
@@ -120,11 +104,6 @@ pub async fn open_release_notes(state: State<'_, AppState>) -> Result<(), String
 #[tauri::command]
 pub fn set_listening(on: bool, state: State<'_, AppState>) {
     state.link.send(Control::SetListening(on));
-}
-
-#[tauri::command]
-pub fn cancel_capture(state: State<'_, AppState>) {
-    state.link.send(Control::Cancel);
 }
 
 /// Hides the overlay's failure; the status stays failed until the next capture starts.

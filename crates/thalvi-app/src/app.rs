@@ -518,11 +518,9 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_audio,
-            commands::overlay_takes_clicks,
             commands::get_settings,
             commands::save_settings,
             commands::set_listening,
-            commands::cancel_capture,
             commands::dismiss_error,
             commands::copy_report,
             commands::list_microphones,
@@ -954,7 +952,7 @@ impl Running for Live {
         &self,
         form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<serde_json::Value>), String>,
     ) -> Result<T, String> {
-        let (value, saved) = commands::save(&self.0, &self.0.state::<AppState>(), form)?;
+        let (value, saved) = commands::save(&self.0.state::<AppState>(), form)?;
         if saved {
             let _ = self.0.emit(CHANGED_ELSEWHERE_EVENT, ());
         }

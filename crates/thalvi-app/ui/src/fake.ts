@@ -1,4 +1,4 @@
-// Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the overlay to the n-th status of the script and `?look=holo` or `?look=gunmetal` picks the look.
+// Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the status to the n-th of the script and `?look=holo` or `?look=gunmetal` picks the look.
 
 import type { AudioStatus, Backend, Draft, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 import { LOOKS } from "./look.ts";
@@ -105,7 +105,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
   let level = 0;
   const requested = params.get("look");
   const look = LOOKS.find(([name]) => name === requested)?.[0] ?? "gunmetal";
-  const savedListeners: (() => void)[] = [];
   const statusListeners: ((status: Status) => void)[] = [];
   const levelListeners: ((level: number) => void)[] = [];
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
@@ -202,7 +201,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
     onLevel: (listener) => levelListeners.push(listener),
     getAudio: () => Promise.resolve(structuredClone(audioState)),
     onAudio: (listener) => audioListeners.push(listener),
-    onSettingsSaved: (listener) => savedListeners.push(listener),
     onSettingsChangedElsewhere: () => undefined,
     getSettings: () => Promise.resolve(structuredClone(saved)),
     saveSettings: (next) => {
@@ -214,7 +212,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
       }
       saved = structuredClone(next);
       emitAudio({ selected: next.microphone, active: audioState.paused ? null : activeFor(next.microphone), paused: audioState.paused });
-      for (const listener of savedListeners) listener();
       return Promise.resolve();
     },
     setListening: (on) => {
@@ -222,11 +219,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
       emit(on ? { state: "listening" } : { state: "paused" });
       return Promise.resolve();
     },
-    cancelCapture: () => {
-      emit({ state: "listening" });
-      return Promise.resolve();
-    },
-    overlayTakesClicks: () => Promise.resolve(true),
     dismissError: () => Promise.resolve(),
     copyReport: () => Promise.resolve(),
     listMicrophones: () => Promise.resolve([...microphones]),

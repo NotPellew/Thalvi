@@ -2559,10 +2559,6 @@ mod tests {
             self.called("open_folder");
             Ok(())
         }
-
-        fn prepare_overlay(&self, _: f64, _: f64) -> Result<f64, thalvi_desktop::host::HostError> {
-            Ok(0.0)
-        }
     }
 
     fn request(route: CaptureRoute, text: &str) -> CaptureOutcome {

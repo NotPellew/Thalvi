@@ -59,8 +59,6 @@ pub trait Win32: Send + Sync {
     fn send_input(&self, events: &[KeyEvent]) -> usize;
     fn set_clipboard(&self, text: &str) -> bool;
     fn open_url(&self, url: &str) -> bool;
-    /// The top of the primary monitor's work area, below a taskbar docked there, in logical pixels.
-    fn work_area_top(&self) -> Option<f64>;
 }
 
 /// A window as bound at wake.
@@ -157,12 +155,6 @@ impl Windows {
     )]
     pub fn overlay_plan(&self) -> Result<OverlayPlan, HostError> {
         Ok(OverlayPlan)
-    }
-
-    /// Shows or hides the overlay window `window` without activating it, which Tauri's `show`
-    /// would.
-    pub fn set_overlay_visible(window: Hwnd, visible: bool) {
-        win32::set_visible_unfocused(window, visible);
     }
 }
 
@@ -347,15 +339,6 @@ impl<A: Win32> Host for Windows<A> {
             Err(nothing_typed("Windows could not open the folder."))
         }
     }
-
-    fn prepare_overlay(&self, _width: f64, _height: f64) -> Result<f64, HostError> {
-        // The app shows the window with `set_overlay_visible`, because tao's `show` activates it
-        // despite WS_EX_NOACTIVATE; it sizes and positions it below the taskbar with the top
-        // returned here.
-        self.api.work_area_top().ok_or_else(|| {
-            HostError::Unsupported("Windows did not say where the taskbar is.".to_owned())
-        })
-    }
 }
 
 fn nothing_typed(notice: &str) -> HostError {
@@ -493,7 +476,6 @@ mod tests {
         clipboard_open: bool,
         opened: Vec<String>,
         browser_open: bool,
-        work_area_top: Option<f64>,
     }
 
     struct Fake(Mutex<State>);
@@ -510,7 +492,6 @@ mod tests {
                 stack: vec![NOTEPAD, OTHER, EDITOR],
                 clipboard_open: true,
                 browser_open: true,
-                work_area_top: Some(0.0),
                 ..State::default()
             }))
         }
@@ -568,9 +549,6 @@ mod tests {
                 state.opened.push(url.to_owned());
             }
             state.browser_open
-        }
-        fn work_area_top(&self) -> Option<f64> {
-            self.read(|state| state.work_area_top)
         }
     }
 
@@ -664,31 +642,11 @@ mod tests {
             fn open_url(&self, url: &str) -> bool {
                 self.0.open_url(url)
             }
-            fn work_area_top(&self) -> Option<f64> {
-                self.0.work_area_top()
-            }
         }
         assert!(matches!(
             Windows::new(Blind(Fake::desktop())),
             Err(HostError::Unsupported(_))
         ));
-    }
-
-    #[test]
-    fn the_overlay_hangs_from_the_top_of_the_work_area_below_a_taskbar() {
-        let desktop = windows(Fake::desktop());
-        assert_eq!(desktop.prepare_overlay(460.0, 200.0), Ok(0.0));
-
-        desktop.api.with(|state| state.work_area_top = Some(32.0));
-        assert_eq!(desktop.prepare_overlay(460.0, 200.0), Ok(32.0));
-
-        desktop.api.with(|state| state.work_area_top = None);
-        assert_eq!(
-            desktop.prepare_overlay(460.0, 200.0),
-            Err(HostError::Unsupported(
-                "Windows did not say where the taskbar is.".to_owned()
-            ))
-        );
     }
 
     #[test]
