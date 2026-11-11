@@ -79,14 +79,8 @@ pub fn save<T>(
     form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
 ) -> Result<(T, bool), String> {
     let (value, saved) = state.save_form(form)?;
-    let Some((_, look_changed)) = saved else {
+    if saved.is_none() {
         return Ok((value, false));
-    };
-    if look_changed {
-        // The settings are saved either way; the overlay keeps its old place.
-        if let Err(error) = overlay::replace(app, &state.host()) {
-            eprintln!("The overlay could not be placed again for the new look: {error}");
-        }
     }
     // The overlay window is hidden and idle, so it re-reads the settings when told.
     let _ = app.emit("thalvi://settings", ());
@@ -135,8 +129,8 @@ pub fn cancel_capture(state: State<'_, AppState>) {
 
 /// Hides the overlay's failure; the status stays failed until the next capture starts.
 #[tauri::command]
-pub fn dismiss_error(app: AppHandle, state: State<'_, AppState>) {
-    state.overlay.apply(&app, overlay::Visibility::Hide);
+pub fn dismiss_error(state: State<'_, AppState>) {
+    state.overlay.apply(overlay::Visibility::Hide);
 }
 
 /// Puts an error report on the clipboard through the desktop; a web view's own clipboard is refused

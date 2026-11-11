@@ -1,52 +1,17 @@
-//! When the overlay window is shown, and the window itself.
+//! The status overlay: when it shows, and its own thread, which draws it on the CPU and hands each
+//! frame to the desktop's overlay surface.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+mod gunmetal;
+mod paint;
 
-use tauri::{AppHandle, LogicalPosition, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
-use thalvi_desktop::host::{Desktop, Host, OVERLAY_TITLE};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::time::{Duration, Instant};
+
+use thalvi_desktop::host::{OverlayEvent, OverlayPlan, OverlaySurface, OverlayWaker};
 
 use crate::status::Status;
-
-pub const LABEL: &str = "overlay";
-
-const WIDTH: f64 = 460.0;
-/// Room for the neon pill under its gap and for the holo and gunmetal module with its shadow.
-/// A fixed-size GTK window is never lower than this, and a mapped one cannot be resized, so every
-/// look uses the one size.
-const HEIGHT: f64 = 200.0;
-
-/// Where the overlay window goes, in logical pixels.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Frame {
-    left: f64,
-    top: f64,
-}
-
-impl Frame {
-    /// The window centred on a screen `screen_width` wide and `top` below its top edge.
-    #[must_use]
-    pub fn new(screen_width: f64, top: f64) -> Self {
-        Self {
-            left: ((screen_width - WIDTH) / 2.0).max(0.0),
-            top,
-        }
-    }
-
-    /// The frame on the primary monitor, below whatever the desktop reserves at its top.
-    fn on_screen(app: &AppHandle, host: &Desktop) -> Result<Self, String> {
-        let top = host
-            .prepare_overlay(WIDTH, HEIGHT)
-            .map_err(|error| error.to_string())?;
-        let screen_width = app
-            .primary_monitor()
-            .map_err(|error| error.to_string())?
-            .map_or(0.0, |monitor| {
-                f64::from(monitor.size().width) / monitor.scale_factor()
-            });
-        Ok(Self::new(screen_width, top))
-    }
-}
+use gunmetal::{Painter, View};
 
 /// How long a delivery's confirmation stays on screen.
 const DONE_FOR: Duration = Duration::from_secs(1);
@@ -93,233 +58,251 @@ impl Visibility {
     }
 }
 
-/// Creates the hidden overlay window; the desktop keeps it unfocused (see `Host::prepare_overlay`).
-///
-/// # Errors
-/// Why the desktop could not place the window or why it could not be created.
-pub fn create(app: &AppHandle, host: &Desktop) -> Result<WebviewWindow, String> {
-    let frame = Frame::on_screen(app, host)?;
-    let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("overlay.html".into()))
-        .title(OVERLAY_TITLE)
-        .inner_size(WIDTH, HEIGHT)
-        .position(frame.left, frame.top)
-        .decorations(false)
-        .transparent(true)
-        .shadow(false)
-        .resizable(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .focusable(false)
-        .focused(false)
-        .visible(false)
-        .build()
-        .map_err(|error| error.to_string())?;
-    // Before the window is first mapped, while it is hidden: the desktop decides focus at map.
-    #[cfg(target_os = "linux")]
-    host.settle_overlay_window(&window.gtk_window().map_err(|error| error.to_string())?);
-    Ok(window)
+/// What the overlay's thread is told.
+enum Message {
+    Status(Box<Status>, Visibility),
+    Visibility(Visibility),
+    Draft(bool),
 }
 
-/// Places the overlay window again, below whatever the desktop reserves at the top now.
-///
-/// # Errors
-/// Why the desktop could not place the window or why it could not be moved; it then stays as it was.
-pub fn replace(app: &AppHandle, host: &Desktop) -> Result<(), String> {
-    let Some(window) = app.get_webview_window(LABEL) else {
-        return Ok(());
-    };
-    let frame = Frame::on_screen(app, host)?;
-    window
-        .set_position(LogicalPosition::new(frame.left, frame.top))
-        .map_err(|error| error.to_string())
-}
-
-/// Shows and hides the overlay window as the status asks.
-#[derive(Default)]
+/// Feeds the overlay's thread from any thread. What it is told before the thread starts waits.
 pub struct Overlay {
-    /// Bumped by every change, so a delayed hide that was overtaken does nothing.
-    generation: AtomicU64,
+    messages: mpsc::Sender<Message>,
+    waiting: Mutex<Option<mpsc::Receiver<Message>>>,
+    waker: Arc<Mutex<Option<OverlayWaker>>>,
+    /// The mic level as `f32` bits; read at each frame rather than sent.
+    level: Arc<AtomicU32>,
 }
 
-impl Overlay {
-    pub fn apply(&self, app: &AppHandle, visibility: Visibility) {
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        match visibility {
-            Visibility::Show => set_visible(app, true, generation),
-            Visibility::Hide => set_visible(app, false, generation),
-            Visibility::ShowFor(delay) => {
-                set_visible(app, true, generation);
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(delay).await;
-                    let overlay = app.state::<crate::app::AppState>();
-                    if overlay.overlay.generation.load(Ordering::SeqCst) == generation {
-                        set_visible(&app, false, generation);
-                    }
-                });
-            }
+impl Default for Overlay {
+    fn default() -> Self {
+        let (messages, waiting) = mpsc::channel();
+        Self {
+            messages,
+            waiting: Mutex::new(Some(waiting)),
+            waker: Arc::default(),
+            level: Arc::default(),
         }
     }
 }
 
-fn set_visible(app: &AppHandle, visible: bool, generation: u64) {
-    if let Some(window) = app.get_webview_window(LABEL)
-        && let Err(error) = change_visibility(&window, visible, || {
-            app.state::<crate::app::AppState>()
-                .overlay
-                .generation
-                .load(Ordering::SeqCst)
-                == generation
-        })
-    {
-        eprintln!("The status overlay could not be shown or hidden: {error}");
+impl Overlay {
+    /// Starts the overlay's thread, which opens `plan`'s surface; `cancel` runs when its cancel
+    /// button is pressed. A second call does nothing.
+    pub fn start(&self, plan: OverlayPlan, takes_clicks: bool, cancel: impl Fn() + Send + 'static) {
+        let Some(messages) = self
+            .waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        let (waker, level) = (Arc::clone(&self.waker), Arc::clone(&self.level));
+        let started = std::thread::Builder::new()
+            .name("overlay".to_owned())
+            .spawn(move || run(plan, takes_clicks, &messages, &waker, &level, &cancel));
+        if let Err(error) = started {
+            println!("The status overlay could not start: {error}. It stays off.");
+        }
+    }
+
+    /// Shows `status`, and shows or hides the overlay as `visibility` says.
+    pub fn show(&self, status: &Status, visibility: Visibility) {
+        self.send(Message::Status(Box::new(status.clone()), visibility));
+    }
+
+    pub fn apply(&self, visibility: Visibility) {
+        self.send(Message::Visibility(visibility));
+    }
+
+    /// Whether the live draft shows on the overlay's line.
+    pub fn show_draft(&self, show: bool) {
+        self.send(Message::Draft(show));
+    }
+
+    /// The microphone's loudness, 0 to 1; the wave picks it up on its next frame.
+    pub fn level(&self, level: f32) {
+        self.level.store(level.to_bits(), Ordering::Relaxed);
+    }
+
+    fn send(&self, message: Message) {
+        let _ = self.messages.send(message);
+        if let Some(waker) = &*self.waker.lock().unwrap_or_else(PoisonError::into_inner) {
+            waker.wake();
+        }
     }
 }
 
-trait OverlayWindow {
-    fn is_visible(&self) -> Result<bool, String>;
-    fn place(&self) -> Result<(), String>;
-    fn set_visible(&self, visible: bool) -> Result<(), String>;
+/// The overlay's thread: opens the surface, then shows, animates and hides it as told.
+fn run(
+    plan: OverlayPlan,
+    takes_clicks: bool,
+    messages: &mpsc::Receiver<Message>,
+    waker: &Mutex<Option<OverlayWaker>>,
+    level: &AtomicU32,
+    cancel: &dyn Fn(),
+) {
+    let mut surface = match plan.open(gunmetal::WIDTH, gunmetal::HEIGHT, takes_clicks) {
+        Ok(surface) => surface,
+        Err(error) => {
+            println!("{error} The status overlay stays off.");
+            return;
+        }
+    };
+    *waker.lock().unwrap_or_else(PoisonError::into_inner) = Some(surface.waker());
+    // Fonts load here, before the first show, so no show waits for them.
+    let Some(mut painter) = Painter::new(surface.scale()) else {
+        println!("The status overlay could not be drawn at this scale. It stays off.");
+        return;
+    };
+    let mut overlay = Overlaying::new(takes_clicks);
+    loop {
+        while let Ok(message) = messages.try_recv() {
+            overlay.take(message);
+        }
+        overlay.settle(
+            &mut surface,
+            &mut painter,
+            f32::from_bits(level.load(Ordering::Relaxed)),
+        );
+        match surface.wait(overlay.deadline()) {
+            OverlayEvent::Woken => {}
+            OverlayEvent::Press { x, y } => {
+                if overlay.visible && overlay.view.cancels(x, y) {
+                    cancel();
+                }
+            }
+            OverlayEvent::Due => overlay.due(),
+        }
+    }
 }
 
-impl OverlayWindow for WebviewWindow {
-    fn is_visible(&self) -> Result<bool, String> {
-        self.is_visible().map_err(|error| error.to_string())
-    }
-
-    fn place(&self) -> Result<(), String> {
-        let app = self.app_handle();
-        replace(app, &app.state::<crate::app::AppState>().host())
-    }
-
-    fn set_visible(&self, visible: bool) -> Result<(), String> {
-        set_window_visible(self, visible)
-    }
-}
-
-/// Windows shows it without activating it, which tao's `show` does.
-#[cfg(windows)]
-fn set_window_visible(window: &WebviewWindow, visible: bool) -> Result<(), String> {
-    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
-    Desktop::set_overlay_visible(hwnd.0 as isize, visible);
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn set_window_visible(window: &WebviewWindow, visible: bool) -> Result<(), String> {
-    if visible {
-        window.show()
-    } else {
-        window.hide()
-    }
-    .map_err(|error| error.to_string())
-}
-
-fn change_visibility(
-    window: &impl OverlayWindow,
+/// What the overlay's thread keeps between waits.
+struct Overlaying {
+    view: View,
+    started: Instant,
+    /// Whether the surface shows.
     visible: bool,
-    still_current: impl Fn() -> bool,
-) -> Result<(), String> {
-    if visible && !window.is_visible()? {
-        window.place()?;
+    /// Whether the surface should show.
+    wanted: bool,
+    /// When a shown-for-a-while overlay hides.
+    hide_at: Option<Instant>,
+    /// When the next frame is due while something moves.
+    frame_at: Option<Instant>,
+    /// Whether the view changed since it was last drawn.
+    stale: bool,
+    /// The last failure to show, reported once.
+    failure: Option<String>,
+}
+
+impl Overlaying {
+    fn new(takes_clicks: bool) -> Self {
+        Self {
+            view: View::new(takes_clicks),
+            started: Instant::now(),
+            visible: false,
+            wanted: false,
+            hide_at: None,
+            frame_at: None,
+            stale: false,
+            failure: None,
+        }
     }
-    if still_current() {
-        window.set_visible(visible)?;
+
+    fn clock(&self) -> f64 {
+        self.started.elapsed().as_secs_f64()
     }
-    Ok(())
+
+    fn take(&mut self, message: Message) {
+        match message {
+            Message::Status(status, visibility) => {
+                self.view.set_status(*status, self.clock());
+                self.stale = true;
+                self.want(visibility);
+            }
+            Message::Visibility(visibility) => self.want(visibility),
+            Message::Draft(show) => {
+                self.view.set_draft(show);
+                self.stale = true;
+            }
+        }
+    }
+
+    fn want(&mut self, visibility: Visibility) {
+        let (wanted, hide_at) = match visibility {
+            Visibility::Show => (true, None),
+            Visibility::Hide => (false, None),
+            Visibility::ShowFor(time) => (true, Some(Instant::now() + time)),
+        };
+        self.wanted = wanted;
+        self.hide_at = hide_at;
+    }
+
+    /// A deadline passed: hide once shown long enough, or draw the next frame.
+    fn due(&mut self) {
+        if self.hide_at.is_some_and(|at| Instant::now() >= at) {
+            self.wanted = false;
+            self.hide_at = None;
+        } else if self.frame_at.is_some_and(|at| Instant::now() >= at) {
+            self.stale = true;
+        }
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        match (self.hide_at, self.frame_at) {
+            (Some(hide), Some(frame)) => Some(hide.min(frame)),
+            (hide, frame) => hide.or(frame),
+        }
+    }
+
+    /// Brings the surface in line with what is wanted, drawing a frame when the view moved.
+    fn settle(&mut self, surface: &mut OverlaySurface, painter: &mut Painter, level: f32) {
+        if !self.wanted {
+            if self.visible {
+                surface.hide();
+                self.visible = false;
+            }
+            self.frame_at = None;
+            return;
+        }
+        if self.visible && !self.stale {
+            return;
+        }
+        let next = self.view.poll(self.clock(), level);
+        let frame = painter.draw(&self.view);
+        let drawn = if self.visible {
+            surface.present(frame)
+        } else {
+            surface.show(frame)
+        };
+        match drawn {
+            Ok(()) => {
+                self.visible = true;
+                self.failure = None;
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if self.failure.as_ref() != Some(&message) {
+                    println!("{message} The status overlay stays hidden.");
+                }
+                self.failure = Some(message);
+            }
+        }
+        self.stale = false;
+        self.frame_at = next.map(|wait| Instant::now() + wait);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::time::Duration;
 
     use thalvi_desktop::capture::CaptureRoute;
 
     use crate::status::FailureKind;
 
     use super::*;
-
-    #[derive(Default)]
-    struct Window {
-        visible: Cell<bool>,
-        placed: Cell<bool>,
-        preparations: Cell<usize>,
-        fail_placement: bool,
-    }
-
-    impl OverlayWindow for Window {
-        fn is_visible(&self) -> Result<bool, String> {
-            Ok(self.visible.get())
-        }
-
-        fn place(&self) -> Result<(), String> {
-            if self.fail_placement {
-                return Err("The desktop is unavailable.".to_owned());
-            }
-            self.placed.set(true);
-            self.preparations.set(self.preparations.get() + 1);
-            Ok(())
-        }
-
-        fn set_visible(&self, visible: bool) -> Result<(), String> {
-            if visible {
-                assert!(
-                    self.placed.get(),
-                    "the overlay mapped without a placement rule"
-                );
-            }
-            self.visible.set(visible);
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn each_remap_restores_placement_but_visible_status_updates_do_not() {
-        let window = Window::default();
-        for capture in 1..=3 {
-            change_visibility(&window, true, || true).unwrap();
-            assert!(window.visible.get());
-            assert_eq!(window.preparations.get(), capture);
-            change_visibility(&window, true, || true).unwrap();
-            assert_eq!(window.preparations.get(), capture);
-            change_visibility(&window, false, || true).unwrap();
-            window.placed.set(false); // A compositor config reload discards the rule.
-        }
-    }
-
-    #[test]
-    fn a_failed_placement_keeps_the_overlay_hidden() {
-        let window = Window {
-            fail_placement: true,
-            ..Window::default()
-        };
-        assert_eq!(
-            change_visibility(&window, true, || true),
-            Err("The desktop is unavailable.".to_owned())
-        );
-        assert!(!window.visible.get());
-        change_visibility(&window, false, || true).unwrap();
-    }
-
-    #[test]
-    fn a_hide_that_overtakes_placement_does_not_let_the_overlay_reappear() {
-        let window = Window::default();
-        change_visibility(&window, true, || {
-            assert!(window.placed.get());
-            false
-        })
-        .unwrap();
-        assert!(!window.visible.get());
-    }
-
-    #[test]
-    fn the_frame_is_centred_and_hangs_below_the_panel() {
-        for top in [0.0, 40.0] {
-            assert_eq!(Frame::new(2048.0, top), Frame { left: 794.0, top });
-        }
-        // A screen narrower than the window starts at its left edge.
-        assert_eq!(Frame::new(300.0, 0.0).left, 0.0);
-    }
 
     #[test]
     fn the_overlay_shows_from_the_wake_word_and_hides_after_a_confirmation_or_a_failure() {

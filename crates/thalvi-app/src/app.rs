@@ -16,7 +16,9 @@ use thalvi_desktop::draft::Drafts;
 use thalvi_desktop::feed::{Clip, FeedEnd};
 use thalvi_desktop::history;
 use thalvi_desktop::hold::HoldKind;
-use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, HostError, RequestServer, refusal};
+use thalvi_desktop::host::{
+    Desktop, HoldSource, HoldWatch, Host, HostError, RequestServer, refusal,
+};
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::SpeechDownloads;
 use thalvi_desktop::speech_device::SpeechDevices;
@@ -27,7 +29,7 @@ use crate::client;
 use crate::commands;
 use crate::launch::{Launch, relaunch_shows_settings};
 use crate::menu_entry::{self, MenuEntry};
-use crate::overlay::{self, Overlay, Visibility};
+use crate::overlay::{Overlay, Visibility};
 use crate::runner::{AudioStatus, Control, EngineLink, Restart};
 use serde_json::Value;
 
@@ -352,6 +354,7 @@ impl AppState {
     fn apply(&self, config: &DesktopConfig) {
         self.overlay_shown
             .store(config.overlay.show, Ordering::SeqCst);
+        self.overlay.show_draft(config.overlay.draft);
         self.saves.set(config);
         self.link.send(Control::Apply(Box::new(config.clone())));
         self.updates.config_changed();
@@ -584,6 +587,7 @@ fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), Stri
     } = AppState::start(config, &app.package_info().version)?;
     state.restore_login(app);
     state.restore_menu_entry(&menu_entry::System::from_env());
+    start_overlay(app, &state);
     app.manage(state);
     serve_requests(app);
     create_windows(app).map_err(|error| error.to_string())?;
@@ -732,16 +736,28 @@ fn serve_requests(app: &AppHandle) {
     }
 }
 
-fn create_windows(app: &AppHandle) -> tauri::Result<()> {
-    let state = app.state::<AppState>();
-    match overlay::create(app, &state.host) {
-        Ok(_) => {}
+/// Starts the overlay's thread on this desktop's overlay surface; its cancel button reaches the
+/// engine. Where the desktop gives no surface, the overlay stays off.
+fn start_overlay(app: &AppHandle, state: &AppState) {
+    // GNOME's panel height comes from GTK, so the plan is made here, on the toolkit's thread.
+    let plan = match state.host.overlay_plan() {
+        Ok(plan) => plan,
         Err(error) => {
-            // An overlay the desktop cannot keep unfocused would take focus from the user's app.
             println!("{error} The status overlay stays off.");
             state.overlay_shown.store(false, Ordering::SeqCst);
+            return;
         }
-    }
+    };
+    state.overlay.show_draft(state.config().overlay.draft);
+    let handle = app.clone();
+    state
+        .overlay
+        .start(plan, state.host.overlay_takes_clicks(), move || {
+            handle.state::<AppState>().link.send(Control::Cancel);
+        });
+}
+
+fn create_windows(app: &AppHandle) -> tauri::Result<()> {
     let settings =
         WebviewWindowBuilder::new(app, SETTINGS, WebviewUrl::App("settings.html".into()))
             .title("Thalvi settings")
@@ -816,6 +832,7 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
     tauri::async_runtime::spawn(async move {
         while level.changed().await.is_ok() {
             let level = *level.borrow_and_update();
+            handle.state::<AppState>().overlay.level(level);
             let _ = handle.emit("thalvi://level", Level { level });
         }
     });
@@ -837,7 +854,7 @@ fn show(app: &AppHandle, status: &Status) {
     }
     let _ = app.emit("thalvi://status", status);
     let enabled = state.overlay_shown.load(Ordering::SeqCst);
-    state.overlay.apply(app, Visibility::of(status, enabled));
+    state.overlay.show(status, Visibility::of(status, enabled));
 }
 
 /// Opens the settings window; only an explicit user action calls this.
