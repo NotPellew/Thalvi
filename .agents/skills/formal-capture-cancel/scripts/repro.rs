@@ -13,6 +13,7 @@ use thalvi_desktop::draft::Draft;
 use thalvi_desktop::draft::Drafts;
 use thalvi_desktop::engine::fakes::{FakeFrames, FakeWake};
 use thalvi_desktop::engine::{CaptureOutcome, CuePlayer, Engine, Parts};
+use thalvi_desktop::feed::Feed;
 use thalvi_desktop::frame::Frame;
 use thalvi_desktop::history::{Capture, Outcome, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};

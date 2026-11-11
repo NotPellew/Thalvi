@@ -144,8 +144,8 @@ areas your change touches. Editing rules are in
   treating an endpoint's presence as enablement.
 - **Resident controls and private request socket.** Commands reach the running app over a request/reply
   socket in the private runtime folder (a user-only pipe on Windows): one JSON line each way, size-bounded,
-  known commands only. Why: controls must not start a microphone, and an agent needs an answer.
-  Rejected: single-instance relaunch (no answer), a keyboard listener, TCP, transcript-bearing replies.
+  known commands only. An agent can feed a WAV file in place of the microphone and set the app up (models, speech servers, word list, quit). Why: controls must not start a microphone, an agent needs an answer, and testing and setup must not need computer use.
+  Rejected: single-instance relaunch (no answer), a keyboard listener, TCP, transcript-bearing replies (they stay rejected).
 - **Hold to talk.** Holding a key dictates and releasing pastes: F9 without a modifier on Hyprland (binds Thalvi adds at runtime with its own executable through `hyprctl`, removed on quit and re-added on `configreloaded`), Alt+KeyZ on Windows (a swallowing keyboard hook that waits for the
   key and Alt both up); a second key, `write_key` (F10, Alt+KeyX), releases into the writing model instead; every word of a hold is text, and only `cancel` abandons one. Each desktop supplies its default keys, and `hold_key` and `write_key` are stored only when they differ. Why: Hyprland 0.53.3 types held modifiers into the paste and drops the release when one comes up first, seen live, and drops a plain `bindr` when another key is pressed or a modifier is down during the hold, so the release is `bindrti`; `RegisterHotKey` sees no release; the key already ends a dictation, and spoken endings cut off sentences that held them; binds in the user's config go stale when the executable moves.
   Rejected: Alt+Y with binds, Ctrl+Z/Y, spoken endings during a hold, a managed `thalvi-binds.conf` the user sources, hand-written binds.

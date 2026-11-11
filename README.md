@@ -405,8 +405,10 @@ current capture and closes the microphone.
 
 ### For agents
 
-A program you run, such as a coding agent, can read and change the settings, see
-what Thalvi is doing and control it with `thalvi-desktop` commands. Each prints
+A program you run, such as a coding agent, can set Thalvi up, read and change the
+settings, feed it audio from a file in place of the microphone, see what Thalvi is
+doing and what its overlay shows, and control it with `thalvi-desktop` commands.
+Nothing that was dictated is ever in an answer. Each prints
 one JSON object and exits 0, or non-zero when the answer is `"ok": false`.
 They talk to the running app over a private socket in your runtime folder on
 Linux, or a named pipe only your user can open on Windows; nothing listens on
@@ -414,7 +416,14 @@ the network, and a command never starts the app or the microphone.
 
 | Command | Answer |
 | --- | --- |
-| `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false}`. `state` is `paused`, `loading`, `listening`, `capturing`, `pending`, `transcribing`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}`, and `awaiting_confirmation: true` marks a submit that waits for you. Nothing that was said is in it. |
+| `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false, "feeding": false, "overlay": {"state": "hidden"}, "recognizer": {"name": "On this computer", "kind": "on_device", "model": "nemotron_160ms", "status": "ready"}}`. `state` is `paused`, `loading`, `listening`, `capturing`, `pending`, `transcribing`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}` (`reason` is left out for a delivery failure, whose notice can hold the dictated text), and `awaiting_confirmation: true` marks a submit that waits for you. `overlay.state` is what the overlay shows: `hidden` (also when the overlay is off), `listening`, `quiet`, `countdown`, `writing`, `working`, `delivered`, `error` (with the `headline` shown) or `loading`. `recognizer` is the speech entry that handles the next dictation (`model` only for a catalog model) and whether it is `ready`, `loading`, `failed` or `paused`, as the Speech page says. Nothing that was said is in it. |
+| `feed <wav-file>` | Plays the file's audio in place of the microphone, at the pace of speech, through the same wake word, recognition, endings and delivery as spoken audio; the microphone is ignored while it plays. Replies when the file has been fed: `{"ok": true, "took_effect": true, "state": "…"}`, with the state then; a capture it started carries on. Refused with `"Thalvi is paused."`, `"A capture is running."`, or the reason for a file that is missing, unreadable, not a mono or stereo 16-bit PCM WAV, or longer than the capture limit. Needs an absolute path (the command makes it absolute). `cancel` stops the feed and any capture it started. Capture metrics record `"source": "file"`. |
+| `models` | `{"ok": true, "models": [{"kind": "speech", "name", "title", "size", "downloaded", "progress_percent", "runs_on"}, …]}`: the wake and speech catalog models, `progress_percent` only while one downloads, `runs_on` (the Speech page's hardware line) only for speech models. |
+| `model-download <wake\|speech> <name>` | Downloads the model; replies when it is ready, `{"ok": true, "downloaded": true}`, or has failed, `{"ok": false, "downloaded": false, "error": "…"}`. `models` shows the progress meanwhile. |
+| `speech-check '<json>'` | Checks one speech server entry exactly as Settings does before saving it: `{"ok": true, "ready": true}`, or `{"ok": false, "ready": false, "error": "…"}`. Saves nothing; keys are never repeated. |
+| `word-list-push` | Gives the active Thalvi server the stored word list, as Settings does: `{"ok": true, "pushed": true}`; `"pushed": false` with a message when the active speech entry is not a Thalvi server. |
+| `show [page]` | Opens Settings, at `speech`, `microphone`, `capture`, `feedback`, `tasks`, `history` or `app` when one is named: `{"ok": true, "took_effect": true}`. |
+| `quit` | Quits as the tray's Quit does: `{"ok": true, "took_effect": true}`. |
 | `settings get` | `{"ok": true, "settings": {…}}`, every setting Settings offers plus `start_at_login` and `show_in_menu`. Speech server keys appear only as `"has_key": true/false`. |
 | `settings check '<json>'` | `{"ok": true, "valid": true}`, or `{"ok": false, "valid": false, "error": "…"}` with the message Settings shows. Saves nothing. |
 | `settings set '<json>'` | `{"ok": true, "changed": true, "applies": "now"}`, or `"next_capture"` while a capture runs. A refusal is `{"ok": false, "error": "…", "changed": false}` and changes nothing. A word list the Thalvi server could not take comes back as `"warning"`. |

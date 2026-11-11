@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `33206a4fdc84505023c72b600bd402e2f89dded4`. The recorded file hashes
+Sync commit: `d15c5e0de2bdd77e58813990ce9661907db62652`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -83,6 +83,11 @@ cancel-first call, so the model is unchanged and only the hashes moved.
 Listening for the dictation wake alone (#342) removes the conversation and ambiguous wake branches from `listen`,
 `scan` and `refuse_quiet`, and the runner's conversation arm in `Runner::step`; no mapped function changed, so only
 the hashes moved.
+A file fed in place of the microphone (#350) adds `Control::Feed`, which `Requests::ends` answers
+by refusing the file and ending nothing, so like `Apply` it has no cancellation effect; `Runner::capture` hands
+`drive` a cancel callback that also stops the feed, and `Engine::capture` notes whether its frames come from a file
+for the capture metric. No mapped await boundary, control drain or delivery admission changed, so the model is
+unchanged and only the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

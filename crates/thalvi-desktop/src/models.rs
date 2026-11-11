@@ -1,6 +1,7 @@
 //! Model catalogs (wake heads, speech recognition) and their checksum-verified download into the per-user data directory.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -835,13 +836,22 @@ pub enum SpeechProgress {
     Done,
 }
 
-/// The speech models being downloaded now, so a model is never fetched twice at once.
+/// The speech models being downloaded now and how far each is, so a model is never fetched twice at once.
 #[derive(Debug, Default)]
 pub struct SpeechDownloads {
-    running: Mutex<HashSet<String>>,
+    running: Mutex<HashMap<String, SpeechProgress>>,
 }
 
 impl SpeechDownloads {
+    /// How far the download of the model called `name` is, if one is running.
+    pub fn progress(&self, name: &str) -> Option<SpeechProgress> {
+        self.running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .copied()
+    }
+
     /// Runs [`ModelStore::fetch_speech`] for the model called `name` unless it is already running.
     ///
     /// # Errors
@@ -851,28 +861,39 @@ impl SpeechDownloads {
         name: &str,
         store: &ModelStore,
         assets: &SpeechAssets<'_>,
-        progress: impl FnMut(SpeechProgress),
+        mut progress: impl FnMut(SpeechProgress),
     ) -> Result<(), ModelError> {
-        if !self
+        match self
             .running
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(name.to_owned())
+            .entry(name.to_owned())
         {
-            return Err(ModelError::AlreadyDownloading {
-                name: name.to_owned(),
-            });
-        }
+            Entry::Occupied(_) => {
+                return Err(ModelError::AlreadyDownloading {
+                    name: name.to_owned(),
+                });
+            }
+            Entry::Vacant(slot) => slot.insert(SpeechProgress::Verifying),
+        };
         let _release = Release {
             running: &self.running,
             name,
         };
-        store.fetch_speech(assets, progress).await
+        store
+            .fetch_speech(assets, |event| {
+                self.running
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(name.to_owned(), event);
+                progress(event);
+            })
+            .await
     }
 }
 
 struct Release<'a> {
-    running: &'a Mutex<HashSet<String>>,
+    running: &'a Mutex<HashMap<String, SpeechProgress>>,
     name: &'a str,
 }
 

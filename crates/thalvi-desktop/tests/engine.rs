@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
@@ -17,9 +18,10 @@ use thalvi_desktop::engine::fakes::{
     SpotterControl, WakeControl,
 };
 use thalvi_desktop::engine::{
-    CaptureError, CaptureOutcome, Engine, EngineHandle, EngineState, ListenError, Parts,
-    WakeTrigger,
+    CaptureError, CaptureOutcome, Engine, EngineHandle, EngineState, FrameSource, ListenError,
+    Parts, WakeTrigger,
 };
+use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::hold::{HoldInput, Refusal};
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
@@ -31,6 +33,7 @@ use thalvi_desktop::spotter::KeywordSpotter;
 use thalvi_desktop::vad::VadDetector;
 use thalvi_desktop::wake::WakeEvent;
 use thalvi_desktop::writing::{DEFAULT_PROMPT, WritingError};
+use tokio::sync::{oneshot, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
 type TestEngine = Engine<FakeRecognizer, FakeWake, FakeCuePlayer>;
@@ -6033,6 +6036,206 @@ async fn a_spotter_that_could_not_load_is_told_once_with_the_first_capture_until
             assert_eq!(rig.notices(), Vec::<String>::new());
             rig.handle.cancel();
             let _ = finished(task).await;
+        })
+        .await;
+}
+
+/// A clip of `frames` frames numbered from 100, whose first is loud enough to be a wake word.
+fn clip(frames: usize) -> Clip {
+    Clip::from_frames(
+        (0..frames)
+            .map(|n| if n == 0 { audible(100) } else { quiet(100 + n) })
+            .collect(),
+    )
+}
+
+/// A feeder on `rig`'s microphone, and whether a clip is playing.
+fn feeder_for(rig: &Rig) -> (Feeder, Arc<watch::Sender<bool>>) {
+    let feeding = Arc::new(watch::channel(false).0);
+    (Feeder::new(&rig.gate, Arc::clone(&feeding)), feeding)
+}
+
+/// Starts `clip` with the wake word heard on its first frame.
+fn feed_wake(rig: &Rig, feeder: &Feeder, clip: Clip) -> oneshot::Receiver<FeedEnd> {
+    let (feed, ended) = Feed::new(clip);
+    rig.wake.fire(WakeEvent::Capture);
+    feeder.start(feed);
+    ended
+}
+
+/// Like [`capture_task`], on a source that also plays clips, which it hands back at the end.
+fn fed_capture_task(
+    mut engine: TestEngine,
+    mut frames: Fed<FakeFrames>,
+) -> JoinHandle<(CaptureOutcome, Fed<FakeFrames>)> {
+    tokio::task::spawn_local(async move {
+        let trigger = engine.listen(&mut frames).await.unwrap();
+        assert_eq!(trigger, WakeTrigger::Capture);
+        let outcome = engine.capture(&mut frames).await;
+        engine.finish().await;
+        (outcome, frames)
+    })
+}
+
+fn capture_flow_sources(dir: &std::path::Path) -> Vec<String> {
+    read_lines(&dir.join("metrics.jsonl"))
+        .iter()
+        .filter(|row| row["event"] == "desktop_capture_flow")
+        .map(|row| row["source"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fed_file_replaces_the_microphone_at_real_time_pace_and_delivers_like_speech() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("fed");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+            let (feeder, feeding) = feeder_for(&rig);
+            let task = fed_capture_task(engine, feeder.wrap(frames));
+            let mut ended = feed_wake(&rig, &feeder, clip(50));
+            settle().await;
+            assert!(*feeding.borrow());
+            rig.server.ready();
+            settle().await;
+            // The room keeps sending frames, numbered below the file's, all through.
+            rig.feed_until(230, Kind::Quiet).await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello paste that").await;
+            rig.feed_until(1699, Kind::Quiet).await;
+            rig.at(1700).await;
+            assert_eq!(rig.started(Cue::Accepted), [1700]);
+
+            let (outcome, mut fed) = finished(task).await;
+            assert_eq!(outcome, accepted(CaptureRoute::Paste, "Hello"));
+            // The file's frames from the end of the wake cue to the ending, one every 80 ms, and none of the room's.
+            let sent = tags(&rig.sent());
+            let first = 103;
+            assert_eq!(
+                sent,
+                (first..first + i16::try_from(sent.len()).unwrap()).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                sent.len(),
+                10,
+                "the frames at 240 ms through 960 ms, before the ending"
+            );
+            assert_eq!(capture_flow_sources(&dir), ["file"]);
+
+            // The file is fed when its last frame is given to the engine, 49 frames in.
+            rig.at(49 * FRAME_MS - 1).await;
+            assert!(ended.try_recv().is_err());
+            assert!(*feeding.borrow());
+            rig.at(49 * FRAME_MS).await;
+            assert_eq!(ended.try_recv(), Ok(FeedEnd::Played));
+            assert!(!*feeding.borrow());
+            // Frames nobody read while the file played wait their turn, as the microphone's do;
+            // then the microphone is heard again.
+            rig.feed.send(quiet(900));
+            let mut rest = Vec::new();
+            while rest.last() != Some(&900) {
+                let queued = tokio::time::timeout(ms(10), fed.next()).await;
+                rest.push(queued.unwrap().unwrap().frame[0]);
+            }
+            rest.pop();
+            assert_eq!(rest.last(), Some(&149), "the file's last frame");
+            assert!(rest.windows(2).all(|pair| pair[1] == pair[0] + 1));
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_spoken_capture_is_recorded_as_coming_from_the_microphone() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("spoken");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello paste that").await;
+            rig.feed_until(2700, Kind::Quiet).await;
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "Hello"));
+            assert_eq!(capture_flow_sources(&dir), ["microphone"]);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fed_frame_is_lost_while_the_microphone_gate_is_off() {
+    LocalSet::new()
+        .run_until(async {
+            let (rig, _engine, frames) = Rig::new("{}");
+            let (feeder, _feeding) = feeder_for(&rig);
+            let mut fed = feeder.wrap(frames);
+            rig.gate.set_enabled(false);
+            let (lost, mut lost_end) = Feed::new(clip(3));
+            feeder.start(lost);
+            settle().await;
+            rig.at(300).await;
+            assert_eq!(lost_end.try_recv(), Ok(FeedEnd::Played));
+            let next = tokio::time::timeout(ms(10), fed.next()).await;
+            assert!(next.is_err(), "nothing reached the engine");
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancel_stops_the_feed_and_the_capture_it_started_and_a_second_file_waits_its_turn() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let (feeder, feeding) = feeder_for(&rig);
+            let task = fed_capture_task(engine, feeder.wrap(frames));
+            let mut ended = feed_wake(&rig, &feeder, clip(50));
+            settle().await;
+            rig.server.ready();
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello").await;
+
+            let (second, mut refused) = Feed::new(clip(5));
+            feeder.start(second);
+            assert_eq!(
+                refused.try_recv(),
+                Ok(FeedEnd::Refused("A file is already being fed."))
+            );
+
+            rig.handle.cancel();
+            feeder.cancel();
+            let (outcome, mut fed) = finished(task).await;
+            assert_eq!(
+                outcome,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("Hello".to_owned())
+                }
+            );
+            settle().await;
+            assert_eq!(ended.try_recv(), Ok(FeedEnd::Cancelled));
+            assert!(!*feeding.borrow());
+            // What the file still held is gone; the next frame is the microphone's.
+            rig.at(1500).await;
+            rig.feed.send(quiet(900));
+            assert_eq!(
+                tokio::time::timeout(ms(10), fed.next())
+                    .await
+                    .map(|queued| queued.unwrap().frame[0]),
+                Ok(900)
+            );
+
+            // Cancelled before any wake, a feed stops just the same, and what it had played unread is gone.
+            let (unheard, mut unheard_end) = Feed::new(clip(50));
+            feeder.start(unheard);
+            rig.at(1900).await;
+            assert!(*feeding.borrow());
+            feeder.cancel();
+            settle().await;
+            assert_eq!(unheard_end.try_recv(), Ok(FeedEnd::Cancelled));
+            assert!(!*feeding.borrow());
+            rig.feed.send(quiet(901));
+            let next = tokio::time::timeout(ms(10), fed.next()).await;
+            assert_eq!(next.unwrap().unwrap().frame[0], 901);
         })
         .await;
 }

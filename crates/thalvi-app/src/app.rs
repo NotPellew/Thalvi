@@ -11,6 +11,7 @@ use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::Delivery;
 use thalvi_desktop::device::Adapters;
 use thalvi_desktop::draft::Drafts;
+use thalvi_desktop::feed::{Clip, FeedEnd};
 use thalvi_desktop::history;
 use thalvi_desktop::hold::HoldKind;
 use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, HostError, RequestServer, refusal};
@@ -19,7 +20,7 @@ use thalvi_desktop::models::SpeechDownloads;
 use thalvi_desktop::speech_device::SpeechDevices;
 use tokio::sync::watch;
 
-use crate::agent::{self, Running, Switch};
+use crate::agent::{self, Catalog, ModelRow, Running, Switch};
 use crate::client;
 use crate::commands;
 use crate::launch::{Launch, relaunch_shows_settings};
@@ -721,8 +722,11 @@ impl Running for Live {
         }
     }
 
-    fn show_settings(&self) {
+    fn show_settings(&self, page: Option<&str>) {
         show_settings(&self.0);
+        if let Some(page) = page {
+            let _ = self.0.emit(OPEN_PAGE_EVENT, page);
+        }
     }
 
     async fn copy_error(&self) -> Result<(), String> {
@@ -764,6 +768,48 @@ impl Running for Live {
     fn recordings(&self) -> Result<std::path::PathBuf, String> {
         Recorder::dir().map_err(|error| error.to_string())
     }
+
+    fn feeding(&self) -> watch::Receiver<bool> {
+        self.0.state::<AppState>().link.feeding_updates()
+    }
+
+    async fn feed(&self, clip: Clip) -> FeedEnd {
+        self.0.state::<AppState>().link.feed(clip).await
+    }
+
+    async fn models(&self) -> Result<Vec<ModelRow>, String> {
+        let state = self.0.state::<AppState>();
+        let mut rows: Vec<ModelRow> = commands::wake_models()
+            .await?
+            .iter()
+            .map(ModelRow::wake)
+            .collect();
+        for info in commands::speech_models(&state).await? {
+            let line = commands::speech_device_line(&state, info.name).await?;
+            let progress = state.speech_downloads.progress(info.name);
+            rows.push(ModelRow::speech(&info, line, progress));
+        }
+        Ok(rows)
+    }
+
+    async fn download_model(&self, kind: Catalog, name: &str) -> Result<(), String> {
+        let state = self.0.state::<AppState>();
+        match kind {
+            Catalog::Wake => commands::download_wake(&state, name).await,
+            Catalog::Speech => commands::download_speech(&self.0, &state, name).await,
+        }
+    }
+
+    fn overlay_on(&self) -> bool {
+        self.0
+            .state::<AppState>()
+            .overlay_shown
+            .load(Ordering::SeqCst)
+    }
+
+    fn quit(&self) {
+        quit(&self.0);
+    }
 }
 
 /// Handles a tray menu item.
@@ -782,32 +828,35 @@ pub fn on_menu(app: &AppHandle, id: &str) {
             show_settings(app);
             let _ = app.emit(OPEN_PAGE_EVENT, HISTORY_PAGE);
         }
-        tray::QUIT => {
-            let app = app.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                let state = app.state::<AppState>();
-                // Bars read "not running" while the microphone and the recognizer close.
-                drop(
-                    state
-                        .request_server
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .take(),
-                );
-                // Exiting never drops managed state, and Hyprland keeps binds the app added.
-                drop(
-                    state
-                        .hold_watch
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .take(),
-                );
-                state.link.quit();
-                app.exit(0);
-            });
-        }
+        tray::QUIT => quit(app),
         _ => {}
     }
+}
+
+/// Closes the request socket, the hold keys, the microphone and the recognizer, then exits.
+fn quit(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        // Bars read "not running" while the microphone and the recognizer close.
+        drop(
+            state
+                .request_server
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
+        // Exiting never drops managed state, and Hyprland keeps binds the app added.
+        drop(
+            state
+                .hold_watch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
+        state.link.quit();
+        app.exit(0);
+    });
 }
 
 #[cfg(test)]

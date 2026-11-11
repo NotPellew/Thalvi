@@ -7,20 +7,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thalvi_desktop::capture::CaptureRoute;
 use thalvi_desktop::config::DesktopConfig;
+use thalvi_desktop::entries::{self, LiveKind};
+use thalvi_desktop::feed::{Clip, FeedEnd};
 use thalvi_desktop::hold::HoldKind;
 use thalvi_desktop::metrics::{self, SUMMARY_WINDOW};
+use thalvi_desktop::models::{SpeechModelInfo, SpeechProgress, WakeModelInfo};
+use thalvi_desktop::transducer::SpeechChoice;
 use tokio::sync::watch;
 
 use crate::control;
 use crate::runner::{AudioStatus, Control};
 use crate::settings::{judge, merge_patch, settings_json};
-use crate::status::{Failure, Status};
+use crate::status::{Failure, FailureKind, Status};
 
 /// How long a control is given to show in the engine's state before it is said to have had no effect.
 pub const EFFECT_WAIT: Duration = Duration::from_secs(3);
 
 /// The commands a refusal lists, so that it need not repeat the one that was sent.
-const COMMANDS: [&str; 16] = [
+const COMMANDS: [&str; 22] = [
     "status",
     "state",
     "pause",
@@ -37,7 +41,32 @@ const COMMANDS: [&str; 16] = [
     "settings-check",
     "settings-set",
     "metrics-summary",
+    "feed",
+    "models",
+    "model-download",
+    "speech-check",
+    "word-list-push",
+    "quit",
 ];
+
+/// The settings pages `show` opens: the ids the Settings window defines.
+const PAGES: [&str; 7] = [
+    "speech",
+    "microphone",
+    "capture",
+    "feedback",
+    "tasks",
+    "history",
+    "app",
+];
+
+/// Which catalog a model is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Catalog {
+    Wake,
+    Speech,
+}
 
 /// What an outside program may ask. A request is one JSON object naming its `command`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,8 +94,11 @@ pub enum Request {
     WriteEnd,
     /// Copy the report of the last error shown.
     CopyError,
-    /// Open the settings window.
-    Show,
+    /// Open the settings window, at a page when one is named.
+    Show {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<String>,
+    },
     /// Every setting the Settings window offers; keys only as set or not set.
     SettingsGet,
     /// Validate a merge patch over the settings without saving it.
@@ -75,6 +107,18 @@ pub enum Request {
     SettingsSet { settings: Value },
     /// Delays per stage and outcomes of the recent dictations.
     MetricsSummary,
+    /// Play a WAV file in place of the microphone, as if it were spoken.
+    Feed { path: String },
+    /// The catalog models with whether each is downloaded.
+    Models,
+    /// Download a catalog model.
+    ModelDownload { kind: Catalog, name: String },
+    /// Check a speech server entry as Settings does before saving it.
+    SpeechCheck { entry: Value },
+    /// Give the active Thalvi server the stored word list.
+    WordListPush,
+    /// Quit as the tray's Quit does.
+    Quit,
 }
 
 impl Request {
@@ -104,7 +148,12 @@ impl Request {
         // Serde ignores extra fields on a command that takes none.
         let takes_details = matches!(
             request,
-            Self::SettingsCheck { .. } | Self::SettingsSet { .. }
+            Self::SettingsCheck { .. }
+                | Self::SettingsSet { .. }
+                | Self::Feed { .. }
+                | Self::ModelDownload { .. }
+                | Self::SpeechCheck { .. }
+                | Self::Show { .. }
         );
         if !takes_details && details > 1 {
             return Err(format!("The command {command} takes no other details."));
@@ -154,7 +203,8 @@ pub trait Running {
     fn control(&self, control: Control);
     /// Presses or releases the dictation key.
     fn hold(&self, kind: HoldKind, down: bool);
-    fn show_settings(&self);
+    /// Opens the Settings window, at `page` when one is given.
+    fn show_settings(&self, page: Option<&str>);
     async fn copy_error(&self) -> Result<(), String>;
     fn config(&self) -> DesktopConfig;
     /// Saves and applies a settings form exactly as a Settings save does. `form` runs under the
@@ -169,6 +219,72 @@ pub trait Running {
     fn set_switch(&self, switch: Switch, on: bool) -> Result<(), String>;
     /// The folder `metrics.jsonl` is written in.
     fn recordings(&self) -> Result<PathBuf, String>;
+    /// Whether a file's audio is being fed in place of the microphone's.
+    fn feeding(&self) -> watch::Receiver<bool>;
+    /// Feeds `clip` in place of the microphone and says how it went, once it has.
+    async fn feed(&self, clip: Clip) -> FeedEnd;
+    /// The catalog models as Settings lists them.
+    async fn models(&self) -> Result<Vec<ModelRow>, String>;
+    /// Downloads a catalog model as Settings does, returning when it is ready or has failed.
+    async fn download_model(&self, kind: Catalog, name: &str) -> Result<(), String>;
+    /// Whether the overlay is turned on.
+    fn overlay_on(&self) -> bool;
+    /// Quits as the tray's Quit does.
+    fn quit(&self);
+}
+
+/// A catalog model as `models` lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ModelRow {
+    kind: Catalog,
+    name: &'static str,
+    title: &'static str,
+    /// Bytes to download in all.
+    size: u64,
+    downloaded: bool,
+    /// How far a download has got, only while one runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress_percent: Option<u8>,
+    /// What the Speech page says about the hardware the model runs on; speech models only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runs_on: Option<String>,
+}
+
+impl ModelRow {
+    #[must_use]
+    pub fn wake(info: &WakeModelInfo) -> Self {
+        Self {
+            kind: Catalog::Wake,
+            name: info.name,
+            title: info.title,
+            size: info.size,
+            downloaded: info.cached,
+            progress_percent: None,
+            runs_on: None,
+        }
+    }
+
+    /// `runs_on` is the Speech page's hardware line; `progress` the download running now, if any.
+    #[must_use]
+    pub fn speech(
+        info: &SpeechModelInfo,
+        runs_on: String,
+        progress: Option<SpeechProgress>,
+    ) -> Self {
+        Self {
+            kind: Catalog::Speech,
+            name: info.name,
+            title: info.title,
+            size: info.size,
+            downloaded: info.cached,
+            progress_percent: progress.map(|progress| match progress {
+                SpeechProgress::Verifying => 0,
+                SpeechProgress::Downloading { percent } => percent,
+                SpeechProgress::Done => 100,
+            }),
+            runs_on: Some(runs_on),
+        }
+    }
 }
 
 fn done(fields: Value) -> String {
@@ -235,14 +351,20 @@ async fn handle(running: &impl Running, wait: Duration, request: Request) -> Str
             "copy_error": running.last_error().is_some(),
         })),
         Request::State => state(running),
-        Request::Show => {
-            running.show_settings();
-            done(json!({"took_effect": true}))
-        }
+        Request::Show { page } => show(running, page.as_deref()),
         Request::SettingsGet => settings_get(running),
         Request::SettingsCheck { settings } => settings_check(running, &settings),
         Request::SettingsSet { settings } => settings_set(running, &settings).await,
         Request::MetricsSummary => metrics_summary(running).await,
+        Request::Feed { path } => feed(running, &path).await,
+        Request::Models => models(running).await,
+        Request::ModelDownload { kind, name } => model_download(running, kind, &name).await,
+        Request::SpeechCheck { entry } => speech_check(running, &entry),
+        Request::WordListPush => word_list_push(running).await,
+        Request::Quit => {
+            running.quit();
+            done(json!({"took_effect": true}))
+        }
         Request::Pause => pause(running, wait).await,
         Request::Resume => resume(running, wait).await,
         Request::Toggle => toggle(running, wait).await,
@@ -275,19 +397,81 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
     }
 }
 
+/// What the overlay shows for `status`.
+fn overlay_word(status: &Status, on: bool) -> &'static str {
+    if !on {
+        return "hidden";
+    }
+    match status {
+        Status::Paused
+        | Status::Listening
+        | Status::Loading {
+            downloading: false, ..
+        } => "hidden",
+        Status::Starting { .. } | Status::Capturing { .. } => "listening",
+        Status::Pending {
+            waiting_for_quiet: true,
+            ..
+        } => "quiet",
+        Status::Pending { .. } => "countdown",
+        Status::Writing { .. } => "writing",
+        Status::Thinking { .. } => "thinking",
+        Status::Working { .. } => "working",
+        Status::Done { .. } => "delivered",
+        Status::Failed { .. } => "error",
+        Status::Loading { .. } => "loading",
+    }
+}
+
+/// The recognizer that handles the next dictation, and whether it can, as the Speech page says.
+fn recognizer(config: &DesktopConfig, phase: &str) -> Value {
+    let entry = config.stt.entries.active_live();
+    let (kind, model) = match &entry.kind {
+        LiveKind::Realtime(_) => ("realtime", None),
+        LiveKind::ThalviServer(_) => ("thalvi_server", None),
+        LiveKind::OnDevice(SpeechChoice::Catalog(model)) => ("on_device", Some(model.name())),
+        LiveKind::OnDevice(SpeechChoice::Folder(_)) => ("on_device", None),
+    };
+    let ready = match phase {
+        "paused" | "loading" | "failed" => phase,
+        _ => "ready",
+    };
+    let mut recognizer = json!({"name": entry.name, "kind": kind, "status": ready});
+    if let Some(model) = model {
+        recognizer["model"] = json!(model);
+    }
+    recognizer
+}
+
 fn state(running: &impl Running) -> String {
     let status = running.status();
-    let secrets = secrets(&running.config(), None);
+    let config = running.config();
+    let secrets = secrets(&config, None);
+    let phase = phase(&status);
     let mut reply = json!({
-        "state": phase(&status),
+        "state": phase,
         "paused": running.audio().borrow().paused,
         "copy_error": running.last_error().is_some(),
+        "feeding": *running.feeding().borrow(),
+        "overlay": {"state": overlay_word(&status.borrow(), running.overlay_on())},
+        "recognizer": recognizer(&config, phase),
     });
     match &*status.borrow() {
         Status::Failed {
-            notice, headline, ..
+            notice,
+            headline,
+            kind,
+            ..
         } => {
-            reply["failure"] = json!({"headline": headline, "reason": scrub(notice, &secrets)});
+            reply["failure"] = match kind {
+                FailureKind::Delivery => json!({"headline": headline}),
+                FailureKind::Other => {
+                    json!({"headline": headline, "reason": scrub(notice, &secrets)})
+                }
+            };
+            if running.overlay_on() {
+                reply["overlay"]["headline"] = json!(headline);
+            }
         }
         // A submit presses Enter in another program, so the user alone confirms it.
         Status::Pending {
@@ -389,6 +573,7 @@ async fn toggle(running: &impl Running, wait: Duration) -> String {
 
 async fn cancel(running: &impl Running, wait: Duration) -> String {
     let mut status = running.status();
+    let mut feeding = running.feeding();
     let (busy, delivering) = {
         let current = status.borrow();
         (
@@ -402,17 +587,20 @@ async fn cancel(running: &impl Running, wait: Duration) -> String {
             ),
         )
     };
+    let feeding_now = *feeding.borrow();
     if delivering {
         return no_effect(
             running,
             "The text is being delivered, which cannot be cancelled.",
         );
     }
-    if !busy {
+    if !busy && !feeding_now {
         return no_effect(running, "There is no capture to cancel.");
     }
     running.control(Control::Cancel);
-    if reached(&mut status, wait, |status| !capturing(status)).await {
+    if reached(&mut status, wait, |status| !capturing(status)).await
+        && reached(&mut feeding, wait, |feeding| !*feeding).await
+    {
         took_effect(running)
     } else {
         no_effect(running, "The capture did not stop.")
@@ -466,6 +654,101 @@ async fn copy_error(running: &impl Running) -> String {
     match running.copy_error().await {
         Ok(()) => took_effect(running),
         Err(reason) => no_effect(running, &reason),
+    }
+}
+
+fn show(running: &impl Running, page: Option<&str>) -> String {
+    if page.is_some_and(|page| !PAGES.contains(&page)) {
+        return refused(
+            &format!(
+                "That is not a settings page. The pages are {}.",
+                PAGES.join(", ")
+            ),
+            json!({"took_effect": false}),
+        );
+    }
+    running.show_settings(page);
+    done(json!({"took_effect": true}))
+}
+
+async fn feed(running: &impl Running, path: &str) -> String {
+    let refusal = {
+        let status = running.status();
+        let current = status.borrow();
+        match &*current {
+            Status::Paused => Some("Thalvi is paused."),
+            Status::Loading { .. } => Some("Thalvi is still starting. Try again in a moment."),
+            current if capturing(current) => Some("A capture is running."),
+            Status::Working { .. } => Some("The last text is still being delivered."),
+            _ if *running.feeding().borrow() => Some("A file is already being fed."),
+            _ => None,
+        }
+    };
+    if let Some(refusal) = refusal {
+        return no_effect(running, refusal);
+    }
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return no_effect(running, "The path of the audio file must be absolute.");
+    }
+    let max = running.config().capture_limits.max();
+    let clip = tokio::task::spawn_blocking(move || Clip::from_wav(&path, max)).await;
+    let clip = match clip {
+        Ok(Ok(clip)) => clip,
+        Ok(Err(error)) => return no_effect(running, &error.to_string()),
+        Err(_) => return no_effect(running, "The audio file could not be read."),
+    };
+    match running.feed(clip).await {
+        FeedEnd::Played => took_effect(running),
+        FeedEnd::Cancelled => no_effect(
+            running,
+            "The file was not fed to the end: it was cancelled.",
+        ),
+        FeedEnd::Refused(reason) => no_effect(running, reason),
+    }
+}
+
+async fn models(running: &impl Running) -> String {
+    match running.models().await {
+        Ok(models) => done(json!({"models": models})),
+        Err(error) => refused(&error, Value::Null),
+    }
+}
+
+async fn model_download(running: &impl Running, kind: Catalog, name: &str) -> String {
+    match running.download_model(kind, name).await {
+        Ok(()) => done(json!({"downloaded": true})),
+        Err(error) => refused(&error, json!({"downloaded": false})),
+    }
+}
+
+fn speech_check(running: &impl Running, entry: &Value) -> String {
+    match entries::check(entry) {
+        Ok(()) => done(json!({"ready": true})),
+        Err(error) => refused(
+            &scrub(&error, &secrets(&running.config(), Some(entry))),
+            json!({"ready": false}),
+        ),
+    }
+}
+
+async fn word_list_push(running: &impl Running) -> String {
+    let config = running.config();
+    if !matches!(
+        config.stt.entries.active_live().kind,
+        LiveKind::ThalviServer(_)
+    ) {
+        return done(json!({
+            "pushed": false,
+            "message": "Only a Thalvi server is given the word list; the active speech entry is not one.",
+        }));
+    }
+    match running.share_word_list().await {
+        Ok(()) => done(json!({"pushed": true})),
+        Err(error) => refused(
+            &scrub(&error, &secrets(&config, None)),
+            json!({"pushed": false}),
+        ),
     }
 }
 
@@ -616,6 +899,7 @@ mod tests {
     use std::sync::{Arc, Mutex, PoisonError};
 
     use thalvi_desktop::config::Look;
+    use thalvi_desktop::feed::{Clip, FeedEnd};
     use thalvi_desktop::hold::{HoldInput, Presses};
     #[cfg(target_os = "linux")]
     use thalvi_desktop::host::RequestServer;
@@ -648,6 +932,19 @@ mod tests {
         switches: Mutex<Vec<(Switch, bool)>>,
         shared: AtomicUsize,
         shown: AtomicUsize,
+        pages: Mutex<Vec<String>>,
+        feeding: watch::Sender<bool>,
+        /// Clips fed, as "Clip(n frames)".
+        fed: Mutex<Vec<String>>,
+        /// Ends the feed in flight when sent to; without it a feed is over at once.
+        feed_release: Mutex<Option<tokio::sync::oneshot::Sender<FeedEnd>>>,
+        /// The next feed stays in flight until cancelled or released.
+        holding: AtomicBool,
+        feed_ending: Mutex<FeedEnd>,
+        downloaded: Mutex<Vec<(Catalog, String)>>,
+        quit: AtomicUsize,
+        overlay: AtomicBool,
+        share_error: Mutex<Option<String>>,
         copy_refused: AtomicBool,
         ignoring: AtomicBool,
         keys: HoldInput,
@@ -681,6 +978,16 @@ mod tests {
                 switches: Mutex::new(Vec::new()),
                 shared: AtomicUsize::new(0),
                 shown: AtomicUsize::new(0),
+                pages: Mutex::new(Vec::new()),
+                feeding: watch::channel(false).0,
+                fed: Mutex::new(Vec::new()),
+                feed_release: Mutex::new(None),
+                holding: AtomicBool::new(false),
+                feed_ending: Mutex::new(FeedEnd::Played),
+                downloaded: Mutex::new(Vec::new()),
+                quit: AtomicUsize::new(0),
+                overlay: AtomicBool::new(true),
+                share_error: Mutex::new(None),
                 copy_refused: AtomicBool::new(false),
                 ignoring: AtomicBool::new(false),
                 keys,
@@ -739,7 +1046,13 @@ mod tests {
             match control {
                 Control::SetListening(on) => self.pause_audio(!on),
                 Control::ToggleListening => self.pause_audio(!paused),
-                Control::Cancel => self.set_status(Status::Listening),
+                Control::Cancel => {
+                    self.set_status(Status::Listening);
+                    self.feeding.send_replace(false);
+                    if let Some(release) = lock(&self.feed_release).take() {
+                        let _ = release.send(FeedEnd::Cancelled);
+                    }
+                }
                 _ => {}
             }
         }
@@ -773,8 +1086,9 @@ mod tests {
             }
         }
 
-        fn show_settings(&self) {
+        fn show_settings(&self, page: Option<&str>) {
             self.shown.fetch_add(1, Ordering::SeqCst);
+            lock(&self.pages).extend(page.map(str::to_owned));
         }
 
         fn copy_error(&self) -> impl Future<Output = Result<(), String>> {
@@ -817,7 +1131,7 @@ mod tests {
 
         fn share_word_list(&self) -> impl Future<Output = Result<(), String>> {
             self.shared.fetch_add(1, Ordering::SeqCst);
-            std::future::ready(Ok(()))
+            std::future::ready(lock(&self.share_error).clone().map_or(Ok(()), Err))
         }
 
         fn set_switch(&self, switch: Switch, on: bool) -> Result<(), String> {
@@ -830,6 +1144,73 @@ mod tests {
 
         fn recordings(&self) -> Result<PathBuf, String> {
             Ok(self.folder.join("recordings"))
+        }
+
+        fn feeding(&self) -> watch::Receiver<bool> {
+            self.feeding.subscribe()
+        }
+
+        async fn feed(&self, clip: Clip) -> FeedEnd {
+            lock(&self.fed).push(format!("{clip:?}"));
+            if !self.holding.swap(false, Ordering::SeqCst) {
+                return *lock(&self.feed_ending);
+            }
+            let (release, ended) = tokio::sync::oneshot::channel();
+            *lock(&self.feed_release) = Some(release);
+            self.feeding.send_replace(true);
+            let end = ended.await.unwrap_or(FeedEnd::Cancelled);
+            self.feeding.send_replace(false);
+            end
+        }
+
+        fn models(&self) -> impl Future<Output = Result<Vec<ModelRow>, String>> {
+            let wake = WakeModelInfo {
+                name: "hey_thalvi",
+                title: "Hey Thalvi",
+                size: 1_000,
+                cached: true,
+                threshold: 0.5,
+            };
+            let speech = SpeechModelInfo {
+                name: "nemotron_160ms",
+                title: "Nemotron",
+                description: "d",
+                size: 650,
+                source: "s",
+                license: "l",
+                languages: &["en"],
+                cached: false,
+            };
+            std::future::ready(Ok(vec![
+                ModelRow::wake(&wake),
+                ModelRow::speech(
+                    &speech,
+                    "Will run on the CPU".to_owned(),
+                    Some(SpeechProgress::Downloading { percent: 42 }),
+                ),
+            ]))
+        }
+
+        fn download_model(
+            &self,
+            kind: Catalog,
+            name: &str,
+        ) -> impl Future<Output = Result<(), String>> {
+            if name == "nope" {
+                return std::future::ready(Err(
+                    "nope is not a speech model Thalvi can download.".to_owned()
+                ));
+            }
+            lock(&self.downloaded).push((kind, name.to_owned()));
+            std::future::ready(Ok(()))
+        }
+
+        fn overlay_on(&self) -> bool {
+            self.overlay.load(Ordering::SeqCst)
+        }
+
+        fn quit(&self) {
+            self.quit.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -1220,7 +1601,10 @@ mod tests {
             ask(Request::CopyError),
             missed("The clipboard is locked.", "listening")
         );
-        assert_eq!(ask(Request::Show), json!({"ok": true, "took_effect": true}));
+        assert_eq!(
+            ask(Request::Show { page: None }),
+            json!({"ok": true, "took_effect": true})
+        );
         assert_eq!(rig.fake.shown.load(Ordering::SeqCst), 1);
     }
 
@@ -1275,32 +1659,29 @@ mod tests {
         }
     }
 
-    #[test]
-    fn state_names_what_thalvi_is_doing_and_never_what_was_said() {
-        let rig = Rig::new(
-            "state",
-            &format!(
-                r#"{{"stt": {{"entries": [{}]}}}}"#,
-                entry("live", "realtime", true, Some(SECRET))
-            ),
-        );
-        let words = [
+    /// Each status with what `state` says of it: its word, the overlay's and the recognizer's.
+    fn state_words() -> Vec<(Status, &'static str, &'static str, &'static str)> {
+        vec![
             (
                 Status::Writing {
                     target: Some("kitty".to_owned()),
                     text: "my password is hunter2".to_owned(),
                 },
                 "writing",
+                "writing",
+                "ready",
             ),
             (
                 Status::Thinking {
                     target: Some("kitty".to_owned()),
                 },
                 "writing",
+                "thinking",
+                "ready",
             ),
-            (Status::Paused, "paused"),
-            (Status::Listening, "listening"),
-            (capturing_status(), "capturing"),
+            (Status::Paused, "paused", "hidden", "paused"),
+            (Status::Listening, "listening", "hidden", "ready"),
+            (capturing_status(), "capturing", "listening", "ready"),
             (
                 Status::Pending {
                     target: Some("kitty".to_owned()),
@@ -1311,6 +1692,21 @@ mod tests {
                     copies: false,
                 },
                 "pending",
+                "countdown",
+                "ready",
+            ),
+            (
+                Status::Pending {
+                    target: Some("kitty".to_owned()),
+                    route: CaptureRoute::Paste,
+                    text: "my password is hunter2".to_owned(),
+                    waiting_for_quiet: true,
+                    pause_ms: 2500,
+                    copies: false,
+                },
+                "pending",
+                "quiet",
+                "ready",
             ),
             (
                 Status::Working {
@@ -1319,6 +1715,8 @@ mod tests {
                     cancellable: true,
                 },
                 "transcribing",
+                "working",
+                "ready",
             ),
             (
                 Status::Working {
@@ -1327,6 +1725,18 @@ mod tests {
                     cancellable: false,
                 },
                 "delivering",
+                "working",
+                "ready",
+            ),
+            (
+                Status::Done {
+                    target: Some("kitty".to_owned()),
+                    route: CaptureRoute::Paste,
+                    notice: "Pasted into kitty.".to_owned(),
+                },
+                "listening",
+                "delivered",
+                "ready",
             ),
             (
                 Status::Loading {
@@ -1334,12 +1744,41 @@ mod tests {
                     downloading: false,
                 },
                 "loading",
+                "hidden",
+                "loading",
             ),
-        ];
-        for (status, word) in words {
+            (
+                Status::Loading {
+                    notice: "/home/me/models".to_owned(),
+                    downloading: true,
+                },
+                "loading",
+                "loading",
+                "loading",
+            ),
+        ]
+    }
+
+    #[test]
+    fn state_names_what_thalvi_is_doing_and_never_what_was_said() {
+        let rig = Rig::new(
+            "state",
+            &format!(
+                r#"{{"stt": {{"entries": [{}]}}}}"#,
+                entry("live", "realtime", true, Some(SECRET))
+            ),
+        );
+        let words = state_words();
+        for (status, word, overlay, recognizer) in words {
             rig.fake.set_status(status);
             let state = rig.ask(&Request::State);
             assert_eq!(state["state"], word);
+            assert_eq!(state["overlay"], json!({"state": overlay}), "{word}");
+            assert_eq!(
+                state["recognizer"],
+                json!({"name": "live", "kind": "realtime", "status": recognizer}),
+                "{word}"
+            );
             let text = state.to_string();
             for said in ["hunter2", "password", "kitty", "/home/me"] {
                 assert!(!text.contains(said), "{word}: {text}");
@@ -1356,6 +1795,17 @@ mod tests {
         let failed = rig.ask(&Request::State);
         assert_eq!(failed["state"], "failed");
         assert_eq!(failed["failure"]["headline"], "Recognition failed");
+        assert_eq!(
+            failed["overlay"],
+            json!({"state": "error", "headline": "Recognition failed"})
+        );
+        assert_eq!(failed["recognizer"]["status"], "failed");
+        rig.fake.overlay.store(false, Ordering::SeqCst);
+        assert_eq!(
+            rig.ask(&Request::State)["overlay"],
+            json!({"state": "hidden"}),
+            "an overlay that is off shows nothing, whatever the status"
+        );
         assert_eq!(
             failed["failure"]["reason"],
             "The recognizer refused the key (a key)."
@@ -1541,6 +1991,533 @@ mod tests {
         assert_eq!(reply["stages"]["delivery"]["count"], 0);
         assert_eq!(reply["stages"]["delivery"]["p50_ms"], Value::Null);
         assert_eq!(reply["captures"], json!({"cancelled": 1, "ok": 1}));
+    }
+
+    /// A mono 16-bit PCM WAV of `samples` silent samples at `rate`.
+    fn wav(rate: u32, samples: u32) -> Vec<u8> {
+        let mut file = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        file.extend(16_u32.to_le_bytes());
+        file.extend([1, 0, 1, 0]);
+        file.extend(rate.to_le_bytes());
+        file.extend((rate * 2).to_le_bytes());
+        file.extend([2, 0, 16, 0]);
+        file.extend(b"data");
+        file.extend((samples * 2).to_le_bytes());
+        file.resize(file.len() + 2 * samples as usize, 0);
+        file
+    }
+
+    impl Fake {
+        /// Writes `contents` as a file in the test folder and gives its path.
+        fn file(&self, name: &str, contents: &[u8]) -> String {
+            let path = self.folder.join(name);
+            std::fs::write(&path, contents).unwrap();
+            path.to_string_lossy().into_owned()
+        }
+    }
+
+    #[test]
+    fn a_file_is_fed_when_listening_with_no_capture_and_otherwise_refused_in_plain_words() {
+        let rig = Rig::new("feed", "{}");
+        let two_frames = rig.fake.file("two.wav", &wav(16_000, 2 * 1_280));
+        let feed = |path: &str| Request::Feed {
+            path: path.to_owned(),
+        };
+        let missed = |error: &str, state: &str| json!({"ok": false, "took_effect": false, "error": error, "state": state});
+        let waiting = Status::Pending {
+            target: None,
+            route: CaptureRoute::Paste,
+            text: String::new(),
+            waiting_for_quiet: false,
+            pause_ms: 700,
+            copies: false,
+        };
+        let loading = Status::Loading {
+            notice: String::new(),
+            downloading: false,
+        };
+        let working = Status::Working {
+            target: None,
+            route: CaptureRoute::Paste,
+            cancellable: false,
+        };
+        for (case, status, request, expected) in [
+            (
+                "listening",
+                Status::Listening,
+                feed(&two_frames),
+                json!({"ok": true, "took_effect": true, "state": "listening"}),
+            ),
+            (
+                "paused",
+                Status::Paused,
+                feed(&two_frames),
+                missed("Thalvi is paused.", "paused"),
+            ),
+            (
+                "a capture is running",
+                capturing_status(),
+                feed(&two_frames),
+                missed("A capture is running.", "capturing"),
+            ),
+            (
+                "waiting out an ending",
+                waiting,
+                feed(&two_frames),
+                missed("A capture is running.", "pending"),
+            ),
+            (
+                "delivering",
+                working,
+                feed(&two_frames),
+                missed("The last text is still being delivered.", "delivering"),
+            ),
+            (
+                "still loading",
+                loading,
+                feed(&two_frames),
+                missed(
+                    "Thalvi is still starting. Try again in a moment.",
+                    "loading",
+                ),
+            ),
+        ] {
+            rig.fake.set_status(status);
+            assert_eq!(rig.ask(&request), expected, "{case}");
+        }
+        assert_eq!(
+            *lock(&rig.fake.fed),
+            ["Clip(2 frames)"],
+            "only the good file"
+        );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_fed_is_refused_with_the_reason() {
+        let rig = Rig::new("feed-files", r#"{"capture_limits": {"max": 60}}"#);
+        let text = rig.fake.file("text.wav", b"not audio at all");
+        let long = rig.fake.file("long.wav", &wav(8_000, 61 * 8_000));
+        let just_fits = rig.fake.file("fits.wav", &wav(8_000, 60 * 8_000));
+        let missing = rig.fake.folder.join("missing.wav");
+        let feed = |path: &str| Request::Feed {
+            path: path.to_owned(),
+        };
+        let missed = |error: &str| json!({"ok": false, "took_effect": false, "error": error, "state": "listening"});
+        for (case, request, expected) in [
+            (
+                "no such file",
+                feed(&missing.to_string_lossy()),
+                missed(&format!("There is no audio file at {}.", missing.display())),
+            ),
+            (
+                "not a WAV file",
+                feed(&text),
+                missed("The file is not a WAV file."),
+            ),
+            (
+                "past the capture limit",
+                feed(&long),
+                missed("The audio is longer than the 60 seconds a capture may take."),
+            ),
+            (
+                "a path relative to nothing",
+                feed("two.wav"),
+                missed("The path of the audio file must be absolute."),
+            ),
+            (
+                "exactly the capture limit",
+                feed(&just_fits),
+                json!({"ok": true, "took_effect": true, "state": "listening"}),
+            ),
+        ] {
+            assert_eq!(rig.ask(&request), expected, "{case}");
+        }
+        assert_eq!(
+            *lock(&rig.fake.fed),
+            ["Clip(750 frames)"],
+            "only the good file"
+        );
+    }
+
+    #[test]
+    fn a_feed_that_does_not_finish_says_how_it_ended_and_one_playing_is_told_apart() {
+        let rig = Rig::new("feed-ends", "{}");
+        let two_frames = rig.fake.file("two.wav", &wav(16_000, 2 * 1_280));
+        let feed = |path: &str| Request::Feed {
+            path: path.to_owned(),
+        };
+        let missed = |error: &str, state: &str| json!({"ok": false, "took_effect": false, "error": error, "state": state});
+        rig.fake.set_status(Status::Listening);
+        for (end, error) in [
+            (
+                FeedEnd::Cancelled,
+                "The file was not fed to the end: it was cancelled.",
+            ),
+            (
+                FeedEnd::Refused("Thalvi is not listening."),
+                "Thalvi is not listening.",
+            ),
+        ] {
+            *lock(&rig.fake.feed_ending) = end;
+            assert_eq!(
+                rig.ask(&feed(&two_frames)),
+                missed(error, "listening"),
+                "{end:?}"
+            );
+        }
+
+        // One already playing is told apart from a capture.
+        rig.fake.feeding.send_replace(true);
+        assert_eq!(
+            rig.ask(&feed(&two_frames)),
+            missed("A file is already being fed.", "listening")
+        );
+    }
+
+    #[test]
+    fn a_cancel_stops_a_feed_that_has_started_no_capture() {
+        let rig = Rig::new("cancel-feed", "{}");
+        assert_eq!(
+            rig.ask(&Request::Cancel)["error"],
+            "There is no capture to cancel."
+        );
+        rig.fake.feeding.send_replace(true);
+        assert_eq!(rig.ask(&Request::State)["feeding"], true);
+        rig.fake.ignoring.store(true, Ordering::SeqCst);
+        assert_eq!(
+            rig.ask(&Request::Cancel),
+            json!({"ok": false, "took_effect": false, "error": "The capture did not stop.", "state": "listening"}),
+            "a feed the engine keeps playing is not called stopped"
+        );
+        rig.fake.ignoring.store(false, Ordering::SeqCst);
+        assert_eq!(
+            rig.ask(&Request::Cancel),
+            json!({"ok": true, "took_effect": true, "state": "listening"})
+        );
+        assert!(!*rig.fake.feeding.borrow());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn state_and_cancel_are_answered_while_a_file_is_being_fed() {
+        let rig = Rig::new("feed-in-flight", "{}");
+        let path = rig.fake.file("in-flight.wav", &wav(16_000, 1_280));
+        rig.fake.holding.store(true, Ordering::SeqCst);
+        let socket = rig.socket.0.clone();
+        let feed = std::thread::spawn(move || {
+            thalvi_desktop::host::Desktop::send_request_in(
+                &socket,
+                &Request::Feed { path }.line(),
+                Duration::from_secs(10),
+            )
+        });
+        let give_up = std::time::Instant::now() + Duration::from_secs(10);
+        let state = loop {
+            let state = rig.ask(&Request::State);
+            if state["feeding"] == true || std::time::Instant::now() > give_up {
+                break state;
+            }
+            std::thread::yield_now();
+        };
+        assert_eq!(state["feeding"], true);
+        assert_eq!(state["state"], "listening");
+        assert_eq!(rig.ask(&Request::Cancel)["took_effect"], true);
+        let reply: Value = serde_json::from_str(&feed.join().unwrap().unwrap().unwrap()).unwrap();
+        assert_eq!(
+            reply["error"],
+            "The file was not fed to the end: it was cancelled."
+        );
+        assert_eq!(rig.ask(&Request::State)["feeding"], false);
+    }
+
+    #[test]
+    fn the_models_are_listed_and_downloaded_by_kind_and_name() {
+        let rig = Rig::new("models", "{}");
+        assert_eq!(
+            rig.ask(&Request::Models),
+            json!({"ok": true, "models": [
+                {"kind": "wake", "name": "hey_thalvi", "title": "Hey Thalvi", "size": 1000, "downloaded": true},
+                {"kind": "speech", "name": "nemotron_160ms", "title": "Nemotron", "size": 650,
+                 "downloaded": false, "progress_percent": 42, "runs_on": "Will run on the CPU"},
+            ]})
+        );
+        for (kind, name) in [
+            (Catalog::Speech, "nemotron_160ms"),
+            (Catalog::Wake, "hey_thalvi"),
+        ] {
+            let reply = rig.ask(&Request::ModelDownload {
+                kind,
+                name: name.to_owned(),
+            });
+            assert_eq!(reply, json!({"ok": true, "downloaded": true}));
+        }
+        assert_eq!(
+            *lock(&rig.fake.downloaded),
+            [
+                (Catalog::Speech, "nemotron_160ms".to_owned()),
+                (Catalog::Wake, "hey_thalvi".to_owned())
+            ]
+        );
+        let unknown = rig.ask(&Request::ModelDownload {
+            kind: Catalog::Speech,
+            name: "nope".to_owned(),
+        });
+        assert_eq!(
+            unknown,
+            json!({"ok": false, "downloaded": false, "error": "nope is not a speech model Thalvi can download."})
+        );
+        assert_eq!(lock(&rig.fake.downloaded).len(), 2);
+    }
+
+    #[test]
+    fn a_speech_entry_is_checked_as_settings_does_and_its_key_is_never_repeated() {
+        let rig = Rig::new(
+            "speech-check",
+            &format!(
+                r#"{{"stt": {{"entries": [{}]}}}}"#,
+                entry("cybrex2", "realtime", true, Some(SECRET))
+            ),
+        );
+        let check = |entry| rig.ask(&Request::SpeechCheck { entry });
+        assert_eq!(
+            check(entry("new", "realtime", false, Some("ANOTHER-KEY"))),
+            json!({"ok": true, "ready": true})
+        );
+        for entry in [
+            json!({"kind": SECRET, "id": "x", "name": "x"}),
+            json!({"kind": "realtime", "id": "x", "name": "x", "address": "http://nowhere", "model": "m", "api_key": "ANOTHER-KEY"}),
+        ] {
+            let reply = check(entry);
+            assert_eq!(reply["ok"], false, "{reply}");
+            assert_eq!(reply["ready"], false);
+            let text = reply.to_string();
+            assert!(
+                !text.contains(SECRET) && !text.contains("ANOTHER-KEY"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_word_list_goes_only_to_a_thalvi_server_and_a_failure_is_told() {
+        let local = Rig::new("push-local", "{}");
+        let reply = local.ask(&Request::WordListPush);
+        assert_eq!(reply["pushed"], false);
+        assert_eq!(local.fake.shared.load(Ordering::SeqCst), 0);
+
+        let server = Rig::new(
+            "push-server",
+            &format!(
+                r#"{{"stt": {{"entries": [{{"kind": "thalvi_server", "id": "s", "name": "s", "active": true, "address": "ws://127.0.0.1:9"}}, {}]}}}}"#,
+                entry("live", "realtime", false, Some(SECRET))
+            ),
+        );
+        assert_eq!(
+            server.ask(&Request::WordListPush),
+            json!({"ok": true, "pushed": true})
+        );
+        assert_eq!(server.fake.shared.load(Ordering::SeqCst), 1);
+        *lock(&server.fake.share_error) = Some(format!("The server refused {SECRET}."));
+        let failed = server.ask(&Request::WordListPush);
+        assert_eq!(
+            failed,
+            json!({"ok": false, "pushed": false, "error": "The server refused (a key)."})
+        );
+    }
+
+    #[test]
+    fn settings_open_at_a_known_page_and_quit_quits() {
+        let rig = Rig::new("show-quit", "{}");
+        let show = |page: Option<&str>| {
+            rig.ask(&Request::Show {
+                page: page.map(str::to_owned),
+            })
+        };
+        assert_eq!(
+            show(Some("speech")),
+            json!({"ok": true, "took_effect": true})
+        );
+        assert_eq!(show(None), json!({"ok": true, "took_effect": true}));
+        assert_eq!(*lock(&rig.fake.pages), ["speech"]);
+        let unknown = show(Some("wake"));
+        assert_eq!(
+            unknown,
+            json!({"ok": false, "took_effect": false,
+                "error": "That is not a settings page. The pages are speech, microphone, capture, feedback, tasks, history, app."})
+        );
+        assert_eq!(
+            rig.fake.shown.load(Ordering::SeqCst),
+            2,
+            "the unknown page opened nothing"
+        );
+
+        assert_eq!(rig.fake.quit.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            rig.ask(&Request::Quit),
+            json!({"ok": true, "took_effect": true})
+        );
+        assert_eq!(rig.fake.quit.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_pages_show_opens_are_the_ones_the_settings_window_has() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/src/settings-pages.ts"),
+        )
+        .unwrap();
+        let table = source
+            .split("const PAGES: ")
+            .nth(1)
+            .and_then(|rest| rest.split("];").next())
+            .unwrap();
+        let ids: Vec<&str> = table
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("[\""))
+            .filter_map(|line| line.split('"').next())
+            .collect();
+        assert_eq!(ids, PAGES);
+    }
+
+    #[test]
+    fn the_new_commands_are_checked_where_they_enter() {
+        let rig = Rig::new("new-entry", "{}");
+        let needs =
+            |command: &str| format!("The command {command} was sent without the details it needs.");
+        for (line, error) in [
+            (r#"{"command": "feed"}"#, needs("feed")),
+            (
+                r#"{"command": "feed", "path": "/a.wav", "loop": true}"#,
+                needs("feed"),
+            ),
+            (
+                r#"{"command": "model-download", "name": "m"}"#,
+                needs("model-download"),
+            ),
+            (
+                r#"{"command": "model-download", "kind": "voice", "name": "m"}"#,
+                needs("model-download"),
+            ),
+            (
+                r#"{"command": "model-download", "kind": "wake"}"#,
+                needs("model-download"),
+            ),
+            (r#"{"command": "speech-check"}"#, needs("speech-check")),
+            (r#"{"command": "show", "page": 3}"#, needs("show")),
+            (
+                r#"{"command": "models", "all": true}"#,
+                "The command models takes no other details.".to_owned(),
+            ),
+            (
+                r#"{"command": "quit", "force": true}"#,
+                "The command quit takes no other details.".to_owned(),
+            ),
+        ] {
+            assert_eq!(
+                rig.ask_line(line),
+                json!({"ok": false, "error": error}),
+                "{line}"
+            );
+        }
+        assert_eq!(rig.fake.quit.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn no_command_ever_answers_with_what_was_dictated() {
+        let rig = Rig::new(
+            "never-said",
+            &format!(
+                r#"{{"stt": {{"entries": [{}]}}}}"#,
+                entry("live", "realtime", true, Some(SECRET))
+            ),
+        );
+        let path = rig.fake.file("said.wav", &wav(16_000, 1_280));
+        let requests = [
+            Request::Status,
+            Request::State,
+            Request::Pause,
+            Request::Resume,
+            Request::Toggle,
+            Request::Cancel,
+            Request::HoldStart,
+            Request::HoldEnd,
+            Request::WriteStart,
+            Request::WriteEnd,
+            Request::CopyError,
+            Request::Show {
+                page: Some("history".to_owned()),
+            },
+            Request::SettingsGet,
+            Request::SettingsCheck {
+                settings: json!({"look": "neon"}),
+            },
+            Request::SettingsSet {
+                settings: json!({"look": "neon"}),
+            },
+            Request::MetricsSummary,
+            Request::Feed { path },
+            Request::Models,
+            Request::ModelDownload {
+                kind: Catalog::Speech,
+                name: "nope".to_owned(),
+            },
+            Request::SpeechCheck {
+                entry: json!({"kind": "realtime"}),
+            },
+            Request::WordListPush,
+            Request::Quit,
+        ];
+        let named: Vec<String> = requests
+            .iter()
+            .map(|request| {
+                serde_json::from_str::<Value>(&request.line()).unwrap()["command"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(named, COMMANDS, "every command is asked");
+        *lock(&rig.fake.failure) = Some(Failure {
+            notice: "Could not paste my password is hunter2.".to_owned(),
+            headline: "Paste failed",
+            causes: Vec::new(),
+            kind: FailureKind::Delivery,
+        });
+        let said = |text: &str| Status::Writing {
+            target: Some("kitty".to_owned()),
+            text: text.to_owned(),
+        };
+        let statuses = [
+            capturing_status(),
+            Status::Pending {
+                target: Some("kitty".to_owned()),
+                route: CaptureRoute::Submit,
+                text: "my password is hunter2".to_owned(),
+                waiting_for_quiet: false,
+                pause_ms: 700,
+                copies: false,
+            },
+            said("my password is hunter2"),
+            Status::Done {
+                target: Some("kitty".to_owned()),
+                route: CaptureRoute::Paste,
+                notice: "Pasted into kitty.".to_owned(),
+            },
+            Status::Failed {
+                notice: "Nothing was delivered. Clipboard recovery failed: No clipboard. Your text follows:\nmy password is hunter2".to_owned(),
+                headline: "Clipboard failed — text in Settings",
+                causes: Vec::new(),
+                kind: FailureKind::Delivery,
+            },
+        ];
+        for status in statuses {
+            for request in &requests {
+                rig.fake.set_status(status.clone());
+                let reply = rig.ask(request).to_string();
+                for said in ["hunter2", "my password"] {
+                    assert!(!reply.contains(said), "{request:?}: {reply}");
+                }
+            }
+        }
     }
 
     #[test]

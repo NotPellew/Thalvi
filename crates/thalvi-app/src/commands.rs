@@ -167,6 +167,14 @@ pub async fn validate_speech_model_folder(path: String) -> Result<(), String> {
 /// The catalog wake heads and whether each is downloaded.
 #[tauri::command]
 pub async fn list_wake_models() -> Result<Vec<WakeModelInfo>, String> {
+    wake_models().await
+}
+
+/// The catalog wake heads and whether each is downloaded.
+///
+/// # Errors
+/// Why the model store cannot be reached.
+pub async fn wake_models() -> Result<Vec<WakeModelInfo>, String> {
     let store = ModelStore::per_user().map_err(|error| error.to_string())?;
     Ok(store.wake_models().await)
 }
@@ -190,7 +198,15 @@ pub async fn validate_wake_model_choices(capture: String) -> Result<(), String> 
 /// The plain reason the download failed.
 #[tauri::command]
 pub async fn download_wake_model(name: String, state: State<'_, AppState>) -> Result<(), String> {
-    let head = CatalogHead::named(&name)
+    download_wake(&state, &name).await
+}
+
+/// Downloads one catalog wake head, as Settings does.
+///
+/// # Errors
+/// The plain reason the download failed.
+pub async fn download_wake(state: &AppState, name: &str) -> Result<(), String> {
+    let head = CatalogHead::named(name)
         .ok_or_else(|| format!("{name} is not a wake model Thalvi can download."))?;
     let store = ModelStore::per_user().map_err(|error| error.to_string())?;
     let recorder =
@@ -211,6 +227,14 @@ pub async fn download_wake_model(name: String, state: State<'_, AppState>) -> Re
 pub async fn list_speech_models(
     state: State<'_, AppState>,
 ) -> Result<Vec<SpeechModelInfo>, String> {
+    speech_models(&state).await
+}
+
+/// The catalog speech models and whether each is downloaded; the files counted are those the model loads here.
+///
+/// # Errors
+/// Why the model store cannot be reached.
+pub async fn speech_models(state: &AppState) -> Result<Vec<SpeechModelInfo>, String> {
     let store = ModelStore::per_user().map_err(|error| error.to_string())?;
     Ok(store
         .speech_models(state.speech_devices.plans().await)
@@ -221,7 +245,15 @@ pub async fn list_speech_models(
 /// has it loaded, else where it will load.
 #[tauri::command]
 pub async fn speech_device(name: String, state: State<'_, AppState>) -> Result<String, String> {
-    let model = CatalogSpeech::named(&name)
+    speech_device_line(&state, &name).await
+}
+
+/// What the Speech section says about the hardware a catalog model runs on.
+///
+/// # Errors
+/// That the model is not in the catalog, or why the model store cannot be reached.
+pub async fn speech_device_line(state: &AppState, name: &str) -> Result<String, String> {
+    let model = CatalogSpeech::named(name)
         .ok_or_else(|| format!("{name} is not a speech model Thalvi knows."))?;
     let store = ModelStore::per_user().map_err(|error| error.to_string())?;
     Ok(state.speech_devices.line(&store, model).await)
@@ -345,7 +377,15 @@ pub async fn download_speech_model(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let model = CatalogSpeech::named(&name)
+    download_speech(&app, &state, &name).await
+}
+
+/// Downloads a catalog speech model, telling the UI how far it is.
+///
+/// # Errors
+/// The plain reason the download failed.
+pub async fn download_speech(app: &AppHandle, state: &AppState, name: &str) -> Result<(), String> {
+    let model = CatalogSpeech::named(name)
         .ok_or_else(|| format!("{name} is not a speech model Thalvi can download."))?;
     let store = ModelStore::per_user().map_err(|error| error.to_string())?;
     let recorder =

@@ -20,6 +20,7 @@ use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
 };
+use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{Desktop, Host};
@@ -49,8 +50,10 @@ pub enum Control {
     SetListening(bool),
     /// Toggle the runner-owned listening intent, including while starting.
     ToggleListening,
-    /// Cancels the capture in progress.
+    /// Cancels the capture in progress, and stops a file being fed.
     Cancel,
+    /// Plays a file's audio in place of the microphone's.
+    Feed(Feed),
     /// Takes new settings in between captures.
     Apply(Box<DesktopConfig>),
     /// The desktop refused to report the hold key; the notice says so in plain words.
@@ -76,6 +79,7 @@ pub struct EngineLink {
     status: watch::Receiver<Status>,
     level: watch::Receiver<f32>,
     audio: watch::Receiver<AudioStatus>,
+    feeding: watch::Receiver<bool>,
     stopped: Mutex<std_mpsc::Receiver<()>>,
     key: HoldInput,
 }
@@ -103,6 +107,7 @@ impl EngineLink {
             active: None,
             paused: false,
         });
+        let (feeding_tx, feeding) = watch::channel(false);
         let (key, key_state) = HoldInput::new();
         let (ready_tx, ready) = std_mpsc::channel();
         let (stopped_tx, stopped) = std_mpsc::channel();
@@ -134,6 +139,7 @@ impl EngineLink {
                         history,
                         drafts,
                         devices,
+                        feeding: Arc::new(feeding_tx),
                     },
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
@@ -148,6 +154,7 @@ impl EngineLink {
             status,
             level,
             audio,
+            feeding,
             stopped: Mutex::new(stopped),
             key,
         })
@@ -196,6 +203,20 @@ impl EngineLink {
     #[must_use]
     pub fn audio_updates(&self) -> watch::Receiver<AudioStatus> {
         self.audio.clone()
+    }
+
+    /// Whether a file's audio is being fed in place of the microphone's.
+    #[must_use]
+    pub fn feeding_updates(&self) -> watch::Receiver<bool> {
+        self.feeding.clone()
+    }
+
+    /// Feeds `clip` in place of the microphone and says how it went, once it has.
+    pub async fn feed(&self, clip: Clip) -> FeedEnd {
+        let (feed, ended) = Feed::new(clip);
+        self.send(Control::Feed(feed));
+        // The engine is gone only while the app quits or after it failed.
+        ended.await.unwrap_or(FeedEnd::Cancelled)
     }
 
     /// Stops the engine and waits until the microphone and the recognizer are closed.
@@ -407,7 +428,8 @@ struct Session {
     device: Option<String>,
     metrics: Metrics,
     microphone: Option<Microphone>,
-    frames: Option<Frames>,
+    frames: Option<Fed<Frames>>,
+    feeder: Feeder,
 }
 
 impl Session {
@@ -420,6 +442,7 @@ impl Session {
 
     fn close_microphone(&mut self) {
         self.engine.stop_listening();
+        self.feeder.cancel();
         self.frames = None;
         if let Some(microphone) = &mut self.microphone {
             microphone.pause();
@@ -442,7 +465,10 @@ impl Session {
             causes: vec![error.to_string()],
         })?;
         self.microphone = Some(microphone);
-        self.frames = Some(frames.map_err(|error| Failure::of(&error))?);
+        self.frames = Some(
+            self.feeder
+                .wrap(frames.map_err(|error| Failure::of(&error))?),
+        );
         Ok(())
     }
 
@@ -471,6 +497,8 @@ struct Shared {
     drafts: Arc<Drafts>,
     /// Where the speech model runs, for Settings.
     devices: Arc<SpeechDevices>,
+    /// Whether a file's audio is being fed in place of the microphone's.
+    feeding: Arc<watch::Sender<bool>>,
 }
 
 struct Runner {
@@ -492,6 +520,7 @@ struct Runner {
     history: Arc<History>,
     drafts: Arc<Drafts>,
     devices: Arc<SpeechDevices>,
+    feeding: Arc<watch::Sender<bool>>,
     http: reqwest::Client,
     /// Loads the current engine's speech model.
     loading: Option<JoinHandle<()>>,
@@ -526,6 +555,7 @@ impl Runner {
             history: shared.history,
             drafts: shared.drafts,
             devices: shared.devices,
+            feeding: shared.feeding,
             http: reqwest::Client::new(),
             loading: None,
             key: Presses::new(shared.key.clone()),
@@ -648,6 +678,7 @@ impl Runner {
             self.audio.subscribe(),
         ));
         println!("Transcribing through {}.", config.speech_source());
+        let feeder = Feeder::new(&gate, Arc::clone(&self.feeding));
         Ok(Session {
             engine,
             local,
@@ -657,6 +688,7 @@ impl Runner {
             metrics,
             microphone: None,
             frames: None,
+            feeder,
         })
     }
 
@@ -831,7 +863,19 @@ impl Runner {
         match control {
             Control::SetListening(on) => self.set_listening(on).await,
             Control::ToggleListening => self.set_listening(self.paused).await,
-            Control::Cancel => {}
+            Control::Cancel => {
+                if let Some(session) = &self.session {
+                    session.feeder.cancel();
+                }
+            }
+            Control::Feed(feed) => match &self.session {
+                Some(Session {
+                    frames: Some(_),
+                    feeder,
+                    ..
+                }) => feeder.start(feed),
+                _ => feed.refuse("Thalvi is not listening."),
+            },
             Control::Apply(config) => self.apply(*config).await,
             Control::HoldKeyFailed(notice) => self.hold_problem = Some(notice),
             Control::Quit => return Flow::Quit,
@@ -965,6 +1009,7 @@ impl Runner {
                 handle,
                 gate,
                 frames: Some(frames),
+                feeder,
                 ..
             }) = session.as_mut()
             else {
@@ -973,7 +1018,10 @@ impl Runner {
             let outcome = Box::pin(drive(
                 engine.capture(frames),
                 control,
-                || handle.cancel(),
+                || {
+                    handle.cancel();
+                    feeder.cancel();
+                },
                 &mut requests,
             ))
             .await;
@@ -1288,6 +1336,10 @@ impl Requests {
             }
             Some(Control::HoldKeyFailed(notice)) => {
                 self.hold_problem = Some(notice);
+                false
+            }
+            Some(Control::Feed(feed)) => {
+                feed.refuse("Thalvi was busy. Try again in a moment.");
                 false
             }
             Some(Control::Quit) | None => {
@@ -1945,6 +1997,18 @@ mod tests {
             assert_eq!(requests.quit, quit, "{label}");
             assert_eq!(requests.listening_off, listening_off, "{label}");
         }
+    }
+
+    #[test]
+    fn a_file_that_arrives_while_a_capture_runs_is_refused_and_ends_nothing() {
+        let (feed, mut ended) = Feed::new(Clip::from_frames(Vec::new()));
+        let mut requests = Requests::default();
+        assert!(!requests.take(Some(Control::Feed(feed))));
+        assert!(!requests.ended);
+        assert_eq!(
+            ended.try_recv(),
+            Ok(FeedEnd::Refused("Thalvi was busy. Try again in a moment."))
+        );
     }
 
     #[test]

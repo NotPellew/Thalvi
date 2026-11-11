@@ -83,7 +83,10 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
 | Need | Command |
 | --- | --- |
 | Tray actions | `$H ctl $R pause`, `resume`, `toggle`, `cancel`, `status` (the relaunch path the tray and key binds use) |
-| Open Settings | `$H ctl $R` with no argument |
+| Open Settings | `$H ctl $R` with no argument, or `$H ctl $R show capture` for one page |
+| What Thalvi and its overlay show | `$H ctl $R state` (state, `overlay`, `recognizer`; never what was said) |
+| Set up from a fresh config | `$H ctl $R models`, `$H ctl $R model-download speech nemotron_160ms` (replies when ready), `$H ctl $R speech-check '<entry json>'`, `$H ctl $R settings set '<json>'` |
+| Quit the app like the tray | `$H ctl $R quit`; the log ends with `Stopped.` |
 | Keys into the focused window | `$H sh $R wtype -k Tab` (also `-M shift -k Tab -m shift`, `-k Return`, `-k Down`, `-k Next` for Page Down) |
 | Window size | `$H hypr $R dispatch setfloating "title:^Thalvi settings\$"`, then `$H hypr $R dispatch resizewindowpixel "exact 400 680,title:^Thalvi settings\$"`; repeat until `$H hypr $R clients` shows `size: 400,680` |
 | Screenshot | `$H shot $R name` (whole screen, `$R/out/name.png`); crop with Pillow, view with the image reader |
@@ -117,6 +120,18 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   an app's environment is fixed when it starts.
 - `Hyprland` only renders a window that is mapped; open Settings before taking
   screenshots of it.
+
+## Feed a file instead of speaking
+
+`$H ctl $R feed /var/tmp/thalvi-rig/wake.wav` plays a WAV file into the app in place of its
+microphone, at the pace of speech and through the same wake word, recognition, endings and
+delivery, so a dictation needs no `--mic`, no `say` and no GNOME run. The reply comes when the last
+frame has been fed (`state` shows what the capture is doing then); `ctl cancel` stops a feed. The
+file is read by the app inside its sandbox, so keep it under `/var/tmp`, not in a home folder, and
+make it a 16-bit PCM WAV no longer than the capture limit. The engine drops audio while its
+wake cue plays, whether it comes from the microphone or a file, so leave about half a second of
+silence after the wake phrase. Captures fed from a file carry `"source": "file"` in
+`metrics.jsonl`. Pair it with `victim` and `--hosted` to see the text land.
 
 ## Speak, type and go offline (Hyprland)
 
@@ -230,6 +245,7 @@ log's stamps and state what frame first shows a notice and which first does not.
 ## Teardown
 
 ```sh
+$H ctl $R quit     # the app quits as the tray's Quit does; the next two make sure
 $H app-stop $R     # the app only
 $H down $R         # app and compositors; $R/out stays
 ```
