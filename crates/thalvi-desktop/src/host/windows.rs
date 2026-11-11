@@ -1,5 +1,6 @@
 //! Windows host: window identity, the clipboard and `SendInput` key presses, over a small Win32 seam.
 
+mod overlay;
 mod pipe;
 mod win32;
 
@@ -13,6 +14,7 @@ use super::{
     WebUrl,
 };
 use crate::hold::{HoldChange, HoldKey, HoldKind};
+pub use overlay::{OverlayPlan, OverlaySurface, OverlayWaker};
 pub use win32::Real;
 
 /// A window handle as a plain number, so targets stay `Send`.
@@ -142,6 +144,19 @@ impl Windows {
     /// detected desktop, so a failure to detect one can be shown.
     pub fn show_error(title: &str, message: &str) {
         win32::message_box(title, message);
+    }
+
+    /// Where the status overlay's window goes.
+    ///
+    /// # Errors
+    /// Never on Windows; the signature matches the Linux desktops'.
+    #[expect(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "one signature for every desktop's host"
+    )]
+    pub fn overlay_plan(&self) -> Result<OverlayPlan, HostError> {
+        Ok(OverlayPlan)
     }
 
     /// Shows or hides the overlay window `window` without activating it, which Tauri's `show`

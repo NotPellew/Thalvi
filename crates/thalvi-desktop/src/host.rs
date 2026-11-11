@@ -30,6 +30,31 @@ pub use linux::{Desktop, Session};
 /// The host for the desktop Thalvi runs on.
 #[cfg(target_os = "windows")]
 pub type Desktop = windows::Windows;
+/// The status overlay's own surface on this desktop, and how its thread is woken.
+#[cfg(target_os = "linux")]
+pub use linux::{OverlayPlan, OverlaySurface, OverlayWaker};
+/// The status overlay's own surface on this desktop, and how its thread is woken.
+#[cfg(target_os = "windows")]
+pub use windows::{OverlayPlan, OverlaySurface, OverlayWaker};
+
+/// One overlay frame: `width` × `height` pixels of premultiplied BGRA, row by row.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OverlayFrame {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
+}
+
+/// What ended a wait on the overlay surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OverlayEvent {
+    /// Its [`OverlayWaker`] was called.
+    Woken,
+    /// The pointer pressed the overlay here, in points from its top-left corner.
+    Press { x: f32, y: f32 },
+    /// The wait reached its deadline.
+    Due,
+}
 
 /// Where `deliver` left the text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

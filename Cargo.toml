@@ -39,6 +39,12 @@ semver = "1"
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
+# The overlay is drawn on the CPU and handed to each desktop's own overlay surface: no GPU device.
+tiny-skia = "0.12"
+cosmic-text = "0.19"
+smithay-client-toolkit = { version = "0.21", default-features = false }
+wayland-client = "0.31"
+x11rb = { version = "0.14", features = ["randr", "shape"] }
 tokio = { version = "1", features = ["full"] }
 gtk = "0.18.2"
 tauri = { version = "2.12", features = ["tray-icon"] }
@@ -56,11 +62,13 @@ webrtc-vad = "0.4"
 xkbcommon = { version = "0.9", default-features = false }
 windows-registry = "0.6"
 windows = { version = "0.62", features = [
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_DataExchange",
     "Win32_System_IO",
+    "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_Pipes",

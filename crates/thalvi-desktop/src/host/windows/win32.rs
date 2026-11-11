@@ -1,4 +1,4 @@
-//! The real Win32 calls behind the host's seam. The only place `unsafe` is allowed.
+//! The real Win32 calls behind the host's seam; `unsafe` is allowed only here and in `overlay`.
 
 #![expect(
     unsafe_code,

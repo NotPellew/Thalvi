@@ -1,13 +1,18 @@
 //! The Linux desktop host: picks Hyprland or GNOME Wayland at startup and forwards every call to it.
 
+mod layer;
+mod xwayland;
+
 use std::fmt;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use super::gnome::{self, Clipboard, Gnome};
 use super::hyprland::{Hyprland, Window};
 use super::{
-    App, Delivered, HoldSource, Host, HostError, PasteText, RequestServer, WebUrl, channel,
+    App, Delivered, HoldSource, Host, HostError, OverlayEvent, OverlayFrame, PasteText,
+    RequestServer, WebUrl, channel,
 };
 use crate::hold::{HoldChange, HoldKey, HoldKind};
 
@@ -144,6 +149,20 @@ impl Desktop {
             // Hyprland's window rules from `prepare_overlay` do this.
             Self::Hyprland(_) => {}
             Self::Gnome(_) => gnome::keep_unfocused(window),
+        }
+    }
+
+    /// Where the status overlay's surface goes. Call on the toolkit's thread.
+    ///
+    /// # Errors
+    /// Why GNOME did not say where its top panel ends.
+    pub fn overlay_plan(&self) -> Result<OverlayPlan, HostError> {
+        match self {
+            // The compositor keeps a layer surface clear of the bars.
+            Self::Hyprland(_) => Ok(OverlayPlan::Layer),
+            Self::Gnome(host) => Ok(OverlayPlan::Xwayland {
+                top: host.prepare_overlay(0.0, 0.0)?,
+            }),
         }
     }
 
@@ -343,6 +362,123 @@ impl Host for Desktop {
         match self {
             Self::Hyprland(host) => host.prepare_overlay(width, height),
             Self::Gnome(host) => host.prepare_overlay(width, height),
+        }
+    }
+}
+
+/// Where the status overlay's surface goes: worked out on the toolkit's thread, opened on the
+/// overlay's own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OverlayPlan {
+    /// A layer-shell surface on the overlay layer, hanging from the top edge.
+    Layer,
+    /// An override-redirect `XWayland` window `top` logical pixels below the screen's top edge.
+    Xwayland { top: f64 },
+}
+
+impl OverlayPlan {
+    /// Opens the hidden surface, `width` × `height` points; the calling thread then owns it.
+    ///
+    /// # Errors
+    /// Why the desktop gave no surface; the overlay then stays off.
+    pub fn open(
+        self,
+        width: f32,
+        height: f32,
+        takes_clicks: bool,
+    ) -> Result<OverlaySurface, HostError> {
+        let (sender, events) = mpsc::channel();
+        let backing = match self {
+            Self::Layer => Backing::Layer(Box::new(layer::Layer::open(width, height)?)),
+            Self::Xwayland { top } => Backing::Xwayland(xwayland::Window::open(
+                (width, height),
+                top,
+                takes_clicks,
+                sender.clone(),
+            )?),
+        };
+        Ok(OverlaySurface {
+            backing,
+            events,
+            waker: OverlayWaker(sender),
+        })
+    }
+}
+
+/// Wakes the overlay's thread from any thread.
+#[derive(Clone, Debug)]
+pub struct OverlayWaker(mpsc::Sender<OverlayEvent>);
+
+impl OverlayWaker {
+    pub fn wake(&self) {
+        let _ = self.0.send(OverlayEvent::Woken);
+    }
+}
+
+/// The status overlay's surface: hidden until shown, never taking the keyboard.
+pub struct OverlaySurface {
+    backing: Backing,
+    events: mpsc::Receiver<OverlayEvent>,
+    waker: OverlayWaker,
+}
+
+enum Backing {
+    Layer(Box<layer::Layer>),
+    Xwayland(xwayland::Window),
+}
+
+impl OverlaySurface {
+    #[must_use]
+    pub fn waker(&self) -> OverlayWaker {
+        self.waker.clone()
+    }
+
+    /// Physical pixels per point; frames are drawn at this scale.
+    #[must_use]
+    pub fn scale(&self) -> f32 {
+        match &self.backing {
+            Backing::Layer(layer) => layer.scale(),
+            Backing::Xwayland(window) => window.scale(),
+        }
+    }
+
+    /// Shows `frame` on a surface that was hidden.
+    ///
+    /// # Errors
+    /// Why the desktop did not show it.
+    pub fn show(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
+        match &mut self.backing {
+            Backing::Layer(layer) => layer.show(frame),
+            Backing::Xwayland(window) => window.show(frame),
+        }
+    }
+
+    /// Replaces what a shown surface shows.
+    ///
+    /// # Errors
+    /// Why the desktop did not take the frame.
+    pub fn present(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
+        match &mut self.backing {
+            Backing::Layer(layer) => layer.present(frame),
+            Backing::Xwayland(window) => window.present(frame),
+        }
+    }
+
+    pub fn hide(&mut self) {
+        match &mut self.backing {
+            Backing::Layer(layer) => layer.hide(),
+            Backing::Xwayland(window) => window.hide(),
+        }
+    }
+
+    /// Waits for a press, a wake or `deadline`; with no deadline, for one of the first two.
+    pub fn wait(&mut self, deadline: Option<Instant>) -> OverlayEvent {
+        match deadline {
+            Some(at) => self
+                .events
+                .recv_timeout(at.saturating_duration_since(Instant::now()))
+                .unwrap_or(OverlayEvent::Due),
+            None => self.events.recv().unwrap_or(OverlayEvent::Due),
         }
     }
 }
