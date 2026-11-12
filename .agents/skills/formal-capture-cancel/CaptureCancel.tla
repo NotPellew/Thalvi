@@ -2,7 +2,7 @@
 EXTENDS Naturals, Sequences, TLC
 
 CONSTANTS MaxControls, Scenario, DropCompletionGuard, ForgetEarlierStop
-Commands == {"cancel", "pause", "resume", "toggle", "apply", "quit"}
+Commands == {"cancel", "pause", "resume", "toggle", "apply", "restart", "quit"}
 VARIABLES phase, queue, sent, off, quit, preEnds, ended, intentOff,
           stopRequested, cancelPending, cueDone, cueAccepted, closeDone,
           secondary, writing, result, delivered

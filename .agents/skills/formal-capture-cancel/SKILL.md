@@ -131,8 +131,8 @@ Temurin JRE `21.0.9+10` in the same user cache, verifying archive SHA-256
 Other platforms need a user-installed Java on PATH. No system package install
 is performed. Downloads require network access only on the first run.
 
-A faithful run here explores 15,896 distinct states (44,390 generated) with no
-error; the passing focused control explores 13,896.
+A faithful run here explores 22,275 distinct states (63,808 generated) with no
+error; the passing focused control explores 19,720.
 Each TLC invocation has a 120 s limit and 512 MB heap limit. State counts are
 receipts for this model, not acceptance criteria for a changed model.
 
@@ -246,7 +246,7 @@ proof, and rerun the full check to restore its recorded result.
 
 One capture, initially listening, one logical FIFO producer (representing
 channel send order), and zero to three controls from Cancel, pause, resume,
-toggle, Apply and Quit. Every combination of enabled and disabled/skipped
+toggle, Apply, an update's restart request (never ending a capture: the engine answers busy) and Quit. Every combination of enabled and disabled/skipped
 second-pass transcription and writing is explored. Each queue send, each receive, and each awaited
 completion is a separate transition; synchronous runner-local updates are
 combined where no other actor reads them. The final empty receive is the
