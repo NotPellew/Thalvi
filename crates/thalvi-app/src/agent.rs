@@ -384,8 +384,8 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
         Status::Pending { .. } => "pending",
         Status::Working {
             cancellable: true, ..
-        } => "transcribing",
-        Status::Transcribing { .. } => "transcribing",
+        }
+        | Status::Transcribing { .. } => "transcribing",
         Status::Working { .. } => "delivering",
         Status::Writing { .. } | Status::Thinking { .. } => "writing",
         Status::Loading { .. } => "loading",

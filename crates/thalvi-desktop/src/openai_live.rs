@@ -17,6 +17,7 @@ pub struct OpenAiRecognizer {
 }
 
 impl OpenAiRecognizer {
+    #[must_use]
     pub fn new(
         _name: &str,
         settings: SecondaryStt,
@@ -48,6 +49,10 @@ pub struct OpenAiSession {
 impl Recognizer for OpenAiRecognizer {
     type Session = OpenAiSession;
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Connecting only creates the in-memory session state."
+    )]
     async fn connect(&self) -> Result<Self::Session, RecognizerError> {
         let (sender, events) = mpsc::unbounded_channel();
         Ok(OpenAiSession {
@@ -71,6 +76,10 @@ impl RecognizerSession for OpenAiSession {
         true
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Finishing only updates buffered capture state."
+    )]
     async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
         self.finished = true;
         self.released_at = Some(Instant::now());
@@ -78,6 +87,10 @@ impl RecognizerSession for OpenAiSession {
         Ok(())
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Frames are buffered locally without I/O."
+    )]
     async fn send_frame(&mut self, frame: &Frame) -> Result<(), RecognizerError> {
         self.frames.push(*frame);
         Ok(())
@@ -167,11 +180,19 @@ impl RecognizerSession for OpenAiSession {
         }
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Cancellation only aborts the local upload task."
+    )]
     async fn cancel(self) {
         if let Some(task) = self.task {
             task.abort();
         }
     }
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Closing only aborts the local upload task."
+    )]
     async fn close(self) {
         if let Some(task) = self.task {
             task.abort();

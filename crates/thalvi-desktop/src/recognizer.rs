@@ -487,6 +487,10 @@ impl RecognizerSession for FakeSession {
         self.buffers.load(Ordering::Relaxed)
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "The fake only records the call in memory."
+    )]
     async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
         self.record(FakeCall::FinishAudio);
         Ok(())

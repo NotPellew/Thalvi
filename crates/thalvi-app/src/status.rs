@@ -466,21 +466,30 @@ mod tests {
                     cancellable: true,
                 },
             ),
-            (
-                EngineState::TranscribingLive {
-                    route: CaptureRoute::Paste,
-                },
-                Status::Transcribing {
-                    target: Some(kitty()),
-                    route: CaptureRoute::Paste,
-                    cancellable: true,
-                },
-            ),
         ];
         for (engine, expected) in cases {
             let label = format!("{engine:?}");
             assert_eq!(view(Mode::Idle, engine).status(), expected, "{label}");
         }
+    }
+
+    #[test]
+    fn live_transcription_keeps_its_delivery_route_and_cancel_state() {
+        let status = view(
+            Mode::Idle,
+            EngineState::TranscribingLive {
+                route: CaptureRoute::Paste,
+            },
+        )
+        .status();
+        assert_eq!(
+            status,
+            Status::Transcribing {
+                target: Some(kitty()),
+                route: CaptureRoute::Paste,
+                cancellable: true,
+            }
+        );
     }
 
     #[test]

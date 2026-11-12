@@ -185,7 +185,7 @@ async fn speaches_streams_transcribed_segments_as_cumulative_text() {
 }
 
 #[tokio::test]
-async fn openai_streaming_emits_cumulative_text_and_plain_json_still_works() {
+async fn openai_streaming_emits_cumulative_text() {
     let (url, mut rx) = serve_sse(
         "data: {\"type\":\"transcript.text.delta\",\"delta\":\"hello \"}\n\ndata: {\"type\":\"transcript.text.delta\",\"delta\":\"world\"}\n\ndata: {\"type\":\"transcript.text.done\",\"text\":\"cleaned transcript\"}\n\n",
     ).await;
@@ -282,7 +282,10 @@ async fn openai_streaming_emits_cumulative_text_and_plain_json_still_works() {
         "every streamed partial is recorded"
     );
     std::fs::remove_dir_all(metrics_dir).expect("remove test metrics");
+}
 
+#[tokio::test]
+async fn openai_plain_json_still_works() {
     let (url, mut rx) = serve(200, r#"{"text":"plain answer"}"#).await;
     let recognizer = OpenAiRecognizer::new(
         "local",

@@ -1581,28 +1581,7 @@ where
             };
             let done = match step {
                 Step::Cancel => Some(Done::Stopped),
-                Step::Event(Err(error)) => Some(Done::Failed(error.into())),
-                Step::Event(Ok(RecognizerEvent::Partial(text))) => {
-                    if has_words(&text) {
-                        live.last_words = Instant::now();
-                        if !std::mem::replace(&mut live.heard.words_came, true) {
-                            self.lag(Event::PartialLag, live.heard.first.take());
-                        }
-                    }
-                    self.on_partial(live, text);
-                    None
-                }
-                Step::Event(Ok(RecognizerEvent::Final(text))) => {
-                    if has_words(&text) {
-                        live.last_words = Instant::now();
-                        self.lag(Event::FinalLag, live.heard.last.take());
-                    }
-                    let done = self.on_final(live, &text);
-                    done.or_else(|| {
-                        matches!(live.release, Release::Tail(_))
-                            .then(|| self.finish_hold(live, held))
-                    })
-                }
+                Step::Event(event) => self.on_event(live, held, event),
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),
                 Step::Frame(Ok(queued)) => self.on_frame(live, &queued).await.err().map(Done::from),
                 Step::Cue(end) => {
@@ -1637,6 +1616,37 @@ where
             };
             if let Some(done) = done {
                 return (done, Instant::now());
+            }
+        }
+    }
+
+    fn on_event(
+        &mut self,
+        live: &mut Live<R::Session>,
+        held: Option<&Held>,
+        event: Result<RecognizerEvent, RecognizerError>,
+    ) -> Option<Done> {
+        match event {
+            Err(error) => Some(Done::Failed(error.into())),
+            Ok(RecognizerEvent::Partial(text)) => {
+                if has_words(&text) {
+                    live.last_words = Instant::now();
+                    if !std::mem::replace(&mut live.heard.words_came, true) {
+                        self.lag(Event::PartialLag, live.heard.first.take());
+                    }
+                }
+                self.on_partial(live, text);
+                None
+            }
+            Ok(RecognizerEvent::Final(text)) => {
+                if has_words(&text) {
+                    live.last_words = Instant::now();
+                    self.lag(Event::FinalLag, live.heard.last.take());
+                }
+                let done = self.on_final(live, &text);
+                done.or_else(|| {
+                    matches!(live.release, Release::Tail(_)).then(|| self.finish_hold(live, held))
+                })
             }
         }
     }

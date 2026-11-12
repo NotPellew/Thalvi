@@ -71,8 +71,7 @@ impl Chosen {
     pub fn local(&self) -> Option<Arc<LocalRecognizer<TransducerSource>>> {
         match self {
             Self::Local { recognizer, .. } => Some(Arc::clone(recognizer)),
-            Self::Realtime(_) => None,
-            Self::OpenAi(_) => None,
+            Self::Realtime(_) | Self::OpenAi(_) => None,
         }
     }
 }

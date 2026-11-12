@@ -268,6 +268,11 @@ pub async fn transcribe(
 }
 
 /// Sends the same WAV request with streaming enabled and emits cumulative text as SSE arrives.
+///
+/// # Errors
+///
+/// Returns an error when the endpoint is unreachable, rejects the request, times out, or returns
+/// an unsupported response.
 pub async fn transcribe_events(
     client: &reqwest::Client,
     settings: &SecondaryStt,
