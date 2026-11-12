@@ -21,6 +21,7 @@ pub mod host;
 pub mod local;
 pub mod metrics;
 pub mod models;
+pub mod openai_live;
 pub mod phrases;
 pub mod realtime;
 pub mod recognizer;

@@ -357,6 +357,45 @@ async fn the_microphone_level_follows_the_capture_frames_and_is_zero_outside_it(
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_buffered_wake_capture_uploads_after_the_voice_pause() {
+    LocalSet::new()
+        .run_until(async {
+            let config = r#"{"ending_pause":{"paste":1.0}}"#;
+            let (mut rig, engine, frames) = Rig::new(config);
+            rig.server.buffer_audio();
+            let task = capture_task(engine, frames);
+            rig.open().await;
+
+            rig.feed_until(1200, Kind::Voice).await;
+            rig.feed_until(2120, Kind::Quiet).await;
+            assert!(matches!(rig.state(), EngineState::Capturing { .. }));
+            assert!(!rig.server.calls().contains(&FakeCall::FinishAudio));
+
+            rig.feed_until(3500, Kind::Quiet).await;
+            assert_eq!(
+                rig.state(),
+                EngineState::TranscribingLive {
+                    route: CaptureRoute::Paste
+                }
+            );
+            assert_eq!(
+                rig.server
+                    .calls()
+                    .iter()
+                    .filter(|call| matches!(call, FakeCall::FinishAudio))
+                    .count(),
+                1
+            );
+            rig.finals("voice after a pause").await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "voice after a pause")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_microphone_level_follows_wake_listening_and_resets_when_it_stops() {
     LocalSet::new()
         .run_until(async {

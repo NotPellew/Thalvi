@@ -8,6 +8,7 @@ use crate::frame::Frame;
 use crate::local::{LocalRecognizer, LocalSession};
 use crate::metrics::Metrics;
 use crate::models::ModelStore;
+use crate::openai_live::{OpenAiRecognizer, OpenAiSession};
 use crate::phrases::WordList;
 use crate::realtime::{RealtimeRecognizer, RealtimeSession};
 use crate::recognizer::{
@@ -18,6 +19,7 @@ use crate::transducer::TransducerSource;
 /// The recognizer a config asks for.
 pub enum Chosen {
     Realtime(RealtimeRecognizer),
+    OpenAi(OpenAiRecognizer),
     Local {
         recognizer: Arc<LocalRecognizer<TransducerSource>>,
         speech: SpeechSource,
@@ -27,6 +29,7 @@ pub enum Chosen {
 /// An open recognition of any kind.
 pub enum ChosenSession {
     Realtime(Box<RealtimeSession>),
+    OpenAi(OpenAiSession),
     Local(LocalSession, SpeechSource),
 }
 
@@ -37,6 +40,7 @@ impl Chosen {
     pub fn new(
         entry: &LiveEntry,
         store: ModelStore,
+        http: reqwest::Client,
         metrics: Metrics,
         phrases: &WordList,
         adapters: Adapters,
@@ -45,6 +49,12 @@ impl Chosen {
             LiveKind::Realtime(realtime) => {
                 Self::Realtime(RealtimeRecognizer::new(&entry.name, realtime, phrases))
             }
+            LiveKind::OpenAi(settings) => Self::OpenAi(OpenAiRecognizer::new(
+                &entry.name,
+                settings.clone(),
+                http,
+                metrics.clone(),
+            )),
             LiveKind::OnDevice(choice) => Self::Local {
                 recognizer: Arc::new(LocalRecognizer::new(
                     TransducerSource::new(store, choice.clone(), phrases, adapters),
@@ -62,6 +72,7 @@ impl Chosen {
         match self {
             Self::Local { recognizer, .. } => Some(Arc::clone(recognizer)),
             Self::Realtime(_) => None,
+            Self::OpenAi(_) => None,
         }
     }
 }
@@ -86,6 +97,7 @@ impl Recognizer for Chosen {
                 .connect()
                 .await
                 .map(|session| ChosenSession::Realtime(Box::new(session))),
+            Self::OpenAi(recognizer) => recognizer.connect().await.map(ChosenSession::OpenAi),
             Self::Local { recognizer, speech } => recognizer
                 .connect()
                 .await
@@ -96,9 +108,21 @@ impl Recognizer for Chosen {
 }
 
 impl RecognizerSession for ChosenSession {
+    fn buffers_audio(&self) -> bool {
+        matches!(self, Self::OpenAi(_))
+    }
+
+    async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
+        match self {
+            Self::OpenAi(session) => session.finish_audio().await,
+            _ => Ok(()),
+        }
+    }
+
     async fn send_frame(&mut self, frame: &Frame) -> Result<(), RecognizerError> {
         match self {
             Self::Realtime(session) => session.send_frame(frame).await,
+            Self::OpenAi(session) => session.send_frame(frame).await,
             Self::Local(session, speech) => session
                 .send_frame(frame)
                 .await
@@ -109,6 +133,7 @@ impl RecognizerSession for ChosenSession {
     async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
         match self {
             Self::Realtime(session) => session.next_event().await,
+            Self::OpenAi(session) => session.next_event().await,
             Self::Local(session, speech) => session
                 .next_event()
                 .await
@@ -119,6 +144,7 @@ impl RecognizerSession for ChosenSession {
     async fn cancel(self) {
         match self {
             Self::Realtime(session) => session.cancel().await,
+            Self::OpenAi(session) => session.cancel().await,
             Self::Local(session, _) => session.cancel().await,
         }
     }
@@ -126,6 +152,7 @@ impl RecognizerSession for ChosenSession {
     async fn close(self) {
         match self {
             Self::Realtime(session) => session.close().await,
+            Self::OpenAi(session) => session.close().await,
             Self::Local(session, _) => session.close().await,
         }
     }

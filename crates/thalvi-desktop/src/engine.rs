@@ -212,6 +212,9 @@ pub enum EngineState {
     TranscribingSecondary {
         route: CaptureRoute,
     },
+    TranscribingLive {
+        route: CaptureRoute,
+    },
     /// The writing model is putting the words into proper text; `text` is what has streamed in.
     Writing {
         text: String,
@@ -591,7 +594,7 @@ enum Release {
     Over,
 }
 
-impl<S> Live<S> {
+impl<S: RecognizerSession> Live<S> {
     /// Whether a frame queued at `order` came after the key went up and is not the hold's to
     /// send.
     fn after_release(&self, order: Order) -> bool {
@@ -605,7 +608,13 @@ impl<S> Live<S> {
     /// When a released hold stops waiting for words.
     fn tail(&self) -> Option<Instant> {
         match self.release {
-            Release::Tail(at) => Some(at + RELEASE_LIMIT),
+            Release::Tail(at) => Some(
+                at + if self.session.buffers_audio() {
+                    Duration::from_secs(11)
+                } else {
+                    RELEASE_LIMIT
+                },
+            ),
             _ => None,
         }
     }
@@ -1488,13 +1497,14 @@ where
         let Some(session) = session else {
             return Err((Done::Failed(self.not_ready()), decided));
         };
+        let buffers_audio = session.buffers_audio();
         let live = Live {
             session,
             dictation: woke.dictation.clone(),
             text: self.capture_session(held.is_some()),
             partial: None,
             sent: Vec::new(),
-            keep_sent: !self.secondary.is_empty() || self.recorder.kinds().audio,
+            keep_sent: !self.secondary.is_empty() || self.recorder.kinds().audio || buffers_audio,
             held: VecDeque::new(),
             speech_run: 0,
             relayed: false,
@@ -1530,7 +1540,14 @@ where
         }
         if let (Some(at), Some(held)) = (released, held) {
             self.held_for = Some(at.duration_since(held.at));
-            if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+            if live.session.buffers_audio() {
+                if let Err(error) = live.session.finish_audio().await {
+                    return (Done::Failed(error.into()), Instant::now());
+                }
+                self.set_state(EngineState::TranscribingLive {
+                    route: held.route(),
+                });
+            } else if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
                 return (stop.into(), Instant::now());
             }
             live.release = Release::Tail(Instant::now());
@@ -1542,7 +1559,10 @@ where
             } else {
                 MIC_TIMEOUT
             };
-            let watchdog = live.cues.is_empty().then(|| live.last_audio + limit);
+            let waiting_on_live_upload =
+                live.session.buffers_audio() && matches!(live.release, Release::Tail(_));
+            let watchdog =
+                (!waiting_on_live_upload && live.cues.is_empty()).then(|| live.last_audio + limit);
             let tail = live.tail();
             let step = tokio::select! {
                 biased;
@@ -1603,7 +1623,13 @@ where
                 Step::Silent => Some(Done::Failed(CaptureError::MicStopped)),
                 Step::Idle => Some(Done::Failed(idle_error(self.limits.idle(), &live.text))),
                 Step::TooLong => Some(Done::Failed(CaptureError::TooLong(self.limits.max()))),
-                Step::Tail => Some(self.finish_hold(live, held)),
+                Step::Tail => Some(if live.session.buffers_audio() {
+                    Done::Failed(CaptureError::Recognizer(RecognizerError::said(
+                        "The speech server took too long to transcribe this capture. Nothing was delivered.",
+                    )))
+                } else {
+                    self.finish_hold(live, held)
+                }),
                 Step::Key(open) => {
                     key_open = open;
                     self.on_key(live, held, frames).await
@@ -1660,7 +1686,14 @@ where
                 return Some(Done::from(stop));
             }
         }
-        if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+        if live.session.buffers_audio() {
+            if let Err(error) = live.session.finish_audio().await {
+                return Some(Done::Failed(error.into()));
+            }
+            self.set_state(EngineState::TranscribingLive {
+                route: held.route(),
+            });
+        } else if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
             return Some(Done::from(stop));
         }
         live.release = Release::Tail(Instant::now());
@@ -1838,7 +1871,24 @@ where
             live.relayed = false;
             let mut out: Vec<Frame> = live.held.drain(..).collect();
             out.push(*frame);
-            return self.send(live, &out).await;
+            self.send(live, &out).await?;
+            if live.session.buffers_audio()
+                && matches!(live.release, Release::Over)
+                && !live.speech
+                && live.heard.last.is_some_and(|last| {
+                    now.duration_since(last) >= self.pauses.get(CaptureRoute::Paste)
+                })
+            {
+                live.session
+                    .finish_audio()
+                    .await
+                    .map_err(|error| Stop::Failed(error.into()))?;
+                live.release = Release::Tail(now);
+                self.set_state(EngineState::TranscribingLive {
+                    route: CaptureRoute::Paste,
+                });
+            }
+            return Ok(());
         }
         if live.held.len() == usize::from(CONTINUATION_FRAMES) {
             live.held.pop_front();

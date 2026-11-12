@@ -4,13 +4,21 @@
 #![expect(clippy::unwrap_used, reason = "a test fails by panicking")]
 
 use std::time::Duration;
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 use axum::Router;
 use axum::body::to_bytes;
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
+use axum::{body::Body, response::Response};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
+use thalvi_desktop::metrics::Recorder;
+use thalvi_desktop::openai_live::OpenAiRecognizer;
 use thalvi_desktop::recognizer::Upsampler;
+use thalvi_desktop::recognizer::{Recognizer, RecognizerEvent, RecognizerSession};
 use thalvi_desktop::secondary::{
     SecondaryApi, SecondaryError, SecondaryStt, SecondarySttError, transcribe,
 };
@@ -49,8 +57,230 @@ async fn serve(status: u16, reply: &'static str) -> (String, mpsc::UnboundedRece
     (url, rx)
 }
 
+async fn serve_sse(reply: &'static str) -> (String, mpsc::UnboundedReceiver<Captured>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let app = Router::new().fallback(move |request: Request| {
+        let tx = tx.clone();
+        async move {
+            let path = request.uri().path().to_string();
+            let headers = request.headers().clone();
+            let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+            let _ = tx.send(Captured {
+                path,
+                headers,
+                body: body.to_vec(),
+            });
+            Response::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .body(Body::from(reply))
+                .unwrap()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}/v1", listener.local_addr().expect("address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (url, rx)
+}
+
+async fn serve_sequence(
+    responses: Vec<(StatusCode, &'static str)>,
+) -> (String, mpsc::UnboundedReceiver<Captured>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+    let app = Router::new().fallback(move |request: Request| {
+        let tx = tx.clone();
+        let responses = Arc::clone(&responses);
+        async move {
+            let path = request.uri().path().to_string();
+            let headers = request.headers().clone();
+            let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+            let _ = tx.send(Captured {
+                path,
+                headers,
+                body: body.to_vec(),
+            });
+            let (status, body) = responses.lock().unwrap().pop_front().unwrap();
+            Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}/v1", listener.local_addr().expect("address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (url, rx)
+}
+
 fn settings(url: &str, api: SecondaryApi, key: &str) -> SecondaryStt {
     SecondaryStt::new(url, "the-model", key.to_string(), api, true).expect("valid settings")
+}
+
+#[tokio::test]
+async fn openai_streaming_emits_cumulative_text_and_plain_json_still_works() {
+    let (url, mut rx) = serve_sse(
+        "data: {\"type\":\"transcript.text.delta\",\"delta\":\"hello \"}\n\ndata: {\"type\":\"transcript.text.delta\",\"delta\":\"world\"}\n\ndata: {\"type\":\"transcript.text.done\",\"text\":\"hello world\"}\n\n",
+    ).await;
+    let metrics = Recorder::disabled().metrics();
+    let client = reqwest::Client::builder()
+        .user_agent("thalvi-second-pass-client")
+        .build()
+        .expect("configured shared client");
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        settings(&url, SecondaryApi::OpenAi, ""),
+        client,
+        metrics,
+    );
+    let mut session = recognizer
+        .connect()
+        .await
+        .expect("connected without uploading");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    assert!(
+        rx.try_recv().is_err(),
+        "upload starts only when capture ends"
+    );
+    session.finish_audio().await.expect("capture ended");
+    let mut events = Vec::new();
+    loop {
+        let event = session.next_event().await.expect("transcription event");
+        let final_event = matches!(event, RecognizerEvent::Final(_));
+        events.push(event);
+        if final_event {
+            break;
+        }
+    }
+    assert_eq!(
+        events,
+        [
+            RecognizerEvent::Partial("hello ".to_owned()),
+            RecognizerEvent::Partial("hello world".to_owned()),
+            RecognizerEvent::Final("hello world".to_owned())
+        ]
+    );
+    let captured = rx.recv().await.expect("one upload");
+    assert_eq!(captured.path, "/v1/audio/transcriptions");
+    assert_eq!(captured.headers["user-agent"], "thalvi-second-pass-client");
+    assert!(
+        captured
+            .body
+            .windows(b"name=\"stream\"".len())
+            .any(|part| part == b"name=\"stream\"")
+    );
+    assert!(rx.try_recv().is_err(), "one upload for one capture");
+
+    let (url, mut rx) = serve(200, r#"{"text":"plain answer"}"#).await;
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        settings(&url, SecondaryApi::OpenAi, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut session = recognizer.connect().await.expect("connected");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    let events = [session.next_event().await.expect("final transcription")];
+    assert_eq!(events, [RecognizerEvent::Final("plain answer".to_owned())]);
+    assert_eq!(
+        rx.recv().await.expect("one upload").path,
+        "/v1/audio/transcriptions"
+    );
+    assert!(rx.try_recv().is_err(), "one upload for one capture");
+}
+
+#[tokio::test]
+async fn a_failed_capture_reports_plainly_and_the_next_capture_can_succeed() {
+    let (url, mut rx) = serve_sequence(vec![
+        (StatusCode::INTERNAL_SERVER_ERROR, "{}"),
+        (StatusCode::OK, r#"{"text":"recovered"}"#),
+    ])
+    .await;
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        settings(&url, SecondaryApi::OpenAi, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut first = recognizer.connect().await.expect("first session");
+    first.send_frame(&ramp(0)).await.expect("buffer");
+    first.finish_audio().await.expect("release");
+    let failure = first
+        .next_event()
+        .await
+        .expect_err("server failure is shown");
+    assert!(failure.to_string().contains("HTTP 500"));
+
+    let mut next = recognizer.connect().await.expect("next capture session");
+    next.send_frame(&ramp(1)).await.expect("buffer");
+    next.finish_audio().await.expect("release");
+    assert_eq!(
+        next.next_event().await.expect("recovered transcription"),
+        RecognizerEvent::Final("recovered".to_owned())
+    );
+    assert_eq!(
+        rx.recv().await.expect("first upload").path,
+        "/v1/audio/transcriptions"
+    );
+    assert_eq!(
+        rx.recv().await.expect("next upload").path,
+        "/v1/audio/transcriptions"
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unreachable_or_slow_live_endpoint_says_what_failed() {
+    let unused = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}", unused.local_addr().expect("address"));
+    drop(unused);
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        settings(&url, SecondaryApi::OpenAi, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut session = recognizer.connect().await.expect("connected");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    let failure = session.next_event().await.expect_err("endpoint is down");
+    assert!(
+        failure
+            .to_string()
+            .contains("could not reach the speech server")
+    );
+
+    let app = Router::new().fallback(std::future::pending::<()>);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        settings(&url, SecondaryApi::OpenAi, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut session = recognizer.connect().await.expect("connected");
+    session.send_frame(&ramp(1)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    let failure = session.next_event().await.expect_err("request deadline");
+    assert!(failure.to_string().contains("took too long to transcribe"));
 }
 
 fn ramp(index: usize) -> Frame {

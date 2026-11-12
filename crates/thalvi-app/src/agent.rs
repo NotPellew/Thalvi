@@ -385,6 +385,7 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
         Status::Working {
             cancellable: true, ..
         } => "transcribing",
+        Status::Transcribing { .. } => "transcribing",
         Status::Working { .. } => "delivering",
         Status::Writing { .. } | Status::Thinking { .. } => "writing",
         Status::Loading { .. } => "loading",
@@ -413,6 +414,7 @@ fn overlay_word(status: &Status, on: bool) -> &'static str {
         Status::Writing { .. } => "writing",
         Status::Thinking { .. } => "thinking",
         Status::Working { .. } => "working",
+        Status::Transcribing { .. } => "transcribing",
         Status::Done { .. } => "delivered",
         Status::Failed { .. } => "error",
         Status::Loading { .. } => "loading",
@@ -424,6 +426,7 @@ fn recognizer(config: &DesktopConfig, phase: &str) -> Value {
     let entry = config.stt.entries.active_live();
     let (kind, model) = match &entry.kind {
         LiveKind::Realtime(_) => ("realtime", None),
+        LiveKind::OpenAi(_) => ("open_ai", None),
         LiveKind::OnDevice(SpeechChoice::Catalog(model)) => ("on_device", Some(model.name())),
         LiveKind::OnDevice(SpeechChoice::Folder(_)) => ("on_device", None),
     };
@@ -494,6 +497,10 @@ fn capturing(status: &Status) -> bool {
             | Status::Writing { .. }
             | Status::Thinking { .. }
             | Status::Working {
+                cancellable: true,
+                ..
+            }
+            | Status::Transcribing {
                 cancellable: true,
                 ..
             }

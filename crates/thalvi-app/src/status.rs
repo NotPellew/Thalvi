@@ -61,6 +61,12 @@ pub enum Status {
         /// The capture can still be cancelled; delivery cannot be.
         cancellable: bool,
     },
+    /// A buffered live recognizer is transcribing a capture after release or a voice pause.
+    Transcribing {
+        target: Option<String>,
+        route: CaptureRoute,
+        cancellable: bool,
+    },
     Done {
         target: Option<String>,
         route: CaptureRoute,
@@ -279,6 +285,11 @@ impl View {
                     route: *route,
                     cancellable: true,
                 },
+                EngineState::TranscribingLive { route } => Status::Transcribing {
+                    target,
+                    route: *route,
+                    cancellable: true,
+                },
                 EngineState::Writing { text } => Status::Writing {
                     target,
                     text: text.clone(),
@@ -452,6 +463,16 @@ mod tests {
                 Status::Working {
                     target: Some(kitty()),
                     route: CaptureRoute::Task,
+                    cancellable: true,
+                },
+            ),
+            (
+                EngineState::TranscribingLive {
+                    route: CaptureRoute::Paste,
+                },
+                Status::Transcribing {
+                    target: Some(kitty()),
+                    route: CaptureRoute::Paste,
                     cancellable: true,
                 },
             ),

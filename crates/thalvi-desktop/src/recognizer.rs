@@ -220,6 +220,16 @@ impl RecognizerError {
 
 /// One open recognition stream; it exists only after the recognizer said it is ready.
 pub trait RecognizerSession: Send {
+    /// Whether audio is buffered until the user ends the capture.
+    fn buffers_audio(&self) -> bool {
+        false
+    }
+
+    /// Signals that all audio for a buffered capture has arrived.
+    fn finish_audio(&mut self) -> impl Future<Output = Result<(), RecognizerError>> + Send {
+        std::future::ready(Ok(()))
+    }
+
     /// Sends one 16 kHz frame.
     fn send_frame(
         &mut self,
@@ -325,6 +335,7 @@ impl Upsampler {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FakeCall {
     Frame(Box<Frame>),
+    FinishAudio,
     Cancel,
     Close,
 }
@@ -339,6 +350,7 @@ pub struct FakeRecognizer {
     events: EventsSlot,
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
+    buffers: Arc<AtomicBool>,
 }
 
 /// Test-side handle of a [`FakeRecognizer`].
@@ -348,6 +360,7 @@ pub struct FakeControl {
     slots: (ReadySlot, EventsSlot),
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
+    buffers: Arc<AtomicBool>,
 }
 
 /// The stream a [`FakeRecognizer`] hands out once ready.
@@ -355,6 +368,7 @@ pub struct FakeSession {
     events: mpsc::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>,
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
+    buffers: Arc<AtomicBool>,
 }
 
 impl FakeRecognizer {
@@ -365,6 +379,7 @@ impl FakeRecognizer {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let calls = Arc::new(Mutex::new(Vec::new()));
         let stalled = Arc::new(AtomicBool::new(false));
+        let buffers = Arc::new(AtomicBool::new(false));
         let ready = Arc::new(Mutex::new(Some(ready_rx)));
         let events = Arc::new(Mutex::new(Some(events_rx)));
         (
@@ -373,6 +388,7 @@ impl FakeRecognizer {
                 events: Arc::clone(&events),
                 calls: Arc::clone(&calls),
                 stalled: Arc::clone(&stalled),
+                buffers: Arc::clone(&buffers),
             },
             FakeControl {
                 ready: Some(ready_tx),
@@ -380,6 +396,7 @@ impl FakeRecognizer {
                 slots: (ready, events),
                 calls,
                 stalled,
+                buffers,
             },
         )
     }
@@ -405,6 +422,7 @@ impl Recognizer for FakeRecognizer {
             events,
             calls: Arc::clone(&self.calls),
             stalled: Arc::clone(&self.stalled),
+            buffers: Arc::clone(&self.buffers),
         })
     }
 }
@@ -442,6 +460,10 @@ impl FakeControl {
         self.stalled.store(true, Ordering::Relaxed);
     }
 
+    pub fn buffer_audio(&self) {
+        self.buffers.store(true, Ordering::Relaxed);
+    }
+
     /// Everything the session was asked to do so far.
     pub fn calls(&self) -> Vec<FakeCall> {
         self.calls
@@ -461,6 +483,15 @@ impl FakeSession {
 }
 
 impl RecognizerSession for FakeSession {
+    fn buffers_audio(&self) -> bool {
+        self.buffers.load(Ordering::Relaxed)
+    }
+
+    async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
+        self.record(FakeCall::FinishAudio);
+        Ok(())
+    }
+
     fn send_frame(
         &mut self,
         frame: &Frame,

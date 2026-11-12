@@ -2,6 +2,7 @@
 
 use std::{fmt, time::Duration};
 
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -264,4 +265,95 @@ pub async fn transcribe(
         Some(Value::String(text)) => Ok(text.clone()),
         _ => Err(SecondaryError::BadResponse),
     }
+}
+
+/// Sends the same WAV request with streaming enabled and emits cumulative text as SSE arrives.
+pub async fn transcribe_events(
+    client: &reqwest::Client,
+    settings: &SecondaryStt,
+    frames: &[Frame],
+    mut emit: impl FnMut(crate::recognizer::RecognizerEvent),
+) -> Result<String, SecondaryError> {
+    let mut body = format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{}\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"stream\"\r\n\r\ntrue\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"capture.wav\"\r\nContent-Type: audio/wav\r\n\r\n", settings.model).into_bytes();
+    body.extend_from_slice(&wav(frames));
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    let mut request = client
+        .post(format!("{}/audio/transcriptions", settings.url))
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .header("Accept", "text/event-stream, application/json")
+        .body(body);
+    if !settings.api_key.is_empty() {
+        request = request.bearer_auth(settings.api_key());
+    }
+    let upload = async {
+        let response = request
+            .send()
+            .await
+            .map_err(|_| SecondaryError::Unreachable)?;
+        if !response.status().is_success() {
+            return Err(SecondaryError::Status(response.status().as_u16()));
+        }
+        if !response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("text/event-stream"))
+        {
+            let answer: Value = response
+                .json()
+                .await
+                .map_err(|_| SecondaryError::BadResponse)?;
+            let text = answer
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or(SecondaryError::BadResponse)?
+                .to_owned();
+            return Ok(text);
+        }
+        let mut stream = response.bytes_stream();
+        let mut pending = Vec::new();
+        let mut transcript = String::new();
+        let mut final_text = None;
+        while let Some(chunk) = stream.next().await {
+            pending.extend_from_slice(&chunk.map_err(|_| SecondaryError::Unreachable)?);
+            while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<_> = pending.drain(..=newline).collect();
+                let line = String::from_utf8_lossy(&line);
+                if let Some(data) = line.trim().strip_prefix("data: ") {
+                    if data == "[DONE]" {
+                        break;
+                    }
+                    let value: Value =
+                        serde_json::from_str(data).map_err(|_| SecondaryError::BadResponse)?;
+                    match value.get("type").and_then(Value::as_str) {
+                        Some("transcript.text.delta") => {
+                            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                                transcript.push_str(delta);
+                                emit(crate::recognizer::RecognizerEvent::Partial(
+                                    transcript.clone(),
+                                ));
+                            }
+                        }
+                        Some("transcript.text.done") => {
+                            if let Some(text) = value.get("text").and_then(Value::as_str) {
+                                final_text = Some(text.to_owned());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let text = final_text.unwrap_or(transcript);
+        if text.is_empty() {
+            return Err(SecondaryError::BadResponse);
+        }
+        Ok(text)
+    };
+    tokio::time::timeout(TIMEOUT, upload)
+        .await
+        .map_err(|_| SecondaryError::Timeout)?
 }

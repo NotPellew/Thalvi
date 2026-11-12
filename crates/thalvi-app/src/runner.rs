@@ -689,6 +689,7 @@ impl Runner {
         let recognizer = Chosen::new(
             config.stt.entries.active_live(),
             store,
+            self.http.clone(),
             metrics.clone(),
             &config.stt.phrases,
             self.devices.adapters(),

@@ -858,6 +858,53 @@ describe("the speech server list", () => {
     expect(badgesOf("Office GPU")).toEqual(["Realtime speech server", "Key saved"]);
   });
 
+  it("adds, uses, masks, edits and removes an OpenAI-compatible live entry", async () => {
+    const stub = await openSeveral();
+    await addServer("open_ai");
+    expect(root.querySelector(".editor h4")?.textContent).toBe("Add an openai-compatible");
+    type(control("Name", "input"), "Local Whisper");
+    type(control("Address", "input"), "http://127.0.0.1:9000/v1");
+    type(control("Model", "input"), "whisper-large");
+    type(control("API key", "input"), "local-secret");
+    await saveServer();
+    expect(stub.backend.checkSpeechEntry.mock.calls.at(-1)?.[0]).toMatchObject({
+      kind: "open_ai", name: "Local Whisper", address: "http://127.0.0.1:9000/v1", model: "whisper-large", api_key: "local-secret",
+    });
+    button("Save").click();
+    await settle();
+    expect(sent(stub).stt.entries.find((entry) => entry.name === "Local Whisper")).toMatchObject({ kind: "open_ai", api_key: "local-secret" });
+
+    use("Local Whisper");
+    await settle();
+    expect(badgesOf("Local Whisper")).toContain("In use");
+    stub.backend.getSettings.mockResolvedValueOnce({
+      ...sent(stub),
+      stt: { entries: sent(stub).stt.entries.map((entry) => {
+        if (entry.kind !== "open_ai" || entry.name !== "Local Whisper") return entry;
+        const masked = { ...entry, has_key: true };
+        delete masked.api_key;
+        return masked;
+      }) },
+    });
+    stub.changedElsewhere();
+    await settle();
+    edit("Local Whisper");
+    expect(control("API key", "input").getAttribute("placeholder")).toBe("Saved — leave blank to keep it");
+    type(control("Model", "input"), "whisper-v3");
+    await saveServer();
+    expect(stub.backend.checkSpeechEntry.mock.calls.at(-1)?.[0]).toMatchObject({ model: "whisper-v3" });
+    expect(stub.backend.checkSpeechEntry.mock.calls.at(-1)?.[0]).not.toHaveProperty("api_key");
+    button("Save").click();
+    await settle();
+    expect(stub.backend.saveSettings.mock.calls.at(-1)?.[0].stt.entries.find((entry) => entry.name === "Local Whisper")).toMatchObject({ has_key: true });
+    expect(stub.backend.saveSettings.mock.calls.at(-1)?.[0].stt.entries.find((entry) => entry.name === "Local Whisper")).not.toHaveProperty("api_key");
+
+    use("On this computer");
+    await settle();
+    entryNamed("Local Whisper").querySelector<HTMLButtonElement>('button[aria-label="Remove Local Whisper"]')?.click();
+    expect(names(lists()[0] as HTMLElement)).not.toContain("Local Whisper");
+  });
+
   it("does not add a server the app refuses, and keeps the editor open with the reason", async () => {
     const stub = await openSeveral();
     stub.backend.checkSpeechEntry.mockRejectedValueOnce('Speech server "Realtime speech server": the address must be a ws or wss URL.');

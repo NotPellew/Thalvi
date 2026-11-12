@@ -116,6 +116,8 @@ const ADDRESS: &str =
 pub enum LiveKind {
     /// Meta's realtime ASR protocol, spoken by the desktop itself.
     Realtime(Realtime),
+    /// OpenAI-compatible audio transcription, uploaded when capture ends.
+    OpenAi(SecondaryStt),
     /// The model on this computer.
     OnDevice(SpeechChoice),
 }
@@ -135,6 +137,9 @@ impl LiveEntry {
         match &self.kind {
             LiveKind::Realtime(realtime) => {
                 SpeechSource::direct(&self.name, realtime.address.clone())
+            }
+            LiveKind::OpenAi(settings) => {
+                SpeechSource::direct(&self.name, settings.address().to_owned())
             }
             LiveKind::OnDevice(choice) => SpeechSource::on_device(&self.name, choice.label()),
         }
@@ -243,6 +248,7 @@ impl Entries {
             .find(|entry| entry.id == id)
             .and_then(|entry| match &entry.kind {
                 LiveKind::Realtime(realtime) => Some(realtime.api_key()),
+                LiveKind::OpenAi(settings) => Some(settings.api_key()),
                 LiveKind::OnDevice(_) => None,
             })
             .or_else(|| {
@@ -423,6 +429,16 @@ enum RawEntry {
         #[serde(default)]
         api_key: String,
     },
+    OpenAi {
+        id: String,
+        name: String,
+        #[serde(default)]
+        active: bool,
+        address: String,
+        model: String,
+        #[serde(default)]
+        api_key: String,
+    },
     #[serde(rename = "thalvi_server")]
     LegacyServer {
         #[serde(default)]
@@ -483,6 +499,7 @@ impl RawEntry {
         }
         let (id, name) = match &self {
             Self::Realtime { id, name, .. }
+            | Self::OpenAi { id, name, .. }
             | Self::LegacyServer { id, name, .. }
             | Self::OnDevice { id, name, .. }
             | Self::SecondPass { id, name, .. } => (id.trim().to_owned(), name.trim().to_owned()),
@@ -514,7 +531,20 @@ impl RawEntry {
                 ),
                 active,
             ),
-            Self::LegacyServer { .. } => {
+            Self::OpenAi {
+                active,
+                address,
+                model,
+                api_key,
+                ..
+            } => live(
+                LiveKind::OpenAi(
+                    SecondaryStt::new(&address, &model, api_key, SecondaryApi::OpenAi, true)
+                        .map_err(|e| fields(&name, second_pass_reason(&e)))?,
+                ),
+                active,
+            ),
+            Self::LegacyServer { .. } if strict => {
                 return Err(fields(&name, "this speech server kind was removed."));
             }
             Self::OnDevice { active, model, .. } => live(
@@ -612,6 +642,14 @@ impl Serialize for Entries {
                 model: &'a str,
                 api_key: &'a str,
             },
+            OpenAi {
+                id: &'a str,
+                name: &'a str,
+                active: bool,
+                address: &'a str,
+                model: &'a str,
+                api_key: &'a str,
+            },
             OnDevice {
                 id: &'a str,
                 name: &'a str,
@@ -638,6 +676,14 @@ impl Serialize for Entries {
                     address: &realtime.address,
                     model: &realtime.model,
                     api_key: &realtime.api_key,
+                },
+                LiveKind::OpenAi(settings) => File::OpenAi {
+                    id,
+                    name,
+                    active,
+                    address: settings.address(),
+                    model: settings.model(),
+                    api_key: settings.api_key(),
                 },
                 LiveKind::OnDevice(choice) => File::OnDevice {
                     id,
@@ -682,6 +728,7 @@ mod tests {
         let live = entries.live().iter().map(|entry| {
             let (kind, place) = match &entry.kind {
                 LiveKind::Realtime(realtime) => ("realtime", realtime.address().to_owned()),
+                LiveKind::OpenAi(settings) => ("open_ai", settings.address().to_owned()),
                 LiveKind::OnDevice(choice) => ("on_device", choice.label()),
             };
             (
@@ -785,6 +832,8 @@ mod tests {
         let json = json!({"stt": {"entries": [
             {"kind": "realtime", "id": "a", "name": "Cybrex2", "active": false,
              "address": "ws://100.64.0.2:8012", "model": "nemotron", "api_key": "live-key"},
+            {"kind": "open_ai", "id": "o", "name": "OpenAI local", "active": true,
+             "address": "http://localhost:9000/v1", "model": "whisper", "api_key": "open-key"},
             {"kind": "thalvi_server", "id": "b", "name": "Office", "active": true,
              "address": "ws://127.0.0.1:8080"},
             {"kind": "on_device", "id": "c", "name": "Offline", "active": false, "model": "/m"},
@@ -796,7 +845,7 @@ mod tests {
         .to_string();
         let config = DesktopConfig::from_json_str(&json).unwrap();
         let got = &config.stt.entries;
-        assert_eq!(got.active_live().name, "Offline");
+        assert_eq!(got.active_live().name, "OpenAI local");
         assert_eq!(
             got.second_pass()
                 .iter()
@@ -810,8 +859,13 @@ mod tests {
             ["Why"]
         );
         assert_eq!(
-            (got.key_of("a"), got.key_of("z"), got.key_of("y")),
-            ("live-key", "zk", "")
+            (
+                got.key_of("a"),
+                got.key_of("o"),
+                got.key_of("z"),
+                got.key_of("y")
+            ),
+            ("live-key", "open-key", "zk", "")
         );
         let written = serde_json::to_string(&config).unwrap();
         assert_eq!(
@@ -931,6 +985,22 @@ mod tests {
         let bad_live = json!({"kind": "realtime", "id": "r", "name": "R", "active": false,
                               "address": "http://h", "model": "m"});
         assert!(check(&bad_live).unwrap_err().contains("ws or wss"));
+        let open_ai = json!({"kind": "open_ai", "id": "o", "name": "Local ASR", "active": false,
+                             "address": "https://host.example/v1/", "model": "whisper", "api_key": "saved"});
+        assert_eq!(check(&open_ai), Ok(()));
+        for address in [
+            "ftp://host/v1",
+            "http://user:pass@host/v1",
+            "http://host/v1?x=1",
+            "http://host/v1#x",
+        ] {
+            let mut invalid = open_ai.clone();
+            invalid["address"] = json!(address);
+            assert!(
+                check(&invalid).unwrap_err().contains("http or https URL"),
+                "{address}"
+            );
+        }
     }
 
     #[test]

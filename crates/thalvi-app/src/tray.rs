@@ -48,6 +48,7 @@ impl Icon {
             Status::Starting { .. } | Status::Capturing { .. } => Self::Capturing,
             Status::Pending { .. } => Self::Pending,
             Status::Working { .. }
+            | Status::Transcribing { .. }
             | Status::Writing { .. }
             | Status::Thinking { .. }
             | Status::Loading { .. } => Self::Working,
@@ -165,6 +166,7 @@ pub fn title(status: &Status) -> String {
             seconds(*pause_ms)
         ),
         Status::Working { .. } => "working".to_owned(),
+        Status::Transcribing { .. } => "transcribing".to_owned(),
         Status::Writing { .. } => "writing".to_owned(),
         Status::Thinking { .. } => "thinking".to_owned(),
         Status::Loading { .. } => "starting".to_owned(),
@@ -194,6 +196,10 @@ pub fn can_cancel(status: &Status) -> bool {
             | Status::Writing { .. }
             | Status::Thinking { .. }
             | Status::Working {
+                cancellable: true,
+                ..
+            }
+            | Status::Transcribing {
                 cancellable: true,
                 ..
             }
