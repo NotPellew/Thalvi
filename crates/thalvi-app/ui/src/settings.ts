@@ -5,11 +5,14 @@ import { errorText } from "./contract.ts";
 import { createControls } from "./controls.ts";
 import { el } from "./dom.ts";
 import { applyLook } from "./look.ts";
-import { buildPages, type Page, type PageContext, type SwitchRead } from "./settings-pages.ts";
+import { type ApplyOptions, buildPages, type Page, type PageContext, type SwitchRead } from "./settings-pages.ts";
 
 export const ELSEWHERE_TEXT = "Changed outside this window — Revert loads the saved settings";
 
 export const SAVED_TEXT = "Saved — applies after the current capture";
+
+/** What the footer says after a setting that takes effect at once, such as a hold key, was saved. */
+export const SAVED_AT_ONCE_TEXT = "Saved — applies at once";
 
 export const SAVED_MICROPHONE_TEXT = `${SAVED_TEXT}; the saved microphone is not active until it opens`;
 
@@ -40,6 +43,8 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   let saveFailure = "";
   let saving = false;
   let saved = false;
+  // Whether the last save was of settings that apply at once, so it need not wait for a capture to end.
+  let savedAtOnce = false;
   // The microphone the last save chose (null is the system default); unset when that save left it alone.
   let savedMicrophone: { name: string | null } | null = null;
   let changedElsewhere = false;
@@ -95,12 +100,14 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   }
 
   function savedText(): string {
+    if (savedAtOnce) return SAVED_AT_ONCE_TEXT;
     const open = savedMicrophone !== null && audio.active !== null && audio.selected === savedMicrophone.name;
     return savedMicrophone === null || open ? SAVED_TEXT : SAVED_MICROPHONE_TEXT;
   }
 
-  function markSaved(before: Settings | undefined, after: Settings): void {
+  function markSaved(before: Settings | undefined, after: Settings, atOnce = false): void {
     saved = true;
+    savedAtOnce = atOnce;
     savedMicrophone = before === undefined || before.microphone === after.microphone ? null : { name: after.microphone };
   }
 
@@ -171,7 +178,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   }
 
   /** Saves the saved settings with `change` applied; unsaved edits stay in the draft and unsaved. */
-  async function applyNow(change: (settings: Settings) => void): Promise<void> {
+  async function applyNow(change: (settings: Settings) => void, options: ApplyOptions = {}): Promise<void> {
     if (baseline === "") return;
     if (saving) {
       saveFailure = "Wait for the save in progress to finish.";
@@ -188,11 +195,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       await backend.saveSettings(next);
       baseline = JSON.stringify(next);
       if (draft !== null) change(draft);
-      markSaved(before, next);
+      markSaved(before, next, options.atOnce === true);
       changedElsewhere = false;
     } catch (error) {
-      saveFailure = errorText(error);
-      throw error;
+      const explained = options.explain ? options.explain(errorText(error)) : errorText(error);
+      saveFailure = explained;
+      throw options.explain ? new Error(explained) : error;
     } finally {
       saving = false;
       feedback();

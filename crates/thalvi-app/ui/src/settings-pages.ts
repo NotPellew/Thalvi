@@ -71,7 +71,14 @@ export interface PageContext {
   /** The settings as last saved, or null before they are read. */
   saved: () => Settings | null;
   /** Saves the last saved settings with `change` applied, leaving other unsaved edits in the draft; says why in the footer when it fails. */
-  applyNow: (change: (settings: Settings) => void) => Promise<void>;
+  applyNow: (change: (settings: Settings) => void, options?: ApplyOptions) => Promise<void>;
+}
+
+export interface ApplyOptions {
+  /** The change takes effect as it is saved, so the footer does not say it waits for a capture. */
+  atOnce?: boolean;
+  /** Rewrites the reason a refused change is shown with, in the footer and to the caller. */
+  explain?: (reason: string) => string;
 }
 
 /** An OS switch as read, or why it could not be. */
@@ -496,9 +503,17 @@ function recordedKey(event: KeyboardEvent): string | null {
   return [...modifiers, event.code].join("+");
 }
 
-/** A key as the settings file names it, written as the keyboard shows it: `Alt+KeyZ` is "Alt+Z". */
-function keyLabel(name: string): string {
-  return name.replace(/(?:Key|Digit)(?=[A-Z0-9]$)/, "");
+/** Text with every key written as the keyboard shows it, not as the settings file names it: `Alt+KeyZ` is "Alt+Z". */
+function keyLabel(text: string): string {
+  return text.replace(/(?:Key|Digit)(?=[A-Z0-9](?![A-Za-z0-9]))/g, "");
+}
+
+/** Why `recorded` was refused, in the words of the rows; a name that is no key at all can't be used, however it is spelled. */
+function holdKeyNotice(reason: string, recorded: string): string {
+  if (reason.startsWith(`The key "${recorded}" is not a key name`)) {
+    return `${keyLabel(recorded)} can't be used as a hold key. Use a letter, a digit, Space or F1 to F12, alone or with Ctrl, Shift, Alt or Win.`;
+  }
+  return keyLabel(reason);
 }
 
 /** One hold key: the key in effect, a recorder that applies the next combination pressed, and a way back to the default. */
@@ -535,7 +550,7 @@ function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key"
   function set(name: string): void {
     applyNow((settings) => {
       settings[field] = name;
-    }).then(render, (error: unknown) => {
+    }, { atOnce: true, explain: (reason) => holdKeyNotice(reason, name) }).then(render, (error: unknown) => {
       say(problem, errorText(error));
       render();
     });

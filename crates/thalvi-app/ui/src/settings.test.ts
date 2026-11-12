@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry, Status, UpdateState } from "./contract.ts";
 import settingsCss from "./settings.css?raw";
 import settingsLooksCss from "./settings-looks.css?raw";
-import { ELSEWHERE_TEXT, mountSettings, SAVED_MICROPHONE_TEXT, SAVED_TEXT } from "./settings.ts";
+import { ELSEWHERE_TEXT, mountSettings, SAVED_AT_ONCE_TEXT, SAVED_MICROPHONE_TEXT, SAVED_TEXT } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO } from "./testing.ts";
 
 let root: HTMLElement;
@@ -1943,11 +1943,14 @@ describe("live controls", () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { code, bubbles: true, cancelable: true, ...modifiers }));
     }
 
-    const SAME = "The write key must differ from the hold key.";
+    const SAME = "The write key must differ from the dictate key.";
     const BOUND = "F8 is already bound in Hyprland. Pick another key or remove that bind. The keys that were set before still work.";
-    const MODIFIER = "Hyprland can bind only F1 to F12 without a modifier for the hold keys, not Alt+KeyZ. The keys that were set before still work.";
+    const KEPT = "The keys that were set before still work.";
+    const MODIFIER = `Hyprland can bind only F1 to F12 without a modifier for the hold keys, not Alt+KeyZ. ${KEPT}`;
+    const NEEDS = 'The key "KeyY" needs a modifier, or typing that key would start dictation.';
+    const UNKNOWN = 'The key "Tab" is not a key name such as Alt+KeyZ: modifiers Ctrl, Shift, Alt or Win, then a key such as KeyZ, Digit1, F9 or Space, joined by +.';
 
-    // (row, keys pressed, what the backend says, key sent, key shown, restore disabled, notice)
+    // (row, keys pressed, what the desktop refuses with, key sent, key shown, restore disabled, notice shown under the row and in the footer)
     const cases: [string, string[][], string | null, string | null, string, boolean, string][] = [
       ["Dictate key", [["KeyY", "ctrl", "shift"]], null, "Ctrl+Shift+KeyY", "Ctrl+Shift+Y", false, ""],
       ["Write key", [["F8"]], null, "F8", "F8", false, ""],
@@ -1955,7 +1958,17 @@ describe("live controls", () => {
       ["Dictate key", [["Escape"], ["KeyY", "ctrl"]], null, null, "Alt+Z", true, ""],
       ["Dictate key", [["F8"]], BOUND, "F8", "Alt+Z", true, BOUND],
       ["Write key", [["KeyZ", "alt"]], SAME, "Alt+KeyZ", "Alt+X", true, SAME],
-      ["Dictate key", [["KeyZ", "alt"]], MODIFIER, "Alt+KeyZ", "Alt+Z", true, MODIFIER],
+      ["Dictate key", [["KeyZ", "alt"]], MODIFIER, "Alt+KeyZ", "Alt+Z", true, MODIFIER.replace("Alt+KeyZ", "Alt+Z")],
+      ["Dictate key", [["KeyY"]], NEEDS, "KeyY", "Alt+Z", true, NEEDS.replace("KeyY", "Y")],
+      [
+        "Write key",
+        [["Tab"]],
+        UNKNOWN,
+        "Tab",
+        "Alt+X",
+        true,
+        "Tab can't be used as a hold key. Use a letter, a digit, Space or F1 to F12, alone or with Ctrl, Shift, Alt or Win.",
+      ],
     ];
 
     it.each(cases)("%s: keys %j, desktop says %j: sends %j, shows %j", async (label, keys, backendSays, sent, shown, restoreDisabled, notice) => {
@@ -1978,6 +1991,8 @@ describe("live controls", () => {
       expect(within(row, "Change…").disabled).toBe(false);
       expect(document.activeElement).toBe(within(row, "Change…"));
       expect(row.querySelector(".note")?.textContent ?? "").toBe(notice);
+      expect(root.querySelector(".err")?.textContent).toBe(notice);
+      expect(root.querySelector(".msg")?.textContent).toBe(notice === "" && sent !== null ? SAVED_AT_ONCE_TEXT : "");
     });
 
     it("restores a key set earlier to the desktop's own, and then has nothing to restore", async () => {
