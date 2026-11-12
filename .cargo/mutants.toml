@@ -58,4 +58,8 @@ exclude_re = [
     "match guard error.is_timeout\\(\\) with (true|false) in explain",
     # The restart's wall-clock time only feeds a metric the next start writes.
     "replace now_ms -> u64",
+    # Quitting waits on the real engine thread, which only the app starts; its quit flow is the formal check's.
+    "replace EngineLink::quit with \\(\\)",
+    # Nothing reads a restart request's debug text.
+    "<impl std::fmt::Debug for Restart>::fmt",
 ]

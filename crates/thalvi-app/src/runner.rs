@@ -917,8 +917,8 @@ impl Runner {
             Control::Apply(config) => self.apply(*config).await,
             Control::HoldKeyFailed(notice) => self.hold_problem = Some(notice),
             Control::RestartIfIdle(restart) => {
-                let busy = self.key_state.borrow().down || *self.feeding.borrow();
-                return answer_restart(restart, self.paused, busy);
+                let held = self.key_state.borrow().down;
+                return answer_restart(restart, self.paused, held, *self.feeding.borrow());
             }
             Control::Quit => return Flow::Quit,
         }
@@ -1298,11 +1298,12 @@ fn retunes_only(old: &DesktopConfig, new: &DesktopConfig) -> bool {
     }
 }
 
-/// Answers a request to stop for an update. Only an idle engine agrees, and only after `prepare`
-/// has saved what the next start needs; a refusal leaves the engine running.
-fn answer_restart(restart: Restart, paused: bool, busy: bool) -> Flow {
+/// Answers a request to stop for an update. Only an idle engine agrees, with no hold key down and
+/// no clip being fed, and only after `prepare` has saved what the next start needs; a refusal
+/// leaves the engine running.
+fn answer_restart(restart: Restart, paused: bool, held: bool, feeding: bool) -> Flow {
     let Restart { prepare, reply } = restart;
-    if busy {
+    if held || feeding {
         let _ = reply.send(Stop::Busy);
         return Flow::Continue;
     }
@@ -2080,7 +2081,11 @@ mod tests {
 
     /// What an engine answers to a request to stop for an update, whether it quits, and what the
     /// request saved for the next start.
-    fn restart_answer(paused: bool, busy: bool, save_fails: bool) -> (Stop, bool, Vec<bool>) {
+    fn restart_answer(
+        paused: bool,
+        (held, fed): (bool, bool),
+        save_fails: bool,
+    ) -> (Stop, bool, Vec<bool>) {
         let saved = Arc::new(Mutex::new(Vec::new()));
         let (reply, mut answer) = oneshot::channel();
         let restart = Restart::new(
@@ -2097,7 +2102,7 @@ mod tests {
             },
             reply,
         );
-        let flow = answer_restart(restart, paused, busy);
+        let flow = answer_restart(restart, paused, held, fed);
         let saved = saved.lock().unwrap().clone();
         (
             answer.try_recv().unwrap(),
@@ -2109,17 +2114,17 @@ mod tests {
     #[test]
     fn only_an_idle_engine_stops_for_an_update_after_saving_whether_it_was_paused() {
         let refused = || Stop::Refused("The restart note could not be saved.".to_owned());
-        for (paused, busy, save_fails, answer, quits, saved) in [
-            (false, false, false, Stop::Stopped, true, vec![false]),
-            (true, false, false, Stop::Stopped, true, vec![true]),
-            (false, true, false, Stop::Busy, false, vec![]),
-            (true, true, false, Stop::Busy, false, vec![]),
-            (false, false, true, refused(), false, vec![false]),
+        for (paused, held, fed, save_fails, answer, quits, saved) in [
+            (false, false, false, false, Stop::Stopped, true, vec![false]),
+            (true, false, false, false, Stop::Stopped, true, vec![true]),
+            (false, true, false, false, Stop::Busy, false, vec![]),
+            (true, false, true, false, Stop::Busy, false, vec![]),
+            (false, false, false, true, refused(), false, vec![false]),
         ] {
             assert_eq!(
-                restart_answer(paused, busy, save_fails),
+                restart_answer(paused, (held, fed), save_fails),
                 (answer, quits, saved),
-                "paused {paused}, busy {busy}, save fails {save_fails}"
+                "paused {paused}, held {held}, fed {fed}, save fails {save_fails}"
             );
         }
     }
