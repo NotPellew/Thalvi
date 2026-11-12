@@ -12,7 +12,7 @@ use super::{
     App, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, PasteText, RequestServer,
     WebUrl,
 };
-use crate::hold::{HoldKey, HoldKind};
+use crate::hold::{HoldChange, HoldKey, HoldKind};
 pub use win32::Real;
 
 /// A window handle as a plain number, so targets stay `Send`.
@@ -124,7 +124,7 @@ impl Windows {
     /// [`HostError::Unsupported`] when Windows refuses the keyboard hook.
     pub fn watch_hold_keys(
         keys: &[(HoldKind, HoldKey)],
-        on_change: impl Fn(HoldKind, bool) + Send + 'static,
+        on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
         _on_problem: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         win32::watch_hold_keys(keys.to_vec(), Box::new(on_change)).map(HoldSource::Watching)

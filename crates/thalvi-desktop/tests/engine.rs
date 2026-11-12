@@ -23,7 +23,7 @@ use thalvi_desktop::engine::{
 };
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
-use thalvi_desktop::hold::{HoldInput, Refusal};
+use thalvi_desktop::hold::{HoldInput, HoldKind, Refusal};
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
 use thalvi_desktop::recognizer::{
     FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, ServerUrl,
@@ -4419,6 +4419,44 @@ async fn a_hold_sends_only_the_audio_that_comes_after_its_start_cue() {
             rig.feed.send(quiet(9));
             settle().await;
             assert_eq!(tags(&rig.sent()), [9]);
+            rig.handle.cancel();
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled { dictated: None }
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_that_waited_to_be_told_from_a_chord_keeps_the_words_said_meanwhile() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = hold_task(engine, frames);
+            settle().await;
+            // AltGr goes down alone; the user starts talking before the wait is over.
+            let wait = rig.key.press_alone(HoldKind::Dictate);
+            rig.at(80).await;
+            rig.feed.send(quiet(3));
+            settle().await;
+            rig.at(160).await;
+            rig.feed.send(quiet(4));
+            settle().await;
+            rig.at(200).await;
+            rig.key.confirm_alone(HoldKind::Dictate, wait);
+            settle().await;
+            rig.server.ready();
+            settle().await;
+            // The cue plays from 200 to 430; what is said during it is not sent.
+            rig.at(300).await;
+            rig.feed.send(quiet(5));
+            settle().await;
+            rig.at(440).await;
+            rig.at(450).await;
+            rig.feed.send(quiet(9));
+            settle().await;
+            assert_eq!(tags(&rig.sent()), [3, 4, 9]);
             rig.handle.cancel();
             assert_eq!(
                 finished(task).await,

@@ -406,10 +406,7 @@ fn watch_hold_keys(config: &DesktopConfig, link: &EngineLink, keeping: bool) -> 
     held(
         Desktop::watch_hold_keys(
             &keys,
-            move |kind, down| match kind {
-                HoldKind::Dictate => input.set(down),
-                HoldKind::Write => input.set_write(down),
-            },
+            move |kind, change| input.apply(kind, change),
             link.hold_problems(),
         ),
         keeping,

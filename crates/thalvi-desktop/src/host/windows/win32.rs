@@ -45,7 +45,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
 use ::windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
 use super::{Hwnd, Identity, KeyEvent, Process, Win32};
-use crate::hold::{self, HoldHooks, HoldKey, HoldKind, Verdict};
+use crate::hold::{self, HoldChange, HoldHooks, HoldKey, HoldKind, Verdict};
 use crate::host::{HoldWatch, HostError};
 
 /// The live Windows desktop.
@@ -203,7 +203,7 @@ fn input(event: KeyEvent) -> INPUT {
 /// or Win so the focused app does not take that release for a lone press that opens its menu.
 const MASK_KEY: u16 = 0xE8;
 
-type OnChange = Box<dyn Fn(HoldKind, bool) + Send>;
+type OnChange = Box<dyn Fn(HoldKind, HoldChange) + Send>;
 
 /// What the keyboard hook procedure works with; it runs on the thread that installed the hook.
 struct Rules {
@@ -275,13 +275,14 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 extended,
                 down,
                 injected: info.flags.0 & LLKHF_INJECTED.0 != 0,
+                time: info.time,
             };
             let decision = RULES.with(|rules| {
                 let mut rules = rules.try_borrow_mut().ok()?;
                 let rules = rules.as_mut()?;
                 let (verdict, changes) = rules.hooks.on_event(event, physically_down);
-                for (kind, down) in changes {
-                    (rules.on_change)(kind, down);
+                for (kind, change) in changes {
+                    (rules.on_change)(kind, change);
                 }
                 Some(verdict)
             });
@@ -353,8 +354,8 @@ pub(super) fn watch_hold_keys(
             RULES.with(|rules| {
                 if let Some(rules) = rules.borrow_mut().take() {
                     // A key still held when watching ends must not stay down.
-                    (rules.on_change)(HoldKind::Dictate, false);
-                    (rules.on_change)(HoldKind::Write, false);
+                    (rules.on_change)(HoldKind::Dictate, HoldChange::Up);
+                    (rules.on_change)(HoldKind::Write, HoldChange::Up);
                 }
             });
         })

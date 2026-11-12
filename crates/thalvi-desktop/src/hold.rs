@@ -13,7 +13,7 @@ use crate::host::Modifier;
 use crate::metrics::{Event, Recorder};
 
 /// The keys a hold key may be, as W3C `KeyboardEvent.code` names with their Windows scan codes.
-const CODES: [(&str, u16); 49] = [
+const CODES: [(&str, u16); 50] = [
     ("Digit1", 0x02),
     ("Digit2", 0x03),
     ("Digit3", 0x04),
@@ -63,13 +63,15 @@ const CODES: [(&str, u16); 49] = [
     ("F10", 0x44),
     ("F11", 0x57),
     ("F12", 0x58),
+    ("AltRight", 0x38),
 ];
 
-/// Where `KeyZ`, `KeyX`, `F9` and `F10` are in [`CODES`].
+/// Where `KeyZ`, `KeyX`, `F9`, `F10` and `AltRight` are in [`CODES`].
 const KEY_Z: usize = 29;
 const KEY_X: usize = 30;
 const F9: usize = 45;
 const F10: usize = 46;
+const ALT_RIGHT: usize = 49;
 
 /// Why a hold key name was refused. Shown as written.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -123,7 +125,11 @@ impl HoldKey {
             modifiers.push(*modifier);
         }
         modifiers.sort();
-        if modifiers.is_empty() && !key.starts_with('F') {
+        // AltGr is a hold key only alone; with another modifier it is a chord the app types.
+        if code == ALT_RIGHT && !modifiers.is_empty() {
+            return Err(unknown());
+        }
+        if modifiers.is_empty() && !key.starts_with('F') && code != ALT_RIGHT {
             return Err(HoldKeyError::NeedsModifier(name.to_owned()));
         }
         Ok(Self { modifiers, code })
@@ -133,6 +139,13 @@ impl HoldKey {
     #[must_use]
     pub fn modifiers(&self) -> &[Modifier] {
         &self.modifiers
+    }
+
+    /// Whether this is `AltGr` (right Alt) held alone, which is also a modifier of the characters it
+    /// types: its hold cannot start before the next key says it is not a chord.
+    #[must_use]
+    pub fn is_altgr(&self) -> bool {
+        self.code == ALT_RIGHT
     }
 
     /// The key's Windows scan code.
@@ -225,8 +238,28 @@ pub struct KeyState {
     pub kind: HoldKind,
     /// The latest press's release.
     pub release: Cutoff,
+    /// Where the latest press happened among the queued frames, when it waited to be told from a
+    /// chord: the frames since then are the hold's.
+    pub since: Option<Order>,
     /// Each key's own phase, so only a key that is up can hold a release that overtook a press.
     phases: [KeyPhase; 2],
+    /// Each key's own wait to be told from a chord.
+    altgr: [AltGrWait; 2],
+    /// Counts the waits, so a late answer to one never settles another.
+    waits: u64,
+}
+
+/// Where an `AltGr` press is between the press and the answer whether it is a hold.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AltGrWait {
+    #[default]
+    Idle,
+    /// Down and waiting: another key may still turn it into a chord.
+    Waiting { wait: u64, since: Order },
+    /// Another key came first: a chord that types, not a hold.
+    Chord,
+    /// Nothing came first: it started a hold.
+    Holding,
 }
 
 /// Where one hold key is. A key that is down has no press left for a release to overtake, so only
@@ -270,6 +303,9 @@ pub struct Press {
     pub number: u64,
     pub kind: HoldKind,
     pub release: Cutoff,
+    /// Where the key went down among the queued frames, for a key that waited to be told from a
+    /// chord; the audio since then is kept for the hold.
+    pub since: Option<Order>,
 }
 
 /// Follows the key so each press is acted on or refused once, however late it is looked at.
@@ -318,6 +354,7 @@ impl Presses {
             number: state.presses,
             kind: state.kind,
             release: state.release.clone(),
+            since: state.since,
         })
     }
 
@@ -415,6 +452,25 @@ impl Refusal {
     }
 }
 
+/// What the keyboard hook reports about a hold key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoldChange {
+    /// The key went down and starts a hold at once.
+    Down,
+    /// The key came up.
+    Up,
+    /// `AltGr` went down alone: a hold if no other key joins it within [`ALONE_AFTER`].
+    Maybe,
+    /// Another key joined `AltGr`: a chord that types.
+    Chord,
+}
+
+/// How long `AltGr` must be down alone before it starts a hold. `AltGr` is also how the layout types
+/// `@`, `€` and `{`, so a press may be the start of a chord for as long as the next key takes.
+/// Chords overlap by well under 200 ms; a longer wait would only delay the cue, since the audio
+/// from the press on is kept, and 200 ms stays under the shortest hold that dictates.
+pub const ALONE_AFTER: Duration = Duration::from_millis(200);
+
 /// Where the hold keys' presses and releases come in, from a compositor bind or the keyboard hook.
 #[derive(Clone)]
 pub struct HoldInput(Arc<watch::Sender<KeyState>>);
@@ -437,47 +493,136 @@ impl HoldInput {
         self.change(HoldKind::Write, down);
     }
 
-    fn change(&self, kind: HoldKind, down: bool) {
+    /// Takes what the keyboard hook reports for `kind`. A key that waited to be told from a chord
+    /// starts its hold [`ALONE_AFTER`] after the press, on a thread of its own, unless another key
+    /// or its release comes first.
+    pub fn apply(&self, kind: HoldKind, change: HoldChange) {
+        match change {
+            HoldChange::Down => self.change(kind, true),
+            HoldChange::Up => self.release(kind),
+            HoldChange::Chord => self.chord(kind),
+            HoldChange::Maybe => {
+                let wait = self.press_alone(kind);
+                let input = self.clone();
+                let thread = std::thread::Builder::new()
+                    .name("thalvi-alone".to_owned())
+                    .spawn(move || {
+                        std::thread::sleep(ALONE_AFTER);
+                        input.confirm_alone(kind, wait);
+                    });
+                if thread.is_err() {
+                    self.confirm_alone(kind, wait);
+                }
+            }
+        }
+    }
+
+    /// `AltGr` went down alone: starts its wait, which [`apply`](Self::apply) ends after
+    /// [`ALONE_AFTER`], and says which wait it is.
+    #[must_use]
+    pub fn press_alone(&self, kind: HoldKind) -> u64 {
+        let mut wait = 0;
+        self.0.send_if_modified(|state| {
+            // A release the hook never saw ends the earlier press first.
+            let ended = state.altgr[kind as usize] == AltGrWait::Holding
+                && Self::step(state, kind, false, None);
+            state.waits += 1;
+            wait = state.waits;
+            state.altgr[kind as usize] = AltGrWait::Waiting {
+                wait,
+                since: Order::next(),
+            };
+            ended
+        });
+        wait
+    }
+
+    /// The wait `wait` of `kind` ran out with `AltGr` still alone: its hold starts, with the frames
+    /// since the press.
+    pub fn confirm_alone(&self, kind: HoldKind, wait: u64) {
+        self.0.send_if_modified(|state| {
+            let AltGrWait::Waiting {
+                wait: current,
+                since,
+            } = state.altgr[kind as usize]
+            else {
+                return false;
+            };
+            if current != wait {
+                return false;
+            }
+            state.altgr[kind as usize] = AltGrWait::Holding;
+            Self::step(state, kind, true, Some(since))
+        });
+    }
+
+    /// Another key joined `AltGr`, which makes a chord unless the hold started already.
+    fn chord(&self, kind: HoldKind) {
+        self.0.send_if_modified(|state| {
+            if matches!(state.altgr[kind as usize], AltGrWait::Waiting { .. }) {
+                state.altgr[kind as usize] = AltGrWait::Chord;
+            }
+            false
+        });
+    }
+
+    /// The key came up: the end of a hold, or of a press that never became one.
+    fn release(&self, kind: HoldKind) {
         self.0.send_if_modified(|state| {
             let index = kind as usize;
-            let phase = state.phases[index];
-            // A press of a tap whose release came first is over already, so it opens no hold.
-            let overtaken =
-                matches!(phase, KeyPhase::Overtaken(at) if at.elapsed() < OVERTAKEN_PRESS);
-            // Every key follows its own events, even while the other key's hold ignores them.
-            state.phases[index] = if down {
-                if overtaken {
-                    KeyPhase::Up
-                } else {
-                    KeyPhase::Down
-                }
-            } else if phase == KeyPhase::Down {
+            match std::mem::take(&mut state.altgr[index]) {
+                AltGrWait::Idle | AltGrWait::Holding => Self::step(state, kind, false, None),
+                AltGrWait::Waiting { .. } | AltGrWait::Chord => false,
+            }
+        });
+    }
+
+    fn change(&self, kind: HoldKind, down: bool) {
+        self.0
+            .send_if_modified(|state| Self::step(state, kind, down, None));
+    }
+
+    /// Applies one event of `kind` to `state` and says whether the state changed for the engine.
+    /// `since` is where a press that waited went down among the queued frames.
+    fn step(state: &mut KeyState, kind: HoldKind, down: bool, since: Option<Order>) -> bool {
+        let index = kind as usize;
+        let phase = state.phases[index];
+        // A press of a tap whose release came first is over already, so it opens no hold.
+        let overtaken = matches!(phase, KeyPhase::Overtaken(at) if at.elapsed() < OVERTAKEN_PRESS);
+        // Every key follows its own events, even while the other key's hold ignores them.
+        state.phases[index] = if down {
+            if overtaken {
                 KeyPhase::Up
             } else {
-                KeyPhase::Overtaken(Instant::now())
-            };
-            // One hold at a time: the other key means nothing until this one is up.
-            if state.down && state.kind != kind {
-                return false;
+                KeyPhase::Down
             }
-            if state.down == down {
-                return false;
+        } else if phase == KeyPhase::Down {
+            KeyPhase::Up
+        } else {
+            KeyPhase::Overtaken(Instant::now())
+        };
+        // One hold at a time: the other key means nothing until this one is up.
+        if state.down && state.kind != kind {
+            return false;
+        }
+        if state.down == down {
+            return false;
+        }
+        if down {
+            state.presses += 1;
+            state.kind = kind;
+            state.since = since;
+            state.release = Cutoff::default();
+            if !overtaken {
+                state.down = true;
+                return true;
             }
-            if down {
-                state.presses += 1;
-                state.kind = kind;
-                state.release = Cutoff::default();
-                if !overtaken {
-                    state.down = true;
-                    return true;
-                }
-                state.release.release();
-            } else {
-                state.release.release();
-                state.down = false;
-            }
-            true
-        });
+            state.release.release();
+        } else {
+            state.release.release();
+            state.down = false;
+        }
+        true
     }
 }
 
@@ -491,6 +636,8 @@ pub struct KeyEvent {
     pub down: bool,
     /// Another program sent it, as Thalvi's own typing does.
     pub injected: bool,
+    /// Windows' time stamp of the event in milliseconds; the key events of one keystroke share it.
+    pub time: u32,
 }
 
 /// What the hook does with an event.
@@ -528,18 +675,31 @@ pub struct Decision {
     pub verdict: Verdict,
     /// The hold key went down (`true`) or up (`false`).
     pub change: Option<bool>,
+    /// `AltGr` went down alone, or another key joined it.
+    pub alone: Option<Alone>,
+}
+
+/// What the hook knows about an `AltGr` hold key that is down: whether another key has joined it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Alone {
+    /// `AltGr` went down with nothing else down.
+    Maybe,
+    /// Another key went down while it was.
+    Chord,
 }
 
 impl Decision {
     const PASS: Self = Self {
         verdict: Verdict::Pass,
         change: None,
+        alone: None,
     };
 
     fn swallow(change: Option<bool>) -> Self {
         Self {
             verdict: Verdict::Swallow,
             change,
+            alone: None,
         }
     }
 }
@@ -565,6 +725,24 @@ pub struct HoldHook {
     /// The hold lasts from the press until the key and all its modifiers are up, in either order:
     /// text typed while a modifier is still down would reach the app as shortcuts.
     holding: bool,
+    /// Where `AltGr` is, for a key that is `AltGr` alone.
+    altgr: AltGrPhase,
+    /// The left Ctrl down now is the one Windows adds to `AltGr`, not the user's.
+    altgr_ctrl: bool,
+    /// The event before this one.
+    previous: Option<KeyEvent>,
+}
+
+/// Where an `AltGr` hold key is, as the hook sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AltGrPhase {
+    Up,
+    /// Down with no other key down: a hold unless another key joins; whether one did.
+    Alone {
+        chorded: bool,
+    },
+    /// Down with another key already down: a chord from the start.
+    Chord,
 }
 
 impl HoldHook {
@@ -576,7 +754,74 @@ impl HoldHook {
             down: [0; 4],
             masks: Vec::new(),
             holding: false,
+            altgr: AltGrPhase::Up,
+            altgr_ctrl: false,
+            previous: None,
         }
+    }
+
+    const LEFT_CTRL: u16 = 0xA2;
+    const RIGHT_ALT_KEY: u16 = 0xA5;
+
+    /// A key that is `AltGr` alone: unlike every other hold key it is down while the user may still
+    /// be typing a chord with it, so it passes every event, tells the app apart from a chord by
+    /// the next key, and ignores the left Ctrl that Windows adds to `AltGr`.
+    fn on_altgr_key(
+        &mut self,
+        event: KeyEvent,
+        physically_down: &impl Fn(u16) -> bool,
+    ) -> Decision {
+        let previous = self.previous.replace(event);
+        let follows = |vk: fn(u16) -> bool, down: bool| {
+            previous.is_some_and(|before| {
+                before.down == down && vk(before.vk) && before.time == event.time
+            })
+        };
+        let is_ctrl = |vk: u16| vk == Self::LEFT_CTRL;
+        let is_altgr = |vk: u16| vk == Self::RIGHT_ALT_KEY;
+        let mut decision = Decision::PASS;
+        if is_altgr(event.vk) {
+            match (event.down, self.altgr) {
+                (true, AltGrPhase::Up) => {
+                    self.altgr_ctrl = follows(|vk| vk == Self::LEFT_CTRL, true);
+                    let others = Self::SIDES.iter().any(|(vk, _, _)| {
+                        *vk != Self::RIGHT_ALT_KEY
+                            && !(self.altgr_ctrl && is_ctrl(*vk))
+                            && physically_down(*vk)
+                    });
+                    if others {
+                        self.altgr = AltGrPhase::Chord;
+                    } else {
+                        self.altgr = AltGrPhase::Alone { chorded: false };
+                        decision.alone = Some(Alone::Maybe);
+                    }
+                }
+                (true, _) => {}
+                (false, phase) => {
+                    self.altgr = AltGrPhase::Up;
+                    self.altgr_ctrl = false;
+                    if let AltGrPhase::Alone { chorded } = phase {
+                        decision.change = Some(false);
+                        // A lone Alt press and release opens the app's menu bar; a chord does not.
+                        if !chorded {
+                            decision.verdict = Verdict::Mask;
+                        }
+                    }
+                }
+            }
+        } else if event.down
+            && let AltGrPhase::Alone { chorded: false } = self.altgr
+        {
+            let added = is_ctrl(event.vk)
+                && (self.altgr_ctrl || follows(|vk| vk == Self::RIGHT_ALT_KEY, true));
+            if added {
+                self.altgr_ctrl = true;
+            } else {
+                self.altgr = AltGrPhase::Alone { chorded: true };
+                decision.alone = Some(Alone::Chord);
+            }
+        }
+        decision
     }
 
     /// Ends the hold if nothing of it is down any more; true when it ended.
@@ -653,6 +898,9 @@ impl HoldHook {
     pub fn on_event(&mut self, event: KeyEvent, physically_down: impl Fn(u16) -> bool) -> Decision {
         if event.injected {
             return Decision::PASS;
+        }
+        if self.key.is_altgr() {
+            return self.on_altgr_key(event, &physically_down);
         }
         self.reconcile(&physically_down);
         // A release the hook never saw may have been the last thing the hold waited for.
@@ -736,7 +984,7 @@ impl HoldHooks {
         &mut self,
         event: KeyEvent,
         physically_down: impl Fn(u16) -> bool,
-    ) -> (Verdict, Vec<(HoldKind, bool)>) {
+    ) -> (Verdict, Vec<(HoldKind, HoldChange)>) {
         let mut verdict = Verdict::Pass;
         let mut changes = Vec::new();
         for (kind, hook) in &mut self.0 {
@@ -746,7 +994,25 @@ impl HoldHooks {
                 (Verdict::Mask, _) | (_, Verdict::Mask) => Verdict::Mask,
                 _ => Verdict::Pass,
             };
-            changes.extend(decision.change.map(|down| (*kind, down)));
+            changes.extend(decision.change.map(|down| {
+                (
+                    *kind,
+                    if down {
+                        HoldChange::Down
+                    } else {
+                        HoldChange::Up
+                    },
+                )
+            }));
+            changes.extend(decision.alone.map(|alone| {
+                (
+                    *kind,
+                    match alone {
+                        Alone::Maybe => HoldChange::Maybe,
+                        Alone::Chord => HoldChange::Chord,
+                    },
+                )
+            }));
         }
         (verdict, changes)
     }
@@ -766,9 +1032,11 @@ mod tests {
             ("Ctrl+Alt+Digit1", 0x02, true),
             ("Shift+Win+Space", 0x39, false),
             ("F9", 0x43, false),
+            ("AltRight", 0x38, false),
         ] {
             let key = HoldKey::parse(name).unwrap();
             assert_eq!(key.to_string(), name);
+            assert_eq!(key.is_altgr(), name == "AltRight", "{name}");
             assert_eq!(key.scan_code(), scan_code, "{name}");
             assert_eq!(key.modifiers().contains(&Modifier::Alt), alt, "{name}");
         }
@@ -795,6 +1063,8 @@ mod tests {
             ("alt+KeyZ", false),
             ("Alt+Z", false),
             ("Alt+KeyZ+Ctrl", false),
+            ("Alt+AltRight", false),
+            ("Ctrl+AltRight", false),
         ] {
             let error = HoldKey::parse(name).unwrap_err();
             assert_eq!(
@@ -845,17 +1115,23 @@ mod tests {
             extended: false,
             down,
             injected: false,
+            time: 0,
         }
     }
 
     fn decision(verdict: Verdict, change: Option<bool>) -> Decision {
-        Decision { verdict, change }
+        Decision {
+            verdict,
+            change,
+            alone: None,
+        }
     }
 
     const PASS: Decision = Decision::PASS;
     const SWALLOW: Decision = Decision {
         verdict: Verdict::Swallow,
         change: None,
+        alone: None,
     };
 
     /// Feeds `events`, `(vk, down)`, to a hook for `key`, with a keyboard that holds down what the
@@ -1225,7 +1501,7 @@ mod tests {
         );
         assert_eq!(
             step(&mut hooks, X, true, &with_alt),
-            (Verdict::Swallow, vec![(HoldKind::Write, true)])
+            (Verdict::Swallow, vec![(HoldKind::Write, HoldChange::Down)])
         );
         assert_eq!(
             step(&mut hooks, X, false, &with_alt),
@@ -1234,16 +1510,19 @@ mod tests {
         );
         assert_eq!(
             step(&mut hooks, Z, true, &with_alt),
-            (Verdict::Swallow, vec![(HoldKind::Dictate, true)])
+            (
+                Verdict::Swallow,
+                vec![(HoldKind::Dictate, HoldChange::Down)]
+            )
         );
         assert_eq!(
             step(&mut hooks, ALT, false, &|_| false),
-            (Verdict::Mask, vec![(HoldKind::Write, false)]),
+            (Verdict::Mask, vec![(HoldKind::Write, HoldChange::Up)]),
             "one mask for both keys, and only the write hold is over"
         );
         assert_eq!(
             step(&mut hooks, Z, false, &|_| false),
-            (Verdict::Swallow, vec![(HoldKind::Dictate, false)])
+            (Verdict::Swallow, vec![(HoldKind::Dictate, HoldChange::Up)])
         );
     }
 
@@ -1375,6 +1654,193 @@ mod tests {
                 }
             }
             proptest::prop_assert!(!holding, "every key is up, so the hold is over");
+        }
+    }
+
+    const LEFT_CTRL: u16 = 0xA2;
+    const Q: u16 = 0x51;
+
+    /// Feeds `events`, `(vk, down, time)`, to a hook for `AltGr` alone, with a keyboard that holds
+    /// down what the events pressed, and returns what each one got.
+    fn run_altgr(events: &[(u16, bool, u32)]) -> Vec<Decision> {
+        let mut hook = HoldHook::new(HoldKey::parse("AltRight").unwrap());
+        let mut keyboard = std::collections::HashSet::new();
+        events
+            .iter()
+            .map(|&(vk, down, time)| {
+                if down {
+                    keyboard.insert(vk);
+                } else {
+                    keyboard.remove(&vk);
+                }
+                let event = KeyEvent {
+                    extended: matches!(vk, RIGHT_ALT | RIGHT_CTRL),
+                    time,
+                    ..event(vk, down)
+                };
+                hook.on_event(event, |vk| keyboard.contains(&vk))
+            })
+            .collect()
+    }
+
+    type AltGrCase<'a> = (&'a str, &'a [(u16, bool, u32)], Vec<Decision>);
+
+    #[test]
+    fn altgr_alone_starts_a_wait_and_a_key_joining_it_makes_a_chord_that_types() {
+        let maybe = Decision {
+            alone: Some(Alone::Maybe),
+            ..PASS
+        };
+        let chord = Decision {
+            alone: Some(Alone::Chord),
+            ..PASS
+        };
+        // The hook never swallows an event, so the chord still types: only the release of a lone
+        // press is masked, and every release of a press that waited tells the input.
+        let lone_release = decision(Verdict::Mask, Some(false));
+        let chord_release = decision(Verdict::Pass, Some(false));
+        // (events as (key, down, time), what each gets)
+        let cases: [AltGrCase; 8] = [
+            (
+                "US layout: right Alt alone",
+                &[(RIGHT_ALT, true, 100), (RIGHT_ALT, false, 900)],
+                vec![maybe, lone_release],
+            ),
+            (
+                "German layout: the Ctrl Windows adds is not a modifier, and its repeats are not keys",
+                &[
+                    (LEFT_CTRL, true, 100),
+                    (RIGHT_ALT, true, 100),
+                    (LEFT_CTRL, true, 700),
+                    (RIGHT_ALT, true, 700),
+                    (LEFT_CTRL, false, 900),
+                    (RIGHT_ALT, false, 900),
+                ],
+                vec![PASS, maybe, PASS, PASS, PASS, lone_release],
+            ),
+            (
+                "AltGr+Q types @",
+                &[
+                    (LEFT_CTRL, true, 100),
+                    (RIGHT_ALT, true, 100),
+                    (Q, true, 160),
+                    (Q, false, 220),
+                    (RIGHT_ALT, false, 300),
+                ],
+                vec![PASS, maybe, chord, PASS, chord_release],
+            ),
+            (
+                "another key before AltGr is a chord from the start",
+                &[
+                    (SHIFT, true, 50),
+                    (RIGHT_ALT, true, 100),
+                    (RIGHT_ALT, false, 300),
+                ],
+                vec![PASS, PASS, PASS],
+            ),
+            (
+                "a real Ctrl held before AltGr is not the Ctrl Windows adds",
+                &[
+                    (LEFT_CTRL, true, 50),
+                    (RIGHT_ALT, true, 100),
+                    (RIGHT_ALT, false, 300),
+                ],
+                vec![PASS, PASS, PASS],
+            ),
+            (
+                "left Alt with right Alt is a chord from the start",
+                &[
+                    (ALT, true, 50),
+                    (RIGHT_ALT, true, 100),
+                    (RIGHT_ALT, false, 300),
+                ],
+                vec![PASS, PASS, PASS],
+            ),
+            (
+                "a modifier pressed after AltGr joins it",
+                &[
+                    (RIGHT_ALT, true, 100),
+                    (RIGHT_SHIFT, true, 160),
+                    (RIGHT_ALT, false, 300),
+                ],
+                vec![maybe, chord, chord_release],
+            ),
+            (
+                "the key before the Ctrl and the right Alt does not pair them",
+                &[
+                    (Z, true, 90),
+                    (LEFT_CTRL, true, 100),
+                    (RIGHT_ALT, true, 150),
+                ],
+                vec![PASS, PASS, PASS],
+            ),
+        ];
+        for (name, events, expected) in cases {
+            assert_eq!(run_altgr(events), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn altgr_starts_its_hold_only_if_nothing_joined_or_released_it_before_the_wait_ran_out() {
+        #[derive(Clone, Copy)]
+        enum Step {
+            /// `AltGr` goes down alone, starting a wait.
+            Wait,
+            /// The wait with this number runs out.
+            Confirm(usize),
+            Chord,
+            Release,
+        }
+        use Step::{Chord, Confirm, Release, Wait};
+        // (steps, whether a hold is open after them)
+        let cases: [(&[Step], bool); 6] = [
+            (&[Wait, Confirm(0)], true),
+            (&[Wait, Chord, Confirm(0)], false),
+            (&[Wait, Release, Confirm(0)], false),
+            // The wait of an earlier press never starts the hold of a later one.
+            (&[Wait, Release, Wait, Confirm(0)], false),
+            (&[Wait, Release, Wait, Confirm(1)], true),
+            // A key pressed once the hold started leaves the hold open.
+            (&[Wait, Confirm(0), Chord], true),
+        ];
+        for (index, (steps, open)) in cases.into_iter().enumerate() {
+            let (input, state) = HoldInput::new();
+            let mut presses = Presses::new(state);
+            let mut waits = Vec::new();
+            let mut down = false;
+            for step in steps {
+                match step {
+                    Wait => {
+                        waits.push(input.press_alone(HoldKind::Dictate));
+                        down = true;
+                    }
+                    Confirm(wait) => input.confirm_alone(HoldKind::Dictate, waits[*wait]),
+                    Chord => input.apply(HoldKind::Dictate, HoldChange::Chord),
+                    Release => {
+                        input.apply(HoldKind::Dictate, HoldChange::Up);
+                        down = false;
+                    }
+                }
+            }
+            let press = presses.take();
+            assert_eq!(press.is_some(), open, "case {index}");
+            assert_eq!(
+                press.is_some_and(|press| press.since.is_some()),
+                open,
+                "a hold that waited keeps where the key went down, case {index}"
+            );
+            assert_eq!(presses.take_lost(), 0, "case {index}");
+
+            // Whatever became of the press, its release leaves nothing behind that spoils the
+            // next press of the key.
+            if down {
+                input.apply(HoldKind::Dictate, HoldChange::Up);
+            }
+            input.set(true);
+            assert!(
+                presses.take().is_some_and(|press| press.since.is_none()),
+                "the next press opens a hold at once, case {index}"
+            );
         }
     }
 }
