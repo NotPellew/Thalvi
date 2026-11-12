@@ -173,6 +173,9 @@ fn default_head(head: CatalogHead) -> HeadConfig {
 pub struct WakeConfig {
     capture: HeadConfig,
     conversation: HeadConfig,
+    /// Whether the wake word starts a capture; the file keeps it only when it is off.
+    #[serde(skip_serializing_if = "is_on")]
+    enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -182,6 +185,20 @@ struct RawWakeConfig {
     capture: HeadConfig,
     #[serde(default = "default_conversation")]
     conversation: HeadConfig,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes a reference"
+)]
+fn is_on(enabled: &bool) -> bool {
+    *enabled
 }
 
 fn default_capture() -> HeadConfig {
@@ -199,7 +216,15 @@ impl WakeConfig {
         Self {
             capture,
             conversation,
+            enabled: true,
         }
+    }
+
+    /// The same configuration with the wake word switched on or off.
+    #[must_use]
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
     }
 }
 
@@ -207,7 +232,7 @@ impl TryFrom<RawWakeConfig> for WakeConfig {
     type Error = ConfigError;
 
     fn try_from(raw: RawWakeConfig) -> Result<Self, ConfigError> {
-        Ok(Self::new(raw.capture, raw.conversation))
+        Ok(Self::new(raw.capture, raw.conversation).with_enabled(raw.enabled))
     }
 }
 
@@ -216,6 +241,7 @@ impl Default for WakeConfig {
         Self {
             capture: default_capture(),
             conversation: default_conversation(),
+            enabled: true,
         }
     }
 }
@@ -229,6 +255,12 @@ impl WakeConfig {
     #[must_use]
     pub fn conversation(&self) -> &HeadConfig {
         &self.conversation
+    }
+
+    /// Whether the wake word starts a capture; the hold keys work either way.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled
     }
 }
 

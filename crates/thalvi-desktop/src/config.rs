@@ -740,6 +740,32 @@ mod tests {
     }
 
     #[test]
+    fn wake_words_are_on_unless_the_file_turns_them_off_and_only_off_is_stored() {
+        for (json, enabled) in [
+            ("{}", true),
+            (r#"{"wake": {}}"#, true),
+            (r#"{"wake": {"enabled": true}}"#, true),
+            (r#"{"wake": {"enabled": false}}"#, false),
+            (
+                r#"{"wake": {"capture": {"model": "hey_jarvis"}, "enabled": false}}"#,
+                false,
+            ),
+        ] {
+            let config = DesktopConfig::from_json_str(json).unwrap();
+            assert_eq!(config.wake.enabled(), enabled, "{json}");
+            let written = serde_json::to_value(&config).unwrap();
+            assert_eq!(
+                written["wake"].get("enabled"),
+                (!enabled).then_some(&serde_json::json!(false)),
+                "{json}"
+            );
+            let again = DesktopConfig::from_json_str(&written.to_string()).unwrap();
+            assert_eq!(again.wake, config.wake, "{json}");
+        }
+        assert!(DesktopConfig::from_json_str(r#"{"wake": {"enabled": "no"}}"#).is_err());
+    }
+
+    #[test]
     fn the_write_key_is_checked_once_and_must_differ_from_the_hold_key() {
         let key = |json: &str| loaded(json, &WINDOWS()).map(|config| config.write_key.to_string());
         assert_eq!(key(r#"{"write_key": "Ctrl+KeyY"}"#).unwrap(), "Ctrl+KeyY");

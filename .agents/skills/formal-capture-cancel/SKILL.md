@@ -93,6 +93,11 @@ frames in `wake_clip`, `begin_hold` copies those since the press into `Held::hea
 seeds its backlog with them before any await. `capture`, `conclude`, `end_cue`, `end_with`, `reconcile`,
 `write`, `bounded` and `cancel` are unchanged, and the seed adds no await, control drain or delivery
 admission, so the model is unchanged and only the `engine.rs` hash moved.
+The Wake words switch (#377) skips `Engine::scan`'s wake scoring when off (`wake_words`, set through
+`Engine::set_wake_words`) and makes `Runner::apply`'s retune branch take the switch without a rebuild; the
+view's `wake_words` only picks the status word. `Requests`, `drive`, `Runner::capture`, `Settling::settle`
+and every mapped engine function are unchanged, and no await, control drain or delivery admission was added,
+so the model is unchanged and only the `runner.rs` and `engine.rs` hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

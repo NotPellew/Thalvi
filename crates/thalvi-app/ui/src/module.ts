@@ -128,6 +128,7 @@ export function createModule(onCancel: () => void): Module {
     switch (status.state) {
       case "paused":
       case "listening":
+      case "keyboardOnly":
         lines(false);
         show("live", {});
         break;

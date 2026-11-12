@@ -275,6 +275,10 @@ pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
         settings.insert("hold_key".to_owned(), config.hold_key.to_string().into());
         settings.insert("write_key".to_owned(), config.write_key.to_string().into());
     }
+    // The file keeps the switch only when it is off; the form always shows it.
+    if let Some(wake) = settings.get_mut("wake").and_then(Value::as_object_mut) {
+        wake.insert("enabled".to_owned(), config.wake.enabled().into());
+    }
     for entry in entries_of(&mut settings) {
         if let Some(key) = entry.remove("api_key") {
             entry.insert(
@@ -546,6 +550,34 @@ mod tests {
                 "{hold} {write}"
             );
         }
+    }
+
+    #[test]
+    fn the_form_always_shows_the_wake_switch_and_the_file_keeps_it_only_when_off() {
+        let (store, dir) = store("wake-words");
+        let file = || -> Value {
+            serde_json::from_str(&std::fs::read_to_string(&store.path).unwrap()).unwrap()
+        };
+        let mut settings = settings_json(&store_defaults()).unwrap();
+        assert_eq!(settings["wake"]["enabled"], json!(true));
+
+        settings["wake"]["enabled"] = json!(false);
+        let off = store.save(settings.clone(), &store_defaults()).unwrap();
+        let kept = file()["wake"]["enabled"].clone();
+        let reloaded = store.load().unwrap();
+        assert_eq!(
+            settings_json(&off).unwrap()["wake"]["enabled"],
+            json!(false)
+        );
+
+        settings["wake"]["enabled"] = json!(true);
+        store.save(settings, &store_defaults()).unwrap();
+        let absent = file()["wake"].get("enabled").cloned();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!off.wake.enabled());
+        assert_eq!(kept, json!(false));
+        assert!(!reloaded.wake.enabled(), "it survives a restart");
+        assert_eq!(absent, None);
     }
 
     #[test]

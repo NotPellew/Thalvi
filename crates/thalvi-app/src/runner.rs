@@ -157,6 +157,7 @@ impl EngineLink {
                 };
                 let _ = ready_tx.send(Ok(()));
                 let publisher = Publisher::new(status_tx, config.ending_pause);
+                publisher.update(|view| view.wake_words = config.wake.enabled());
                 let runner = Runner::new(
                     config,
                     delivery,
@@ -350,6 +351,7 @@ impl Publisher {
                 copies: false,
                 pauses,
                 loading: None,
+                wake_words: true,
             }),
             out,
         })
@@ -979,7 +981,10 @@ impl Runner {
         if retunes_only(&self.config, &config) {
             if let Some(session) = self.session.as_mut() {
                 session.engine.set_recordings(config.recordings);
+                session.engine.set_wake_words(config.wake.enabled());
             }
+            self.publisher
+                .update(|view| view.wake_words = config.wake.enabled());
             self.take_history(&config);
             self.config = config;
             return;
@@ -1009,8 +1014,10 @@ impl Runner {
                 if let Some(old) = self.session.replace(session) {
                     old.close().await;
                 }
-                self.publisher
-                    .update(|view| view.pauses = config.ending_pause);
+                self.publisher.update(|view| {
+                    view.pauses = config.ending_pause;
+                    view.wake_words = config.wake.enabled();
+                });
                 self.take_history(&config);
                 self.config = config;
                 self.load_speech_model();
@@ -1294,6 +1301,7 @@ fn retunes_only(old: &DesktopConfig, new: &DesktopConfig) -> bool {
         recordings: old.recordings,
         history: old.history,
         update_channel: old.update_channel,
+        wake: new.wake.clone().with_enabled(old.wake.enabled()),
         ..new.clone()
     }
 }
@@ -2150,6 +2158,10 @@ mod tests {
                 r#"{"history": {"limit": 5}, "recordings": {"audio": true}}"#,
                 false,
             ),
+            // The wake switch is a retune: the model stays loaded and the microphone open.
+            (r#"{"wake": {"enabled": false}}"#, false),
+            (r#"{"wake": {"enabled": false}, "look": "neon"}"#, true),
+            (r#"{"wake": {"capture": {"model": "hey_jarvis"}}}"#, true),
             (r#"{"look": "neon"}"#, true),
             (r#"{"history": {"limit": 5}, "look": "neon"}"#, true),
         ] {

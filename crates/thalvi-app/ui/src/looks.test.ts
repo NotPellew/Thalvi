@@ -365,6 +365,7 @@ describe("the settings window's look", () => {
       Array.from(root.querySelectorAll(`section[data-page="${page}"] .grp`)).map((group) => group.querySelector("h4")?.textContent ?? "");
     expect(headings("feedback")).toEqual(["Overlay", "Look", "Sounds"]);
     expect(headings("capture")).toEqual([
+      "Wake words",
       "Dictation wake word",
       "Hold keys",
       "Endings",

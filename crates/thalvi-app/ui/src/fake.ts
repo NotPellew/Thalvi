@@ -35,6 +35,7 @@ const SETTINGS: Settings = {
   wake: {
     capture: { model: "hey_thalvi", threshold: 0.7 },
     conversation: { model: "hey_mycroft", threshold: 0.5 },
+    enabled: true,
   },
   cues: { wake: true, provisional: true, cancelled: true, accepted: true, error: true },
   ending_pause: { paste: 0.7, submit: 2.5, task: 2.5 },

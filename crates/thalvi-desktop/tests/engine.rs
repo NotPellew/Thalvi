@@ -4429,6 +4429,58 @@ async fn a_hold_sends_only_the_audio_that_comes_after_its_start_cue() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_wake_word_starts_a_capture_only_with_wake_words_on_and_the_hold_key_always_does() {
+    #[derive(Clone, Copy)]
+    enum Input {
+        Wake,
+        Hold,
+        WakeThenHold,
+    }
+    use Input::{Hold, Wake, WakeThenHold};
+    const OFF: &str = r#"{"wake": {"enabled": false}}"#;
+    // (config, switched before listening, input, what listen returns, whether the wake model scored)
+    let cases = [
+        ("{}", None, Wake, Some(WakeTrigger::Capture), true),
+        ("{}", None, Hold, Some(WakeTrigger::Hold), true),
+        (OFF, None, Wake, None, false),
+        (OFF, None, Hold, Some(WakeTrigger::Hold), false),
+        (OFF, None, WakeThenHold, Some(WakeTrigger::Hold), false),
+        ("{}", Some(false), Wake, None, false),
+        (OFF, Some(true), Wake, Some(WakeTrigger::Capture), true),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for (case, (config, switched, input, expected, scored)) in cases.into_iter().enumerate()
+            {
+                let (rig, mut engine, mut frames) = Rig::new(config);
+                if let Some(on) = switched {
+                    engine.set_wake_words(on);
+                }
+                let task =
+                    tokio::task::spawn_local(
+                        async move { engine.listen(&mut frames).await.unwrap() },
+                    );
+                hear(&rig, 1, 3).await;
+                if matches!(input, Wake | WakeThenHold) {
+                    rig.wake.fire(WakeEvent::Capture);
+                    hear(&rig, 4, 5).await;
+                }
+                if matches!(input, Hold | WakeThenHold) {
+                    rig.press().await;
+                }
+                if let Some(trigger) = expected {
+                    assert_eq!(finished(task).await, trigger, "case {case}");
+                } else {
+                    assert!(!task.is_finished(), "case {case}: the wake word started it");
+                    task.abort();
+                }
+                assert_eq!(rig.wake.scored() > 0, scored, "case {case}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_hold_that_waited_to_be_told_from_a_chord_keeps_the_words_said_meanwhile() {
     LocalSet::new()
         .run_until(async {

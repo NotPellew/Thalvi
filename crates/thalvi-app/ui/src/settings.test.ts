@@ -148,6 +148,7 @@ describe("pages", () => {
         id: "capture",
         title: "Capture",
         groups: {
+          "Wake words": ["wake words"],
           "Dictation wake word": ["wake model (dictation)", "threshold (dictation)"],
           "Hold keys": ["dictate key", "write key"],
           Endings: ["ending phrases"],
@@ -444,6 +445,34 @@ describe("the wake word picker", () => {
     goTo("capture");
     return stub;
   }
+  const WITH_WAKE = "Listening for the wake words and the hold keys.";
+  const KEYBOARD = "Listening for the hold keys only.";
+  const PAUSED = "Paused: neither the hold keys nor the wake words start anything.";
+
+  // (saved switch, paused, clicked, the desktop refuses with, switch after, sent, status text, notice)
+  const switches: [boolean, boolean, boolean, string | null, boolean, boolean | null, string, string][] = [
+    [true, false, true, null, false, false, KEYBOARD, ""],
+    [false, false, true, null, true, true, WITH_WAKE, ""],
+    [true, true, true, null, false, false, PAUSED, ""],
+    [true, false, true, "Thalvi could not apply it.", true, false, WITH_WAKE, "Thalvi could not apply it."],
+    [false, false, false, null, false, null, KEYBOARD, ""],
+  ];
+
+  it.each(switches)("wake words saved %j, paused %j, clicked %j, refused with %j: shows %j, sends %j, says %j", async (saved, paused, clicked, refusal, after, sent, text, notice) => {
+    const stub = await openCapture({ ...SETTINGS, wake: { ...SETTINGS.wake, enabled: saved } });
+    if (paused) stub.emit({ state: "paused" });
+    if (refusal !== null) stub.backend.saveSettings.mockRejectedValue(refusal);
+    const input = control("Wake words", "input");
+    expect(input.checked).toBe(saved);
+    if (clicked) flip(input);
+    await settle();
+
+    expect(input.checked).toBe(after);
+    expect(stub.backend.saveSettings.mock.calls.map(([settings]) => settings.wake.enabled)).toEqual(sent === null ? [] : [sent]);
+    expect(rowOf("Wake words").querySelector("[role=status]")?.textContent).toBe(text);
+    expect(rowOf("Wake words").querySelector(".note")?.textContent ?? "").toBe(notice);
+  });
+
   const badge = (label: string): string => rowOf(label).querySelector(".badge")?.textContent ?? "";
   const problem = (label: string): string =>
     rowOf(label).querySelector<HTMLElement>(".note:not([hidden])")?.textContent ?? "";
@@ -556,7 +585,7 @@ describe("the wake word picker", () => {
   it("shows a saved custom file by name when Settings opens", async () => {
     await openCapture({
       ...SETTINGS,
-      wake: { capture: { model: "/models/mine.onnx", threshold: 0.5 }, conversation: { model: "hey_mycroft", threshold: 0.5 } },
+      wake: { capture: { model: "/models/mine.onnx", threshold: 0.5 }, conversation: { model: "hey_mycroft", threshold: 0.5 }, enabled: true },
     });
     expect(control("Wake model (dictation)", "select").value).toBe("__custom");
     expect(rowOf("Wake model (dictation)").textContent).toContain("mine.onnx");

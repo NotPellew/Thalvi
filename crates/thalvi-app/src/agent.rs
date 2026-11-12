@@ -385,6 +385,7 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
     match &*status.borrow() {
         Status::Paused => "paused",
         Status::Listening | Status::Done { .. } => "listening",
+        Status::KeyboardOnly => "keyboard",
         Status::Starting { .. } | Status::Capturing { .. } => "capturing",
         Status::Pending { .. } => "pending",
         Status::Working {
@@ -405,6 +406,7 @@ fn overlay_word(status: &Status, on: bool) -> &'static str {
     match status {
         Status::Paused
         | Status::Listening
+        | Status::KeyboardOnly
         | Status::Loading {
             downloading: false, ..
         } => "hidden",
@@ -1681,6 +1683,7 @@ mod tests {
             ),
             (Status::Paused, "paused", "hidden", "paused"),
             (Status::Listening, "listening", "hidden", "ready"),
+            (Status::KeyboardOnly, "keyboard", "hidden", "ready"),
             (capturing_status(), "capturing", "listening", "ready"),
             (
                 Status::Pending {

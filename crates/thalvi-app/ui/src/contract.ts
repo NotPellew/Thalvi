@@ -8,6 +8,7 @@ export type FailureKind = "delivery" | "other";
 export type Status =
   | { state: "paused" }
   | { state: "listening" }
+  | { state: "keyboardOnly" } // listening with wake words off: only the hold keys start a capture
   | { state: "starting"; target: string | null }
   | {
       state: "capturing";
@@ -133,7 +134,8 @@ export interface ScriptSettings {
 
 /** The desktop config file with every field filled. */
 export interface Settings {
-  wake: { capture: HeadSettings; conversation: HeadSettings };
+  /** `enabled` is the Wake words switch: off, only the hold keys start a capture. */
+  wake: { capture: HeadSettings; conversation: HeadSettings; enabled: boolean };
   cues: { wake: boolean; provisional: boolean; cancelled: boolean; accepted: boolean; error: boolean };
   ending_pause: { paste: number; submit: number; task: number };
   capture_limits: { idle: number; max: number };

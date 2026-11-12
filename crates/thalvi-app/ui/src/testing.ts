@@ -8,6 +8,7 @@ export const SETTINGS: Settings = {
   wake: {
     capture: { model: "hey_thalvi", threshold: 0.5 },
     conversation: { model: "hey_mycroft", threshold: 0.5 },
+    enabled: true,
   },
   cues: { wake: true, provisional: true, cancelled: true, accepted: true, error: true },
   ending_pause: { paste: 0.7, submit: 2.5, task: 2.5 },
@@ -172,7 +173,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     emit: (status: Status) => {
       for (const listener of statusListeners) listener(status);
       const paused = status.state === "paused";
-      if ((status.state === "paused" || status.state === "listening") && paused !== audioState.paused) {
+      if ((status.state === "paused" || status.state === "listening" || status.state === "keyboardOnly") && paused !== audioState.paused) {
         emitAudio({
           selected: audioState.selected,
           active: paused ? null : (audioState.selected ?? "Built-in"),

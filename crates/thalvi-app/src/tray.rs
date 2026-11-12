@@ -24,11 +24,13 @@ pub const LAST_DICTATION: &str = "last-dictation";
 pub const SETTINGS: &str = "settings";
 pub const QUIT: &str = "quit";
 
-/// The six looks of the tray icon.
+/// The seven looks of the tray icon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
     Paused,
     Listening,
+    /// Listening with the wake word off: only the hold keys start a capture.
+    Keyboard,
     /// The wake word was heard or words are being taken.
     Capturing,
     Pending,
@@ -42,6 +44,7 @@ impl Icon {
         match status {
             Status::Paused => Self::Paused,
             Status::Listening | Status::Done { .. } => Self::Listening,
+            Status::KeyboardOnly => Self::Keyboard,
             Status::Starting { .. } | Status::Capturing { .. } => Self::Capturing,
             Status::Pending { .. } => Self::Pending,
             Status::Working { .. }
@@ -61,6 +64,7 @@ impl Icon {
         let (shape, color): (fn(f32, f32) -> bool, [u8; 3]) = match self {
             Self::Paused => (paused, [160, 160, 172]),
             Self::Listening => (listening, [34, 197, 94]),
+            Self::Keyboard => (keyboard, [20, 184, 166]),
             Self::Capturing => (capturing, [239, 68, 68]),
             Self::Pending => (pending, [245, 158, 11]),
             Self::Working => (working, [59, 130, 246]),
@@ -102,6 +106,14 @@ fn listening(x: f32, y: f32) -> bool {
     (8.0..=12.0).contains(&distance(x, y, 16.0, 16.0))
 }
 
+/// A keyboard: an outline with a space bar.
+fn keyboard(x: f32, y: f32) -> bool {
+    let frame = (4.0..=28.0).contains(&x) && (9.0..=23.0).contains(&y);
+    let inside = (6.0..=26.0).contains(&x) && (11.0..=21.0).contains(&y);
+    let space = (10.0..=22.0).contains(&x) && (16.0..=18.0).contains(&y);
+    (frame && !inside) || space
+}
+
 fn capturing(x: f32, y: f32) -> bool {
     distance(x, y, 16.0, 16.0) <= 11.0
 }
@@ -138,6 +150,7 @@ pub fn title(status: &Status) -> String {
     let state = match status {
         Status::Paused => "paused".to_owned(),
         Status::Listening | Status::Done { .. } => "listening".to_owned(),
+        Status::KeyboardOnly => "listening (hold keys only)".to_owned(),
         Status::Starting { .. } | Status::Capturing { .. } => "capturing".to_owned(),
         Status::Pending {
             route, pause_ms, ..
@@ -348,10 +361,16 @@ mod tests {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "one row per status")]
     fn all() -> Vec<(Status, Icon, &'static str)> {
         vec![
             (Status::Paused, Icon::Paused, "Thalvi: paused"),
             (Status::Listening, Icon::Listening, "Thalvi: listening"),
+            (
+                Status::KeyboardOnly,
+                Icon::Keyboard,
+                "Thalvi: listening (hold keys only)",
+            ),
             (
                 Status::Starting {
                     target: Some(kitty()),
@@ -460,10 +479,34 @@ mod tests {
     }
 
     #[test]
-    fn the_six_icons_are_distinct_shapes_of_the_right_size() {
+    fn the_keyboard_icon_is_an_outline_with_a_space_bar() {
+        // (x, y, drawn)
+        for (x, y, drawn) in [
+            (5.0, 15.0, true),
+            (27.0, 15.0, true),
+            (15.0, 10.0, true),
+            (15.0, 22.0, true),
+            (15.0, 17.0, true),
+            (15.0, 13.0, false),
+            (15.0, 19.5, false),
+            (2.0, 15.0, false),
+            (30.0, 15.0, false),
+            (15.0, 5.0, false),
+            (15.0, 30.0, false),
+            (2.0, 17.0, false),
+            (5.0, 30.0, false),
+            (2.0, 2.0, false),
+        ] {
+            assert_eq!(keyboard(x, y), drawn, "({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn the_seven_icons_are_distinct_shapes_of_the_right_size() {
         let icons = [
             Icon::Paused,
             Icon::Listening,
+            Icon::Keyboard,
             Icon::Capturing,
             Icon::Pending,
             Icon::Working,
