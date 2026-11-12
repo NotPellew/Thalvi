@@ -1,10 +1,6 @@
 //! Owns the speech recognizer trait and the server's Meta realtime ASR factory.
 
-use std::sync::{Arc, Mutex, PoisonError};
-
 use thalvi_asr::{Connection, Handshake};
-
-use crate::phrases::PhraseStore;
 
 pub use thalvi_asr::Event as RecognizerEvent;
 
@@ -92,29 +88,17 @@ pub struct MetaRecognizerFactory {
     url: String,
     model: String,
     api_key: String,
-    phrases: Arc<PhraseStore>,
-    /// What the last handshake said about phrase boosting; `None` before one.
-    boosting: Arc<Mutex<Option<bool>>>,
 }
 
 impl MetaRecognizerFactory {
-    /// Creates a factory from validated configuration values; recognizers that announce phrase
-    /// boosting get `phrases` before any audio.
+    /// Creates a factory from validated configuration values.
     #[must_use]
-    pub fn new(url: String, model: String, api_key: String, phrases: Arc<PhraseStore>) -> Self {
+    pub fn new(url: String, model: String, api_key: String) -> Self {
         Self {
             url,
             model,
             api_key,
-            phrases,
-            boosting: Arc::default(),
         }
-    }
-
-    /// Whether the recognizer boosts a word list, as its last handshake said; `None` before one.
-    #[must_use]
-    pub fn boosts_phrases(&self) -> Option<bool> {
-        *self.boosting.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -127,16 +111,13 @@ impl RecognizerFactory for MetaRecognizerFactory {
     type Rec = MetaRecognizer;
 
     async fn connect(&self) -> Result<Self::Rec, RecognizerError> {
-        let phrases = self.phrases.list();
         let connection = Connection::open(Handshake {
             url: &self.url,
             model: &self.model,
             api_key: &self.api_key,
-            phrases: &phrases,
+            phrases: &[],
         })
         .await?;
-        *self.boosting.lock().unwrap_or_else(PoisonError::into_inner) =
-            Some(connection.boosts_phrases());
         Ok(MetaRecognizer { connection })
     }
 }
