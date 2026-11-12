@@ -87,8 +87,10 @@ exclude_re = [
     "<impl Source for PluginSource>",
     "appimage_of",
     "match guard error.is_timeout\\(\\) with (true|false) in explain",
-    # OpenAiSession cancel/close are empty; the arms only consume and drop the same session.
-    "delete match arm Self::OpenAi\\(session\\) in <impl RecognizerSession for ChosenSession>::(cancel|close)",
+    # OpenAiSession cancel/close have empty bodies; consuming self drops the same fields either way.
+    "replace <impl RecognizerSession for OpenAiSession>::(cancel|close) with \\(\\)",
+    # A nonbuffered hold's release tail bounds the wait at 250 ms; the pending-text watchdog has the same bound.
+    "replace && with || in Engine<R, W, C>::drive",
     # The restart's wall-clock time only feeds a metric the next start writes.
     "replace now_ms -> u64",
     # Quitting waits on the real engine thread, which only the app starts; its quit flow is the formal check's.

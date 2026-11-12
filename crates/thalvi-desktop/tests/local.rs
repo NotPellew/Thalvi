@@ -252,6 +252,7 @@ fn dictation(n: usize) -> Reply {
 async fn partials_and_finals_arrive_in_order_and_the_recognition_is_reported() {
     let rig = rig("dictation", dictation, None, 0);
     let mut session = rig.recognizer.connect().await.expect("connects");
+    assert!(!session.buffers_audio(), "local recognition streams frames");
     for _ in 0..4 {
         session.send_frame(&FRAME).await.expect("sends");
     }

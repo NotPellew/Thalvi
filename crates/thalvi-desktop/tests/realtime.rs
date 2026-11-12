@@ -156,45 +156,56 @@ async fn a_recognizer_that_does_not_announce_boosting_never_sees_the_word_list()
 }
 
 #[tokio::test]
-async fn chosen_realtime_entry_does_not_buffer_audio() {
-    let address = serve(|mut socket| async move {
-        socket.next().await.expect("handshake").expect("message");
-        socket
-            .send(text(&json!({"sessionId": "s", "phraseBoosting": true})))
-            .await
-            .expect("ready");
-        socket.next().await.expect("phrase list").expect("message");
-        let end = socket.next().await.expect("end stream").expect("message");
-        assert_eq!(
-            serde_json::from_str::<Value>(end.to_text().expect("text")).expect("JSON"),
-            json!({"type": "endStream"})
+async fn chosen_realtime_entry_streams_audio_and_forwards_endings() {
+    for cancel in [false, true] {
+        let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let address = serve(move |mut socket| async move {
+            socket.next().await.expect("handshake").expect("message");
+            socket
+                .send(text(&json!({"sessionId": "s", "phraseBoosting": true})))
+                .await
+                .expect("ready");
+            socket.next().await.expect("phrase list").expect("message");
+            let clean = matches!(socket.next().await, Some(Ok(Message::Close(_))));
+            let _ = closed_tx.send(clean);
+        })
+        .await;
+        let entry = LiveEntry {
+            id: "realtime".to_owned(),
+            name: "Realtime speech".to_owned(),
+            kind: LiveKind::Realtime(
+                Realtime::new(&address, "nemotron", KEY.to_owned()).expect("entry"),
+            ),
+        };
+        let chosen = Chosen::new(
+            &entry,
+            ModelStore::in_dir("unused"),
+            reqwest::Client::new(),
+            Recorder::disabled().metrics(),
+            &WordList::default(),
+            Adapters::default(),
         );
-    })
-    .await;
-    let entry = LiveEntry {
-        id: "realtime".to_owned(),
-        name: "Realtime speech".to_owned(),
-        kind: LiveKind::Realtime(
-            Realtime::new(&address, "nemotron", KEY.to_owned()).expect("entry"),
-        ),
-    };
-    let chosen = Chosen::new(
-        &entry,
-        ModelStore::in_dir("unused"),
-        reqwest::Client::new(),
-        Recorder::disabled().metrics(),
-        &WordList::default(),
-        Adapters::default(),
-    );
-    let session = tokio::time::timeout(WAIT, chosen.connect())
-        .await
-        .expect("connects")
-        .expect("ready");
-    assert!(
-        !session.buffers_audio(),
-        "realtime audio streams as it arrives"
-    );
-    session.close().await;
+        let session = tokio::time::timeout(WAIT, chosen.connect())
+            .await
+            .expect("connects")
+            .expect("ready");
+        assert!(
+            !session.buffers_audio(),
+            "realtime audio streams as it arrives"
+        );
+        if cancel {
+            session.cancel().await;
+        } else {
+            session.close().await;
+        }
+        assert!(
+            tokio::time::timeout(WAIT, closed_rx.recv())
+                .await
+                .expect("server observes the ending")
+                .expect("server reports the close frame"),
+            "Chosen forwards cancel and close to the realtime session"
+        );
+    }
 }
 
 #[tokio::test]

@@ -2564,9 +2564,17 @@ async fn cancelling_during_the_secondary_transcription_abandons_it() {
             let (url, mut uploads) = serve(Reply::Stall).await;
             let (mut rig, engine, frames) = Rig::new(&with_secondary(&url, "openai"));
             let task = capture_task(engine, frames);
-            live_words(&mut rig).await;
+            tokio::time::timeout(Duration::from_secs(10), live_words(&mut rig))
+                .await
+                .expect("capture reaches the second transcription");
             rig.at(3600).await;
-            assert!(uploads.recv().await.is_some(), "the upload started");
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), uploads.recv())
+                    .await
+                    .expect("second transcription starts")
+                    .is_some(),
+                "the upload started"
+            );
             assert_eq!(
                 rig.state(),
                 EngineState::TranscribingSecondary {

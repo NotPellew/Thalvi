@@ -3,7 +3,7 @@
 #![expect(clippy::expect_used, reason = "a test fails by panicking")]
 #![expect(clippy::unwrap_used, reason = "a test fails by panicking")]
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -18,7 +18,7 @@ use thalvi_desktop::chosen::Chosen;
 use thalvi_desktop::device::Adapters;
 use thalvi_desktop::entries::{LiveEntry, LiveKind};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
-use thalvi_desktop::metrics::Recorder;
+use thalvi_desktop::metrics::{RecordKinds, Recorder};
 use thalvi_desktop::models::{CatalogSpeech, ModelStore};
 use thalvi_desktop::openai_live::OpenAiRecognizer;
 use thalvi_desktop::phrases::WordList;
@@ -135,49 +135,70 @@ fn settings(url: &str, api: SecondaryApi, key: &str) -> SecondaryStt {
 #[tokio::test]
 async fn openai_streaming_emits_cumulative_text_and_plain_json_still_works() {
     let (url, mut rx) = serve_sse(
-        "data: {\"type\":\"transcript.text.delta\",\"delta\":\"hello \"}\n\ndata: {\"type\":\"transcript.text.delta\",\"delta\":\"world\"}\n\ndata: {\"type\":\"transcript.text.done\",\"text\":\"hello world\"}\n\n",
+        "data: {\"type\":\"transcript.text.delta\",\"delta\":\"hello \"}\n\ndata: {\"type\":\"transcript.text.delta\",\"delta\":\"world\"}\n\ndata: {\"type\":\"transcript.text.done\",\"text\":\"cleaned transcript\"}\n\n",
     ).await;
-    let metrics = Recorder::disabled().metrics();
+    let metrics_dir = std::env::temp_dir().join(format!(
+        "thalvi-live-stt-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos()
+    ));
+    let recorder = Recorder::in_dir(
+        RecordKinds {
+            metrics: true,
+            ..RecordKinds::default()
+        },
+        &metrics_dir,
+    )
+    .expect("metrics recorder");
     let client = reqwest::Client::builder()
         .user_agent("thalvi-second-pass-client")
         .build()
         .expect("configured shared client");
     let recognizer = OpenAiRecognizer::new(
         "local",
-        settings(&url, SecondaryApi::OpenAi, ""),
+        settings(&url, SecondaryApi::OpenAi, "stream-key"),
         client,
-        metrics,
+        recorder.metrics(),
     );
     let mut session = recognizer
         .connect()
         .await
         .expect("connected without uploading");
+    assert!(session.buffers_audio(), "audio waits until capture ends");
     session.send_frame(&ramp(0)).await.expect("buffered frame");
     assert!(
         rx.try_recv().is_err(),
         "upload starts only when capture ends"
     );
     session.finish_audio().await.expect("capture ended");
-    let mut events = Vec::new();
-    loop {
-        let event = session.next_event().await.expect("transcription event");
-        let final_event = matches!(event, RecognizerEvent::Final(_));
-        events.push(event);
-        if final_event {
-            break;
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        loop {
+            let event = session.next_event().await.expect("transcription event");
+            let final_event = matches!(event, RecognizerEvent::Final(_));
+            events.push(event);
+            if final_event {
+                break events;
+            }
         }
-    }
+    })
+    .await
+    .expect("transcription completes after release");
     assert_eq!(
         events,
         [
             RecognizerEvent::Partial("hello ".to_owned()),
             RecognizerEvent::Partial("hello world".to_owned()),
-            RecognizerEvent::Final("hello world".to_owned())
+            RecognizerEvent::Final("cleaned transcript".to_owned())
         ]
     );
     let captured = rx.recv().await.expect("one upload");
     assert_eq!(captured.path, "/v1/audio/transcriptions");
     assert_eq!(captured.headers["user-agent"], "thalvi-second-pass-client");
+    assert_eq!(captured.headers["authorization"], "Bearer stream-key");
     assert!(
         captured
             .body
@@ -185,6 +206,30 @@ async fn openai_streaming_emits_cumulative_text_and_plain_json_still_works() {
             .any(|part| part == b"name=\"stream\"")
     );
     assert!(rx.try_recv().is_err(), "one upload for one capture");
+    recorder.finish().await;
+    let metrics = std::fs::read_to_string(metrics_dir.join("metrics.jsonl"))
+        .expect("live transcription metrics");
+    let metrics: Vec<serde_json::Value> = metrics
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("metric line"))
+        .collect();
+    assert_eq!(
+        metrics
+            .iter()
+            .filter(|event| event["event"] == "desktop_live_stt_first_text")
+            .count(),
+        1,
+        "first-text latency is recorded once"
+    );
+    assert_eq!(
+        metrics
+            .iter()
+            .filter(|event| event["event"] == "desktop_live_stt_delta")
+            .count(),
+        2,
+        "every streamed partial is recorded"
+    );
+    std::fs::remove_dir_all(metrics_dir).expect("remove test metrics");
 
     let (url, mut rx) = serve(200, r#"{"text":"plain answer"}"#).await;
     let recognizer = OpenAiRecognizer::new(
