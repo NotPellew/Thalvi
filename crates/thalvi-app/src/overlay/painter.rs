@@ -405,6 +405,7 @@ mod tests {
                 (button.0, 150.0),
                 (10.0, button.1),
                 (button.0 + 14.0, button.1),
+                (button.0, button.1 + 12.0),
             ] {
                 assert!(!painter.cancels(&clickable, x, y), "{look:?} at ({x}, {y})");
             }

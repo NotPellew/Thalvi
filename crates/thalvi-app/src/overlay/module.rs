@@ -686,9 +686,17 @@ fn line_strip(canvas: &mut Canvas, view: &View, color: Rgba, finish: Finish) {
 
 #[cfg(test)]
 mod tests {
+    use thalvi_desktop::capture::CaptureRoute;
     use thalvi_desktop::host::OverlayFrame;
 
     use super::*;
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the overlay's size in pixels at scale 1"
+    )]
+    const COLUMNS: usize = WIDTH as usize;
 
     /// The ink of `line` along the ticker's row: the strongest alpha in each column.
     fn ink(line: &Line, blink_on: bool) -> Vec<u8> {
@@ -745,8 +753,8 @@ mod tests {
         );
         let (first, last) = inked(&long);
         assert!(
-            first >= left && last <= right && last + 12 > right,
-            "{first}..{last}"
+            first >= left && last + 3 <= right && last + 8 >= right,
+            "the newest word ends just short of the right edge: {first}..{last}"
         );
         let strongest =
             |range: std::ops::Range<usize>| long[range].iter().copied().max().unwrap_or(0);
@@ -769,9 +777,290 @@ mod tests {
             true,
         );
         assert!(
-            notice[right - 4] < notice[left + 100].max(1),
-            "a long notice fades at its end"
+            notice[left + 100] > 0 && notice[right - 4] < notice[left + 100],
+            "a long notice shows and fades at its end"
+        );
+        let mut text = Text::new();
+        let mut fits = "a".to_owned();
+        while text
+            .measure(&[(fits.as_str(), INK)], TICKER, Layout::Line, 1.0)
+            .0
+            < SLOT_W - 48.0 - 20.0
+        {
+            fits.push_str(" a");
+        }
+        let fitting = ink(&Line::Notice(fits), true);
+        let (_, end) = inked(&fitting);
+        assert!(
+            fitting[end - 6..=end].iter().any(|alpha| *alpha >= 200),
+            "a notice that fits keeps its end"
         );
         assert!(ink(&Line::None, true).iter().all(|alpha| *alpha == 0));
+    }
+
+    /// The pixels `draw` puts on a blank canvas, as premultiplied BGRA.
+    fn painted(draw: impl FnOnce(&mut Canvas, &mut Text)) -> Vec<[u8; 4]> {
+        let mut canvas = Canvas::new(WIDTH, HEIGHT, 1.0).unwrap();
+        draw(&mut canvas, &mut Text::new());
+        let mut frame = OverlayFrame::default();
+        canvas.frame_into(&mut frame);
+        frame.bgra.as_chunks::<4>().0.to_vec()
+    }
+
+    /// The alpha-weighted centre of the pixels where `a` and `b` differ, and their row span.
+    fn changed(a: &[[u8; 4]], b: &[[u8; 4]]) -> ((f32, f32), (usize, usize)) {
+        let width = COLUMNS;
+        let (mut sum, mut x, mut y, mut rows) = (0.0, 0.0, 0.0, (usize::MAX, 0));
+        for (i, (p, q)) in a.iter().zip(b).enumerate() {
+            let weight = f32::from(
+                p.iter()
+                    .zip(q)
+                    .map(|(p, q)| p.abs_diff(*q))
+                    .max()
+                    .unwrap_or(0),
+            );
+            if weight > 0.0 {
+                #[expect(clippy::cast_precision_loss, reason = "pixel positions")]
+                let (px, py) = ((i % width) as f32, (i / width) as f32);
+                (sum, x, y) = (sum + weight, x + px * weight, y + py * weight);
+                rows = (rows.0.min(i / width), rows.1.max(i / width));
+            }
+        }
+        ((x / sum, y / sum), rows)
+    }
+
+    fn drawn(finish: Finish, view: &View) -> Vec<[u8; 4]> {
+        let mut module = Module::new(finish, 1.0).unwrap();
+        painted(|canvas, text| module.draw(canvas, text, view, view.clock))
+    }
+
+    fn shown(status: Status, draft: bool, clock: f64, level: f32) -> View {
+        let mut view = View::new(false);
+        view.set_draft(draft);
+        view.set_status(status, 0.0);
+        for frame in 0..=12 {
+            view.poll(clock * f64::from(frame) / 12.0, level);
+        }
+        view
+    }
+
+    fn capturing() -> Status {
+        Status::Capturing {
+            target: None,
+            committed: "hello".to_owned(),
+            partial: None,
+            notice: None,
+        }
+    }
+
+    #[test]
+    fn only_holo_shines_as_time_passes() {
+        let done = Status::Done {
+            target: None,
+            route: CaptureRoute::Paste,
+            notice: "Delivered.".to_owned(),
+        };
+        for (finish, shines) in [(Finish::Gunmetal, false), (Finish::Holo, true)] {
+            let mut view = shown(done.clone(), false, 0.0, 0.0);
+            let still = drawn(finish, &view);
+            view.clock = 5.5;
+            assert_eq!(drawn(finish, &view) != still, shines, "{finish:?}");
+        }
+    }
+
+    #[test]
+    fn the_wave_sits_centred_in_the_slot_rising_above_a_line_of_text_and_quiet_coloured_while_waiting()
+     {
+        let quiet = Status::Pending {
+            target: None,
+            route: CaptureRoute::Paste,
+            text: String::new(),
+            waiting_for_quiet: true,
+            pause_ms: 2000,
+            copies: false,
+        };
+        let centre = |status: &Status, draft| {
+            let loud = drawn(Finish::Gunmetal, &shown(status.clone(), draft, 1.0, 1.0));
+            let silent = drawn(Finish::Gunmetal, &shown(status.clone(), draft, 1.0, 0.0));
+            changed(&loud, &silent).0
+        };
+        let (bare, worded) = (centre(&capturing(), false), centre(&capturing(), true));
+        assert!(
+            (bare.0 - (SLOT.0 + 5.0 + WAVE_W / 2.0)).abs() <= 2.0,
+            "{bare:?}"
+        );
+        assert!(
+            (bare.1 - worded.1 - 15.0).abs() <= 1.5,
+            "{bare:?} {worded:?}"
+        );
+        let cyan = |status: &Status| {
+            drawn(Finish::Gunmetal, &shown(status.clone(), false, 1.0, 1.0))
+                .iter()
+                .filter(|[b, g, r, _]| {
+                    r.abs_diff(107) < 30 && g.abs_diff(248) < 30 && b.abs_diff(255) < 30
+                })
+                .count()
+        };
+        assert!(
+            cyan(&capturing()) > 50 && cyan(&quiet) == 0,
+            "{} {}",
+            cyan(&capturing()),
+            cyan(&quiet)
+        );
+    }
+
+    #[test]
+    fn the_caret_blinks_once_a_second() {
+        let ticker = |clock: f64| {
+            let mut view = shown(capturing(), true, 0.0, 0.0);
+            view.clock = clock;
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the ticker's rows"
+            )]
+            let rows = (SLOT.1 + 52.0) as usize * COLUMNS..(SLOT.1 + 74.0) as usize * COLUMNS;
+            drawn(Finish::Gunmetal, &view)[rows].to_vec()
+        };
+        let cyan = |pixels: &[[u8; 4]]| {
+            pixels
+                .iter()
+                .filter(|[b, g, r, _]| *r < 140 && *g > 200 && *b > 200)
+                .count()
+        };
+        let (on, off) = (ticker(0.2), ticker(0.7));
+        assert!(cyan(&on) > cyan(&off), "on at the start of each second");
+        assert_eq!(ticker(1.2), on);
+    }
+
+    #[test]
+    fn the_caret_sits_just_after_the_last_word() {
+        let mut text = Text::new();
+        let used = text.measure(&[("hello", INK)], TICKER, Layout::Line, 1.0).0;
+        let on = painted(|canvas, text| ticker(canvas, text, &words("hello", true), true));
+        let off = painted(|canvas, text| ticker(canvas, text, &words("hello", true), false));
+        let ((x, _), (top, _)) = changed(&on, &off);
+        assert!(
+            (x - (SLOT.0 + 24.0 + used + 2.0)).abs() <= 1.0,
+            "{x} after {used}"
+        );
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a row"
+        )]
+        let row = (SLOT.1 + 52.0 + 4.0) as usize;
+        assert_eq!(top, row);
+    }
+
+    #[test]
+    fn a_confirmation_is_centred_in_the_slot_and_wraps_inside_it() {
+        let done = Status::Done {
+            target: Some("a-window-with-a-rather-long-name".to_owned()),
+            route: CaptureRoute::Submit,
+            notice: "Delivered, and the answer is on its way.".to_owned(),
+        };
+        let view = shown(done, false, 0.0, 0.0);
+        let width = COLUMNS;
+        let green: Vec<(usize, usize)> = drawn(Finish::Gunmetal, &view)
+            .iter()
+            .enumerate()
+            .filter(|(i, [b, g, r, _])| {
+                #[expect(clippy::cast_precision_loss, reason = "a row")]
+                let in_slot = ((i / width) as f32) < SLOT.1 + SLOT_H;
+                in_slot && *r < 120 && *g > 200 && *b > 100 && *b < 180
+            })
+            .map(|(i, _)| (i % width, i / width))
+            .collect();
+        #[expect(clippy::cast_precision_loss, reason = "pixel positions")]
+        let span = |pick: fn(&(usize, usize)) -> usize| {
+            let values = green.iter().map(pick);
+            (
+                values.clone().min().unwrap() as f32,
+                values.max().unwrap() as f32,
+            )
+        };
+        let ((left, right), (top, bottom)) = (span(|p| p.0), span(|p| p.1));
+        assert!(
+            left >= SLOT.0 + 8.0 && right <= SLOT.0 + SLOT_W - 8.0,
+            "{left}..{right}"
+        );
+        assert!(
+            (left.midpoint(right) - (SLOT.0 + SLOT_W / 2.0)).abs() <= 2.0,
+            "{left}..{right}"
+        );
+        assert!(
+            (top.midpoint(bottom) - (SLOT.1 + SLOT_H / 2.0)).abs() <= 3.0,
+            "{top}..{bottom}"
+        );
+        assert!(
+            bottom - top > 17.0 && bottom - top < 2.0 * 17.0 + 4.0,
+            "two lines: {top}..{bottom}"
+        );
+    }
+
+    #[test]
+    fn the_countdown_tag_is_centred_on_the_wave_between_two_lines() {
+        let top = SLOT.1 + 2.0;
+        let amber = Rgba::rgb(255, 194, 75);
+        let tagged = painted(|canvas, text| tag(canvas, text, "PASTE IN 3 s", amber, top));
+        let width = COLUMNS;
+        let inked: Vec<(usize, usize)> = tagged
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p[3] > 60)
+            .map(|(i, _)| (i % width, i / width))
+            .collect();
+        let (left, right) = (
+            inked.iter().map(|p| p.0).min().unwrap(),
+            inked.iter().map(|p| p.0).max().unwrap(),
+        );
+        #[expect(clippy::cast_precision_loss, reason = "pixel columns")]
+        let middle_x = (left + right) as f32 / 2.0;
+        assert!(
+            (middle_x - (SLOT.0 + 5.0 + WAVE_W / 2.0)).abs() <= 1.5,
+            "{left}..{right}"
+        );
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a row"
+        )]
+        let middle = (top + WAVE_H / 2.0) as usize;
+        let at = |x: usize, y: usize| tagged[y * width + x][3];
+        for x in [left + 20, right - 20] {
+            assert!(
+                at(x, middle) > 60 && at(x, middle - 3) == 0 && at(x, middle + 3) == 0,
+                "a line at {x}"
+            );
+        }
+        let words: Vec<usize> = inked
+            .iter()
+            .filter(|p| p.0.abs_diff(left + (right - left) / 2) < 30)
+            .map(|p| p.1)
+            .collect();
+        #[expect(clippy::cast_precision_loss, reason = "pixel rows")]
+        let words_middle = (words.iter().min().unwrap() + words.iter().max().unwrap()) as f32 / 2.0;
+        #[expect(clippy::cast_precision_loss, reason = "a row")]
+        let middle = middle as f32;
+        assert!(
+            (words_middle - middle).abs() <= 3.0,
+            "{words_middle} on {middle}"
+        );
+    }
+
+    #[test]
+    fn the_cancel_glyph_is_centred_in_its_button() {
+        for finish in [Finish::Gunmetal, Finish::Holo] {
+            let face = painted(|canvas, _| {
+                button_face(canvas, finish);
+            });
+            let button = painted(|canvas, text| cancel_button(canvas, text, finish));
+            let ((x, _), _) = changed(&button, &face);
+            assert!(
+                (x - (CANCEL.0 + CANCEL.2 / 2.0)).abs() <= 1.0,
+                "{finish:?}: {x}"
+            );
+        }
     }
 }

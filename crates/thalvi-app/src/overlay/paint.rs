@@ -632,12 +632,17 @@ mod tests {
             move |x: usize, y: usize| frame.bgra[(y * width + x) * 4 + 3]
         };
         let white = Fill::Solid(Rgba::rgb(255, 255, 255));
-        let mut full = Canvas::new(12.0, 9.0, 1.0).unwrap();
-        full.rect((0.0, 0.0, 12.0, 9.0), 0.0, &white);
-        full.blur(4.0);
-        let at = alpha(&full);
-        for (x, y) in [(0, 0), (11, 0), (5, 4), (0, 8), (11, 8)] {
-            assert_eq!(at(x, y), 255, "({x}, {y})");
+        // The second blur reaches past the whole canvas.
+        for (width, height, radius) in [(12, 9, 4.0), (2, 3, 8.0)] {
+            let mut full = Canvas::new(width as f32, height as f32, 1.0).unwrap();
+            full.rect((0.0, 0.0, width as f32, height as f32), 0.0, &white);
+            full.blur(radius);
+            let at = alpha(&full);
+            for y in 0..height {
+                for x in 0..width {
+                    assert_eq!(at(x, y), 255, "{width} × {height}: ({x}, {y})");
+                }
+            }
         }
         let mut dot = Canvas::new(21.0, 21.0, 1.0).unwrap();
         dot.rect((10.0, 10.0, 1.0, 1.0), 0.0, &white);
@@ -658,6 +663,12 @@ mod tests {
             assert!(around[0] < at(10 - step + 1, 10), "{step}");
         }
         assert_eq!((at(6, 10), at(14, 10), at(10, 6), at(10, 14)), (0, 0, 0, 0));
+        // Three passes of a 2-point blur reach 6 pixels past an edge at scale 2.
+        let mut fine = Canvas::new(21.0, 21.0, 2.0).unwrap();
+        fine.rect((0.0, 0.0, 10.5, 21.0), 0.0, &white);
+        fine.blur(2.0);
+        let at = alpha(&fine);
+        assert!(at(26, 20) > 0 && at(27, 20) == 0, "the radius is in points");
     }
     const WHITE: Rgba = Rgba::rgb(255, 255, 255);
 
@@ -679,9 +690,11 @@ mod tests {
         let white = Fill::Solid(WHITE);
         let mut square = Canvas::new(4.0, 4.0, 1.0).unwrap();
         square.rect((0.0, 0.0, 4.0, 4.0), 0.0, &white);
+        let mut fine = Canvas::new(2.0, 2.0, 2.0).unwrap();
+        fine.rect((0.0, 0.0, 2.0, 2.0), 0.0, &white);
         let triangle = [(0.0, 0.0), (12.0, 0.0), (0.0, 12.0)];
         let full = (0.0, 0.0, 12.0, 12.0);
-        let cases: [Case; 10] = [
+        let cases: [Case; 11] = [
             (
                 "rect",
                 1.0,
@@ -692,16 +705,16 @@ mod tests {
             (
                 "rounded",
                 1.0,
-                Box::new(|c| c.rect(full, 4.0, &white)),
-                &[(6, 6), (0, 6), (6, 0)],
-                &[(0, 0), (11, 11)],
+                Box::new(|c| c.rect((2.0, 2.0, 8.0, 8.0), 3.0, &white)),
+                &[(6, 6), (2, 5), (5, 2), (9, 5), (5, 9)],
+                &[(10, 2), (9, 1), (1, 9), (2, 10)],
             ),
             (
                 "outline",
                 1.0,
-                Box::new(|c| c.outline(full, 0.0, WHITE)),
-                &[(0, 6), (11, 6), (6, 0)],
-                &[(6, 6)],
+                Box::new(|c| c.outline((1.0, 1.0, 10.0, 10.0), 0.0, WHITE)),
+                &[(1, 6), (10, 6), (6, 1), (6, 10)],
+                &[(6, 6), (0, 6), (11, 6), (6, 11)],
             ),
             (
                 "polygon",
@@ -756,6 +769,13 @@ mod tests {
                 &[(2, 2), (7, 7)],
             ),
             (
+                "draw at scale",
+                2.0,
+                Box::new(|c| c.draw(&fine, (1.5, 1.5), 1.0)),
+                &[(3, 3), (6, 6)],
+                &[(2, 2), (7, 7)],
+            ),
+            (
                 "scale",
                 2.0,
                 Box::new(|c| c.rect((0.0, 0.0, 3.0, 3.0), 0.0, &white)),
@@ -763,6 +783,33 @@ mod tests {
                 &[(6, 6)],
             ),
         ];
+        covers(cases);
+    }
+
+    #[test]
+    fn a_corner_too_big_for_its_shape_rounds_it_into_a_pill() {
+        let white = Fill::Solid(WHITE);
+        let cases: [Case; 2] = [
+            (
+                "wide pill",
+                1.0,
+                Box::new(|c| c.rect((1.0, 4.0, 10.0, 4.0), 10.0, &white)),
+                &[(3, 4), (8, 4), (3, 7), (8, 7), (2, 5), (9, 6)],
+                &[(0, 5), (11, 5), (2, 3), (9, 3), (2, 8), (9, 8)],
+            ),
+            (
+                "tall pill",
+                1.0,
+                Box::new(|c| c.rect((4.0, 1.0, 4.0, 10.0), 10.0, &white)),
+                &[(4, 3), (4, 8), (7, 3), (7, 8), (5, 2), (6, 9)],
+                &[(5, 0), (5, 11), (3, 2), (3, 9), (8, 2), (8, 9)],
+            ),
+        ];
+        covers(cases);
+    }
+
+    /// Draws each case on a 12-point canvas and checks the pixels it must fill and leave empty.
+    fn covers<const N: usize>(cases: [Case; N]) {
         for (name, scale, draw, filled, empty) in cases {
             let mut canvas = Canvas::new(12.0 / scale, 12.0 / scale, scale).unwrap();
             assert!((canvas.scale_of() - scale).abs() < f32::EPSILON);
@@ -790,6 +837,12 @@ mod tests {
         assert_eq!(alpha(&canvas, 1, 1), 0);
         canvas.copy(&square);
         assert_eq!(canvas.pixmap.data(), square.pixmap.data());
+        canvas.clear();
+        canvas.rect((0.0, 0.0, 4.0, 4.0), 0.0, &Fill::Solid(WHITE.alpha(0.5)));
+        assert!(
+            alpha(&canvas, 1, 1).abs_diff(128) <= 1,
+            "a fill keeps its colour's opacity"
+        );
     }
 
     #[test]
@@ -823,43 +876,41 @@ mod tests {
 
     #[test]
     fn text_blends_its_colour_by_coverage_over_what_is_there_and_only_in_bounds() {
-        let mut canvas = Canvas::new(4.0, 2.0, 1.0).unwrap();
-        canvas.rect((0.0, 0.0, 4.0, 1.0), 0.0, &Fill::Solid(Rgba::rgb(0, 0, 0)));
-        canvas.blend(
-            (0, 0),
-            4,
-            &[255, 128, 0, 255, 255, 255, 255, 255],
-            WHITE.alpha(0.5),
-        );
-        let pixel = |canvas: &Canvas, x, y| {
-            let p = canvas.pixmap.pixel(x, y).unwrap();
-            [p.red(), p.green(), p.blue(), p.alpha()]
+        let raw = |canvas: &Canvas, x: usize| -> [u8; 4] {
+            canvas.pixmap.data()[x * 4..x * 4 + 4].try_into().unwrap()
         };
-        assert_eq!(pixel(&canvas, 0, 0), [128, 128, 128, 255]);
-        assert_eq!(pixel(&canvas, 1, 0), [64, 64, 64, 255]);
-        assert_eq!(pixel(&canvas, 2, 0), [0, 0, 0, 255], "no coverage");
-        assert_eq!(pixel(&canvas, 1, 1), [128, 128, 128, 128], "over nothing");
-        canvas.clear();
-        canvas.set_text_bounds(Some(TextBounds {
+        let mut canvas = Canvas::new(3.0, 1.0, 1.0).unwrap();
+        canvas.pixmap.data_mut()[..8].copy_from_slice(&[100, 100, 100, 255, 100, 100, 100, 100]);
+        let color = Rgba {
+            r: 200,
+            g: 0,
+            b: 50,
+            a: 0.5,
+        };
+        canvas.blend((0, 0), 3, &[255, 128, 0], color);
+        assert_eq!(raw(&canvas, 0), [150, 50, 75, 255], "over an opaque pixel");
+        assert_eq!(
+            raw(&canvas, 1),
+            [125, 75, 87, 139],
+            "partly covered, over a faint pixel"
+        );
+        assert_eq!(raw(&canvas, 2), [0, 0, 0, 0], "no coverage");
+        let mut edges = Canvas::new(4.0, 3.0, 1.0).unwrap();
+        edges.blend((-1, -1), 6, &[255; 30], WHITE);
+        assert!(
+            edges.pixmap.data().iter().all(|byte| *byte == 255),
+            "covered exactly once, nothing drawn past the edges"
+        );
+        let mut scaled = Canvas::new(2.0, 1.0, 2.0).unwrap();
+        scaled.set_text_bounds(Some(TextBounds {
             left: 0.0,
-            right: 1.5,
+            right: 1.0,
             fade_left: 0.0,
             fade_right: 0.0,
         }));
-        canvas.blend((-1, 1), 4, &[255; 4], WHITE);
-        assert_eq!(
-            [
-                pixel(&canvas, 0, 1)[3],
-                pixel(&canvas, 1, 1)[3],
-                pixel(&canvas, 2, 1)[3]
-            ],
-            [255, 255, 0]
-        );
-        assert_eq!(
-            pixel(&canvas, 0, 0)[3],
-            0,
-            "rows outside the canvas are skipped"
-        );
+        scaled.blend((0, 0), 4, &[255; 4], WHITE);
+        let alphas: Vec<u8> = (0..4).map(|x| raw(&scaled, x)[3]).collect();
+        assert_eq!(alphas, [255, 255, 255, 0], "bounds are in points");
     }
 
     #[test]
@@ -900,17 +951,123 @@ mod tests {
         #[expect(clippy::cast_precision_loss, reason = "a few lines")]
         let lines = widths.len() as f32;
         assert!((tall - lines * 17.0).abs() < 1e-3);
-        let mut inked = |layout| {
-            let mut canvas = Canvas::new(200.0, 30.0, 1.0).unwrap();
+        let fine = text.line_widths(&sentence, style, wrapped, 2.0);
+        assert_eq!(fine.len(), widths.len(), "wraps the same at scale 2");
+        assert!(
+            fine.iter().zip(&widths).all(|(a, b)| (a - b).abs() < 2.0),
+            "{fine:?}"
+        );
+        // The leftmost, rightmost and topmost inked pixel, divided by the scale.
+        let mut inked = |layout, scale: f32| {
+            let mut canvas = Canvas::new(200.0, 40.0, scale).unwrap();
             text.draw(&mut canvas, &spans("Hi"), style, layout, (20.0, 5.0));
-            let columns: Vec<u32> = (0..200)
-                .filter(|x| (0..30).any(|y| alpha(&canvas, *x, y) > 0))
+            let (w, h) = (canvas.pixmap.width(), canvas.pixmap.height());
+            let ink: Vec<(u32, u32)> = (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter(|(x, y)| alpha(&canvas, *x, *y) > 0)
                 .collect();
-            (columns[0], columns[columns.len() - 1])
+            let points = |v: u32| f32::from(u16::try_from(v).unwrap()) / scale;
+            (
+                points(ink.iter().map(|p| p.0).min().unwrap()),
+                points(ink.iter().map(|p| p.0).max().unwrap()),
+                points(ink.iter().map(|p| p.1).min().unwrap()),
+            )
         };
-        let (left, _) = inked(Layout::Line);
-        assert!((20..24).contains(&left), "{left}");
-        let (left, right) = inked(Layout::Centred { width: 160.0 });
-        assert!((left + right).abs_diff(2 * 100) <= 3, "{left}..{right}");
+        let (left, _, top) = inked(Layout::Line, 1.0);
+        assert!((20.0..24.0).contains(&left), "{left}");
+        let (fine_left, _, fine_top) = inked(Layout::Line, 2.0);
+        assert!(
+            (fine_left - left).abs() <= 1.0 && (fine_top - top).abs() <= 1.0,
+            "at scale 2: {fine_left} {fine_top}, at 1: {left} {top}"
+        );
+        for scale in [1.0, 2.0] {
+            let (left, right, _) = inked(Layout::Centred { width: 160.0 }, scale);
+            assert!(
+                (left + right - 200.0).abs() <= 3.0,
+                "{scale}: {left}..{right}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_keeps_its_tracking_weight_and_transparency() {
+        let mut text = Text::new();
+        let style = Style {
+            size: 13.0,
+            line_height: 17.0,
+            weight: 400,
+            mono: false,
+            tracking: 0.0,
+        };
+        let hello = [("Hello", WHITE)];
+        let (plain, _) = text.measure(&hello, style, Layout::Line, 1.0);
+        let (spaced, _) = text.measure(
+            &hello,
+            Style {
+                tracking: 2.0,
+                ..style
+            },
+            Layout::Line,
+            1.0,
+        );
+        assert!(
+            (spaced - plain - 10.0).abs() <= 2.0,
+            "2 points after each of 5 letters: {plain} {spaced}"
+        );
+        let ink = |text: &mut Text, spans: &[(&str, Rgba)], style: Style| {
+            let mut canvas = Canvas::new(120.0, 30.0, 1.0).unwrap();
+            text.draw(&mut canvas, spans, style, Layout::Line, (4.0, 4.0));
+            canvas
+                .pixmap
+                .pixels()
+                .iter()
+                .map(|p| u32::from(p.alpha()))
+                .collect::<Vec<_>>()
+        };
+        let regular: u32 = ink(&mut text, &hello, style).iter().sum();
+        let bold: u32 = ink(
+            &mut text,
+            &hello,
+            Style {
+                weight: 700,
+                ..style
+            },
+        )
+        .iter()
+        .sum();
+        assert!(
+            bold * 10 > regular * 11,
+            "bold is heavier: {regular} {bold}"
+        );
+        let faint = ink(&mut text, &[("Hello", WHITE.alpha(0.5))], style);
+        assert!(
+            faint.iter().max().unwrap().abs_diff(128) <= 2,
+            "half-transparent text"
+        );
+    }
+
+    #[test]
+    fn a_weight_is_the_nearest_one_the_family_has() {
+        let text = Text::new();
+        let fonts = text.fonts.db();
+        let name = fonts.family_name(&Family::SansSerif);
+        let has: Vec<u16> = fonts
+            .faces()
+            .filter(|face| face.families.iter().any(|(named, _)| named == name))
+            .map(|face| face.weight.0)
+            .collect();
+        assert!(!has.is_empty(), "{name} has faces");
+        for wanted in [1, 400, 650, 1000] {
+            let got = text.nearest_weight(Family::SansSerif, wanted);
+            let best = has
+                .iter()
+                .map(|weight| weight.abs_diff(wanted))
+                .min()
+                .unwrap();
+            assert!(
+                has.contains(&got) && got.abs_diff(wanted) == best,
+                "{wanted}: {got} from {has:?}"
+            );
+        }
     }
 }

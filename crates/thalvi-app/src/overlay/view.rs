@@ -451,6 +451,13 @@ mod tests {
                 1000,
                 "SEND TO A-VERY-LO… IN 1 s",
             ),
+            (
+                CaptureRoute::Paste,
+                Some("powershell"),
+                false,
+                2500,
+                "PASTE INTO POWERSHELL IN 3 s",
+            ),
             (CaptureRoute::Write, None, false, 1, "WRITE IN 1 s"),
             (CaptureRoute::Paste, Some("kitty"), true, 0, "COPY IN 1 s"),
             (CaptureRoute::Task, Some("kitty"), true, 2000, "TASK IN 2 s"),
@@ -570,6 +577,15 @@ mod tests {
             [0.7, 0.3],
             "periods restart at the gap's end"
         );
+        let mut late = Wave::default();
+        late.step(0.0, 0.2);
+        late.step(10.05, 0.7);
+        late.step(10.17, 0.3);
+        assert_eq!(
+            newest(&late, 2),
+            [0.7, 0.3],
+            "counted from the gap's end, not from whole periods before it"
+        );
     }
 
     #[test]
@@ -629,5 +645,84 @@ mod tests {
             "the history still holds the sound"
         );
         assert_eq!(quiet_until(&mut wave, 6.0), SETTLED_FRAME);
+    }
+
+    #[test]
+    fn the_line_shows_a_notice_always_and_the_words_only_with_the_draft_on() {
+        let capturing = |notice: Option<&str>| Status::Capturing {
+            target: None,
+            committed: "hello".to_owned(),
+            partial: Some("wor".to_owned()),
+            notice: notice.map(str::to_owned),
+        };
+        let pending = Status::Pending {
+            target: None,
+            route: CaptureRoute::Paste,
+            text: "hello".to_owned(),
+            waiting_for_quiet: false,
+            pause_ms: 2000,
+            copies: false,
+        };
+        let writing = Status::Writing {
+            target: None,
+            text: "hello".to_owned(),
+        };
+        let words = |committed: &str, partial: &str, caret| Line::Words {
+            committed: committed.to_owned(),
+            partial: partial.to_owned(),
+            caret,
+        };
+        let cases = [
+            (
+                capturing(Some("Speak up")),
+                false,
+                Line::Notice("Speak up".to_owned()),
+            ),
+            (capturing(None), false, Line::None),
+            (capturing(None), true, words("hello", "wor", true)),
+            (pending.clone(), true, words("hello", "", false)),
+            (pending, false, Line::None),
+            (writing.clone(), true, words("hello", "", true)),
+            (writing, false, Line::None),
+        ];
+        for (status, draft, line) in cases {
+            let mut view = View::new(false);
+            view.set_draft(draft);
+            view.set_status(status.clone(), 0.0);
+            assert_eq!(view.line, line, "{status:?} draft {draft}");
+        }
+    }
+
+    #[test]
+    fn the_view_animates_while_its_wave_countdown_or_sweep_moves() {
+        let pending = Status::Pending {
+            target: None,
+            route: CaptureRoute::Paste,
+            text: String::new(),
+            waiting_for_quiet: false,
+            pause_ms: 2000,
+            copies: false,
+        };
+        let working = Status::Working {
+            target: None,
+            route: CaptureRoute::Paste,
+            cancellable: false,
+        };
+        let done = Status::Done {
+            target: None,
+            route: CaptureRoute::Paste,
+            notice: String::new(),
+        };
+        for (status, animating) in [
+            (Status::Starting { target: None }, true),
+            (pending, true),
+            (working, true),
+            (done, false),
+            (Status::Listening, false),
+        ] {
+            let mut view = View::new(false);
+            view.set_status(status.clone(), 0.0);
+            assert_eq!(view.animating(), animating, "{status:?}");
+        }
     }
 }

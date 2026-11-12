@@ -554,3 +554,269 @@ fn shadow(canvas: &mut Canvas, (x, y, width, height): (f32, f32, f32, f32), radi
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the overlay's size in pixels at scale 1"
+    )]
+    const COLUMNS: usize = WIDTH as usize;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the overlay's size in pixels at scale 1"
+    )]
+    const ROWS: usize = HEIGHT as usize;
+    use crate::overlay::view::HEIGHT;
+
+    fn words(committed: &str, caret: bool, ending: Option<(&'static str, f32, bool)>) -> Draft {
+        Draft {
+            committed: committed.to_owned(),
+            partial: String::new(),
+            notice: false,
+            caret,
+            ending,
+        }
+    }
+
+    /// The card for `words`, drawn alone at blink time `clock`.
+    fn drawn(words: &Draft, clock: f64) -> Canvas {
+        let mut canvas = Canvas::new(WIDTH, HEIGHT, 1.0).unwrap();
+        let mut view = View::new(false);
+        view.clock = clock;
+        card(&mut canvas, &mut Text::new(), &view, &DARK, words, 10.0);
+        canvas
+    }
+
+    fn pixels(canvas: &Canvas) -> Vec<[u8; 4]> {
+        let mut frame = thalvi_desktop::host::OverlayFrame::default();
+        canvas.frame_into(&mut frame);
+        frame.bgra.as_chunks::<4>().0.to_vec()
+    }
+
+    /// The last row the card's body covers.
+    fn bottom(canvas: &Canvas) -> usize {
+        let width = COLUMNS;
+        let pixels = pixels(canvas);
+        (0..ROWS)
+            .rfind(|y| {
+                pixels[y * width..(y + 1) * width]
+                    .iter()
+                    .any(|p| p[3] >= 200)
+            })
+            .unwrap()
+    }
+
+    /// Where the blinking caret is: the leftmost column and the top row that change with the blink.
+    fn caret(words: &Draft) -> Option<(usize, usize)> {
+        let (on, off) = (pixels(&drawn(words, 0.0)), pixels(&drawn(words, 0.6)));
+        let width = COLUMNS;
+        let changed: Vec<usize> = (0..on.len()).filter(|i| on[*i] != off[*i]).collect();
+        let left = changed.iter().map(|i| i % width).min()?;
+        Some((left, changed[0] / width))
+    }
+
+    #[test]
+    fn neons_card_puts_the_ending_after_the_last_word_or_on_its_own_line_and_counts_under_it() {
+        let ending = Some(("paste", 1.0, true));
+        let plain = bottom(&drawn(&words("hello", false, None), 0.0));
+        let counting = bottom(&drawn(&words("hello", false, ending), 0.0));
+        assert_eq!(counting - plain, 12, "room for the countdown bar");
+        let mut committed = "hello".to_owned();
+        let grown = loop {
+            committed.push_str(" ab");
+            let height = bottom(&drawn(&words(&committed, false, ending), 0.0));
+            if height > counting {
+                break height;
+            }
+        };
+        assert_eq!(
+            bottom(&drawn(&words(&committed, false, None), 0.0)),
+            plain,
+            "the words alone still fit one line"
+        );
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a line's height"
+        )]
+        let line = DRAFT.line_height.round() as usize;
+        assert!(grown.abs_diff(counting + line) <= 1, "{grown} {counting}");
+    }
+
+    #[test]
+    fn neons_caret_follows_the_last_word_onto_new_lines_and_stays_in_view_as_the_card_scrolls() {
+        let mut text = Text::new();
+        let mut width = |words: &str| {
+            text.measure(&[(words, DARK.fg)], DRAFT, Layout::Line, 1.0)
+                .0
+        };
+        let (short, long) = ("hi", "hello there");
+        let (at_short, row) = caret(&words(short, true, None)).unwrap();
+        let (at_long, same_row) = caret(&words(long, true, None)).unwrap();
+        #[expect(clippy::cast_precision_loss, reason = "pixel columns")]
+        let moved = (at_long - at_short) as f32;
+        assert!(
+            (moved - (width(long) - width(short))).abs() <= 1.5,
+            "{moved}"
+        );
+        assert_eq!(row, same_row);
+        assert_eq!(
+            caret(&words(short, false, None)),
+            None,
+            "no caret without one"
+        );
+        let sentence = "one more sentence that runs on ";
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a line's height"
+        )]
+        let line = DRAFT.line_height.round() as usize;
+        for (lines, repeats) in [(2, 2), (3, 4)] {
+            let (_, lower) = caret(&words(&sentence.repeat(repeats), true, None)).unwrap();
+            assert!(
+                lower.abs_diff(row + (lines - 1) * line) <= 1,
+                "{repeats}: {lower}"
+            );
+        }
+        let (_, scrolled) = caret(&words(&sentence.repeat(9), true, None)).unwrap();
+        assert!(
+            scrolled.abs_diff(row + 2 * line) <= 1,
+            "the newest line shows last: {scrolled}"
+        );
+    }
+
+    #[test]
+    fn neons_countdown_bar_fills_by_its_share_and_fades_while_waiting_for_quiet() {
+        let amber = |share: f32, running: bool| {
+            pixels(&drawn(
+                &words("hello", false, Some(("paste", share, running))),
+                0.0,
+            ))
+            .iter()
+            .filter(|[b, g, r, _]| {
+                r.abs_diff(0xff) < 24 && g.abs_diff(0xc2) < 24 && b.abs_diff(0x4b) < 24
+            })
+            .count()
+        };
+        let (full, half) = (amber(1.0, true), amber(0.5, true));
+        assert!(
+            half * 10 > full * 4 && half * 10 < full * 6,
+            "{full} {half}"
+        );
+        assert!(
+            amber(1.0, false) * 4 < full,
+            "faded while waiting for quiet"
+        );
+    }
+
+    #[test]
+    fn neons_card_shows_a_notice_always_and_the_draft_only_when_asked() {
+        let capturing = |notice: Option<&str>| Status::Capturing {
+            target: None,
+            committed: "hello".to_owned(),
+            partial: Some("wor".to_owned()),
+            notice: notice.map(str::to_owned),
+        };
+        let pending = |waiting_for_quiet| Status::Pending {
+            target: None,
+            route: CaptureRoute::Submit,
+            text: "hello".to_owned(),
+            waiting_for_quiet,
+            pause_ms: 2000,
+            copies: false,
+        };
+        let writing = Status::Writing {
+            target: None,
+            text: "hello".to_owned(),
+        };
+        let cases = [
+            (
+                capturing(Some("Speak up")),
+                false,
+                Some(("Speak up", "", true, false, None)),
+            ),
+            (capturing(None), false, None),
+            (
+                capturing(None),
+                true,
+                Some(("hello", "wor", false, true, None)),
+            ),
+            (
+                pending(false),
+                true,
+                Some(("hello", "", false, false, Some(("submit", true)))),
+            ),
+            (
+                pending(true),
+                true,
+                Some(("hello", "", false, false, Some(("submit", false)))),
+            ),
+            (pending(false), false, None),
+            (writing, true, Some(("hello", "", false, true, None))),
+            (Status::Listening, true, None),
+        ];
+        for (status, show_draft, want) in cases {
+            let mut view = View::new(false);
+            view.set_status(status.clone(), 0.0);
+            view.set_draft(show_draft);
+            let got = draft(&view).map(|d| {
+                (
+                    d.committed,
+                    d.partial,
+                    d.notice,
+                    d.caret,
+                    d.ending.map(|(word, _, running)| (word, running)),
+                )
+            });
+            let want = want.map(|(committed, partial, notice, caret, ending)| {
+                (
+                    committed.to_owned(),
+                    partial.to_owned(),
+                    notice,
+                    caret,
+                    ending,
+                )
+            });
+            assert_eq!(got, want, "{status:?} draft {show_draft}");
+        }
+    }
+
+    #[test]
+    fn neons_pill_counts_down_whole_seconds_rounded_down_but_never_below_one() {
+        for (route, copies, left_ms, want) in [
+            (CaptureRoute::Paste, false, 2500, "PASTE IN 2 s"),
+            (CaptureRoute::Write, false, 1000, "WRITE IN 1 s"),
+            (CaptureRoute::Submit, false, 999, "SUBMIT IN 1 s"),
+            (CaptureRoute::Paste, true, 3000, "COPY IN 3 s"),
+            (CaptureRoute::Task, true, 2000, "TASK IN 2 s"),
+        ] {
+            assert_eq!(countdown(route, copies, left_ms), want);
+        }
+    }
+
+    #[test]
+    fn neons_cancel_mark_is_centred_on_its_place() {
+        let mut canvas = Canvas::new(WIDTH, HEIGHT, 1.0).unwrap();
+        cancel_mark(&mut canvas, &mut Text::new(), &DARK, (100.0, 50.0));
+        let width = COLUMNS;
+        let inked: Vec<(usize, usize)> = pixels(&canvas)
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p[3] > 60)
+            .map(|(i, _)| (i % width, i / width))
+            .collect();
+        assert!(!inked.is_empty(), "a mark is drawn");
+        let span = |pick: fn(&(usize, usize)) -> usize| {
+            let values = inked.iter().map(pick);
+            values.clone().min().unwrap() + values.max().unwrap()
+        };
+        assert!(span(|p| p.0).abs_diff(2 * 110) <= 3, "centred on x + 10");
+        assert!(span(|p| p.1).abs_diff(2 * 50) <= 5, "centred on the middle");
+    }
+}
