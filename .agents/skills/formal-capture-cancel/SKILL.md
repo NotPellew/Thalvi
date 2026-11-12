@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `31fac0b6246b7147c4999ec0db089076200e44ad`. The recorded file hashes
+Sync commit: `5139c6d6a978801fae1400edf1f045c7ef8297e7`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -105,6 +105,7 @@ Removing dictation through the Thalvi server (#386) deletes `ServerSession` and 
 same `CLOSE_TIMEOUT`, so `CloseReturns` now maps there. `engine.rs`, `runner.rs` and `delivery.rs` lose the server
 engine's arms and the word-list sharing; no mapped await boundary, control drain or delivery admission changed, so the
 model is unchanged and only the hashes moved.
+Its later tests of a reply that isn't speech live in `recognizer.rs`'s test module; only that hash moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
