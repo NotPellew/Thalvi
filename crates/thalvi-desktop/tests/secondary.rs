@@ -387,7 +387,10 @@ async fn an_unreachable_or_slow_live_endpoint_says_what_failed() {
     let mut session = recognizer.connect().await.expect("connected");
     session.send_frame(&ramp(0)).await.expect("buffered frame");
     session.finish_audio().await.expect("capture ended");
-    let failure = session.next_event().await.expect_err("endpoint is down");
+    let failure = tokio::time::timeout(Duration::from_secs(5), session.next_event())
+        .await
+        .expect("the unreachable endpoint returns an error")
+        .expect_err("endpoint is down");
     assert!(
         failure
             .to_string()
@@ -411,7 +414,10 @@ async fn an_unreachable_or_slow_live_endpoint_says_what_failed() {
     let mut session = recognizer.connect().await.expect("connected");
     session.send_frame(&ramp(1)).await.expect("buffered frame");
     session.finish_audio().await.expect("capture ended");
-    let failure = session.next_event().await.expect_err("request deadline");
+    let failure = tokio::time::timeout(Duration::from_secs(12), session.next_event())
+        .await
+        .expect("the slow endpoint returns its bounded deadline")
+        .expect_err("request deadline");
     assert!(failure.to_string().contains("took too long to transcribe"));
 }
 
