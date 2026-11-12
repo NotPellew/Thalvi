@@ -45,6 +45,10 @@ exclude_re = [
     "get_hold_key_unavailable",
     # Picks the hold key check by the session in the process environment, which a test cannot set (unsafe_code is denied); Hyprland's check is tested directly.
     "replace Desktop::check_hold_keys ->",
+    # The overlay's Tauri wiring (window and theme events, the engine follower, the error dismissal) runs only inside the app; the overlay thread it feeds is tested with a fake surface.
+    "crates/thalvi-app/src/(app|commands).rs.*(replace (setup|create_windows|follow_engine) ->|replace (start_overlay|show|dismiss_error) with \\(\\)|in create_windows)",
+    # Where the overlay's strands, shine and bars land and how fast they ease is judged in screenshots of the real app; the tests pin what it shows, not each pixel.
+    "crates/thalvi-app/src/overlay/(module|neon).rs.*(in (shine|draw_wave|Neon::draw)$|:\\d+:\\d+: replace \\S+ with \\S+$)",
     # Reads the process environment, which a test cannot set (unsafe_code is denied); the socket path it joins is tested through Events::connect.
     "delete ! in Events::system",
     # The updater's Tauri wiring, tray lines and commands run only inside the app; the driver and marker they carry are tested in update.rs.
