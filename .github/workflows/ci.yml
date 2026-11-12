@@ -143,6 +143,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: .github/scripts/gates issue-sync
 
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/thalvi-app/ui/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends minisign
+      - run: .github/scripts/gates release
+
   dependencies:
     name: dependencies
     runs-on: ubuntu-latest

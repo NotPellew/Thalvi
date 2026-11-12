@@ -250,6 +250,10 @@ areas your change touches. Editing rules are in
 - **Releases wait for approval.** `publish` runs in a `release` environment only the developer can approve.
   Why: agent tokens can push tags, and a tag builds and publishes to users. Rejected: a tag ruleset (the token
   acts as the developer, so any bypass for the developer also lets agents through).
+- **The approved `publish` job signs for the updater.** It signs the downloaded packages with `tauri signer sign`
+  after an `--ignore-scripts` install, checks each signature against the committed public key, and writes `latest.json`.
+  Why: the key in the `release` environment never reaches a job that runs build scripts. Rejected: signing inside
+  `tauri build` (`createUpdaterArtifacts`), which needs the key in both package jobs and fails PR builds without it.
 - **Dependency and secret gates.** cargo-deny checks advisories, licences and sources; gitleaks scans
   history in CI and staged changes in a hook. Why: nothing else watched Rust advisories, the binaries link
   every crate, and on a public repo a pushed secret has leaked. Rejected: bans (nothing to ban), flagging

@@ -529,6 +529,23 @@ npm ci --prefix crates/thalvi-app/ui && npm run build --prefix crates/thalvi-app
 cargo run --release -p thalvi-app   # or: cargo install --path crates/thalvi-app
 ```
 
+### Release
+
+A `desktop-vX.Y.Z` tag on `main` builds both packages; after the developer
+approves the `release` environment, `publish` signs them for the updater and
+publishes them with their `.sig` files and `latest.json`.
+
+- **Key:** made once with `npm exec --prefix crates/thalvi-app/ui -- tauri
+  signer generate` and a password. The public key is `plugins.updater.pubkey`
+  in `crates/thalvi-app/tauri.conf.json`; the private key and its password are
+  the `release` environment's `TAURI_SIGNING_PRIVATE_KEY` and
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets, with an offline backup.
+  Without either secret, or with a key that does not match the public key, the
+  release fails and publishes nothing.
+- **Lost or leaked key:** make a new pair, commit the new public key and replace
+  the secrets. Installed apps cannot verify releases signed with the new key, so
+  their users reinstall once from the release page.
+
 ## Measure a setup
 
 `cargo run --release --bin measure -- --setup data/measure/a.env --setup data/measure/b.env`
