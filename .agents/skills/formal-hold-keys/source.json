@@ -1,8 +1,8 @@
 {
-  "sync_commit": "a5060554df34d8b99071e7f379376d4e69466f41",
+  "sync_commit": "6baf0f0e1046590b29f2b562c71aca84f4de0858",
   "files": {
     "crates/thalvi-desktop/src/hold.rs": {
-      "sha256": "7eb3ffcd33786b8368a0a785b848de9317050cb9106bfd8ce6b2ec5ef99ebe3a",
+      "sha256": "5a997a2d51944b718681cc23889c272c34fa866745a09c221adf02266eeb627d",
       "functions": [
         "KeyState",
         "Cutoff::release",
@@ -12,8 +12,15 @@
         "Presses::is_over",
         "HoldInput::set",
         "HoldInput::set_write",
+        "HoldInput::apply",
+        "HoldInput::press_alone",
+        "HoldInput::confirm_alone",
+        "HoldInput::chord",
+        "HoldInput::release",
         "HoldInput::change",
-        "OVERTAKEN_PRESS"
+        "HoldInput::step",
+        "OVERTAKEN_PRESS",
+        "ALONE_AFTER"
       ]
     }
   }

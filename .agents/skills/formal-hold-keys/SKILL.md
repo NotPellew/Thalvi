@@ -1,6 +1,6 @@
 ---
 name: formal-hold-keys
-description: Check that the hold and write keys start one hold per press, that a hold lasts exactly while its own key is down, and that each press is taken or refused once, for every sequence of key events up to a bound, run against the real HoldInput and Presses. Use on any change to crates/thalvi-desktop/src/hold.rs above the Windows hook (KeyState, Cutoff, Presses, HoldInput); the harness runs the real code, but its model of key events must be checked against the change first.
+description: Check that the hold and write keys start one hold per press, that a hold lasts exactly while its own key is down, and that each press is taken or refused once, for every sequence of key events up to a bound, run against the real HoldInput and Presses, also for AltGr alone, which waits to be told from a chord. Use on any change to crates/thalvi-desktop/src/hold.rs above the Windows hook (KeyState, Cutoff, Presses, HoldInput); the harness runs the real code, but its model of key events must be checked against the change first.
 ---
 
 # Formal hold keys
@@ -13,7 +13,7 @@ is either taken or refused once. Breaking this leaves the microphone open after
 the key is up, cuts a dictation short, or answers a key the user is holding with
 "pressed and released too quickly".
 
-Three properties, each checked on the real code:
+Four properties, each checked on the real code:
 
 - `EachPressCountedOnce`: whenever the engine looks, the presses `Presses::take`
   returned plus those `Presses::take_lost` refused equal `KeyState::presses`,
@@ -22,9 +22,14 @@ Three properties, each checked on the real code:
   down, never during another hold, and `Presses::is_over` turns true exactly at
   that key's own release.
 - `FreeKeyStartsHold`: a key that goes down in order while no hold is open and
-  the other key is up starts a hold of that key.
+  the other key is up starts a hold of that key. For AltGr alone, which waits to
+  be told from a chord (#387), that is the moment its wait runs out with the key
+  still alone.
+- `ChordNeverHolds`: a press of AltGr that another key joined, that was released,
+  or whose wait belonged to an earlier press, never opens a hold. Breaking this
+  opens the microphone, with a cue and the overlay, while the user types `@`.
 
-**Current result: PASS.** All three properties hold on the real code. Until #326,
+**Current result: PASS.** All four properties hold on the real code. Until #326,
 `FreeKeyStartsHold` was broken:
 
 1. The write key goes down: `HoldInput::change` starts a write hold, and the engine takes it.
@@ -51,7 +56,7 @@ own, so either order could (not tried on a live session).
 
 ## Covers
 
-Sync commit: `a5060554df34d8b99071e7f379376d4e69466f41`. [source.json](source.json)
+Sync commit: `6baf0f0e1046590b29f2b562c71aca84f4de0858` (#387). [source.json](source.json)
 records the whole-file hash of `crates/thalvi-desktop/src/hold.rs`. Matching
 hashes establish synchronization only, not that the event model still fits. The
 recorded hash also covers the #326 fix, whose own commit cannot name itself, so
@@ -61,12 +66,13 @@ recorded hash also covers the #326 fix, whose own commit cannot name itself, so
 | --- | --- |
 | `hold.rs`: `HoldInput::set`, `HoldInput::set_write`, `HoldInput::change`, `KeyState`, `KeyPhase`, `OVERTAKEN_PRESS` | Called for each arriving key event, in arrival order. Every scenario runs within microseconds, so every early release is inside the 1 s window: the worst case for overtake credit. |
 | `hold.rs`: `Presses::take`, `Presses::take_lost`, `Presses::is_over`, `Cutoff` | A "look" calls `is_over` on the open hold, then `take` and `take_lost`, as `Engine::scan` and `Engine::on_key` do after each change of the watch. |
+| `hold.rs`: `HoldInput::apply`, `press_alone`, `confirm_alone`, `chord`, `release`, `AltGrWait`, `KeyState::since` | A second family of sequences, `Step` in `harness.rs`: the dictate key is AltGr alone and the write key is plain. AltGr goes down alone (`press_alone`, as `apply(Maybe)` does before it starts its timer), another key joins it (`apply(Chord)`), the wait of the latest or of an earlier press runs out (`confirm_alone`, which the timer calls), it comes up (`apply(Up)`); the write key goes down and up (`set_write`). Every legal order of up to 8 steps, looked at after every step, and of up to 7 steps, looked at after any subset of them; only `EachPressCountedOnce` is judged there. The 200 ms of `ALONE_AFTER` is not modelled: a wait runs out at any point after its press. |
 | Hyprland binds (one process per press and per release) | Every `hold-start`, `hold-end`, `write-start` and `write-end` request reaches `HoldInput` through `Running::hold` (`agent.rs`), refused or not, as the Windows hook delivers every key event, so one arrival sequence covers both. An arrival order may swap a quick tap's press and release (`arrivals` in `harness.rs`). |
 | `Engine::scan`'s biased `self.key.changed()` branch | Eager mode: a look after every arrival, up to 8 events. |
 | A watch whose changes are seen late (coalesced, or a cursor not polled) | Late mode: a look after any subset of arrivals, up to 7 events; only `EachPressCountedOnce` is judged there. |
 
 Not covered: `HoldHook` and `HoldHooks` (the Windows hook, which the
-`any_key_order_leaves_one_hold_at_a_time…` property test in `hold.rs` covers),
+`any_key_order_leaves_one_hold_at_a_time…` property test and the AltGr tests in `hold.rs` cover), the 200 ms timer thread in `apply`, the engine's pre-roll of the frames heard since the press (`engine.rs` `begin_hold`; `tests/engine.rs` covers it),
 `Presses::skip` and the hand-offs between the engine's and the runner's cursors
 in `crates/thalvi-app/src/runner.rs` (`formal-capture-cancel`'s `repro.py` replays
 the shutdown, reload and hand-off cases), `Cutoff::precedes` against queued
@@ -89,7 +95,7 @@ Build output goes to `${XDG_CACHE_HOME:-~/.cache}/thalvi-formal/hold-keys-target
 never into the checkout. It needs the Cargo dependencies already fetched and the
 Linux build prerequisites from AGENTS.md. Nothing is installed.
 
-It runs 85,770 scenarios in about 25 s with a warm Cargo cache, most of that
+It runs 351,684 scenarios (85,770 of two plain keys, 265,914 of AltGr alone beside a plain key) in under a minute with a warm Cargo cache, most of that
 compiling; each run has a 600 s limit. It prints `EVIDENCE=...`; `harness.txt` there
 holds the full output. Exit 0 prints `PASS`; exit 1 prints each broken
 property's shortest counterexample as numbered steps, then `FAIL`; exit 2 prints
@@ -111,6 +117,9 @@ break its property:
 | `NoOtherKeyGuard` | no "one hold at a time" check: the other key's release ends the hold | `HoldFollowsItsKey` |
 | `UncountedLoss` | `Presses::take` stops counting presses it passes over | `EachPressCountedOnce` |
 | `ForgetIgnoredKey` | the other key's press and release leave no phase behind while a hold ignores them: the #326 bug | `FreeKeyStartsHold` |
+| `ChordIgnored` | a key joining AltGr does not cancel its wait | `ChordNeverHolds` |
+| `StaleWaitConfirms` | the wait of an earlier press starts the hold of a later one | `ChordNeverHolds` |
+| `ReleaseCreditsWaiting` | the release of a press that never became a hold leaves an early-release credit, as a release of a key that is up does | `FreeKeyStartsHold` |
 
 A fix for the finding must turn `FreeKeyStartsHold` to `HOLDS` without breaking
 the other two, and `ForgetIgnoredKey` is that fix's reversal, so the self-test
@@ -164,7 +173,11 @@ Remove the worktree and confirm the checkout is unchanged.
 Two keys, both up at the start; physical histories of up to 8 key changes,
 looked at after every arrival, and up to 7 looked at after any subset of
 arrivals; every quick tap may arrive release first; every event within 1 s of
-the others. One `Presses` cursor that is never skipped.
+the others. One `Presses` cursor that is never skipped. For AltGr alone beside a
+plain write key: every legal order of up to 8 steps looked at after every step,
+and of up to 7 looked at after any subset; a wait may run out at any point after
+its press (the 200 ms is not modelled), and only the wait of the latest press or
+the oldest earlier one runs out at a time.
 
 Not verified: histories longer than the bounds, events more than a second apart
 (an expired early release), a key already down when the app starts, other
