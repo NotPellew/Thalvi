@@ -520,6 +520,7 @@ function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key"
       if (name === null && event.code !== "Escape") return;
       window.removeEventListener("keydown", record, true);
       change.disabled = false;
+      change.focus();
       if (event.code === "Escape" || name === null) render();
       else set(name);
     };

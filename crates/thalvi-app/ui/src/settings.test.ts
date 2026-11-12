@@ -1960,6 +1960,7 @@ describe("live controls", () => {
 
     it.each(cases)("%s: keys %j, desktop says %j: sends %j, shows %j", async (label, keys, backendSays, sent, shown, restoreDisabled, notice) => {
       const stub = await open();
+      goTo("capture");
       if (backendSays !== null) stub.backend.saveSettings.mockRejectedValue(backendSays);
       const row = rowOf(label);
       within(row, "Change…").click();
@@ -1975,6 +1976,7 @@ describe("live controls", () => {
       expect(row.querySelector("kbd")?.textContent).toBe(shown);
       expect(within(row, "Restore default").disabled).toBe(restoreDisabled);
       expect(within(row, "Change…").disabled).toBe(false);
+      expect(document.activeElement).toBe(within(row, "Change…"));
       expect(row.querySelector(".note")?.textContent ?? "").toBe(notice);
     });
 
