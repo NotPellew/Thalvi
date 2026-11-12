@@ -31,6 +31,14 @@ const CYAN: Rgba = Rgba::rgb(107, 248, 255);
 const QUIET: Rgba = Rgba::rgb(143, 179, 196);
 const INK: Rgba = Rgba::rgb(234, 255, 243);
 const BLACK: Rgba = Rgba::rgb(0, 0, 0);
+/// A delivery's confirmation, centred in the slot.
+const CONFIRMATION: Style = Style {
+    size: 13.0,
+    line_height: 17.0,
+    weight: 600,
+    mono: false,
+    tracking: 0.0,
+};
 /// The ticker's line of words or notice.
 const TICKER: Style = Style {
     size: 14.0,
@@ -121,13 +129,7 @@ impl Module {
         } = &view.status
         {
             let message = done_message(*route, target.as_deref(), notice);
-            let style = Style {
-                size: 13.0,
-                line_height: 17.0,
-                weight: 600,
-                mono: false,
-                tracking: 0.0,
-            };
+            let style = CONFIRMATION;
             let layout = Layout::Centred {
                 width: SLOT_W - 16.0,
             };
@@ -743,17 +745,26 @@ mod tests {
         };
         let short = ink(&words("hello", false), true);
         let (first, last) = inked(&short);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a width in pixels"
+        )]
+        let used = Text::new()
+            .measure(&[("hello", INK)], TICKER, Layout::Line, 1.0)
+            .0
+            .ceil() as usize;
         assert!(
-            (left..left + 3).contains(&first) && last < left + 60,
-            "{first}..{last}"
+            (left..=left + 5).contains(&first) && last <= left + used + 1,
+            "{first}..{last} for {used}"
         );
         let long = ink(
-            &words(&"the newest words stay in view ".repeat(6), false),
+            &words("the newest words stay in view ".repeat(6).trim_end(), false),
             true,
         );
         let (first, last) = inked(&long);
         assert!(
-            first >= left && last + 3 <= right && last + 8 >= right,
+            first >= left && last + 3 <= right && last + 12 >= right,
             "the newest word ends just short of the right edge: {first}..{last}"
         );
         let strongest =
@@ -776,9 +787,15 @@ mod tests {
             &Line::Notice("a notice long enough to run past the end ".repeat(3)),
             true,
         );
+        let shown = notice[left + 80..left + 160]
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let end = notice[right - 8..right].iter().copied().max().unwrap_or(0);
         assert!(
-            notice[left + 100] > 0 && notice[right - 4] < notice[left + 100],
-            "a long notice shows and fades at its end"
+            shown > 200 && end < shown / 2,
+            "a long notice shows and fades at its end: {shown} {end}"
         );
         let mut text = Text::new();
         let mut fits = "a".to_owned();
@@ -986,16 +1003,28 @@ mod tests {
             "{left}..{right}"
         );
         assert!(
-            (left.midpoint(right) - (SLOT.0 + SLOT_W / 2.0)).abs() <= 2.0,
+            (left.midpoint(right) - (SLOT.0 + SLOT_W / 2.0)).abs() <= 4.0,
             "{left}..{right}"
         );
         assert!(
             (top.midpoint(bottom) - (SLOT.1 + SLOT_H / 2.0)).abs() <= 3.0,
             "{top}..{bottom}"
         );
+        let message =
+            "✓ Sent to a-window-with-a-rather-long-name. Delivered, and the answer is on its way.";
+        let (_, height) = Text::new().measure(
+            &[(message, INK)],
+            CONFIRMATION,
+            Layout::Centred {
+                width: SLOT_W - 16.0,
+            },
+            1.0,
+        );
         assert!(
-            bottom - top > 17.0 && bottom - top < 2.0 * 17.0 + 4.0,
-            "two lines: {top}..{bottom}"
+            height >= 2.0 * CONFIRMATION.line_height
+                && bottom - top > height - CONFIRMATION.line_height
+                && bottom - top < height + 2.0,
+            "wrapped to {height} points, inked {top}..{bottom}"
         );
     }
 

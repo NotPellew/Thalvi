@@ -670,24 +670,30 @@ mod tests {
             None,
             "no caret without one"
         );
-        let sentence = "one more sentence that runs on ";
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "a line's height"
         )]
         let line = DRAFT.line_height.round() as usize;
-        for (lines, repeats) in [(2, 2), (3, 4)] {
-            let (_, lower) = caret(&words(&sentence.repeat(repeats), true, None)).unwrap();
-            assert!(
-                lower.abs_diff(row + (lines - 1) * line) <= 1,
-                "{repeats}: {lower}"
-            );
+        // Word by word, the caret drops one line at each wrap until the card shows three lines.
+        let mut draft = "word".to_owned();
+        let mut rows = vec![row];
+        for _ in 0..80 {
+            draft.push_str(" word");
+            let (_, now) = caret(&words(&draft, true, None)).unwrap();
+            if now != *rows.last().unwrap() {
+                rows.push(now);
+            }
         }
-        let (_, scrolled) = caret(&words(&sentence.repeat(9), true, None)).unwrap();
+        let expected: Vec<usize> = (0..3).map(|n| row + n * line).collect();
         assert!(
-            scrolled.abs_diff(row + 2 * line) <= 1,
-            "the newest line shows last: {scrolled}"
+            rows.len() == 3
+                && rows
+                    .iter()
+                    .zip(&expected)
+                    .all(|(got, want)| got.abs_diff(*want) <= 1),
+            "80 words fill more than three lines, and the newest shows last: {rows:?}"
         );
     }
 

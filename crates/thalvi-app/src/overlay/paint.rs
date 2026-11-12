@@ -1035,14 +1035,25 @@ mod tests {
         )
         .iter()
         .sum();
+        let name = text.fonts.db().family_name(&Family::SansSerif).to_owned();
+        let installed = text
+            .fonts
+            .db()
+            .faces()
+            .any(|face| face.families.iter().any(|(family, _)| *family == name));
+        let heavier = installed
+            && text.nearest_weight(Family::SansSerif, 700)
+                > text.nearest_weight(Family::SansSerif, 400);
         assert!(
-            bold * 10 > regular * 11,
-            "bold is heavier: {regular} {bold}"
+            !heavier || bold * 10 > regular * 11,
+            "bold is heavier where the family has a heavier face: {regular} {bold}"
         );
-        let faint = ink(&mut text, &[("Hello", WHITE.alpha(0.5))], style);
+        let strongest = |ink: Vec<u32>| ink.into_iter().max().unwrap();
+        let opaque = strongest(ink(&mut text, &hello, style));
+        let faint = strongest(ink(&mut text, &[("Hello", WHITE.alpha(0.5))], style));
         assert!(
-            faint.iter().max().unwrap().abs_diff(128) <= 2,
-            "half-transparent text"
+            faint * 2 >= opaque.saturating_sub(4) && faint * 2 <= opaque + 4,
+            "half-transparent text: {faint} of {opaque}"
         );
     }
 
@@ -1056,14 +1067,13 @@ mod tests {
             .filter(|face| face.families.iter().any(|(named, _)| named == name))
             .map(|face| face.weight.0)
             .collect();
-        assert!(!has.is_empty(), "{name} has faces");
         for wanted in [1, 400, 650, 1000] {
             let got = text.nearest_weight(Family::SansSerif, wanted);
-            let best = has
-                .iter()
-                .map(|weight| weight.abs_diff(wanted))
-                .min()
-                .unwrap();
+            // A family that is not installed keeps the weight asked for.
+            let Some(best) = has.iter().map(|weight| weight.abs_diff(wanted)).min() else {
+                assert_eq!(got, wanted, "{name} is not installed");
+                continue;
+            };
             assert!(
                 has.contains(&got) && got.abs_diff(wanted) == best,
                 "{wanted}: {got} from {has:?}"
