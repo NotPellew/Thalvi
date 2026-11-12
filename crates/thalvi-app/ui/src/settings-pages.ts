@@ -496,6 +496,48 @@ function wordListTable(draft: Settings, controls: Controls): { node: HTMLElement
   };
 }
 
+/** The Wake words switch: off, Thalvi keeps listening but only the hold keys start a capture. It applies as it is clicked. */
+function wakeSwitch({ draft, controls, backend, applyNow }: PageContext): HTMLElement[] {
+  const toggle = controls.toggle(draft.wake.enabled, () => undefined);
+  const input = toggle.field as HTMLInputElement;
+  const problem = note();
+  const state = el("small", { class: "unit", role: "status" });
+  let paused = false;
+  const show = (): void => {
+    state.textContent = paused
+      ? "Paused: neither the hold keys nor the wake words start anything."
+      : input.checked
+        ? "Listening for the wake words and the hold keys."
+        : "Listening for the hold keys only.";
+  };
+  const follow = (status: Status): void => {
+    paused = status.state === "paused";
+    show();
+  };
+  backend.onStatus(follow);
+  backend.getStatus().then(follow, () => undefined);
+  show();
+  input.addEventListener("change", () => {
+    say(problem, "");
+    const wanted = input.checked;
+    show();
+    applyNow((settings) => {
+      settings.wake.enabled = wanted;
+    }).catch((error: unknown) => {
+      input.checked = !wanted;
+      show();
+      say(problem, errorText(error));
+    });
+  });
+  return [
+    group("Wake words"),
+    row("Wake words", "Off: Thalvi keeps listening, but only the hold keys start a dictation. This applies at once, without Save.", {
+      node: el("span", { class: "stack" }, toggle.node, state, problem),
+      field: input,
+    }),
+  ];
+}
+
 /** The key a `keydown` names as the settings file does, such as `Alt+KeyZ`; null for a modifier alone, except AltGr. */
 function recordedKey(event: KeyboardEvent): string | null {
   // Windows reports AltGr as a left Ctrl it adds, then the right Alt with both flags set; neither is the user's.
@@ -593,6 +635,7 @@ function capture(context: PageContext): HTMLElement[] {
       }),
     );
   return [
+    ...wakeSwitch(context),
     ...wakeHeads(context),
     ...holdKeys(context),
     group("Endings"),
@@ -990,6 +1033,7 @@ function speech(context: PageContext): HTMLElement[] {
   function statusState(status: Status): string {
     switch (status.state) {
       case "listening":
+      case "keyboardOnly":
       case "starting":
       case "capturing":
       case "pending":

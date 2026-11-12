@@ -133,7 +133,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
   function render(next: Status): void {
     const previous = status;
     status = next;
-    root.hidden = next.state === "paused" || next.state === "listening";
+    root.hidden = idle(next);
     root.dataset["state"] = next.state;
     const noticing = next.state === "capturing" && next.notice !== null;
     const drafting = noticing || (showDraft && (next.state === "capturing" || next.state === "pending" || next.state === "writing"));
@@ -147,6 +147,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
     switch (next.state) {
       case "paused":
       case "listening":
+      case "keyboardOnly":
         countdownStart = null;
         return;
       case "starting":
@@ -241,7 +242,7 @@ export function mountOverlay(root: HTMLElement, backend: Backend, clock: Clock):
     });
 
   function idle(of: Status): boolean {
-    return of.state === "paused" || of.state === "listening";
+    return of.state === "paused" || of.state === "listening" || of.state === "keyboardOnly";
   }
 
   function refreshSettings(): void {
