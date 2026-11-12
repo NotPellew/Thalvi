@@ -165,14 +165,13 @@ struct Started {
 }
 
 impl AppState {
-    /// Reads the config and starts the engine.
-    fn start(config: Option<std::path::PathBuf>) -> Result<Started, String> {
+    /// Reads the config and starts the engine. `running` is the app's version as the updater sees it,
+    /// which a development build sets at build time, so not the crate's version.
+    fn start(config: Option<std::path::PathBuf>, running: &Version) -> Result<Started, String> {
         let store = Store::new(config)?;
         let (config, first_start) = store.start()?;
-        let running = Version::parse(env!("CARGO_PKG_VERSION"))
-            .map_err(|error| format!("Thalvi's own version is not valid: {error}"))?;
         let marker = Marker::take(&store.sibling(Marker::FILE));
-        let arrival = marker.as_ref().map(|marker| marker.arrival(&running));
+        let arrival = marker.as_ref().map(|marker| marker.arrival(running));
         let (updates, inbox) = update::channel(Snapshot::start(
             arrival.as_ref().map(|(arrival, _)| arrival.clone()),
         ));
@@ -584,7 +583,7 @@ fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), Stri
         first_start,
         inbox,
         arrival,
-    } = AppState::start(config)?;
+    } = AppState::start(config, &app.package_info().version)?;
     state.restore_login(app);
     state.restore_menu_entry(&menu_entry::System::from_env());
     app.manage(state);
