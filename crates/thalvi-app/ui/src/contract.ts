@@ -49,6 +49,8 @@ export type Ending = "paste" | "write" | "submit" | "task" | "scratch" | "cancel
 export type ScriptActionKind = "open_url" | "focus_app" | "discord_message";
 export type SecondaryApi = "openai" | "meta";
 export type Look = "gunmetal" | "holo" | "neon";
+/** Which builds Thalvi keeps itself updated to. */
+export type UpdateChannel = "stable" | "development";
 
 export interface HeadSettings {
   model: string;
@@ -147,6 +149,7 @@ export interface Settings {
   overlay: { show: boolean; draft: boolean };
   microphone: string | null;
   look: Look;
+  update_channel: UpdateChannel;
   recordings: { metrics: boolean; text: boolean; audio: boolean };
   /** The key held to dictate, such as `Alt+KeyZ`; only Windows reads it. */
   hold_key: string;
@@ -222,6 +225,25 @@ export interface SpeechModelProgress {
   message: string | null;
 }
 
+/** What the update is doing; mirrors `Phase` in crates/thalvi-app/src/update.rs. */
+export type UpdatePhase =
+  | { state: "idle" } // no check has run yet
+  | { state: "checking" }
+  | { state: "upToDate" }
+  | { state: "downloading"; version: string; percent: number | null }
+  | { state: "ready"; version: string } // downloaded and verified; installs once Thalvi is idle
+  | { state: "installing"; version: string }
+  | { state: "failed"; message: string } // the installed version is as it was
+  | { state: "unsupported"; message: string }; // this install cannot update itself
+
+export interface UpdateState {
+  phase: UpdatePhase;
+  /** The release page of the version being fetched or waiting. */
+  notes: string | null;
+  /** What happened at this start, such as "Updated to 0.2.0." */
+  notice: string | null;
+}
+
 /** The Tauri commands and events, behind one interface so tests inject a fake. */
 export interface Backend {
   getStatus(): Promise<Status>;
@@ -295,6 +317,12 @@ export interface Backend {
   /** Saves the stored word list on the server; rejects with the plain reason it could not. */
   shareWordList(): Promise<void>;
   appVersion(): Promise<string>;
+  getUpdateState(): Promise<UpdateState>;
+  onUpdate(listener: (state: UpdateState) => void): void;
+  /** Checks now, or joins the check that is running; the answer arrives as the update's state changes. */
+  checkForUpdates(): Promise<void>;
+  /** Opens the release page of the update being fetched or waiting; rejects with the plain reason it could not. */
+  openReleaseNotes(): Promise<void>;
 }
 
 /** An OS setting Thalvi can switch, or the reason it offers no switch and a line to do it by hand. */

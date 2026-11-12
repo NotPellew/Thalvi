@@ -1,6 +1,6 @@
 // Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the overlay to the n-th status of the script and `?look=holo` or `?look=gunmetal` picks the look.
 
-import type { AudioStatus, Backend, Draft, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 import { LOOKS } from "./look.ts";
 
 const UNIFIED_LANGUAGES = [
@@ -54,6 +54,7 @@ const SETTINGS: Settings = {
   overlay: { show: true, draft: true },
   microphone: null,
   look: "gunmetal",
+  update_channel: "stable",
   recordings: { metrics: true, text: false, audio: false },
   hold_key: "Alt+KeyZ",
   write_key: "Alt+KeyX",
@@ -185,6 +186,12 @@ export function fakeBackend(params: URLSearchParams): Backend {
   };
   let startAtLogin = false;
   let menuEntry = false;
+  const updateListeners: ((state: UpdateState) => void)[] = [];
+  let update: UpdateState = { phase: { state: "idle" }, notes: null, notice: null };
+  const tell = (next: UpdateState): void => {
+    update = next;
+    for (const listener of updateListeners) listener(structuredClone(next));
+  };
   const hyprland = params.has("hyprland");
   const installer = params.has("installer");
   let saved = { ...structuredClone(SETTINGS), look };
@@ -315,5 +322,15 @@ export function fakeBackend(params: URLSearchParams): Backend {
     wordListSupport: () => Promise.resolve(true),
     shareWordList: () => Promise.resolve(),
     appVersion: () => Promise.resolve("0.1.0 (fake)"),
+    getUpdateState: () => Promise.resolve(structuredClone(update)),
+    onUpdate: (listener) => updateListeners.push(listener),
+    checkForUpdates: () => {
+      tell({ phase: { state: "checking" }, notes: null, notice: null });
+      setTimeout(() => {
+        tell({ phase: { state: "upToDate" }, notes: null, notice: null });
+      }, 800);
+      return Promise.resolve();
+    },
+    openReleaseNotes: () => Promise.resolve(),
   };
 }
