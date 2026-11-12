@@ -53,6 +53,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     opened: () => undefined,
     refresh: () => undefined,
     saved: () => undefined,
+    update: () => undefined,
   };
 
   function applyView(): void {
@@ -282,6 +283,9 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     if (progress.status === "done") live.refresh();
   });
   backend.onOpenPage(open);
+  backend.onUpdate((state) => {
+    live.update(state);
+  });
   backend.onSettingsChangedElsewhere(() => {
     if (!saving && draft !== null && JSON.stringify(draft) === baseline) void load();
     else changedElsewhere = true;

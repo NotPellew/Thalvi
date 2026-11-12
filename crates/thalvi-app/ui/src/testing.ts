@@ -1,7 +1,7 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
-import type { AudioStatus, Backend, Draft, HistoryEntry, LiveEntry, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, LiveEntry, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 import type { Clock } from "./overlay.ts";
 
 export const SETTINGS: Settings = {
@@ -26,6 +26,7 @@ export const SETTINGS: Settings = {
   overlay: { show: true, draft: true },
   microphone: null,
   look: "neon",
+  update_channel: "stable",
   recordings: { metrics: true, text: false, audio: false },
   hold_key: "Alt+KeyZ",
   write_key: "Alt+KeyX",
@@ -99,6 +100,8 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
   const elsewhereListeners: (() => void)[] = [];
   const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
   const pageListeners: ((page: string) => void)[] = [];
+  const updateListeners: ((state: UpdateState) => void)[] = [];
+  let updateState: UpdateState = { phase: { state: "idle" }, notes: null, notice: null };
   let audioState: AudioStatus = {
     selected: settings.microphone,
     active: initial.state === "paused" ? null : (settings.microphone ?? "Built-in"),
@@ -158,6 +161,10 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     wordListSupport: vi.fn<(entry: LiveEntry) => Promise<boolean>>(() => Promise.resolve(false)),
     shareWordList: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     appVersion: vi.fn(() => Promise.resolve("1.2.3")),
+    getUpdateState: vi.fn<() => Promise<UpdateState>>(() => Promise.resolve(structuredClone(updateState))),
+    onUpdate: vi.fn((listener: (state: UpdateState) => void) => updateListeners.push(listener)),
+    checkForUpdates: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+    openReleaseNotes: vi.fn<() => Promise<void>>(() => Promise.resolve()),
   } satisfies Backend;
   return {
     backend,
@@ -188,6 +195,10 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     },
     changedElsewhere: () => {
       for (const listener of elsewhereListeners) listener();
+    },
+    update: (next: UpdateState) => {
+      updateState = next;
+      for (const listener of updateListeners) listener(structuredClone(next));
     },
   };
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry, Status } from "./contract.ts";
+import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry, Status, UpdateState } from "./contract.ts";
 import settingsCss from "./settings.css?raw";
 import settingsLooksCss from "./settings-looks.css?raw";
 import { ELSEWHERE_TEXT, mountSettings, SAVED_MICROPHONE_TEXT, SAVED_TEXT } from "./settings.ts";
@@ -182,6 +182,7 @@ describe("pages", () => {
         title: "App",
         groups: {
           Startup: ["start thalvi when i log in", "show thalvi in the app menu"],
+          Updates: ["update channel", "check for updates"],
           Recordings: ["metrics recording", "text recording", "audio recording"],
           "Right now": ["recordings folder"],
           About: ["version"],
@@ -2215,6 +2216,128 @@ describe("live controls", () => {
   it("shows the version", async () => {
     await open();
     expect(rowOf("Version").querySelector("output")?.textContent).toBe("1.2.3");
+  });
+});
+
+describe("updates", () => {
+  const state = (phase: UpdateState["phase"], notes: string | null = null, notice: string | null = null): UpdateState => ({ phase, notes, notice });
+  const status = () => rowOf("Check for updates").querySelector("output");
+  const inRow = (name: string) => within(rowOf("Check for updates"), name);
+
+  async function openOn(version: string, channel: Settings["update_channel"] = "stable") {
+    const stub = stubBackend({ ...structuredClone(SETTINGS), update_channel: channel });
+    stub.backend.appVersion.mockResolvedValue(version);
+    mountSettings(root, stub.backend);
+    await settle();
+    return stub;
+  }
+
+  it("offers Stable first and sends a Development choice with Save", async () => {
+    const stub = await open();
+    const channel = control("Update channel", "select");
+    expect(Array.from(channel.options).map((option) => [option.value, option.textContent])).toEqual([
+      ["stable", "Stable"],
+      ["development", "Development"],
+    ]);
+    expect(channel.value).toBe("stable");
+
+    choose(channel, "development");
+    button("Save").click();
+    expect(sent(stub).update_channel).toBe("development");
+  });
+
+  it.each([
+    [state({ state: "idle" }), "Thalvi has not checked for updates yet. It checks by itself shortly after it starts.", "Check for updates", false, "note ok"],
+    [state({ state: "checking" }), "Checking for updates…", "Check for updates", true, "note ok"],
+    [state({ state: "upToDate" }), "Thalvi 1.2.3 is up to date.", "Check for updates", false, "note ok"],
+    [state({ state: "downloading", version: "1.3.0", percent: 40 }, "https://example.com/1.3.0"), "Downloading 1.3.0 — 40%…", "Check for updates", true, "note ok"],
+    [state({ state: "downloading", version: "1.3.0", percent: null }), "Downloading 1.3.0…", "Check for updates", true, "note ok"],
+    [state({ state: "ready", version: "1.3.0" }, "https://example.com/1.3.0"), "1.3.0 is downloaded. Thalvi installs it and restarts when it is idle: not during a dictation.", "Check for updates", false, "note ok"],
+    [state({ state: "installing", version: "1.3.0" }), "Installing 1.3.0. Thalvi restarts in a moment.", "Check for updates", true, "note ok"],
+    [state({ state: "failed", message: "Thalvi could not reach the update server." }), "Thalvi could not reach the update server.", "Retry", false, "note"],
+    [state({ state: "unsupported", message: "Run Thalvi as the AppImage to update it." }), "Run Thalvi as the AppImage to update it.", "Check for updates", true, "note"],
+  ])("shows the update's state in plain words: %j", async (next, text, label, disabled, tone) => {
+    const stub = await open();
+    stub.update(next);
+    expect(status()?.textContent).toBe(text);
+    expect(status()?.className).toBe(tone);
+    expect(inRow(label).disabled).toBe(disabled);
+  });
+
+  it("tells a failed check apart from being up to date", async () => {
+    const stub = await open();
+    stub.update(state({ state: "upToDate" }));
+    const upToDate = [status()?.textContent, status()?.className];
+    stub.update(state({ state: "failed", message: "Thalvi could not reach the update server." }));
+    expect([status()?.textContent, status()?.className]).not.toEqual(upToDate);
+    expect(inRow("Retry")).toBeDefined();
+  });
+
+  it("shows the state it was opened in, then follows it", async () => {
+    const stub = stubBackend();
+    stub.update(state({ state: "ready", version: "1.3.0" }));
+    mountSettings(root, stub.backend);
+    await settle();
+    expect(status()?.textContent).toContain("1.3.0 is downloaded");
+    stub.update(state({ state: "upToDate" }));
+    expect(status()?.textContent).toBe("Thalvi 1.2.3 is up to date.");
+  });
+
+  it("checks on a click, and says why it could not ask", async () => {
+    const stub = await open();
+    inRow("Check for updates").click();
+    expect(stub.backend.checkForUpdates).toHaveBeenCalledTimes(1);
+
+    stub.backend.checkForUpdates.mockRejectedValueOnce(new Error("Thalvi is shutting down."));
+    inRow("Check for updates").click();
+    await settle();
+    expect(rowOf("Check for updates").textContent).toContain("Thalvi is shutting down.");
+  });
+
+  it("offers the release notes only when the update has some, and says why they would not open", async () => {
+    const stub = await open();
+    expect(inRow("Release notes").hidden).toBe(true);
+    stub.update(state({ state: "ready", version: "1.3.0" }, "https://example.com/1.3.0"));
+    expect(inRow("Release notes").hidden).toBe(false);
+
+    inRow("Release notes").click();
+    expect(stub.backend.openReleaseNotes).toHaveBeenCalledTimes(1);
+    stub.backend.openReleaseNotes.mockRejectedValueOnce(new Error("No browser could be started."));
+    inRow("Release notes").click();
+    await settle();
+    expect(rowOf("Check for updates").textContent).toContain("No browser could be started.");
+
+    stub.update(state({ state: "upToDate" }));
+    expect(inRow("Release notes").hidden).toBe(true);
+  });
+
+  it("says once what the last update did, without hiding the state", async () => {
+    const stub = await open();
+    stub.update(state({ state: "idle" }, null, "Updated to 1.2.3."));
+    const notes = Array.from(rowOf("Check for updates").querySelectorAll("p")).map((paragraph) => [paragraph.textContent, paragraph.hidden]);
+    expect(notes).toContainEqual(["Updated to 1.2.3.", false]);
+    expect(status()?.textContent).toContain("has not checked");
+  });
+
+  it.each([
+    ["0.2.0-dev.3", "stable", true],
+    ["0.2.0-dev.3", "development", false],
+    ["0.2.0-dev.3+abc", "stable", true],
+    ["1.2.3", "stable", false],
+    ["1.2.3+build-5", "stable", false],
+  ] as const)("on %s with %s chosen, the note that Thalvi stays on its build is shown: %s", async (version, channel, shown) => {
+    await openOn(version, channel);
+    const note = Array.from(rowOf("Update channel").querySelectorAll("p")).find((paragraph) => paragraph.textContent.includes("stays on this build"));
+    expect(note !== undefined && !note.hidden).toBe(shown);
+    if (shown) expect(note?.textContent).toBe(`You are on the development build ${version}. On Stable, Thalvi stays on this build until a newer stable release is published.`);
+  });
+
+  it("shows the note as soon as Stable is picked on a development build, before Save", async () => {
+    await openOn("0.2.0-dev.3", "development");
+    const note = () => Array.from(rowOf("Update channel").querySelectorAll("p")).find((paragraph) => !paragraph.hidden);
+    expect(note()).toBeUndefined();
+    choose(control("Update channel", "select"), "stable");
+    expect(note()?.textContent).toContain("stays on this build");
   });
 });
 

@@ -4,7 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AudioStatus, Backend, Draft, HistoryEntry, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 
 export function tauriBackend(): Backend {
   return {
@@ -87,5 +87,13 @@ export function tauriBackend(): Backend {
     wordListSupport: (entry) => invoke<boolean>("word_list_support", { entry }),
     shareWordList: () => invoke<undefined>("share_word_list"),
     appVersion: getVersion,
+    getUpdateState: () => invoke<UpdateState>("get_update_state"),
+    onUpdate: (listener) => {
+      void listen<UpdateState>("thalvi://update", (event) => {
+        listener(event.payload);
+      });
+    },
+    checkForUpdates: () => invoke<undefined>("check_for_updates"),
+    openReleaseNotes: () => invoke<undefined>("open_release_notes"),
   };
 }

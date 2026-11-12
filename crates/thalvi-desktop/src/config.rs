@@ -56,6 +56,8 @@ pub struct DesktopConfig {
     /// The input device to open; `None` is the system default.
     pub microphone: Option<String>,
     pub look: Look,
+    /// Which builds the app updates itself to.
+    pub update_channel: UpdateChannel,
     /// What is recorded on this computer; nothing unless the user turns it on.
     pub recordings: RecordKinds,
     /// The dictation history kept on this computer; on unless the user turns it off.
@@ -104,6 +106,8 @@ struct RawDesktopConfig {
     #[serde(default)]
     look: Look,
     #[serde(default)]
+    update_channel: UpdateChannel,
+    #[serde(default)]
     recordings: RecordKinds,
     #[serde(default)]
     history: HistoryConfig,
@@ -146,6 +150,38 @@ impl TryFrom<String> for Look {
             "holo" => Ok(Self::Holo),
             "gunmetal" => Ok(Self::Gunmetal),
             _ => Err("look must be gunmetal, holo or neon.".to_owned()),
+        }
+    }
+}
+
+/// Which builds the app keeps itself on: `Stable` unless the user picks the development builds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", rename_all = "lowercase")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Development,
+}
+
+impl UpdateChannel {
+    /// The name the config file and the metrics use.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Development => "development",
+        }
+    }
+}
+
+impl TryFrom<String> for UpdateChannel {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, String> {
+        match name.as_str() {
+            "stable" => Ok(Self::Stable),
+            "development" => Ok(Self::Development),
+            _ => Err("update_channel must be stable or development.".to_owned()),
         }
     }
 }
@@ -241,6 +277,7 @@ fn build(
         overlay: raw.overlay,
         microphone,
         look: raw.look,
+        update_channel: raw.update_channel,
         recordings: raw.recordings,
         history: raw.history,
         start_at_login: raw.start_at_login,
@@ -464,6 +501,7 @@ struct FileForm<'a> {
     overlay: &'a OverlayConfig,
     microphone: Option<&'a str>,
     look: Look,
+    update_channel: UpdateChannel,
     recordings: RecordKinds,
     history: HistoryConfig,
     start_at_login: bool,
@@ -569,6 +607,7 @@ impl DesktopConfig {
             overlay: &self.overlay,
             microphone: self.microphone.as_deref(),
             look: self.look,
+            update_channel: self.update_channel,
             recordings: self.recordings,
             history: self.history,
             start_at_login: self.start_at_login,
@@ -1608,6 +1647,7 @@ mod tests {
             "overlay": {"show": false, "draft": true},
             "microphone": " USB Mic ",
             "look": "gunmetal",
+            "update_channel": "development",
             "recordings": {"metrics": true, "text": false, "audio": true},
             "history": {"enabled": false, "limit": 50},
             "start_at_login": true,
@@ -1673,6 +1713,29 @@ mod tests {
             let error = parse(json).unwrap_err().to_string();
             assert!(
                 error.contains("look must be gunmetal, holo or neon."),
+                "{json}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_update_channel_defaults_to_stable_and_rejects_unknown_names() {
+        assert_eq!(parse("{}").unwrap().update_channel, UpdateChannel::Stable);
+        for (name, channel) in [
+            ("stable", UpdateChannel::Stable),
+            ("development", UpdateChannel::Development),
+        ] {
+            let config = parse(&format!(r#"{{"update_channel": "{name}"}}"#)).unwrap();
+            assert_eq!(config.update_channel, channel);
+            assert_eq!(channel.name(), name, "the name the metrics use");
+        }
+        for json in [
+            r#"{"update_channel": "nightly"}"#,
+            r#"{"update_channel": "Stable"}"#,
+        ] {
+            let error = parse(json).unwrap_err().to_string();
+            assert!(
+                error.contains("update_channel must be stable or development."),
                 "{json}: {error}"
             );
         }

@@ -267,7 +267,8 @@ is needed.
   recordings stay.
 - **Linux:** install `wtype` and `wl-copy`, then
   `chmod +x Thalvi_<version>_amd64.AppImage` and run it. Keep it on a path
-  without spaces. To update, replace the file; settings and models stay.
+  without spaces. Thalvi updates the AppImage in place (see
+  [Updates](#updates)); settings and models stay.
 
 Start it once and it stays in the tray; starting it again opens Settings. The
 first start writes the default config, opens Settings on Speech, and downloads
@@ -367,6 +368,36 @@ Settings → App → Startup, both off by default and applied right away:
   shows the `exec-once = … --login` line to add to `hyprland.conf`.
 - **Show Thalvi in the app menu** (AppImage) adds a menu entry and icon under
   `~/.local/share`. On Windows the installer owns the Start menu entry.
+
+### Updates
+
+Thalvi keeps itself on one update channel, chosen in Settings → App → Updates
+(saved with Save): **Stable** (the default) follows released versions;
+**Development** also follows the builds the developer approves for testing.
+Stable never installs a development build, and neither channel ever installs an
+older version, so switching from Development to Stable keeps the development
+build until a newer stable release exists.
+
+- **Supported installs:** the Windows installer's per-user folder, and the Linux
+  AppImage in a folder you can write to. A copy that cannot replace itself, such
+  as a build from source or an AppImage in a read-only folder, says so under
+  Updates and in words you can follow; it does not keep trying.
+- **How it runs:** a check a few seconds after Thalvi is usable, then at most
+  once a day while it runs; **Check for updates** checks at once, and a failed
+  check says so and is retried by the button only. The download is verified
+  against the public key built into the app before anything is installed. A
+  check sends only what is needed to find the right version and is counted, with
+  its time and outcome, in the opt-in metrics.
+- **Restart:** a downloaded update installs, and Thalvi restarts, only while it
+  is idle: no capture, key held, ending countdown or delivery in progress. Until
+  then the tray and Settings show that it is waiting. Nothing is pasted or sent
+  by an update, a paused microphone stays paused, and no window takes focus. The
+  tray and Settings say "Updated to X" once afterwards.
+- **If it fails:** a download, signature or installer failure leaves the
+  installed version working and says what happened under Updates and in the
+  tray. If an install did not take, the next start says so. To recover, download
+  the version you want from [Releases](https://github.com/NotPellew/Thalvi/releases)
+  and install it as in [Install](#install); settings and models stay.
 
 ### Recordings
 

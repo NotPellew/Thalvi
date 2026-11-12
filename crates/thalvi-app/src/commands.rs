@@ -36,6 +36,7 @@ use crate::settings::settings_json;
 use crate::startup;
 use crate::status::Status;
 use crate::switch::{SwitchState, Unavailable};
+use crate::update::Snapshot;
 
 #[tauri::command]
 pub fn get_status(state: State<'_, AppState>) -> Status {
@@ -90,6 +91,36 @@ pub fn save<T>(
     // The overlay window is hidden and idle, so it re-reads the settings when told.
     let _ = app.emit("thalvi://settings", ());
     Ok((value, true))
+}
+
+/// What the update is doing, for a window that opens after the events were sent.
+#[tauri::command]
+pub fn get_update_state(state: State<'_, AppState>) -> Snapshot {
+    state.updates.snapshot()
+}
+
+/// Checks for an update now, or joins the check that is running; the answer comes as the update's
+/// state changes.
+#[tauri::command]
+pub fn check_for_updates(state: State<'_, AppState>) {
+    state.updates.check_now();
+}
+
+/// Opens the release page of the update being fetched or waiting.
+#[tauri::command]
+pub async fn open_release_notes(state: State<'_, AppState>) -> Result<(), String> {
+    let notes = state
+        .updates
+        .snapshot()
+        .notes
+        .ok_or("There are no release notes to open yet.")?;
+    let url = WebUrl::parse(&notes).map_err(|error| error.to_string())?;
+    let host = state.host();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.open_url(&url).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("The page could not be opened: {error}"))?
 }
 
 #[tauri::command]

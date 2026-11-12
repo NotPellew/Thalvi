@@ -18,6 +18,8 @@ import type {
   SpeechModelProgress,
   Status,
   SpeechEntry,
+  UpdateChannel,
+  UpdateState,
   WakeModelInfo,
   SwitchState,
   WritingOpening,
@@ -58,6 +60,8 @@ export interface PageContext {
     refresh: () => void;
     /** Settings were saved, so what a page marks as unsaved is out of date. */
     saved: () => void;
+    /** The update's state changed. */
+    update: (state: UpdateState) => void;
   };
   /** Checks a page adds that must pass before Save sends; each returns null when it has nothing to check. */
   checks: (() => Promise<void> | null)[];
@@ -2028,8 +2032,109 @@ function about({ backend }: PageContext): HTMLElement[] {
   ];
 }
 
+const CHANNELS: readonly (readonly [UpdateChannel, string])[] = [
+  ["stable", "Stable"],
+  ["development", "Development"],
+];
+
+/** Whether a version such as `0.2.0-dev.3` is a pre-release; build metadata after `+` does not count. */
+function isPrerelease(version: string): boolean {
+  return (version.split("+")[0] ?? "").includes("-");
+}
+
+/** What the update is doing, in the words the Updates rows show; a failure is told apart from being up to date. */
+function updateText(update: UpdateState, version: string): string {
+  const phase = update.phase;
+  switch (phase.state) {
+    case "idle":
+      return "Thalvi has not checked for updates yet. It checks by itself shortly after it starts.";
+    case "checking":
+      return "Checking for updates…";
+    case "upToDate":
+      return `Thalvi ${version} is up to date.`;
+    case "downloading":
+      return `Downloading ${phase.version}${phase.percent === null ? "" : ` — ${String(phase.percent)}%`}…`;
+    case "ready":
+      return `${phase.version} is downloaded. Thalvi installs it and restarts when it is idle: not during a dictation.`;
+    case "installing":
+      return `Installing ${phase.version}. Thalvi restarts in a moment.`;
+    case "failed":
+    case "unsupported":
+      return phase.message;
+  }
+}
+
+function updates({ draft, backend, controls, live }: PageContext): HTMLElement[] {
+  let installed = "";
+  let latest: UpdateState = { phase: { state: "idle" }, notes: null, notice: null };
+  const status = el("output", { class: "note ok", role: "status" });
+  const notice = el("p", { class: "note ok", role: "status", hidden: true });
+  const problem = note();
+  const switchNote = el("p", { class: "note ok", hidden: true });
+  const check = button("Check for updates", () => {
+    say(problem, "");
+    backend.checkForUpdates().catch((error: unknown) => {
+      say(problem, errorText(error));
+    });
+  });
+  const notes = button("Release notes", () => {
+    say(problem, "");
+    backend.openReleaseNotes().catch((error: unknown) => {
+      say(problem, errorText(error));
+    });
+  }, "quiet");
+  notes.hidden = true;
+
+  function showSwitchNote(): void {
+    const stays = isPrerelease(installed) && draft.update_channel === "stable";
+    switchNote.hidden = !stays;
+    switchNote.textContent = stays
+      ? `You are on the development build ${installed}. On Stable, Thalvi stays on this build until a newer stable release is published.`
+      : "";
+  }
+
+  function show(next: UpdateState): void {
+    latest = next;
+    const phase = next.phase;
+    status.textContent = updateText(next, installed);
+    status.className = phase.state === "failed" || phase.state === "unsupported" ? "note" : "note ok";
+    check.textContent = phase.state === "failed" ? "Retry" : "Check for updates";
+    check.disabled = phase.state === "checking" || phase.state === "downloading" || phase.state === "installing" || phase.state === "unsupported";
+    notes.hidden = next.notes === null;
+    const told = next.notice !== null && (phase.state === "idle" || phase.state === "upToDate");
+    notice.hidden = !told;
+    notice.textContent = told ? (next.notice ?? "") : "";
+  }
+
+  backend
+    .appVersion()
+    .then((value) => {
+      installed = value;
+      showSwitchNote();
+      show(latest);
+    })
+    .catch(() => undefined);
+  backend.getUpdateState().then(show, (error: unknown) => {
+    say(problem, errorText(error));
+  });
+  live.update = show;
+  show(latest);
+
+  const channel = controls.select(CHANNELS, draft.update_channel, (value) => {
+    draft.update_channel = value;
+    showSwitchNote();
+  });
+  return [
+    group("Updates"),
+    row("Update channel", "Stable follows released versions. Development also follows the builds the developer approves for testing. Applies after Save; Thalvi never goes back to an older version.",
+      { node: el("span", { class: "stack" }, channel.node, switchNote), field: channel.field }),
+    row("Check for updates", "Thalvi checks by itself once a day and installs while idle. A check sends only what is needed to find the right version; it takes effect now and is not part of Save.",
+      { node: el("span", { class: "stack" }, status, notice, el("span", { class: "num" }, check, notes), problem), field: check }),
+  ];
+}
+
 function app(context: PageContext): HTMLElement[] {
-  return [...startup(context), ...recordings(context), ...about(context)];
+  return [...startup(context), ...updates(context), ...recordings(context), ...about(context)];
 }
 
 const PAGES: readonly (readonly [string, string, (context: PageContext) => HTMLElement[]])[] = [

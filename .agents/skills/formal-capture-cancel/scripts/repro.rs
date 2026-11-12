@@ -67,6 +67,16 @@ impl Host for RecordingHost {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Stop {
+    Stopped,
+    Busy,
+    Refused(String),
+}
+enum Flow {
+    Continue,
+    Quit,
+}
 // INSERT_RUNNER_SOURCE
 
 struct ReloadEngine {

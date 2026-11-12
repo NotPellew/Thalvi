@@ -45,4 +45,21 @@ exclude_re = [
     "get_hold_key_unavailable",
     # Reads the process environment, which a test cannot set (unsafe_code is denied); the socket path it joins is tested through Events::connect.
     "delete ! in Events::system",
+    # The updater's Tauri wiring, tray lines and commands run only inside the app; the driver and marker they carry are tested in update.rs.
+    "run_updates",
+    "follow_updates",
+    "<impl Restarter for AppRestarter>",
+    "crates/thalvi-app/src/app.rs.*replace (setup|follow_engine|show) ",
+    "crates/thalvi-app/src/commands.rs.*replace (check_for_updates|open_release_notes) ",
+    "Tray::(say|update|show)",
+    # The tauri-plugin-updater adapter needs the plugin, the process environment and a real feed; the driver uses it through a tested fake Source.
+    "<impl Source for PluginSource>",
+    "appimage_of",
+    "match guard error.is_timeout\\(\\) with (true|false) in explain",
+    # The restart's wall-clock time only feeds a metric the next start writes.
+    "replace now_ms -> u64",
+    # Quitting waits on the real engine thread, which only the app starts; its quit flow is the formal check's.
+    "replace EngineLink::quit with \\(\\)",
+    # Nothing reads a restart request's debug text.
+    "<impl std::fmt::Debug for Restart>::fmt",
 ]

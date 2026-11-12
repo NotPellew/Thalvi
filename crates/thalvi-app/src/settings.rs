@@ -34,6 +34,12 @@ impl Store {
         Ok(Self { path, required })
     }
 
+    /// A file named `name` beside the config.
+    #[must_use]
+    pub fn sibling(&self, name: &str) -> PathBuf {
+        self.path.with_file_name(name)
+    }
+
     /// The config to start with, and whether this is the first start: no file at the per-user path.
     /// A first start writes the defaults as a save with nothing changed would. A path given on the
     /// command line must exist, so a missing one is an error before it can be a first start.
@@ -312,7 +318,7 @@ fn unmask_keys(settings: &mut Value, current: &DesktopConfig) {
     }
 }
 
-fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -358,6 +364,15 @@ mod tests {
     }
 
     #[test]
+    fn the_update_marker_is_kept_beside_the_config() {
+        let (store, dir) = store("sibling");
+        assert_eq!(
+            store.sibling("update.json"),
+            dir.join("nested").join("update.json")
+        );
+    }
+
+    #[test]
     fn the_effective_config_has_every_field_and_says_what_is_recorded() {
         let config =
             DesktopConfig::from_json_str(r#"{"recordings": {"metrics": true, "audio": true}}"#)
@@ -387,6 +402,7 @@ mod tests {
                 "recordings",
                 "scripts",
                 "stt",
+                "update_channel",
                 "wake",
                 "write_key",
                 "writing",
