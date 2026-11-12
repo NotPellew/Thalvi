@@ -199,6 +199,18 @@ impl Desktop {
         Hyprland::default_hold_keys()
     }
 
+    /// Refuses the keys this desktop can never bind, without binding anything; a key that is
+    /// merely taken is found only when the keys are watched.
+    ///
+    /// # Errors
+    /// [`HostError::Unsupported`] saying why a key cannot be used.
+    pub fn check_hold_keys(keys: &[(HoldKind, HoldKey)]) -> Result<(), HostError> {
+        match Session::detect() {
+            Ok(Session::Hyprland) => Hyprland::check_hold_keys(keys),
+            Ok(Session::Gnome) | Err(_) => Ok(()),
+        }
+    }
+
     /// Reports the hold keys as the desktop allows: through binds Thalvi adds to Hyprland, not at
     /// all on GNOME. Problems found after this returns go to `on_problem`.
     ///

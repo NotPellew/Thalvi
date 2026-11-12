@@ -4,7 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AudioStatus, Backend, Draft, HistoryEntry, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, HoldKeyDefaults, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 
 export function tauriBackend(): Backend {
   return {
@@ -57,6 +57,7 @@ export function tauriBackend(): Backend {
       });
     },
     getHoldKeyUnavailable: () => invoke<string | null>("get_hold_key_unavailable"),
+    getHoldKeyDefaults: () => invoke<HoldKeyDefaults>("get_hold_key_defaults"),
     getStartAtLogin: () => invoke<SwitchState>("get_start_at_login"),
     setStartAtLogin: (on) => invoke<undefined>("set_start_at_login", { on }),
     getMenuEntry: () => invoke<SwitchState>("get_menu_entry"),

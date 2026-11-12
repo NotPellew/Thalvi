@@ -16,7 +16,7 @@ use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::draft::DraftView;
 use thalvi_desktop::entries::{self, LiveKind, Realtime};
 use thalvi_desktop::history::{Entry, HistoryError, Store as History};
-use thalvi_desktop::host::{Host, WebUrl};
+use thalvi_desktop::host::{Desktop, Host, WebUrl};
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{
     CatalogHead, CatalogSpeech, ModelError, ModelStore, SpeechAssets, SpeechDownloads,
@@ -570,6 +570,13 @@ pub fn get_hold_key_unavailable(state: State<'_, AppState>) -> Option<&'static s
     state.hold_key_unavailable()
 }
 
+/// The hold and write keys this desktop starts with, named as in the settings.
+#[tauri::command]
+pub fn get_hold_key_defaults() -> Value {
+    let (hold, write) = Desktop::default_hold_keys();
+    json!({"hold_key": hold.to_string(), "write_key": write.to_string()})
+}
+
 #[tauri::command]
 pub fn get_start_at_login(
     app: AppHandle,
@@ -628,6 +635,15 @@ mod tests {
     use thalvi_desktop::models::{Asset, ModelKind};
 
     use super::*;
+
+    #[test]
+    fn the_defaults_the_ui_restores_are_this_desktops_keys_as_the_settings_name_them() {
+        let (hold, write) = Desktop::default_hold_keys();
+        assert_eq!(
+            get_hold_key_defaults(),
+            json!({"hold_key": hold.to_string(), "write_key": write.to_string()})
+        );
+    }
 
     #[tokio::test]
     async fn a_download_that_fails_tells_the_ui_how_far_it_got_and_why_and_records_the_error() {

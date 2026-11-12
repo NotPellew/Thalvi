@@ -50,6 +50,14 @@ impl Hyprland {
         (HoldKey::f9(), HoldKey::f10())
     }
 
+    /// Refuses the keys Hyprland cannot bind without binding anything.
+    ///
+    /// # Errors
+    /// [`HostError::Unsupported`] when a key has a modifier.
+    pub fn check_hold_keys(keys: &[(HoldKind, HoldKey)]) -> Result<(), HostError> {
+        hold_binds::check(keys)
+    }
+
     /// Binds `keys` in Hyprland to the `hold-*` and `write-*` commands of the running program,
     /// which report the presses and releases, so `_on_change` is not called. The binds go when the
     /// watch is dropped, and come back after a config reload. Later problems go to `on_problem`.
@@ -545,6 +553,16 @@ impl<R: CommandRunner> Host for Hyprland<R> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_modifier_is_refused_before_anything_is_bound() {
+        let key = |name: &str| (HoldKind::Dictate, HoldKey::parse(name).unwrap());
+        assert!(Hyprland::check_hold_keys(&[key("F9")]).is_ok());
+        assert!(matches!(
+            Hyprland::check_hold_keys(&[key("F9"), key("Alt+KeyZ")]),
+            Err(HostError::Unsupported(reason)) if reason.contains("Alt+KeyZ")
+        ));
+    }
+
     #[test]
     fn the_shipped_binds_leave_the_hold_keys_to_thalvi() {
         let conf = include_str!("../../../../integrations/hyprland/hyprland-binds.conf");

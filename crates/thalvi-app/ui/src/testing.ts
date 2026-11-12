@@ -1,7 +1,7 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
-import type { AudioStatus, Backend, Draft, HistoryEntry, LiveEntry, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, HoldKeyDefaults, LiveEntry, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 import type { Clock } from "./overlay.ts";
 
 export const SETTINGS: Settings = {
@@ -137,6 +137,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     discardDraft: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     onOpenPage: vi.fn((listener: (page: string) => void) => pageListeners.push(listener)),
     getHoldKeyUnavailable: vi.fn<() => Promise<string | null>>(() => Promise.resolve(null)),
+    getHoldKeyDefaults: vi.fn<() => Promise<HoldKeyDefaults>>(() => Promise.resolve({ hold_key: "Alt+KeyZ", write_key: "Alt+KeyX" })),
     getStartAtLogin: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),
     setStartAtLogin: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
     getMenuEntry: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),

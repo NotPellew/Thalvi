@@ -8,6 +8,7 @@ import type {
   Ending,
   HistoryEntry,
   HistoryOutcome,
+  HoldKeyDefaults,
   ScriptActionKind,
   LiveEntry,
   OnDeviceEntry,
@@ -41,6 +42,8 @@ export interface PageContext {
   audio: AudioStatus;
   /** Why this desktop offers no hold key, or null where it does. */
   holdKeyUnavailable: string | null;
+  /** The keys this desktop starts with. */
+  holdKeyDefaults: HoldKeyDefaults;
   /** Whether the OS starts Thalvi at login, or why that could not be read. */
   startAtLogin: SwitchRead;
   /** Whether Thalvi is in the app menu, or why that could not be read. */
@@ -68,7 +71,14 @@ export interface PageContext {
   /** The settings as last saved, or null before they are read. */
   saved: () => Settings | null;
   /** Saves the last saved settings with `change` applied, leaving other unsaved edits in the draft; says why in the footer when it fails. */
-  applyNow: (change: (settings: Settings) => void) => Promise<void>;
+  applyNow: (change: (settings: Settings) => void, options?: ApplyOptions) => Promise<void>;
+}
+
+export interface ApplyOptions {
+  /** The change takes effect as it is saved, so the footer does not say it waits for a capture. */
+  atOnce?: boolean;
+  /** Rewrites the reason a refused change is shown with, in the footer and to the caller. */
+  explain?: (reason: string) => string;
 }
 
 /** An OS switch as read, or why it could not be. */
@@ -486,13 +496,87 @@ function wordListTable(draft: Settings, controls: Controls): { node: HTMLElement
   };
 }
 
-/** The hold key has no setting here; the group appears only where the desktop gives the app no way to see it. */
-function holdKey({ holdKeyUnavailable }: PageContext): HTMLElement[] {
-  if (holdKeyUnavailable === null) return [];
+/** The key a `keydown` names as the settings file does, such as `Alt+KeyZ`; null for a modifier alone. */
+function recordedKey(event: KeyboardEvent): string | null {
+  if (/^(?:Control|Shift|Alt|Meta)(?:Left|Right)$/.test(event.code)) return null;
+  const modifiers = [event.ctrlKey && "Ctrl", event.shiftKey && "Shift", event.altKey && "Alt", event.metaKey && "Win"].filter((name) => name !== false);
+  return [...modifiers, event.code].join("+");
+}
+
+/** Text with every key written as the keyboard shows it, not as the settings file names it: `Alt+KeyZ` is "Alt+Z". */
+function keyLabel(text: string): string {
+  return text.replace(/(?:Key|Digit)(?=[A-Z0-9](?![A-Za-z0-9]))/g, "");
+}
+
+/** Why `recorded` was refused, in the words of the rows; a name that is no key at all can't be used, however it is spelled. */
+function holdKeyNotice(reason: string, recorded: string): string {
+  if (reason.startsWith(`The key "${recorded}" is not a key name`)) {
+    return `${keyLabel(recorded)} can't be used as a hold key. Use a letter, a digit, Space or F1 to F12, alone or with Ctrl, Shift, Alt or Win.`;
+  }
+  return keyLabel(reason);
+}
+
+/** One hold key: the key in effect, a recorder that applies the next combination pressed, and a way back to the default. `notices` holds every hold key row's notice, which any new attempt clears. */
+function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key", { draft, applyNow, holdKeyDefaults }: PageContext, notices: HTMLElement[]): HTMLElement {
+  const shown = el("kbd", { class: "key" });
+  const problem = note();
+  notices.push(problem);
+  const clearNotices = (): void => {
+    for (const notice of notices) say(notice, "");
+  };
+  const restore = button("Restore default", () => {
+    set(holdKeyDefaults[field]);
+  }, "quiet");
+  const change = button("Change…", () => {
+    clearNotices();
+    shown.textContent = "Press the new key. Escape cancels.";
+    change.disabled = true;
+    restore.disabled = true;
+    const record = (event: KeyboardEvent): void => {
+      event.preventDefault();
+      event.stopPropagation();
+      const name = recordedKey(event);
+      if (name === null && event.code !== "Escape") return;
+      window.removeEventListener("keydown", record, true);
+      change.disabled = false;
+      change.focus();
+      if (event.code === "Escape" || name === null) render();
+      else set(name);
+    };
+    window.addEventListener("keydown", record, true);
+  });
+
+  function render(): void {
+    shown.textContent = keyLabel(draft[field]);
+    restore.disabled = draft[field] === holdKeyDefaults[field];
+  }
+
+  function set(name: string): void {
+    clearNotices();
+    applyNow((settings) => {
+      settings[field] = name;
+    }, { atOnce: true, explain: (reason) => holdKeyNotice(reason, name) }).then(render, (error: unknown) => {
+      say(problem, errorText(error));
+      render();
+    });
+  }
+
+  render();
+  return row(label, hint, el("span", { class: "stack" }, el("span", { class: "trow" }, shown, change, restore), problem));
+}
+
+/** Where the desktop gives the app no way to see a key, the group says why and has no controls. */
+function holdKeys(context: PageContext): HTMLElement[] {
+  const { holdKeyUnavailable } = context;
+  if (holdKeyUnavailable !== null) {
+    const why = (): HTMLElement => unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null });
+    return [group("Hold keys"), row("Dictate key", null, why()), row("Write key", null, why())];
+  }
+  const notices: HTMLElement[] = [];
   return [
-    group("Hold key"),
-    row("Hold a key to dictate", null, unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null })),
-    row("Hold a key to write", null, unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null })),
+    group("Hold keys"),
+    holdKeyRow("Dictate key", "Hold it, speak, let go to paste.", "hold_key", context, notices),
+    holdKeyRow("Write key", "Hold it, speak, let go to have the words written out, then pasted.", "write_key", context, notices),
   ];
 }
 
@@ -508,7 +592,7 @@ function capture(context: PageContext): HTMLElement[] {
     );
   return [
     ...wakeHeads(context),
-    ...holdKey(context),
+    ...holdKeys(context),
     group("Endings"),
     row("Ending phrases", "Say one to finish a capture. Every action needs at least one phrase.", endingsTable(context)),
     group("Quiet before acting"),

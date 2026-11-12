@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use thalvi_desktop::config::{ConfigError, DesktopConfig};
 use thalvi_desktop::entries::{self, LiveKind};
+use thalvi_desktop::hold::{HoldKey, HoldKind};
+use thalvi_desktop::host::{Desktop, HostError};
 use thalvi_desktop::transducer::{SpeechChoice, check_folder};
 use thalvi_desktop::wake::validate_wake_model;
 use thalvi_desktop::writing::{DEFAULT_PROMPT, Writing};
@@ -87,6 +89,7 @@ impl Store {
     /// The loader's message when the settings are invalid.
     pub fn check(mut settings: Value, current: &DesktopConfig) -> Result<DesktopConfig, String> {
         prepare(&mut settings, current);
+        check_keys(&settings, current, Desktop::check_hold_keys)?;
         load(&settings)
     }
 
@@ -128,6 +131,30 @@ fn prepare(settings: &mut Value, current: &DesktopConfig) {
         settings.insert("show_in_menu".to_owned(), Value::Bool(current.show_in_menu));
     }
     unmask_keys(settings, current);
+}
+
+/// Refuses changed hold keys this desktop can never bind, before the loader reads them: it takes
+/// the key every config once stored (Alt+KeyZ, Alt+KeyX) for the desktop's default, so a refusal
+/// after it would never see that key. A key that is no key name is the loader's to refuse.
+fn check_keys(
+    settings: &Value,
+    current: &DesktopConfig,
+    check: impl FnOnce(&[(HoldKind, HoldKey)]) -> Result<(), HostError>,
+) -> Result<(), String> {
+    let asked = |name: &str, current: &HoldKey| {
+        settings
+            .get(name)
+            .and_then(Value::as_str)
+            .and_then(|key| HoldKey::parse(key).ok())
+            .unwrap_or_else(|| current.clone())
+    };
+    let hold = asked("hold_key", &current.hold_key);
+    let write = asked("write_key", &current.write_key);
+    if (&hold, &write) == (&current.hold_key, &current.write_key) {
+        return Ok(());
+    }
+    check(&[(HoldKind::Dictate, hold), (HoldKind::Write, write)])
+        .map_err(|error| format!("{error} The keys that were set before still work."))
 }
 
 /// Validates `settings` as the loader does at startup.
@@ -199,6 +226,7 @@ pub fn judge(
 ) -> Result<DesktopConfig, String> {
     ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
     prepare(&mut settings, current);
+    check_keys(&settings, current, Desktop::check_hold_keys)?;
     let config = load(&settings)?;
     let mut before = serde_json::to_value(current).map_err(|error| error.to_string())?;
     let known: Vec<Value> = entries_of(&mut before)
@@ -351,7 +379,6 @@ mod tests {
     use serde_json::json;
     use thalvi_desktop::config::Look;
     use thalvi_desktop::entries::LiveKind;
-    use thalvi_desktop::host::Desktop;
     use thalvi_desktop::transducer::SpeechChoice;
 
     use super::*;
@@ -476,12 +503,49 @@ mod tests {
             (None, None)
         );
 
-        settings["hold_key"] = json!("Ctrl+F8");
+        settings["hold_key"] = json!("F8");
         let saved = store.save(settings, &store_defaults()).unwrap();
         let (kept, absent) = (file()["hold_key"].clone(), file().get("write_key").cloned());
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(saved.hold_key.to_string(), "Ctrl+F8");
-        assert_eq!((kept, absent), (json!("Ctrl+F8"), None));
+        assert_eq!(saved.hold_key.to_string(), "F8");
+        assert_eq!((kept, absent), (json!("F8"), None));
+    }
+
+    #[test]
+    fn a_changed_hold_key_the_desktop_can_never_bind_is_refused_even_when_it_was_the_old_default() {
+        let refuse_modifiers = |keys: &[(HoldKind, HoldKey)]| match keys
+            .iter()
+            .find(|(_, key)| !key.modifiers().is_empty())
+        {
+            Some((_, key)) => Err(HostError::Unsupported(format!("No {key} here."))),
+            None => Ok(()),
+        };
+        let mut current = store_defaults();
+        current.hold_key = HoldKey::f9();
+        current.write_key = HoldKey::f10();
+        let asked = |hold: &str, write: &str| {
+            let mut settings = settings_json(&current).unwrap();
+            settings["hold_key"] = json!(hold);
+            settings["write_key"] = json!(write);
+            check_keys(&settings, &current, refuse_modifiers)
+        };
+
+        for (hold, write, refused) in [
+            ("F9", "F10", None),
+            ("F8", "F10", None),
+            ("Alt+KeyZ", "F10", Some("No Alt+KeyZ here.")),
+            ("F9", "Alt+KeyX", Some("No Alt+KeyX here.")),
+            ("Ctrl+F8", "F10", Some("No Ctrl+F8 here.")),
+            ("Alt+Hyper", "F10", None),
+        ] {
+            assert_eq!(
+                asked(hold, write),
+                refused.map_or(Ok(()), |reason| Err(format!(
+                    "{reason} The keys that were set before still work."
+                ))),
+                "{hold} {write}"
+            );
+        }
     }
 
     #[test]
