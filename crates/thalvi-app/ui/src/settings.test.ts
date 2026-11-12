@@ -1958,7 +1958,7 @@ describe("live controls", () => {
       ["Dictate key", [["KeyZ", "alt"]], MODIFIER, "Alt+KeyZ", "Alt+Z", true, MODIFIER],
     ];
 
-    it.each(cases)("%s: %j with the desktop saying %j sends %j, shows %j and says %j", async (label, keys, backendSays, sent, shown, restoreDisabled, notice) => {
+    it.each(cases)("%s: keys %j, desktop says %j: sends %j, shows %j", async (label, keys, backendSays, sent, shown, restoreDisabled, notice) => {
       const stub = await open();
       if (backendSays !== null) stub.backend.saveSettings.mockRejectedValue(backendSays);
       const row = rowOf(label);
