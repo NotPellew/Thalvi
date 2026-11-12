@@ -259,7 +259,7 @@ fn build(
         .map(|name| nonempty(&name, "microphone"))
         .transpose()?;
     if write_key == hold_key {
-        return Err("The write key must differ from the hold key.".to_owned());
+        return Err("The write key must differ from the dictate key.".to_owned());
     }
     let (entries, phrases) = raw
         .stt
@@ -752,7 +752,7 @@ mod tests {
         ] {
             let error = key(json).unwrap_err();
             assert!(
-                error.contains("must differ from the hold key"),
+                error.contains("must differ from the dictate key"),
                 "{json}: {error}"
             );
         }
@@ -762,7 +762,10 @@ mod tests {
             "the keys may swap places"
         );
         let error = loaded(r#"{"hold_key": "F10"}"#, &HYPRLAND()).unwrap_err();
-        assert!(error.contains("must differ from the hold key"), "{error}");
+        assert!(
+            error.contains("must differ from the dictate key"),
+            "{error}"
+        );
     }
 
     #[test]
