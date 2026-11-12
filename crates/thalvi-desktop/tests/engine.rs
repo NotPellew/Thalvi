@@ -386,6 +386,15 @@ async fn a_buffered_wake_capture_uploads_after_the_voice_pause() {
                     .count(),
                 1
             );
+            rig.at(8_000).await;
+            assert_eq!(
+                rig.state(),
+                EngineState::TranscribingLive {
+                    route: CaptureRoute::Paste
+                },
+                "a buffered upload does not use the microphone watchdog"
+            );
+            assert!(!task.is_finished(), "the pending upload can still answer");
             rig.finals("voice after a pause").await;
             assert_eq!(
                 finished(task).await,

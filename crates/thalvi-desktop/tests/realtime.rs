@@ -6,8 +6,12 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use thalvi_desktop::entries::Realtime;
+use thalvi_desktop::chosen::Chosen;
+use thalvi_desktop::device::Adapters;
+use thalvi_desktop::entries::{LiveEntry, LiveKind, Realtime};
 use thalvi_desktop::frame::FRAME_SAMPLES;
+use thalvi_desktop::metrics::Recorder;
+use thalvi_desktop::models::ModelStore;
 use thalvi_desktop::phrases::WordList;
 use thalvi_desktop::realtime::RealtimeRecognizer;
 use thalvi_desktop::recognizer::{
@@ -148,6 +152,48 @@ async fn a_recognizer_that_does_not_announce_boosting_never_sees_the_word_list()
         .await
         .expect("ready");
     session.send_frame(&[1; FRAME_SAMPLES]).await.expect("send");
+    session.close().await;
+}
+
+#[tokio::test]
+async fn chosen_realtime_entry_does_not_buffer_audio() {
+    let address = serve(|mut socket| async move {
+        socket.next().await.expect("handshake").expect("message");
+        socket
+            .send(text(&json!({"sessionId": "s", "phraseBoosting": true})))
+            .await
+            .expect("ready");
+        socket.next().await.expect("phrase list").expect("message");
+        let end = socket.next().await.expect("end stream").expect("message");
+        assert_eq!(
+            serde_json::from_str::<Value>(end.to_text().expect("text")).expect("JSON"),
+            json!({"type": "endStream"})
+        );
+    })
+    .await;
+    let entry = LiveEntry {
+        id: "realtime".to_owned(),
+        name: "Realtime speech".to_owned(),
+        kind: LiveKind::Realtime(
+            Realtime::new(&address, "nemotron", KEY.to_owned()).expect("entry"),
+        ),
+    };
+    let chosen = Chosen::new(
+        &entry,
+        ModelStore::in_dir("unused"),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+        &WordList::default(),
+        Adapters::default(),
+    );
+    let session = tokio::time::timeout(WAIT, chosen.connect())
+        .await
+        .expect("connects")
+        .expect("ready");
+    assert!(
+        !session.buffers_audio(),
+        "realtime audio streams as it arrives"
+    );
     session.close().await;
 }
 

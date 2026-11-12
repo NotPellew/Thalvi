@@ -14,14 +14,20 @@ use axum::body::to_bytes;
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
 use axum::{body::Body, response::Response};
+use thalvi_desktop::chosen::Chosen;
+use thalvi_desktop::device::Adapters;
+use thalvi_desktop::entries::{LiveEntry, LiveKind};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::metrics::Recorder;
+use thalvi_desktop::models::{CatalogSpeech, ModelStore};
 use thalvi_desktop::openai_live::OpenAiRecognizer;
+use thalvi_desktop::phrases::WordList;
 use thalvi_desktop::recognizer::Upsampler;
-use thalvi_desktop::recognizer::{Recognizer, RecognizerEvent, RecognizerSession};
+use thalvi_desktop::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
 use thalvi_desktop::secondary::{
     SecondaryApi, SecondaryError, SecondaryStt, SecondarySttError, transcribe,
 };
+use thalvi_desktop::transducer::SpeechChoice;
 use tokio::sync::mpsc;
 
 struct Captured {
@@ -197,6 +203,84 @@ async fn openai_streaming_emits_cumulative_text_and_plain_json_still_works() {
         "/v1/audio/transcriptions"
     );
     assert!(rx.try_recv().is_err(), "one upload for one capture");
+}
+
+#[tokio::test]
+async fn chosen_live_openai_entry_buffers_and_forwards_the_whole_capture() {
+    let (url, mut rx) = serve_sse(
+        "data: {\"type\":\"transcript.text.delta\",\"delta\":\"hello\"}\n\ndata: {\"type\":\"transcript.text.done\",\"text\":\"hello\"}\n\n",
+    )
+    .await;
+    let entry = LiveEntry {
+        id: "live".to_owned(),
+        name: "Local speech".to_owned(),
+        kind: LiveKind::OpenAi(settings(&url, SecondaryApi::OpenAi, "")),
+    };
+    let chosen = Chosen::new(
+        &entry,
+        ModelStore::in_dir("unused"),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+        &WordList::default(),
+        Adapters::default(),
+    );
+    let mut session = chosen.connect().await.expect("connects before upload");
+    assert!(session.buffers_audio(), "audio waits until capture ends");
+    session.send_frame(&ramp(0)).await.expect("buffer frame");
+    assert!(rx.try_recv().is_err(), "the request waits for release");
+    session.finish_audio().await.expect("capture ended");
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        loop {
+            let event = session.next_event().await?;
+            let final_event = matches!(event, RecognizerEvent::Final(_));
+            events.push(event);
+            if final_event {
+                return Ok::<_, RecognizerError>(events);
+            }
+        }
+    })
+    .await
+    .expect("the upload starts after release")
+    .expect("transcription succeeds");
+    assert_eq!(
+        result,
+        [
+            RecognizerEvent::Partial("hello".to_owned()),
+            RecognizerEvent::Final("hello".to_owned())
+        ]
+    );
+
+    let captured = rx.recv().await.expect("one upload");
+    assert_eq!(captured.path, "/v1/audio/transcriptions");
+    let uploaded = parts(&captured)
+        .into_iter()
+        .find(|(headers, _)| headers.contains("name=\"file\""))
+        .expect("WAV part")
+        .1;
+    assert!(
+        uploaded[44..].iter().any(|byte| *byte != 0),
+        "the frame is sent"
+    );
+    assert!(rx.try_recv().is_err(), "one request per capture");
+}
+
+#[test]
+fn only_an_on_device_entry_has_a_preloadable_recognizer() {
+    let entry = LiveEntry {
+        id: "local".to_owned(),
+        name: "On this computer".to_owned(),
+        kind: LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
+    };
+    let chosen = Chosen::new(
+        &entry,
+        ModelStore::in_dir("unused"),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+        &WordList::default(),
+        Adapters::default(),
+    );
+    assert!(chosen.local().is_some());
 }
 
 #[tokio::test]
