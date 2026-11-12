@@ -483,9 +483,17 @@ phrase ends or cancels a hold: words such as "never mind" are dictated as text.
 To abandon a hold, use the `cancel` command: the tray's **Cancel**, or a key
 bound to `thalvi-desktop cancel` (the Hyprland examples bind SUPER+Escape).
 
+Choose the keys under **Settings → Capture → Hold keys**: **Change…** records the
+next combination you press in the Settings window (Escape cancels), and **Restore
+default** goes back to the desktop's own key. A key applies at once, with no Save.
+Thalvi refuses a key that is not a key it can use, the same key for both actions,
+and one the desktop will not bind, says why under the row, and keeps the keys that
+worked. A key other than the default is stored as `hold_key` in the config. GNOME
+shows why it has no hold key and no controls.
+
 - **Hyprland:** F9, with no modifier. Thalvi binds the key in Hyprland itself while
   it runs and binds it again after `hyprctl reload`, so `hyprland.conf` needs no
-  lines for it. Set another of F1 to F12 as `hold_key` in the config. Hyprland types
+  lines for it. Pick another of F1 to F12. Hyprland types
   any modifier you still hold into the pasted text and skips the release when a
   modifier comes up first, so the key must be a single key. If another bind already
   uses the key, or `hold-start` lines from an older `hyprland-binds.conf` are still in
@@ -493,9 +501,9 @@ bound to `thalvi-desktop cancel` (the Hyprland examples bind SUPER+Escape).
   another key; a key that cannot be bound keeps the previous one working.
 - **Windows:** Alt and the key left of X (Z on a QWERTY keyboard, Y on QWERTZ).
   The app watches the keyboard itself and keeps the key from the focused app; the
-  hold ends when the key and Alt are both up. Set another as `hold_key` in the
-  config, such as `Ctrl+Shift+F9`, named by its place on the keyboard (`Alt+KeyZ`,
-  `Digit1`, `Space`, `F9`). While an administrator window is focused, Windows
+  hold ends when the key and Alt are both up. Pick another, such as `Ctrl+Shift+F9`;
+  the config names it by its place on the keyboard (`Alt+KeyZ`, `Digit1`, `Space`,
+  `F9`). While an administrator window is focused, Windows
   shows Thalvi no keys and lets it send no keys, so the key reaches that window
   as usual and no dictation starts.
 
@@ -537,10 +545,11 @@ match uses the Writing prompt. Rules apply only when you write out with "write t
 out" or the write key. A new rule starts as a copy of the Writing prompt, and a
 rule edited in Settings applies from the next capture.
 
-- **Hyprland:** F10, with no modifier, bound by Thalvi like the hold key
-  (`write_key` in the config).
-- **Windows:** Alt and X (`write_key` in the config), kept from the focused app
-  like the hold key. It must differ from `hold_key`.
+- **Hyprland:** F10, with no modifier, bound by Thalvi like the hold key.
+- **Windows:** Alt and X, kept from the focused app like the hold key.
+
+Change the write key in the **Write key** row of the same **Hold keys** group
+(`write_key` in the config). It must differ from the dictate key.
 
 ### Config
 
