@@ -1741,7 +1741,7 @@ mod tests {
         let with_write: &[(HoldKind, &str)] = &[(Dictate, "AltRight"), (Write, "Alt+KeyX")];
         let with_dictate: &[(HoldKind, &str)] = &[(Dictate, "Alt+KeyZ"), (Write, "AltRight")];
         // (what happens, the keys set, events as (key, down, time), what each gets)
-        let cases: [AltGrCase; 12] = [
+        let cases: [AltGrCase; 15] = [
             (
                 "US layout: right Alt alone",
                 altgr,
@@ -1875,6 +1875,42 @@ mod tests {
                 vec![
                     nothing.clone(),
                     (Verdict::Swallow, vec![(Dictate, HoldChange::Down)]),
+                ],
+            ),
+            (
+                "German layout, the Ctrl in the same millisecond as the right Alt, after it, is the one Windows adds",
+                altgr,
+                &[
+                    (RIGHT_ALT, true, 100),
+                    (LEFT_CTRL, true, 100),
+                    (RIGHT_ALT, false, 300),
+                ],
+                vec![maybe(Dictate), nothing.clone(), lone_release(Dictate)],
+            ),
+            (
+                "a Ctrl that comes after the right Alt in another millisecond is a chord",
+                altgr,
+                &[
+                    (RIGHT_ALT, true, 100),
+                    (LEFT_CTRL, true, 160),
+                    (RIGHT_ALT, false, 300),
+                ],
+                vec![maybe(Dictate), chord(Dictate), chord_release(Dictate)],
+            ),
+            (
+                "the release of the left Alt ends the other key's hold and is masked beside an AltGr key",
+                with_dictate,
+                &[
+                    (ALT, true, 100),
+                    (Z, true, 160),
+                    (Z, false, 220),
+                    (ALT, false, 300),
+                ],
+                vec![
+                    nothing.clone(),
+                    (Verdict::Swallow, vec![(Dictate, HoldChange::Down)]),
+                    (Verdict::Swallow, vec![]),
+                    (Verdict::Mask, vec![(Dictate, HoldChange::Up)]),
                 ],
             ),
             (
