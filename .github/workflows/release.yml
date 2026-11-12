@@ -156,22 +156,41 @@ jobs:
           else
             gh release create "$TAG" packages/* --repo "$GITHUB_REPOSITORY" --verify-tag --latest --title "Thalvi Desktop $VERSION" --generate-notes
           fi
-      # The development feed names the newest development build or release; Stable reads releases/latest.
-      - name: Point the development feed at this version if it is newer
+
+  # The development feed names the newest published release or development build; Stable reads releases/latest.
+  # Each run recomputes it from the releases, so one serialized run after any publish leaves it right.
+  feed:
+    name: development feed
+    needs: [gate, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: desktop-feed
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - name: Point the development feed at the newest version
         run: |
-          if gh release view desktop-dev --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            current=$(gh release download desktop-dev --repo "$GITHUB_REPOSITORY" --pattern latest.json --output - | jq -er .version)
-          else
-            gh release create desktop-dev --repo "$GITHUB_REPOSITORY" --target "$SHA" --prerelease --latest=false \
+          newest=""
+          while read -r version; do
+            if .github/scripts/newer-version "$version" "$newest"; then newest=$version; fi
+          done < <(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,isDraft \
+            --jq '.[] | select(.isDraft | not) | .tagName | capture("^desktop-v(?<v>[0-9]+\\.[0-9]+\\.[0-9]+(-dev\\.[0-9]+)?)$").v')
+          [ -n "$newest" ] || { echo "::error::No published desktop release or development build to name"; exit 1; }
+          gh release download "desktop-v$newest" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir feed
+          [ "$(jq -er .version feed/latest.json)" = "$newest" ] || { echo "::error::desktop-v$newest's latest.json names another version"; exit 1; }
+          gh release view desktop-dev --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create desktop-dev --repo "$GITHUB_REPOSITORY" --target "${{ needs.gate.outputs.sha }}" --prerelease --latest=false \
               --title "Thalvi Desktop development feed" --notes "The update feed for the Development choice in Thalvi's Settings. The builds are the desktop-v*-dev.* prereleases."
-            current=""
-          fi
-          if .github/scripts/newer-version "$VERSION" "$current"; then
-            gh release upload desktop-dev packages/latest.json --repo "$GITHUB_REPOSITORY" --clobber
-            echo "The development feed now names $VERSION (was ${current:-empty})."
-          else
-            echo "The development feed keeps $current, which is not older than $VERSION."
-          fi
+          gh release upload desktop-dev feed/latest.json --repo "$GITHUB_REPOSITORY" --clobber
+          echo "The development feed names $newest."
       - name: Keep the last five development builds
         if: needs.gate.outputs.prerelease == 'true'
         run: |
