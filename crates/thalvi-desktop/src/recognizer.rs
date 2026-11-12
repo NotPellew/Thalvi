@@ -556,4 +556,22 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_reply_that_is_not_speech_says_what_the_address_should_be() {
+        let cases = [
+            (
+                SpeechSource::direct("Office", "ws://127.0.0.1:9".to_owned()),
+                "Check that its address under Settings → Speech is a realtime speech recognizer.",
+            ),
+            (
+                SpeechSource::on_device("Offline", "nemotron_160ms".to_owned()),
+                "Check that its address under Settings → Speech is a speech model.",
+            ),
+        ];
+        for (speech, expected) in cases {
+            let words = RecognizerError::NotUnderstood { speech }.to_string();
+            assert!(words.ends_with(expected), "{words}");
+        }
+    }
 }
