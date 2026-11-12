@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 SHELLCHECK=(pipx run --spec shellcheck-py==0.11.0.1 shellcheck)
-components=(server desktop-windows web desktop-ui speech issue-sync)
+components=(server desktop-windows web desktop-ui speech issue-sync release)
 
 step() {
   printf '\n==> %s\n' "$*"
@@ -74,6 +74,12 @@ gate_issue_sync() {
   step .github/scripts/issue-refs.test.sh
 }
 
+gate_release() {
+  step npm ci --ignore-scripts --prefix crates/thalvi-app/ui
+  step "${SHELLCHECK[@]}" .github/scripts/updater-feed .github/scripts/updater-feed.test.sh
+  step .github/scripts/updater-feed.test.sh
+}
+
 run_component() {
   case $1 in
     server) gate_server ;;
@@ -82,6 +88,7 @@ run_component() {
     desktop-ui) gate_desktop_ui ;;
     speech) gate_speech ;;
     issue-sync) gate_issue_sync ;;
+    release) gate_release ;;
   esac
 }
 
@@ -89,13 +96,13 @@ run_all() {
   local runnable skipped reason component
   case $(uname -s) in
     Linux)
-      runnable=(server web desktop-ui speech issue-sync)
+      runnable=(server web desktop-ui speech issue-sync release)
       skipped=(desktop-windows)
       reason="needs Windows"
       ;;
     MINGW* | MSYS* | CYGWIN*)
       runnable=(desktop-windows)
-      skipped=(server web desktop-ui speech issue-sync)
+      skipped=(server web desktop-ui speech issue-sync release)
       reason="CI runs it on Linux"
       ;;
     *)
