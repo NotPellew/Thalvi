@@ -93,6 +93,18 @@ impl ReloadEngine {
     fn set_recordings(&mut self, _: thalvi_desktop::metrics::RecordKinds) {
         panic!("this replay changes the server, not the recording switches");
     }
+
+    fn set_wake_words(&mut self, _: bool) {}
+}
+/// What `Runner::apply` tells the status; this replay does not read it.
+struct ReloadView {
+    wake_words: bool,
+}
+struct ReloadPublisher;
+impl ReloadPublisher {
+    fn update(&self, change: impl FnOnce(&mut ReloadView)) {
+        change(&mut ReloadView { wake_words: true });
+    }
 }
 struct ReloadSession {
     engine: ReloadEngine,
@@ -106,6 +118,7 @@ struct ReloadRunner {
     refused: RefCell<Vec<(Refusal, u64)>>,
     entered: Option<oneshot::Sender<()>>,
     release: Option<oneshot::Receiver<bool>>,
+    publisher: ReloadPublisher,
 }
 impl ReloadRunner {
     // INSERT_RELOAD_SOURCE
@@ -144,6 +157,7 @@ async fn settings_apply_reports_presses_during_successful_and_failed_rebuilds() 
                 refused: RefCell::default(),
                 entered: Some(entered),
                 release: Some(release),
+                publisher: ReloadPublisher,
             };
             if before_apply {
                 input.set(true);
@@ -410,6 +424,7 @@ async fn no_rebuild_apply_handoff_keeps_holds_and_reports_taps() {
                 refused: RefCell::default(),
                 entered: None,
                 release: None,
+                publisher: ReloadPublisher,
             };
             let (mut engine, _) = Engine::new(
                 Parts {
