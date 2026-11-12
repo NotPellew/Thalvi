@@ -4468,12 +4468,11 @@ async fn the_wake_word_starts_a_capture_only_with_wake_words_on_and_the_hold_key
                 if matches!(input, Hold | WakeThenHold) {
                     rig.press().await;
                 }
-                match expected {
-                    Some(trigger) => assert_eq!(finished(task).await, trigger, "case {case}"),
-                    None => {
-                        assert!(!task.is_finished(), "case {case}: the wake word started it");
-                        task.abort();
-                    }
+                if let Some(trigger) = expected {
+                    assert_eq!(finished(task).await, trigger, "case {case}");
+                } else {
+                    assert!(!task.is_finished(), "case {case}: the wake word started it");
+                    task.abort();
                 }
                 assert_eq!(rig.wake.scored() > 0, scored, "case {case}");
             }

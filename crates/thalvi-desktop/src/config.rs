@@ -756,7 +756,7 @@ mod tests {
             let written = serde_json::to_value(&config).unwrap();
             assert_eq!(
                 written["wake"].get("enabled"),
-                (!enabled).then(|| &serde_json::json!(false)),
+                (!enabled).then_some(&serde_json::json!(false)),
                 "{json}"
             );
             let again = DesktopConfig::from_json_str(&written.to_string()).unwrap();

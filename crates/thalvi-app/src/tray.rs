@@ -361,6 +361,7 @@ mod tests {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "one row per status")]
     fn all() -> Vec<(Status, Icon, &'static str)> {
         vec![
             (Status::Paused, Icon::Paused, "Thalvi: paused"),
