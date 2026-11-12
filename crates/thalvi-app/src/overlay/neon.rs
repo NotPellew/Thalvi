@@ -573,6 +573,15 @@ mod tests {
     const ROWS: usize = HEIGHT as usize;
     use crate::overlay::view::HEIGHT;
 
+    thread_local! {
+        /// The fonts one test draws with; loading the system's fonts is slow, above all on Windows.
+        static TEXT: std::cell::RefCell<Text> = std::cell::RefCell::new(Text::new());
+    }
+
+    fn with_text<R>(use_text: impl FnOnce(&mut Text) -> R) -> R {
+        TEXT.with_borrow_mut(use_text)
+    }
+
     fn words(committed: &str, caret: bool, ending: Option<(&'static str, f32, bool)>) -> Draft {
         Draft {
             committed: committed.to_owned(),
@@ -588,7 +597,7 @@ mod tests {
         let mut canvas = Canvas::new(WIDTH, HEIGHT, 1.0).unwrap();
         let mut view = View::new(false);
         view.clock = clock;
-        card(&mut canvas, &mut Text::new(), &view, &DARK, words, 10.0);
+        with_text(|text| card(&mut canvas, text, &view, &DARK, words, 10.0));
         canvas
     }
 
@@ -650,10 +659,8 @@ mod tests {
 
     #[test]
     fn neons_caret_follows_the_last_word_onto_new_lines_and_stays_in_view_as_the_card_scrolls() {
-        let mut text = Text::new();
-        let mut width = |words: &str| {
-            text.measure(&[(words, DARK.fg)], DRAFT, Layout::Line, 1.0)
-                .0
+        let width = |words: &str| {
+            with_text(|text| text.measure(&[(words, DARK.fg)], DRAFT, Layout::Line, 1.0)).0
         };
         let (short, long) = ("hi", "hello there");
         let (at_short, row) = caret(&words(short, true, None)).unwrap();
@@ -676,11 +683,12 @@ mod tests {
             reason = "a line's height"
         )]
         let line = DRAFT.line_height.round() as usize;
-        // Word by word, the caret drops one line at each wrap until the card shows three lines.
+        // Three words at a time, far less than a line, the caret drops one line at each wrap until
+        // the card shows three lines.
         let mut draft = "word".to_owned();
         let mut rows = vec![row];
-        for _ in 0..80 {
-            draft.push_str(" word");
+        for _ in 0..27 {
+            draft.push_str(" word word word");
             let (_, now) = caret(&words(&draft, true, None)).unwrap();
             if now != *rows.last().unwrap() {
                 rows.push(now);
@@ -809,7 +817,7 @@ mod tests {
     #[test]
     fn neons_cancel_mark_is_centred_on_its_place() {
         let mut canvas = Canvas::new(WIDTH, HEIGHT, 1.0).unwrap();
-        cancel_mark(&mut canvas, &mut Text::new(), &DARK, (100.0, 50.0));
+        with_text(|text| cancel_mark(&mut canvas, text, &DARK, (100.0, 50.0)));
         let width = COLUMNS;
         let inked: Vec<(usize, usize)> = pixels(&canvas)
             .iter()

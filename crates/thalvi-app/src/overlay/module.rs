@@ -693,6 +693,15 @@ mod tests {
 
     use super::*;
 
+    thread_local! {
+        /// The fonts one test draws with; loading the system's fonts is slow, above all on Windows.
+        static TEXT: std::cell::RefCell<Text> = std::cell::RefCell::new(Text::new());
+    }
+
+    fn with_text<R>(use_text: impl FnOnce(&mut Text) -> R) -> R {
+        TEXT.with_borrow_mut(use_text)
+    }
+
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -703,7 +712,7 @@ mod tests {
     /// The ink of `line` along the ticker's row: the strongest alpha in each column.
     fn ink(line: &Line, blink_on: bool) -> Vec<u8> {
         let mut canvas = Canvas::new(WIDTH, HEIGHT, 1.0).unwrap();
-        ticker(&mut canvas, &mut Text::new(), line, blink_on);
+        with_text(|text| ticker(&mut canvas, text, line, blink_on));
         let mut frame = OverlayFrame::default();
         canvas.frame_into(&mut frame);
         let width = frame.width as usize;
@@ -750,8 +759,7 @@ mod tests {
             clippy::cast_sign_loss,
             reason = "a width in pixels"
         )]
-        let used = Text::new()
-            .measure(&[("hello", INK)], TICKER, Layout::Line, 1.0)
+        let used = with_text(|text| text.measure(&[("hello", INK)], TICKER, Layout::Line, 1.0))
             .0
             .ceil() as usize;
         assert!(
@@ -797,15 +805,17 @@ mod tests {
             shown > 200 && end < shown / 2,
             "a long notice shows and fades at its end: {shown} {end}"
         );
-        let mut text = Text::new();
-        let mut fits = "a".to_owned();
-        while text
-            .measure(&[(fits.as_str(), INK)], TICKER, Layout::Line, 1.0)
-            .0
-            < SLOT_W - 48.0 - 20.0
-        {
-            fits.push_str(" a");
-        }
+        let fits = with_text(|text| {
+            let mut fits = "a".to_owned();
+            while text
+                .measure(&[(fits.as_str(), INK)], TICKER, Layout::Line, 1.0)
+                .0
+                < SLOT_W - 48.0 - 20.0
+            {
+                fits.push_str(" a");
+            }
+            fits
+        });
         let fitting = ink(&Line::Notice(fits), true);
         let (_, end) = inked(&fitting);
         assert!(
@@ -818,7 +828,7 @@ mod tests {
     /// The pixels `draw` puts on a blank canvas, as premultiplied BGRA.
     fn painted(draw: impl FnOnce(&mut Canvas, &mut Text)) -> Vec<[u8; 4]> {
         let mut canvas = Canvas::new(WIDTH, HEIGHT, 1.0).unwrap();
-        draw(&mut canvas, &mut Text::new());
+        with_text(|text| draw(&mut canvas, text));
         let mut frame = OverlayFrame::default();
         canvas.frame_into(&mut frame);
         frame.bgra.as_chunks::<4>().0.to_vec()
@@ -952,8 +962,7 @@ mod tests {
 
     #[test]
     fn the_caret_sits_just_after_the_last_word() {
-        let mut text = Text::new();
-        let used = text.measure(&[("hello", INK)], TICKER, Layout::Line, 1.0).0;
+        let used = with_text(|text| text.measure(&[("hello", INK)], TICKER, Layout::Line, 1.0)).0;
         let on = painted(|canvas, text| ticker(canvas, text, &words("hello", true), true));
         let off = painted(|canvas, text| ticker(canvas, text, &words("hello", true), false));
         let ((x, _), (top, _)) = changed(&on, &off);
@@ -1012,14 +1021,16 @@ mod tests {
         );
         let message =
             "✓ Sent to a-window-with-a-rather-long-name. Delivered, and the answer is on its way.";
-        let (_, height) = Text::new().measure(
-            &[(message, INK)],
-            CONFIRMATION,
-            Layout::Centred {
-                width: SLOT_W - 16.0,
-            },
-            1.0,
-        );
+        let (_, height) = with_text(|text| {
+            text.measure(
+                &[(message, INK)],
+                CONFIRMATION,
+                Layout::Centred {
+                    width: SLOT_W - 16.0,
+                },
+                1.0,
+            )
+        });
         assert!(
             height >= 2.0 * CONFIRMATION.line_height
                 && bottom - top > height - CONFIRMATION.line_height
