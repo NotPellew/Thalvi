@@ -287,6 +287,9 @@ under each entry's collapsed **Details**. The kinds are:
 - **Realtime speech server:** a recognizer that speaks Meta's realtime ASR
   protocol, such as the self-hosted one below, which the app connects to itself
   (address, model, API key).
+- **OpenAI-compatible:** sends each capture to an OpenAI-compatible
+  `/v1/audio/transcriptions` endpoint when you release the dictation key. A
+  wake-word capture ends after a pause in speech (address, model, API key).
 - **On this computer:** dictates without the server or a network; the default.
   Use **Show models for** to filter the list of models (each model recognizes the
   languages on its card), then pick a model.
