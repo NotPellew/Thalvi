@@ -78,6 +78,7 @@ pub struct FakeWake {
     score: Rc<Cell<f32>>,
     inference: Rc<Cell<Duration>>,
     resets: Rc<Cell<u32>>,
+    scored: Rc<Cell<u32>>,
 }
 
 /// Test-side handle of [`FakeWake`].
@@ -86,6 +87,7 @@ pub struct WakeControl {
     score: Rc<Cell<f32>>,
     inference: Rc<Cell<Duration>>,
     resets: Rc<Cell<u32>>,
+    scored: Rc<Cell<u32>>,
 }
 
 impl FakeWake {
@@ -95,18 +97,21 @@ impl FakeWake {
         let score = Rc::new(Cell::new(0.0));
         let inference = Rc::new(Cell::new(Duration::ZERO));
         let resets = Rc::new(Cell::new(0));
+        let scored = Rc::new(Cell::new(0));
         (
             Self {
                 next: Rc::clone(&next),
                 score: Rc::clone(&score),
                 inference: Rc::clone(&inference),
                 resets: Rc::clone(&resets),
+                scored: Rc::clone(&scored),
             },
             WakeControl {
                 next,
                 score,
                 inference,
                 resets,
+                scored,
             },
         )
     }
@@ -140,6 +145,12 @@ impl WakeControl {
         self.next.set(Some(Err(())));
     }
 
+    /// How many frames the wake detector has scored so far.
+    #[must_use]
+    pub fn scored(&self) -> u32 {
+        self.scored.get()
+    }
+
     /// How many times the engine forgot the audio so far.
     #[must_use]
     pub fn resets(&self) -> u32 {
@@ -149,6 +160,7 @@ impl WakeControl {
 
 impl WakeDetector for FakeWake {
     fn process(&mut self, _frame: &Frame) -> Result<WakeFrame, WakeError> {
+        self.scored.set(self.scored.get() + 1);
         let event = match self.next.take() {
             Some(Err(())) => return Err(WakeError::Inference("scripted failure".to_owned())),
             Some(Ok(event)) => Some(event),

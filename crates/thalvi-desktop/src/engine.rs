@@ -445,6 +445,8 @@ pub struct Engine<R, W, C> {
     level_frames: u64,
     level_activity: bool,
     capture_threshold: f32,
+    /// Whether the wake word starts a capture; off, idle audio is not scored at all.
+    wake_words: bool,
     /// Whether the previous frame's wake was refused as too quiet.
     refused: bool,
     /// The wake word that opened the next capture.
@@ -906,6 +908,7 @@ where
             level_frames: 0,
             level_activity: false,
             capture_threshold: config.wake.capture().threshold.get(),
+            wake_words: config.wake.enabled(),
             refused: false,
             woke: None,
             wake_clip: VecDeque::new(),
@@ -929,6 +932,12 @@ where
     /// it from running during a capture, which finishes under the kinds it started with.
     pub fn set_recordings(&mut self, kinds: RecordKinds) {
         self.recorder.set_kinds(kinds);
+    }
+
+    /// Switches the wake word on or off from the next [`listen`](Self::listen) on; the hold keys
+    /// work either way. Taking `&mut self` keeps it from running during a capture.
+    pub fn set_wake_words(&mut self, on: bool) {
+        self.wake_words = on;
     }
 
     /// The presses of the dictation key that started nothing since this was last called: each
@@ -1037,6 +1046,10 @@ where
             self.level.send_replace(loudness(&frame));
             self.note_level(&frame, latency);
             self.remember(&queued);
+            // Only the hold keys start a capture: the wake model has nothing to score for.
+            if !self.wake_words {
+                continue;
+            }
             let wake = match self.wake.process(&frame) {
                 Ok(wake) => wake,
                 Err(error) => {
