@@ -74,6 +74,7 @@ impl Visibility {
         match status {
             Status::Paused
             | Status::Listening
+            | Status::KeyboardOnly
             | Status::Loading {
                 downloading: false, ..
             } => Self::Hide,

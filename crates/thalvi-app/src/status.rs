@@ -22,6 +22,8 @@ pub const SPOTTER_DOWNLOAD_NOTICE: &str = "Downloading the ending phrase model."
 pub enum Status {
     Paused,
     Listening,
+    /// Listening with the wake word off: only the hold keys start a capture.
+    KeyboardOnly,
     /// The wake word was heard and the recognizer is connecting.
     Starting {
         target: Option<String>,
@@ -199,6 +201,8 @@ pub struct View {
     pub pauses: EndingPauses,
     /// What the speech model needs, while it loads.
     pub loading: Option<Step>,
+    /// The wake word starts captures; off, listening is for the hold keys alone.
+    pub wake_words: bool,
 }
 
 impl View {
@@ -244,7 +248,8 @@ impl View {
                 kind: failure.kind,
             },
             (Mode::Idle | Mode::Done { .. } | Mode::Failed(_), engine) => match engine {
-                EngineState::Listening => Status::Listening,
+                EngineState::Listening if self.wake_words => Status::Listening,
+                EngineState::Listening => Status::KeyboardOnly,
                 EngineState::StartingCapture => Status::Starting { target },
                 EngineState::Capturing {
                     committed,
@@ -301,6 +306,7 @@ mod tests {
             copies: false,
             pauses: EndingPauses::default(),
             loading: None,
+            wake_words: true,
         }
     }
 
@@ -313,6 +319,51 @@ mod tests {
             route,
             text: "hello".to_owned(),
             waiting_for_quiet,
+        }
+    }
+
+    #[test]
+    fn listening_is_with_wake_words_keyboard_only_or_paused_and_nothing_else_changes() {
+        // (mode, engine, wake words on, status)
+        let cases = [
+            (Mode::Idle, EngineState::Listening, true, Status::Listening),
+            (
+                Mode::Idle,
+                EngineState::Listening,
+                false,
+                Status::KeyboardOnly,
+            ),
+            (Mode::Paused, EngineState::Listening, true, Status::Paused),
+            (Mode::Paused, EngineState::Listening, false, Status::Paused),
+            (
+                Mode::Idle,
+                EngineState::StartingCapture,
+                false,
+                Status::Starting {
+                    target: Some(kitty()),
+                },
+            ),
+            (
+                Mode::Done {
+                    route: CaptureRoute::Paste,
+                    notice: "Pasted.".to_owned(),
+                },
+                EngineState::Listening,
+                false,
+                Status::Done {
+                    target: Some(kitty()),
+                    route: CaptureRoute::Paste,
+                    notice: "Pasted.".to_owned(),
+                },
+            ),
+        ];
+        for (mode, engine, wake_words, expected) in cases {
+            let status = View {
+                wake_words,
+                ..view(mode, engine)
+            }
+            .status();
+            assert_eq!(status, expected, "wake words {wake_words}");
         }
     }
 
@@ -607,6 +658,7 @@ mod tests {
     fn the_status_is_the_json_the_ui_reads() {
         let cases = [
             (Status::Paused, json!({"state": "paused"})),
+            (Status::KeyboardOnly, json!({"state": "keyboardOnly"})),
             (
                 Status::Starting { target: None },
                 json!({"state": "starting", "target": null}),
