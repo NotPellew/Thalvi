@@ -342,6 +342,20 @@ pub async fn transcribe_events(
                                 final_text = Some(text.to_owned());
                             }
                         }
+                        None => {
+                            if let Some(text) = value.get("text").and_then(Value::as_str) {
+                                if !transcript.is_empty()
+                                    && !transcript.chars().last().is_some_and(char::is_whitespace)
+                                    && !text.chars().next().is_some_and(char::is_whitespace)
+                                {
+                                    transcript.push(' ');
+                                }
+                                transcript.push_str(text);
+                                emit(crate::recognizer::RecognizerEvent::Partial(
+                                    transcript.clone(),
+                                ));
+                            }
+                        }
                         _ => {}
                     }
                 }

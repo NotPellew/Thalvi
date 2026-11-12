@@ -133,6 +133,58 @@ fn settings(url: &str, api: SecondaryApi, key: &str) -> SecondaryStt {
 }
 
 #[tokio::test]
+async fn speaches_streams_transcribed_segments_as_cumulative_text() {
+    let (url, mut rx) = serve_sse(
+        "data: {\"text\":\"We are checking the endpoint.\"}\n\ndata: {\"text\":\"It returns the next sentence.\"}\n\ndata: {\"text\":\"This is the end.\"}\n\n",
+    )
+    .await;
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        settings(&url, SecondaryApi::OpenAi, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut session = recognizer.connect().await.expect("connected");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        loop {
+            let event = session.next_event().await.expect("transcription event");
+            let final_event = matches!(event, RecognizerEvent::Final(_));
+            events.push(event);
+            if final_event {
+                return events;
+            }
+        }
+    })
+    .await
+    .expect("all speech segments arrive");
+    assert_eq!(
+        events,
+        [
+            RecognizerEvent::Partial("We are checking the endpoint.".to_owned()),
+            RecognizerEvent::Partial(
+                "We are checking the endpoint. It returns the next sentence.".to_owned()
+            ),
+            RecognizerEvent::Partial(
+                "We are checking the endpoint. It returns the next sentence. This is the end."
+                    .to_owned()
+            ),
+            RecognizerEvent::Final(
+                "We are checking the endpoint. It returns the next sentence. This is the end."
+                    .to_owned()
+            ),
+        ]
+    );
+    assert_eq!(
+        rx.recv().await.expect("one upload").path,
+        "/v1/audio/transcriptions"
+    );
+    assert!(rx.try_recv().is_err(), "one request per capture");
+}
+
+#[tokio::test]
 async fn openai_streaming_emits_cumulative_text_and_plain_json_still_works() {
     let (url, mut rx) = serve_sse(
         "data: {\"type\":\"transcript.text.delta\",\"delta\":\"hello \"}\n\ndata: {\"type\":\"transcript.text.delta\",\"delta\":\"world\"}\n\ndata: {\"type\":\"transcript.text.done\",\"text\":\"cleaned transcript\"}\n\n",
