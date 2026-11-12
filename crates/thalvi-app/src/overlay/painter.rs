@@ -254,6 +254,134 @@ mod tests {
     }
 
     #[test]
+    fn a_new_look_or_theme_shows_on_the_next_frame() {
+        let line = (WIDTH / 2.0, 83.0);
+        let pill = (WIDTH / 2.0, 26.5);
+        let shown = view(&capturing(), false);
+        let mut painter = Painter::new(1.0, Look::Gunmetal, true).unwrap();
+        for (look, dark, at, want) in [
+            (Look::Neon, false, pill, [0xb9, 0xcb, 0xdd]),
+            (Look::Neon, true, pill, [0x12, 0x31, 0x5e]),
+            (Look::Gunmetal, true, line, [107, 248, 255]),
+        ] {
+            painter.restyle(look, dark);
+            let got = rgb(painter.draw(&shown, 0.0), at);
+            assert!(near(got, want), "{look:?} dark {dark} drew {got:?}");
+        }
+    }
+
+    #[test]
+    fn only_holo_moves_on_its_own_and_only_while_its_shine_passes() {
+        let holo = Painter::new(1.0, Look::Holo, true).unwrap();
+        let wait = |clock: f64| holo.motion(clock).map(|wait| wait.as_secs_f64());
+        for (clock, until) in [
+            (1.0, 3.9),
+            (8.0, 3.9),
+            (5.0, super::super::view::FRAME.as_secs_f64()),
+        ] {
+            let got = wait(clock).unwrap();
+            assert!((got - until).abs() < 1e-6, "at {clock} s: {got}");
+        }
+        for look in [Look::Gunmetal, Look::Neon] {
+            assert_eq!(
+                Painter::new(1.0, look, true).unwrap().motion(1.0),
+                None,
+                "{look:?}"
+            );
+        }
+    }
+
+    const LOOKS: [(Look, bool); 4] = [
+        (Look::Gunmetal, true),
+        (Look::Holo, true),
+        (Look::Neon, true),
+        (Look::Neon, false),
+    ];
+
+    fn pending() -> Status {
+        Status::Pending {
+            target: None,
+            route: CaptureRoute::Paste,
+            text: "hello".to_owned(),
+            waiting_for_quiet: false,
+            pause_ms: 2000,
+            copies: false,
+        }
+    }
+
+    #[test]
+    fn the_countdown_bar_shrinks_as_its_time_runs_out_in_every_look() {
+        for ((look, dark), tone) in LOOKS.into_iter().zip([
+            [255, 194, 75],
+            [255, 194, 75],
+            [0xff, 0xc2, 0x4b],
+            [0x8a, 0x5a, 0x00],
+        ]) {
+            let mut painter = Painter::new(1.0, look, dark).unwrap();
+            let mut shown = view(&pending(), false);
+            let mut toned = |clock: f64| {
+                shown.poll(clock, 0.0);
+                painter
+                    .draw(&shown, clock)
+                    .bgra
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .filter(|[b, g, r, _]| near([*r, *g, *b], tone))
+                    .count()
+            };
+            let (full, half) = (toned(0.0), toned(1.0));
+            assert!(
+                half * 10 < full * 8 && half * 10 > full * 2,
+                "{look:?} dark {dark}: {full} then {half}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cancel_button_shows_only_on_a_capture_the_desktop_lets_be_clicked() {
+        for (look, dark) in LOOKS {
+            let mut painter = Painter::new(1.0, look, dark).unwrap();
+            let with = painter.draw(&view(&capturing(), true), 0.0).bgra.clone();
+            let without = painter.draw(&view(&capturing(), false), 0.0).bgra.clone();
+            let differing = with
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(without.as_chunks::<4>().0)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert!(differing > 40, "{look:?} dark {dark}: {differing}");
+        }
+    }
+
+    #[test]
+    fn neons_card_grows_with_the_draft_up_to_three_lines() {
+        let bottom = |committed: &str| {
+            let mut painter = Painter::new(1.0, Look::Neon, true).unwrap();
+            let status = Status::Capturing {
+                target: None,
+                committed: committed.to_owned(),
+                partial: None,
+                notice: None,
+            };
+            let frame = painter.draw(&view(&status, false), 0.0);
+            let width = frame.width as usize;
+            (0..frame.height as usize)
+                .rfind(|y| (0..width).any(|x| frame.bgra[(y * width + x) * 4 + 3] > 30))
+                .unwrap()
+        };
+        let sentence = "one more sentence that runs on ";
+        let (one, three, many) = (
+            bottom("hello"),
+            bottom(&sentence.repeat(5)),
+            bottom(&sentence.repeat(9)),
+        );
+        assert!(three > one + 30, "{one} {three}");
+        assert_eq!(three, many, "the card stops at three lines");
+    }
+
+    #[test]
     fn only_a_capture_where_the_desktop_takes_clicks_is_cancelled_by_its_button() {
         let done = Status::Done {
             target: None,

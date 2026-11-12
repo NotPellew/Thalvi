@@ -419,11 +419,12 @@ mod tests {
             overlay.settle(&mut surface, &mut painter, 0.5, now);
             overlay.deadline()
         };
-        step(
+        let first = step(
             Some(Message::Status(Box::new(capturing()), Visibility::Show)),
             false,
             at(0),
         );
+        assert_eq!(first, Some(at(0) + view::FRAME), "the wave's next frame");
         // Nothing changed and no frame is due: the surface is left alone.
         step(None, false, at(10));
         // The wave asks for its next frame.
@@ -583,5 +584,56 @@ mod tests {
                 "{status:?}"
             );
         }
+    }
+    #[test]
+    fn what_the_overlay_is_told_before_its_thread_starts_waits_for_it_in_order() {
+        let overlay = Overlay::default();
+        overlay.show_draft(false);
+        overlay.set_look(Look::Neon);
+        overlay.set_dark(false);
+        overlay.show(&capturing(), Visibility::Show);
+        overlay.apply(Visibility::Hide);
+        overlay.level(0.25);
+        let waiting = overlay.waiting.lock().unwrap().take().unwrap();
+        let start = Instant::now();
+        let mut thread = Overlaying::new(false, start);
+        let mut taken = 0;
+        for message in waiting.try_iter() {
+            thread.take(message, start);
+            taken += 1;
+        }
+        assert_eq!(taken, 5);
+        assert!(!thread.view.show_draft);
+        assert_eq!(thread.style, (Look::Neon, false));
+        assert!(matches!(thread.view.status, Status::Capturing { .. }));
+        assert!(!thread.wanted, "the later hide wins");
+        assert!(
+            (f32::from_bits(overlay.level.load(Ordering::Relaxed)) - 0.25).abs() < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn the_countdown_counts_down_on_the_overlay_threads_own_clock() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut painter = Painter::new(1.0, Look::Gunmetal, true).unwrap();
+        let (mut surface, mut overlay) = (Fake::default(), Overlaying::new(false, start));
+        let pending = Status::Pending {
+            target: None,
+            route: CaptureRoute::Paste,
+            text: "hello".to_owned(),
+            waiting_for_quiet: false,
+            pause_ms: 2500,
+            copies: false,
+        };
+        overlay.take(
+            Message::Status(Box::new(pending), Visibility::Show),
+            at(10_000),
+        );
+        overlay.settle(&mut surface, &mut painter, 0.0, at(10_000));
+        assert_eq!(overlay.view.label.as_deref(), Some("PASTE IN 3 s"));
+        overlay.due(at(11_000));
+        overlay.settle(&mut surface, &mut painter, 0.0, at(11_000));
+        assert_eq!(overlay.view.label.as_deref(), Some("PASTE IN 2 s"));
     }
 }

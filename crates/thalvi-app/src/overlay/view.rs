@@ -551,4 +551,97 @@ mod tests {
         let quiet = Wave::default();
         assert!(quiet.amplitude(0.5, 0.0) > 0.0 && quiet.amplitude(0.5, 0.0) < 0.05 * WAVE_H);
     }
+    #[test]
+    fn the_wave_samples_the_level_once_per_period_and_refills_after_a_gap() {
+        let mut wave = Wave::default();
+        let newest = |wave: &Wave, n: usize| wave.history[HISTORY - n..].to_vec();
+        wave.step(0.0, 0.2);
+        assert!(
+            wave.history
+                .iter()
+                .all(|sample| (sample - 0.2).abs() < 1e-6)
+        );
+        wave.step(0.05, 0.9);
+        assert_eq!(newest(&wave, 1), [0.2], "less than a period later");
+        wave.step(0.17, 0.9);
+        assert_eq!(newest(&wave, 3), [0.2, 0.9, 0.9], "two periods later");
+        wave.step(0.25, 0.4);
+        assert_eq!(
+            newest(&wave, 3),
+            [0.9, 0.9, 0.4],
+            "counted from the last sample, not the last frame"
+        );
+        wave.step(10.0, 0.7);
+        assert!(
+            wave.history
+                .iter()
+                .all(|sample| (sample - 0.7).abs() < 1e-6),
+            "after a gap"
+        );
+        wave.step(10.09, 0.3);
+        assert_eq!(
+            newest(&wave, 2),
+            [0.7, 0.3],
+            "periods restart at the gap's end"
+        );
+    }
+
+    #[test]
+    fn the_wave_rises_quickly_falls_slowly_and_swings_faster_when_loud() {
+        let run = |from: f32, level: f32| {
+            let mut wave = Wave {
+                smoothed: from,
+                ..Wave::default()
+            };
+            for frame in 0..4 {
+                wave.step(f64::from(frame) / 30.0, level);
+            }
+            wave
+        };
+        let (rising, falling) = (run(0.0, 1.0), run(1.0, 0.0));
+        assert!(rising.smoothed > 0.9, "rose to {}", rising.smoothed);
+        assert!(
+            falling.smoothed > 0.55 && falling.smoothed < 0.7,
+            "fell to {}",
+            falling.smoothed
+        );
+        let quiet = run(0.0, 0.0);
+        assert!((quiet.phase - 1.1 * 0.1).abs() < 1e-4, "{}", quiet.phase);
+        assert!(rising.phase > 2.0 * quiet.phase);
+        let mut late = Wave::default();
+        late.step(0.0, 1.0);
+        late.step(5.0, 1.0);
+        assert!(
+            late.smoothed > 0.7 && late.smoothed < 0.75,
+            "a late frame counts as a short one: {}",
+            late.smoothed
+        );
+    }
+
+    #[test]
+    fn the_wave_slows_its_frames_only_once_everything_is_quiet() {
+        let mut wave = Wave::default();
+        assert_eq!(wave.step(0.0, 0.0), SETTLED_FRAME);
+        assert_eq!(
+            wave.step(0.033, SETTLED_BELOW),
+            FRAME,
+            "a level at the threshold moves"
+        );
+        let mut clock = 0.1;
+        let mut quiet_until = |wave: &mut Wave, until: f64| {
+            let mut frame = FRAME;
+            while clock < until {
+                clock += 1.0 / 30.0;
+                frame = wave.step(clock, 0.0);
+            }
+            frame
+        };
+        wave.step(0.1, 0.8);
+        assert_eq!(
+            quiet_until(&mut wave, 2.0),
+            FRAME,
+            "the history still holds the sound"
+        );
+        assert_eq!(quiet_until(&mut wave, 6.0), SETTLED_FRAME);
+    }
 }

@@ -664,3 +664,95 @@ fn line_strip(canvas: &mut Canvas, view: &View, color: Rgba, finish: Finish) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use thalvi_desktop::host::OverlayFrame;
+
+    use super::*;
+
+    /// The ink of `line` along the ticker's row: the strongest alpha in each column.
+    fn ink(line: &Line, blink_on: bool) -> Vec<u8> {
+        let mut canvas = Canvas::new(WIDTH, HEIGHT, 1.0).unwrap();
+        ticker(&mut canvas, &mut Text::new(), line, blink_on);
+        let mut frame = OverlayFrame::default();
+        canvas.frame_into(&mut frame);
+        let width = frame.width as usize;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the slot's rows"
+        )]
+        let rows = (SLOT.1 + 52.0) as usize..(SLOT.1 + 52.0 + 22.0) as usize;
+        (0..width)
+            .map(|x| {
+                rows.clone()
+                    .map(|y| frame.bgra[(y * width + x) * 4 + 3])
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+
+    fn words(committed: &str, caret: bool) -> Line {
+        Line::Words {
+            committed: committed.to_owned(),
+            partial: String::new(),
+            caret,
+        }
+    }
+
+    #[test]
+    fn the_ticker_starts_a_short_line_at_the_left_and_keeps_a_long_lines_newest_words_in_view() {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the slot's columns"
+        )]
+        let (left, right) = ((SLOT.0 + 24.0) as usize, (SLOT.0 + SLOT_W - 24.0) as usize);
+        let inked = |ink: &[u8]| {
+            let columns: Vec<usize> = (0..ink.len()).filter(|x| ink[*x] > 0).collect();
+            (columns[0], columns[columns.len() - 1])
+        };
+        let short = ink(&words("hello", false), true);
+        let (first, last) = inked(&short);
+        assert!(
+            (left..left + 3).contains(&first) && last < left + 60,
+            "{first}..{last}"
+        );
+        let long = ink(
+            &words(&"the newest words stay in view ".repeat(6), false),
+            true,
+        );
+        let (first, last) = inked(&long);
+        assert!(
+            first >= left && last <= right && last + 12 > right,
+            "{first}..{last}"
+        );
+        let strongest =
+            |range: std::ops::Range<usize>| long[range].iter().copied().max().unwrap_or(0);
+        assert!(
+            strongest(left..left + 6) < strongest(left + 100..left + 160) / 2,
+            "the cut-off start fades"
+        );
+        assert_ne!(
+            ink(&words("hello", true), true),
+            ink(&words("hello", true), false),
+            "the caret blinks"
+        );
+        assert_eq!(
+            ink(&words("hello", false), true),
+            short,
+            "no caret without one"
+        );
+        let notice = ink(
+            &Line::Notice("a notice long enough to run past the end ".repeat(3)),
+            true,
+        );
+        assert!(
+            notice[right - 4] < notice[left + 100].max(1),
+            "a long notice fades at its end"
+        );
+        assert!(ink(&Line::None, true).iter().all(|alpha| *alpha == 0));
+    }
+}

@@ -510,7 +510,6 @@ impl Text {
             .unwrap_or(wanted)
     }
 
-    /// The width of `spans` set on one line, and its line count's height when wrapped, in points.
     /// The width of each line `spans` are set in, in points.
     pub fn line_widths(
         &mut self,
@@ -525,6 +524,7 @@ impl Text {
             .collect()
     }
 
+    /// The width of `spans` set on one line, and its line count's height when wrapped, in points.
     pub fn measure(
         &mut self,
         spans: &[(&str, Rgba)],
@@ -658,5 +658,259 @@ mod tests {
             assert!(around[0] < at(10 - step + 1, 10), "{step}");
         }
         assert_eq!((at(6, 10), at(14, 10), at(10, 6), at(10, 14)), (0, 0, 0, 0));
+    }
+    const WHITE: Rgba = Rgba::rgb(255, 255, 255);
+
+    /// A drawing, the canvas's scale, and the pixels it must cover and leave empty.
+    type Case<'a> = (
+        &'a str,
+        f32,
+        Box<dyn Fn(&mut Canvas) + 'a>,
+        &'a [(u32, u32)],
+        &'a [(u32, u32)],
+    );
+
+    fn alpha(canvas: &Canvas, x: u32, y: u32) -> u8 {
+        canvas.pixmap.pixel(x, y).unwrap().alpha()
+    }
+
+    #[test]
+    fn each_shape_covers_its_own_area_and_nothing_else() {
+        let white = Fill::Solid(WHITE);
+        let mut square = Canvas::new(4.0, 4.0, 1.0).unwrap();
+        square.rect((0.0, 0.0, 4.0, 4.0), 0.0, &white);
+        let triangle = [(0.0, 0.0), (12.0, 0.0), (0.0, 12.0)];
+        let full = (0.0, 0.0, 12.0, 12.0);
+        let cases: [Case; 10] = [
+            (
+                "rect",
+                1.0,
+                Box::new(|c| c.rect((2.0, 2.0, 6.0, 4.0), 0.0, &white)),
+                &[(2, 2), (7, 5)],
+                &[(1, 3), (8, 3), (4, 6)],
+            ),
+            (
+                "rounded",
+                1.0,
+                Box::new(|c| c.rect(full, 4.0, &white)),
+                &[(6, 6), (0, 6), (6, 0)],
+                &[(0, 0), (11, 11)],
+            ),
+            (
+                "outline",
+                1.0,
+                Box::new(|c| c.outline(full, 0.0, WHITE)),
+                &[(0, 6), (11, 6), (6, 0)],
+                &[(6, 6)],
+            ),
+            (
+                "polygon",
+                1.0,
+                Box::new(|c| c.polygon(&triangle, &white)),
+                &[(2, 2)],
+                &[(9, 9)],
+            ),
+            (
+                "stroke",
+                1.0,
+                Box::new(|c| c.stroke(&[(2.0, 6.0), (10.0, 6.0)], 2.0, &white)),
+                &[(2, 6), (9, 5)],
+                &[(6, 8), (1, 6), (10, 6)],
+            ),
+            (
+                "clip",
+                1.0,
+                Box::new(|c| {
+                    c.clip(Some((0.0, 0.0, 6.0, 12.0)));
+                    c.rect(full, 0.0, &white);
+                }),
+                &[(2, 6)],
+                &[(8, 6)],
+            ),
+            (
+                "unclip",
+                1.0,
+                Box::new(|c| {
+                    c.clip(Some((0.0, 0.0, 6.0, 12.0)));
+                    c.clip(None);
+                    c.rect(full, 0.0, &white);
+                }),
+                &[(2, 6), (8, 6)],
+                &[],
+            ),
+            (
+                "clip_to",
+                1.0,
+                Box::new(|c| {
+                    c.clip_to(&triangle);
+                    c.rect(full, 0.0, &white);
+                }),
+                &[(2, 2)],
+                &[(9, 9)],
+            ),
+            (
+                "draw",
+                1.0,
+                Box::new(|c| c.draw(&square, (3.0, 3.0), 1.0)),
+                &[(3, 3), (6, 6)],
+                &[(2, 2), (7, 7)],
+            ),
+            (
+                "scale",
+                2.0,
+                Box::new(|c| c.rect((0.0, 0.0, 3.0, 3.0), 0.0, &white)),
+                &[(5, 5)],
+                &[(6, 6)],
+            ),
+        ];
+        for (name, scale, draw, filled, empty) in cases {
+            let mut canvas = Canvas::new(12.0 / scale, 12.0 / scale, scale).unwrap();
+            assert!((canvas.scale_of() - scale).abs() < f32::EPSILON);
+            draw(&mut canvas);
+            for &(x, y) in filled {
+                assert_eq!(alpha(&canvas, x, y), 255, "{name} ({x}, {y})");
+            }
+            for &(x, y) in empty {
+                assert_eq!(alpha(&canvas, x, y), 0, "{name} ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_canvas_is_drawn_at_its_opacity_copied_whole_and_cleared() {
+        let mut square = Canvas::new(4.0, 4.0, 1.0).unwrap();
+        square.rect((0.0, 0.0, 4.0, 4.0), 0.0, &Fill::Solid(WHITE));
+        let mut canvas = Canvas::new(4.0, 4.0, 1.0).unwrap();
+        canvas.draw(&square, (0.0, 0.0), 0.5);
+        assert!(alpha(&canvas, 1, 1).abs_diff(128) <= 1);
+        canvas.clear();
+        canvas.draw(&square, (0.0, 0.0), 3.0);
+        assert_eq!(alpha(&canvas, 1, 1), 255, "opacity stops at one");
+        canvas.clear();
+        assert_eq!(alpha(&canvas, 1, 1), 0);
+        canvas.copy(&square);
+        assert_eq!(canvas.pixmap.data(), square.pixmap.data());
+    }
+
+    #[test]
+    fn text_fades_in_from_the_edges_of_its_bounds_and_vanishes_past_them() {
+        let bounds = TextBounds {
+            left: 10.0,
+            right: 50.0,
+            fade_left: 4.0,
+            fade_right: 8.0,
+        };
+        let sharp = TextBounds {
+            fade_left: 0.0,
+            fade_right: 0.0,
+            ..bounds
+        };
+        for (x, bounds, shown) in [
+            (9.0, bounds, 0.0),
+            (51.0, bounds, 0.0),
+            (12.0, bounds, 0.5),
+            (46.0, bounds, 0.5),
+            (30.0, bounds, 1.0),
+            (10.0, sharp, 1.0),
+            (50.0, sharp, 1.0),
+        ] {
+            assert!(
+                (fade_at(x, bounds) - shown).abs() < 1e-6,
+                "{x} in {bounds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_blends_its_colour_by_coverage_over_what_is_there_and_only_in_bounds() {
+        let mut canvas = Canvas::new(4.0, 2.0, 1.0).unwrap();
+        canvas.rect((0.0, 0.0, 4.0, 1.0), 0.0, &Fill::Solid(Rgba::rgb(0, 0, 0)));
+        canvas.blend(
+            (0, 0),
+            4,
+            &[255, 128, 0, 255, 255, 255, 255, 255],
+            WHITE.alpha(0.5),
+        );
+        let pixel = |canvas: &Canvas, x, y| {
+            let p = canvas.pixmap.pixel(x, y).unwrap();
+            [p.red(), p.green(), p.blue(), p.alpha()]
+        };
+        assert_eq!(pixel(&canvas, 0, 0), [128, 128, 128, 255]);
+        assert_eq!(pixel(&canvas, 1, 0), [64, 64, 64, 255]);
+        assert_eq!(pixel(&canvas, 2, 0), [0, 0, 0, 255], "no coverage");
+        assert_eq!(pixel(&canvas, 1, 1), [128, 128, 128, 128], "over nothing");
+        canvas.clear();
+        canvas.set_text_bounds(Some(TextBounds {
+            left: 0.0,
+            right: 1.5,
+            fade_left: 0.0,
+            fade_right: 0.0,
+        }));
+        canvas.blend((-1, 1), 4, &[255; 4], WHITE);
+        assert_eq!(
+            [
+                pixel(&canvas, 0, 1)[3],
+                pixel(&canvas, 1, 1)[3],
+                pixel(&canvas, 2, 1)[3]
+            ],
+            [255, 255, 0]
+        );
+        assert_eq!(
+            pixel(&canvas, 0, 0)[3],
+            0,
+            "rows outside the canvas are skipped"
+        );
+    }
+
+    #[test]
+    fn text_measures_wider_when_longer_wraps_to_its_width_and_centres_when_asked() {
+        let mut text = Text::new();
+        let style = Style {
+            size: 13.0,
+            line_height: 17.0,
+            weight: 400,
+            mono: false,
+            tracking: 0.0,
+        };
+        let spans = |words: &'static str| [(words, WHITE)];
+        let (short, _) = text.measure(&spans("Hello"), style, Layout::Line, 1.0);
+        let (long, height) = text.measure(&spans("Hello there"), style, Layout::Line, 1.0);
+        assert!(
+            long > short + 10.0 && (height - 17.0).abs() < 1e-3,
+            "{short} {long} {height}"
+        );
+        let (double, _) = text.measure(
+            &spans("Hello"),
+            Style {
+                size: 26.0,
+                ..style
+            },
+            Layout::Line,
+            2.0,
+        );
+        assert!((double - 2.0 * short).abs() < 2.0, "{short} {double}");
+        let sentence = spans("The overlay keeps the newest words of a long sentence in view");
+        let wrapped = Layout::Wrapped { width: 120.0 };
+        let widths = text.line_widths(&sentence, style, wrapped, 1.0);
+        assert!(
+            widths.len() > 2 && widths.iter().all(|w| *w <= 120.0),
+            "{widths:?}"
+        );
+        let (_, tall) = text.measure(&sentence, style, wrapped, 1.0);
+        #[expect(clippy::cast_precision_loss, reason = "a few lines")]
+        let lines = widths.len() as f32;
+        assert!((tall - lines * 17.0).abs() < 1e-3);
+        let mut inked = |layout| {
+            let mut canvas = Canvas::new(200.0, 30.0, 1.0).unwrap();
+            text.draw(&mut canvas, &spans("Hi"), style, layout, (20.0, 5.0));
+            let columns: Vec<u32> = (0..200)
+                .filter(|x| (0..30).any(|y| alpha(&canvas, *x, y) > 0))
+                .collect();
+            (columns[0], columns[columns.len() - 1])
+        };
+        let (left, _) = inked(Layout::Line);
+        assert!((20..24).contains(&left), "{left}");
+        let (left, right) = inked(Layout::Centred { width: 160.0 });
+        assert!((left + right).abs_diff(2 * 100) <= 3, "{left}..{right}");
     }
 }
