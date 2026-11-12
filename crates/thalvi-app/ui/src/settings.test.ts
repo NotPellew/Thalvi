@@ -149,6 +149,7 @@ describe("pages", () => {
         title: "Capture",
         groups: {
           "Dictation wake word": ["wake model (dictation)", "threshold (dictation)"],
+          "Hold keys": ["dictate key", "write key"],
           Endings: ["ending phrases"],
           "Quiet before acting": ["quiet before paste", "quiet before paste and enter", "quiet before running a task"],
           "Capture limits": ["stop after silence", "stop after"],
@@ -1928,13 +1929,66 @@ describe("live controls", () => {
     stub.backend.getHoldKeyUnavailable.mockResolvedValue("GNOME Wayland does not tell Thalvi when a key is let go.");
     mountSettings(root, stub.backend);
     await settle();
-    const hold = rowOf("Hold a key to dictate");
-    expect(hold.querySelector("input")).toBeNull();
+    const hold = rowOf("Dictate key");
+    expect(hold.querySelector("button")).toBeNull();
     expect(hold.textContent).toContain("GNOME Wayland does not tell Thalvi when a key is let go.");
     expect(hold.closest("section")?.dataset["page"]).toBe("capture");
-    const write = rowOf("Hold a key to write");
-    expect(write.querySelector("input")).toBeNull();
+    const write = rowOf("Write key");
+    expect(write.querySelector("button")).toBeNull();
     expect(write.textContent).toContain("GNOME Wayland does not tell Thalvi when a key is let go.");
+  });
+
+  describe("hold keys", () => {
+    function press(code: string, modifiers: { ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean; metaKey?: boolean } = {}): void {
+      window.dispatchEvent(new KeyboardEvent("keydown", { code, bubbles: true, cancelable: true, ...modifiers }));
+    }
+
+    const SAME = "The write key must differ from the hold key.";
+    const BOUND = "F8 is already bound in Hyprland. Pick another key or remove that bind. The keys that were set before still work.";
+    const MODIFIER = "Hyprland can bind only F1 to F12 without a modifier for the hold keys, not Alt+KeyZ. The keys that were set before still work.";
+
+    // (row, keys pressed, what the backend says, key sent, key shown, restore disabled, notice)
+    const cases: [string, string[][], string | null, string | null, string, boolean, string][] = [
+      ["Dictate key", [["KeyY", "ctrl", "shift"]], null, "Ctrl+Shift+KeyY", "Ctrl+Shift+Y", false, ""],
+      ["Write key", [["F8"]], null, "F8", "F8", false, ""],
+      ["Dictate key", [["AltLeft", "alt"], ["Digit1", "alt"]], null, "Alt+Digit1", "Alt+1", false, ""],
+      ["Dictate key", [["Escape"], ["KeyY", "ctrl"]], null, null, "Alt+Z", true, ""],
+      ["Dictate key", [["F8"]], BOUND, "F8", "Alt+Z", true, BOUND],
+      ["Write key", [["KeyZ", "alt"]], SAME, "Alt+KeyZ", "Alt+X", true, SAME],
+      ["Dictate key", [["KeyZ", "alt"]], MODIFIER, "Alt+KeyZ", "Alt+Z", true, MODIFIER],
+    ];
+
+    it.each(cases)("%s: %j with the desktop saying %j sends %j, shows %j and says %j", async (label, keys, backendSays, sent, shown, restoreDisabled, notice) => {
+      const stub = await open();
+      if (backendSays !== null) stub.backend.saveSettings.mockRejectedValue(backendSays);
+      const row = rowOf(label);
+      within(row, "Change…").click();
+      expect(row.querySelector("kbd")?.textContent).toBe("Press the new key. Escape cancels.");
+      expect(within(row, "Restore default").disabled).toBe(true);
+      for (const [code, ...held] of keys) {
+        press(code ?? "", { ctrlKey: held.includes("ctrl"), shiftKey: held.includes("shift"), altKey: held.includes("alt") });
+        await settle();
+      }
+
+      const field = label === "Dictate key" ? "hold_key" : "write_key";
+      expect(stub.backend.saveSettings.mock.calls.map(([settings]) => settings[field])).toEqual(sent === null ? [] : [sent]);
+      expect(row.querySelector("kbd")?.textContent).toBe(shown);
+      expect(within(row, "Restore default").disabled).toBe(restoreDisabled);
+      expect(within(row, "Change…").disabled).toBe(false);
+      expect(row.querySelector(".note")?.textContent ?? "").toBe(notice);
+    });
+
+    it("restores a key set earlier to the desktop's own, and then has nothing to restore", async () => {
+      const stub = await open({ ...SETTINGS, hold_key: "Ctrl+F9" });
+      const row = rowOf("Dictate key");
+      expect(row.querySelector("kbd")?.textContent).toBe("Ctrl+F9");
+      within(row, "Restore default").click();
+      await settle();
+
+      expect(stub.backend.saveSettings.mock.calls.map(([settings]) => settings.hold_key)).toEqual(["Alt+KeyZ"]);
+      expect(row.querySelector("kbd")?.textContent).toBe("Alt+Z");
+      expect(within(row, "Restore default").disabled).toBe(true);
+    });
   });
 
   it("shows the line for hyprland.conf instead of a switch and copies it", async () => {

@@ -8,6 +8,7 @@ import type {
   Ending,
   HistoryEntry,
   HistoryOutcome,
+  HoldKeyDefaults,
   ScriptActionKind,
   LiveEntry,
   OnDeviceEntry,
@@ -41,6 +42,8 @@ export interface PageContext {
   audio: AudioStatus;
   /** Why this desktop offers no hold key, or null where it does. */
   holdKeyUnavailable: string | null;
+  /** The keys this desktop starts with. */
+  holdKeyDefaults: HoldKeyDefaults;
   /** Whether the OS starts Thalvi at login, or why that could not be read. */
   startAtLogin: SwitchRead;
   /** Whether Thalvi is in the app menu, or why that could not be read. */
@@ -486,13 +489,72 @@ function wordListTable(draft: Settings, controls: Controls): { node: HTMLElement
   };
 }
 
-/** The hold key has no setting here; the group appears only where the desktop gives the app no way to see it. */
-function holdKey({ holdKeyUnavailable }: PageContext): HTMLElement[] {
-  if (holdKeyUnavailable === null) return [];
+/** The key a `keydown` names as the settings file does, such as `Alt+KeyZ`; null for a modifier alone. */
+function recordedKey(event: KeyboardEvent): string | null {
+  if (/^(?:Control|Shift|Alt|Meta)(?:Left|Right)$/.test(event.code)) return null;
+  const modifiers = [event.ctrlKey && "Ctrl", event.shiftKey && "Shift", event.altKey && "Alt", event.metaKey && "Win"].filter((name) => name !== false);
+  return [...modifiers, event.code].join("+");
+}
+
+/** A key as the settings file names it, written as the keyboard shows it: `Alt+KeyZ` is "Alt+Z". */
+function keyLabel(name: string): string {
+  return name.replace(/(?:Key|Digit)(?=[A-Z0-9]$)/, "");
+}
+
+/** One hold key: the key in effect, a recorder that applies the next combination pressed, and a way back to the default. */
+function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key", { draft, applyNow, holdKeyDefaults }: PageContext): HTMLElement {
+  const shown = el("kbd", { class: "key" });
+  const problem = note();
+  const restore = button("Restore default", () => {
+    set(holdKeyDefaults[field]);
+  }, "quiet");
+  const change = button("Change…", () => {
+    say(problem, "");
+    shown.textContent = "Press the new key. Escape cancels.";
+    change.disabled = true;
+    restore.disabled = true;
+    const record = (event: KeyboardEvent): void => {
+      event.preventDefault();
+      event.stopPropagation();
+      const name = recordedKey(event);
+      if (name === null && event.code !== "Escape") return;
+      window.removeEventListener("keydown", record, true);
+      change.disabled = false;
+      if (event.code === "Escape" || name === null) render();
+      else set(name);
+    };
+    window.addEventListener("keydown", record, true);
+  });
+
+  function render(): void {
+    shown.textContent = keyLabel(draft[field]);
+    restore.disabled = draft[field] === holdKeyDefaults[field];
+  }
+
+  function set(name: string): void {
+    applyNow((settings) => {
+      settings[field] = name;
+    }).then(render, (error: unknown) => {
+      say(problem, errorText(error));
+      render();
+    });
+  }
+
+  render();
+  return row(label, hint, el("span", { class: "stack" }, el("span", { class: "trow" }, shown, change, restore), problem));
+}
+
+/** Where the desktop gives the app no way to see a key, the group says why and has no controls. */
+function holdKeys(context: PageContext): HTMLElement[] {
+  const { holdKeyUnavailable } = context;
+  if (holdKeyUnavailable !== null) {
+    const why = (): HTMLElement => unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null });
+    return [group("Hold keys"), row("Dictate key", null, why()), row("Write key", null, why())];
+  }
   return [
-    group("Hold key"),
-    row("Hold a key to dictate", null, unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null })),
-    row("Hold a key to write", null, unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null })),
+    group("Hold keys"),
+    holdKeyRow("Dictate key", "Hold it, speak, let go to paste.", "hold_key", context),
+    holdKeyRow("Write key", "Hold it, speak, let go to have the words written out, then pasted.", "write_key", context),
   ];
 }
 
@@ -508,7 +570,7 @@ function capture(context: PageContext): HTMLElement[] {
     );
   return [
     ...wakeHeads(context),
-    ...holdKey(context),
+    ...holdKeys(context),
     group("Endings"),
     row("Ending phrases", "Say one to finish a capture. Every action needs at least one phrase.", endingsTable(context)),
     group("Quiet before acting"),

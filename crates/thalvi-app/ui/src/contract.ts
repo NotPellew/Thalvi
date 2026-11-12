@@ -283,6 +283,8 @@ export interface Backend {
   onOpenPage(listener: (page: string) => void): void;
   /** Why this desktop offers no hold key to dictate with, or null where it does. */
   getHoldKeyUnavailable(): Promise<string | null>;
+  /** The keys this desktop starts with, which Settings restores. */
+  getHoldKeyDefaults(): Promise<HoldKeyDefaults>;
   /** Whether the OS starts Thalvi at login, read from the OS, and why Thalvi could not put its entry back on start. */
   getStartAtLogin(): Promise<SwitchState>;
   /** Adds or removes the startup entry; rejects unless the OS then holds it as asked. */
@@ -323,6 +325,12 @@ export interface Backend {
   checkForUpdates(): Promise<void>;
   /** Opens the release page of the update being fetched or waiting; rejects with the plain reason it could not. */
   openReleaseNotes(): Promise<void>;
+}
+
+/** The dictate and write keys a desktop starts with, named as in `Settings`. */
+export interface HoldKeyDefaults {
+  hold_key: string;
+  write_key: string;
 }
 
 /** An OS setting Thalvi can switch, or the reason it offers no switch and a line to do it by hand. */

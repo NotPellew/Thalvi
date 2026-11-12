@@ -251,6 +251,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
     },
     onOpenPage: () => undefined,
     getHoldKeyUnavailable: () => Promise.resolve(null),
+    getHoldKeyDefaults: () => Promise.resolve({ hold_key: "Alt+KeyZ", write_key: "Alt+KeyX" }),
     getStartAtLogin: () =>
       Promise.resolve(
         hyprland

@@ -139,6 +139,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     }
     const microphones = await backend.listMicrophones().catch((error: unknown) => ({ error: errorText(error) }));
     const holdKeyUnavailable = await backend.getHoldKeyUnavailable();
+    const holdKeyDefaults = await backend.getHoldKeyDefaults();
     const startAtLogin = await backend.getStartAtLogin().catch((error: unknown): SwitchRead => ({ kind: "unreadable", message: errorText(error) }));
     const menuEntry = await backend.getMenuEntry().catch((error: unknown): SwitchRead => ({ kind: "unreadable", message: errorText(error) }));
     audio = await backend.getAudio().catch(() => ({
@@ -151,7 +152,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     applyLook(root, draft.look);
     checks = [];
     pages = buildPages({
-      draft, backend, root, controls: createControls(feedback), microphones, audio, holdKeyUnavailable, startAtLogin, menuEntry, live, checks,
+      draft, backend, root, controls: createControls(feedback), microphones, audio, holdKeyUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, checks,
       saved: () => (baseline === "" ? null : (JSON.parse(baseline) as Settings)),
       applyNow,
     });
