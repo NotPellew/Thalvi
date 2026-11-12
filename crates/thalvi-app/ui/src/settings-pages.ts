@@ -496,16 +496,18 @@ function wordListTable(draft: Settings, controls: Controls): { node: HTMLElement
   };
 }
 
-/** The key a `keydown` names as the settings file does, such as `Alt+KeyZ`; null for a modifier alone. */
+/** The key a `keydown` names as the settings file does, such as `Alt+KeyZ`; null for a modifier alone, except AltGr. */
 function recordedKey(event: KeyboardEvent): string | null {
-  if (/^(?:Control|Shift|Alt|Meta)(?:Left|Right)$/.test(event.code)) return null;
-  const modifiers = [event.ctrlKey && "Ctrl", event.shiftKey && "Shift", event.altKey && "Alt", event.metaKey && "Win"].filter((name) => name !== false);
+  // Windows reports AltGr as a left Ctrl it adds, then the right Alt with both flags set; neither is the user's.
+  const altGr = event.code === "AltRight";
+  if (!altGr && /^(?:Control|Shift|Alt|Meta)(?:Left|Right)$/.test(event.code)) return null;
+  const modifiers = [!altGr && event.ctrlKey && "Ctrl", event.shiftKey && "Shift", !altGr && event.altKey && "Alt", event.metaKey && "Win"].filter((name) => name !== false);
   return [...modifiers, event.code].join("+");
 }
 
-/** Text with every key written as the keyboard shows it, not as the settings file names it: `Alt+KeyZ` is "Alt+Z". */
+/** Text with every key written as the keyboard shows it, not as the settings file names it: `Alt+KeyZ` is "Alt+Z" and `AltRight` is "AltGr". */
 function keyLabel(text: string): string {
-  return text.replace(/(?:Key|Digit)(?=[A-Z0-9](?![A-Za-z0-9]))/g, "");
+  return text.replace(/(?:Key|Digit)(?=[A-Z0-9](?![A-Za-z0-9]))/g, "").replaceAll("AltRight", "AltGr");
 }
 
 /** Why `recorded` was refused, in the words of the rows; a name that is no key at all can't be used, however it is spelled. */

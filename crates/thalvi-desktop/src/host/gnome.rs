@@ -10,7 +10,7 @@ use std::path::Path;
 
 use super::command::{CommandRunner, SystemRunner, tool};
 use super::{App, Delivered, HoldSource, Host, HostError, PasteText, WebUrl};
-use crate::hold::{HoldKey, HoldKind};
+use crate::hold::{HoldChange, HoldKey, HoldKind};
 
 /// Where GNOME dictation goes: there is no window to bind, so the text waits on the clipboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,7 +46,7 @@ impl Gnome {
     )]
     pub fn watch_hold_keys(
         _keys: &[(HoldKind, HoldKey)],
-        _on_change: impl Fn(HoldKind, bool) + Send + 'static,
+        _on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
         _on_problem: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         Ok(HoldSource::Unavailable(

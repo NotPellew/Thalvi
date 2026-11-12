@@ -88,6 +88,11 @@ by refusing the file and ending nothing, so like `Apply` it has no cancellation 
 `drive` a cancel callback that also stops the feed, and `Engine::capture` notes whether its frames come from a file
 for the capture metric. No mapped await boundary, control drain or delivery admission changed, so the model is
 unchanged and only the hashes moved.
+AltGr alone as a hold key (#387) keeps the frames heard since the press: `Engine::scan` stores `Queued`
+frames in `wake_clip`, `begin_hold` copies those since the press into `Held::heard`, and `Engine::start`
+seeds its backlog with them before any await. `capture`, `conclude`, `end_cue`, `end_with`, `reconcile`,
+`write`, `bounded` and `cancel` are unchanged, and the seed adds no await, control drain or delivery
+admission, so the model is unchanged and only the `engine.rs` hash moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

@@ -1966,6 +1966,11 @@ describe("live controls", () => {
       ["Write key", [["Tab"]], UNKNOWN, "Tab", "Alt+X", true, TAB, false],
       ["Write key", [["Tab"]], UNKNOWN, "Tab", "Alt+X", true, TAB, true],
       ["Write key", [["F8"]], null, "F8", "F8", false, "", true],
+      // AltGr alone: Windows sends the left Ctrl it adds first, and both flags with the right Alt.
+      ["Dictate key", [["ControlLeft", "ctrl"], ["AltRight", "ctrl", "alt"]], null, "AltRight", "AltGr", false, "", false],
+      ["Write key", [["AltRight", "alt"]], null, "AltRight", "AltGr", false, "", false],
+      ["Write key", [["ControlLeft", "ctrl"], ["Escape"], ["AltRight", "ctrl", "alt"]], null, null, "Alt+X", true, "", false],
+      ["Dictate key", [["AltRight", "alt"]], MODIFIER.replace("Alt+KeyZ", "AltRight"), "AltRight", "Alt+Z", true, MODIFIER.replace("Alt+KeyZ", "AltGr"), false],
     ];
 
     it.each(cases)("%s: keys %j, desktop says %j: sends %j, shows %j", async (label, keys, backendSays, sent, shown, restoreDisabled, notice, otherRefused) => {

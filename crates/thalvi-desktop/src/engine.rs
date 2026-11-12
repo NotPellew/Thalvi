@@ -450,7 +450,7 @@ pub struct Engine<R, W, C> {
     /// The wake word that opened the next capture.
     woke: Option<Woke>,
     /// The latest frames scored while listening.
-    wake_clip: VecDeque<Frame>,
+    wake_clip: VecDeque<Queued>,
     key: Presses,
     listening: ListenState,
     /// The hold that opened the next capture.
@@ -470,6 +470,9 @@ struct Held {
     at: Instant,
     /// Where this press was released among the queued frames, however many presses followed.
     release: Cutoff,
+    /// The frames heard since the key went down, when it waited to be told from a chord: the
+    /// hold's first words, said before it could start.
+    heard: Vec<Queued>,
 }
 
 impl Held {
@@ -1023,16 +1026,17 @@ where
                 }
                 frame = frames.next() => frame,
             };
-            let frame = match frame {
-                Ok(queued) => queued.frame,
+            let queued = match frame {
+                Ok(queued) => queued,
                 Err(error) => {
                     self.level.send_replace(0.0);
                     return Err(error.into());
                 }
             };
+            let frame = queued.frame;
             self.level.send_replace(loudness(&frame));
             self.note_level(&frame, latency);
-            self.remember(&frame);
+            self.remember(&queued);
             let wake = match self.wake.process(&frame) {
                 Ok(wake) => wake,
                 Err(error) => {
@@ -1079,11 +1083,19 @@ where
     /// cue is sent.
     fn begin_hold(&mut self, press: Press) {
         let at = Instant::now();
+        let heard = press.since.map_or_else(Vec::new, |since| {
+            self.wake_clip
+                .iter()
+                .filter(|queued| queued.order >= since)
+                .copied()
+                .collect()
+        });
         self.held = Some(Held {
             press: press.number,
             kind: press.kind,
             at,
             release: press.release,
+            heard,
         });
         self.woke = Some(Woke {
             at,
@@ -1111,11 +1123,11 @@ where
     }
 
     /// Keeps `frame` for the wake level check and, when audio is recorded, the wake clip.
-    fn remember(&mut self, frame: &Frame) {
+    fn remember(&mut self, queued: &Queued) {
         if self.wake_clip.len() == WAKE_CLIP_FRAMES {
             self.wake_clip.pop_front();
         }
-        self.wake_clip.push_back(*frame);
+        self.wake_clip.push_back(*queued);
     }
 
     /// Whether `wake` is too quiet to be speech and is dropped, recording the first frame of each
@@ -1141,7 +1153,7 @@ where
     fn wake_peak(&self) -> u16 {
         let recent = self.wake_clip.iter().rev().take(WAKE_FLOOR_FRAMES);
         recent
-            .flat_map(|frame| frame.iter().map(|sample| sample.unsigned_abs()))
+            .flat_map(|queued| queued.frame.iter().map(|sample| sample.unsigned_abs()))
             .max()
             .unwrap_or(0)
     }
@@ -1152,8 +1164,8 @@ where
             return;
         }
         let mut pcm = Vec::with_capacity(self.wake_clip.len() * FRAME_SAMPLES);
-        for frame in &self.wake_clip {
-            pcm.extend_from_slice(frame);
+        for queued in &self.wake_clip {
+            pcm.extend_from_slice(&queued.frame);
         }
         self.recorder.wake_audio(dictation, pcm);
     }
@@ -1399,7 +1411,7 @@ where
         let mut wake_cue = self.cue(Cue::Wake, woke.at);
         let mut session = None;
         let mut cue_ended = false;
-        let mut backlog = Vec::new();
+        let mut backlog = held.map_or_else(Vec::new, |held| held.heard.clone());
         let mut released = None;
         let mut connection: (&str, Option<Duration>) = ("cancelled", None);
         let stop = loop {

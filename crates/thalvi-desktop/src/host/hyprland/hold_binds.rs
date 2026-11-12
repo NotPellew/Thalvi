@@ -84,9 +84,12 @@ fn quoted(exe: &Path) -> Result<String, HostError> {
         })
 }
 
-/// Refuses a key with a modifier: Hyprland types a held modifier into the paste.
+/// Refuses a key with a modifier, and `AltGr`, which is one: Hyprland types a held modifier into the paste.
 pub(super) fn check(keys: &[(HoldKind, HoldKey)]) -> Result<(), HostError> {
-    match keys.iter().find(|(_, key)| !key.modifiers().is_empty()) {
+    match keys
+        .iter()
+        .find(|(_, key)| !key.modifiers().is_empty() || key.is_altgr())
+    {
         Some((_, key)) => Err(HostError::Unsupported(format!(
             "Hyprland can bind only F1 to F12 without a modifier for the hold keys, not {key}."
         ))),
@@ -641,6 +644,7 @@ mod tests {
             ("Ctrl+F9", false),
             ("Shift+F9", false),
             ("Win+F9", false),
+            ("AltRight", false),
         ] {
             assert_eq!(check(&[hold(key)]).is_ok(), bindable, "{key}");
             let hypr = Compositor::new(Vec::new());

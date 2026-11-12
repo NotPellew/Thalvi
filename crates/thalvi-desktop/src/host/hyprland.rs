@@ -16,7 +16,7 @@ use super::{
     App, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, OVERLAY_TITLE, PasteText,
     Shortcut, WebUrl,
 };
-use crate::hold::{HoldKey, HoldKind};
+use crate::hold::{HoldChange, HoldKey, HoldKind};
 use hold_binds::{Events, Installed};
 
 /// The window as Hyprland identifies it; the pid tells a reused address from the original window.
@@ -67,7 +67,7 @@ impl Hyprland {
     /// Hyprland refuses the binds.
     pub fn watch_hold_keys(
         keys: &[(HoldKind, HoldKey)],
-        _on_change: impl Fn(HoldKind, bool) + Send + 'static,
+        _on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
         on_problem: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         /// Shared by every watch, since a key change has two at once.

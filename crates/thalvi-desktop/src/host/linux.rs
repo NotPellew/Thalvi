@@ -9,7 +9,7 @@ use super::hyprland::{Hyprland, Window};
 use super::{
     App, Delivered, HoldSource, Host, HostError, PasteText, RequestServer, WebUrl, channel,
 };
-use crate::hold::{HoldKey, HoldKind};
+use crate::hold::{HoldChange, HoldKey, HoldKind};
 
 /// The desktop session Thalvi runs in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,7 +219,7 @@ impl Desktop {
     /// Thalvi supports.
     pub fn watch_hold_keys(
         keys: &[(HoldKind, HoldKey)],
-        on_change: impl Fn(HoldKind, bool) + Send + 'static,
+        on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
         on_problem: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         match Session::detect()? {
