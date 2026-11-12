@@ -514,10 +514,9 @@ impl RawEntry {
                 ),
                 active,
             ),
-            Self::LegacyServer { .. } if strict => {
+            Self::LegacyServer { .. } => {
                 return Err(fields(&name, "this speech server kind was removed."));
             }
-            Self::LegacyServer { active, .. } => Built::RemovedLegacyServer { active },
             Self::OnDevice { active, model, .. } => live(
                 LiveKind::OnDevice(speech_choice(model.as_deref()).map_err(|e| fields(&name, e))?),
                 active,
@@ -663,7 +662,7 @@ impl Serialize for Entries {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::config::DesktopConfig;
@@ -672,6 +671,10 @@ mod tests {
         DesktopConfig::from_json_str(json)
             .map(|config| config.stt.entries)
             .map_err(|error| error.to_string())
+    }
+
+    fn entries_of(json: &Value) -> Entries {
+        entries(&json.to_string()).unwrap()
     }
 
     /// `(id, kind, address or model, active)` for every entry, live ones first.
@@ -928,6 +931,85 @@ mod tests {
         let bad_live = json!({"kind": "realtime", "id": "r", "name": "R", "active": false,
                               "address": "http://h", "model": "m"});
         assert!(check(&bad_live).unwrap_err().contains("ws or wss"));
+    }
+
+    #[test]
+    fn a_saved_thalvi_server_entry_is_dropped_and_the_config_says_whether_it_was_active() {
+        let device = |active: bool| json!({"kind": "on_device", "id": "d", "name": "Device", "active": active});
+        let server = |active: bool| {
+            json!({"kind": "thalvi_server", "id": "s", "name": "Office", "active": active,
+                   "address": "ws://127.0.0.1:8080"})
+        };
+        let cases = [
+            ("none", vec![device(true)], (false, false), "Device"),
+            (
+                "inactive",
+                vec![server(false), device(true)],
+                (true, false),
+                "Device",
+            ),
+            (
+                "active beside a device",
+                vec![server(true), device(false)],
+                (true, true),
+                "Device",
+            ),
+            (
+                "active alone",
+                vec![server(true)],
+                (true, true),
+                ON_DEVICE_NAME,
+            ),
+        ];
+        for (case, list, flags, active) in cases {
+            let got = entries(&json!({"stt": {"entries": list}}).to_string()).unwrap();
+            assert_eq!(
+                (
+                    got.dropped_legacy_server(),
+                    got.dropped_active_legacy_server()
+                ),
+                flags,
+                "{case}"
+            );
+            assert_eq!(got.active_live().name, active, "{case}");
+            assert!(got.live().iter().all(|entry| entry.id != "s"), "{case}");
+        }
+        assert!(
+            check(&server(false))
+                .unwrap_err()
+                .contains("this speech server kind was removed"),
+            "where an entry is added, the removed kind is refused"
+        );
+    }
+
+    #[test]
+    fn lists_are_equal_only_when_entries_active_one_and_second_passes_all_match() {
+        let live = |id: &str, name: &str, active: bool| json!({"kind": "on_device", "id": id, "name": name, "active": active});
+        let second = json!({"kind": "second_pass", "id": "p", "name": "P", "active": true,
+                            "address": "http://h/v1", "model": "m"});
+        let list = |entries: Vec<Value>| entries_of(&json!({"stt": {"entries": entries}}));
+        let base = list(vec![live("a", "A", true), live("b", "B", false)]);
+        assert_eq!(
+            base,
+            list(vec![live("a", "A", true), live("b", "B", false)])
+        );
+        let others = [
+            (
+                "another name",
+                list(vec![live("a", "A", true), live("b", "C", false)]),
+            ),
+            (
+                "another active entry",
+                list(vec![live("a", "A", false), live("b", "B", true)]),
+            ),
+            (
+                "a second pass",
+                list(vec![live("a", "A", true), live("b", "B", false), second]),
+            ),
+        ];
+        for (case, other) in others {
+            assert_ne!(base, other, "{case}");
+        }
     }
 
     #[test]
