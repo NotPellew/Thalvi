@@ -636,6 +636,15 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn the_defaults_the_ui_restores_are_this_desktops_keys_as_the_settings_name_them() {
+        let (hold, write) = Desktop::default_hold_keys();
+        assert_eq!(
+            get_hold_key_defaults(),
+            json!({"hold_key": hold.to_string(), "write_key": write.to_string()})
+        );
+    }
+
     #[tokio::test]
     async fn a_download_that_fails_tells_the_ui_how_far_it_got_and_why_and_records_the_error() {
         let dir = std::env::temp_dir().join(format!("thalvi-download-{}", std::process::id()));
