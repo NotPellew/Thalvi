@@ -479,6 +479,29 @@ mod tests {
     }
 
     #[test]
+    fn the_keyboard_icon_is_an_outline_with_a_space_bar() {
+        // (x, y, drawn)
+        for (x, y, drawn) in [
+            (5.0, 15.0, true),
+            (27.0, 15.0, true),
+            (15.0, 10.0, true),
+            (15.0, 22.0, true),
+            (15.0, 17.0, true),
+            (15.0, 13.0, false),
+            (15.0, 19.5, false),
+            (2.0, 15.0, false),
+            (30.0, 15.0, false),
+            (15.0, 5.0, false),
+            (15.0, 30.0, false),
+            (2.0, 17.0, false),
+            (5.0, 30.0, false),
+            (2.0, 2.0, false),
+        ] {
+            assert_eq!(keyboard(x, y), drawn, "({x}, {y})");
+        }
+    }
+
+    #[test]
     fn the_seven_icons_are_distinct_shapes_of_the_right_size() {
         let icons = [
             Icon::Paused,
