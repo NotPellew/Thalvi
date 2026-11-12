@@ -59,9 +59,9 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   between cases by deleting `$R/home/.local/share/thalvi` (that is the app's
   private data directory, models included) and rewriting
   `$R/home/.config/thalvi/desktop.json` (`--config` copies a file there).
-- Without `--config` the defaults apply: speech goes to a Thalvi server at
-  `ws://127.0.0.1:8080`, which on the host can be the developer's own. Always
-  point the live entry at an unreachable address:
+- Without `--config`, speech uses On this computer. To verify migration of an
+  old saved config, pass an active legacy Thalvi server entry with an unreachable
+  address so it cannot connect to the developer's server:
   `{"stt":{"entries":[{"kind":"thalvi_server","id":"rig","name":"Rig","active":true,"address":"ws://127.0.0.1:1"}]}}`.
   An on-device entry (`{"kind":"on_device","id":"dev","name":"On this computer","active":true,"model":"nemotron_160ms"}`)
   downloads about 650 MB at start; add `--env HTTPS_PROXY=http://127.0.0.1:1`
