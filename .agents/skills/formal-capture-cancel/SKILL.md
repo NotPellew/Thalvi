@@ -34,6 +34,7 @@ when the switch was off), still polling cancellation first, and the recognizer
 errors name their entry. `drive` times the recognizer's first words and each final
 result against the speech heard (`Heard`) for the metrics. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
+The OpenAI-compatible recognizer buffers audio until release or the wake VAD pause; cancellation aborts its upload before delivery, with the existing cancel-first control path unchanged.
 The GNOME host (#267) changed `delivery.rs` and `runner.rs` without changing that:
 `Delivery::paste_in` (formerly `type_in`) returns `Delivered::InWindow` or `Delivered::OnClipboard` from the
 same `Delivery::finish` admission, so a clipboard-only desktop is another admitted host
