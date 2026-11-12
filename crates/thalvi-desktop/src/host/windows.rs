@@ -104,6 +104,15 @@ impl Windows {
         (HoldKey::alt_z(), HoldKey::alt_x())
     }
 
+    /// Refuses the keys this desktop can never bind, without binding anything; Windows takes
+    /// every key a hold key can be, and refuses one only when the hook is installed.
+    ///
+    /// # Errors
+    /// Never.
+    pub fn check_hold_keys(_keys: &[(HoldKind, HoldKey)]) -> Result<(), HostError> {
+        Ok(())
+    }
+
     /// Reports each press and release of `keys` to `on_change` until the guard is dropped, and
     /// keeps them from the focused app. `on_change` runs inside the keyboard hook: it must not block.
     ///

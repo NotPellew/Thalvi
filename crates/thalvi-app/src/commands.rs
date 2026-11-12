@@ -16,7 +16,7 @@ use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::draft::DraftView;
 use thalvi_desktop::entries::{self, LiveKind, Realtime};
 use thalvi_desktop::history::{Entry, HistoryError, Store as History};
-use thalvi_desktop::host::{Host, WebUrl};
+use thalvi_desktop::host::{Desktop, Host, WebUrl};
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{
     CatalogHead, CatalogSpeech, ModelError, ModelStore, SpeechAssets, SpeechDownloads,
@@ -568,6 +568,13 @@ pub fn discard_draft(state: State<'_, AppState>) {
 #[tauri::command]
 pub fn get_hold_key_unavailable(state: State<'_, AppState>) -> Option<&'static str> {
     state.hold_key_unavailable()
+}
+
+/// The hold and write keys this desktop starts with, named as in the settings.
+#[tauri::command]
+pub fn get_hold_key_defaults() -> Value {
+    let (hold, write) = Desktop::default_hold_keys();
+    json!({"hold_key": hold.to_string(), "write_key": write.to_string()})
 }
 
 #[tauri::command]

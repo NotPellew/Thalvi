@@ -75,10 +75,10 @@ const F10: usize = 46;
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HoldKeyError {
     #[error(
-        "The hold key \"{0}\" is not a key name such as Alt+KeyZ: modifiers Ctrl, Shift, Alt or Win, then a key such as KeyZ, Digit1, F9 or Space, joined by +."
+        "The key \"{0}\" is not a key name such as Alt+KeyZ: modifiers Ctrl, Shift, Alt or Win, then a key such as KeyZ, Digit1, F9 or Space, joined by +."
     )]
     Unknown(String),
-    #[error("The hold key \"{0}\" needs a modifier, or typing that key would start dictation.")]
+    #[error("The key \"{0}\" needs a modifier, or typing that key would start dictation.")]
     NeedsModifier(String),
 }
 

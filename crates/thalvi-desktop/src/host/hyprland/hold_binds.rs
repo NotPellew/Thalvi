@@ -84,16 +84,22 @@ fn quoted(exe: &Path) -> Result<String, HostError> {
         })
 }
 
+/// Refuses a key with a modifier: Hyprland types a held modifier into the paste.
+pub(super) fn check(keys: &[(HoldKind, HoldKey)]) -> Result<(), HostError> {
+    match keys.iter().find(|(_, key)| !key.modifiers().is_empty()) {
+        Some((_, key)) => Err(HostError::Unsupported(format!(
+            "Hyprland can bind only F1 to F12 without a modifier for the hold keys, not {key}."
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// The binds that start and end each hold: Hyprland takes F1 to F12 alone and no other key.
 fn wanted(exe: &Path, keys: &[(HoldKind, HoldKey)]) -> Result<Vec<Bind>, HostError> {
+    check(keys)?;
     let exe = quoted(exe)?;
     let mut binds = Vec::new();
     for (kind, key) in keys {
-        if !key.modifiers().is_empty() {
-            return Err(HostError::Unsupported(format!(
-                "Hyprland can bind only F1 to F12 without a modifier for the hold keys, not {key}."
-            )));
-        }
         let (start, end) = match kind {
             HoldKind::Dictate => ("hold-start", "hold-end"),
             HoldKind::Write => ("write-start", "write-end"),
@@ -636,6 +642,7 @@ mod tests {
             ("Shift+F9", false),
             ("Win+F9", false),
         ] {
+            assert_eq!(check(&[hold(key)]).is_ok(), bindable, "{key}");
             let hypr = Compositor::new(Vec::new());
             let (watch, _) = bind_keys(&hypr, &Installed::default(), EXE, &[hold(key)]);
             match watch {

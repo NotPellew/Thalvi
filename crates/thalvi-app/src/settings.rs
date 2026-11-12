@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use thalvi_desktop::config::{ConfigError, DesktopConfig};
 use thalvi_desktop::entries::{self, LiveKind};
+use thalvi_desktop::hold::HoldKind;
+use thalvi_desktop::host::Desktop;
 use thalvi_desktop::transducer::{SpeechChoice, check_folder};
 use thalvi_desktop::wake::validate_wake_model;
 use thalvi_desktop::writing::{DEFAULT_PROMPT, Writing};
@@ -200,6 +202,13 @@ pub fn judge(
     ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
     prepare(&mut settings, current);
     let config = load(&settings)?;
+    if (&config.hold_key, &config.write_key) != (&current.hold_key, &current.write_key) {
+        Desktop::check_hold_keys(&[
+            (HoldKind::Dictate, config.hold_key.clone()),
+            (HoldKind::Write, config.write_key.clone()),
+        ])
+        .map_err(|error| error.to_string())?;
+    }
     let mut before = serde_json::to_value(current).map_err(|error| error.to_string())?;
     let known: Vec<Value> = entries_of(&mut before)
         .map(|entry| Value::Object(entry.clone()))
@@ -351,7 +360,6 @@ mod tests {
     use serde_json::json;
     use thalvi_desktop::config::Look;
     use thalvi_desktop::entries::LiveKind;
-    use thalvi_desktop::host::Desktop;
     use thalvi_desktop::transducer::SpeechChoice;
 
     use super::*;

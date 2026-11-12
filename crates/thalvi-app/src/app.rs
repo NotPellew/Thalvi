@@ -526,6 +526,7 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::list_microphones,
             commands::open_recordings,
             commands::get_hold_key_unavailable,
+            commands::get_hold_key_defaults,
             commands::get_start_at_login,
             commands::set_start_at_login,
             commands::copy_login_line,
