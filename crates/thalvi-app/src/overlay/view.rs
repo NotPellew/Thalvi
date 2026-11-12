@@ -496,7 +496,6 @@ mod tests {
         assert_eq!(view.label.as_deref(), Some("PASTE IN 3 s"));
     }
 
-    /// The frame's colour at `(x, y)` points, at scale 1, as RGB.
     #[test]
     fn a_delivery_names_where_the_words_went() {
         assert_eq!(
@@ -511,5 +510,45 @@ mod tests {
             done_message(CaptureRoute::Task, Some("kitty"), "Opened."),
             "✓ Opened."
         );
+    }
+    #[test]
+    fn the_wave_shows_new_sound_at_its_centre_moves_older_sound_outwards_and_stays_in_its_strip() {
+        let heard = |age: usize| {
+            let mut wave = Wave::default();
+            wave.history[HISTORY - 1 - age] = 1.0;
+            wave
+        };
+        #[expect(clippy::cast_precision_loss, reason = "small counts")]
+        let out = |age: usize| age as f32 / 28.0;
+        let newest = heard(0);
+        assert!(newest.amplitude(0.5, 0.0) > 2.0 * newest.amplitude(0.5 + out(4), 0.0));
+        let older = heard(4);
+        for side in [0.5 - out(4), 0.5 + out(4)] {
+            assert!(
+                older.amplitude(side, 0.0) > 2.0 * older.amplitude(0.5, 0.0),
+                "{side}"
+            );
+            assert!(
+                older.amplitude(side, 0.0) > 2.0 * older.amplitude(0.5 + out(8), 0.0),
+                "{side}"
+            );
+        }
+        assert!(
+            (older.amplitude(0.5 - out(4), 0.0) - older.amplitude(0.5 + out(4), 0.0)).abs() < 1e-4
+        );
+        let between = older.amplitude(0.5 + out(3) + out(1) / 2.0, 0.0);
+        assert!(
+            between > older.amplitude(0.5 + out(3), 0.0)
+                && between < older.amplitude(0.5 + out(4), 0.0)
+        );
+        let loud = Wave {
+            history: [1.0; HISTORY],
+            smoothed: 1.0,
+            ..Wave::default()
+        };
+        let peak = loud.amplitude(0.5, 0.0);
+        assert!(peak > 0.4 * WAVE_H && peak <= WAVE_H / 2.0, "{peak}");
+        let quiet = Wave::default();
+        assert!(quiet.amplitude(0.5, 0.0) > 0.0 && quiet.amplitude(0.5, 0.0) < 0.05 * WAVE_H);
     }
 }

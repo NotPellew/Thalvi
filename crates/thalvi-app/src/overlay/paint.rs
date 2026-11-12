@@ -619,4 +619,44 @@ mod tests {
             assert_eq!(fonts.len(), 1, "weight {weight} drew from {fonts:?}");
         }
     }
+    #[test]
+    fn a_blur_keeps_a_filled_canvas_whole_and_spreads_a_dot_evenly_and_only_so_far() {
+        let alpha = |canvas: &Canvas| {
+            let mut frame = OverlayFrame {
+                width: 0,
+                height: 0,
+                bgra: Vec::new(),
+            };
+            canvas.frame_into(&mut frame);
+            let width = frame.width as usize;
+            move |x: usize, y: usize| frame.bgra[(y * width + x) * 4 + 3]
+        };
+        let white = Fill::Solid(Rgba::rgb(255, 255, 255));
+        let mut full = Canvas::new(12.0, 9.0, 1.0).unwrap();
+        full.rect((0.0, 0.0, 12.0, 9.0), 0.0, &white);
+        full.blur(4.0);
+        let at = alpha(&full);
+        for (x, y) in [(0, 0), (11, 0), (5, 4), (0, 8), (11, 8)] {
+            assert_eq!(at(x, y), 255, "({x}, {y})");
+        }
+        let mut dot = Canvas::new(21.0, 21.0, 1.0).unwrap();
+        dot.rect((10.0, 10.0, 1.0, 1.0), 0.0, &white);
+        dot.blur(2.0);
+        let at = alpha(&dot);
+        assert!(at(10, 10) > 0 && at(10, 10) < 255);
+        for step in 1..=3 {
+            let around = [
+                at(10 - step, 10),
+                at(10 + step, 10),
+                at(10, 10 - step),
+                at(10, 10 + step),
+            ];
+            assert!(
+                around.iter().all(|a| *a == around[0] && *a > 0),
+                "{step}: {around:?}"
+            );
+            assert!(around[0] < at(10 - step + 1, 10), "{step}");
+        }
+        assert_eq!((at(6, 10), at(14, 10), at(10, 6), at(10, 14)), (0, 0, 0, 0));
+    }
 }

@@ -214,6 +214,46 @@ mod tests {
     }
 
     #[test]
+    fn the_module_looks_draw_a_silent_wave_and_every_look_moves_with_the_voice() {
+        let differing = |a: &[u8], b: &[u8]| {
+            a.as_chunks::<4>()
+                .0
+                .iter()
+                .zip(b.as_chunks::<4>().0)
+                .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 24))
+                .count()
+        };
+        for (look, dark) in [
+            (Look::Gunmetal, true),
+            (Look::Holo, true),
+            (Look::Neon, true),
+            (Look::Neon, false),
+        ] {
+            let [without, quiet, loud] = [None, Some(0.0), Some(1.0)].map(|level| {
+                let mut painter = Painter::new(1.0, look, dark).unwrap();
+                let mut shown = view(&capturing(), false);
+                for step in 0..15 {
+                    let clock = f64::from(step) * 0.033;
+                    shown.poll(clock, level.unwrap_or(0.0));
+                    if level.is_none() {
+                        shown.wave = None;
+                    }
+                    painter.draw(&shown, clock);
+                }
+                painter.frame.bgra.clone()
+            });
+            let silent = differing(&without, &quiet);
+            let flat_bars_either_way = look == Look::Neon;
+            assert!(
+                flat_bars_either_way || silent > 150,
+                "{look:?}: the silent wave drew {silent} pixels"
+            );
+            let moved = differing(&quiet, &loud);
+            assert!(moved > 150, "{look:?} dark {dark}: {moved} pixels moved");
+        }
+    }
+
+    #[test]
     fn only_a_capture_where_the_desktop_takes_clicks_is_cancelled_by_its_button() {
         let done = Status::Done {
             target: None,
@@ -232,10 +272,14 @@ mod tests {
                     .unwrap(),
             };
             assert!(painter.cancels(&clickable, button.0, button.1), "{look:?}");
-            assert!(
-                !painter.cancels(&clickable, WIDTH / 2.0, 150.0),
-                "{look:?} away from the button"
-            );
+            for (x, y) in [
+                (WIDTH / 2.0, 150.0),
+                (button.0, 150.0),
+                (10.0, button.1),
+                (button.0 + 14.0, button.1),
+            ] {
+                assert!(!painter.cancels(&clickable, x, y), "{look:?} at ({x}, {y})");
+            }
             let unclickable = view(&capturing(), false);
             painter.draw(&unclickable, 0.0);
             assert!(
