@@ -88,7 +88,7 @@ impl ReloadEngine {
     }
 
     fn set_recordings(&mut self, _: thalvi_desktop::metrics::RecordKinds) {
-        panic!("this replay changes the server, not the recording switches");
+        panic!("this replay changes the live speech entry, not the recording switches");
     }
 
     fn set_wake_words(&mut self, _: bool) {}
@@ -135,7 +135,10 @@ impl ReloadRunner {
 #[tokio::test]
 async fn settings_apply_reports_presses_during_successful_and_failed_rebuilds() {
     let config = DesktopConfig::from_json_str("{}").unwrap();
-    let next = DesktopConfig::from_json_str(r#"{"server":"ws://127.0.0.1:9012"}"#).unwrap();
+    let next = DesktopConfig::from_json_str(
+        r#"{"stt":{"entries":[{"kind":"realtime","id":"r","name":"Realtime","active":true,"address":"ws://127.0.0.1:9012","model":"m"}]}}"#,
+    )
+    .unwrap();
     for rebuilt in [true, false] {
         for (tapped, before_apply) in [(true, false), (false, false), (true, true), (false, true)] {
             let (input, key) = HoldInput::new();

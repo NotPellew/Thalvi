@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `d15c5e0de2bdd77e58813990ce9661907db62652`. The recorded file hashes
+Sync commit: `31fac0b6246b7147c4999ec0db089076200e44ad`. The recorded file hashes
 match the covered files at that commit. Since the model was last updated, holds
 stopped honouring spoken endings (a hold's secondary transcript is agreed as
 plain text, and cancellation is still polled first), the quiet wake floor was
@@ -100,6 +100,11 @@ and every mapped engine function are unchanged, and no await, control drain or d
 so the model is unchanged and only the `runner.rs` and `engine.rs` hashes moved.
 The CPU-drawn overlay (#384) drops `prepare_overlay` from the host interface, which removes it from `runner.rs`'s
 test host only; no mapped function changed, so only the hash moved.
+Removing dictation through the Thalvi server (#386) deletes `ServerSession` and its `/transcription` client from
+`recognizer.rs`; the remaining network session, `RealtimeSession::close` in `realtime.rs`, awaits its close under the
+same `CLOSE_TIMEOUT`, so `CloseReturns` now maps there. `engine.rs`, `runner.rs` and `delivery.rs` lose the server
+engine's arms and the word-list sharing; no mapped await boundary, control drain or delivery admission changed, so the
+model is unchanged and only the hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
@@ -119,7 +124,7 @@ Matching hashes establish synchronization only, not correctness of the model.
 | `crates/thalvi-desktop/src/engine.rs`: `EngineHandle::cancel`, `Engine::capture` | `cancelPending` represents the watch version change; capture entry consumes the old version. `Accept` and `ActiveCancelled` abstract capture work before the ending. |
 | Same file: `Engine::conclude`, `Engine::end_cue`, `Engine::end_with` | `CueReturns`, `CloseReturns`; the cue's cancellation-biased select and recognizer release are separate futures joined together. A completed cue retains its bool while close is still Pending. Neither completion is a transaction encompassing the other. |
 | Same file: `Engine::reconcile`, `Engine::write`, `bounded` | `secondary`, `writing`, `SecondaryReturns`, `WritingReturns`; disabled stages are skipped, each enabled stage polls cancellation first before handing the result to the next stage. |
-| `crates/thalvi-desktop/src/recognizer.rs`: `RecognizerSession`, `ServerSession::close` | `CloseReturns` may occur before or after the cue. Network close is awaited under a timeout, so it can remain Pending. |
+| `crates/thalvi-desktop/src/recognizer.rs`: `RecognizerSession`; `crates/thalvi-desktop/src/realtime.rs`: `RealtimeSession::close` | `CloseReturns` may occur before or after the cue. Network close is awaited under a timeout, so it can remain Pending. |
 | `crates/thalvi-desktop/src/delivery.rs`: `Delivery::finish`, `paste_in`, `call` | `delivered` abstracts admission to a valid configured host action. Actual host execution is outside the proof; once admitted it can run via `spawn_blocking`. Other changes to this file are not covered by the model. |
 
 ## Run
