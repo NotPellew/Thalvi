@@ -426,7 +426,7 @@ never API keys.
 
 `thalvi-desktop toggle`, `pause`, `resume`, `cancel` and `copy-error` control
 the running app (with the AppImage, run it with that word). `status` prints
-Waybar JSON. They work on Hyprland, GNOME and Windows, and start nothing when
+Waybar JSON, with the class `keyboard` while wake words are off. They work on Hyprland, GNOME and Windows, and start nothing when
 Thalvi is not running. The
 examples in [`integrations/hyprland/`](integrations/hyprland/) add a Waybar
 microphone button (left click toggles listening without moving focus, right
@@ -447,7 +447,7 @@ the network, and a command never starts the app or the microphone.
 
 | Command | Answer |
 | --- | --- |
-| `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false, "feeding": false, "overlay": {"state": "hidden"}, "recognizer": {"name": "On this computer", "kind": "on_device", "model": "nemotron_160ms", "status": "ready"}}`. `state` is `paused`, `loading`, `listening`, `capturing`, `pending`, `transcribing`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}` (`reason` is left out for a delivery failure, whose notice can hold the dictated text), and `awaiting_confirmation: true` marks a submit that waits for you. `overlay.state` is what the overlay shows: `hidden` (also when the overlay is off), `listening`, `quiet`, `countdown`, `writing`, `working`, `delivered`, `error` (with the `headline` shown) or `loading`. `recognizer` is the speech entry that handles the next dictation (`model` only for a catalog model) and whether it is `ready`, `loading`, `failed` or `paused`, as the Speech page says. Nothing that was said is in it. |
+| `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false, "feeding": false, "overlay": {"state": "hidden"}, "recognizer": {"name": "On this computer", "kind": "on_device", "model": "nemotron_160ms", "status": "ready"}}`. `state` is `paused`, `loading`, `listening`, `keyboard` (listening with wake words off), `capturing`, `pending`, `transcribing`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}` (`reason` is left out for a delivery failure, whose notice can hold the dictated text), and `awaiting_confirmation: true` marks a submit that waits for you. `overlay.state` is what the overlay shows: `hidden` (also when the overlay is off), `listening`, `quiet`, `countdown`, `writing`, `working`, `delivered`, `error` (with the `headline` shown) or `loading`. `recognizer` is the speech entry that handles the next dictation (`model` only for a catalog model) and whether it is `ready`, `loading`, `failed` or `paused`, as the Speech page says. Nothing that was said is in it. |
 | `feed <wav-file>` | Plays the file's audio in place of the microphone, at the pace of speech, through the same wake word, recognition, endings and delivery as spoken audio; the microphone is ignored while it plays. Replies when the file has been fed: `{"ok": true, "took_effect": true, "state": "…"}`, with the state then; a capture it started carries on. Refused with `"Thalvi is paused."`, `"A capture is running."`, or the reason for a file that is missing, unreadable, not a mono or stereo 16-bit PCM WAV, or longer than the capture limit. Needs an absolute path (the command makes it absolute). `cancel` stops the feed and any capture it started. Capture metrics record `"source": "file"`. |
 | `models` | `{"ok": true, "models": [{"kind": "speech", "name", "title", "size", "downloaded", "progress_percent", "runs_on"}, …]}`: the wake and speech catalog models, `progress_percent` only while one downloads, `runs_on` (the Speech page's hardware line) only for speech models. |
 | `model-download <wake\|speech> <name>` | Downloads the model; replies when it is ready, `{"ok": true, "downloaded": true}`, or has failed, `{"ok": false, "downloaded": false, "error": "…"}`. `models` shows the progress meanwhile. |
@@ -473,6 +473,17 @@ A confirmation stays with you: no command answers one, and a submit that waits
 for it shows as `awaiting_confirmation` in `state`. Any other failure of a
 command is `{"ok": false, "error": "…"}`; a command with no running app says so
 and exits 1, and one that is not a command exits 2.
+
+### Wake words off
+
+Settings → Capture → **Wake words** is a switch, on by default. Off, Thalvi keeps
+listening for the hold keys and the microphone stays open, but no wake word starts
+anything, plays a cue or delivers, and the wake model scores nothing. It applies at
+once, without Save or a restart, survives restarts and pause and resume, and is
+stored as `"wake": {"enabled": false}` only when it is off. The tray, `state` and
+Settings tell the three states apart: listening with wake words, listening for the
+hold keys only (the tray tooltip says "hold keys only"), and paused. Pausing still
+stops the hold keys too.
 
 ### Hold a key to dictate
 
