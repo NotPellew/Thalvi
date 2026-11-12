@@ -1727,6 +1727,7 @@ mod tests {
         ] {
             let config = parse(&format!(r#"{{"update_channel": "{name}"}}"#)).unwrap();
             assert_eq!(config.update_channel, channel);
+            assert_eq!(channel.name(), name, "the name the metrics use");
         }
         for json in [
             r#"{"update_channel": "nightly"}"#,

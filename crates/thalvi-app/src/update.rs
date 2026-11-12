@@ -911,6 +911,11 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
             match fetch {
                 Fetch::Bytes(bytes) => {
+                    // A server may announce a length of zero; that shows no percentage.
+                    progress(Progress {
+                        done: 0,
+                        total: Some(0),
+                    });
                     for done in [0, 50, 100] {
                         progress(Progress {
                             done,

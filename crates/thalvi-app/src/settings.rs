@@ -364,6 +364,15 @@ mod tests {
     }
 
     #[test]
+    fn the_update_marker_is_kept_beside_the_config() {
+        let (store, dir) = store("sibling");
+        assert_eq!(
+            store.sibling("update.json"),
+            dir.join("nested").join("update.json")
+        );
+    }
+
+    #[test]
     fn the_effective_config_has_every_field_and_says_what_is_recorded() {
         let config =
             DesktopConfig::from_json_str(r#"{"recordings": {"metrics": true, "audio": true}}"#)
