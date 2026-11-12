@@ -76,8 +76,10 @@ gate_issue_sync() {
 
 gate_release() {
   step npm ci --ignore-scripts --prefix crates/thalvi-app/ui
-  step "${SHELLCHECK[@]}" .github/scripts/updater-feed .github/scripts/updater-feed.test.sh
+  step "${SHELLCHECK[@]}" .github/scripts/updater-feed .github/scripts/updater-feed.test.sh \
+    .github/scripts/newer-version .github/scripts/newer-version.test.sh
   step .github/scripts/updater-feed.test.sh
+  step .github/scripts/newer-version.test.sh
 }
 
 run_component() {

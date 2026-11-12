@@ -121,7 +121,7 @@ Prerequisites the script does not install:
 - Speech servers: Docker with Compose, `pipx`, and `uv` (Python pinned in
   `speech/asr/.python-version`).
 - Issue sync: `pipx`.
-- Release (the updater signing script): Node pinned in `.node-version`,
+- Release (the updater signing and feed scripts): Node pinned in `.node-version`,
   `minisign`, and `pipx`.
 
 Two required checks are not in the script:
