@@ -506,6 +506,11 @@ shows why it has no hold key and no controls.
   `F9`). While an administrator window is focused, Windows
   shows Thalvi no keys and lets it send no keys, so the key reaches that window
   as usual and no dictation starts.
+  **AltGr alone** (`AltRight`, the right Alt key) can be the dictate or write key
+  too. It is never kept from the focused app, so AltGr with another key still
+  types its character, as `@`, `€` and `{` do on a German keyboard, with no cue or
+  overlay. The hold starts when AltGr has been down for 0.2 s with no other key; the
+  words said meanwhile are kept. Hyprland refuses it.
 
 ### Write a dictation out
 
