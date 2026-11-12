@@ -2,7 +2,7 @@
   "sync_commit": "6baf0f0e1046590b29f2b562c71aca84f4de0858",
   "files": {
     "crates/thalvi-desktop/src/hold.rs": {
-      "sha256": "5a997a2d51944b718681cc23889c272c34fa866745a09c221adf02266eeb627d",
+      "sha256": "36eb7f599727fc7143930b65070011c4e94e7c3c555881b391cbada73e6a82dc",
       "functions": [
         "KeyState",
         "Cutoff::release",

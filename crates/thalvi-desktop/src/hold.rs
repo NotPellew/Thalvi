@@ -731,6 +731,8 @@ pub struct HoldHook {
     altgr_ctrl: bool,
     /// The event before this one.
     previous: Option<KeyEvent>,
+    /// Another hold key is `AltGr` alone, so right Alt is its key, never this key's `Alt`.
+    without_right_alt: bool,
 }
 
 /// Where an `AltGr` hold key is, as the hook sees it.
@@ -757,7 +759,15 @@ impl HoldHook {
             altgr: AltGrPhase::Up,
             altgr_ctrl: false,
             previous: None,
+            without_right_alt: false,
         }
+    }
+
+    /// Leaves right Alt to an `AltGr` hold key: `AltGr` with a key is a chord that types, however
+    /// this key's modifiers read.
+    fn without_right_alt(mut self) -> Self {
+        self.without_right_alt = true;
+        self
     }
 
     const LEFT_CTRL: u16 = 0xA2;
@@ -856,6 +866,9 @@ impl HoldHook {
     fn reconcile(&mut self, physically_down: &impl Fn(u16) -> bool) {
         self.down = [0; 4];
         for (vk, modifier, side) in Self::SIDES {
+            if self.without_right_alt && vk == Self::RIGHT_ALT_KEY {
+                continue;
+            }
             if physically_down(vk) {
                 self.down[modifier as usize] |= side;
             }
@@ -905,7 +918,9 @@ impl HoldHook {
         self.reconcile(&physically_down);
         // A release the hook never saw may have been the last thing the hold waited for.
         let lost = self.end_if_clear().then_some(false);
-        let mut decision = if let Some((modifier, side)) = Self::modifier(event.vk) {
+        let modifier = Self::modifier(event.vk)
+            .filter(|_| !(self.without_right_alt && event.vk == Self::RIGHT_ALT_KEY));
+        let mut decision = if let Some((modifier, side)) = modifier {
             self.on_modifier(modifier, side, event)
         } else if event.scan_code != self.key.scan_code() || event.extended {
             Decision::PASS
@@ -971,9 +986,20 @@ pub struct HoldHooks(Vec<(HoldKind, HoldHook)>);
 impl HoldHooks {
     #[must_use]
     pub fn new(keys: Vec<(HoldKind, HoldKey)>) -> Self {
+        let altgr = keys.iter().any(|(_, key)| key.is_altgr());
         Self(
             keys.into_iter()
-                .map(|(kind, key)| (kind, HoldHook::new(key)))
+                .map(|(kind, key)| {
+                    let hook = HoldHook::new(key);
+                    (
+                        kind,
+                        if altgr && !hook.key.is_altgr() {
+                            hook.without_right_alt()
+                        } else {
+                            hook
+                        },
+                    )
+                })
                 .collect(),
         )
     }
@@ -1660,10 +1686,17 @@ mod tests {
     const LEFT_CTRL: u16 = 0xA2;
     const Q: u16 = 0x51;
 
-    /// Feeds `events`, `(vk, down, time)`, to a hook for `AltGr` alone, with a keyboard that holds
-    /// down what the events pressed, and returns what each one got.
-    fn run_altgr(events: &[(u16, bool, u32)]) -> Vec<Decision> {
-        let mut hook = HoldHook::new(HoldKey::parse("AltRight").unwrap());
+    /// What the hooks for `keys` make of each event, `(key, down, time)`, with a keyboard that holds
+    /// down what the events pressed.
+    fn run_altgr(
+        keys: &[(HoldKind, &str)],
+        events: &[(u16, bool, u32)],
+    ) -> Vec<(Verdict, Vec<(HoldKind, HoldChange)>)> {
+        let mut hooks = HoldHooks::new(
+            keys.iter()
+                .map(|(kind, key)| (*kind, HoldKey::parse(key).unwrap()))
+                .collect(),
+        );
         let mut keyboard = std::collections::HashSet::new();
         events
             .iter()
@@ -1678,36 +1711,46 @@ mod tests {
                     time,
                     ..event(vk, down)
                 };
-                hook.on_event(event, |vk| keyboard.contains(&vk))
+                hooks.on_event(event, |vk| keyboard.contains(&vk))
             })
             .collect()
     }
 
-    type AltGrCase<'a> = (&'a str, &'a [(u16, bool, u32)], Vec<Decision>);
+    type Said = (Verdict, Vec<(HoldKind, HoldChange)>);
+    type AltGrCase<'a> = (
+        &'a str,
+        &'a [(HoldKind, &'a str)],
+        &'a [(u16, bool, u32)],
+        Vec<Said>,
+    );
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "one row per case")]
     fn altgr_alone_starts_a_wait_and_a_key_joining_it_makes_a_chord_that_types() {
-        let maybe = Decision {
-            alone: Some(Alone::Maybe),
-            ..PASS
-        };
-        let chord = Decision {
-            alone: Some(Alone::Chord),
-            ..PASS
-        };
+        use HoldKind::{Dictate, Write};
+        let nothing: Said = (Verdict::Pass, vec![]);
+        let said = |kind, change| (Verdict::Pass, vec![(kind, change)]);
         // The hook never swallows an event, so the chord still types: only the release of a lone
         // press is masked, and every release of a press that waited tells the input.
-        let lone_release = decision(Verdict::Mask, Some(false));
-        let chord_release = decision(Verdict::Pass, Some(false));
-        // (events as (key, down, time), what each gets)
-        let cases: [AltGrCase; 8] = [
+        let lone_release = |kind| (Verdict::Mask, vec![(kind, HoldChange::Up)]);
+        let chord_release = |kind| said(kind, HoldChange::Up);
+        let maybe = |kind| said(kind, HoldChange::Maybe);
+        let chord = |kind| said(kind, HoldChange::Chord);
+        let altgr: &[(HoldKind, &str)] = &[(Dictate, "AltRight")];
+        // AltGr and the other key, each as the dictate key or the write key.
+        let with_write: &[(HoldKind, &str)] = &[(Dictate, "AltRight"), (Write, "Alt+KeyX")];
+        let with_dictate: &[(HoldKind, &str)] = &[(Dictate, "Alt+KeyZ"), (Write, "AltRight")];
+        // (what happens, the keys set, events as (key, down, time), what each gets)
+        let cases: [AltGrCase; 12] = [
             (
                 "US layout: right Alt alone",
+                altgr,
                 &[(RIGHT_ALT, true, 100), (RIGHT_ALT, false, 900)],
-                vec![maybe, lone_release],
+                vec![maybe(Dictate), lone_release(Dictate)],
             ),
             (
                 "German layout: the Ctrl Windows adds is not a modifier, and its repeats are not keys",
+                altgr,
                 &[
                     (LEFT_CTRL, true, 100),
                     (RIGHT_ALT, true, 100),
@@ -1716,10 +1759,18 @@ mod tests {
                     (LEFT_CTRL, false, 900),
                     (RIGHT_ALT, false, 900),
                 ],
-                vec![PASS, maybe, PASS, PASS, PASS, lone_release],
+                vec![
+                    nothing.clone(),
+                    maybe(Dictate),
+                    nothing.clone(),
+                    nothing.clone(),
+                    nothing.clone(),
+                    lone_release(Dictate),
+                ],
             ),
             (
                 "AltGr+Q types @",
+                altgr,
                 &[
                     (LEFT_CTRL, true, 100),
                     (RIGHT_ALT, true, 100),
@@ -1727,56 +1778,118 @@ mod tests {
                     (Q, false, 220),
                     (RIGHT_ALT, false, 300),
                 ],
-                vec![PASS, maybe, chord, PASS, chord_release],
+                vec![
+                    nothing.clone(),
+                    maybe(Dictate),
+                    chord(Dictate),
+                    nothing.clone(),
+                    chord_release(Dictate),
+                ],
             ),
             (
                 "another key before AltGr is a chord from the start",
+                altgr,
                 &[
                     (SHIFT, true, 50),
                     (RIGHT_ALT, true, 100),
                     (RIGHT_ALT, false, 300),
                 ],
-                vec![PASS, PASS, PASS],
+                vec![nothing.clone(), nothing.clone(), nothing.clone()],
             ),
             (
                 "a real Ctrl held before AltGr is not the Ctrl Windows adds",
+                altgr,
                 &[
                     (LEFT_CTRL, true, 50),
                     (RIGHT_ALT, true, 100),
                     (RIGHT_ALT, false, 300),
                 ],
-                vec![PASS, PASS, PASS],
+                vec![nothing.clone(), nothing.clone(), nothing.clone()],
             ),
             (
                 "left Alt with right Alt is a chord from the start",
+                altgr,
                 &[
                     (ALT, true, 50),
                     (RIGHT_ALT, true, 100),
                     (RIGHT_ALT, false, 300),
                 ],
-                vec![PASS, PASS, PASS],
+                vec![nothing.clone(), nothing.clone(), nothing.clone()],
             ),
             (
                 "a modifier pressed after AltGr joins it",
+                altgr,
                 &[
                     (RIGHT_ALT, true, 100),
                     (RIGHT_SHIFT, true, 160),
                     (RIGHT_ALT, false, 300),
                 ],
-                vec![maybe, chord, chord_release],
+                vec![maybe(Dictate), chord(Dictate), chord_release(Dictate)],
             ),
             (
                 "the key before the Ctrl and the right Alt does not pair them",
+                altgr,
                 &[
                     (Z, true, 90),
                     (LEFT_CTRL, true, 100),
                     (RIGHT_ALT, true, 150),
                 ],
-                vec![PASS, PASS, PASS],
+                vec![nothing.clone(), nothing.clone(), nothing.clone()],
+            ),
+            (
+                "AltGr+X types, and the default write key does not start",
+                with_write,
+                &[
+                    (RIGHT_ALT, true, 100),
+                    (X, true, 160),
+                    (X, false, 220),
+                    (RIGHT_ALT, false, 300),
+                ],
+                vec![
+                    maybe(Dictate),
+                    chord(Dictate),
+                    nothing.clone(),
+                    chord_release(Dictate),
+                ],
+            ),
+            (
+                "AltGr+Z types, and a write key of AltGr leaves the dictate key's Alt alone",
+                with_dictate,
+                &[
+                    (RIGHT_ALT, true, 100),
+                    (Z, true, 160),
+                    (Z, false, 220),
+                    (RIGHT_ALT, false, 300),
+                ],
+                vec![
+                    maybe(Write),
+                    chord(Write),
+                    nothing.clone(),
+                    chord_release(Write),
+                ],
+            ),
+            (
+                "left Alt still starts the other key beside an AltGr key",
+                with_dictate,
+                &[(ALT, true, 100), (Z, true, 160)],
+                vec![
+                    nothing.clone(),
+                    (Verdict::Swallow, vec![(Dictate, HoldChange::Down)]),
+                ],
+            ),
+            (
+                "German layout: AltGr+X types, and the default write key does not start",
+                with_write,
+                &[
+                    (LEFT_CTRL, true, 100),
+                    (RIGHT_ALT, true, 100),
+                    (X, true, 160),
+                ],
+                vec![nothing, maybe(Dictate), chord(Dictate)],
             ),
         ];
-        for (name, events, expected) in cases {
-            assert_eq!(run_altgr(events), expected, "{name}");
+        for (name, keys, events, expected) in cases {
+            assert_eq!(run_altgr(keys, events), expected, "{name}");
         }
     }
 
