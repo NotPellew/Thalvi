@@ -11,14 +11,12 @@ use crate::models::ModelStore;
 use crate::phrases::WordList;
 use crate::realtime::{RealtimeRecognizer, RealtimeSession};
 use crate::recognizer::{
-    Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, ServerRecognizer,
-    ServerSession, SpeechSource,
+    Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
 };
 use crate::transducer::TransducerSource;
 
 /// The recognizer a config asks for.
 pub enum Chosen {
-    Server(ServerRecognizer),
     Realtime(RealtimeRecognizer),
     Local {
         recognizer: Arc<LocalRecognizer<TransducerSource>>,
@@ -28,7 +26,6 @@ pub enum Chosen {
 
 /// An open recognition of any kind.
 pub enum ChosenSession {
-    Server(Box<ServerSession>),
     Realtime(Box<RealtimeSession>),
     Local(LocalSession, SpeechSource),
 }
@@ -45,9 +42,6 @@ impl Chosen {
         adapters: Adapters,
     ) -> Self {
         match &entry.kind {
-            LiveKind::ThalviServer(server) => {
-                Self::Server(ServerRecognizer::new(&entry.name, server.clone()))
-            }
             LiveKind::Realtime(realtime) => {
                 Self::Realtime(RealtimeRecognizer::new(&entry.name, realtime, phrases))
             }
@@ -67,7 +61,7 @@ impl Chosen {
     pub fn local(&self) -> Option<Arc<LocalRecognizer<TransducerSource>>> {
         match self {
             Self::Local { recognizer, .. } => Some(Arc::clone(recognizer)),
-            Self::Server(_) | Self::Realtime(_) => None,
+            Self::Realtime(_) => None,
         }
     }
 }
@@ -88,10 +82,6 @@ impl Recognizer for Chosen {
 
     async fn connect(&self) -> Result<ChosenSession, RecognizerError> {
         match self {
-            Self::Server(server) => server
-                .connect()
-                .await
-                .map(|session| ChosenSession::Server(Box::new(session))),
             Self::Realtime(realtime) => realtime
                 .connect()
                 .await
@@ -108,7 +98,6 @@ impl Recognizer for Chosen {
 impl RecognizerSession for ChosenSession {
     async fn send_frame(&mut self, frame: &Frame) -> Result<(), RecognizerError> {
         match self {
-            Self::Server(session) => session.send_frame(frame).await,
             Self::Realtime(session) => session.send_frame(frame).await,
             Self::Local(session, speech) => session
                 .send_frame(frame)
@@ -119,7 +108,6 @@ impl RecognizerSession for ChosenSession {
 
     async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
         match self {
-            Self::Server(session) => session.next_event().await,
             Self::Realtime(session) => session.next_event().await,
             Self::Local(session, speech) => session
                 .next_event()
@@ -130,7 +118,6 @@ impl RecognizerSession for ChosenSession {
 
     async fn cancel(self) {
         match self {
-            Self::Server(session) => session.cancel().await,
             Self::Realtime(session) => session.cancel().await,
             Self::Local(session, _) => session.cancel().await,
         }
@@ -138,7 +125,6 @@ impl RecognizerSession for ChosenSession {
 
     async fn close(self) {
         match self {
-            Self::Server(session) => session.close().await,
             Self::Realtime(session) => session.close().await,
             Self::Local(session, _) => session.close().await,
         }

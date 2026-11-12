@@ -24,7 +24,7 @@ use crate::status::{Failure, FailureKind, Status};
 pub const EFFECT_WAIT: Duration = Duration::from_secs(3);
 
 /// The commands a refusal lists, so that it need not repeat the one that was sent.
-const COMMANDS: [&str; 22] = [
+const COMMANDS: [&str; 21] = [
     "status",
     "state",
     "pause",
@@ -45,7 +45,6 @@ const COMMANDS: [&str; 22] = [
     "models",
     "model-download",
     "speech-check",
-    "word-list-push",
     "quit",
 ];
 
@@ -115,8 +114,6 @@ pub enum Request {
     ModelDownload { kind: Catalog, name: String },
     /// Check a speech server entry as Settings does before saving it.
     SpeechCheck { entry: Value },
-    /// Give the active Thalvi server the stored word list.
-    WordListPush,
     /// Quit as the tray's Quit does.
     Quit,
 }
@@ -214,8 +211,6 @@ pub trait Running {
         &self,
         form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
     ) -> Result<T, String>;
-    /// Gives the Thalvi server the stored word list, as Settings does after a save.
-    async fn share_word_list(&self) -> Result<(), String>;
     fn set_switch(&self, switch: Switch, on: bool) -> Result<(), String>;
     /// The folder `metrics.jsonl` is written in.
     fn recordings(&self) -> Result<PathBuf, String>;
@@ -354,13 +349,12 @@ async fn handle(running: &impl Running, wait: Duration, request: Request) -> Str
         Request::Show { page } => show(running, page.as_deref()),
         Request::SettingsGet => settings_get(running),
         Request::SettingsCheck { settings } => settings_check(running, &settings),
-        Request::SettingsSet { settings } => settings_set(running, &settings).await,
+        Request::SettingsSet { settings } => settings_set(running, &settings),
         Request::MetricsSummary => metrics_summary(running).await,
         Request::Feed { path } => feed(running, &path).await,
         Request::Models => models(running).await,
         Request::ModelDownload { kind, name } => model_download(running, kind, &name).await,
         Request::SpeechCheck { entry } => speech_check(running, &entry),
-        Request::WordListPush => word_list_push(running).await,
         Request::Quit => {
             running.quit();
             done(json!({"took_effect": true}))
@@ -430,7 +424,6 @@ fn recognizer(config: &DesktopConfig, phase: &str) -> Value {
     let entry = config.stt.entries.active_live();
     let (kind, model) = match &entry.kind {
         LiveKind::Realtime(_) => ("realtime", None),
-        LiveKind::ThalviServer(_) => ("thalvi_server", None),
         LiveKind::OnDevice(SpeechChoice::Catalog(model)) => ("on_device", Some(model.name())),
         LiveKind::OnDevice(SpeechChoice::Folder(_)) => ("on_device", None),
     };
@@ -734,26 +727,6 @@ fn speech_check(running: &impl Running, entry: &Value) -> String {
     }
 }
 
-async fn word_list_push(running: &impl Running) -> String {
-    let config = running.config();
-    if !matches!(
-        config.stt.entries.active_live().kind,
-        LiveKind::ThalviServer(_)
-    ) {
-        return done(json!({
-            "pushed": false,
-            "message": "Only a Thalvi server is given the word list; the active speech entry is not one.",
-        }));
-    }
-    match running.share_word_list().await {
-        Ok(()) => done(json!({"pushed": true})),
-        Err(error) => refused(
-            &scrub(&error, &secrets(&config, None)),
-            json!({"pushed": false}),
-        ),
-    }
-}
-
 fn settings_get(running: &impl Running) -> String {
     let config = running.config();
     match settings_json(&config) {
@@ -820,7 +793,7 @@ fn settings_check(running: &impl Running, change: &Value) -> String {
     }
 }
 
-async fn settings_set(running: &impl Running, change: &Value) -> String {
+fn settings_set(running: &impl Running, change: &Value) -> String {
     let secrets = secrets(&running.config(), Some(change));
     let plan = running.save(|current| {
         let paused = running.audio().borrow().paused;
@@ -841,15 +814,6 @@ async fn settings_set(running: &impl Running, change: &Value) -> String {
     } else {
         "now"
     };
-    let warning = if settings_changed && plan.config.stt.phrases != plan.current.stt.phrases {
-        running
-            .share_word_list()
-            .await
-            .err()
-            .map(|error| scrub(&error, &secrets))
-    } else {
-        None
-    };
     let mut switched = false;
     for (switch, on) in plan.switches {
         if switch.of(&plan.current) == on {
@@ -866,9 +830,6 @@ async fn settings_set(running: &impl Running, change: &Value) -> String {
     let mut reply = json!({"changed": settings_changed || switched});
     if settings_changed {
         reply["applies"] = json!(applies);
-    }
-    if let Some(warning) = warning {
-        reply["warning"] = json!(warning);
     }
     done(reply)
 }
@@ -932,7 +893,6 @@ mod tests {
         failure: Mutex<Option<Failure>>,
         sent: Mutex<Vec<String>>,
         switches: Mutex<Vec<(Switch, bool)>>,
-        shared: AtomicUsize,
         shown: AtomicUsize,
         pages: Mutex<Vec<String>>,
         feeding: watch::Sender<bool>,
@@ -946,7 +906,6 @@ mod tests {
         downloaded: Mutex<Vec<(Catalog, String)>>,
         quit: AtomicUsize,
         overlay: AtomicBool,
-        share_error: Mutex<Option<String>>,
         copy_refused: AtomicBool,
         ignoring: AtomicBool,
         keys: HoldInput,
@@ -978,7 +937,6 @@ mod tests {
                 failure: Mutex::new(None),
                 sent: Mutex::new(Vec::new()),
                 switches: Mutex::new(Vec::new()),
-                shared: AtomicUsize::new(0),
                 shown: AtomicUsize::new(0),
                 pages: Mutex::new(Vec::new()),
                 feeding: watch::channel(false).0,
@@ -989,7 +947,6 @@ mod tests {
                 downloaded: Mutex::new(Vec::new()),
                 quit: AtomicUsize::new(0),
                 overlay: AtomicBool::new(true),
-                share_error: Mutex::new(None),
                 copy_refused: AtomicBool::new(false),
                 ignoring: AtomicBool::new(false),
                 keys,
@@ -1129,11 +1086,6 @@ mod tests {
                     Ok(())
                 })
                 .map(|(value, _)| value)
-        }
-
-        fn share_word_list(&self) -> impl Future<Output = Result<(), String>> {
-            self.shared.fetch_add(1, Ordering::SeqCst);
-            std::future::ready(lock(&self.share_error).clone().map_or(Ok(()), Err))
         }
 
         fn set_switch(&self, switch: Switch, on: bool) -> Result<(), String> {
@@ -1316,11 +1268,6 @@ mod tests {
 
         let set = rig.set(json!({"stt": {"entries": entries, "phrases": ["Cybrex2"]}}));
         assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
-        assert_eq!(
-            rig.fake.shared.load(Ordering::SeqCst),
-            1,
-            "the word list is shared"
-        );
 
         let after = rig.ask(&Request::SettingsGet);
         assert!(!after.to_string().contains(SECRET), "{after}");
@@ -1520,11 +1467,6 @@ mod tests {
         assert_eq!(config.look, Look::Holo, "the Settings save is kept");
         assert_eq!(config.microphone.as_deref(), Some("USB Mic"));
         assert_eq!(rig.fake.saves.store.load().unwrap(), config);
-        assert_eq!(
-            rig.fake.shared.load(Ordering::SeqCst),
-            0,
-            "an unchanged word list is not shared"
-        );
     }
 
     #[test]
@@ -2302,33 +2244,6 @@ mod tests {
     }
 
     #[test]
-    fn the_word_list_goes_only_to_a_thalvi_server_and_a_failure_is_told() {
-        let local = Rig::new("push-local", "{}");
-        let reply = local.ask(&Request::WordListPush);
-        assert_eq!(reply["pushed"], false);
-        assert_eq!(local.fake.shared.load(Ordering::SeqCst), 0);
-
-        let server = Rig::new(
-            "push-server",
-            &format!(
-                r#"{{"stt": {{"entries": [{{"kind": "thalvi_server", "id": "s", "name": "s", "active": true, "address": "ws://127.0.0.1:9"}}, {}]}}}}"#,
-                entry("live", "realtime", false, Some(SECRET))
-            ),
-        );
-        assert_eq!(
-            server.ask(&Request::WordListPush),
-            json!({"ok": true, "pushed": true})
-        );
-        assert_eq!(server.fake.shared.load(Ordering::SeqCst), 1);
-        *lock(&server.fake.share_error) = Some(format!("The server refused {SECRET}."));
-        let failed = server.ask(&Request::WordListPush);
-        assert_eq!(
-            failed,
-            json!({"ok": false, "pushed": false, "error": "The server refused (a key)."})
-        );
-    }
-
-    #[test]
     fn settings_open_at_a_known_page_and_quit_quits() {
         let rig = Rig::new("show-quit", "{}");
         let show = |page: Option<&str>| {
@@ -2466,7 +2381,6 @@ mod tests {
             Request::SpeechCheck {
                 entry: json!({"kind": "realtime"}),
             },
-            Request::WordListPush,
             Request::Quit,
         ];
         let named: Vec<String> = requests

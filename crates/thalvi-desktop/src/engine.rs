@@ -2430,7 +2430,7 @@ mod tests {
     use super::*;
     use crate::engine::fakes::{FakeCuePlayer, FakeFrames, FakeWake};
     use crate::hold::KeyState;
-    use crate::recognizer::{FakeRecognizer, ServerUrl};
+    use crate::recognizer::FakeRecognizer;
 
     #[tokio::test]
     async fn dictation_wakes_when_its_score_crosses() {
@@ -2518,11 +2518,8 @@ mod tests {
     fn not_ready_names_what_waited_and_the_setting_to_fix() {
         let cases = [
             (
-                SpeechSource::thalvi_server(
-                    "Office",
-                    &ServerUrl::parse("ws://127.0.0.1:9").unwrap(),
-                ),
-                "The Thalvi server \"Office\" at ws://127.0.0.1:9 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix its address under Settings → Speech.",
+                SpeechSource::direct("Office", "ws://127.0.0.1:9".to_owned()),
+                "The speech server \"Office\" at ws://127.0.0.1:9 was not ready after 8 seconds. Nothing was delivered. Check that it is running, or fix its address under Settings → Speech.",
             ),
             (
                 SpeechSource::direct("Cybrex2", "ws://100.64.0.2:8012".to_owned()),

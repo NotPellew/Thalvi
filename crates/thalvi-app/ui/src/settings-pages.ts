@@ -767,13 +767,11 @@ function modelOption(info: SpeechModelInfo): HTMLOptionElement {
 
 const KIND_NAMES: Record<SpeechEntry["kind"], string> = {
   realtime: "Realtime speech server",
-  thalvi_server: "Thalvi server",
   on_device: "On this computer",
   second_pass: "Second pass",
 };
 const LIVE_KINDS: readonly (readonly [LiveEntry["kind"], string])[] = [
   ["realtime", "Realtime speech server"],
-  ["thalvi_server", "Through a Thalvi server"],
   ["on_device", "On this computer"],
 ];
 
@@ -790,8 +788,6 @@ function summary(entry: SpeechEntry): string {
   switch (entry.kind) {
     case "realtime":
       return `${entry.address} · ${entry.model}`;
-    case "thalvi_server":
-      return entry.address;
     case "on_device":
       return entry.model ?? SPEECH_MODEL;
     case "second_pass":
@@ -804,8 +800,6 @@ function blankEntry(kind: SpeechEntry["kind"], name: string): SpeechEntry {
   switch (kind) {
     case "realtime":
       return { ...base, kind, address: "", model: "" };
-    case "thalvi_server":
-      return { ...base, kind, address: "ws://127.0.0.1:8080" };
     case "on_device":
       return { ...base, kind };
     case "second_pass":
@@ -1087,8 +1081,6 @@ function speech(context: PageContext): HTMLElement[] {
     switch (entry.kind) {
       case "realtime":
         return "Dictation through a realtime speech server.";
-      case "thalvi_server":
-        return "Dictation through a Thalvi server.";
       case "on_device":
         return `Recognition with ${modelTitleFor(entry)}.`;
       case "second_pass":
@@ -1367,9 +1359,6 @@ function speech(context: PageContext): HTMLElement[] {
       case "realtime":
         rows.push(address("The ws:// or wss:// address of a speech server that speaks Meta's realtime protocol, such as the self-hosted one.", "ws://127.0.0.1:8012"), modelRow(), keyRow());
         break;
-      case "thalvi_server":
-        rows.push(address("The Thalvi server's address. Its own recognizer key stays in the server's .env.", "ws://127.0.0.1:8080"));
-        break;
       case "on_device": {
         const built = onDeviceRows(working, context, speechModels);
         rows.push(...built.rows);
@@ -1560,36 +1549,34 @@ function speech(context: PageContext): HTMLElement[] {
 
   const words = wordListTable(draft, controls);
   const wordProblem = note();
+  words.node.append(wordProblem);
   const wordRow = row(
     "Word list",
-    "Names and terms to spell your way, added one at a time. Recognition on this computer favours them, and so does a recognizer that supports it.",
+    "Names and terms to spell your way, added one at a time. Recognition on this computer and recognizers reached directly can favour them.",
     words.node,
   );
-  words.node.append(wordProblem);
-  let asked = 0;
+  let wordListRequest = 0;
   function checkWordList(): void {
-    const ask = (asked += 1);
-    wordRow.classList.add("off");
-    say(wordProblem, "");
+    const request = (wordListRequest += 1);
     const active = activeLive();
+    wordRow.classList.remove("off");
+    say(wordProblem, "");
     if (active === undefined || active.kind === "on_device") {
-      wordRow.classList.remove("off");
       words.enable(true);
       return;
     }
-    backend
-      .wordListSupport(active)
-      .then((supported) => {
-        if (ask !== asked) return;
+    backend.wordListSupport(active).then(
+      (supported) => {
+        if (request !== wordListRequest) return;
         wordRow.classList.toggle("off", !supported);
         words.enable(true);
-      })
-      .catch((error: unknown) => {
-        if (ask !== asked) return;
-        wordRow.classList.remove("off");
+      },
+      (error: unknown) => {
+        if (request !== wordListRequest) return;
         words.enable(false);
         say(wordProblem, errorText(error));
-      });
+      },
+    );
   }
   render();
   checkWordList();
@@ -1600,7 +1587,7 @@ function speech(context: PageContext): HTMLElement[] {
     summaryActions,
     row(
       "Speech servers",
-      "One is in use for dictation. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Conversation mode always uses the Thalvi server's own recognizer.",
+      "One is in use for dictation. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Web conversations use the server's own recognizer.",
       liveBlock,
     ),
     wordRow,

@@ -2839,9 +2839,15 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_switch_of_the_live_server_waits_for_the_end_of_the_running_capture() {
-        let running = DesktopConfig::from_json_str(r#"{"stt": {"engine": "server"}}"#).unwrap();
-        let switched = DesktopConfig::from_json_str(r#"{"stt": {"engine": "local"}}"#).unwrap();
+    async fn a_switch_of_the_live_entry_waits_for_the_end_of_the_running_capture() {
+        let running = DesktopConfig::from_json_str(
+            r#"{"stt":{"entries":[{"kind":"on_device","id":"first","name":"First","active":true,"model":"nemotron_160ms"}]}}"#,
+        )
+        .unwrap();
+        let switched = DesktopConfig::from_json_str(
+            r#"{"stt":{"entries":[{"kind":"on_device","id":"second","name":"Second","active":true,"model":"unified_160ms"}]}}"#,
+        )
+        .unwrap();
         assert_ne!(
             running.stt.entries.active_live().id,
             switched.stt.entries.active_live().id
