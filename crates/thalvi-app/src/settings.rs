@@ -42,19 +42,22 @@ impl Store {
         self.path.with_file_name(name)
     }
 
-    /// The config to start with, and whether this is the first start: no file at the per-user path.
+    /// The config to start with, whether this is the first start, and whether the active legacy
+    /// Thalvi server entry was removed.
     /// A first start writes the defaults as a save with nothing changed would. A path given on the
     /// command line must exist, so a missing one is an error before it can be a first start.
     ///
     /// # Errors
     /// Why the file cannot be read or is not valid, or why the defaults cannot be written.
-    pub fn start(&self) -> Result<(DesktopConfig, bool), String> {
+    pub fn start(&self) -> Result<(DesktopConfig, bool, bool), String> {
         let first_start = !self.path.exists();
         let config = self.load()?;
-        if first_start {
-            self.save_switches(&config)?;
+        let removed_entry = config.stt.entries.dropped_legacy_server();
+        let removed_active_entry = config.stt.entries.dropped_active_legacy_server();
+        if first_start || removed_entry {
+            self.write(&config)?;
         }
-        Ok((config, first_start))
+        Ok((config, first_start, removed_active_entry))
     }
 
     /// The config in effect: the file if there is one, else the defaults.
@@ -590,10 +593,11 @@ mod tests {
             required: false,
         };
 
-        let (config, first) = store.start().unwrap();
+        let (config, first, removed) = store.start().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let file: Value = serde_json::from_str(&text).unwrap();
         assert!(first, "no file yet");
+        assert!(!removed);
         assert_eq!(
             file["stt"]["entries"],
             json!([{"kind": "on_device", "id": "on-device", "name": "On this computer", "active": true, "model": "nemotron_160ms"}])
@@ -605,22 +609,28 @@ mod tests {
         );
         assert!(!text.contains("\"prompt\""), "{text}");
 
-        let (again, first) = store.start().unwrap();
+        let (again, first, removed) = store.start().unwrap();
         assert!(!first, "the written file ends the first start");
+        assert!(!removed);
         assert_eq!(again, config);
 
         let server = r#"{"stt": {"entries": [{"kind": "thalvi_server", "id": "s", "name": "Thalvi server", "active": true, "address": "ws://127.0.0.1:8080"}]}}"#;
         std::fs::write(&path, server).unwrap();
-        let (kept, first) = store.start().unwrap();
+        let (kept, first, removed) = store.start().unwrap();
         assert!(!first);
+        assert!(removed, "the active legacy entry needs one notice");
         assert!(matches!(
             kept.stt.entries.active_live().kind,
-            LiveKind::ThalviServer(_)
+            LiveKind::OnDevice(SpeechChoice::Catalog(_))
         ));
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            server,
-            "an existing file is not rewritten"
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["stt"]["entries"][0]["kind"], "on_device");
+        assert_eq!(saved["stt"]["entries"][0]["active"].as_bool(), Some(true));
+        assert!(saved.to_string().find("thalvi_server").is_none());
+        let (_, _, removed_again) = store.start().unwrap();
+        assert!(
+            !removed_again,
+            "the normalized config does not repeat the notice"
         );
 
         let required = Store {
@@ -871,7 +881,7 @@ mod tests {
         let (store, dir) = store("private");
         let mut settings = settings_json(&store_defaults()).unwrap();
         settings["stt"] = json!({"entries": [
-            {"kind": "thalvi_server", "id": "s", "name": "Thalvi server", "active": true, "address": "ws://127.0.0.1:8080"},
+            {"kind": "realtime", "id": "s", "name": "Realtime", "active": true, "address": "ws://127.0.0.1:8012", "model": "m"},
             {"kind": "second_pass", "id": "p", "name": "P", "active": true, "address": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k"}
         ]});
         // A leftover from an earlier crash must not lend its permissions to the new file.
