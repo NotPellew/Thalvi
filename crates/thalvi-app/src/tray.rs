@@ -1,5 +1,7 @@
 //! The tray icon: one drawn shape per state, a title without dictated text, and the menu texts.
 
+use std::sync::{Mutex, PoisonError};
+
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -7,6 +9,7 @@ use tauri::{AppHandle, Wry};
 use thalvi_desktop::capture::CaptureRoute;
 
 use crate::status::Status;
+use crate::update::Snapshot;
 
 const SIZE: u8 = 32;
 
@@ -16,6 +19,7 @@ const SAMPLES: u8 = 4;
 pub const TOGGLE: &str = "toggle";
 pub const CANCEL: &str = "cancel";
 pub const COPY_ERROR: &str = "copy-error";
+pub const UPDATE: &str = "update";
 pub const LAST_DICTATION: &str = "last-dictation";
 pub const SETTINGS: &str = "settings";
 pub const QUIT: &str = "quit";
@@ -215,13 +219,30 @@ pub struct Tray {
     toggle: MenuItem<Wry>,
     cancel: MenuItem<Wry>,
     copy_error: MenuItem<Wry>,
+    /// The update's state in words; clicking it checks for an update or opens the App page.
+    update: MenuItem<Wry>,
+    /// The state in words and the update's news, which the header and the tooltip put together.
+    said: Mutex<(String, Option<String>)>,
+}
+
+/// The state in words, with the update's news after it when there is some.
+fn headline(title: &str, remark: Option<&str>) -> String {
+    remark.map_or_else(|| title.to_owned(), |remark| format!("{title} — {remark}"))
 }
 
 impl Tray {
     /// # Errors
     /// Fails when the tray icon or its menu cannot be created.
-    pub fn new(app: &AppHandle, status: &Status, paused: bool) -> tauri::Result<Self> {
-        let header = MenuItem::with_id(app, "state", title(status), false, None::<&str>)?;
+    pub fn new(
+        app: &AppHandle,
+        status: &Status,
+        paused: bool,
+        updates: &Snapshot,
+    ) -> tauri::Result<Self> {
+        let remark = updates.remark();
+        let said = headline(&title(status), remark.as_deref());
+        let header = MenuItem::with_id(app, "state", &said, false, None::<&str>)?;
+        let update = MenuItem::with_id(app, UPDATE, updates.tray().0, true, None::<&str>)?;
         let toggle = MenuItem::with_id(app, TOGGLE, toggle_text(paused), true, None::<&str>)?;
         let cancel = MenuItem::with_id(
             app,
@@ -248,6 +269,7 @@ impl Tray {
                 &cancel,
                 &copy_error,
                 &last,
+                &update,
                 &settings,
                 &quit,
             ],
@@ -258,7 +280,7 @@ impl Tray {
                 u32::from(SIZE),
                 u32::from(SIZE),
             ))
-            .tooltip(title(status))
+            .tooltip(&said)
             .menu(&menu)
             .on_menu_event(|app, event| crate::app::on_menu(app, event.id().as_ref()))
             .build(app)?;
@@ -268,7 +290,22 @@ impl Tray {
             toggle,
             cancel,
             copy_error,
+            update,
+            said: Mutex::new((title(status), remark)),
         })
+    }
+
+    fn say(&self) {
+        let said = self.said.lock().unwrap_or_else(PoisonError::into_inner);
+        let text = headline(&said.0, said.1.as_deref());
+        let _ = self.icon.set_tooltip(Some(&text));
+        let _ = self.header.set_text(text);
+    }
+
+    pub fn update(&self, updates: &Snapshot) {
+        let _ = self.update.set_text(updates.tray().0);
+        self.said.lock().unwrap_or_else(PoisonError::into_inner).1 = updates.remark();
+        self.say();
     }
 
     pub fn listening(&self, paused: bool) {
@@ -277,8 +314,8 @@ impl Tray {
 
     pub fn show(&self, status: &Status) {
         let _ = self.icon.set_icon(Some(Icon::of(status).image()));
-        let _ = self.icon.set_tooltip(Some(title(status)));
-        let _ = self.header.set_text(title(status));
+        self.said.lock().unwrap_or_else(PoisonError::into_inner).0 = title(status);
+        self.say();
         let _ = self.cancel.set_enabled(can_cancel(status));
         if matches!(status, Status::Failed { .. }) {
             self.copy_item(&CopyItem::Ready);
@@ -454,6 +491,19 @@ mod tests {
             for (other_at, other) in shapes.iter().enumerate().skip(at + 1) {
                 assert_ne!(shape, other, "{:?} and {:?}", icons[at], icons[other_at]);
             }
+        }
+    }
+
+    #[test]
+    fn the_header_and_tooltip_carry_the_updates_news_after_the_state() {
+        for (remark, expected) in [
+            (None, "Thalvi: listening"),
+            (
+                Some("updated to 0.2.0"),
+                "Thalvi: listening — updated to 0.2.0",
+            ),
+        ] {
+            assert_eq!(headline("Thalvi: listening", remark), expected);
         }
     }
 

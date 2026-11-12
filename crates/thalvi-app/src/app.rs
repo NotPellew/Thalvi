@@ -4,7 +4,9 @@ use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
 
+use semver::Version;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use thalvi_desktop::config::DesktopConfig;
@@ -15,7 +17,7 @@ use thalvi_desktop::feed::{Clip, FeedEnd};
 use thalvi_desktop::history;
 use thalvi_desktop::hold::HoldKind;
 use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, HostError, RequestServer, refusal};
-use thalvi_desktop::metrics::Recorder;
+use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::SpeechDownloads;
 use thalvi_desktop::speech_device::SpeechDevices;
 use tokio::sync::watch;
@@ -26,15 +28,23 @@ use crate::commands;
 use crate::launch::{Launch, relaunch_shows_settings};
 use crate::menu_entry::{self, MenuEntry};
 use crate::overlay::{self, Overlay, Visibility};
-use crate::runner::{AudioStatus, Control, EngineLink};
+use crate::runner::{AudioStatus, Control, EngineLink, Restart};
 use serde_json::Value;
 
 use crate::settings::{Store, ensure_microphone_change_allowed};
 use crate::startup::{self, APP_NAME, LOGIN_ARG, Registration};
 use crate::status::{Failure, FailureKind, LastError, Status};
 use crate::tray::{self, CopyItem, Tray};
+use crate::update::{self, Arrival, Inbox, Marker, Restarter, Snapshot, Stop, TrayClick, Updates};
+use crate::updater::PluginSource;
 
 const SETTINGS: &str = "settings";
+
+/// The settings page with the update's state and the channel choice.
+const APP_PAGE: &str = "app";
+
+/// Sent when the update's state changes, with the new `Snapshot`.
+const UPDATE_EVENT: &str = "thalvi://update";
 
 /// The settings page that holds the last dictation, and the event that opens a page.
 const HISTORY_PAGE: &str = "history";
@@ -138,13 +148,34 @@ pub struct AppState {
     /// Reports the hold key where the app sees the keyboard itself; empty elsewhere.
     hold_watch: Mutex<Option<HoldWatch>>,
     hold_unavailable: Option<&'static str>,
+    /// Asks for update checks and tells what the update is doing.
+    pub updates: Updates,
+    /// Set when the engine is about to close for an update, which is not a failure to show.
+    restarting: AtomicBool,
+}
+
+/// What starting the app made: the state, whether it is the first start, and what the update
+/// driver and the metrics are to hear about.
+struct Started {
+    state: AppState,
+    first_start: bool,
+    inbox: Inbox,
+    /// What the last update came to, and how long the restart took.
+    arrival: Option<(Arrival, Duration)>,
 }
 
 impl AppState {
-    /// Reads the config and starts the engine; also whether this is the first start.
-    fn start(config: Option<std::path::PathBuf>) -> Result<(Self, bool), String> {
+    /// Reads the config and starts the engine.
+    fn start(config: Option<std::path::PathBuf>) -> Result<Started, String> {
         let store = Store::new(config)?;
         let (config, first_start) = store.start()?;
+        let running = Version::parse(env!("CARGO_PKG_VERSION"))
+            .map_err(|error| format!("Thalvi's own version is not valid: {error}"))?;
+        let marker = Marker::take(&store.sibling(Marker::FILE));
+        let arrival = marker.as_ref().map(|marker| marker.arrival(&running));
+        let (updates, inbox) = update::channel(Snapshot::start(
+            arrival.as_ref().map(|(arrival, _)| arrival.clone()),
+        ));
         let history = Arc::new(history::Store::per_user());
         let drafts = Arc::new(Drafts::default());
         let delivery = Arc::new(Delivery::new(
@@ -157,6 +188,8 @@ impl AppState {
             Arc::clone(&history),
             Arc::clone(&drafts),
             Arc::clone(&speech_devices),
+            // An update restarts the app as it was: a paused microphone stays closed.
+            marker.as_ref().is_some_and(|marker| marker.paused),
         )?;
         let mut held = watch_hold_keys(&config, &link, false);
         if let Some(notice) = held.refusal.take() {
@@ -180,8 +213,15 @@ impl AppState {
             request_server: Mutex::new(None),
             hold_watch: Mutex::new(held.watch),
             hold_unavailable: held.unavailable,
+            updates,
+            restarting: AtomicBool::new(false),
         };
-        Ok((state, first_start))
+        Ok(Started {
+            state,
+            first_start,
+            inbox,
+            arrival,
+        })
     }
 
     #[must_use]
@@ -315,6 +355,7 @@ impl AppState {
             .store(config.overlay.show, Ordering::SeqCst);
         self.saves.set(config);
         self.link.send(Control::Apply(Box::new(config.clone())));
+        self.updates.config_changed();
     }
 }
 
@@ -472,6 +513,7 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_audio,
@@ -508,6 +550,9 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::edit_draft,
             commands::copy_text,
             commands::discard_draft,
+            commands::get_update_state,
+            commands::check_for_updates,
+            commands::open_release_notes,
         ])
         .setup(move |app| {
             // Tauri turns an error from this hook into a panic, so it is reported here instead.
@@ -534,7 +579,12 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
 /// Reads the config and starts the engine, the tray and the windows.
 fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), String> {
     // Only the first instance gets here, so a relaunch never reads the config.
-    let (state, first_start) = AppState::start(config)?;
+    let Started {
+        state,
+        first_start,
+        inbox,
+        arrival,
+    } = AppState::start(config)?;
     state.restore_login(app);
     state.restore_menu_entry(&menu_entry::System::from_env());
     app.manage(state);
@@ -543,7 +593,124 @@ fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), Stri
     if first_start {
         show_settings(app);
     }
-    follow_engine(app).map_err(|error| error.to_string())
+    follow_engine(app).map_err(|error| error.to_string())?;
+    follow_updates(app);
+    run_updates(app, inbox, arrival);
+    Ok(())
+}
+
+/// Starts the update driver and records how the last update came out. Nothing here waits for the
+/// engine: the first check comes after the app is usable, in the background.
+fn run_updates(app: &AppHandle, inbox: Inbox, arrival: Option<(Arrival, Duration)>) {
+    let config = {
+        let app = app.clone();
+        move || app.state::<AppState>().config()
+    };
+    let recordings = config().recordings;
+    if let Some((arrival, took)) = arrival {
+        let channel = config().update_channel;
+        tauri::async_runtime::spawn(async move {
+            if recordings.metrics
+                && let Ok(recorder) = Recorder::per_user(recordings)
+            {
+                let (outcome, fields) = arrival.metric(channel);
+                recorder.metric(Event::Update, outcome, Some(took), fields);
+                recorder.finish().await;
+            }
+        });
+    }
+    let mut status = app.state::<AppState>().link.status_updates();
+    let usable = async move {
+        let _ = status
+            .wait_for(|status| !matches!(status, Status::Loading { .. }))
+            .await;
+    };
+    let current = app.package_info().version.clone();
+    tauri::async_runtime::spawn(update::drive(
+        inbox,
+        PluginSource::new(app.clone()),
+        AppRestarter(app.clone()),
+        config,
+        current,
+        Recorder::per_user(recordings).ok(),
+        usable,
+    ));
+}
+
+/// Carries the update's state to the tray and the settings window.
+fn follow_updates(app: &AppHandle) {
+    let mut changes = app.state::<AppState>().updates.changes();
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let snapshot = changes.borrow_and_update().clone();
+            if let Some(tray) = handle.state::<AppState>().tray.get() {
+                tray.update(&snapshot);
+            }
+            let _ = handle.emit(UPDATE_EVENT, &snapshot);
+            if changes.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// Stops Thalvi for an update and starts it again. The engine decides whether Thalvi is idle.
+struct AppRestarter(AppHandle);
+
+impl Restarter for AppRestarter {
+    async fn stop_if_idle(&self, from: &Version, to: &Version) -> Stop {
+        let state = self.0.state::<AppState>();
+        let marker = state.saves.store.sibling(Marker::FILE);
+        let (from, to) = (from.clone(), to.clone());
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let app = self.0.clone();
+        state.link.send(Control::RestartIfIdle(Restart::new(
+            move |paused| {
+                Marker::new(&from, &to, paused).write(&marker)?;
+                app.state::<AppState>()
+                    .restarting
+                    .store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            reply,
+        )));
+        let stop = answer
+            .await
+            .unwrap_or_else(|_| Stop::Refused("Thalvi's engine is not running.".to_owned()));
+        if stop == Stop::Stopped {
+            let app = self.0.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                let state = app.state::<AppState>();
+                // As a quit does: bars read "not running", and Hyprland keeps no binds of ours.
+                drop(
+                    state
+                        .request_server
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take(),
+                );
+                drop(
+                    state
+                        .hold_watch
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take(),
+                );
+                state.link.wait_stopped();
+            })
+            .await;
+        }
+        stop
+    }
+
+    fn relaunch(&self, failure: Option<&str>) {
+        if let Some(failure) = failure {
+            let state = self.0.state::<AppState>();
+            Marker::failed(&state.saves.store.sibling(Marker::FILE), failure);
+        }
+        self.0.restart();
+    }
 }
 
 /// Starts answering requests from outside. The app works without; status bars then report Thalvi
@@ -602,7 +769,12 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
     let mut status = state.link.status_updates();
     let mut level = state.link.level_updates();
     let mut audio = state.link.audio_updates();
-    let tray = Tray::new(app, &status.borrow(), state.link.audio().paused)?;
+    let tray = Tray::new(
+        app,
+        &status.borrow(),
+        state.link.audio().paused,
+        &state.updates.snapshot(),
+    )?;
     let _ = state.tray.set(tray);
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -629,6 +801,9 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
                 }
             };
             if changed.is_err() {
+                if handle.state::<AppState>().restarting.load(Ordering::SeqCst) {
+                    break;
+                }
                 let failed = Status::Failed {
                     kind: FailureKind::Other,
                     notice: "Thalvi stopped unexpectedly. Restart it.".to_owned(),
@@ -653,6 +828,13 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
 fn show(app: &AppHandle, status: &Status) {
     let state = app.state::<AppState>();
     state.last_error.record(status);
+    if matches!(
+        status,
+        Status::Paused | Status::Listening | Status::Done { .. } | Status::Failed { .. }
+    ) {
+        // A downloaded update may install when Thalvi has become quiet.
+        state.updates.quiet();
+    }
     if let Some(tray) = state.tray.get() {
         tray.show(status);
     }
@@ -824,6 +1006,13 @@ pub fn on_menu(app: &AppHandle, id: &str) {
             });
         }
         tray::SETTINGS => show_settings(app),
+        tray::UPDATE => match app.state::<AppState>().updates.snapshot().tray().1 {
+            TrayClick::Check => app.state::<AppState>().updates.check_now(),
+            TrayClick::Settings => {
+                show_settings(app);
+                let _ = app.emit(OPEN_PAGE_EVENT, APP_PAGE);
+            }
+        },
         tray::LAST_DICTATION => {
             show_settings(app);
             let _ = app.emit(OPEN_PAGE_EVENT, HISTORY_PAGE);

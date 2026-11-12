@@ -32,13 +32,14 @@ use thalvi_desktop::speech_device::SpeechDevices;
 use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
 use thalvi_desktop::transducer::TransducerSource;
 use thalvi_desktop::wake::{WakeConfig, WakeEngine};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::status::{
     Failure, FailureKind, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, Status, View,
     WAKE_DOWNLOAD_NOTICE, load_notice,
 };
+use crate::update::Stop;
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -58,8 +59,35 @@ pub enum Control {
     Apply(Box<DesktopConfig>),
     /// The desktop refused to report the hold key; the notice says so in plain words.
     HoldKeyFailed(String),
+    /// Stops for an update, but only if nothing is going on.
+    RestartIfIdle(Restart),
     /// Cancels any capture, closes the microphone and the recognizer, and stops.
     Quit,
+}
+
+/// A request to stop for an update: `prepare` saves what the next start needs, given whether
+/// listening is paused, and runs only once the engine has found itself idle.
+pub struct Restart {
+    prepare: Box<dyn FnOnce(bool) -> Result<(), String> + Send>,
+    reply: oneshot::Sender<Stop>,
+}
+
+impl Restart {
+    pub fn new(
+        prepare: impl FnOnce(bool) -> Result<(), String> + Send + 'static,
+        reply: oneshot::Sender<Stop>,
+    ) -> Self {
+        Self {
+            prepare: Box::new(prepare),
+            reply,
+        }
+    }
+}
+
+impl std::fmt::Debug for Restart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Restart")
+    }
 }
 
 /// The saved microphone choice, the device actually open, and whether listening is paused.
@@ -85,7 +113,8 @@ pub struct EngineLink {
 }
 
 impl EngineLink {
-    /// Starts the engine thread; it loads the wake word models before it listens.
+    /// Starts the engine thread; it loads the wake word models before it listens. Listening starts
+    /// `paused` when the user had paused it before an update restarted the app.
     ///
     /// # Errors
     /// Fails when the thread or its runtime cannot start.
@@ -95,6 +124,7 @@ impl EngineLink {
         history: Arc<History>,
         drafts: Arc<Drafts>,
         devices: Arc<SpeechDevices>,
+        paused: bool,
     ) -> Result<Self, String> {
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
@@ -105,7 +135,7 @@ impl EngineLink {
         let (audio_tx, audio) = watch::channel(AudioStatus {
             selected: config.microphone.clone(),
             active: None,
-            paused: false,
+            paused,
         });
         let (feeding_tx, feeding) = watch::channel(false);
         let (key, key_state) = HoldInput::new();
@@ -140,6 +170,7 @@ impl EngineLink {
                         drafts,
                         devices,
                         feeding: Arc::new(feeding_tx),
+                        paused,
                     },
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
@@ -224,6 +255,11 @@ impl EngineLink {
     /// Blocks for at most a few seconds.
     pub fn quit(&self) {
         self.send(Control::Quit);
+        self.wait_stopped();
+    }
+
+    /// Waits until the engine has closed the microphone and the recognizer, for at most a few seconds.
+    pub fn wait_stopped(&self) {
         let stopped = self.stopped.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = stopped.recv_timeout(QUIT_TIMEOUT);
     }
@@ -499,6 +535,8 @@ struct Shared {
     devices: Arc<SpeechDevices>,
     /// Whether a file's audio is being fed in place of the microphone's.
     feeding: Arc<watch::Sender<bool>>,
+    /// Whether listening starts paused.
+    paused: bool,
 }
 
 struct Runner {
@@ -542,7 +580,7 @@ impl Runner {
         Self {
             config,
             session: None,
-            paused: false,
+            paused: shared.paused,
             stopping: false,
             reopen_failures: None,
             pending: None,
@@ -878,6 +916,10 @@ impl Runner {
             },
             Control::Apply(config) => self.apply(*config).await,
             Control::HoldKeyFailed(notice) => self.hold_problem = Some(notice),
+            Control::RestartIfIdle(restart) => {
+                let busy = self.key_state.borrow().down || *self.feeding.borrow();
+                return answer_restart(restart, self.paused, busy);
+            }
             Control::Quit => return Flow::Quit,
         }
         Flow::Continue
@@ -1251,7 +1293,28 @@ fn retunes_only(old: &DesktopConfig, new: &DesktopConfig) -> bool {
     *old == DesktopConfig {
         recordings: old.recordings,
         history: old.history,
+        update_channel: old.update_channel,
         ..new.clone()
+    }
+}
+
+/// Answers a request to stop for an update. Only an idle engine agrees, and only after `prepare`
+/// has saved what the next start needs; a refusal leaves the engine running.
+fn answer_restart(restart: Restart, paused: bool, busy: bool) -> Flow {
+    let Restart { prepare, reply } = restart;
+    if busy {
+        let _ = reply.send(Stop::Busy);
+        return Flow::Continue;
+    }
+    match prepare(paused) {
+        Ok(()) => {
+            let _ = reply.send(Stop::Stopped);
+            Flow::Quit
+        }
+        Err(message) => {
+            let _ = reply.send(Stop::Refused(message));
+            Flow::Continue
+        }
     }
 }
 
@@ -1340,6 +1403,10 @@ impl Requests {
             }
             Some(Control::Feed(feed)) => {
                 feed.refuse("Thalvi was busy. Try again in a moment.");
+                false
+            }
+            Some(Control::RestartIfIdle(restart)) => {
+                let _ = restart.reply.send(Stop::Busy);
                 false
             }
             Some(Control::Quit) | None => {
@@ -2011,11 +2078,68 @@ mod tests {
         );
     }
 
+    /// What an engine answers to a request to stop for an update, whether it quits, and what the
+    /// request saved for the next start.
+    fn restart_answer(paused: bool, busy: bool, save_fails: bool) -> (Stop, bool, Vec<bool>) {
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let (reply, mut answer) = oneshot::channel();
+        let restart = Restart::new(
+            {
+                let saved = Arc::clone(&saved);
+                move |paused| {
+                    saved.lock().unwrap().push(paused);
+                    if save_fails {
+                        Err("The restart note could not be saved.".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            reply,
+        );
+        let flow = answer_restart(restart, paused, busy);
+        let saved = saved.lock().unwrap().clone();
+        (
+            answer.try_recv().unwrap(),
+            matches!(flow, Flow::Quit),
+            saved,
+        )
+    }
+
+    #[test]
+    fn only_an_idle_engine_stops_for_an_update_after_saving_whether_it_was_paused() {
+        let refused = || Stop::Refused("The restart note could not be saved.".to_owned());
+        for (paused, busy, save_fails, answer, quits, saved) in [
+            (false, false, false, Stop::Stopped, true, vec![false]),
+            (true, false, false, Stop::Stopped, true, vec![true]),
+            (false, true, false, Stop::Busy, false, vec![]),
+            (true, true, false, Stop::Busy, false, vec![]),
+            (false, false, true, refused(), false, vec![false]),
+        ] {
+            assert_eq!(
+                restart_answer(paused, busy, save_fails),
+                (answer, quits, saved),
+                "paused {paused}, busy {busy}, save fails {save_fails}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_to_stop_for_an_update_during_a_capture_is_told_busy_and_ends_nothing() {
+        let (reply, mut answer) = oneshot::channel();
+        let mut requests = Requests::default();
+        let restart = Restart::new(|_| panic!("a busy engine saves nothing"), reply);
+        assert!(!requests.take(Some(Control::RestartIfIdle(restart))));
+        assert!(!requests.ended && !requests.quit);
+        assert_eq!(answer.try_recv(), Ok(Stop::Busy));
+    }
+
     #[test]
     fn only_the_recordings_and_the_history_are_taken_without_rebuilding_the_engine() {
         let old = DesktopConfig::from_json_str("{}").unwrap();
         for (change, rebuilds) in [
             (r#"{"recordings": {"text": true}}"#, false),
+            (r#"{"update_channel": "development"}"#, false),
             (r#"{"history": {"enabled": false}}"#, false),
             (
                 r#"{"history": {"limit": 5}, "recordings": {"audio": true}}"#,
