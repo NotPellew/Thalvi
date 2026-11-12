@@ -516,15 +516,19 @@ function holdKeyNotice(reason: string, recorded: string): string {
   return keyLabel(reason);
 }
 
-/** One hold key: the key in effect, a recorder that applies the next combination pressed, and a way back to the default. */
-function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key", { draft, applyNow, holdKeyDefaults }: PageContext): HTMLElement {
+/** One hold key: the key in effect, a recorder that applies the next combination pressed, and a way back to the default. `notices` holds every hold key row's notice, which any new attempt clears. */
+function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key", { draft, applyNow, holdKeyDefaults }: PageContext, notices: HTMLElement[]): HTMLElement {
   const shown = el("kbd", { class: "key" });
   const problem = note();
+  notices.push(problem);
+  const clearNotices = (): void => {
+    for (const notice of notices) say(notice, "");
+  };
   const restore = button("Restore default", () => {
     set(holdKeyDefaults[field]);
   }, "quiet");
   const change = button("Change…", () => {
-    say(problem, "");
+    clearNotices();
     shown.textContent = "Press the new key. Escape cancels.";
     change.disabled = true;
     restore.disabled = true;
@@ -548,6 +552,7 @@ function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key"
   }
 
   function set(name: string): void {
+    clearNotices();
     applyNow((settings) => {
       settings[field] = name;
     }, { atOnce: true, explain: (reason) => holdKeyNotice(reason, name) }).then(render, (error: unknown) => {
@@ -567,10 +572,11 @@ function holdKeys(context: PageContext): HTMLElement[] {
     const why = (): HTMLElement => unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null });
     return [group("Hold keys"), row("Dictate key", null, why()), row("Write key", null, why())];
   }
+  const notices: HTMLElement[] = [];
   return [
     group("Hold keys"),
-    holdKeyRow("Dictate key", "Hold it, speak, let go to paste.", "hold_key", context),
-    holdKeyRow("Write key", "Hold it, speak, let go to have the words written out, then pasted.", "write_key", context),
+    holdKeyRow("Dictate key", "Hold it, speak, let go to paste.", "hold_key", context, notices),
+    holdKeyRow("Write key", "Hold it, speak, let go to have the words written out, then pasted.", "write_key", context, notices),
   ];
 }
 
