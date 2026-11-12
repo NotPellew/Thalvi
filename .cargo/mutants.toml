@@ -6,6 +6,8 @@ exclude_globs = [
     "crates/thalvi-desktop/src/device/webgpu.rs",
     "crates/thalvi-desktop/src/device/windows.rs",
     "crates/thalvi-app/src/menu_entry/windows.rs",
+    # The overlay's Wayland layer surface talks only to a running compositor.
+    "crates/thalvi-desktop/src/host/linux/layer.rs",
     # Test doubles for the integration tests, not shipped behavior.
     "crates/thalvi-desktop/src/engine/fakes.rs",
 ]
@@ -47,8 +49,15 @@ exclude_re = [
     "replace Desktop::check_hold_keys ->",
     # The overlay's Tauri wiring (window and theme events, the engine follower, the error dismissal) runs only inside the app; the overlay thread it feeds is tested with a fake surface.
     "crates/thalvi-app/src/(app|commands).rs.*(replace (setup|create_windows|follow_engine) ->|replace (start_overlay|show|dismiss_error) with \\(\\)|in create_windows)",
-    # Where the overlay's strands, shine and bars land and how fast they ease is judged in screenshots of the real app; the tests pin what it shows, not each pixel.
-    "crates/thalvi-app/src/overlay/(module|neon).rs.*(in (shine|draw_wave|Neon::draw)$|:\\d+:\\d+: replace \\S+ with \\S+$)",
+    # The overlay's own windows and their threads talk only to a running X server or compositor; the Xft scale they use is tested.
+    "crates/thalvi-desktop/src/host/linux/xwayland.rs.*(Window::|forward_presses|desktop_scale|intern|\\bname\\b|\\bfailed\\b)",
+    "crates/thalvi-desktop/src/host/linux.rs.*Overlay(Plan|Surface|Waker)::",
+    # The overlay thread's start and wait loop around the desktop's surface; what it does with each message and press is tested through Overlaying and a fake surface.
+    "crates/thalvi-app/src/overlay.rs.*(replace (Overlay::start|run) with \\(\\)|impl Surface for OverlaySurface)",
+    # Only how often an unchanged failure to show is printed.
+    "replace != with == in Overlaying::settle",
+    # The looks' decoration (frame, shadows, mesh, glows, shine, the wave's strands, how fast the bars ease) is judged in screenshots of the real app; the tests pin what the overlay shows, not each pixel.
+    "crates/thalvi-app/src/overlay/(module|neon).rs.*(\\b(background|accents|trapezoid|closed|shade|hexes|glow|shine|draw_wave|shadow|Neon::draw)\\b|:\\d+:\\d+: replace [-+*/%<>=!&|]+ with [-+*/%<>=!&|]+$)",
     # Reads the process environment, which a test cannot set (unsafe_code is denied); the socket path it joins is tested through Events::connect.
     "delete ! in Events::system",
     # The updater's Tauri wiring, tray lines and commands run only inside the app; the driver and marker they carry are tested in update.rs.
