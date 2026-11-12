@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Exits 0 when version A is newer than version B or B is empty, 1 otherwise.
+# Versions are X.Y.Z or X.Y.Z-dev.N; a release is newer than its own dev builds.
+set -euo pipefail
+
+key() {
+  [[ $1 =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-dev\.([0-9]+))?$ ]] || {
+    echo "::error::$1 is not a version like 1.2.3 or 1.2.3-dev.4" >&2
+    exit 2
+  }
+  local released=1
+  [[ -z ${BASH_REMATCH[4]} ]] || released=0
+  echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]} $released ${BASH_REMATCH[5]:-0}"
+}
+
+a=$(key "$1")
+[[ -n ${2:-} ]] || exit 0
+b=$(key "$2")
+read -ra a <<<"$a"
+read -ra b <<<"$b"
+for i in 0 1 2 3 4; do
+  ((a[i] > b[i])) && exit 0
+  ((a[i] < b[i])) && exit 1
+done
+exit 1

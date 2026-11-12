@@ -165,7 +165,7 @@ areas your change touches. Editing rules are in
   final or after 250 ms. Why: a streaming recognizer emits a word only after audio past it; measured headless on the server
   recognizer, no last word lost in 336 releases (75% before when released on the word's end). Rejected: a fixed 500 ms tail;
   an end-of-stream message through the server (11% lost at the word's end, a protocol change).
-- **Packaged desktop with an OS-held login entry.** AppImage on Linux, per-user NSIS on Windows, released from `desktop-vX.Y.Z` tags that match the Cargo version; login startup is the OS entry (`tauri-plugin-autostart`, run with `--login`), and the config keeps the preference (`start_at_login`, written by the switch alone, never by Save) so each start restores an entry an upgrade removed. Hyprland runs no XDG autostart unless `xdg-desktop-autostart.target` is up (uwsm starts it), so otherwise the row shows an `exec-once` line to copy and no entry is written. The AppImage's app menu entry is Thalvi's own file (`show_in_menu`, same pattern); a startup failure shows a GTK or `MessageBoxW` box when stderr is no terminal (`gtk` is Tauri's own).
+- **Packaged desktop with an OS-held login entry.** AppImage on Linux, per-user NSIS on Windows, released from `desktop-vX.Y.Z` tags that match the Cargo version (development builds add `-dev.N` at build time); login startup is the OS entry (`tauri-plugin-autostart`, run with `--login`), and the config keeps the preference (`start_at_login`, written by the switch alone, never by Save) so each start restores an entry an upgrade removed. Hyprland runs no XDG autostart unless `xdg-desktop-autostart.target` is up (uwsm starts it), so otherwise the row shows an `exec-once` line to copy and no entry is written. The AppImage's app menu entry is Thalvi's own file (`show_in_menu`, same pattern); a startup failure shows a GTK or `MessageBoxW` box when stderr is no terminal (`gtk` is Tauri's own).
   Why: both formats suit the updater (#137), the plugin is Tauri's own, the switch reads the OS back, and the NSIS uninstall hook cannot tell an upgrade from an uninstall.
   Rejected: deb and MSI as well, a hand-written login `.desktop` and `Run` key writer, restoring over a Thalvi entry the user turned off in Windows (read from `StartupApproved` with `windows-registry`).
 - **Pause before changing microphones.** Save device changes only while paused;
@@ -231,10 +231,10 @@ areas your change touches. Editing rules are in
   branches may be rewritten before merge. Why: the commits show the work being
   iterated, which is enough; no full audit trail. Rejected: squash merge (hides
   the iteration), a force-push block on all branches (more friction).
-- **Work lands on `development`; releases merge it into `main`.** PRs target `development`; a release PR
-  merges it into `main`, and only a tag on `main` publishes. Why: `main` stays what users run, and a
-  release is one reviewable diff. Rejected: PRs straight to `main` (every merge a release candidate),
-  changing GitHub's default branch during the hackathon freeze.
+- **Work lands on `development`; releases merge it into `main`.** PRs target `development`; a release PR merges it
+  into `main`, and only a tag on `main` publishes a release. An approved push to `development` publishes an `X.Y.Z-dev.N`
+  prerelease, never Latest, for the Development update choice. Why: `main` stays what Stable users run, a release is one
+  reviewable diff, and testers get fixes as they land. Rejected: PRs straight to `main`, a version commit per dev build.
 - **No review gate.** The `main` and `development` rulesets require PRs and passing checks but
   no approvals. Why: Thalvi has one author, and GitHub does not let authors
   approve their own PRs. Revisit if a second contributor joins.
