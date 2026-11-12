@@ -419,7 +419,13 @@ impl Transducer {
 }
 
 fn threads() -> usize {
-    std::thread::available_parallelism().map_or(2, |n| n.get().min(4))
+    std::thread::available_parallelism().map_or(2, |n| threads_for(n.get()))
+}
+
+/// Intra-op threads on a CPU with `logical` hardware threads: all but two, as 6 of 8 and 14 of 16 gave the lowest
+/// lag measured (#380); the cap is the most threads measured.
+fn threads_for(logical: usize) -> usize {
+    logical.saturating_sub(2).clamp(4, 16).min(logical)
 }
 
 fn tdt_shape(sessions: &Sessions, shape: &Shape, path: &Path) -> Result<usize, TransducerError> {
@@ -1388,6 +1394,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn threads_leave_two_logical_threads_free_between_four_and_sixteen() {
+        for (logical, threads) in [
+            (1, 1),
+            (2, 2),
+            (4, 4),
+            (6, 4),
+            (8, 6),
+            (16, 14),
+            (18, 16),
+            (32, 16),
+        ] {
+            assert_eq!(threads_for(logical), threads, "{logical} logical threads");
+        }
     }
 
     const FILES: [&str; 4] = [
