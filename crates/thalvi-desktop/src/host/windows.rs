@@ -109,6 +109,10 @@ impl Windows {
     ///
     /// # Errors
     /// Never.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as the other hosts, which refuse keys they can't bind"
+    )]
     pub fn check_hold_keys(_keys: &[(HoldKind, HoldKey)]) -> Result<(), HostError> {
         Ok(())
     }
