@@ -344,9 +344,9 @@ async fn a_failed_capture_reports_plainly_and_the_next_capture_can_succeed() {
     let mut first = recognizer.connect().await.expect("first session");
     first.send_frame(&ramp(0)).await.expect("buffer");
     first.finish_audio().await.expect("release");
-    let failure = first
-        .next_event()
+    let failure = tokio::time::timeout(Duration::from_secs(5), first.next_event())
         .await
+        .expect("the failed request returns an event")
         .expect_err("server failure is shown");
     assert!(failure.to_string().contains("HTTP 500"));
 
@@ -354,7 +354,10 @@ async fn a_failed_capture_reports_plainly_and_the_next_capture_can_succeed() {
     next.send_frame(&ramp(1)).await.expect("buffer");
     next.finish_audio().await.expect("release");
     assert_eq!(
-        next.next_event().await.expect("recovered transcription"),
+        tokio::time::timeout(Duration::from_secs(5), next.next_event())
+            .await
+            .expect("the recovered request returns an event")
+            .expect("recovered transcription"),
         RecognizerEvent::Final("recovered".to_owned())
     );
     assert_eq!(

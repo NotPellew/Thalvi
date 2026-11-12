@@ -405,6 +405,28 @@ async fn a_buffered_wake_capture_uploads_after_the_voice_pause() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_buffered_hold_reports_a_microphone_stall_before_release() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            rig.server.buffer_audio();
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.feed_until(1000, Kind::Voice).await;
+            rig.at(3960).await;
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: CaptureError::MicStopped,
+                    recoverable_text: None,
+                },
+                "a buffered upload starts only after release and cannot disable the live microphone watchdog"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_microphone_level_follows_wake_listening_and_resets_when_it_stops() {
     LocalSet::new()
         .run_until(async {
