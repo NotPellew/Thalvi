@@ -87,6 +87,10 @@ pub enum Event {
     /// Microphone audio was lost: `xrun` for a discontinuity the system reported, `queue_full`
     /// when the engine stopped reading for ten seconds.
     AudioGap,
+    /// One step of keeping the app updated: `check` and `download` carry the real latency of the
+    /// update server; `install` is how long the restart into the new version took. Fields hold only
+    /// the step, the channel and versions.
+    Update,
 }
 
 impl Event {
@@ -118,6 +122,7 @@ impl Event {
             Self::HoldEnd => "desktop_hold_end",
             Self::HostCall => "desktop_host_call",
             Self::AudioGap => "desktop_audio_gap",
+            Self::Update => "desktop_update",
         }
     }
 }
@@ -787,6 +792,7 @@ mod tests {
             (Event::HoldStart, "desktop_hold_start"),
             (Event::HoldEnd, "desktop_hold_end"),
             (Event::HostCall, "desktop_host_call"),
+            (Event::Update, "desktop_update"),
         ] {
             assert_eq!(event.name(), name);
         }
