@@ -181,7 +181,7 @@ impl View {
     }
 
     /// The tone, label and line `next` shows; whether the wave runs, and the countdown if one does.
-    fn take(&mut self, next: &Status, was_counting: bool, now: f64) -> (bool, Option<Countdown>) {
+    fn take(&mut self, next: &Status, now: f64) -> (bool, Option<Countdown>) {
         let mut wave = false;
         let mut countdown = None;
         match next {
@@ -227,7 +227,7 @@ impl View {
                 } else {
                     self.tone = Tone::Pending;
                     let started = match &self.countdown {
-                        Some(running) if was_counting => running.started,
+                        Some(running) => running.started,
                         _ => now,
                     };
                     countdown = Some(Countdown {
@@ -284,25 +284,15 @@ impl View {
 
     /// Takes in a new status at `now` on the overlay's clock.
     pub fn set_status(&mut self, next: Status, now: f64) {
-        let was_counting = matches!(
-            self.status,
-            Status::Pending {
-                waiting_for_quiet: false,
-                ..
-            }
-        );
         self.clock = now;
         self.label = None;
         self.sweep = false;
-        let (wave, countdown) = self.take(&next, was_counting, now);
+        let (wave, countdown) = self.take(&next, now);
         self.wave = match (wave, self.wave.take()) {
             (true, Some(running)) => Some(running),
             (true, None) => Some(Wave::default()),
             (false, _) => None,
         };
-        if !wave {
-            self.level = 0.0;
-        }
         self.countdown = countdown;
         self.status = next;
         if let Some(running) = &self.countdown {
@@ -352,11 +342,7 @@ impl View {
     }
 
     pub fn animating(&self) -> bool {
-        self.wave.is_some() || self.countdown.is_some() || self.sweep || self.caret()
-    }
-
-    fn caret(&self) -> bool {
-        matches!(self.line, Line::Words { caret: true, .. })
+        self.wave.is_some() || self.countdown.is_some() || self.sweep
     }
 }
 

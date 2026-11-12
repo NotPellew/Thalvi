@@ -31,6 +31,14 @@ const CYAN: Rgba = Rgba::rgb(107, 248, 255);
 const QUIET: Rgba = Rgba::rgb(143, 179, 196);
 const INK: Rgba = Rgba::rgb(234, 255, 243);
 const BLACK: Rgba = Rgba::rgb(0, 0, 0);
+/// The ticker's line of words or notice.
+const TICKER: Style = Style {
+    size: 14.0,
+    line_height: 22.0,
+    weight: 400,
+    mono: false,
+    tracking: 0.0,
+};
 const WHITE: Rgba = Rgba::rgb(255, 255, 255);
 
 /// Which of the two module looks.
@@ -94,14 +102,7 @@ impl Module {
         let seconds = view.clock as f32;
         if let Some(wave) = &view.wave {
             if let Some(glow) = glow(&mut self.glows, view.tone, canvas.scale_of()) {
-                canvas.draw(
-                    glow,
-                    (
-                        SLOT.0 + 5.0 + (WAVE_W - 160.0) / 2.0 - GLOW_PAD,
-                        wave_top + 7.0 - GLOW_PAD,
-                    ),
-                    (wave.smoothed * 1.3).min(1.0),
-                );
+                halo(canvas, glow, wave_top, wave.smoothed);
             }
             let strands = if view.tone == Tone::Quiet {
                 QUIET
@@ -140,21 +141,7 @@ impl Module {
                 (SLOT.0 + 8.0, SLOT.1 + (SLOT_H - height) / 2.0),
             );
         } else if has_text {
-            let stops = [
-                (0.0, TRANSPARENT),
-                (0.5, QUIET.alpha(0.25)),
-                (1.0, TRANSPARENT),
-            ];
-            let (left, right) = (SLOT.0 + 24.0, SLOT.0 + SLOT_W - 24.0);
-            canvas.rect(
-                (left, SLOT.1 + 48.0, right - left, 1.0),
-                0.0,
-                &Fill::Linear {
-                    from: (left, 0.0),
-                    to: (right, 0.0),
-                    stops: &stops,
-                },
-            );
+            rule(canvas);
             ticker(canvas, text, &view.line, view.clock % 1.0 < 0.5);
         }
         if view.cancellable() {
@@ -163,6 +150,37 @@ impl Module {
         canvas.clip(None);
         line_strip(canvas, view, tone_color, self.finish);
     }
+}
+
+/// The tone's glow behind the wave, as strong as the voice is loud.
+fn halo(canvas: &mut Canvas, glow: &Canvas, wave_top: f32, loudness: f32) {
+    canvas.draw(
+        glow,
+        (
+            SLOT.0 + 5.0 + (WAVE_W - 160.0) / 2.0 - GLOW_PAD,
+            wave_top + 7.0 - GLOW_PAD,
+        ),
+        (loudness * 1.3).min(1.0),
+    );
+}
+
+/// The faint rule above the ticker.
+fn rule(canvas: &mut Canvas) {
+    let stops = [
+        (0.0, TRANSPARENT),
+        (0.5, QUIET.alpha(0.25)),
+        (1.0, TRANSPARENT),
+    ];
+    let (left, right) = (SLOT.0 + 24.0, SLOT.0 + SLOT_W - 24.0);
+    canvas.rect(
+        (left, SLOT.1 + 48.0, right - left, 1.0),
+        0.0,
+        &Fill::Linear {
+            from: (left, 0.0),
+            to: (right, 0.0),
+            stops: &stops,
+        },
+    );
 }
 
 /// The module's shadow and frame, with the finish's own panel, bezel and slot.
@@ -502,14 +520,9 @@ fn tag(canvas: &mut Canvas, text: &mut Text, label: &str, color: Rgba, top: f32)
 /// One line that never wraps. Words that overflow it keep their newest end in view and fade out
 /// at the start; a notice that overflows fades out at its end.
 fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool) {
-    let style = Style {
-        size: 14.0,
-        line_height: 22.0,
-        weight: 400,
-        mono: false,
-        tracking: 0.0,
-    };
+    let style = TICKER;
     let (left, top, width) = (SLOT.0 + 24.0, SLOT.1 + 52.0, SLOT_W - 48.0);
+    let right = left + width;
     let scale = canvas.scale_of();
     match line {
         Line::None => {}
@@ -518,7 +531,7 @@ fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool) {
             let (used, _) = text.measure(&spans, style, Layout::Line, scale);
             canvas.set_text_bounds(Some(TextBounds {
                 left,
-                right: left + width,
+                right,
                 fade_left: 0.0,
                 fade_right: if used > width { 36.0 } else { 0.0 },
             }));
@@ -546,7 +559,7 @@ fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool) {
             };
             canvas.set_text_bounds(Some(TextBounds {
                 left,
-                right: left + width,
+                right,
                 fade_left: if long { 36.0 } else { 0.0 },
                 fade_right: 0.0,
             }));
@@ -563,9 +576,10 @@ fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool) {
     }
 }
 
-fn cancel_button(canvas: &mut Canvas, text: &mut Text, finish: Finish) {
-    let (x, y, width, height) = CANCEL;
-    let glyph = match finish {
+/// The button's face in `finish`; the colour its × is drawn in.
+fn button_face(canvas: &mut Canvas, finish: Finish) -> Rgba {
+    let (_, y, _, height) = CANCEL;
+    match finish {
         Finish::Gunmetal => {
             let stops = [
                 (0.0, Rgba::rgb(0x5c, 0x5c, 0x60)),
@@ -588,7 +602,12 @@ fn cancel_button(canvas: &mut Canvas, text: &mut Text, finish: Finish) {
             canvas.outline(CANCEL, 2.0, QUIET.alpha(0.4));
             QUIET
         }
-    };
+    }
+}
+
+fn cancel_button(canvas: &mut Canvas, text: &mut Text, finish: Finish) {
+    let (x, y, width, height) = CANCEL;
+    let glyph = button_face(canvas, finish);
     let style = Style {
         size: 14.0,
         line_height: height,
