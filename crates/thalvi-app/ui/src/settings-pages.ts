@@ -14,7 +14,7 @@ import type {
   OnDeviceEntry,
   OpenAiRequest,
   SecondaryApi,
-  SecondPassEntry,
+  ExtraEntry,
   Settings,
   SpeechModelInfo,
   SpeechModelProgress,
@@ -774,7 +774,7 @@ const KIND_NAMES: Record<SpeechEntry["kind"], string> = {
   realtime: "Realtime speech server",
   open_ai: "OpenAI-compatible",
   on_device: "On this computer",
-  second_pass: "Second pass",
+  extra: "Extra recognizer",
 };
 const LIVE_KINDS: readonly (readonly [LiveEntry["kind"], string])[] = [
   ["realtime", "Realtime speech server"],
@@ -783,11 +783,11 @@ const LIVE_KINDS: readonly (readonly [LiveEntry["kind"], string])[] = [
 ];
 
 function isLive(entry: SpeechEntry): entry is LiveEntry {
-  return entry.kind !== "second_pass";
+  return entry.kind !== "extra";
 }
 
 function hasKey(entry: SpeechEntry): boolean {
-  if (entry.kind !== "realtime" && entry.kind !== "open_ai" && entry.kind !== "second_pass") return false;
+  if (entry.kind !== "realtime" && entry.kind !== "open_ai" && entry.kind !== "extra") return false;
   return entry.api_key === undefined ? entry.has_key === true : entry.api_key !== "";
 }
 
@@ -799,7 +799,7 @@ function summary(entry: SpeechEntry): string {
       return `${entry.address} · ${entry.model}`;
     case "on_device":
       return entry.model ?? SPEECH_MODEL;
-    case "second_pass":
+    case "extra":
       return `${entry.address} · ${entry.model} · ${APIS.find(([value]) => value === entry.api)?.[1] ?? entry.api}`;
   }
 }
@@ -813,7 +813,7 @@ function blankEntry(kind: SpeechEntry["kind"], name: string): SpeechEntry {
       return { ...base, kind, address: "", model: "", request: "transcriptions", language: "" };
     case "on_device":
       return { ...base, kind };
-    case "second_pass":
+    case "extra":
       return { ...base, kind, address: "", model: "", api: "openai" };
   }
 }
@@ -986,11 +986,11 @@ function speech(context: PageContext): HTMLElement[] {
   const isSaved = (entry: SpeechEntry): boolean => JSON.stringify(savedEntries().find((known) => known.id === entry.id)) === JSON.stringify(entry);
 
   const liveList = el("div", { class: "table" });
-  const secondList = el("div", { class: "table" });
+  const extraList = el("div", { class: "table" });
   const editor = el("div", { class: "editor", hidden: true });
   const problem = note();
   let editingId: string | null = null;
-  let editingSecond = false;
+  let editingExtra = false;
   let editingAdd = false;
   const nextDictation = el("p", { class: "next-dictation", role: "status" }, "");
   const retryProblem = note();
@@ -1049,6 +1049,8 @@ function speech(context: PageContext): HTMLElement[] {
         return "Ready";
       case "transcribing":
         return "Transcribing…";
+      case "merging":
+        return "Merging…";
       case "loading":
         return status.notice;
       case "paused":
@@ -1098,8 +1100,8 @@ function speech(context: PageContext): HTMLElement[] {
         return "Transcribes each capture with an OpenAI-compatible speech server.";
       case "on_device":
         return `Recognition with ${modelTitleFor(entry)}.`;
-      case "second_pass":
-        return "Transcribes each accepted capture again.";
+      case "extra":
+        return "Transcribes each accepted capture again for the chat model to merge.";
     }
   }
 
@@ -1151,20 +1153,6 @@ function speech(context: PageContext): HTMLElement[] {
       const entry = list.find((known) => known.id === id);
       if (entry) entry.active = on;
     });
-  }
-
-  function move(id: string, by: -1 | 1): void {
-    const list = entries();
-    const here = list.findIndex((entry) => entry.id === id);
-    let there = here + by;
-    while (there >= 0 && there < list.length && list[there]?.kind !== "second_pass") there += by;
-    const moved = list[here];
-    const swapped = list[there];
-    if (moved === undefined || swapped === undefined) return;
-    list[here] = swapped;
-    list[there] = moved;
-    controls.touched();
-    render();
   }
 
   function remove(entry: SpeechEntry): void {
@@ -1229,21 +1217,26 @@ function speech(context: PageContext): HTMLElement[] {
     return [line];
   }
 
-  function secondRow(entry: SecondPassEntry, index: number, count: number): HTMLElement {
+  const NEEDS_WRITING = "Set up the writing model under Writing first.";
+
+  /** An extra can be switched on only while the draft has a writing endpoint; one already on can always be switched off. */
+  function lockTick(input: HTMLInputElement): void {
+    const locked = !input.checked && draft.writing === null;
+    input.disabled = locked;
+    input.title = locked ? NEEDS_WRITING : "";
+  }
+
+  function lockTicks(): void {
+    for (const input of extraList.querySelectorAll<HTMLInputElement>(".trow.server input[type=checkbox]")) lockTick(input);
+  }
+
+  function extraRow(entry: ExtraEntry): HTMLElement {
     const ticked = controls.toggle(entry.active, (on) => {
       tick(entry.id, on);
     });
-    (ticked.field as HTMLInputElement).setAttribute("aria-label", `Run ${entry.name}`);
-    const up = button("↑", () => {
-      move(entry.id, -1);
-    }, "quiet");
-    up.setAttribute("aria-label", `Move ${entry.name} up`);
-    up.disabled = index === 0;
-    const down = button("↓", () => {
-      move(entry.id, 1);
-    }, "quiet");
-    down.setAttribute("aria-label", `Move ${entry.name} down`);
-    down.disabled = index === count - 1;
+    const tickInput = ticked.field as HTMLInputElement;
+    tickInput.setAttribute("aria-label", `Run ${entry.name}`);
+    lockTick(tickInput);
     const edit = button("Edit", () => {
       openEditor(entry);
     }, "quiet");
@@ -1260,8 +1253,6 @@ function speech(context: PageContext): HTMLElement[] {
       el("span", { class: "phrase" }, entry.name),
       ...badges(entry),
       el("small", { class: "unit" }, entryDescription(entry)),
-      up,
-      down,
       edit,
       drop,
       entryDetails(entry),
@@ -1269,7 +1260,7 @@ function speech(context: PageContext): HTMLElement[] {
   }
 
   function editButtonFor(id: string): HTMLButtonElement | null {
-    for (const list of [liveList, secondList]) {
+    for (const list of [liveList, extraList]) {
       const row = list.querySelector<HTMLElement>(`.trow.server[data-id="${id}"]`);
       const found = row?.querySelector<HTMLButtonElement>('button[aria-label^="Edit "]');
       if (found) return found;
@@ -1286,20 +1277,20 @@ function speech(context: PageContext): HTMLElement[] {
     const liveChildren: HTMLElement[] = [];
     for (const entry of entries().filter(isLive)) {
       liveChildren.push(liveRow(entry));
-      if (editingId === entry.id && !editingSecond) liveChildren.push(editor);
+      if (editingId === entry.id && !editingExtra) liveChildren.push(editor);
     }
-    if (editingAdd && !editingSecond) liveChildren.push(editor);
-    const second = entries().filter((entry): entry is SecondPassEntry => entry.kind === "second_pass");
-    const secondChildren: HTMLElement[] = [];
-    second.forEach((entry, index) => {
-      secondChildren.push(secondRow(entry, index, second.length));
-      if (editingId === entry.id && editingSecond) secondChildren.push(editor);
+    if (editingAdd && !editingExtra) liveChildren.push(editor);
+    const extras = entries().filter((entry): entry is ExtraEntry => entry.kind === "extra");
+    const extraChildren: HTMLElement[] = [];
+    extras.forEach((entry) => {
+      extraChildren.push(extraRow(entry));
+      if (editingId === entry.id && editingExtra) extraChildren.push(editor);
     });
-    if (editingAdd && editingSecond) secondChildren.push(editor);
-    if (!liveChildren.includes(editor) && !secondChildren.includes(editor)) liveChildren.push(editor);
+    if (editingAdd && editingExtra) extraChildren.push(editor);
+    if (!liveChildren.includes(editor) && !extraChildren.includes(editor)) liveChildren.push(editor);
     liveList.replaceChildren(...liveChildren);
-    secondList.replaceChildren(...secondChildren);
-    secondList.hidden = second.length === 0 && !((editingId !== null && editingSecond) || (editingAdd && editingSecond));
+    extraList.replaceChildren(...extraChildren);
+    extraList.hidden = extras.length === 0 && !((editingId !== null && editingExtra) || (editingAdd && editingExtra));
     updateSummary();
   }
   context.live.saved = render;
@@ -1317,7 +1308,7 @@ function speech(context: PageContext): HTMLElement[] {
     editor.replaceChildren();
     editor.hidden = true;
     context.live.speechModel = () => undefined;
-    for (const list of [liveList, secondList]) {
+    for (const list of [liveList, extraList]) {
       for (const btn of list.querySelectorAll('button[aria-label^="Edit "]')) btn.setAttribute("aria-expanded", "false");
     }
     if (returnFocus && wasId !== null) {
@@ -1331,7 +1322,7 @@ function speech(context: PageContext): HTMLElement[] {
   function openEditor(existing: SpeechEntry | null, kind?: SpeechEntry["kind"]): void {
     editingAdd = existing === null;
     editingId = existing?.id ?? null;
-    editingSecond = existing ? existing.kind === "second_pass" : kind === "second_pass";
+    editingExtra = existing ? existing.kind === "extra" : kind === "extra";
     const working: SpeechEntry = existing ? structuredClone(existing) : blankEntry(kind ?? "realtime", uniqueName(KIND_NAMES[kind ?? "realtime"]));
     const message = note();
     let validate: () => Promise<void> = () => Promise.resolve();
@@ -1346,7 +1337,7 @@ function speech(context: PageContext): HTMLElement[] {
       }, { placeholder }));
     const modelRow = (): HTMLElement =>
       row("Model", "The model named in each request.", controls.text("model" in working ? (working.model ?? "") : "", (value) => {
-        if (working.kind === "realtime" || working.kind === "open_ai" || working.kind === "second_pass") working.model = value;
+        if (working.kind === "realtime" || working.kind === "open_ai" || working.kind === "extra") working.model = value;
       }));
     const key: { input?: HTMLInputElement } = {};
     let clearKey = false;
@@ -1393,9 +1384,9 @@ function speech(context: PageContext): HTMLElement[] {
         validate = built.validate;
         break;
       }
-      case "second_pass": {
+      case "extra": {
         rows.push(
-          address("Where the second transcription is sent.", "http://127.0.0.1:9000/v1"),
+          address("Where the capture is sent for the extra transcription.", "http://127.0.0.1:9000/v1"),
           modelRow(),
           row("API", "Which transcription API the endpoint speaks.", controls.select(APIS, working.api, (value) => {
             working.api = value;
@@ -1409,7 +1400,7 @@ function speech(context: PageContext): HTMLElement[] {
       say(message, "");
       const typed = key.input?.value ?? "";
       const entry = structuredClone(working);
-      if (entry.kind === "realtime" || entry.kind === "open_ai" || entry.kind === "second_pass") {
+      if (entry.kind === "realtime" || entry.kind === "open_ai" || entry.kind === "extra") {
         if (typed !== "") entry.api_key = typed;
         else if (clearKey) entry.api_key = "";
       }
@@ -1446,7 +1437,7 @@ function speech(context: PageContext): HTMLElement[] {
       "h4",
       { id: headingId },
       existing
-        ? `Editing “${existing.name}” · ${existing.kind === "second_pass" ? "second pass" : "live dictation"}`
+        ? `Editing “${existing.name}” · ${existing.kind === "extra" ? "extra recognizer" : "live dictation"}`
         : `Add ${working.kind === "open_ai" ? "an" : "a"} ${KIND_NAMES[working.kind].toLowerCase()}`,
     );
     editor.setAttribute("aria-labelledby", headingId);
@@ -1467,11 +1458,11 @@ function speech(context: PageContext): HTMLElement[] {
   }
   const addLive = button("Add", addSelected);
   addLive.setAttribute("aria-label", "Add a speech server");
-  const addSecond = button("Add a second-pass API", () => {
-    openEditor(null, "second_pass");
+  const addExtra = button("Add an extra recognizer", () => {
+    openEditor(null, "extra");
   });
   const liveBlock = el("div", { class: "stack wide" }, liveList, problem, el("div", { class: "trow add" }, kindPicker.node, addLive));
-  const secondBlock = el("div", { class: "stack wide" }, secondList, addSecond);
+  const extraBlock = el("div", { class: "stack wide" }, extraList, addExtra);
 
   const writing = draft.writing;
   const writingUrl = controls.text(writing?.url ?? "", () => { syncWriting(); }, { placeholder: "http://127.0.0.1:8000/v1" });
@@ -1509,12 +1500,14 @@ function speech(context: PageContext): HTMLElement[] {
     restorePrompt.disabled = !custom;
     if (!custom && writingInputs.every((input) => input.value.trim() === "") && (draft.writing?.openings ?? []).length === 0) {
       draft.writing = null;
+      lockTicks();
       return;
     }
     const next: WritingSettings = { ...draft.writing, url: urlInput?.value ?? "", model: modelInput?.value ?? "", ...(replaceKey ? { api_key: keyInput?.value ?? "" } : {}) };
     if (custom) next.prompt = promptArea.value;
     else delete next.prompt;
     draft.writing = next;
+    lockTicks();
   }
   restorePrompt.disabled = promptArea.value.trim() === defaultPrompt.trim();
 
@@ -1619,11 +1612,11 @@ function speech(context: PageContext): HTMLElement[] {
       liveBlock,
     ),
     wordRow,
-    group("Second pass"),
+    group("Extra recognizers"),
     row(
-      "Second-pass servers",
-      "Ticked servers transcribe each accepted capture again. The first one in this order that answers replaces the live text; the rest are only recorded. Ticking applies at once.",
-      secondBlock,
+      "Extra recognizers",
+      "Switched-on extra recognizers transcribe the same capture, and the chat model merges their texts with the live text; if that fails, the live text is pasted. They need the writing model below. Switching one on or off applies at once.",
+      extraBlock,
     ),
     group("Writing"),
     row(

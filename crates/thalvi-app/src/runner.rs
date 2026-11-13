@@ -1042,7 +1042,7 @@ impl Runner {
         self.publisher
             .woke(bound.window(), self.delivery.copies_only());
         let mut requests = Requests::default();
-        let (finished, route, ignored) = {
+        let (finished, route, ignored, note) = {
             let Self {
                 session,
                 control,
@@ -1076,11 +1076,12 @@ impl Runner {
             ))
             .await;
             let mut ignored = engine.take_ignored();
+            let note = engine.take_merge_note();
             match outcome {
                 None => {
                     // The wake word closed the gate and only a capture opens it again.
                     gate.set_enabled(true);
-                    (None, None, ignored)
+                    (None, None, ignored, None)
                 }
                 Some(outcome) => {
                     let route = match &outcome {
@@ -1104,7 +1105,7 @@ impl Runner {
                     })
                     .await;
                     ignored.extend(refused.into_inner());
-                    (finished, route, ignored)
+                    (finished, route, ignored, note)
                 }
             }
         };
@@ -1117,7 +1118,7 @@ impl Runner {
             return Flow::Quit;
         }
         self.publisher
-            .mode(told(delivered(finished, route), &ignored));
+            .mode(told(noted(delivered(finished, route), note), &ignored));
         if requests.listening_off {
             self.pause();
         }
@@ -1229,6 +1230,21 @@ fn told(mode: Mode, ignored: &[Refusal]) -> Mode {
             headline: first.headline(),
             causes: Vec::new(),
         }),
+    }
+}
+
+/// Adds what the merge told the user to the capture's final `mode`, which would otherwise hide it.
+fn noted(mode: Mode, note: Option<String>) -> Mode {
+    match (mode, note) {
+        (Mode::Done { route, notice }, Some(note)) => Mode::Done {
+            route,
+            notice: format!("{note} {notice}"),
+        },
+        (Mode::Failed(failure), Some(note)) => Mode::Failed(Failure {
+            notice: format!("{note} {}", failure.notice),
+            ..failure
+        }),
+        (mode, _) => mode,
     }
 }
 
@@ -2734,6 +2750,50 @@ mod tests {
                 route: CaptureRoute::Paste,
                 notice: "Done.".to_owned(),
             },
+        );
+    }
+
+    #[test]
+    fn what_the_merge_told_is_kept_beside_the_result_and_not_lost_to_it() {
+        let done = Mode::Done {
+            route: CaptureRoute::Paste,
+            notice: "Delivered.".to_owned(),
+        };
+        let failure = Failure {
+            kind: FailureKind::Delivery,
+            notice: "It failed.".to_owned(),
+            headline: "Failed",
+            causes: Vec::new(),
+        };
+        let note =
+            || Some("Merge skipped: the chat model took too long. Used the live text.".to_owned());
+        assert_eq!(
+            noted(done.clone(), note()),
+            Mode::Done {
+                route: CaptureRoute::Paste,
+                notice:
+                    "Merge skipped: the chat model took too long. Used the live text. Delivered."
+                        .to_owned(),
+            }
+        );
+        assert_eq!(
+            noted(Mode::Failed(failure.clone()), note()),
+            Mode::Failed(Failure {
+                notice:
+                    "Merge skipped: the chat model took too long. Used the live text. It failed."
+                        .to_owned(),
+                ..failure
+            })
+        );
+        assert_eq!(
+            noted(done.clone(), None),
+            done,
+            "nothing told, nothing added"
+        );
+        assert_eq!(
+            noted(Mode::Idle, note()),
+            Mode::Idle,
+            "a cancelled capture shows nothing"
         );
     }
 

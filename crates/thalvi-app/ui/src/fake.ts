@@ -204,8 +204,17 @@ export function fakeBackend(params: URLSearchParams): Backend {
     onSettingsChangedElsewhere: () => undefined,
     getSettings: () => Promise.resolve(structuredClone(saved)),
     saveSettings: (next) => {
-      if (next.stt.entries.filter((entry) => entry.kind !== "second_pass" && entry.active).length !== 1) {
+      if (next.stt.entries.filter((entry) => entry.kind !== "extra" && entry.active).length !== 1) {
         return Promise.reject(new Error("The desktop config is not valid: exactly one live speech server must be active."));
+      }
+      if (next.writing === null && next.stt.entries.some((entry) => entry.kind === "extra" && entry.active)) {
+        return Promise.reject(
+          new Error(
+            saved.writing === null
+              ? "Extra recognizers need a writing model. Set one up under Settings → Speech → Writing first, or switch the extras off."
+              : "Switch off the extra recognizers before removing the writing model.",
+          ),
+        );
       }
       if (next.microphone !== saved.microphone && !audioState.paused) {
         return Promise.reject(new Error("Pause listening before changing the microphone. Turn listening off, then save again."));
@@ -308,9 +317,9 @@ export function fakeBackend(params: URLSearchParams): Backend {
       Promise.resolve(name === "unified_160ms" ? "Will run on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)" : "Will run on the CPU: this model runs on the CPU"),
     openSpeechModelSource: () => Promise.resolve(),
     checkSpeechEntry: (entry) => {
-      const wanted = entry.kind === "second_pass" ? /^https?:\/\// : /^wss?:\/\//;
+      const wanted = entry.kind === "extra" ? /^https?:\/\// : /^wss?:\/\//;
       return "address" in entry && !wanted.test(entry.address)
-        ? Promise.reject(new Error(`Speech server "${entry.name}": the address must start with ${entry.kind === "second_pass" ? "http:// or https://" : "ws:// or wss://"}.`))
+        ? Promise.reject(new Error(`Speech server "${entry.name}": the address must start with ${entry.kind === "extra" ? "http:// or https://" : "ws:// or wss://"}.`))
         : Promise.resolve();
     },
     wordListSupport: (entry) => Promise.resolve(entry.kind !== "realtime"),

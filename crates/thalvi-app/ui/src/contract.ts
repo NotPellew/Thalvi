@@ -32,6 +32,7 @@ export type Status =
   | { state: "thinking"; target: string | null } // the writing model is reasoning and has written no text yet; cancellable
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
   | { state: "transcribing"; target: string | null; route: Route; cancellable: boolean }
+  | { state: "merging"; target: string | null; route: Route } // extra recognizers' texts are being merged with the live text; cancellable
   | { state: "done"; target: string | null; route: Route; notice: string }
   | { state: "failed"; notice: string; headline: string; causes: string[]; kind: FailureKind } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report
   | { state: "loading"; notice: string }; // the speech model is being fetched or loaded
@@ -65,7 +66,7 @@ interface EntryBase {
   /** Never shown; the key saved for an entry belongs to its id. */
   id: string;
   name: string;
-  /** The one live entry in use; for a second-pass entry, whether it is ticked. */
+  /** The one live entry in use; for an extra recognizer, whether it is switched on. */
   active: boolean;
 }
 
@@ -99,9 +100,9 @@ export interface OpenAiEntry extends EntryBase {
   has_key?: boolean;
 }
 
-/** An OpenAI or Meta transcription API that transcribes each accepted capture again. */
-export interface SecondPassEntry extends EntryBase {
-  kind: "second_pass";
+/** An OpenAI or Meta transcription API that transcribes each accepted capture again; the chat model merges its text with the live text. */
+export interface ExtraEntry extends EntryBase {
+  kind: "extra";
   address: string;
   model: string;
   api: SecondaryApi;
@@ -126,7 +127,7 @@ export interface WritingSettings {
   openings?: WritingOpening[];
 }
 export type LiveEntry = RealtimeEntry | OnDeviceEntry | OpenAiEntry;
-export type SpeechEntry = LiveEntry | SecondPassEntry;
+export type SpeechEntry = LiveEntry | ExtraEntry;
 
 export interface AppSettings {
   classes: string[];
@@ -150,7 +151,7 @@ export interface Settings {
   capture_limits: { idle: number; max: number };
   endings: Record<string, Ending>;
   stt: {
-    /** Live entries (exactly one active) and second-pass entries; the order of the second-pass ones is the order they are tried. */
+    /** Live entries (exactly one active) and extra recognizers, whose order carries no meaning. */
     entries: SpeechEntry[];
     /** Spellings recognition favours; absent when empty. */
     phrases?: string[];
