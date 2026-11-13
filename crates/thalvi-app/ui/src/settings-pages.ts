@@ -767,11 +767,13 @@ function modelOption(info: SpeechModelInfo): HTMLOptionElement {
 
 const KIND_NAMES: Record<SpeechEntry["kind"], string> = {
   realtime: "Realtime speech server",
+  open_ai: "OpenAI-compatible",
   on_device: "On this computer",
   second_pass: "Second pass",
 };
 const LIVE_KINDS: readonly (readonly [LiveEntry["kind"], string])[] = [
   ["realtime", "Realtime speech server"],
+  ["open_ai", "OpenAI-compatible"],
   ["on_device", "On this computer"],
 ];
 
@@ -780,13 +782,15 @@ function isLive(entry: SpeechEntry): entry is LiveEntry {
 }
 
 function hasKey(entry: SpeechEntry): boolean {
-  if (entry.kind !== "realtime" && entry.kind !== "second_pass") return false;
+  if (entry.kind !== "realtime" && entry.kind !== "open_ai" && entry.kind !== "second_pass") return false;
   return entry.api_key === undefined ? entry.has_key === true : entry.api_key !== "";
 }
 
 function summary(entry: SpeechEntry): string {
   switch (entry.kind) {
     case "realtime":
+      return `${entry.address} · ${entry.model}`;
+    case "open_ai":
       return `${entry.address} · ${entry.model}`;
     case "on_device":
       return entry.model ?? SPEECH_MODEL;
@@ -799,6 +803,8 @@ function blankEntry(kind: SpeechEntry["kind"], name: string): SpeechEntry {
   const base = { id: `e-${Math.random().toString(36).slice(2, 10)}`, name, active: false };
   switch (kind) {
     case "realtime":
+      return { ...base, kind, address: "", model: "" };
+    case "open_ai":
       return { ...base, kind, address: "", model: "" };
     case "on_device":
       return { ...base, kind };
@@ -1036,6 +1042,8 @@ function speech(context: PageContext): HTMLElement[] {
       case "working":
       case "done":
         return "Ready";
+      case "transcribing":
+        return "Transcribing…";
       case "loading":
         return status.notice;
       case "paused":
@@ -1081,6 +1089,8 @@ function speech(context: PageContext): HTMLElement[] {
     switch (entry.kind) {
       case "realtime":
         return "Dictation through a realtime speech server.";
+      case "open_ai":
+        return "Transcribes each capture with an OpenAI-compatible speech server.";
       case "on_device":
         return `Recognition with ${modelTitleFor(entry)}.`;
       case "second_pass":
@@ -1331,7 +1341,7 @@ function speech(context: PageContext): HTMLElement[] {
       }, { placeholder }));
     const modelRow = (): HTMLElement =>
       row("Model", "The model named in each request.", controls.text("model" in working ? (working.model ?? "") : "", (value) => {
-        if (working.kind === "realtime" || working.kind === "second_pass") working.model = value;
+        if (working.kind === "realtime" || working.kind === "open_ai" || working.kind === "second_pass") working.model = value;
       }));
     const key: { input?: HTMLInputElement } = {};
     let clearKey = false;
@@ -1359,6 +1369,9 @@ function speech(context: PageContext): HTMLElement[] {
       case "realtime":
         rows.push(address("The ws:// or wss:// address of a speech server that speaks Meta's realtime protocol, such as the self-hosted one.", "ws://127.0.0.1:8012"), modelRow(), keyRow());
         break;
+      case "open_ai":
+        rows.push(address("Where each capture is sent for transcription.", "http://127.0.0.1:9000/v1"), modelRow(), keyRow());
+        break;
       case "on_device": {
         const built = onDeviceRows(working, context, speechModels);
         rows.push(...built.rows);
@@ -1381,7 +1394,7 @@ function speech(context: PageContext): HTMLElement[] {
       say(message, "");
       const typed = key.input?.value ?? "";
       const entry = structuredClone(working);
-      if (entry.kind === "realtime" || entry.kind === "second_pass") {
+      if (entry.kind === "realtime" || entry.kind === "open_ai" || entry.kind === "second_pass") {
         if (typed !== "") entry.api_key = typed;
         else if (clearKey) entry.api_key = "";
       }
@@ -1419,7 +1432,7 @@ function speech(context: PageContext): HTMLElement[] {
       { id: headingId },
       existing
         ? `Editing “${existing.name}” · ${existing.kind === "second_pass" ? "second pass" : "live dictation"}`
-        : `Add a ${KIND_NAMES[working.kind].toLowerCase()}`,
+        : `Add ${working.kind === "open_ai" ? "an" : "a"} ${KIND_NAMES[working.kind].toLowerCase()}`,
     );
     editor.setAttribute("aria-labelledby", headingId);
     editor.replaceChildren(
@@ -1561,7 +1574,7 @@ function speech(context: PageContext): HTMLElement[] {
     const active = activeLive();
     wordRow.classList.remove("off");
     say(wordProblem, "");
-    if (active === undefined || active.kind === "on_device") {
+    if (active === undefined || active.kind !== "realtime") {
       words.enable(true);
       return;
     }

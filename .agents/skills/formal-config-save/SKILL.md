@@ -202,6 +202,8 @@ lands in one step, so a half-written file is not modeled; validation in `load`
 never fails; the runner applies `Control::Apply` messages in send order;
 `rename` replaces the target atomically.
 
+Preserving an OpenAI-compatible API key in an unchanged Settings entry (#385 review fix) only changes form normalization before the existing serialized save; it adds no writer or file-system step, so the model is unchanged and the `settings.rs` hash moved.
+
 Not verified: two writers on the main thread at once (they cannot overlap); a
 tray switch on the main thread racing an agent save (the same steps as `L`,
 with `MainThread = {"S", "L"}`); more than three writers; partial writes, disk

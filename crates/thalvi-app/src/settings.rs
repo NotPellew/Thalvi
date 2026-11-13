@@ -334,7 +334,7 @@ fn unmask_keys(settings: &mut Value, current: &DesktopConfig) {
         entry.remove("has_key");
         let keyed = matches!(
             entry.get("kind").and_then(Value::as_str),
-            Some("realtime" | "second_pass")
+            Some("realtime" | "open_ai" | "second_pass")
         );
         if keyed && !entry.contains_key("api_key") {
             let saved = entry
@@ -711,11 +711,13 @@ mod tests {
         let mut settings = settings_json(&store_defaults()).unwrap();
         settings["stt"] = json!({"entries": [
             entry("live", "realtime", Some("live-secret")),
+            entry("open-ai", "open_ai", Some("open-ai-secret")),
             entry("second", "second_pass", Some("second-secret")),
             entry("blank", "second_pass", None),
         ]});
         store.save(settings, &store_defaults()).unwrap();
         let saved = store.load().unwrap();
+        assert_eq!(saved.stt.entries.key_of("open-ai"), "open-ai-secret");
 
         let form = settings_json(&saved).unwrap();
         assert!(!form.to_string().contains("secret"), "{form}");
@@ -725,21 +727,26 @@ mod tests {
             .iter()
             .map(|entry| entry["has_key"].clone())
             .collect();
-        assert_eq!(has, [json!(true), json!(true), json!(false)]);
+        assert_eq!(has, [json!(true), json!(true), json!(true), json!(false)]);
 
         // An untouched form keeps both keys; a replaced key changes and a cleared one empties.
         let keys = |config: &DesktopConfig| {
-            ["live", "second", "blank"].map(|id| config.stt.entries.key_of(id).to_owned())
+            ["live", "open-ai", "second", "blank"]
+                .map(|id| config.stt.entries.key_of(id).to_owned())
         };
         let after_untouched = store.save(form.clone(), &saved).unwrap();
         let mut edited = form;
         edited["stt"]["entries"][0]["api_key"] = json!("replaced");
-        edited["stt"]["entries"][1]["api_key"] = json!("");
+        edited["stt"]["entries"][1]["api_key"] = json!("open-ai-replaced");
+        edited["stt"]["entries"][2]["api_key"] = json!("");
         let after_edit = store.save(edited, &after_untouched).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert_eq!(keys(&after_untouched), ["live-secret", "second-secret", ""]);
-        assert_eq!(keys(&after_edit), ["replaced", "", ""]);
+        assert_eq!(
+            keys(&after_untouched),
+            ["live-secret", "open-ai-secret", "second-secret", ""]
+        );
+        assert_eq!(keys(&after_edit), ["replaced", "open-ai-replaced", "", ""]);
     }
 
     #[test]

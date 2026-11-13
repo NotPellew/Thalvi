@@ -151,6 +151,19 @@ impl ConnectFailure {
 #[error("{0}")]
 pub struct Detail(pub String);
 
+/// What kind of OpenAI-compatible transcription failure the user needs to fix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptionFailure {
+    /// The endpoint could not be reached.
+    Unreachable,
+    /// The endpoint did not answer before the request deadline.
+    Timeout,
+    /// The endpoint rejected the request with an HTTP error status.
+    HttpStatus,
+    /// The endpoint replied with a body that did not match its transcription API.
+    BadReply,
+}
+
 /// A failure the user can be told about in plain words; `Display` says what failed, why and
 /// what to do, naming the entry.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -179,6 +192,12 @@ pub enum RecognizerError {
         speech: SpeechSource,
         message: String,
     },
+    /// A transcription endpoint failed; the full message accompanies a short classified headline.
+    #[error("{message}")]
+    Transcription {
+        failure: TranscriptionFailure,
+        message: String,
+    },
     /// A speech model that could not be provided; the headline is the model error's own.
     #[error("{message}")]
     Model {
@@ -198,6 +217,12 @@ impl UserError for RecognizerError {
             Self::NotUnderstood { .. } => "Bad speech server reply — Settings",
             Self::Model { headline, .. } => headline,
             Self::Reported { .. } | Self::Said(_) => "Speech recognition failed — Settings",
+            Self::Transcription { failure, .. } => match failure {
+                TranscriptionFailure::Unreachable => "Can't reach speech server — Settings",
+                TranscriptionFailure::Timeout => "Speech server timed out — Settings",
+                TranscriptionFailure::HttpStatus => "Speech server error — Settings",
+                TranscriptionFailure::BadReply => "Bad speech server reply — Settings",
+            },
         }
     }
 }
@@ -220,6 +245,16 @@ impl RecognizerError {
 
 /// One open recognition stream; it exists only after the recognizer said it is ready.
 pub trait RecognizerSession: Send {
+    /// Whether audio is buffered until the user ends the capture.
+    fn buffers_audio(&self) -> bool {
+        false
+    }
+
+    /// Signals that all audio for a buffered capture has arrived.
+    fn finish_audio(&mut self) -> impl Future<Output = Result<(), RecognizerError>> + Send {
+        std::future::ready(Ok(()))
+    }
+
     /// Sends one 16 kHz frame.
     fn send_frame(
         &mut self,
@@ -325,6 +360,7 @@ impl Upsampler {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FakeCall {
     Frame(Box<Frame>),
+    FinishAudio,
     Cancel,
     Close,
 }
@@ -339,6 +375,7 @@ pub struct FakeRecognizer {
     events: EventsSlot,
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
+    buffers: Arc<AtomicBool>,
 }
 
 /// Test-side handle of a [`FakeRecognizer`].
@@ -348,6 +385,7 @@ pub struct FakeControl {
     slots: (ReadySlot, EventsSlot),
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
+    buffers: Arc<AtomicBool>,
 }
 
 /// The stream a [`FakeRecognizer`] hands out once ready.
@@ -355,6 +393,7 @@ pub struct FakeSession {
     events: mpsc::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>,
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
+    buffers: Arc<AtomicBool>,
 }
 
 impl FakeRecognizer {
@@ -365,6 +404,7 @@ impl FakeRecognizer {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let calls = Arc::new(Mutex::new(Vec::new()));
         let stalled = Arc::new(AtomicBool::new(false));
+        let buffers = Arc::new(AtomicBool::new(false));
         let ready = Arc::new(Mutex::new(Some(ready_rx)));
         let events = Arc::new(Mutex::new(Some(events_rx)));
         (
@@ -373,6 +413,7 @@ impl FakeRecognizer {
                 events: Arc::clone(&events),
                 calls: Arc::clone(&calls),
                 stalled: Arc::clone(&stalled),
+                buffers: Arc::clone(&buffers),
             },
             FakeControl {
                 ready: Some(ready_tx),
@@ -380,6 +421,7 @@ impl FakeRecognizer {
                 slots: (ready, events),
                 calls,
                 stalled,
+                buffers,
             },
         )
     }
@@ -405,6 +447,7 @@ impl Recognizer for FakeRecognizer {
             events,
             calls: Arc::clone(&self.calls),
             stalled: Arc::clone(&self.stalled),
+            buffers: Arc::clone(&self.buffers),
         })
     }
 }
@@ -442,6 +485,10 @@ impl FakeControl {
         self.stalled.store(true, Ordering::Relaxed);
     }
 
+    pub fn buffer_audio(&self) {
+        self.buffers.store(true, Ordering::Relaxed);
+    }
+
     /// Everything the session was asked to do so far.
     pub fn calls(&self) -> Vec<FakeCall> {
         self.calls
@@ -461,6 +508,19 @@ impl FakeSession {
 }
 
 impl RecognizerSession for FakeSession {
+    fn buffers_audio(&self) -> bool {
+        self.buffers.load(Ordering::Relaxed)
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "The fake only records the call in memory."
+    )]
+    async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
+        self.record(FakeCall::FinishAudio);
+        Ok(())
+    }
+
     fn send_frame(
         &mut self,
         frame: &Frame,

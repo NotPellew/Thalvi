@@ -31,6 +31,7 @@ export type Status =
   | { state: "writing"; target: string | null; text: string } // the writing model is at work; text is what has come in so far; cancellable until the paste
   | { state: "thinking"; target: string | null } // the writing model is reasoning and has written no text yet; cancellable
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
+  | { state: "transcribing"; target: string | null; route: Route; cancellable: boolean }
   | { state: "done"; target: string | null; route: Route; notice: string }
   | { state: "failed"; notice: string; headline: string; causes: string[]; kind: FailureKind } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report
   | { state: "loading"; notice: string }; // the speech model is being fetched or loaded
@@ -84,6 +85,15 @@ export interface OnDeviceEntry extends EntryBase {
   model?: string;
 }
 
+/** A buffered OpenAI-compatible transcription endpoint used for live dictation. */
+export interface OpenAiEntry extends EntryBase {
+  kind: "open_ai";
+  address: string;
+  model: string;
+  api_key?: string;
+  has_key?: boolean;
+}
+
 /** An OpenAI or Meta transcription API that transcribes each accepted capture again. */
 export interface SecondPassEntry extends EntryBase {
   kind: "second_pass";
@@ -110,7 +120,7 @@ export interface WritingSettings {
   /** Absent when there are none. */
   openings?: WritingOpening[];
 }
-export type LiveEntry = RealtimeEntry | OnDeviceEntry;
+export type LiveEntry = RealtimeEntry | OnDeviceEntry | OpenAiEntry;
 export type SpeechEntry = LiveEntry | SecondPassEntry;
 
 export interface AppSettings {

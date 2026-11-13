@@ -353,6 +353,9 @@ fn pill_words(view: &View) -> (Tone, String, Option<&str>) {
         }
         Status::Writing { target, .. } => (Tone::Working, words("WRITING…"), target.as_deref()),
         Status::Thinking { target } => (Tone::Working, words("THINKING…"), target.as_deref()),
+        Status::Transcribing { target, .. } => {
+            (Tone::Working, words("TRANSCRIBING…"), target.as_deref())
+        }
         Status::Working { target, .. } => (Tone::Working, words("WORKING"), target.as_deref()),
         Status::Done {
             target,
@@ -796,6 +799,25 @@ mod tests {
             });
             assert_eq!(got, want, "{status:?} draft {show_draft}");
         }
+    }
+
+    #[test]
+    fn neons_pill_shows_when_a_live_capture_is_transcribing() {
+        let mut view = View::new(false);
+        view.set_status(
+            Status::Transcribing {
+                target: Some("Editor".to_owned()),
+                route: CaptureRoute::Paste,
+                cancellable: true,
+            },
+            0.0,
+        );
+
+        assert_eq!(
+            pill_words(&view),
+            (Tone::Working, "TRANSCRIBING…".to_owned(), Some("Editor"))
+        );
+        assert_eq!(view.label.as_deref(), Some("TRANSCRIBING…"));
     }
 
     #[test]

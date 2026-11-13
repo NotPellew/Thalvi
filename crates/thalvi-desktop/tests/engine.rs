@@ -357,6 +357,76 @@ async fn the_microphone_level_follows_the_capture_frames_and_is_zero_outside_it(
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_buffered_wake_capture_uploads_after_the_voice_pause() {
+    LocalSet::new()
+        .run_until(async {
+            let config = r#"{"ending_pause":{"paste":1.0}}"#;
+            let (mut rig, engine, frames) = Rig::new(config);
+            rig.server.buffer_audio();
+            let task = capture_task(engine, frames);
+            rig.open().await;
+
+            rig.feed_until(1200, Kind::Voice).await;
+            rig.feed_until(2120, Kind::Quiet).await;
+            assert!(matches!(rig.state(), EngineState::Capturing { .. }));
+            assert!(!rig.server.calls().contains(&FakeCall::FinishAudio));
+
+            rig.feed_until(3500, Kind::Quiet).await;
+            assert_eq!(
+                rig.state(),
+                EngineState::TranscribingLive {
+                    route: CaptureRoute::Paste
+                }
+            );
+            assert_eq!(
+                rig.server
+                    .calls()
+                    .iter()
+                    .filter(|call| matches!(call, FakeCall::FinishAudio))
+                    .count(),
+                1
+            );
+            rig.at(8_000).await;
+            assert_eq!(
+                rig.state(),
+                EngineState::TranscribingLive {
+                    route: CaptureRoute::Paste
+                },
+                "a buffered upload does not use the microphone watchdog"
+            );
+            assert!(!task.is_finished(), "the pending upload can still answer");
+            rig.finals("voice after a pause").await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "voice after a pause")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_buffered_hold_reports_a_microphone_stall_before_release() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            rig.server.buffer_audio();
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.feed_until(1000, Kind::Voice).await;
+            rig.at(3960).await;
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: CaptureError::MicStopped,
+                    recoverable_text: None,
+                },
+                "a buffered upload starts only after release and cannot disable the live microphone watchdog"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_microphone_level_follows_wake_listening_and_resets_when_it_stops() {
     LocalSet::new()
         .run_until(async {
@@ -2516,9 +2586,17 @@ async fn cancelling_during_the_secondary_transcription_abandons_it() {
             let (url, mut uploads) = serve(Reply::Stall).await;
             let (mut rig, engine, frames) = Rig::new(&with_secondary(&url, "openai"));
             let task = capture_task(engine, frames);
-            live_words(&mut rig).await;
+            tokio::time::timeout(Duration::from_secs(10), live_words(&mut rig))
+                .await
+                .expect("capture reaches the second transcription");
             rig.at(3600).await;
-            assert!(uploads.recv().await.is_some(), "the upload started");
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), uploads.recv())
+                    .await
+                    .expect("second transcription starts")
+                    .is_some(),
+                "the upload started"
+            );
             assert_eq!(
                 rig.state(),
                 EngineState::TranscribingSecondary {
@@ -6329,6 +6407,42 @@ async fn cancel_stops_the_feed_and_the_capture_it_started_and_a_second_file_wait
             rig.feed.send(quiet(901));
             let next = tokio::time::timeout(ms(10), fed.next()).await;
             assert_eq!(next.unwrap().unwrap().frame[0], 901);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_buffered_wake_capture_keeps_its_spoken_route() {
+    LocalSet::new()
+        .run_until(async {
+            let config = r#"{"ending_pause":{"paste":1.0}}"#;
+            let (mut rig, engine, frames) = Rig::new(config);
+            rig.server.buffer_audio();
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1200, Kind::Voice).await;
+            rig.feed_until(3500, Kind::Quiet).await;
+            assert!(matches!(rig.state(), EngineState::TranscribingLive { .. }));
+            rig.finals("Run tests submit").await;
+            let got = finished(task).await;
+            assert_eq!(got, accepted(CaptureRoute::Submit, "Run tests"));
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_long_buffered_hold_is_not_cut_off_as_idle() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            rig.server.buffer_audio();
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.feed_until(61_000, Kind::Voice).await;
+            rig.release(61_100).await;
+            rig.finals("a long dictation").await;
+            let got = finished(task).await;
+            assert!(matches!(got, CaptureOutcome::Accepted(_)), "{got:?}");
         })
         .await;
 }

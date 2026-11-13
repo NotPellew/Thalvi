@@ -180,6 +180,12 @@ impl View {
         self.show_draft = show;
     }
 
+    fn working(&mut self, label: &str) {
+        self.tone = Tone::Working;
+        self.label = Some(label.to_owned());
+        self.sweep = true;
+    }
+
     /// The tone, label and line `next` shows; whether the wave runs, and the countdown if one does.
     fn take(&mut self, next: &Status, now: f64) -> (bool, Option<Countdown>) {
         let mut wave = false;
@@ -241,26 +247,20 @@ impl View {
             }
             Status::Writing { text: words, .. } => {
                 self.line = self.words(words, true);
-                self.tone = Tone::Working;
-                self.label = Some("WRITING…".to_owned());
-                self.sweep = true;
+                self.working("WRITING…");
             }
             Status::Thinking { .. } => {
                 self.line = Line::None;
-                self.tone = Tone::Working;
-                self.label = Some("THINKING…".to_owned());
-                self.sweep = true;
+                self.working("THINKING…");
             }
-            Status::Working { .. } => {
-                self.tone = Tone::Working;
-                self.label = Some("WORKING".to_owned());
-                self.sweep = true;
+            Status::Transcribing { .. } => {
+                self.line = Line::None;
+                self.working("TRANSCRIBING…");
             }
+            Status::Working { .. } => self.working("WORKING"),
             Status::Loading { notice, .. } => {
                 self.line = Line::Notice(notice.clone());
-                self.tone = Tone::Working;
-                self.label = Some("LOADING".to_owned());
-                self.sweep = true;
+                self.working("LOADING");
             }
             Status::Done { .. } => {
                 // The confirmation takes the line's place, so its caret stops blinking.

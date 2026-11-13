@@ -34,6 +34,8 @@ when the switch was off), still polling cancellation first, and the recognizer
 errors name their entry. `drive` times the recognizer's first words and each final
 result against the speech heard (`Heard`) for the metrics. None of these touch the mapped functions' cancellation
 behaviour, so the model is unchanged and only the hashes moved.
+The OpenAI-compatible recognizer buffers audio until release or the wake VAD pause; cancellation aborts its upload before delivery, with the existing cancel-first control path unchanged.
+Classifying its endpoint errors (#385 review fix) changes only the reported message and headline; cancellation and delivery admission are unchanged, so the model is unchanged and its `recognizer.rs` and `openai_live.rs` hashes moved.
 The GNOME host (#267) changed `delivery.rs` and `runner.rs` without changing that:
 `Delivery::paste_in` (formerly `type_in`) returns `Delivered::InWindow` or `Delivered::OnClipboard` from the
 same `Delivery::finish` admission, so a clipboard-only desktop is another admitted host
@@ -106,6 +108,7 @@ same `CLOSE_TIMEOUT`, so `CloseReturns` now maps there. `engine.rs`, `runner.rs`
 engine's arms and the word-list sharing; no mapped await boundary, control drain or delivery admission changed, so the
 model is unchanged and only the hashes moved.
 Its later tests of a reply that isn't speech live in `recognizer.rs`'s test module; only that hash moved.
+Buffered OpenAI captures no longer expire at the idle deadline, and a wake upload's final spoken ending carries its armed route and text to delivery. Neither change alters the cancellation-first select, control drains, or delivery admission, so the model is unchanged and only the `engine.rs` hash moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
@@ -125,7 +128,7 @@ Matching hashes establish synchronization only, not correctness of the model.
 | `crates/thalvi-desktop/src/engine.rs`: `EngineHandle::cancel`, `Engine::capture` | `cancelPending` represents the watch version change; capture entry consumes the old version. `Accept` and `ActiveCancelled` abstract capture work before the ending. |
 | Same file: `Engine::conclude`, `Engine::end_cue`, `Engine::end_with` | `CueReturns`, `CloseReturns`; the cue's cancellation-biased select and recognizer release are separate futures joined together. A completed cue retains its bool while close is still Pending. Neither completion is a transaction encompassing the other. |
 | Same file: `Engine::reconcile`, `Engine::write`, `bounded` | `secondary`, `writing`, `SecondaryReturns`, `WritingReturns`; disabled stages are skipped, each enabled stage polls cancellation first before handing the result to the next stage. |
-| `crates/thalvi-desktop/src/recognizer.rs`: `RecognizerSession`; `crates/thalvi-desktop/src/realtime.rs`: `RealtimeSession::close` | `CloseReturns` may occur before or after the cue. Network close is awaited under a timeout, so it can remain Pending. |
+| `crates/thalvi-desktop/src/recognizer.rs`: `RecognizerSession`; `crates/thalvi-desktop/src/realtime.rs`: `RealtimeSession::close`; `crates/thalvi-desktop/src/openai_live.rs`: `OpenAiSession::cancel`, `OpenAiSession::close` | `CloseReturns` may occur before or after the cue. Network close is awaited under a timeout, so it can remain Pending; `OpenAiSession::close` aborts its upload task and returns at once. |
 | `crates/thalvi-desktop/src/delivery.rs`: `Delivery::finish`, `paste_in`, `call` | `delivered` abstracts admission to a valid configured host action. Actual host execution is outside the proof; once admitted it can run via `spawn_blocking`. Other changes to this file are not covered by the model. |
 
 ## Run
