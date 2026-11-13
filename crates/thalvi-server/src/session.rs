@@ -644,7 +644,6 @@ async fn run_session<F, M, T>(
         briefing,
     } = retention.open().await;
     let private = persistence.is_private();
-    let resumed = !history.is_empty();
     let recording_config = if private {
         recording_config.metrics_only()
     } else {
@@ -654,7 +653,7 @@ async fn run_session<F, M, T>(
     let mut turn_log = TurnLog::new(recording.recorder.clone(), next_turn, audio_input);
     turn_log
         .recorder
-        .emit("session_open", json!({"resumed": resumed}));
+        .emit("session_open", json!({"resumed": !history.is_empty()}));
     let mut browser_gone = send_session_opening(&mut sink, &session_id, &history, private)
         .await
         .err();
