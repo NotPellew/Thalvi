@@ -45,15 +45,38 @@ render_node() {
   die "no non-NVIDIA render node under /sys/class/drm"
 }
 
+# The host device that backs the sandbox's render node. A virtio GPU without 3D (bit 0 of its virtio features) has no
+# hardware GL: Mesa draws in software into dumb buffers, which only a primary node allows, so that is bound in the
+# render node's place. THALVI_RIG_RENDER=software|hardware overrides the detection.
+render_source() {
+  local node=$1 dev c
+  dev=/sys/class/drm/${node##*/}/device
+  case ${THALVI_RIG_RENDER:-auto} in
+    hardware) echo "$node"; return ;;
+    software) ;;
+    auto) { [ "$(cat "$dev/vendor" "$dev/device" 2>/dev/null | tr '\n' ' ')" = "0x1af4 0x1050 " ] &&
+              [ "$(cut -c1 "$dev"/virtio*/features 2>/dev/null)" = 0 ]; } || { echo "$node"; return; } ;;
+    *) die "THALVI_RIG_RENDER is software or hardware, not ${THALVI_RIG_RENDER}" ;;
+  esac
+  for c in "$dev"/drm/card[0-9]*; do
+    [ -e "$c" ] || continue
+    [ -r "/dev/dri/${c##*/}" ] && [ -w "/dev/dri/${c##*/}" ] || die "software rendering needs /dev/dri/${c##*/}: join the video group"
+    echo "/dev/dri/${c##*/}"
+    return
+  done
+  die "software rendering needs a primary node next to $node"
+}
+
 # bwrap arguments shared by every process of a run. The host is read-only; /home, /tmp, /run/user
 # and /dev are replaced, so the developer's config, cache, models, sockets and sound devices are absent.
 sandbox_args() {
-  local r=$1
+  local r=$1 node
+  node=$(render_node)
   printf '%s\0' --unshare-pid --unshare-ipc --die-with-parent --new-session --clearenv \
     --ro-bind / / --tmpfs /home --tmpfs /tmp --tmpfs /run/user --dev /dev --proc /proc \
-    --dev-bind "$(render_node)" "$(render_node)" \
+    --dev-bind "$(render_source "$node")" "$node" \
     --setenv __EGL_VENDOR_LIBRARY_FILENAMES /usr/share/glvnd/egl_vendor.d/50_mesa.json \
-    --setenv WLR_RENDER_DRM_DEVICE "$(render_node)" \
+    --setenv WLR_RENDER_DRM_DEVICE "$node" \
     --dir "/run/user/$UID_NUM" --bind "$r/rt" "/run/user/$UID_NUM" \
     --dir /home/rig --bind "$r/home" /home/rig --bind "$r/out" /tmp/out \
     --setenv HOME /home/rig --setenv USER rig --setenv PATH /usr/local/bin:/usr/bin:/bin \
@@ -209,6 +232,9 @@ cmd_up() {
       *) die "up: unknown argument $1" ;;
     esac
   done
+  local node
+  node=$(render_node)
+  render_source "$node" > /dev/null  # dies here, in the main shell, on a bad THALVI_RIG_RENDER or an unusable primary node
   mkdir -p "$BASE"
   local r
   r=$(mktemp -d "$BASE/run-XXXXXX")
