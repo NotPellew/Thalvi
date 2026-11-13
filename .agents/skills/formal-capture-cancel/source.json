@@ -45,7 +45,7 @@
       ]
     },
     "crates/thalvi-desktop/src/openai_live.rs": {
-      "sha256": "4579004acb3c3b400866d157edb389660edf52e3e009d6a64c7872f457846959",
+      "sha256": "3aefdc55433c28dcd3c5a0796b849887b7509e4560c2da5d30715c27ed54729d",
       "functions": [
         "OpenAiSession::cancel",
         "OpenAiSession::close"

@@ -109,6 +109,7 @@ engine's arms and the word-list sharing; no mapped await boundary, control drain
 model is unchanged and only the hashes moved.
 Its later tests of a reply that isn't speech live in `recognizer.rs`'s test module; only that hash moved.
 Buffered OpenAI captures no longer expire at the idle deadline, and a wake upload's final spoken ending carries its armed route and text to delivery. Neither change alters the cancellation-first select, control drains, or delivery admission, so the model is unchanged and only the `engine.rs` hash moved.
+The Chat request kind and language (#419) change only what `OpenAiSession`'s upload task sends and records; `OpenAiSession::cancel` and `close` still abort it, so the model is unchanged and only the `openai_live.rs` hash moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
