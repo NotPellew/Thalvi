@@ -11,9 +11,15 @@ WEBSOCKETS="websockets==17.4"
 
 usage() {
   cat <<'EOF'
-thalvi-verify up [--local]            build, launch, print RUN_DIR; --local uses self-hosted
-                                      model and speech (see local_endpoints.py)
+thalvi-verify up [--local] [--briefing ok|fail]
+                                      build, launch, print RUN_DIR; --local uses self-hosted
+                                      model and speech (see local_endpoints.py); fake mode also
+                                      runs a briefing source, answering ok (default) or failing
+                                      at first
 thalvi-verify doctor RUN_DIR          read-only health and identity check
+thalvi-verify briefing RUN_DIR ok|fail|hold ["headline" ...]
+                                      switch the fake briefing source's answer, optionally its
+                                      headlines; hold waits for the next switch (fake mode)
 thalvi-verify say RUN_DIR "words"     queue the transcript of the next mic speech burst
 thalvi-verify ab RUN_DIR <args...>    agent-browser in this run's session, fake mic attached
 thalvi-verify state RUN_DIR STATE     wait (25 s) until the page's data-state is STATE
@@ -56,12 +62,16 @@ wait_for() {
 }
 
 up() {
-  local mode=fake run_id run_dir app_port http_port asr_port
-  case "${1:-}" in
-    "") ;;
-    --local) mode=local ;;
-    *) usage ;;
-  esac
+  local mode=fake briefing=ok run_id run_dir app_port http_port asr_port
+  while (($#)); do
+    case "$1" in
+      --local) mode=local ;;
+      --briefing) briefing="${2:-}"; shift ;;
+      *) usage ;;
+    esac
+    shift
+  done
+  [[ "$briefing" == ok || "$briefing" == fail ]] || usage
   run_dir="$(mktemp -d "${TMPDIR:-/var/tmp}/thalvi-verify-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
   run_id="${run_dir##*/thalvi-verify-}"
   mkdir "$run_dir/data" "$run_dir/evidence"
@@ -85,10 +95,16 @@ up() {
   printf '{"next_id":1,"learnings":[{"id":"l1","text":"Prefers metric units in recipes.","source_session":null,"updated_ms":%s}]}' \
     "$(date +%s000)" >"$run_dir/data/learnings.json"
   : >"$run_dir/asr-queue.txt"
+  printf '{"mode":"%s"}' "$briefing" >"$run_dir/briefing.json"
 
   local llm_base="http://127.0.0.1:$http_port/v1" llm_model=fake-chat tts_api=openai
   local tts_base="http://127.0.0.1:$http_port/v1" tts_model=fake-tts tts_voice=fake_heart
-  local tts_voices=fake_heart,fake_bella
+  local tts_voices=fake_heart,fake_bella briefing_url=
+  local briefing_env=()
+  if [[ "$mode" == fake ]]; then
+    briefing_url="http://127.0.0.1:$http_port"
+    briefing_env=(BRIEFING_URL="$briefing_url" BRIEFING_TOKEN=verify-briefing-token)
+  fi
   if [[ "$mode" == local ]]; then
     # shellcheck disable=SC1091
     source "$run_dir/local.env"
@@ -100,6 +116,8 @@ up() {
   setsid uv run --quiet --no-project --with "$WEBSOCKETS" python -I "$SCRIPTS/fake_endpoints.py" \
     serve "$run_dir" "$http_port" "$asr_port" >"$run_dir/fakes.log" 2>&1 </dev/null &
   local fakes_pgid=$!
+  # The server fetches its briefing as it starts, so the fake source must already answer.
+  wait_for "fake endpoints" "curl -sf http://127.0.0.1:$http_port/health"
   # Empty environment and a cwd outside the repo keep shell variables and its .env out.
   (cd "$run_dir" && exec setsid env -i HOME="$HOME" PATH="$PATH" RUST_LOG=info \
     THALVI_ADDR="127.0.0.1:$app_port" THALVI_WEB_DIR="$run_dir/web" THALVI_DATA_DIR="$run_dir/data" \
@@ -107,7 +125,7 @@ up() {
     LLM_BASE_URL="$llm_base" LLM_MODEL="$llm_model" LLM_API_KEY= LLM_REASONING_EFFORT= \
     STT_URL="ws://127.0.0.1:$asr_port" STT_MODEL=fake-asr STT_API_KEY=fake \
     TTS_API="$tts_api" TTS_BASE_URL="$tts_base" TTS_MODEL="$tts_model" TTS_API_KEY= \
-    TTS_VOICE="$tts_voice" TTS_VOICES="$tts_voices" \
+    TTS_VOICE="$tts_voice" TTS_VOICES="$tts_voices" "${briefing_env[@]}" \
     ./thalvi >"$run_dir/server.log" 2>&1 </dev/null) &
   local server_pgid=$!
 
@@ -119,6 +137,7 @@ LLM_MODEL=$llm_model
 TTS_BASE_URL=$tts_base
 TTS_VOICE=$tts_voice
 TTS_VOICES=$tts_voices
+BRIEFING_URL=$briefing_url
 URL=http://127.0.0.1:$app_port/
 APP_PORT=$app_port
 FAKE_HTTP_PORT=$http_port
@@ -130,7 +149,6 @@ SOURCE_HASH=$(source_hash)
 BINARY_SHA=$(sha256sum "$run_dir/thalvi" | cut -c1-16)
 EOF
   load "$run_dir"
-  wait_for "fake endpoints" "curl -sf http://127.0.0.1:$http_port/health"
   wait_for "Thalvi voices" "curl -sf ${URL}voices | grep -q '\"default\":\"$tts_voice\"'"
   doctor "$run_dir"
   echo "URL=$URL"
@@ -156,6 +174,10 @@ doctor() {
     "curl -sf ${URL}voices | grep -qF '\"voices\":[\"${TTS_VOICES//,/\",\"}\"]'"
   check "$MODE model ($LLM_MODEL) and speech configured, recognizer is this run's fake" \
     "[[ \$(tr '\\0' '\\n' </proc/$SERVER_PGID/environ | grep -cxF -e LLM_BASE_URL=$LLM_BASE_URL -e LLM_MODEL=$LLM_MODEL -e TTS_BASE_URL=$TTS_BASE_URL -e STT_URL=ws://127.0.0.1:$FAKE_ASR_PORT) == 4 ]]"
+  if [[ "$MODE" == fake ]]; then
+    check "briefing source is this run's fake, and the server holds a token for it" \
+      "[[ \$(tr '\\0' '\\n' </proc/$SERVER_PGID/environ | grep -cxF -e BRIEFING_URL=$BRIEFING_URL -e BRIEFING_TOKEN=verify-briefing-token) == 2 ]]"
+  fi
   if [[ "$MODE" == local ]]; then
     check "self-hosted model and every voice answer" \
       "python3 -I $SCRIPTS/local_endpoints.py check $RUN_DIR/local.env"
@@ -163,6 +185,20 @@ doctor() {
   check "running binary matches the checkout (source $SOURCE_HASH)" "[[ \$(source_hash) == $SOURCE_HASH ]]"
   echo "run $RUN_DIR binary $BINARY_SHA url $URL"
   return "$failed"
+}
+
+briefing() {
+  load "$1"
+  [[ -n "$BRIEFING_URL" ]] || { echo "this run has no briefing source (--local)" >&2; exit 2; }
+  case "$2" in ok | fail | hold) ;; *) usage ;; esac
+  python3 -I -c '
+import json, os, sys
+path, mode, *headlines = sys.argv[1:]
+control = {"mode": mode, **({"headlines": headlines} if headlines else {})}
+with open(path + ".tmp", "w") as handle:
+    json.dump(control, handle)
+os.replace(path + ".tmp", path)' "$RUN_DIR/briefing.json" "${@:2}"
+  echo "briefing source: $2"
 }
 
 say() {
@@ -224,7 +260,8 @@ down() {
 }
 
 case "${1:-}" in
-  up) up "${2:-}" ;;
+  up) up "${@:2}" ;;
+  briefing) [[ $# -ge 3 ]] || usage; briefing "${@:2}" ;;
   doctor) doctor "${2:-}" ;;
   say) [[ $# -eq 3 ]] || usage; say "$2" "$3" ;;
   ab) [[ $# -ge 3 ]] || usage; ab "${@:2}" ;;

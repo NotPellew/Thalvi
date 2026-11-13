@@ -97,6 +97,12 @@ here** moves it to this device.
 - **History search:** Thalvi can call the read-only `search_history` tool for
   short, timestamped matches in past conversations. The app shows **Working**
   while it runs; **Task steps** opens the details.
+- **Briefing headlines:** with `BRIEFING_URL` and `BRIEFING_TOKEN` set (both or
+  neither), the server fetches the latest briefing from `GET /v1/briefings/latest`
+  in the background. A new saved conversation starts with the headlines fetched
+  within the last 24 hours, or is told none are available; its first reply never
+  waits for the fetch. Private conversations neither see headlines nor contact
+  the source.
 - **Retirement:** with `THALVI_RETIRE_DAYS=90`, conversations inactive for 90
   days are replaced by a summary on startup and then daily. Lasting preferences
   and facts go to `$THALVI_DATA_DIR/learnings.json`, which you can read and

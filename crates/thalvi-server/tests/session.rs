@@ -18,6 +18,8 @@ use bytes::Bytes;
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde_json::{Value, json};
 use thalvi_server::api;
+use thalvi_server::briefing::{Briefing, BriefingContext};
+use thalvi_server::config::BriefingConfig;
 use thalvi_server::model::{
     ChatEvent, ChatMessage, ChatModel, DeltaStream, EventStream, ModelError, ToolCall,
     ToolDefinition, ToolResult,
@@ -382,6 +384,8 @@ struct FakeModel {
     dropped: Arc<AtomicUsize>,
     /// The tool names offered and the tool results shown on each call.
     tool_rounds: Arc<Mutex<Vec<ToolRound>>>,
+    /// What each reply call was told about the briefing.
+    briefings: Arc<Mutex<Vec<BriefingContext>>>,
 }
 
 impl FakeModel {
@@ -400,6 +404,16 @@ impl FakeModel {
 
     fn tool_rounds(&self) -> Vec<ToolRound> {
         self.tool_rounds.lock().unwrap().clone()
+    }
+
+    /// Each reply call's briefing, as described by [`describe_briefing`].
+    fn briefings(&self) -> Vec<String> {
+        self.briefings
+            .lock()
+            .unwrap()
+            .iter()
+            .map(describe_briefing)
+            .collect()
     }
 
     fn next_events(&self, history: &[ChatMessage], audio: Option<&[u8]>) -> EventStream {
@@ -461,7 +475,9 @@ impl ChatModel for FakeModel {
         audio: Option<&[u8]>,
         tools: &[ToolDefinition],
         tool_results: &[ToolResult],
+        briefing: &BriefingContext,
     ) -> Result<EventStream, ModelError> {
+        self.briefings.lock().unwrap().push(briefing.clone());
         self.tool_rounds.lock().unwrap().push(ToolRound {
             offered: tools.iter().map(|tool| tool.name.clone()).collect(),
             results: tool_results.to_vec(),
@@ -625,7 +641,7 @@ fn title_model() -> (FakeModel, Arc<Titler<FakeModel>>) {
 }
 
 async fn start_with(recording: RecordingConfig, titler: Option<Arc<Titler<FakeModel>>>) -> Harness {
-    start_full(recording, titler, false, false).await
+    start_full(recording, titler, false, false, None).await
 }
 
 async fn start_with_ack(
@@ -633,14 +649,19 @@ async fn start_with_ack(
     titler: Option<Arc<Titler<FakeModel>>>,
     ack_enabled: bool,
 ) -> Harness {
-    start_full(recording, titler, ack_enabled, false).await
+    start_full(recording, titler, ack_enabled, false, None).await
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the harness wires every fake into one server"
+)]
 async fn start_full(
     recording: RecordingConfig,
     titler: Option<Arc<Titler<FakeModel>>>,
     ack_enabled: bool,
     audio_input: bool,
+    briefing: Option<Arc<Briefing>>,
 ) -> Harness {
     let factory = FakeFactory::default();
     let model = FakeModel::default();
@@ -664,26 +685,33 @@ async fn start_full(
                       axum::extract::Query(query): axum::extract::Query<
                     std::collections::HashMap<String, String>,
                 >| {
-                    let (factory, model, tts, store, closed, titler) = (
+                    let (factory, model, tts, store, closed, titler, briefing) = (
                         factory2.clone(),
                         model2.clone(),
                         tts2.clone(),
                         Arc::clone(&store2),
                         Arc::clone(&closed2),
                         titler.clone(),
+                        briefing.clone(),
                     );
                     let recording = recording2.clone();
                     async move {
                         let private = query.get("private").is_some_and(|value| value == "1");
                         let resume = query.get("resume").cloned();
-                        let retention =
-                            Retention::from_request(private, resume, store, titler, || {
+                        let retention = Retention::from_request(
+                            private,
+                            resume,
+                            store,
+                            titler,
+                            briefing,
+                            || {
                                 static NEXT_PRIVATE: AtomicUsize = AtomicUsize::new(1);
                                 format!(
                                     "{PRIVATE_ID_PREFIX}{}",
                                     NEXT_PRIVATE.fetch_add(1, Ordering::SeqCst)
                                 )
-                            });
+                            },
+                        );
                         upgrade.on_upgrade(move |socket: WebSocket| async move {
                             let Some(retention) = retention else {
                                 refuse_private_resume(socket).await;
@@ -2995,7 +3023,7 @@ async fn only_a_voice_turn_carries_its_padded_clip_and_only_with_audio_input_on(
             ..metrics_only()
         };
         let config = recording_config(kinds, &data_dir);
-        let mut harness = start_full(config, None, false, audio_input).await;
+        let mut harness = start_full(config, None, false, audio_input, None).await;
         voice_on(&mut harness).await;
         let mut mic = Vec::new();
         for frame in 0..30_u8 {
@@ -3090,7 +3118,7 @@ async fn a_voice_turn_whose_echo_disagrees_gets_the_fallback_and_leaves_no_histo
         (None, "Lights are on.", "Lights are on."),
     ];
     for (echo, answer, spoken) in cases {
-        let mut harness = start_full(RecordingConfig::disabled(), None, false, true).await;
+        let mut harness = start_full(RecordingConfig::disabled(), None, false, true, None).await;
         harness.model.add_script(
             echo.map(|echo| ModelChunk::Heard(echo.to_string()))
                 .into_iter()
@@ -3148,7 +3176,7 @@ async fn a_voice_turn_whose_echo_disagrees_gets_the_fallback_and_leaves_no_histo
 #[tokio::test]
 async fn voice_echo_admits_matching_short_reply_and_rejects_tool_on_mismatch() {
     for (echo, accepted) in [("yes", true), ("no", false)] {
-        let mut harness = start_full(RecordingConfig::disabled(), None, false, true).await;
+        let mut harness = start_full(RecordingConfig::disabled(), None, false, true, None).await;
         harness.model.add_script(vec![
             ModelChunk::Heard(echo.to_string()),
             search_call("call-1", r#"{"query":"anything"}"#),
@@ -4054,4 +4082,201 @@ async fn switching_between_saved_and_private_never_carries_context_across() {
     harness.store.flush().await;
     assert_eq!(saved_titles(&harness), ["saved question"]);
     harness.server.abort();
+}
+
+// ---------- briefing headlines ----------
+
+/// `off`, `unavailable`, or the headlines joined by `|`.
+fn describe_briefing(context: &BriefingContext) -> String {
+    match context {
+        BriefingContext::Off => "off".to_string(),
+        BriefingContext::Unavailable => "unavailable".to_string(),
+        BriefingContext::Headlines(snapshot) => snapshot
+            .items
+            .iter()
+            .map(|item| item.headline.as_str())
+            .collect::<Vec<_>>()
+            .join("|"),
+    }
+}
+
+/// A loopback briefing source that always serves one fresh headline; when `held`, each
+/// request waits for [`BriefingSource::release`].
+struct BriefingSource {
+    config: BriefingConfig,
+    hits: Arc<AtomicUsize>,
+    headline: Arc<Mutex<String>>,
+    gate: Arc<Notify>,
+}
+
+impl BriefingSource {
+    async fn start(headline: &str, held: bool) -> Self {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let headline = Arc::new(Mutex::new(headline.to_string()));
+        let gate = Arc::new(Notify::new());
+        let (hits2, headline2, gate2) =
+            (Arc::clone(&hits), Arc::clone(&headline), Arc::clone(&gate));
+        let app = Router::new().route(
+            "/v1/briefings/latest",
+            get(move || {
+                let (hits, headline, gate) = (
+                    Arc::clone(&hits2),
+                    Arc::clone(&headline2),
+                    Arc::clone(&gate2),
+                );
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    if held {
+                        gate.notified().await;
+                    }
+                    let generated_at = (chrono::Utc::now() - chrono::TimeDelta::hours(1))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    let headline = headline.lock().unwrap().clone();
+                    axum::Json(json!({
+                        "generated_at": generated_at,
+                        "items": [{"id": "topic-1", "headline": headline}],
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Self {
+            config: BriefingConfig {
+                base_url: format!("http://{addr}"),
+                token: "test-token".to_string(),
+            },
+            hits,
+            headline,
+            gate,
+        }
+    }
+
+    fn hits(&self) -> usize {
+        self.hits.load(Ordering::SeqCst)
+    }
+
+    async fn requested(&self, count: usize) {
+        wait_until(|| self.hits() >= count).await;
+    }
+
+    fn release(&self) {
+        self.gate.notify_one();
+    }
+
+    fn serve_headline(&self, headline: &str) {
+        *self.headline.lock().unwrap() = headline.to_string();
+    }
+
+    fn start_briefing(&self) -> Arc<Briefing> {
+        let recorder = thalvi_server::recorder::start_recording(
+            RecordingConfig::disabled(),
+            "briefing".into(),
+        )
+        .recorder;
+        Briefing::start(&self.config, recorder).unwrap()
+    }
+}
+
+/// Opens conversations on `briefing` until one is told `expected`.
+async fn cache_holds(briefing: &Arc<Briefing>, expected: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while describe_briefing(&briefing.open()) != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the briefing never reached the cache");
+}
+
+#[tokio::test]
+async fn a_new_conversation_is_told_the_cached_briefing_and_keeps_it_for_every_turn() {
+    let source = BriefingSource::start("Markets rally", false).await;
+    let briefing = source.start_briefing();
+    cache_holds(&briefing, "Markets rally").await;
+    let mut harness = start_full(
+        RecordingConfig::disabled(),
+        None,
+        false,
+        false,
+        Some(Arc::clone(&briefing)),
+    )
+    .await;
+    source.serve_headline("Storm warning");
+    cache_holds(&briefing, "Storm warning").await;
+    ask(&mut harness, "what is new?", "A rally.").await;
+    ask(&mut harness, "and now?", "Still a rally.").await;
+    assert_eq!(
+        harness.model.briefings(),
+        ["Markets rally", "Markets rally"],
+        "later turns keep what the conversation opened with"
+    );
+}
+
+#[tokio::test]
+async fn a_cold_conversation_replies_before_the_fetch_finishes_and_a_resume_takes_the_new_snapshot()
+{
+    let source = BriefingSource::start("Markets rally", true).await;
+    let briefing = source.start_briefing();
+    source.requested(1).await;
+    let mut harness = start_full(
+        RecordingConfig::disabled(),
+        None,
+        false,
+        false,
+        Some(Arc::clone(&briefing)),
+    )
+    .await;
+    let id = harness.session_id.clone();
+    ask(&mut harness, "what is new?", "No briefing yet.").await;
+    assert_eq!(source.hits(), 1, "opening joined the running fetch");
+    assert_eq!(harness.model.briefings(), ["unavailable"]);
+
+    source.release();
+    cache_holds(&briefing, "Markets rally").await;
+    ask(&mut harness, "and now?", "Still none.").await;
+    assert_eq!(harness.model.briefings(), ["unavailable", "unavailable"]);
+
+    harness.client.close(None).await.unwrap();
+    wait_closed(&harness, 1).await;
+    harness.reconnect(Some(&id)).await;
+    ask(&mut harness, "and after resuming?", "A rally.").await;
+    assert_eq!(harness.model.briefings()[2], "Markets rally");
+}
+
+#[tokio::test]
+async fn a_private_conversation_gets_no_briefing_and_asks_the_source_for_nothing() {
+    let source = BriefingSource::start("Markets rally", false).await;
+    let briefing = source.start_briefing();
+    cache_holds(&briefing, "Markets rally").await;
+    let mut harness = start_full(
+        RecordingConfig::disabled(),
+        None,
+        false,
+        false,
+        Some(Arc::clone(&briefing)),
+    )
+    .await;
+    ask(&mut harness, "saved question", "Saved answer.").await;
+    let before = source.hits();
+
+    open_private(&mut harness).await;
+    ask(&mut harness, "private question", "Private answer.").await;
+    assert_eq!(harness.model.briefings(), ["Markets rally", "off"]);
+    assert_eq!(
+        source.hits(),
+        before,
+        "a private conversation fetched nothing"
+    );
+
+    open_client(harness.addr, None).await;
+    source.requested(before + 1).await;
+}
+
+#[tokio::test]
+async fn without_a_briefing_source_replies_carry_no_briefing() {
+    let mut harness = start().await;
+    ask(&mut harness, "hello", "Hi.").await;
+    assert_eq!(harness.model.briefings(), ["off"]);
 }

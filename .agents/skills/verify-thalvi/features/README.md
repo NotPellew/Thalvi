@@ -81,6 +81,8 @@ user-visible behavior. It then has exactly four H2 sections, in this order:
   Working state, collapsed Task steps, and cross-conversation matches.
 - [Voice picker and speed](./voice-and-speed.md) covers previewing and applying
   a voice, and playback speed.
+- [Briefing headlines](./briefing.md) covers the model request of a new
+  conversation: prefetched, cold, failed and private flows.
 
 Desktop features are outside this web map. The overlay, Settings window and
 looks (`crates/thalvi-app/ui/src/look.ts`), model download notices and tray
