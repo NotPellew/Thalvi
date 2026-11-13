@@ -133,6 +133,28 @@ Two required checks are not in the script:
   --verbose --log-opts=HEAD .` on the full history. With gitleaks on `PATH`, the
   pre-commit hook scans what is staged.
 
+Locally, run checks in three stages; none replaces a required CI result.
+
+- **Editing:** the closest check that sees the edit: `cargo test -p <crate> <filter>`,
+  or the web or desktop UI test and `npm run typecheck` for the files touched. No
+  workspace tests, docs, mutation testing or packaging.
+- **Before pushing,** with the work committed: `.github/scripts/changed origin/main HEAD`
+  prints the affected units. Run each affected component's gate once:
+  - Units `server`, `desktop`, `app`, `desktop-ui` (any of them): `TESTS="<packages>" BUNDLE=false
+    .github/scripts/gates server`, where `<packages>` is `-p thalvi-server`, `-p thalvi-desktop` and
+    `-p thalvi-app` for those of `server`, `desktop`, `app` printed, or `none`. `desktop-ui` also runs
+    `.github/scripts/gates desktop-ui`.
+  - Units `web`, `speech`: `.github/scripts/gates web`, `.github/scripts/gates speech`. Unit `issues`:
+    `.github/scripts/gates issue-sync`.
+  - `all` (an empty, unreadable or shallow diff, or any path outside the mapped ones, such as
+    `crates/thalvi-app/tauri.conf.json`, its icons and build files): `.github/scripts/gates all`, unnarrowed.
+    That is the only case that builds the AppImage or NSIS package locally.
+  - A gate this OS can't run stays reported as skipped, never passed: off Windows, `desktop-windows`
+    (units `desktop`, `app`, `desktop-ui`; on Windows its command is `TESTS="<-p thalvi-desktop and
+    -p thalvi-app as printed, or none>" BUNDLE=false .github/scripts/gates desktop-windows`). Windows CI or a
+    Windows machine covers it.
+- **After pushing:** PR CI runs the affected tier, and the heavy run on `main` runs every gate.
+
 On a PR, CI runs only the steps its changed paths affect
 (`.github/scripts/changed`); the job names stay, so required checks still
 report. `.github/workflows/heavy.yml` runs every gate on each push to `main`,

@@ -9,7 +9,8 @@ Thalvi's main surface is the web client the Rust server serves at `/`. A user
 types or talks in it, hears spoken replies, and manages saved conversations.
 The desktop app (`crates/thalvi-app`) is driven by [desktop.md](desktop.md): the
 real app in a sandboxed nested Hyprland, for its overlay, Settings window,
-downloads and tray commands. It still needs the Rust and desktop UI gates plus
+downloads and tray commands. It still needs the affected gates before pushing
+(AGENTS.md, Gates: `TESTS` and `BUNDLE=false` narrow them) plus
 real use on each claimed desktop, as AGENTS.md requires, and the web recipes
 below establish no native desktop behavior. The `measure` binary has CLI tests in
 `crates/thalvi-server/tests/measure_bin.rs`; it is not driven here.

@@ -271,6 +271,9 @@ areas your change touches. Editing rules are in
 - **PRs run what changed; `main` runs everything.** A PR runs the steps its paths affect, and anything unmapped
   runs all; `heavy.yml` runs every gate plus mutants on `main`, nightly and on request. Why: PRs get a fast answer,
   and a slip past detection is caught on `main` with the commits since `verified`. Rejected: mutants on every PR.
+- **Local checks run in three stages.** Editing runs the closest check; before pushing, each component `changed origin/main HEAD` names runs `gates` once, with `TESTS` and `BUNDLE=false`, and only `all` (an unmapped diff) builds a package locally; PR CI and `main` are unchanged (13 Nov 2026).
+  Why: in 54 PR server jobs the AppImage took a median 135 s of a 261 s gate (53%), and a branch ran the full gate 2.3 times on average.
+  Rejected: nextest, sccache or a shared target (no measurement points at them), a second path mapping, dropping the package from CI.
 - **Mutation testing advises on the diff.** cargo-mutants reports survivors in the Rust changed since the last
   verified commit, in the heavy tier, on Linux; locally it runs only when an issue asks, `--in-diff` against the base (13 Nov 2026).
   Why: it found real gaps but can't tell them from equivalent mutants, and 250 local runs wrote 577 GiB in 4.5 hours.

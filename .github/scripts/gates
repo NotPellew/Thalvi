@@ -34,7 +34,8 @@ node_checks() {
   in_dir "$dir" npm run build
 }
 
-# TESTS (cargo package arguments, or `none`) and BUNDLE=false narrow a gate to what a change affects.
+# TESTS (cargo package arguments, or `none`) and BUNDLE=false narrow a gate to what a change affects:
+# CI sets both from `changed`, and AGENTS.md says when to set them locally.
 tests() {
   local packages=${TESTS:-$1}
   if [[ $packages == none ]]; then
@@ -47,7 +48,7 @@ tests() {
 
 bundle() {
   if [[ ${BUNDLE:-true} == false ]]; then
-    echo "SKIPPED the $1 package: the app is unchanged"
+    echo "SKIPPED the $1 package: BUNDLE=false; it did not run and is not reported as passed"
   else
     in_dir crates/thalvi-app "${@:2}" npm exec --prefix ui -- tauri build --bundles "$1" -- --locked
   fi
