@@ -42,8 +42,9 @@ V=.agents/skills/verify-thalvi/scripts/thalvi-verify
 ## Launch
 
 ```sh
-$V up            # fake mode
-$V up --local    # self-hosted model and speech
+$V up                    # fake mode
+$V up --briefing fail    # fake mode, the briefing source fails at first
+$V up --local            # self-hosted model and speech
 ```
 
 `up` creates `${TMPDIR:-/var/tmp}/thalvi-verify-<id>/` with an empty data
@@ -56,8 +57,10 @@ mounts. It then:
 2. Runs `npm ci` if `web/node_modules` is missing.
 3. Builds the web client into `R/web` without touching `web/dist`, then builds
    the debug server and copies it to `R/thalvi`.
-4. Picks three free ports and starts the fakes and the server, each in its own
-   process group.
+4. Picks three free ports, starts the fakes, waits for them to answer, then
+   starts the server, each in its own process group. In fake mode the fakes also
+   serve a briefing source, and the server is configured to use it
+   (`$V briefing $R ok|fail|hold` switches its answer).
 5. Writes `R/run.env` with the mode, endpoints, URL, ports, process groups,
    browser session name and build identity, then runs doctor.
 
@@ -248,7 +251,10 @@ Evidence goes in `R/evidence/`, outside the repository. Never commit it.
   speech engine. Report them as that, never as Meta's latency.
 - **Fake side effects, fake mode:** `R/fakes.jsonl` gets one JSON line for each
   of these:
-  - model request (`llm_request`: user turn, tools offered, tool results, plan)
+  - model request (`llm_request`: user turn, tools offered, tool results, plan,
+    and `messages`, the complete messages the server sent)
+  - briefing source request and answer (`briefing_request`: mode, authorized;
+    `briefing_response`: status)
   - cancelled stream (`llm_cancelled`, `tts_cancelled`)
   - speech request (`tts_request`: voice, input)
 
@@ -308,7 +314,8 @@ All helpers need `uv`, `python3`, `node`/`npm`, `cargo`, `agent-browser`, `ss`
 and `curl` on `PATH`.
 
 - `.agents/skills/verify-thalvi/scripts/thalvi-verify`:
-  `up [--local]`, `doctor R`, `say R "<words>"`,
+  `up [--local] [--briefing ok|fail]`, `doctor R`, `say R "<words>"`,
+  `briefing R ok|fail|hold ["headline" ...]`,
   `ab R <agent-browser args>`, `state R <state>`,
   `reply R "<text>"` or `reply R --after "<user text>"`, `down R`. Run it with
   no arguments for usage.
