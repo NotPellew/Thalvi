@@ -44,7 +44,9 @@ cp -L $T/debug/libwebgpu_dawn.so /var/tmp/thalvi-rig/bin/<name>/
 ```
 
 The UI is rebuilt only when a source is newer than the last build: Tauri embeds
-`ui/dist`, so rebuilding unchanged files would recompile the app. The binary loads `libwebgpu_dawn.so` from its own folder (rpath `$ORIGIN`);
+`ui/dist`, so rebuilding unchanged files would recompile the app.
+
+The binary loads `libwebgpu_dawn.so` from its own folder (rpath `$ORIGIN`);
 `app-start` and `ctl` bind every `.so` beside it into the sandbox, and without it
 the app exits 127 at once. A warm target builds in about a minute. Evidence and binaries live under
 `/var/tmp/thalvi-rig/` (`THALVI_RIG_BASE` changes it); never commit them.
