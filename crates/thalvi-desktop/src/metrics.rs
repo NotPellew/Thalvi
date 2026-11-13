@@ -59,6 +59,11 @@ pub enum Event {
     /// From the last speech heard before a final result to that result.
     FinalLag,
     SecondaryStt,
+    LiveStt,
+    LiveSttFirstText,
+    LiveSttDelta,
+    /// One call to the writing model: time to the first text and in all, and how it ended.
+    Writing,
     /// Fetching and loading the local speech model.
     SpeechLoad,
     /// Downloading a catalog speech model from the settings window.
@@ -71,6 +76,8 @@ pub enum Event {
     Cue,
     EndingState,
     EndingPause,
+    /// The ending spotter: loading it (`load`), one capture's work (`capture`), or a heard ending's fate (`hit`).
+    EndingSpotter,
     EndCue,
     CaptureFlow,
     /// The dictation key went down: it started a capture, or was refused and why.
@@ -83,6 +90,10 @@ pub enum Event {
     /// Microphone audio was lost: `xrun` for a discontinuity the system reported, `queue_full`
     /// when the engine stopped reading for ten seconds.
     AudioGap,
+    /// One step of keeping the app updated: `check` and `download` carry the real latency of the
+    /// update server; `install` is how long the restart into the new version took. Fields hold only
+    /// the step, the channel and versions.
+    Update,
 }
 
 impl Event {
@@ -98,6 +109,10 @@ impl Event {
             Self::PartialLag => "desktop_partial_lag",
             Self::FinalLag => "desktop_final_lag",
             Self::SecondaryStt => "desktop_secondary_stt",
+            Self::LiveStt => "desktop_live_stt",
+            Self::LiveSttFirstText => "desktop_live_stt_first_text",
+            Self::LiveSttDelta => "desktop_live_stt_delta",
+            Self::Writing => "desktop_writing",
             Self::SpeechLoad => "desktop_speech_load",
             Self::SpeechDownload => "desktop_speech_download",
             Self::WordList => "desktop_word_list",
@@ -106,12 +121,14 @@ impl Event {
             Self::Cue => "desktop_cue",
             Self::EndingState => "desktop_ending_state",
             Self::EndingPause => "desktop_ending_pause",
+            Self::EndingSpotter => "desktop_ending_spotter",
             Self::EndCue => "desktop_end_cue",
             Self::CaptureFlow => "desktop_capture_flow",
             Self::HoldStart => "desktop_hold_start",
             Self::HoldEnd => "desktop_hold_end",
             Self::HostCall => "desktop_host_call",
             Self::AudioGap => "desktop_audio_gap",
+            Self::Update => "desktop_update",
         }
     }
 }
@@ -767,6 +784,9 @@ mod tests {
             (Event::WakeReset, "desktop_wake_reset"),
             (Event::TranscriptionReady, "desktop_transcription_ready"),
             (Event::SecondaryStt, "desktop_secondary_stt"),
+            (Event::LiveStt, "desktop_live_stt"),
+            (Event::LiveSttFirstText, "desktop_live_stt_first_text"),
+            (Event::LiveSttDelta, "desktop_live_stt_delta"),
             (Event::SpeechLoad, "desktop_speech_load"),
             (Event::SpeechDownload, "desktop_speech_download"),
             (Event::WordList, "desktop_word_list"),
@@ -775,11 +795,13 @@ mod tests {
             (Event::Cue, "desktop_cue"),
             (Event::EndingState, "desktop_ending_state"),
             (Event::EndingPause, "desktop_ending_pause"),
+            (Event::EndingSpotter, "desktop_ending_spotter"),
             (Event::EndCue, "desktop_end_cue"),
             (Event::CaptureFlow, "desktop_capture_flow"),
             (Event::HoldStart, "desktop_hold_start"),
             (Event::HoldEnd, "desktop_hold_end"),
             (Event::HostCall, "desktop_host_call"),
+            (Event::Update, "desktop_update"),
         ] {
             assert_eq!(event.name(), name);
         }

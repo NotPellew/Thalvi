@@ -1,8 +1,8 @@
 {
-  "sync_commit": "cb7007419cf3ada15adea927ec63b3c0ec1e5551",
+  "sync_commit": "a03b86c0f995a8ec683157ed28765e668c183c66",
   "files": {
     "crates/thalvi-app/src/runner.rs": {
-      "sha256": "1d2bf415d851eff202f926bf2b94ef0f51670b303c41e4c7bb9d1a92516c8b55",
+      "sha256": "2d0e1b9989af5cbf5de8ef10d036e6d6e3d6aa90b00db253c93770068112c709",
       "functions": [
         "Requests::take",
         "Requests::read_queued",
@@ -12,29 +12,43 @@
       ]
     },
     "crates/thalvi-desktop/src/engine.rs": {
-      "sha256": "2933d3b56e57159578ed6f68b84929e6db6f1da2c309b9c4deac322943d4e615",
+      "sha256": "8e25f50e85d6659def8102b9a25565525d286f805507e2851308b7ade6346c71",
       "functions": [
         "EngineHandle::cancel",
         "Engine::capture",
         "Engine::conclude",
         "Engine::end_cue",
         "Engine::end_with",
-        "Engine::reconcile"
+        "Engine::reconcile",
+        "Engine::write",
+        "bounded"
       ]
     },
     "crates/thalvi-desktop/src/recognizer.rs": {
-      "sha256": "1a8eeae8b4164b7f132a653b01e85f78b7b976294295162ade436595f4104c06",
+      "sha256": "1b33cb9fdff65bcc0ea0ee565fd06cc4572026f47009940eb45c6dec53efd129",
       "functions": [
-        "RecognizerSession",
-        "ServerSession::close"
+        "RecognizerSession"
       ]
     },
     "crates/thalvi-desktop/src/delivery.rs": {
-      "sha256": "34a96c1ef7e94092721fe1447ba6201618b9b9751c94e86a7fddba77b7dd0883",
+      "sha256": "57e4d2167d60fdbdb77c409cfccc1a67cba763f50ac219dce89d9f1819106269",
       "functions": [
         "Delivery::finish",
-        "Delivery::type_in",
+        "Delivery::paste_in",
         "Delivery::call"
+      ]
+    },
+    "crates/thalvi-desktop/src/realtime.rs": {
+      "sha256": "8f5e32b9beab8a5b32cc648eff8f673b81a5c3fba6c09a1848ab15bf1a452bbc",
+      "functions": [
+        "RealtimeSession::close"
+      ]
+    },
+    "crates/thalvi-desktop/src/openai_live.rs": {
+      "sha256": "3aefdc55433c28dcd3c5a0796b849887b7509e4560c2da5d30715c27ed54729d",
+      "functions": [
+        "OpenAiSession::cancel",
+        "OpenAiSession::close"
       ]
     }
   }

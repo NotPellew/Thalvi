@@ -3,18 +3,43 @@
 #![expect(clippy::expect_used, reason = "a test fails by panicking")]
 #![expect(clippy::unwrap_used, reason = "a test fails by panicking")]
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 use axum::Router;
 use axum::body::to_bytes;
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
+use axum::{body::Body, response::Response};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use thalvi_desktop::chosen::Chosen;
+use thalvi_desktop::device::Adapters;
+use thalvi_desktop::entries::{LiveEntry, LiveKind};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
+use thalvi_desktop::metrics::{RecordKinds, Recorder};
+use thalvi_desktop::models::{CatalogSpeech, ModelStore};
+use thalvi_desktop::openai_live::OpenAiRecognizer;
+use thalvi_desktop::phrases::WordList;
 use thalvi_desktop::recognizer::Upsampler;
+use thalvi_desktop::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
+use thalvi_desktop::report::UserError;
 use thalvi_desktop::secondary::{
-    SecondaryApi, SecondaryError, SecondaryStt, SecondarySttError, transcribe,
+    Language, LiveRequest, OpenAiLive, SecondaryApi, SecondaryError, SecondaryStt,
+    SecondarySttError, transcribe,
 };
+use thalvi_desktop::transducer::SpeechChoice;
 use tokio::sync::mpsc;
+
+/// The next request the fake received, or none when nothing arrives in time.
+async fn received(rx: &mut mpsc::UnboundedReceiver<Captured>) -> Option<Captured> {
+    tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .ok()
+        .flatten()
+}
 
 struct Captured {
     path: String,
@@ -49,8 +74,502 @@ async fn serve(status: u16, reply: &'static str) -> (String, mpsc::UnboundedRece
     (url, rx)
 }
 
+async fn serve_sse(reply: &'static str) -> (String, mpsc::UnboundedReceiver<Captured>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let app = Router::new().fallback(move |request: Request| {
+        let tx = tx.clone();
+        async move {
+            let path = request.uri().path().to_string();
+            let headers = request.headers().clone();
+            let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+            let _ = tx.send(Captured {
+                path,
+                headers,
+                body: body.to_vec(),
+            });
+            Response::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .body(Body::from(reply))
+                .unwrap()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}/v1", listener.local_addr().expect("address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (url, rx)
+}
+
+async fn serve_sequence(
+    responses: Vec<(StatusCode, &'static str)>,
+) -> (String, mpsc::UnboundedReceiver<Captured>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+    let app = Router::new().fallback(move |request: Request| {
+        let tx = tx.clone();
+        let responses = Arc::clone(&responses);
+        async move {
+            let path = request.uri().path().to_string();
+            let headers = request.headers().clone();
+            let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+            let _ = tx.send(Captured {
+                path,
+                headers,
+                body: body.to_vec(),
+            });
+            let (status, body) = responses.lock().unwrap().pop_front().unwrap();
+            Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}/v1", listener.local_addr().expect("address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (url, rx)
+}
+
 fn settings(url: &str, api: SecondaryApi, key: &str) -> SecondaryStt {
     SecondaryStt::new(url, "the-model", key.to_string(), api, true).expect("valid settings")
+}
+
+fn live(url: &str, key: &str) -> OpenAiLive {
+    OpenAiLive {
+        settings: settings(url, SecondaryApi::OpenAi, key),
+        request: LiveRequest::Transcriptions,
+        language: None,
+    }
+}
+
+fn chat(url: &str, key: &str, language: &str) -> OpenAiLive {
+    OpenAiLive {
+        request: LiveRequest::Chat,
+        language: Language::parse(language).unwrap(),
+        ..live(url, key)
+    }
+}
+
+/// One buffered capture of `ramp(0)` through `recognizer`, and what it delivered.
+async fn dictate(recognizer: &OpenAiRecognizer) -> Result<String, RecognizerError> {
+    let mut session = recognizer.connect().await.expect("connected");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    loop {
+        if let RecognizerEvent::Final(text) = session.next_event().await? {
+            return Ok(text);
+        }
+    }
+}
+
+fn recognizer(live: OpenAiLive) -> OpenAiRecognizer {
+    OpenAiRecognizer::new(
+        "local",
+        live,
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    )
+}
+
+#[tokio::test]
+async fn speaches_streams_transcribed_segments_as_cumulative_text() {
+    let (url, mut rx) = serve_sse(
+        "data: {\"text\":\"We are checking the endpoint.\"}\n\ndata: {\"text\":\"It returns the next sentence.\"}\n\ndata: {\"text\":\"This is the end.\"}\n\n",
+    )
+    .await;
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        live(&url, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut session = recognizer.connect().await.expect("connected");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        loop {
+            let event = session.next_event().await.expect("transcription event");
+            let final_event = matches!(event, RecognizerEvent::Final(_));
+            events.push(event);
+            if final_event {
+                return events;
+            }
+        }
+    })
+    .await
+    .expect("all speech segments arrive");
+    assert_eq!(
+        events,
+        [
+            RecognizerEvent::Partial("We are checking the endpoint.".to_owned()),
+            RecognizerEvent::Partial(
+                "We are checking the endpoint. It returns the next sentence.".to_owned()
+            ),
+            RecognizerEvent::Partial(
+                "We are checking the endpoint. It returns the next sentence. This is the end."
+                    .to_owned()
+            ),
+            RecognizerEvent::Final(
+                "We are checking the endpoint. It returns the next sentence. This is the end."
+                    .to_owned()
+            ),
+        ]
+    );
+    assert_eq!(
+        received(&mut rx).await.expect("one upload").path,
+        "/v1/audio/transcriptions"
+    );
+    assert!(rx.try_recv().is_err(), "one request per capture");
+}
+
+#[tokio::test]
+async fn openai_streaming_emits_cumulative_text() {
+    let (url, mut rx) = serve_sse(
+        "data: {\"type\":\"transcript.text.delta\",\"delta\":\"hello \"}\n\ndata: {\"type\":\"transcript.text.delta\",\"delta\":\"world\"}\n\ndata: {\"type\":\"transcript.text.done\",\"text\":\"cleaned transcript\"}\n\n",
+    ).await;
+    let metrics_dir = std::env::temp_dir().join(format!(
+        "thalvi-live-stt-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos()
+    ));
+    let recorder = Recorder::in_dir(
+        RecordKinds {
+            metrics: true,
+            ..RecordKinds::default()
+        },
+        &metrics_dir,
+    )
+    .expect("metrics recorder");
+    let client = reqwest::Client::builder()
+        .user_agent("thalvi-second-pass-client")
+        .build()
+        .expect("configured shared client");
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        live(&url, "stream-key"),
+        client,
+        recorder.metrics(),
+    );
+    let mut session = recognizer
+        .connect()
+        .await
+        .expect("connected without uploading");
+    assert!(session.buffers_audio(), "audio waits until capture ends");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    assert!(
+        rx.try_recv().is_err(),
+        "upload starts only when capture ends"
+    );
+    session.finish_audio().await.expect("capture ended");
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        loop {
+            let event = session.next_event().await.expect("transcription event");
+            let final_event = matches!(event, RecognizerEvent::Final(_));
+            events.push(event);
+            if final_event {
+                break events;
+            }
+        }
+    })
+    .await
+    .expect("transcription completes after release");
+    assert_eq!(
+        events,
+        [
+            RecognizerEvent::Partial("hello ".to_owned()),
+            RecognizerEvent::Partial("hello world".to_owned()),
+            RecognizerEvent::Final("cleaned transcript".to_owned())
+        ]
+    );
+    let captured = received(&mut rx).await.expect("one upload");
+    assert_eq!(captured.path, "/v1/audio/transcriptions");
+    assert_eq!(captured.headers["user-agent"], "thalvi-second-pass-client");
+    assert_eq!(captured.headers["authorization"], "Bearer stream-key");
+    assert!(
+        captured
+            .body
+            .windows(b"name=\"stream\"".len())
+            .any(|part| part == b"name=\"stream\"")
+    );
+    assert!(rx.try_recv().is_err(), "one upload for one capture");
+    recorder.finish().await;
+    let metrics = std::fs::read_to_string(metrics_dir.join("metrics.jsonl"))
+        .expect("live transcription metrics");
+    let metrics: Vec<serde_json::Value> = metrics
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("metric line"))
+        .collect();
+    assert_eq!(
+        metrics
+            .iter()
+            .filter(|event| event["event"] == "desktop_live_stt_first_text")
+            .count(),
+        1,
+        "first-text latency is recorded once"
+    );
+    assert_eq!(
+        metrics
+            .iter()
+            .filter(|event| event["event"] == "desktop_live_stt_delta")
+            .count(),
+        2,
+        "every streamed partial is recorded"
+    );
+    std::fs::remove_dir_all(metrics_dir).expect("remove test metrics");
+}
+
+#[tokio::test]
+async fn openai_streaming_accepts_a_clean_empty_stream() {
+    let (url, _rx) = serve_sse("").await;
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        live(&url, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut session = recognizer.connect().await.expect("connected");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), session.next_event())
+            .await
+            .expect("clean stream completes")
+            .expect("empty stream is a transcript"),
+        RecognizerEvent::Final(String::new())
+    );
+}
+
+#[tokio::test]
+async fn openai_plain_json_still_works() {
+    let (url, mut rx) = serve(200, r#"{"text":"plain answer"}"#).await;
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        live(&url, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut session = recognizer.connect().await.expect("connected");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    let event = tokio::time::timeout(Duration::from_secs(10), session.next_event())
+        .await
+        .expect("transcription completes")
+        .expect("final transcription");
+    let events = [event];
+    assert_eq!(events, [RecognizerEvent::Final("plain answer".to_owned())]);
+    assert_eq!(
+        received(&mut rx).await.expect("one upload").path,
+        "/v1/audio/transcriptions"
+    );
+    assert!(rx.try_recv().is_err(), "one upload for one capture");
+}
+
+#[tokio::test]
+async fn chosen_live_openai_entry_buffers_and_forwards_the_whole_capture() {
+    let (url, mut rx) = serve_sse(
+        "data: {\"type\":\"transcript.text.delta\",\"delta\":\"hello\"}\n\ndata: {\"type\":\"transcript.text.done\",\"text\":\"hello\"}\n\n",
+    )
+    .await;
+    let entry = LiveEntry {
+        id: "live".to_owned(),
+        name: "Local speech".to_owned(),
+        kind: LiveKind::OpenAi(live(&url, "")),
+    };
+    let chosen = Chosen::new(
+        &entry,
+        ModelStore::in_dir("unused"),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+        &WordList::default(),
+        Adapters::default(),
+    );
+    let mut session = chosen.connect().await.expect("connects before upload");
+    assert!(session.buffers_audio(), "audio waits until capture ends");
+    session.send_frame(&ramp(0)).await.expect("buffer frame");
+    assert!(rx.try_recv().is_err(), "the request waits for release");
+    session.finish_audio().await.expect("capture ended");
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        loop {
+            let event = session.next_event().await?;
+            let final_event = matches!(event, RecognizerEvent::Final(_));
+            events.push(event);
+            if final_event {
+                return Ok::<_, RecognizerError>(events);
+            }
+        }
+    })
+    .await
+    .expect("the upload starts after release")
+    .expect("transcription succeeds");
+    assert_eq!(
+        result,
+        [
+            RecognizerEvent::Partial("hello".to_owned()),
+            RecognizerEvent::Final("hello".to_owned())
+        ]
+    );
+
+    let captured = received(&mut rx).await.expect("one upload");
+    assert_eq!(captured.path, "/v1/audio/transcriptions");
+    let uploaded = parts(&captured)
+        .into_iter()
+        .find(|(headers, _)| headers.contains("name=\"file\""))
+        .expect("WAV part")
+        .1;
+    assert!(
+        uploaded[44..].iter().any(|byte| *byte != 0),
+        "the frame is sent"
+    );
+    assert!(rx.try_recv().is_err(), "one request per capture");
+}
+
+#[test]
+fn only_an_on_device_entry_has_a_preloadable_recognizer() {
+    let entry = LiveEntry {
+        id: "local".to_owned(),
+        name: "On this computer".to_owned(),
+        kind: LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
+    };
+    let chosen = Chosen::new(
+        &entry,
+        ModelStore::in_dir("unused"),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+        &WordList::default(),
+        Adapters::default(),
+    );
+    assert!(chosen.local().is_some());
+}
+
+#[tokio::test]
+async fn a_failed_capture_reports_plainly_and_the_next_capture_can_succeed() {
+    let (url, mut rx) = serve_sequence(vec![
+        (StatusCode::INTERNAL_SERVER_ERROR, "{}"),
+        (StatusCode::OK, r#"{"text":"recovered"}"#),
+    ])
+    .await;
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        live(&url, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut first = recognizer.connect().await.expect("first session");
+    first.send_frame(&ramp(0)).await.expect("buffer");
+    first.finish_audio().await.expect("release");
+    let failure = tokio::time::timeout(Duration::from_secs(5), first.next_event())
+        .await
+        .expect("the failed request returns an event")
+        .expect_err("server failure is shown");
+    assert_eq!(failure.headline(), "Speech server error — Settings");
+    assert!(failure.to_string().contains("HTTP 500"));
+
+    let mut next = recognizer.connect().await.expect("next capture session");
+    next.send_frame(&ramp(1)).await.expect("buffer");
+    next.finish_audio().await.expect("release");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), next.next_event())
+            .await
+            .expect("the recovered request returns an event")
+            .expect("recovered transcription"),
+        RecognizerEvent::Final("recovered".to_owned())
+    );
+    assert_eq!(
+        received(&mut rx).await.expect("first upload").path,
+        "/v1/audio/transcriptions"
+    );
+    assert_eq!(
+        received(&mut rx).await.expect("next upload").path,
+        "/v1/audio/transcriptions"
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn an_unreachable_live_endpoint_says_what_failed() {
+    let unused = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}", unused.local_addr().expect("address"));
+    drop(unused);
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        live(&url, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut session = recognizer.connect().await.expect("connected");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    let failure = tokio::time::timeout(Duration::from_secs(15), session.next_event())
+        .await
+        .expect("the unreachable endpoint returns an error")
+        .expect_err("endpoint is down");
+    assert_eq!(failure.headline(), "Can't reach speech server — Settings");
+    assert!(failure.to_string().contains("could not be reached"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_live_endpoint_says_what_failed() {
+    let app = Router::new().fallback(std::future::pending::<()>);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        live(&url, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut session = recognizer.connect().await.expect("connected");
+    session.send_frame(&ramp(1)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    let failure = tokio::time::timeout(Duration::from_secs(12), session.next_event())
+        .await
+        .expect("the slow endpoint returns its bounded deadline")
+        .expect_err("request deadline");
+    assert_eq!(failure.headline(), "Speech server timed out — Settings");
+    assert!(failure.to_string().contains("took too long to transcribe"));
+}
+
+#[tokio::test]
+async fn a_malformed_live_reply_has_the_bad_reply_headline_and_full_message() {
+    let (url, _) = serve(200, "not json").await;
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        live(&url, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut session = recognizer.connect().await.expect("connected");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    let failure = tokio::time::timeout(Duration::from_secs(5), session.next_event())
+        .await
+        .expect("the malformed reply returns an error")
+        .expect_err("malformed response");
+    assert_eq!(failure.headline(), "Bad speech server reply — Settings");
+    assert!(failure.to_string().contains("unreadable transcription"));
+    assert!(failure.to_string().contains("Nothing was delivered"));
 }
 
 fn ramp(index: usize) -> Frame {
@@ -117,7 +636,7 @@ async fn each_api_gets_its_request_and_a_24_khz_wav_of_the_whole_capture() {
         .await;
         assert_eq!(text.as_deref(), Ok("polished words"), "{api:?}");
 
-        let captured = rx.recv().await.expect("a request");
+        let captured = received(&mut rx).await.expect("a request");
         assert_eq!(captured.path, path);
         assert_eq!(captured.headers["accept"], "application/json");
         let parts = parts(&captured);
@@ -184,7 +703,7 @@ async fn the_bearer_header_is_sent_only_with_a_key() {
             )
             .await
             .expect("transcribed");
-            let captured = rx.recv().await.expect("a request");
+            let captured = received(&mut rx).await.expect("a request");
             assert_eq!(
                 captured
                     .headers
@@ -391,4 +910,208 @@ fn the_switch_defaults_off_and_off_keeps_the_endpoint() {
         (off.address(), off.model(), off.api_key(), off.api()),
         ("http://localhost:9000", "m", "hunter2", SecondaryApi::Meta)
     );
+}
+
+#[tokio::test]
+async fn chat_entry_sends_the_wav_as_input_audio_and_delivers_the_reply() {
+    let (url, mut rx) = serve(
+        200,
+        r#"{"choices":[{"message":{"role":"assistant","content":"hallo welt"}}]}"#,
+    )
+    .await;
+    let (plain, mut plain_rx) = serve(200, r#"{"text":"x"}"#).await;
+    dictate(&recognizer(live(&plain, "")))
+        .await
+        .expect("transcriptions");
+    let sent_wav = parts(&received(&mut plain_rx).await.expect("upload"))
+        .into_iter()
+        .find(|(headers, _)| headers.contains("name=\"file\""))
+        .expect("WAV part")
+        .1;
+
+    let cases = [("", ""), ("DE", "k"), (" fr ", "")];
+    for (language, key) in cases {
+        let entry = LiveEntry {
+            id: "live".to_owned(),
+            name: "Chat speech".to_owned(),
+            kind: LiveKind::OpenAi(chat(&url, key, language)),
+        };
+        let chosen = Chosen::new(
+            &entry,
+            ModelStore::in_dir("unused"),
+            reqwest::Client::new(),
+            Recorder::disabled().metrics(),
+            &WordList::default(),
+            Adapters::default(),
+        );
+        let mut session = chosen.connect().await.expect("connected");
+        session.send_frame(&ramp(0)).await.expect("buffer frame");
+        assert!(rx.try_recv().is_err(), "the request waits for release");
+        session.finish_audio().await.expect("capture ended");
+        let event = tokio::time::timeout(Duration::from_secs(10), session.next_event())
+            .await
+            .expect("the answer arrives")
+            .expect("transcription succeeds");
+        assert_eq!(
+            event,
+            RecognizerEvent::Final("hallo welt".to_owned()),
+            "{language}"
+        );
+
+        let captured = received(&mut rx).await.expect("one request");
+        assert_eq!(captured.path, "/v1/chat/completions");
+        assert_eq!(captured.headers["content-type"], "application/json");
+        match (key.is_empty(), captured.headers.get("authorization")) {
+            (true, None) => {}
+            (false, Some(value)) => assert_eq!(value, &format!("Bearer {key}")),
+            other => panic!("key {key:?}: {other:?}"),
+        }
+        let mut body: serde_json::Value = serde_json::from_slice(&captured.body).unwrap();
+        let data = body["messages"][0]["content"][0]["input_audio"]["data"]
+            .as_str()
+            .expect("base64 audio")
+            .to_owned();
+        assert_eq!(
+            STANDARD.decode(&data).unwrap(),
+            sent_wav,
+            "same WAV as the upload"
+        );
+        body["messages"][0]["content"][0]["input_audio"]["data"] = serde_json::json!("<wav>");
+        let mut expected = serde_json::json!({
+            "model": "the-model",
+            "messages": [{"role": "user", "content": [{
+                "type": "input_audio",
+                "input_audio": {"data": "<wav>", "format": "wav"}
+            }]}],
+        });
+        if !language.trim().is_empty() {
+            expected["language"] = serde_json::json!(language.trim().to_lowercase());
+        }
+        assert_eq!(body, expected, "{language}");
+        assert!(rx.try_recv().is_err(), "one request per capture");
+    }
+}
+
+#[tokio::test]
+async fn transcriptions_entry_sends_language_only_when_set() {
+    for (language, expected) in [("", None), ("DE", Some("de"))] {
+        let (url, mut rx) = serve_sse("").await;
+        let entry = OpenAiLive {
+            language: Language::parse(language).unwrap(),
+            ..live(&url, "")
+        };
+        dictate(&recognizer(entry)).await.expect("transcription");
+        let found = parts(&received(&mut rx).await.expect("upload"))
+            .into_iter()
+            .find(|(headers, _)| headers.contains("name=\"language\""))
+            .map(|(_, value)| String::from_utf8(value).unwrap());
+        assert_eq!(found.as_deref(), expected, "{language:?}");
+    }
+}
+
+#[tokio::test]
+async fn chat_failures_are_typed_and_the_next_capture_succeeds() {
+    let bad_reply = "unreadable transcription";
+    let failures = [
+        (StatusCode::INTERNAL_SERVER_ERROR, "{}", "HTTP 500"),
+        (StatusCode::OK, "not json", bad_reply),
+        (StatusCode::OK, r#"{"choices":[]}"#, bad_reply),
+        (StatusCode::OK, r#"{"choices":[{"message":{}}]}"#, bad_reply),
+        (
+            StatusCode::OK,
+            r#"{"choices":[{"message":{"content":null}}]}"#,
+            bad_reply,
+        ),
+        (
+            StatusCode::OK,
+            r#"{"choices":[{"message":{"content":[{"type":"text"}]}}]}"#,
+            bad_reply,
+        ),
+    ];
+    let mut replies: Vec<_> = failures
+        .iter()
+        .map(|(status, body, _)| (*status, *body))
+        .collect();
+    replies.push((
+        StatusCode::OK,
+        r#"{"choices":[{"message":{"content":"recovered"}}]}"#,
+    ));
+    let (url, _rx) = serve_sequence(replies).await;
+    let recognizer = recognizer(chat(&url, "", ""));
+    for (_, body, message) in failures {
+        let failure = dictate(&recognizer).await.expect_err(body);
+        assert!(failure.to_string().contains(message), "{body}: {failure}");
+        assert!(failure.to_string().contains("Nothing was delivered"));
+    }
+    assert_eq!(dictate(&recognizer).await.expect("recovered"), "recovered");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_silent_chat_endpoint_times_out_after_ten_seconds() {
+    let app = Router::new().fallback(std::future::pending::<()>);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let failure = tokio::time::timeout(
+        Duration::from_secs(12),
+        dictate(&recognizer(chat(&url, "", ""))),
+    )
+    .await
+    .expect("the deadline is bounded")
+    .expect_err("request deadline");
+    assert_eq!(failure.headline(), "Speech server timed out — Settings");
+}
+
+#[tokio::test]
+async fn an_unreachable_chat_endpoint_says_what_failed() {
+    let unused = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}", unused.local_addr().expect("address"));
+    drop(unused);
+    let failure = dictate(&recognizer(chat(&url, "", "")))
+        .await
+        .expect_err("endpoint is down");
+    assert_eq!(failure.headline(), "Can't reach speech server — Settings");
+}
+
+#[tokio::test]
+async fn the_live_metric_names_the_request_kind() {
+    let (url, _rx) = serve(
+        200,
+        r#"{"text":"plain","choices":[{"message":{"content":"chat"}}]}"#,
+    )
+    .await;
+    for (entry, kind) in [
+        (live(&url, ""), "transcriptions"),
+        (chat(&url, "", ""), "chat"),
+    ] {
+        let dir =
+            std::env::temp_dir().join(format!("thalvi-live-kind-{}-{kind}", std::process::id()));
+        let kinds = RecordKinds {
+            metrics: true,
+            ..RecordKinds::default()
+        };
+        let recorder = Recorder::in_dir(kinds, &dir).expect("metrics recorder");
+        let recognizer =
+            OpenAiRecognizer::new("local", entry, reqwest::Client::new(), recorder.metrics());
+        dictate(&recognizer).await.expect("transcription");
+        recorder.finish().await;
+        let lines = std::fs::read_to_string(dir.join("metrics.jsonl")).expect("metrics");
+        let done: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("metric line"))
+            .filter(|event: &serde_json::Value| event["event"] == "desktop_live_stt")
+            .collect();
+        assert_eq!(done.len(), 1, "{kind}");
+        assert_eq!(
+            (&done[0]["outcome"], &done[0]["request"]),
+            (&"ok".into(), &kind.into())
+        );
+        std::fs::remove_dir_all(dir).expect("remove test metrics");
+    }
 }

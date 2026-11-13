@@ -1,7 +1,98 @@
-# Compiled only on Windows, or run only with speech model files CI doesn't have: survivors here say nothing.
+# Compiled only on Windows, run only with speech model files CI doesn't have, or run only inside the app: survivors here say nothing.
 exclude_globs = [
     "crates/thalvi-desktop/src/host/windows.rs",
     "crates/thalvi-desktop/src/host/windows/**",
+    # Dawn and ONNX Runtime FFI that needs a GPU, which CI has none of, and its Windows stand-in: the placement rule they apply is tested in device.rs.
+    "crates/thalvi-desktop/src/device/webgpu.rs",
+    "crates/thalvi-desktop/src/device/windows.rs",
     "crates/thalvi-app/src/menu_entry/windows.rs",
+    # The overlay's Wayland layer surface talks only to a running compositor.
+    "crates/thalvi-desktop/src/host/linux/layer.rs",
+    # Test doubles for the integration tests, not shipped behavior.
+    "crates/thalvi-desktop/src/engine/fakes.rs",
 ]
-exclude_re = ["approval::", "OnnxJoiner", "TransducerStream::decode", "run_predictor"]
+exclude_re = [
+    "approval::",
+    "OnnxJoiner",
+    "TransducerStream::decode",
+    "run_predictor",
+    # Equivalent mutants: no input can tell them from the code.
+    # Dropping zero samples changes nothing.
+    "replace > with >= in Samples::drop_before",
+    # A bin exactly on a filter's edge has weight zero, and equal terms add the same either way round.
+    "replace [<>] with [<>]= in (kaldi_filters|log_add)",
+    # Bins past Nyquist are in no filter either way.
+    "replace / with \\* in kaldi_filters",
+    # The winner of a second pass answered ok, so it is never in the list of failures either way.
+    "replace > with >= in .*::reconcile",
+    # The encoder window is 45 samples, which no chunk length divisible by 4 can equal.
+    "replace > with >= in Network::load",
+    # The pinned decoder accepts -1 and 1 alike as the first context token.
+    "delete - in Network::check",
+    # Tauri state and commands, and the keys and clicks of the real desktop, run only inside the app.
+    "AppState::",
+    "impl Running for Live",
+    "watch_hold_keys",
+    "overlay_takes_clicks",
+    "on_menu",
+    "replace save_settings ->",
+    # Tauri commands that only pass AppState to SpeechDevices, ModelStore and Download, which the tests above them cover.
+    # The count of intra-op threads changes speed, not output.
+    "replace threads ->",
+    # Needs a model loaded on a GPU; the counts it hands to the metric are tested through a fake model.
+    "<impl SpeechModel for Transducer>::placement",
+    # The engine thread starts, applies settings, rebuilds and spawns the load around a real engine and microphone; the load it shows and the retune it takes are tested, and the formal-capture-cancel replay runs the apply handoff.
+    "Runner::(start|rebuild|apply|load_speech_model)",
+    "crates/thalvi-app/src/(app|commands).rs.*replace (start|list_speech_models|speech_device|download_speech_model|word_list_support) ->",
+    "get_hold_key_unavailable",
+    # Picks the hold key check by the session in the process environment, which a test cannot set (unsafe_code is denied); Hyprland's check is tested directly.
+    "replace Desktop::check_hold_keys ->",
+    # The overlay's Tauri wiring (window and theme events, the engine follower, the error dismissal) runs only inside the app; the overlay thread it feeds is tested with a fake surface.
+    "crates/thalvi-app/src/(app|commands).rs.*(replace (setup|create_windows|follow_engine) ->|replace (start_overlay|show|dismiss_error) with \\(\\)|in create_windows)",
+    # The overlay's own windows and their threads talk only to a running X server or compositor; the Xft scale they use is tested.
+    "crates/thalvi-desktop/src/host/linux/xwayland.rs.*(Window::|forward_presses|desktop_scale|intern|\\bname\\b|\\bfailed\\b)",
+    "crates/thalvi-desktop/src/host/linux.rs.*Overlay(Plan|Surface|Waker)::",
+    # The overlay thread's start and wait loop around the desktop's surface; what it does with each message and press is tested through Overlaying and a fake surface.
+    "crates/thalvi-app/src/overlay.rs.*(replace (Overlay::start|run) with \\(\\)|impl Surface for OverlaySurface)",
+    # Only how often an unchanged failure to show is printed.
+    "replace != with == in Overlaying::settle",
+    # The looks' decoration (frame, shadows, mesh, glows, shine, the wave's strands, how fast the bars ease) is judged in screenshots of the real app; the tests pin what the overlay shows, not each pixel.
+    "crates/thalvi-app/src/overlay/(module|neon).rs.*(\\b(background|accents|trapezoid|closed|shade|hexes|glow|halo|rule|button_face|shine|draw_wave|shadow|Neon::draw)\\b|:\\d+:\\d+: replace [-+*/%<>=!&|]+ with [-+*/%<>=!&|]+$)",
+    # Where neon's bars and dot, the module looks' bottom line, neon's pill parts and its card's padding land is judged in screenshots; tests pin that the bars follow the voice, the line shrinks with the countdown and the card's ending, caret, scrolling and bar.
+    "crates/thalvi-app/src/overlay/(module|neon).rs:\\d+:\\d+: replace [-+*/%<>=!&|]+ with [-+*/%<>=!&|]+ in (Neon::marks|line_strip|Neon::pill|card)$",
+    # The neon dot's pulse and ring and the bars fading while working are judged in screenshots; tests pin each tone's dot and bar colours.
+    "delete match arm Tone::Working in Neon::marks",
+    "delete ! in Neon::marks",
+    # Equivalent: with no fade width, x / 0.0 is infinite (NaN at the edge) and .min(1.0) makes either 1.
+    "replace > with >= in fade_at",
+    # The wave's strand shape is judged in screenshots, like the strands; tests pin where new and old sound sit.
+    "crates/thalvi-app/src/overlay/view.rs:\\d+:\\d+: replace [-+*/%<>=!&|]+ with [-+*/%<>=!&|]+ in Wave::amplitude$",
+    "delete - in Wave::amplitude",
+    # Equivalent: the shaping cache's bound only changes how much shaping is kept, never what is drawn.
+    "replace >= with < in Text::shape",
+    # Equivalent: they differ only for a float exactly at the threshold, or when both sides are equal and nothing changes.
+    "replace < with <= in Wave::settled",
+    "replace > with >= in Wave::step",
+    "replace > with >= in ticker",
+    # Reads the process environment, which a test cannot set (unsafe_code is denied); the socket path it joins is tested through Events::connect.
+    "delete ! in Events::system",
+    # The updater's Tauri wiring, tray lines and commands run only inside the app; the driver and marker they carry are tested in update.rs.
+    "run_updates",
+    "follow_updates",
+    "<impl Restarter for AppRestarter>",
+    "crates/thalvi-app/src/app.rs.*replace (setup|follow_engine|show) ",
+    "crates/thalvi-app/src/commands.rs.*replace (check_for_updates|open_release_notes) ",
+    "Tray::(say|update|show)",
+    # The tauri-plugin-updater adapter needs the plugin, the process environment and a real feed; the driver uses it through a tested fake Source.
+    "<impl Source for PluginSource>",
+    "appimage_of",
+    "match guard error.is_timeout\\(\\) with (true|false) in explain",
+    # OpenAiSession cancel/close have empty bodies; consuming self drops the same fields either way.
+    "replace <impl RecognizerSession for OpenAiSession>::(cancel|close) with \\(\\)",
+    # The restart's wall-clock time only feeds a metric the next start writes.
+    "replace now_ms -> u64",
+    # Quitting waits on the real engine thread, which only the app starts; its quit flow is the formal check's.
+    "replace EngineLink::quit with \\(\\)",
+    # Nothing reads a restart request's debug text.
+    "<impl std::fmt::Debug for Restart>::fmt",
+]

@@ -9,31 +9,37 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use thalvi_desktop::audio::{Frames, InputGate, Microphone};
-use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
+use thalvi_desktop::capture::{CaptureRoute, EndingPauses, Endings};
 use thalvi_desktop::chosen::Chosen;
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::{Bound, Delivery, Finished};
+use thalvi_desktop::device::Step;
 use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
 };
+use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{Desktop, Host};
-use thalvi_desktop::local::LocalRecognizer;
+use thalvi_desktop::local::{LocalRecognizer, ModelSource};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
-use thalvi_desktop::models::ModelStore;
+use thalvi_desktop::models::{self, ModelStore};
 use thalvi_desktop::report::{UserError, causes};
+use thalvi_desktop::speech_device::SpeechDevices;
+use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
 use thalvi_desktop::transducer::TransducerSource;
 use thalvi_desktop::wake::{WakeConfig, WakeEngine};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::status::{
-    Failure, FailureKind, Mode, STARTING_NOTICE, SpeechLoad, Status, View, WAKE_DOWNLOAD_NOTICE,
+    Failure, FailureKind, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, Status, View,
+    WAKE_DOWNLOAD_NOTICE, load_notice,
 };
+use crate::update::Stop;
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -45,14 +51,43 @@ pub enum Control {
     SetListening(bool),
     /// Toggle the runner-owned listening intent, including while starting.
     ToggleListening,
-    /// Cancels the capture in progress.
+    /// Cancels the capture in progress, and stops a file being fed.
     Cancel,
+    /// Plays a file's audio in place of the microphone's.
+    Feed(Feed),
     /// Takes new settings in between captures.
     Apply(Box<DesktopConfig>),
     /// The desktop refused to report the hold key; the notice says so in plain words.
     HoldKeyFailed(String),
+    /// Stops for an update, but only if nothing is going on.
+    RestartIfIdle(Restart),
     /// Cancels any capture, closes the microphone and the recognizer, and stops.
     Quit,
+}
+
+/// A request to stop for an update: `prepare` saves what the next start needs, given whether
+/// listening is paused, and runs only once the engine has found itself idle.
+pub struct Restart {
+    prepare: Box<dyn FnOnce(bool) -> Result<(), String> + Send>,
+    reply: oneshot::Sender<Stop>,
+}
+
+impl Restart {
+    pub fn new(
+        prepare: impl FnOnce(bool) -> Result<(), String> + Send + 'static,
+        reply: oneshot::Sender<Stop>,
+    ) -> Self {
+        Self {
+            prepare: Box::new(prepare),
+            reply,
+        }
+    }
+}
+
+impl std::fmt::Debug for Restart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Restart")
+    }
 }
 
 /// The saved microphone choice, the device actually open, and whether listening is paused.
@@ -72,12 +107,14 @@ pub struct EngineLink {
     status: watch::Receiver<Status>,
     level: watch::Receiver<f32>,
     audio: watch::Receiver<AudioStatus>,
+    feeding: watch::Receiver<bool>,
     stopped: Mutex<std_mpsc::Receiver<()>>,
     key: HoldInput,
 }
 
 impl EngineLink {
-    /// Starts the engine thread; it loads the wake word models before it listens.
+    /// Starts the engine thread; it loads the wake word models before it listens. Listening starts
+    /// `paused` when the user had paused it before an update restarted the app.
     ///
     /// # Errors
     /// Fails when the thread or its runtime cannot start.
@@ -86,6 +123,8 @@ impl EngineLink {
         delivery: Arc<Delivery<Desktop>>,
         history: Arc<History>,
         drafts: Arc<Drafts>,
+        devices: Arc<SpeechDevices>,
+        paused: bool,
     ) -> Result<Self, String> {
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
@@ -96,8 +135,9 @@ impl EngineLink {
         let (audio_tx, audio) = watch::channel(AudioStatus {
             selected: config.microphone.clone(),
             active: None,
-            paused: false,
+            paused,
         });
+        let (feeding_tx, feeding) = watch::channel(false);
         let (key, key_state) = HoldInput::new();
         let (ready_tx, ready) = std_mpsc::channel();
         let (stopped_tx, stopped) = std_mpsc::channel();
@@ -117,6 +157,7 @@ impl EngineLink {
                 };
                 let _ = ready_tx.send(Ok(()));
                 let publisher = Publisher::new(status_tx, config.ending_pause);
+                publisher.update(|view| view.wake_words = config.wake.enabled());
                 let runner = Runner::new(
                     config,
                     delivery,
@@ -128,6 +169,9 @@ impl EngineLink {
                         key: key_state,
                         history,
                         drafts,
+                        devices,
+                        feeding: Arc::new(feeding_tx),
+                        paused,
                     },
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
@@ -142,6 +186,7 @@ impl EngineLink {
             status,
             level,
             audio,
+            feeding,
             stopped: Mutex::new(stopped),
             key,
         })
@@ -156,6 +201,15 @@ impl EngineLink {
     pub fn send(&self, control: Control) {
         // The engine thread is gone only while the app quits or after it failed.
         let _ = self.control.send(control);
+    }
+
+    /// Tells the user about a hold key problem found after the keys were set up, such as binds
+    /// Hyprland dropped.
+    pub fn hold_problems(&self) -> impl Fn(String) + Send + Sync + 'static {
+        let control = self.control.clone();
+        move |notice| {
+            let _ = control.send(Control::HoldKeyFailed(notice));
+        }
     }
 
     #[must_use]
@@ -183,11 +237,30 @@ impl EngineLink {
         self.audio.clone()
     }
 
+    /// Whether a file's audio is being fed in place of the microphone's.
+    #[must_use]
+    pub fn feeding_updates(&self) -> watch::Receiver<bool> {
+        self.feeding.clone()
+    }
+
+    /// Feeds `clip` in place of the microphone and says how it went, once it has.
+    pub async fn feed(&self, clip: Clip) -> FeedEnd {
+        let (feed, ended) = Feed::new(clip);
+        self.send(Control::Feed(feed));
+        // The engine is gone only while the app quits or after it failed.
+        ended.await.unwrap_or(FeedEnd::Cancelled)
+    }
+
     /// Stops the engine and waits until the microphone and the recognizer are closed.
     ///
     /// Blocks for at most a few seconds.
     pub fn quit(&self) {
         self.send(Control::Quit);
+        self.wait_stopped();
+    }
+
+    /// Waits until the engine has closed the microphone and the recognizer, for at most a few seconds.
+    pub fn wait_stopped(&self) {
         let stopped = self.stopped.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = stopped.recv_timeout(QUIT_TIMEOUT);
     }
@@ -218,6 +291,49 @@ async fn load_wake<T>(
     loaded
 }
 
+/// Loads the ending spotter next to the wake models. It only double-checks the transcript, so a
+/// failure is a notice, shown with the first capture, and dictation goes on without it.
+async fn load_spotter(
+    publisher: &Publisher,
+    endings: &Endings,
+    store: &ModelStore,
+    recorder: &Recorder,
+    load: impl Future<Output = Result<Box<dyn KeywordSpotter>, SpotterError>>,
+) -> (Option<Box<dyn KeywordSpotter>>, Option<String>) {
+    let started = Instant::now();
+    let mut downloads = false;
+    for asset in [
+        models::SPOTTER.encoder,
+        models::SPOTTER.decoder,
+        models::SPOTTER.joiner,
+        models::SPOTTER.pieces,
+    ] {
+        downloads |= !store.is_asset_cached(&asset).await;
+    }
+    if downloads {
+        println!("{SPOTTER_DOWNLOAD_NOTICE}");
+        publisher.mode(Mode::SpotterDownload);
+    }
+    let loaded = load.await;
+    if downloads {
+        publisher.mode(Mode::Starting);
+    }
+    recorder.metric(
+        Event::EndingSpotter,
+        if loaded.is_ok() { "ok" } else { "error" },
+        Some(started.elapsed()),
+        json!({"call": "load", "phrases": endings.entries().count(), "downloaded": downloads}),
+    );
+    match loaded {
+        Ok(spotter) => (Some(spotter), None),
+        Err(error) => {
+            let notice = format!("{error} Endings still work from the transcript.");
+            println!("{notice}");
+            (None, Some(notice))
+        }
+    }
+}
+
 /// Derives the status from the view and publishes it when it changes.
 struct Publisher {
     view: RefCell<View>,
@@ -235,6 +351,7 @@ impl Publisher {
                 copies: false,
                 pauses,
                 loading: None,
+                wake_words: true,
             }),
             out,
         })
@@ -262,7 +379,7 @@ impl Publisher {
     }
 
     /// A capture started at the wake: in `window` when one was bound, on a desktop that `copies`
-    /// the text to the clipboard or types it.
+    /// the text to the clipboard or pastes it.
     fn woke(&self, window: Option<String>, copies: bool) {
         self.update(|view| {
             view.copies = copies;
@@ -271,7 +388,7 @@ impl Publisher {
         });
     }
 
-    fn loading(&self, load: Option<SpeechLoad>) {
+    fn loading(&self, load: Option<Step>) {
         self.update(|view| view.loading = load);
     }
 
@@ -306,6 +423,39 @@ impl Publisher {
     }
 }
 
+/// Loads the model, showing each step it takes until it is ready, and a failure as a notice.
+async fn load_showing<S: ModelSource>(local: &LocalRecognizer<S>, publisher: &Publisher) {
+    let mut steps = local.steps();
+    let load = local.load();
+    tokio::pin!(load);
+    let loaded = loop {
+        tokio::select! {
+            loaded = &mut load => break loaded,
+            Ok(()) = steps.changed() => {
+                let step = *steps.borrow_and_update();
+                println!("{}", load_notice(step));
+                publisher.loading(Some(step));
+            }
+        }
+    };
+    if let Err(error) = &loaded {
+        println!("{error}");
+    }
+    publisher.update(|view| {
+        view.loading = None;
+        if let Err(error) = loaded
+            && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
+        {
+            view.mode = Mode::Failed(Failure {
+                kind: FailureKind::Other,
+                notice: format!("{error} Dictation will try again when you start it."),
+                headline: error.headline(),
+                causes: causes(&error),
+            });
+        }
+    });
+}
+
 /// Everything one engine needs; replaced when settings change.
 struct Session {
     engine: Engine<Chosen, WakeEngine, CpalCuePlayer>,
@@ -316,7 +466,8 @@ struct Session {
     device: Option<String>,
     metrics: Metrics,
     microphone: Option<Microphone>,
-    frames: Option<Frames>,
+    frames: Option<Fed<Frames>>,
+    feeder: Feeder,
 }
 
 impl Session {
@@ -329,6 +480,7 @@ impl Session {
 
     fn close_microphone(&mut self) {
         self.engine.stop_listening();
+        self.feeder.cancel();
         self.frames = None;
         if let Some(microphone) = &mut self.microphone {
             microphone.pause();
@@ -351,7 +503,10 @@ impl Session {
             causes: vec![error.to_string()],
         })?;
         self.microphone = Some(microphone);
-        self.frames = Some(frames.map_err(|error| Failure::of(&error))?);
+        self.frames = Some(
+            self.feeder
+                .wrap(frames.map_err(|error| Failure::of(&error))?),
+        );
         Ok(())
     }
 
@@ -378,6 +533,12 @@ struct Shared {
     key: watch::Receiver<KeyState>,
     history: Arc<History>,
     drafts: Arc<Drafts>,
+    /// Where the speech model runs, for Settings.
+    devices: Arc<SpeechDevices>,
+    /// Whether a file's audio is being fed in place of the microphone's.
+    feeding: Arc<watch::Sender<bool>>,
+    /// Whether listening starts paused.
+    paused: bool,
 }
 
 struct Runner {
@@ -398,6 +559,8 @@ struct Runner {
     delivery: Arc<Delivery<Desktop>>,
     history: Arc<History>,
     drafts: Arc<Drafts>,
+    devices: Arc<SpeechDevices>,
+    feeding: Arc<watch::Sender<bool>>,
     http: reqwest::Client,
     /// Loads the current engine's speech model.
     loading: Option<JoinHandle<()>>,
@@ -419,7 +582,7 @@ impl Runner {
         Self {
             config,
             session: None,
-            paused: false,
+            paused: shared.paused,
             stopping: false,
             reopen_failures: None,
             pending: None,
@@ -431,6 +594,8 @@ impl Runner {
             delivery,
             history: shared.history,
             drafts: shared.drafts,
+            devices: shared.devices,
+            feeding: shared.feeding,
             http: reqwest::Client::new(),
             loading: None,
             key: Presses::new(shared.key.clone()),
@@ -456,7 +621,7 @@ impl Runner {
         match self.build(&config).await {
             Ok(session) => {
                 self.session = Some(session);
-                self.load_speech_model().await;
+                self.load_speech_model();
                 self.open_microphone().await;
             }
             Err(failure) => {
@@ -466,9 +631,9 @@ impl Runner {
         }
     }
 
-    /// Fetches and loads the speech model in the background, and shows that until it is ready.
+    /// Fetches and loads the speech model in the background, and shows what it is doing until it is ready.
     /// A failure is a notice; the app keeps listening and dictation tries again.
-    async fn load_speech_model(&mut self) {
+    fn load_speech_model(&mut self) {
         if let Some(loading) = self.loading.take() {
             loading.abort();
         }
@@ -480,28 +645,12 @@ impl Runner {
             self.publisher.loading(None);
             return;
         };
-        let load = SpeechLoad::of(&local).await;
-        println!("{}", load.notice());
-        self.publisher.loading(Some(load));
+        let first = *local.steps().borrow();
+        println!("{}", load_notice(first));
+        self.publisher.loading(Some(first));
         let publisher = Rc::clone(&self.publisher);
         self.loading = Some(tokio::task::spawn_local(async move {
-            let loaded = local.load().await;
-            if let Err(error) = &loaded {
-                println!("{error}");
-            }
-            publisher.update(|view| {
-                view.loading = None;
-                if let Err(error) = loaded
-                    && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
-                {
-                    view.mode = Mode::Failed(Failure {
-                        kind: FailureKind::Other,
-                        notice: format!("{error} Dictation will try again when you start it."),
-                        headline: error.headline(),
-                        causes: causes(&error),
-                    });
-                }
-            });
+            load_showing(&local, &publisher).await;
         }));
     }
 
@@ -515,13 +664,19 @@ impl Runner {
             Recorder::per_user(config.recordings).map_err(|error| Failure::of(&error))?;
         let store = ModelStore::per_user().map_err(|error| Failure::of(&error))?;
         let started = Instant::now();
-        let wake = load_wake(
-            &self.publisher,
-            &config.wake,
-            &store,
-            WakeEngine::load(&config.wake, &store),
-        )
-        .await;
+        let (wake, (spotter, spotter_off)) = tokio::join!(
+            load_wake(
+                &self.publisher,
+                &config.wake,
+                &store,
+                WakeEngine::load(&config.wake, &store),
+            ),
+            load_spotter(&self.publisher, &config.endings, &store, &recorder, async {
+                OnnxSpotter::load(&config.endings, &store)
+                    .await
+                    .map(|spotter| Box::new(spotter) as Box<dyn KeywordSpotter>)
+            }),
+        );
         recorder.metric(
             Event::WakeLoad,
             if wake.is_ok() { "ok" } else { "error" },
@@ -534,10 +689,13 @@ impl Runner {
         let recognizer = Chosen::new(
             config.stt.entries.active_live(),
             store,
+            self.http.clone(),
             metrics.clone(),
             &config.stt.phrases,
+            self.devices.adapters(),
         );
         let local = recognizer.local();
+        self.devices.use_recognizer(local.clone());
         let (engine, handle) = Engine::new(
             Parts {
                 recognizer,
@@ -547,6 +705,8 @@ impl Runner {
                 http: self.http.clone(),
                 hold: self.key_state.clone(),
                 notice: self.publisher.notice_sink(),
+                spotter,
+                spotter_off,
             },
             config,
             recorder,
@@ -559,6 +719,7 @@ impl Runner {
             self.audio.subscribe(),
         ));
         println!("Transcribing through {}.", config.speech_source());
+        let feeder = Feeder::new(&gate, Arc::clone(&self.feeding));
         Ok(Session {
             engine,
             local,
@@ -568,6 +729,7 @@ impl Runner {
             metrics,
             microphone: None,
             frames: None,
+            feeder,
         })
     }
 
@@ -702,10 +864,6 @@ impl Runner {
             Woke::Trigger(Ok(WakeTrigger::Capture | WakeTrigger::Hold)) => {
                 Box::pin(self.capture()).await
             }
-            Woke::Trigger(Ok(WakeTrigger::Conversation)) => {
-                println!("Conversation wake heard. This build has no conversation.");
-                Flow::Continue
-            }
             Woke::Trigger(Err(error)) => {
                 tracing::warn!(?error, "listening stopped");
                 self.close_microphone();
@@ -746,9 +904,25 @@ impl Runner {
         match control {
             Control::SetListening(on) => self.set_listening(on).await,
             Control::ToggleListening => self.set_listening(self.paused).await,
-            Control::Cancel => {}
+            Control::Cancel => {
+                if let Some(session) = &self.session {
+                    session.feeder.cancel();
+                }
+            }
+            Control::Feed(feed) => match &self.session {
+                Some(Session {
+                    frames: Some(_),
+                    feeder,
+                    ..
+                }) => feeder.start(feed),
+                _ => feed.refuse("Thalvi is not listening."),
+            },
             Control::Apply(config) => self.apply(*config).await,
             Control::HoldKeyFailed(notice) => self.hold_problem = Some(notice),
+            Control::RestartIfIdle(restart) => {
+                let held = self.key_state.borrow().down;
+                return answer_restart(restart, self.paused, held, *self.feeding.borrow());
+            }
             Control::Quit => return Flow::Quit,
         }
         Flow::Continue
@@ -808,7 +982,10 @@ impl Runner {
         if retunes_only(&self.config, &config) {
             if let Some(session) = self.session.as_mut() {
                 session.engine.set_recordings(config.recordings);
+                session.engine.set_wake_words(config.wake.enabled());
             }
+            self.publisher
+                .update(|view| view.wake_words = config.wake.enabled());
             self.take_history(&config);
             self.config = config;
             return;
@@ -838,11 +1015,13 @@ impl Runner {
                 if let Some(old) = self.session.replace(session) {
                     old.close().await;
                 }
-                self.publisher
-                    .update(|view| view.pauses = config.ending_pause);
+                self.publisher.update(|view| {
+                    view.pauses = config.ending_pause;
+                    view.wake_words = config.wake.enabled();
+                });
                 self.take_history(&config);
                 self.config = config;
-                self.load_speech_model().await;
+                self.load_speech_model();
                 self.open_microphone().await;
             }
             Err(failure) => {
@@ -880,6 +1059,7 @@ impl Runner {
                 handle,
                 gate,
                 frames: Some(frames),
+                feeder,
                 ..
             }) = session.as_mut()
             else {
@@ -888,7 +1068,10 @@ impl Runner {
             let outcome = Box::pin(drive(
                 engine.capture(frames),
                 control,
-                || handle.cancel(),
+                || {
+                    handle.cancel();
+                    feeder.cancel();
+                },
                 &mut requests,
             ))
             .await;
@@ -1118,7 +1301,30 @@ fn retunes_only(old: &DesktopConfig, new: &DesktopConfig) -> bool {
     *old == DesktopConfig {
         recordings: old.recordings,
         history: old.history,
+        update_channel: old.update_channel,
+        wake: new.wake.clone().with_enabled(old.wake.enabled()),
         ..new.clone()
+    }
+}
+
+/// Answers a request to stop for an update. Only an idle engine agrees, with no hold key down and
+/// no clip being fed, and only after `prepare` has saved what the next start needs; a refusal
+/// leaves the engine running.
+fn answer_restart(restart: Restart, paused: bool, held: bool, feeding: bool) -> Flow {
+    let Restart { prepare, reply } = restart;
+    if held || feeding {
+        let _ = reply.send(Stop::Busy);
+        return Flow::Continue;
+    }
+    match prepare(paused) {
+        Ok(()) => {
+            let _ = reply.send(Stop::Stopped);
+            Flow::Quit
+        }
+        Err(message) => {
+            let _ = reply.send(Stop::Refused(message));
+            Flow::Continue
+        }
     }
 }
 
@@ -1205,6 +1411,14 @@ impl Requests {
                 self.hold_problem = Some(notice);
                 false
             }
+            Some(Control::Feed(feed)) => {
+                feed.refuse("Thalvi was busy. Try again in a moment.");
+                false
+            }
+            Some(Control::RestartIfIdle(restart)) => {
+                let _ = restart.reply.send(Stop::Busy);
+                false
+            }
             Some(Control::Quit) | None => {
                 self.quit = true;
                 true
@@ -1259,6 +1473,9 @@ async fn follow(
                     break;
                 }
                 let engine = state.borrow_and_update().clone();
+                if let EngineState::Capturing { notice: Some(notice), .. } = &engine {
+                    println!("{notice}");
+                }
                 publisher.update(|view| view.engine = engine);
             }
             changed = level.changed() => {
@@ -1278,9 +1495,8 @@ mod tests {
     use std::cell::Cell;
     use std::time::Duration;
 
-    use thalvi_desktop::models::{self, CatalogHead, CatalogSpeech};
-    use thalvi_desktop::phrases::WordList;
-    use thalvi_desktop::transducer::SpeechChoice;
+    use thalvi_desktop::device::Export;
+    use thalvi_desktop::models::{self, CatalogHead};
 
     use super::*;
     use crate::overlay::Visibility;
@@ -1359,60 +1575,304 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_overlay_stays_hidden_while_a_model_on_disk_loads_and_shows_only_a_download() {
-        let catalog = CatalogSpeech::Nemotron160ms;
+    async fn the_overlay_stays_hidden_while_a_model_on_disk_loads_and_shows_each_download_by_name()
+    {
         let cases = [
-            ("downloaded", true, false, false),
-            ("not downloaded", false, false, true),
-            ("model folder", false, true, false),
+            (
+                "from disk",
+                Step::Reading,
+                false,
+                "Loading the speech model.",
+            ),
+            (
+                "the CPU files",
+                Step::Fetching(Export::Cpu),
+                true,
+                "Loading the speech model. Downloading about 650 MB.",
+            ),
+            (
+                "the GPU files",
+                Step::Fetching(Export::Gpu),
+                true,
+                "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.",
+            ),
         ];
-        for (case, on_disk, folder, overlay) in cases {
-            let dir = std::env::temp_dir().join(format!(
-                "thalvi-load-{}-{}",
-                case.replace(' ', "-"),
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            if on_disk {
-                let assets = catalog.assets();
-                for asset in [assets.encoder, assets.decoder, assets.joiner, assets.tokens] {
-                    std::fs::File::create(dir.join(asset.file_name))
-                        .unwrap()
-                        .set_len(asset.size)
-                        .unwrap();
-                }
-            }
-            let choice = if folder {
-                SpeechChoice::Folder(dir.clone())
-            } else {
-                SpeechChoice::Catalog(catalog)
-            };
-            let source =
-                TransducerSource::new(ModelStore::in_dir(&dir), choice, &WordList::default());
-            let local = LocalRecognizer::new(source, "test", Recorder::disabled().metrics());
-            let (out, status) = watch::channel(Status::Paused);
-            let publisher = Publisher::new(out, EndingPauses::default());
-            let shown = || Visibility::of(&status.borrow(), true) == Visibility::Show;
+        let (out, status) = watch::channel(Status::Paused);
+        let publisher = Publisher::new(out, EndingPauses::default());
+        let shown = || Visibility::of(&status.borrow(), true) == Visibility::Show;
 
-            publisher.mode(Mode::Starting);
-            assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}");
-            assert!(!shown(), "{case}: starting the engine");
-            publisher.loading(Some(SpeechLoad::of(&local).await));
-            publisher.mode(Mode::Idle);
+        publisher.mode(Mode::Starting);
+        assert_eq!(title(&status.borrow()), "Thalvi: starting");
+        assert!(!shown(), "starting the engine");
+        publisher.mode(Mode::Idle);
+        for (case, step, overlay, notice) in cases {
+            publisher.loading(Some(step));
             assert_eq!(shown(), overlay, "{case}: loading the model");
             assert_eq!(title(&status.borrow()), "Thalvi: starting", "{case}");
             assert_eq!(
-                matches!(&*status.borrow(), Status::Loading { notice, .. } if notice.contains("650 MB")),
-                overlay,
-                "{case}: the download notice"
+                *status.borrow(),
+                Status::Loading {
+                    notice: notice.to_owned(),
+                    downloading: overlay
+                },
+                "{case}: the notice"
             );
-
-            publisher.loading(None);
-            assert!(!shown(), "{case}: loaded");
-            assert_eq!(title(&status.borrow()), "Thalvi: listening", "{case}");
-            std::fs::remove_dir_all(&dir).unwrap();
         }
+
+        publisher.loading(None);
+        assert!(!shown(), "loaded");
+        assert_eq!(title(&status.borrow()), "Thalvi: listening");
+    }
+
+    /// Takes the steps it is told to, one at a time, and then fails or loads.
+    struct Scripted {
+        gate: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        fails: bool,
+    }
+
+    struct NoModel;
+
+    struct NoStream;
+
+    impl thalvi_desktop::local::SpeechStream for NoStream {
+        fn accept(
+            &mut self,
+            _frame: &thalvi_desktop::frame::Frame,
+        ) -> Result<
+            Vec<thalvi_desktop::recognizer::RecognizerEvent>,
+            thalvi_desktop::recognizer::RecognizerError,
+        > {
+            Ok(Vec::new())
+        }
+    }
+
+    impl thalvi_desktop::local::SpeechModel for NoModel {
+        type Stream = NoStream;
+
+        fn device(&self) -> thalvi_desktop::device::Device {
+            thalvi_desktop::device::Device::Cpu(thalvi_desktop::device::Fallback::CpuModel)
+        }
+
+        fn stream(&self) -> NoStream {
+            NoStream
+        }
+    }
+
+    impl ModelSource for Scripted {
+        type Model = NoModel;
+
+        async fn load(
+            &self,
+            step: impl Fn(Step) + Send + Sync,
+        ) -> Result<NoModel, thalvi_desktop::recognizer::RecognizerError> {
+            step(Step::Fetching(Export::Gpu));
+            let gate = self.gate.lock().unwrap().take().unwrap();
+            let _ = gate.await;
+            step(Step::Fetching(Export::Cpu));
+            if self.fails {
+                Err(thalvi_desktop::recognizer::RecognizerError::said(
+                    "Could not download the speech model.",
+                ))
+            } else {
+                Ok(NoModel)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_load_shows_each_step_it_takes_and_then_nothing_or_its_failure() {
+        for (case, fails, mode, shown) in [
+            ("loads", false, Mode::Idle, Mode::Idle),
+            (
+                "fails",
+                true,
+                Mode::Idle,
+                Mode::Failed(Failure {
+                    kind: FailureKind::Other,
+                    notice: "Could not download the speech model. Dictation will try again when you start it."
+                        .to_owned(),
+                    headline: "Speech recognition failed — Settings",
+                    causes: Vec::new(),
+                }),
+            ),
+            ("fails while paused", true, Mode::Paused, Mode::Paused),
+        ] {
+            let (release, gate) = tokio::sync::oneshot::channel();
+            let local = LocalRecognizer::new(
+                Scripted {
+                    gate: std::sync::Mutex::new(Some(gate)),
+                    fails,
+                },
+                "test",
+                Recorder::disabled().metrics(),
+            );
+            let (out, status) = watch::channel(Status::Paused);
+            let publisher = Publisher::new(out, EndingPauses::default());
+            publisher.mode(mode.clone());
+            let load = load_showing(&local, &publisher);
+            tokio::pin!(load);
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    () = &mut load => panic!("{case}: finished before the GPU download was shown"),
+                    () = async {
+                        while publisher.view.borrow().loading != Some(Step::Fetching(Export::Gpu)) {
+                            tokio::task::yield_now().await;
+                        }
+                    } => {}
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{case}: the GPU download is never shown"));
+            if mode == Mode::Idle {
+                let notice = "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.";
+                assert_eq!(
+                    *status.borrow(),
+                    Status::Loading { notice: notice.to_owned(), downloading: true },
+                    "{case}: the step is shown"
+                );
+            }
+            release.send(()).unwrap();
+            load.await;
+            assert_eq!(publisher.view.borrow().loading, None, "{case}: loading ends");
+            assert_eq!(publisher.view.borrow().mode, shown, "{case}");
+        }
+    }
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// The loading notice now, and whether the overlay shows.
+    fn loading_now(status: &watch::Receiver<Status>) -> (String, bool) {
+        let status = status.borrow();
+        match &*status {
+            Status::Loading { notice, .. } => (
+                notice.clone(),
+                Visibility::of(&status, true) == Visibility::Show,
+            ),
+            other => panic!("not loading: {other:?}"),
+        }
+    }
+
+    /// Waits for the next status change, then returns [`loading_now`].
+    async fn next_loading(status: &mut watch::Receiver<Status>) -> (String, bool) {
+        tokio::time::timeout(WAIT, status.changed())
+            .await
+            .expect("the status changed")
+            .expect("the publisher lives");
+        loading_now(status)
+    }
+
+    /// Takes the steps it is sent, and loads when the sender is dropped.
+    struct Streamed(std::sync::Mutex<Option<mpsc::UnboundedReceiver<Step>>>);
+
+    impl ModelSource for Streamed {
+        type Model = NoModel;
+
+        async fn load(
+            &self,
+            step: impl Fn(Step) + Send + Sync,
+        ) -> Result<NoModel, thalvi_desktop::recognizer::RecognizerError> {
+            let mut steps = self.0.lock().unwrap().take().unwrap();
+            while let Some(next) = steps.recv().await {
+                step(next);
+            }
+            Ok(NoModel)
+        }
+    }
+
+    /// A load of a model being downloaded, driven by the returned sender, and the status it publishes.
+    fn loading_download() -> (
+        mpsc::UnboundedSender<Step>,
+        Rc<Publisher>,
+        JoinHandle<()>,
+        watch::Receiver<Status>,
+    ) {
+        let (out, mut status) = watch::channel(Status::Paused);
+        let publisher = Publisher::new(out, EndingPauses::default());
+        publisher.mode(Mode::Idle);
+        publisher.loading(Some(Step::Fetching(Export::Cpu)));
+        status.mark_unchanged();
+        let (steps, received) = mpsc::unbounded_channel();
+        let local = Arc::new(LocalRecognizer::new(
+            Streamed(std::sync::Mutex::new(Some(received))),
+            "test",
+            Recorder::disabled().metrics(),
+        ));
+        let load = tokio::task::spawn_local({
+            let publisher = Rc::clone(&publisher);
+            async move { load_showing(&local, &publisher).await }
+        });
+        (steps, publisher, load, status)
+    }
+
+    #[tokio::test]
+    async fn the_loading_notice_follows_a_download_once_per_percent_and_ends_with_the_model_loading()
+     {
+        use Export::{Cpu, Gpu};
+        LocalSet::new()
+            .run_until(async {
+                let (steps, _publisher, load, mut status) = loading_download();
+                let mut shown = vec![loading_now(&status)];
+                for (step, changes) in [
+                    (Step::Downloading(Cpu, 0), true),
+                    (Step::Downloading(Cpu, 0), false),
+                    (Step::Downloading(Cpu, 1), true),
+                    (Step::Downloading(Cpu, 100), true),
+                    (Step::Reading, true),
+                    (Step::Fetching(Gpu), true),
+                    (Step::Downloading(Gpu, 50), true),
+                    (Step::Reading, true),
+                ] {
+                    steps.send(step).unwrap();
+                    if changes {
+                        shown.push(next_loading(&mut status).await);
+                    }
+                }
+                drop(steps);
+                tokio::time::timeout(WAIT, load).await.unwrap().unwrap();
+
+                let download = |text: &str| (text.to_owned(), true);
+                let reading = ("Loading the speech model.".to_owned(), false);
+                assert_eq!(
+                    shown,
+                    [
+                        download("Loading the speech model. Downloading about 650 MB."),
+                        download("Downloading the speech model, about 650 MB \u{2014} 0%"),
+                        download("Downloading the speech model, about 650 MB \u{2014} 1%"),
+                        download("Downloading the speech model, about 650 MB \u{2014} 100%"),
+                        reading.clone(),
+                        download(
+                            "Loading the speech model. Downloading the model for the GPU, about 1.3 GB."
+                        ),
+                        download("Downloading the model for the GPU, about 1.3 GB \u{2014} 50%"),
+                        reading,
+                    ]
+                );
+                assert_eq!(*status.borrow(), Status::Listening);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn switching_away_mid_download_leaves_no_downloading_notice() {
+        LocalSet::new()
+            .run_until(async {
+                let (steps, publisher, load, mut status) = loading_download();
+                steps.send(Step::Downloading(Export::Cpu, 40)).unwrap();
+                assert_eq!(
+                    next_loading(&mut status).await.0,
+                    "Downloading the speech model, about 650 MB \u{2014} 40%"
+                );
+
+                load.abort();
+                assert!(load.await.unwrap_err().is_cancelled());
+                publisher.loading(None);
+                let late = steps.send(Step::Downloading(Export::Cpu, 41));
+
+                assert!(late.is_err(), "the aborted load no longer listens");
+                assert_eq!(*status.borrow(), Status::Listening);
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -1422,7 +1882,6 @@ mod tests {
             models::MELSPECTROGRAM,
             models::EMBEDDING,
             CatalogHead::HeyThalvi.asset(),
-            CatalogHead::HeyMycroft.asset(),
         ];
         let failed = Mode::Failed(Failure {
             kind: FailureKind::Other,
@@ -1432,8 +1891,14 @@ mod tests {
         });
         // A retry after a failed download starts from Paused (the tray) or Failed (Settings).
         let starts = [Mode::Starting, Mode::Idle, Mode::Paused, failed];
-        for (case, files, downloads) in [("cached", cached.len(), false), ("missing one", 3, true)]
-        {
+        for (case, files, downloads) in [
+            (
+                "cached dictation assets with saved conversation head missing",
+                cached.len(),
+                false,
+            ),
+            ("missing dictation head", cached.len() - 1, true),
+        ] {
             let dir = std::env::temp_dir().join(format!(
                 "thalvi-wake-load-{}-{}",
                 case.replace(' ', "-"),
@@ -1509,6 +1974,8 @@ mod tests {
                 recognizer, wake, cues, gate, hold,
                 http: reqwest::Client::new(),
                 notice: publisher.notice_sink(),
+                spotter: None,
+                spotter_off: None,
             }, &DesktopConfig::from_json_str("{}").unwrap(), Recorder::disabled());
             let listening = tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -1524,6 +1991,7 @@ mod tests {
             publisher.mode(Mode::Idle);
             publisher.update(|view| view.engine = EngineState::Capturing {
                 committed: "keep speaking".to_owned(), partial: None,
+                notice: None,
             });
             publisher.notice_sink()(Refusal::Capturing.notice());
             assert!(matches!(&*status.borrow(), Status::Capturing { committed, .. } if committed == "keep speaking"));
@@ -1609,15 +2077,92 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_arrives_while_a_capture_runs_is_refused_and_ends_nothing() {
+        let (feed, mut ended) = Feed::new(Clip::from_frames(Vec::new()));
+        let mut requests = Requests::default();
+        assert!(!requests.take(Some(Control::Feed(feed))));
+        assert!(!requests.ended);
+        assert_eq!(
+            ended.try_recv(),
+            Ok(FeedEnd::Refused("Thalvi was busy. Try again in a moment."))
+        );
+    }
+
+    /// What an engine answers to a request to stop for an update, whether it quits, and what the
+    /// request saved for the next start.
+    fn restart_answer(
+        paused: bool,
+        (held, fed): (bool, bool),
+        save_fails: bool,
+    ) -> (Stop, bool, Vec<bool>) {
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let (reply, mut answer) = oneshot::channel();
+        let restart = Restart::new(
+            {
+                let saved = Arc::clone(&saved);
+                move |paused| {
+                    saved.lock().unwrap().push(paused);
+                    if save_fails {
+                        Err("The restart note could not be saved.".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            reply,
+        );
+        let flow = answer_restart(restart, paused, held, fed);
+        let saved = saved.lock().unwrap().clone();
+        (
+            answer.try_recv().unwrap(),
+            matches!(flow, Flow::Quit),
+            saved,
+        )
+    }
+
+    #[test]
+    fn only_an_idle_engine_stops_for_an_update_after_saving_whether_it_was_paused() {
+        let refused = || Stop::Refused("The restart note could not be saved.".to_owned());
+        for (paused, held, fed, save_fails, answer, quits, saved) in [
+            (false, false, false, false, Stop::Stopped, true, vec![false]),
+            (true, false, false, false, Stop::Stopped, true, vec![true]),
+            (false, true, false, false, Stop::Busy, false, vec![]),
+            (true, false, true, false, Stop::Busy, false, vec![]),
+            (false, false, false, true, refused(), false, vec![false]),
+        ] {
+            assert_eq!(
+                restart_answer(paused, (held, fed), save_fails),
+                (answer, quits, saved),
+                "paused {paused}, held {held}, fed {fed}, save fails {save_fails}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_to_stop_for_an_update_during_a_capture_is_told_busy_and_ends_nothing() {
+        let (reply, mut answer) = oneshot::channel();
+        let mut requests = Requests::default();
+        let restart = Restart::new(|_| panic!("a busy engine saves nothing"), reply);
+        assert!(!requests.take(Some(Control::RestartIfIdle(restart))));
+        assert!(!requests.ended && !requests.quit);
+        assert_eq!(answer.try_recv(), Ok(Stop::Busy));
+    }
+
+    #[test]
     fn only_the_recordings_and_the_history_are_taken_without_rebuilding_the_engine() {
         let old = DesktopConfig::from_json_str("{}").unwrap();
         for (change, rebuilds) in [
             (r#"{"recordings": {"text": true}}"#, false),
+            (r#"{"update_channel": "development"}"#, false),
             (r#"{"history": {"enabled": false}}"#, false),
             (
                 r#"{"history": {"limit": 5}, "recordings": {"audio": true}}"#,
                 false,
             ),
+            // The wake switch is a retune: the model stays loaded and the microphone open.
+            (r#"{"wake": {"enabled": false}}"#, false),
+            (r#"{"wake": {"enabled": false}, "look": "neon"}"#, true),
+            (r#"{"wake": {"capture": {"model": "hey_jarvis"}}}"#, true),
             (r#"{"look": "neon"}"#, true),
             (r#"{"history": {"limit": 5}, "look": "neon"}"#, true),
         ] {
@@ -1741,6 +2286,8 @@ mod tests {
                         hold,
                         http: reqwest::Client::new(),
                         notice: publisher.notice_sink(),
+                        spotter: None,
+                        spotter_off: None,
                     },
                     &DesktopConfig::from_json_str("{}").unwrap(),
                     Recorder::disabled(),
@@ -1981,7 +2528,7 @@ mod tests {
         fn deliver(
             &self,
             _: &String,
-            _: &thalvi_desktop::host::TypedText,
+            _: &thalvi_desktop::host::PasteText,
             _: bool,
         ) -> Result<thalvi_desktop::host::Delivered, thalvi_desktop::host::HostError> {
             self.called("deliver");
@@ -2012,10 +2559,6 @@ mod tests {
         fn open_folder(&self, _: &std::path::Path) -> Result<(), thalvi_desktop::host::HostError> {
             self.called("open_folder");
             Ok(())
-        }
-
-        fn prepare_overlay(&self, _: f64, _: f64) -> Result<f64, thalvi_desktop::host::HostError> {
-            Ok(0.0)
         }
     }
 
@@ -2096,7 +2639,7 @@ mod tests {
             (
                 request(CaptureRoute::Paste, "hello world"),
                 false,
-                vec!["deliver", "copy"],
+                vec!["deliver"],
                 Outcome::Accepted,
                 Some("Editor"),
                 Some(DraftOutcome::Delivered),
@@ -2199,7 +2742,7 @@ mod tests {
         let failure = |notice: &str| Failure {
             kind: FailureKind::Other,
             notice: notice.to_owned(),
-            headline: "Nothing was typed",
+            headline: "Nothing was pasted",
             causes: vec!["cause".to_owned()],
         };
         let done = Mode::Done {
@@ -2271,9 +2814,41 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_switch_of_the_live_server_waits_for_the_end_of_the_running_capture() {
-        let running = DesktopConfig::from_json_str("{}").unwrap();
-        let switched = DesktopConfig::from_json_str(r#"{"stt": {"engine": "local"}}"#).unwrap();
+    async fn changed_writing_openings_wait_for_the_end_of_the_capture_and_then_rebuild_the_engine()
+    {
+        let with = |openings: &str| {
+            DesktopConfig::from_json_str(&format!(
+                r#"{{"writing": {{"url": "http://127.0.0.1:9/v1", "model": "m", "openings": {openings}}}}}"#
+            ))
+            .unwrap()
+        };
+        let running = with(r#"[{"phrase": "write me an email", "prompt": "Old."}]"#);
+        let changed = with(r#"[{"phrase": "write me an email", "prompt": "New."}]"#);
+        let (outcome, requests, started) = run(
+            vec![],
+            vec![Control::Apply(Box::new(changed.clone())), Control::Cancel],
+        )
+        .await;
+        assert!(started);
+        assert_eq!(outcome, Some("cancelled"));
+        assert_eq!(
+            requests.pending,
+            Some(changed.clone()),
+            "the capture goes on with the rules it started with"
+        );
+        assert!(!retunes_only(&running, &changed));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_switch_of_the_live_entry_waits_for_the_end_of_the_running_capture() {
+        let running = DesktopConfig::from_json_str(
+            r#"{"stt":{"entries":[{"kind":"on_device","id":"first","name":"First","active":true,"model":"nemotron_160ms"}]}}"#,
+        )
+        .unwrap();
+        let switched = DesktopConfig::from_json_str(
+            r#"{"stt":{"entries":[{"kind":"on_device","id":"second","name":"Second","active":true,"model":"unified_160ms"}]}}"#,
+        )
+        .unwrap();
         assert_ne!(
             running.stt.entries.active_live().id,
             switched.stt.entries.active_live().id
@@ -2489,5 +3064,80 @@ mod tests {
         drop(state_tx);
         drop(engine_level_tx);
         following.await.unwrap();
+    }
+    #[tokio::test]
+    async fn the_spotter_loader_reports_downloads_and_returns_the_model_or_a_notice() {
+        use thalvi_desktop::engine::fakes::FakeSpotter;
+        use thalvi_desktop::spotter::Unspeakable;
+
+        let assets = [
+            models::SPOTTER.encoder,
+            models::SPOTTER.decoder,
+            models::SPOTTER.joiner,
+            models::SPOTTER.pieces,
+        ];
+        for missing in [None, Some(0), Some(3)] {
+            let dir = std::env::temp_dir().join(format!(
+                "thalvi-spotter-load-{}-{missing:?}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            for (index, asset) in assets.iter().enumerate() {
+                if missing != Some(index) {
+                    std::fs::File::create(dir.join(asset.file_name))
+                        .unwrap()
+                        .set_len(asset.size)
+                        .unwrap();
+                }
+            }
+            let store = ModelStore::in_dir(&dir);
+            for fails in [false, true] {
+                let (out, status) = watch::channel(Status::Paused);
+                let publisher = Publisher::new(out, EndingPauses::default());
+                publisher.mode(Mode::Paused);
+                let recorder = Recorder::disabled();
+                let (spotter, notice) =
+                    load_spotter(&publisher, &Endings::default(), &store, &recorder, async {
+                        assert_eq!(
+                            *status.borrow(),
+                            if missing.is_some() {
+                                Status::Loading {
+                                    notice: SPOTTER_DOWNLOAD_NOTICE.to_owned(),
+                                    downloading: true,
+                                }
+                            } else {
+                                Status::Paused
+                            }
+                        );
+                        if fails {
+                            Err(SpotterError::Phrases(vec![Unspeakable {
+                                phrase: "f\u{fc}ge ein".to_owned(),
+                                characters: "\u{dc}".to_owned(),
+                            }]))
+                        } else {
+                            let (fake, _control) = FakeSpotter::new();
+                            Ok(Box::new(fake) as Box<dyn KeywordSpotter>)
+                        }
+                    })
+                    .await;
+                if fails {
+                    assert!(spotter.is_none());
+                    let notice = notice.unwrap();
+                    assert!(
+                        notice.contains("\"f\u{fc}ge ein\"")
+                            && notice.ends_with("Endings still work from the transcript."),
+                        "{notice}"
+                    );
+                } else {
+                    assert!(spotter.is_some() && notice.is_none());
+                }
+                if missing.is_some() {
+                    assert_eq!(title(&status.borrow()), "Thalvi: starting");
+                } else {
+                    assert_eq!(*status.borrow(), Status::Paused);
+                }
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 }

@@ -1,9 +1,11 @@
-//! Owns the log-mel features of the local speech models: incremental ones matching sherpa-onnx, and whole-buffer ones matching `NeMo`.
+//! Owns the log-mel features of the local models: incremental ones matching sherpa-onnx, and whole-buffer ones matching `NeMo`.
 //!
 //! [`LogMel`] matches kaldi-native-fbank as sherpa-onnx configures it for `NeMo` transducers: 25 ms
 //! Hann windows every 10 ms centred on their frame (reflected at the start), 0.97 pre-emphasis, a
-//! 512-point power spectrum and 128 Slaney mel bins up to 8 kHz. [`WindowMel`] matches `NeMo`'s own
-//! preprocessor, which the buffered model was trained with.
+//! 512-point power spectrum and 128 Slaney mel bins up to 8 kHz. [`KaldiFbank`] is the profile of
+//! the keyword spotter: it removes each frame's DC offset, uses a Povey window and 80 HTK mel bins
+//! from 20 Hz to 7.6 kHz. [`WindowMel`] matches `NeMo`'s own preprocessor, which the buffered model
+//! was trained with.
 
 use std::f32::consts::PI;
 use std::sync::Arc;
@@ -181,13 +183,42 @@ impl Tables {
     }
 }
 
+/// The samples of a stream that later frames still need.
+#[derive(Clone, Default)]
+struct Samples {
+    /// Samples not yet dropped; the first is sample number `offset` of the stream.
+    kept: Vec<f32>,
+    offset: usize,
+}
+
+impl Samples {
+    fn total(&self) -> usize {
+        self.offset + self.kept.len()
+    }
+
+    /// Sample `index`, reflected around the first sample as kaldi does before the stream starts.
+    fn at(&self, index: isize) -> f32 {
+        let mut index = index;
+        while index < 0 {
+            index = -index - 1;
+        }
+        let index = index.unsigned_abs().min(self.total() - 1);
+        self.kept[index - self.offset]
+    }
+
+    fn drop_before(&mut self, keep_from: usize) {
+        if keep_from > self.offset {
+            self.kept.drain(..keep_from - self.offset);
+            self.offset = keep_from;
+        }
+    }
+}
+
 /// Turns a stream of samples into log-mel frames as soon as each frame's window is complete.
 #[derive(Clone)]
 pub struct LogMel {
     tables: Arc<Tables>,
-    /// Samples not yet dropped; the first is sample number `offset` of the stream.
-    samples: Vec<f32>,
-    offset: usize,
+    samples: Samples,
     frames: usize,
 }
 
@@ -202,37 +233,22 @@ impl LogMel {
     pub fn new() -> Self {
         Self {
             tables: Tables::new(),
-            samples: Vec::new(),
-            offset: 0,
+            samples: Samples::default(),
             frames: 0,
         }
     }
 
     /// Adds 16 kHz samples scaled to -1..1 and appends every frame they complete to `out`.
     pub fn push(&mut self, samples: &[f32], out: &mut Vec<MelFrame>) {
-        self.samples.extend_from_slice(samples);
-        let total = self.offset + self.samples.len();
+        self.samples.kept.extend_from_slice(samples);
+        let total = self.samples.total();
         // Frame `n` is centred on sample `n * SHIFT + SHIFT / 2`.
         while (self.frames * SHIFT + SHIFT / 2 + WINDOW / 2) <= total {
             out.push(self.frame(self.frames));
             self.frames += 1;
         }
-        let keep_from = (self.frames * SHIFT + SHIFT / 2).saturating_sub(WINDOW / 2);
-        if keep_from > self.offset {
-            self.samples.drain(..keep_from - self.offset);
-            self.offset = keep_from;
-        }
-    }
-
-    fn sample(&self, index: isize) -> f32 {
-        let total = self.offset + self.samples.len();
-        let mut index = index;
-        // Reflect around the first sample, as kaldi does for the first frame.
-        while index < 0 {
-            index = -index - 1;
-        }
-        let index = index.unsigned_abs().min(total - 1);
-        self.samples[index - self.offset]
+        self.samples
+            .drop_before((self.frames * SHIFT + SHIFT / 2).saturating_sub(WINDOW / 2));
     }
 
     #[expect(
@@ -241,12 +257,145 @@ impl LogMel {
     )]
     fn frame(&self, number: usize) -> MelFrame {
         let start = (number * SHIFT + SHIFT / 2) as isize - (WINDOW / 2) as isize;
-        let mut wave: [f32; WINDOW] = std::array::from_fn(|i| self.sample(start + i as isize));
+        let mut wave: [f32; WINDOW] = std::array::from_fn(|i| self.samples.at(start + i as isize));
+        // The first sample is not emphasized: the window is zero there.
         for i in (1..WINDOW).rev() {
             wave[i] -= PRE_EMPHASIS * wave[i - 1];
         }
-        wave[0] -= PRE_EMPHASIS * wave[0];
         self.tables.mel(&wave, &self.tables.periodic, |energy| {
+            energy.max(f32::EPSILON).ln()
+        })
+    }
+}
+
+/// Mel bins per frame of the Kaldi profile.
+pub const KALDI_BINS: usize = 80;
+
+const KALDI_LOW_HZ: f32 = 20.0;
+const KALDI_HIGH_HZ: f32 = 7_600.0;
+
+/// One frame of the Kaldi profile's log-mel features.
+pub type KaldiFrame = [f32; KALDI_BINS];
+
+fn htk_mel(hz: f32) -> f32 {
+    1_127.0 * (1.0 + hz / 700.0).ln()
+}
+
+/// Triangular filters of the Kaldi profile, weighted in the mel domain over the 256 bins below Nyquist.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "bin and filter indices are far below 2^24"
+)]
+fn kaldi_filters() -> Vec<Filter> {
+    let bin_width = SAMPLE_RATE / FFT_SIZE as f32;
+    let (low, high) = (htk_mel(KALDI_LOW_HZ), htk_mel(KALDI_HIGH_HZ));
+    let delta = (high - low) / (KALDI_BINS + 1) as f32;
+    (0..KALDI_BINS)
+        .map(|bin| {
+            let edge = |step: usize| low + (bin + step) as f32 * delta;
+            let (left, center, right) = (edge(0), edge(1), edge(2));
+            let weights: Vec<(usize, f32)> = (0..FFT_SIZE / 2)
+                .filter_map(|index| {
+                    let mel = htk_mel(bin_width * index as f32);
+                    (mel > left && mel < right).then(|| {
+                        let weight = if mel <= center {
+                            (mel - left) / (center - left)
+                        } else {
+                            (right - mel) / (right - center)
+                        };
+                        (index, weight)
+                    })
+                })
+                .collect();
+            Filter {
+                first: weights.first().map_or(0, |(index, _)| *index),
+                weights: weights.into_iter().map(|(_, weight)| weight).collect(),
+            }
+        })
+        .collect()
+}
+
+struct KaldiTables {
+    window: [f32; WINDOW],
+    filters: Vec<Filter>,
+    fft: Fft,
+}
+
+/// Like [`LogMel`] with the Kaldi profile the keyword spotter was trained on.
+#[derive(Clone)]
+pub struct KaldiFbank {
+    tables: Arc<KaldiTables>,
+    samples: Samples,
+    frames: usize,
+}
+
+impl Default for KaldiFbank {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KaldiFbank {
+    #[must_use]
+    #[expect(clippy::cast_precision_loss, reason = "indices are far below 2^24")]
+    pub fn new() -> Self {
+        let window = std::array::from_fn(|i| {
+            (0.5 - 0.5 * (2.0 * PI * i as f32 / (WINDOW - 1) as f32).cos()).powf(0.85)
+        });
+        Self {
+            tables: Arc::new(KaldiTables {
+                window,
+                filters: kaldi_filters(),
+                fft: Fft::new(),
+            }),
+            samples: Samples::default(),
+            frames: 0,
+        }
+    }
+
+    /// Adds 16 kHz samples scaled to -1..1 and appends every frame they complete to `out`.
+    pub fn push(&mut self, samples: &[f32], out: &mut Vec<KaldiFrame>) {
+        self.samples.kept.extend_from_slice(samples);
+        let total = self.samples.total();
+        while (self.frames * SHIFT + SHIFT / 2 + WINDOW / 2) <= total {
+            out.push(self.frame(self.frames));
+            self.frames += 1;
+        }
+        self.samples
+            .drop_before((self.frames * SHIFT + SHIFT / 2).saturating_sub(WINDOW / 2));
+    }
+
+    #[expect(
+        clippy::cast_possible_wrap,
+        clippy::cast_precision_loss,
+        reason = "stream positions stay far below isize::MAX and window sizes below 2^24"
+    )]
+    fn frame(&self, number: usize) -> KaldiFrame {
+        let start = (number * SHIFT + SHIFT / 2) as isize - (WINDOW / 2) as isize;
+        let mut wave: [f32; WINDOW] = std::array::from_fn(|i| self.samples.at(start + i as isize));
+        let mean = wave.iter().sum::<f32>() / WINDOW as f32;
+        for value in &mut wave {
+            *value -= mean;
+        }
+        // The first sample is not emphasized: the window is zero there.
+        for i in (1..WINDOW).rev() {
+            wave[i] -= PRE_EMPHASIS * wave[i - 1];
+        }
+        let mut re = [0.0; FFT_SIZE];
+        let mut im = [0.0; FFT_SIZE];
+        for (i, (value, weight)) in wave.iter().zip(&self.tables.window).enumerate() {
+            re[i] = value * weight;
+        }
+        self.tables.fft.run(&mut re, &mut im);
+        let power: [f32; FFT_SIZE / 2] = std::array::from_fn(|i| re[i] * re[i] + im[i] * im[i]);
+        std::array::from_fn(|bin| {
+            let filter = &self.tables.filters[bin];
+            let energy: f32 = filter
+                .weights
+                .iter()
+                .zip(&power[filter.first..])
+                .map(|(weight, power)| weight * power)
+                .sum();
             energy.max(f32::EPSILON).ln()
         })
     }
@@ -364,6 +513,8 @@ mod tests {
         for size in chunks {
             mel.push(&samples[at..at + size], &mut out);
             at += size;
+            assert_eq!(out.len(), at.saturating_sub(120) / 160);
+            assert!(mel.samples.kept.len() < 400, "old audio is released");
         }
         out
     }
@@ -391,8 +542,10 @@ mod tests {
                 -5.5949,
             ),
         ];
-        for chunks in [vec![4000], vec![1280, 1280, 1280, 160]] {
+        let whole = features(&[4000]);
+        for chunks in [vec![4000], vec![1280, 1280, 1280, 160], vec![1; 4000]] {
             let frames = features(&chunks);
+            assert_eq!(frames, whole);
             assert_eq!(frames.len(), 24);
             for (number, head, sum, last) in expected {
                 let frame = &frames[number];
@@ -409,6 +562,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn samples_reflect_before_the_stream_repeat_its_last_and_release_what_is_dropped() {
+        let mut samples = Samples {
+            kept: vec![10.0, 11.0, 12.0, 13.0],
+            offset: 0,
+        };
+        for (index, want) in [
+            (-5, 13.0),
+            (-4, 13.0),
+            (-3, 12.0),
+            (-2, 11.0),
+            (-1, 10.0),
+            (0, 10.0),
+            (3, 13.0),
+            (9, 13.0),
+        ] {
+            assert_eq!(samples.at(index), want, "sample {index}");
+        }
+        samples.drop_before(2);
+        assert_eq!(
+            (samples.kept.as_slice(), samples.offset),
+            (&[12.0, 13.0][..], 2)
+        );
+        for (index, want) in [(2, 12.0), (3, 13.0), (9, 13.0)] {
+            assert_eq!(samples.at(index), want, "sample {index} after the drop");
+        }
+        samples.drop_before(1);
+        assert_eq!((samples.kept.len(), samples.offset), (2, 2));
+        assert_eq!(samples.total(), 4);
     }
 
     #[test]
@@ -476,5 +660,89 @@ mod tests {
         let frames = WindowMel::new().features(&[0.0; 3200]);
         assert_eq!(frames.len(), 20);
         assert!(frames.iter().flatten().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn a_zero_first_sample_does_not_hide_the_signal_later_in_a_window() {
+        let mut samples = [0.0; 440];
+        samples[240] = 0.5;
+        samples[241] = -0.5;
+        let mut signal = Vec::new();
+        LogMel::new().push(&samples, &mut signal);
+        assert!(signal.iter().flatten().all(|value| value.is_finite()));
+        assert!(signal[1].iter().any(|value| *value > f32::EPSILON.ln()));
+        let mut signal = Vec::new();
+        KaldiFbank::new().push(&samples, &mut signal);
+        let mut silence = Vec::new();
+        KaldiFbank::new().push(&[0.0; 440], &mut silence);
+        assert_eq!(signal.len(), 2);
+        assert!(signal.iter().flatten().all(|value| value.is_finite()));
+        assert!(
+            signal[1]
+                .iter()
+                .zip(&silence[1])
+                .any(|(heard, quiet)| heard > quiet)
+        );
+    }
+
+    #[test]
+    fn kaldi_frames_match_kaldi_native_fbank_however_the_samples_arrive() {
+        // Expected values come from kaldi-native-fbank's OnlineFbank with sherpa-onnx's keyword options.
+        let expected: [(usize, [f32; 6], f32, f32); 3] = [
+            (
+                0,
+                [-11.1924, -9.8937, -9.9471, -11.0002, -10.2933, -9.2331],
+                -312.9,
+                0.2234,
+            ),
+            (
+                1,
+                [-12.711, -12.8061, -10.4374, -10.1782, -10.1082, -9.4308],
+                -306.098,
+                0.675,
+            ),
+            (
+                5,
+                [-10.2306, -8.7779, -8.5133, -9.028, -8.5031, -7.6634],
+                -286.117,
+                -0.1698,
+            ),
+        ];
+        let samples = noise(4000);
+        let mut whole = Vec::new();
+        KaldiFbank::new().push(&samples, &mut whole);
+        assert!(
+            kaldi_filters()
+                .iter()
+                .flat_map(|filter| &filter.weights)
+                .all(|weight| (0.0..=1.0).contains(weight))
+        );
+        for chunks in [vec![4000], vec![1280, 1280, 1280, 160], vec![1; 4000]] {
+            let mut fbank = KaldiFbank::new();
+            let mut frames = Vec::new();
+            let mut at = 0;
+            for size in chunks {
+                fbank.push(&samples[at..at + size], &mut frames);
+                at += size;
+                assert_eq!(frames.len(), at.saturating_sub(120) / 160);
+                assert!(fbank.samples.kept.len() < 400, "old audio is released");
+            }
+            assert_eq!(frames, whole);
+            assert_eq!(frames.len(), 24);
+            for (number, head, sum, last) in expected {
+                let frame = &frames[number];
+                for (got, want) in frame.iter().zip(head) {
+                    assert!((got - want).abs() < 2e-3, "frame {number}: {got} vs {want}");
+                }
+                assert!(
+                    (frame.iter().sum::<f32>() - sum).abs() < 0.2,
+                    "frame {number} sum"
+                );
+                assert!(
+                    (frame[KALDI_BINS - 1] - last).abs() < 2e-3,
+                    "frame {number} last bin"
+                );
+            }
+        }
     }
 }

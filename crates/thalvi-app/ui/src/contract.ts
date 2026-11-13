@@ -1,6 +1,6 @@
 // The Rust app <-> UI contract; mirrors crates/thalvi-app/src/status.rs and the desktop config.
 
-export type Route = "paste" | "submit" | "task";
+export type Route = "paste" | "write" | "submit" | "task";
 
 /** What a failure stopped: only `delivery` means a capture's text did not reach its destination. */
 export type FailureKind = "delivery" | "other";
@@ -8,8 +8,16 @@ export type FailureKind = "delivery" | "other";
 export type Status =
   | { state: "paused" }
   | { state: "listening" }
+  | { state: "keyboardOnly" } // listening with wake words off: only the hold keys start a capture
   | { state: "starting"; target: string | null }
-  | { state: "capturing"; target: string | null; committed: string; partial: string | null }
+  | {
+      state: "capturing";
+      target: string | null;
+      committed: string;
+      partial: string | null;
+      /** Something to tell the user while the capture goes on; it holds no dictated words and goes with the next words. */
+      notice: string | null;
+    }
   | {
       state: "pending";
       target: string | null;
@@ -20,7 +28,10 @@ export type Status =
       /** The desktop can only copy dictation to the clipboard, so a paste or submit ending is a copy. */
       copies: boolean;
     }
+  | { state: "writing"; target: string | null; text: string } // the writing model is at work; text is what has come in so far; cancellable until the paste
+  | { state: "thinking"; target: string | null } // the writing model is reasoning and has written no text yet; cancellable
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
+  | { state: "transcribing"; target: string | null; route: Route; cancellable: boolean }
   | { state: "done"; target: string | null; route: Route; notice: string }
   | { state: "failed"; notice: string; headline: string; causes: string[]; kind: FailureKind } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report
   | { state: "loading"; notice: string }; // the speech model is being fetched or loaded
@@ -36,10 +47,14 @@ export interface AudioStatus {
   paused: boolean;
 }
 
-export type Ending = "paste" | "submit" | "task" | "scratch" | "cancel";
+export type Ending = "paste" | "write" | "submit" | "task" | "scratch" | "cancel";
 export type ScriptActionKind = "open_url" | "focus_app" | "discord_message";
 export type SecondaryApi = "openai" | "meta";
+/** How a live OpenAI-compatible entry sends each capture. */
+export type OpenAiRequest = "transcriptions" | "chat";
 export type Look = "gunmetal" | "holo" | "neon";
+/** Which builds Thalvi keeps itself updated to. */
+export type UpdateChannel = "stable" | "development";
 
 export interface HeadSettings {
   model: string;
@@ -65,17 +80,23 @@ export interface RealtimeEntry extends EntryBase {
   has_key?: boolean;
 }
 
-/** A Thalvi server's `/transcription` route; its recognizer key is held in the server's `.env`. */
-export interface ThalviServerEntry extends EntryBase {
-  kind: "thalvi_server";
-  address: string;
-}
-
 /** The speech model on this computer. */
 export interface OnDeviceEntry extends EntryBase {
   kind: "on_device";
   /** A catalog name or a model folder; its default when absent. */
   model?: string;
+}
+
+/** A buffered OpenAI-compatible transcription endpoint used for live dictation. */
+export interface OpenAiEntry extends EntryBase {
+  kind: "open_ai";
+  address: string;
+  model: string;
+  request: OpenAiRequest;
+  /** A two-letter ISO 639-1 code, or empty to let the server detect it. */
+  language: string;
+  api_key?: string;
+  has_key?: boolean;
 }
 
 /** An OpenAI or Meta transcription API that transcribes each accepted capture again. */
@@ -88,7 +109,23 @@ export interface SecondPassEntry extends EntryBase {
   has_key?: boolean;
 }
 
-export type LiveEntry = RealtimeEntry | ThalviServerEntry | OnDeviceEntry;
+/** A Writing prompt for dictations that begin with `phrase`, which the desktop stores normalized. */
+export interface WritingOpening {
+  phrase: string;
+  prompt: string;
+}
+
+export interface WritingSettings {
+  url: string;
+  model: string;
+  api_key?: string;
+  has_key?: boolean;
+  /** Set only when it differs from `Settings.writing_default_prompt`; Settings shows the prompt in effect. */
+  prompt?: string;
+  /** Absent when there are none. */
+  openings?: WritingOpening[];
+}
+export type LiveEntry = RealtimeEntry | OnDeviceEntry | OpenAiEntry;
 export type SpeechEntry = LiveEntry | SecondPassEntry;
 
 export interface AppSettings {
@@ -106,7 +143,8 @@ export interface ScriptSettings {
 
 /** The desktop config file with every field filled. */
 export interface Settings {
-  wake: { capture: HeadSettings; conversation: HeadSettings };
+  /** `enabled` is the Wake words switch: off, only the hold keys start a capture. */
+  wake: { capture: HeadSettings; conversation: HeadSettings; enabled: boolean };
   cues: { wake: boolean; provisional: boolean; cancelled: boolean; accepted: boolean; error: boolean };
   ending_pause: { paste: number; submit: number; task: number };
   capture_limits: { idle: number; max: number };
@@ -122,9 +160,16 @@ export interface Settings {
   overlay: { show: boolean; draft: boolean };
   microphone: string | null;
   look: Look;
+  update_channel: UpdateChannel;
   recordings: { metrics: boolean; text: boolean; audio: boolean };
   /** The key held to dictate, such as `Alt+KeyZ`; only Windows reads it. */
   hold_key: string;
+  /** The key held to dictate and have the words written out, such as `Alt+KeyX`; only Windows reads it. */
+  write_key: string;
+  /** The chat endpoint that writes dictation out; null until one is set up. */
+  writing: WritingSettings | null;
+  /** The writing prompt used until the user sets their own; read only. */
+  writing_default_prompt: string;
   /** Whether finished captures are kept on this computer, and how many. */
   history: { enabled: boolean; limit: number };
 }
@@ -191,6 +236,25 @@ export interface SpeechModelProgress {
   message: string | null;
 }
 
+/** What the update is doing; mirrors `Phase` in crates/thalvi-app/src/update.rs. */
+export type UpdatePhase =
+  | { state: "idle" } // no check has run yet
+  | { state: "checking" }
+  | { state: "upToDate" }
+  | { state: "downloading"; version: string; percent: number | null }
+  | { state: "ready"; version: string } // downloaded and verified; installs once Thalvi is idle
+  | { state: "installing"; version: string }
+  | { state: "failed"; message: string } // the installed version is as it was
+  | { state: "unsupported"; message: string }; // this install cannot update itself
+
+export interface UpdateState {
+  phase: UpdatePhase;
+  /** The release page of the version being fetched or waiting. */
+  notes: string | null;
+  /** What happened at this start, such as "Updated to 0.2.0." */
+  notice: string | null;
+}
+
 /** The Tauri commands and events, behind one interface so tests inject a fake. */
 export interface Backend {
   getStatus(): Promise<Status>;
@@ -198,16 +262,11 @@ export interface Backend {
   onLevel(listener: (level: number) => void): void;
   getAudio(): Promise<AudioStatus>;
   onAudio(listener: (audio: AudioStatus) => void): void;
-  /** Settings were saved, from any window. */
-  onSettingsSaved(listener: () => void): void;
   /** An agent changed the saved settings or a switch the window reads from the OS; the window's own saves never fire this. */
   onSettingsChangedElsewhere(listener: () => void): void;
   getSettings(): Promise<Settings>;
   saveSettings(settings: Settings): Promise<void>;
   setListening(on: boolean): Promise<void>;
-  cancelCapture(): Promise<void>;
-  /** Whether a click on the overlay reaches it; Hyprland gives a window that never takes focus no clicks. */
-  overlayTakesClicks(): Promise<boolean>;
   /** The user dismissed the latest error; the overlay stops showing it. */
   dismissError(): Promise<void>;
   /** Puts an error report for `message` on the clipboard; rejects with the plain reason it could not. */
@@ -230,6 +289,8 @@ export interface Backend {
   onOpenPage(listener: (page: string) => void): void;
   /** Why this desktop offers no hold key to dictate with, or null where it does. */
   getHoldKeyUnavailable(): Promise<string | null>;
+  /** The keys this desktop starts with, which Settings restores. */
+  getHoldKeyDefaults(): Promise<HoldKeyDefaults>;
   /** Whether the OS starts Thalvi at login, read from the OS, and why Thalvi could not put its entry back on start. */
   getStartAtLogin(): Promise<SwitchState>;
   /** Adds or removes the startup entry; rejects unless the OS then holds it as asked. */
@@ -243,8 +304,8 @@ export interface Backend {
   /** Resolves when the folder holds a speech model; rejects with the plain reason it does not. */
   validateSpeechModelFolder(path: string): Promise<void>;
   listWakeModels(): Promise<WakeModelInfo[]>;
-  /** Resolves when both wake choices can be used and differ; rejects with the plain reason they cannot. */
-  validateWakeModels(capture: string, conversation: string): Promise<void>;
+  /** Resolves when the dictation wake choice can be used; rejects with the plain reason it cannot. */
+  validateWakeModels(capture: string): Promise<void>;
   /** Resolves when the catalog wake head is on disk and verified; rejects with the plain reason it is not. */
   downloadWakeModel(name: string): Promise<void>;
   /** The `.onnx` file the user picked, or null when they cancelled. */
@@ -253,15 +314,27 @@ export interface Backend {
   /** Resolves when the model is on disk and verified; rejects with the plain reason it is not. */
   downloadSpeechModel(name: string): Promise<void>;
   onSpeechModelProgress(listener: (progress: SpeechModelProgress) => void): void;
+  /** Where the model runs, or will run when it loads, in plain words: the GPU, or the CPU and why. */
+  speechDevice(name: string): Promise<string>;
   /** Opens the model's page in the browser. */
   openSpeechModelSource(name: string): Promise<void>;
   /** Resolves when the entry's fields can be used; rejects with the plain reason they cannot. */
   checkSpeechEntry(entry: SpeechEntry): Promise<void>;
-  /** Whether the recognizer behind a live entry boosts a word list; rejects with the plain reason it can't tell. */
+  /** Whether a direct realtime recognizer boosts the word list. */
   wordListSupport(entry: LiveEntry): Promise<boolean>;
-  /** Saves the stored word list on the server; rejects with the plain reason it could not. */
-  shareWordList(): Promise<void>;
   appVersion(): Promise<string>;
+  getUpdateState(): Promise<UpdateState>;
+  onUpdate(listener: (state: UpdateState) => void): void;
+  /** Checks now, or joins the check that is running; the answer arrives as the update's state changes. */
+  checkForUpdates(): Promise<void>;
+  /** Opens the release page of the update being fetched or waiting; rejects with the plain reason it could not. */
+  openReleaseNotes(): Promise<void>;
+}
+
+/** The dictate and write keys a desktop starts with, named as in `Settings`. */
+export interface HoldKeyDefaults {
+  hold_key: string;
+  write_key: string;
 }
 
 /** An OS setting Thalvi can switch, or the reason it offers no switch and a line to do it by hand. */

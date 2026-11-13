@@ -37,6 +37,7 @@ h4 { margin: 16px 0 4px; font: 600 12px system-ui; color: var(--mut); text-trans
 .num, .slider, .stack { display: inline-flex; align-items: center; gap: 8px; }
 .stack { flex-direction: column; align-items: flex-end; }
 .stack.wide { width: 100%; align-items: stretch; }
+kbd.key { font: 13px var(--mono); }
 .unit, .val { font: 12px var(--mono); color: var(--mut); }
 .slider input { width: 150px; accent-color: var(--neon); }
 input[type="checkbox"] { appearance: none; width: 36px; height: 20px; margin: 0; border-radius: 10px; background: var(--line); position: relative; cursor: pointer; transition: background 0.15s; }
@@ -56,6 +57,8 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .trow.add { justify-content: flex-end; }
 .trow.add input { flex: 1; max-width: 16em; }
 .trow.add.word-add { justify-content: flex-start; }
+.trow.add.phrase-add { justify-content: flex-start; }
+.trow.add.phrase-add input { max-width: none; }
 .trow.check input { flex: 1; }
 .card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
 .card legend { font: 700 12px var(--mono); color: var(--neon); padding: 0 6px; }
@@ -68,6 +71,12 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .editor { display: flex; flex-direction: column; }
 .editor[hidden] { display: none; }
 .editor h4 { margin: 12px 0 0; }
+.table > .editor { margin-left: 1.5em; padding: 0 10px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+.next-dictation { margin: 6px 0; font-size: 13px; }
+.next-dictation:empty { display: none; }
+details.entry-details, details.model-details { font-size: 12px; color: var(--mut); }
+.trow.server details.entry-details { flex-basis: 100%; }
+details.entry-details summary, details.model-details summary { cursor: pointer; }
 textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .entries { display: flex; flex-direction: column; gap: 6px; max-height: 24em; overflow-y: auto; }
 .entry { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; }
@@ -84,11 +93,12 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
 .note.why { margin: 4px 0 0; color: var(--amber); }
 .empty { color: var(--mut); }
 
-.bar { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 10px 22px; border-top: 1px solid var(--line); background: var(--surf); }
+.bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; padding: 10px 22px; border-top: 1px solid var(--line); background: var(--surf); }
 .msg { flex: 1; color: var(--mut); font-size: 12px; }
+.msg:empty { display: none; }
 .err { flex: 1; color: var(--warn); font-size: 12px; text-align: right; }
 .err:empty { display: none; }
-.msg:has(+ .err:not(:empty)) { display: none; }
+.msg:has(+ .err:not(:empty)) { flex: 1 0 100%; }
 
 .models { display: flex; flex-direction: column; gap: 6px; }
 .stack.wide > select { width: 100%; min-width: 0; }
@@ -114,8 +124,7 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
   .app > nav, #settings[data-look] .app > nav { width: auto; max-height: 40%; padding: 8px 10px; border-right: 0; border-bottom: 1px solid var(--line); }
   .items { flex-direction: row; flex-wrap: wrap; }
   .pages { padding: 14px 10px; }
-  .bar { flex-wrap: wrap; padding-inline: 10px; }
-  .msg:empty { display: none; }
+  .bar { padding-inline: 10px; }
   .bar .msg, #settings[data-look] .bar .err { flex: 1 0 100%; max-height: 6.5em; overflow-y: auto; overflow-wrap: anywhere; text-align: left; }
   .row { flex-direction: column; align-items: stretch; gap: 8px; }
   .what { max-width: none; }
@@ -130,6 +139,9 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
   .table .trow:not(.add) { flex-wrap: wrap; }
   .table .trow:not(.add) .phrase { flex-basis: 100%; }
   .table .trow:not(.add) select { flex: 1; }
+  .trow.add.phrase-add { flex-wrap: wrap; }
+  .trow.add.phrase-add input { flex-basis: 100%; }
+  .trow.add.phrase-add select { flex: 1; }
 }
 
 @media (max-width: 360px) {

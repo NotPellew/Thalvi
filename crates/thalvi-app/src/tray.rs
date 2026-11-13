@@ -1,5 +1,7 @@
 //! The tray icon: one drawn shape per state, a title without dictated text, and the menu texts.
 
+use std::sync::{Mutex, PoisonError};
+
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -7,6 +9,7 @@ use tauri::{AppHandle, Wry};
 use thalvi_desktop::capture::CaptureRoute;
 
 use crate::status::Status;
+use crate::update::Snapshot;
 
 const SIZE: u8 = 32;
 
@@ -16,15 +19,18 @@ const SAMPLES: u8 = 4;
 pub const TOGGLE: &str = "toggle";
 pub const CANCEL: &str = "cancel";
 pub const COPY_ERROR: &str = "copy-error";
+pub const UPDATE: &str = "update";
 pub const LAST_DICTATION: &str = "last-dictation";
 pub const SETTINGS: &str = "settings";
 pub const QUIT: &str = "quit";
 
-/// The six looks of the tray icon.
+/// The seven looks of the tray icon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
     Paused,
     Listening,
+    /// Listening with the wake word off: only the hold keys start a capture.
+    Keyboard,
     /// The wake word was heard or words are being taken.
     Capturing,
     Pending,
@@ -38,9 +44,14 @@ impl Icon {
         match status {
             Status::Paused => Self::Paused,
             Status::Listening | Status::Done { .. } => Self::Listening,
+            Status::KeyboardOnly => Self::Keyboard,
             Status::Starting { .. } | Status::Capturing { .. } => Self::Capturing,
             Status::Pending { .. } => Self::Pending,
-            Status::Working { .. } | Status::Loading { .. } => Self::Working,
+            Status::Working { .. }
+            | Status::Transcribing { .. }
+            | Status::Writing { .. }
+            | Status::Thinking { .. }
+            | Status::Loading { .. } => Self::Working,
             Status::Failed { .. } => Self::Error,
         }
     }
@@ -54,6 +65,7 @@ impl Icon {
         let (shape, color): (fn(f32, f32) -> bool, [u8; 3]) = match self {
             Self::Paused => (paused, [160, 160, 172]),
             Self::Listening => (listening, [34, 197, 94]),
+            Self::Keyboard => (keyboard, [20, 184, 166]),
             Self::Capturing => (capturing, [239, 68, 68]),
             Self::Pending => (pending, [245, 158, 11]),
             Self::Working => (working, [59, 130, 246]),
@@ -95,6 +107,14 @@ fn listening(x: f32, y: f32) -> bool {
     (8.0..=12.0).contains(&distance(x, y, 16.0, 16.0))
 }
 
+/// A keyboard: an outline with a space bar.
+fn keyboard(x: f32, y: f32) -> bool {
+    let frame = (4.0..=28.0).contains(&x) && (9.0..=23.0).contains(&y);
+    let inside = (6.0..=26.0).contains(&x) && (11.0..=21.0).contains(&y);
+    let space = (10.0..=22.0).contains(&x) && (16.0..=18.0).contains(&y);
+    (frame && !inside) || space
+}
+
 fn capturing(x: f32, y: f32) -> bool {
     distance(x, y, 16.0, 16.0) <= 11.0
 }
@@ -131,6 +151,7 @@ pub fn title(status: &Status) -> String {
     let state = match status {
         Status::Paused => "paused".to_owned(),
         Status::Listening | Status::Done { .. } => "listening".to_owned(),
+        Status::KeyboardOnly => "listening (hold keys only)".to_owned(),
         Status::Starting { .. } | Status::Capturing { .. } => "capturing".to_owned(),
         Status::Pending {
             route, pause_ms, ..
@@ -138,12 +159,16 @@ pub fn title(status: &Status) -> String {
             "{} pending, {} s",
             match route {
                 CaptureRoute::Paste => "paste",
+                CaptureRoute::Write => "write",
                 CaptureRoute::Submit => "submit",
                 CaptureRoute::Task => "task",
             },
             seconds(*pause_ms)
         ),
         Status::Working { .. } => "working".to_owned(),
+        Status::Transcribing { .. } => "transcribing".to_owned(),
+        Status::Writing { .. } => "writing".to_owned(),
+        Status::Thinking { .. } => "thinking".to_owned(),
         Status::Loading { .. } => "starting".to_owned(),
         Status::Failed { .. } => "something went wrong".to_owned(),
     };
@@ -168,7 +193,13 @@ pub fn can_cancel(status: &Status) -> bool {
         Status::Starting { .. }
             | Status::Capturing { .. }
             | Status::Pending { .. }
+            | Status::Writing { .. }
+            | Status::Thinking { .. }
             | Status::Working {
+                cancellable: true,
+                ..
+            }
+            | Status::Transcribing {
                 cancellable: true,
                 ..
             }
@@ -207,13 +238,30 @@ pub struct Tray {
     toggle: MenuItem<Wry>,
     cancel: MenuItem<Wry>,
     copy_error: MenuItem<Wry>,
+    /// The update's state in words; clicking it checks for an update or opens the App page.
+    update: MenuItem<Wry>,
+    /// The state in words and the update's news, which the header and the tooltip put together.
+    said: Mutex<(String, Option<String>)>,
+}
+
+/// The state in words, with the update's news after it when there is some.
+fn headline(title: &str, remark: Option<&str>) -> String {
+    remark.map_or_else(|| title.to_owned(), |remark| format!("{title} — {remark}"))
 }
 
 impl Tray {
     /// # Errors
     /// Fails when the tray icon or its menu cannot be created.
-    pub fn new(app: &AppHandle, status: &Status, paused: bool) -> tauri::Result<Self> {
-        let header = MenuItem::with_id(app, "state", title(status), false, None::<&str>)?;
+    pub fn new(
+        app: &AppHandle,
+        status: &Status,
+        paused: bool,
+        updates: &Snapshot,
+    ) -> tauri::Result<Self> {
+        let remark = updates.remark();
+        let said = headline(&title(status), remark.as_deref());
+        let header = MenuItem::with_id(app, "state", &said, false, None::<&str>)?;
+        let update = MenuItem::with_id(app, UPDATE, updates.tray().0, true, None::<&str>)?;
         let toggle = MenuItem::with_id(app, TOGGLE, toggle_text(paused), true, None::<&str>)?;
         let cancel = MenuItem::with_id(
             app,
@@ -240,6 +288,7 @@ impl Tray {
                 &cancel,
                 &copy_error,
                 &last,
+                &update,
                 &settings,
                 &quit,
             ],
@@ -250,7 +299,7 @@ impl Tray {
                 u32::from(SIZE),
                 u32::from(SIZE),
             ))
-            .tooltip(title(status))
+            .tooltip(&said)
             .menu(&menu)
             .on_menu_event(|app, event| crate::app::on_menu(app, event.id().as_ref()))
             .build(app)?;
@@ -260,7 +309,22 @@ impl Tray {
             toggle,
             cancel,
             copy_error,
+            update,
+            said: Mutex::new((title(status), remark)),
         })
+    }
+
+    fn say(&self) {
+        let said = self.said.lock().unwrap_or_else(PoisonError::into_inner);
+        let text = headline(&said.0, said.1.as_deref());
+        let _ = self.icon.set_tooltip(Some(&text));
+        let _ = self.header.set_text(text);
+    }
+
+    pub fn update(&self, updates: &Snapshot) {
+        let _ = self.update.set_text(updates.tray().0);
+        self.said.lock().unwrap_or_else(PoisonError::into_inner).1 = updates.remark();
+        self.say();
     }
 
     pub fn listening(&self, paused: bool) {
@@ -269,8 +333,8 @@ impl Tray {
 
     pub fn show(&self, status: &Status) {
         let _ = self.icon.set_icon(Some(Icon::of(status).image()));
-        let _ = self.icon.set_tooltip(Some(title(status)));
-        let _ = self.header.set_text(title(status));
+        self.said.lock().unwrap_or_else(PoisonError::into_inner).0 = title(status);
+        self.say();
         let _ = self.cancel.set_enabled(can_cancel(status));
         if matches!(status, Status::Failed { .. }) {
             self.copy_item(&CopyItem::Ready);
@@ -303,10 +367,16 @@ mod tests {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "one row per status")]
     fn all() -> Vec<(Status, Icon, &'static str)> {
         vec![
             (Status::Paused, Icon::Paused, "Thalvi: paused"),
             (Status::Listening, Icon::Listening, "Thalvi: listening"),
+            (
+                Status::KeyboardOnly,
+                Icon::Keyboard,
+                "Thalvi: listening (hold keys only)",
+            ),
             (
                 Status::Starting {
                     target: Some(kitty()),
@@ -319,6 +389,7 @@ mod tests {
                     target: Some(kitty()),
                     committed: "secret words".to_owned(),
                     partial: Some("more".to_owned()),
+                    notice: None,
                 },
                 Icon::Capturing,
                 "Thalvi: capturing",
@@ -337,6 +408,24 @@ mod tests {
                 pending_status(CaptureRoute::Task, 3000),
                 Icon::Pending,
                 "Thalvi: task pending, 3 s",
+            ),
+            (
+                pending_status(CaptureRoute::Write, 700),
+                Icon::Pending,
+                "Thalvi: write pending, 0.7 s",
+            ),
+            (
+                Status::Writing {
+                    target: Some(kitty()),
+                    text: "secret words".to_owned(),
+                },
+                Icon::Working,
+                "Thalvi: writing",
+            ),
+            (
+                Status::Thinking { target: None },
+                Icon::Working,
+                "Thalvi: thinking",
             ),
             (
                 Status::Working {
@@ -396,10 +485,34 @@ mod tests {
     }
 
     #[test]
-    fn the_six_icons_are_distinct_shapes_of_the_right_size() {
+    fn the_keyboard_icon_is_an_outline_with_a_space_bar() {
+        // (x, y, drawn)
+        for (x, y, drawn) in [
+            (5.0, 15.0, true),
+            (27.0, 15.0, true),
+            (15.0, 10.0, true),
+            (15.0, 22.0, true),
+            (15.0, 17.0, true),
+            (15.0, 13.0, false),
+            (15.0, 19.5, false),
+            (2.0, 15.0, false),
+            (30.0, 15.0, false),
+            (15.0, 5.0, false),
+            (15.0, 30.0, false),
+            (2.0, 17.0, false),
+            (5.0, 30.0, false),
+            (2.0, 2.0, false),
+        ] {
+            assert_eq!(keyboard(x, y), drawn, "({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn the_seven_icons_are_distinct_shapes_of_the_right_size() {
         let icons = [
             Icon::Paused,
             Icon::Listening,
+            Icon::Keyboard,
             Icon::Capturing,
             Icon::Pending,
             Icon::Working,
@@ -431,6 +544,19 @@ mod tests {
     }
 
     #[test]
+    fn the_header_and_tooltip_carry_the_updates_news_after_the_state() {
+        for (remark, expected) in [
+            (None, "Thalvi: listening"),
+            (
+                Some("updated to 0.2.0"),
+                "Thalvi: listening — updated to 0.2.0",
+            ),
+        ] {
+            assert_eq!(headline("Thalvi: listening", remark), expected);
+        }
+    }
+
+    #[test]
     fn the_menu_offers_the_opposite_of_the_current_listening_intent() {
         for (paused, expected) in [(true, "Resume listening"), (false, "Pause listening")] {
             assert_eq!(toggle_text(paused), expected);
@@ -454,6 +580,19 @@ mod tests {
                 true,
             ),
             (pending_status(CaptureRoute::Paste, 700), true),
+            (
+                Status::Writing {
+                    target: Some(kitty()),
+                    text: String::new(),
+                },
+                true,
+            ),
+            (
+                Status::Thinking {
+                    target: Some(kitty()),
+                },
+                true,
+            ),
             (working(true), true),
             (working(false), false),
             (

@@ -1,6 +1,7 @@
 //! Model catalogs (wake heads, speech recognition) and their checksum-verified download into the per-user data directory.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -9,6 +10,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::device::{Device, Export};
 use crate::report::UserError;
 
 /// The most a download may take besides moving its bytes.
@@ -25,6 +27,7 @@ static DOWNLOADS: AtomicU64 = AtomicU64::new(0);
 pub enum ModelKind {
     Wake,
     Speech,
+    Spotter,
 }
 
 impl ModelKind {
@@ -32,6 +35,7 @@ impl ModelKind {
         match self {
             Self::Wake => "wake model",
             Self::Speech => "speech model",
+            Self::Spotter => "ending phrase model",
         }
     }
 }
@@ -62,6 +66,50 @@ pub const EMBEDDING: Asset<'static> = Asset {
     url: "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx",
     size: 1_326_578,
     sha256: "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f",
+};
+
+/// The files of the ending phrase spotter: sherpa-onnx's streaming Zipformer keyword model trained
+/// on `GigaSpeech` (Apache-2.0), 2024-01-01. Each file is byte-identical to its member of the
+/// official `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2` and is fetched from the
+/// model author's `ModelScope` repository, which holds them apart from test audio.
+#[derive(Debug, Clone, Copy)]
+pub struct SpotterAssets<'a> {
+    pub encoder: Asset<'a>,
+    pub decoder: Asset<'a>,
+    pub joiner: Asset<'a>,
+    /// The `SentencePiece` model whose piece numbers are the model's token numbers.
+    pub pieces: Asset<'a>,
+}
+
+pub const SPOTTER: SpotterAssets<'static> = SpotterAssets {
+    encoder: Asset {
+        kind: ModelKind::Spotter,
+        file_name: "kws_gigaspeech_3m.encoder.int8.onnx",
+        url: "https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/resolve/master/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+        size: 4_807_159,
+        sha256: "1e721676515bcd42a186979733981213c66c80db680e1cc582dfedf3be76e678",
+    },
+    decoder: Asset {
+        kind: ModelKind::Spotter,
+        file_name: "kws_gigaspeech_3m.decoder.onnx",
+        url: "https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/resolve/master/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+        size: 1_063_189,
+        sha256: "f61ebd3eed3773a44d088d53dfae92dbb6aec4839f4dcaee2d402414741663a3",
+    },
+    joiner: Asset {
+        kind: ModelKind::Spotter,
+        file_name: "kws_gigaspeech_3m.joiner.int8.onnx",
+        url: "https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/resolve/master/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+        size: 163_380,
+        sha256: "eae9da0c7e1e6c6a3f4cc42d167899c388f6c6701b94cb96320e4f55df79624c",
+    },
+    pieces: Asset {
+        kind: ModelKind::Spotter,
+        file_name: "kws_gigaspeech_3m.bpe.model",
+        url: "https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/resolve/master/bpe.model",
+        size: 244_837,
+        sha256: "c8a2a0129c4ab8e463164c142f82d25649661b122c8cd0b7aab5c9e80b90ad24",
+    },
 };
 
 /// A wake head that ships in the catalog and is chosen by name.
@@ -159,26 +207,33 @@ pub struct WakeModelInfo {
 pub enum CatalogSpeech {
     Nemotron160ms,
     Unified160ms,
+    ParakeetTdtV3,
 }
 
 /// A catalog model's files, which a model folder must also contain under these names.
 #[derive(Debug, Clone, Copy)]
 pub struct SpeechAssets<'a> {
     pub encoder: Asset<'a>,
+    /// A file the encoder names in its own bytes and finds beside itself.
+    pub encoder_data: Option<Asset<'a>>,
     pub decoder: Asset<'a>,
     pub joiner: Asset<'a>,
     pub tokens: Asset<'a>,
 }
 
 impl<'a> SpeechAssets<'a> {
-    fn all(&self) -> [Asset<'a>; 4] {
-        [self.encoder, self.decoder, self.joiner, self.tokens]
+    fn all(&self) -> impl Iterator<Item = Asset<'a>> {
+        [self.encoder].into_iter().chain(self.encoder_data).chain([
+            self.decoder,
+            self.joiner,
+            self.tokens,
+        ])
     }
 
     /// The bytes of all files together.
     #[must_use]
     pub fn size(&self) -> u64 {
-        self.all().iter().map(|asset| asset.size).sum()
+        self.all().map(|asset| asset.size).sum()
     }
 }
 
@@ -217,6 +272,7 @@ macro_rules! speech_assets {
     ($model:literal, $base:literal, $encoder:tt, $decoder:tt, $joiner:tt, $tokens:tt) => {
         SpeechAssets {
             encoder: speech_assets!(@file $model, $base, "encoder.int8.onnx", $encoder),
+            encoder_data: None,
             decoder: speech_assets!(@file $model, $base, "decoder.int8.onnx", $decoder),
             joiner: speech_assets!(@file $model, $base, "joiner.int8.onnx", $joiner),
             tokens: speech_assets!(@file $model, $base, "tokens.txt", $tokens),
@@ -227,8 +283,8 @@ macro_rules! speech_assets {
     };
 }
 
-/// The languages on NVIDIA's card for the unified model.
-const UNIFIED_LANGUAGES: [&str; 25] = [
+/// The languages on NVIDIA's cards for the unified and Parakeet models.
+const EUROPEAN_LANGUAGES: [&str; 25] = [
     "Bulgarian",
     "Croatian",
     "Czech",
@@ -257,7 +313,7 @@ const UNIFIED_LANGUAGES: [&str; 25] = [
 ];
 
 impl CatalogSpeech {
-    pub const ALL: [Self; 2] = [Self::Nemotron160ms, Self::Unified160ms];
+    pub const ALL: [Self; 3] = [Self::Nemotron160ms, Self::Unified160ms, Self::ParakeetTdtV3];
 
     /// The catalog model called `name` in config.
     #[must_use]
@@ -270,6 +326,7 @@ impl CatalogSpeech {
         match self {
             Self::Nemotron160ms => "Nemotron Streaming",
             Self::Unified160ms => "Nemotron Unified",
+            Self::ParakeetTdtV3 => "Parakeet TDT",
         }
     }
 
@@ -280,7 +337,10 @@ impl CatalogSpeech {
                 "From NVIDIA: the lightest on the CPU, and text appears soonest. Mostly without punctuation. The default."
             }
             Self::Unified160ms => {
-                "From NVIDIA: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it needs a fast CPU and text appears about half a second later. Exported by Thalvi."
+                "From NVIDIA: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it runs on a discrete GPU on Linux, and otherwise needs a fast CPU. Text appears about half a second later. Exported by Thalvi."
+            }
+            Self::ParakeetTdtV3 => {
+                "From NVIDIA: light on the CPU, with punctuation and capitals. Text may change while you speak and settles when you pause. More word errors than Nemotron Unified in German and Spanish."
             }
         }
     }
@@ -291,6 +351,7 @@ impl CatalogSpeech {
         match self {
             Self::Nemotron160ms => "NVIDIA Open Model License",
             Self::Unified160ms => "OpenMDW-1.1",
+            Self::ParakeetTdtV3 => "CC BY 4.0",
         }
     }
 
@@ -299,7 +360,7 @@ impl CatalogSpeech {
     pub fn languages(self) -> &'static [&'static str] {
         match self {
             Self::Nemotron160ms => &["English"],
-            Self::Unified160ms => &UNIFIED_LANGUAGES,
+            Self::Unified160ms | Self::ParakeetTdtV3 => &EUROPEAN_LANGUAGES,
         }
     }
 
@@ -311,6 +372,7 @@ impl CatalogSpeech {
                 "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25"
             }
             Self::Unified160ms => "https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b",
+            Self::ParakeetTdtV3 => "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
         }
     }
 
@@ -320,13 +382,14 @@ impl CatalogSpeech {
         match self {
             Self::Nemotron160ms => "nemotron_160ms",
             Self::Unified160ms => "unified_160ms",
+            Self::ParakeetTdtV3 => "parakeet_tdt_v3",
         }
     }
 
-    /// The downloads that provide this model, each pinned by size and checksum. The Nemotron
-    /// Speech Streaming ones (NVIDIA Open Model License) are sherpa-onnx's int8 exports, pinned by
-    /// repository commit; Nemotron Unified ASR (OpenMDW-1.1) is Thalvi's own export, which is not
-    /// published anywhere else.
+    /// The downloads that provide this model, each pinned by size and checksum. Nemotron Speech
+    /// Streaming (NVIDIA Open Model License) and Parakeet TDT (CC BY 4.0) are sherpa-onnx's int8
+    /// exports, pinned by repository commit; Nemotron Unified ASR (OpenMDW-1.1) is Thalvi's own
+    /// export, which is not published anywhere else.
     #[must_use]
     pub fn assets(self) -> SpeechAssets<'static> {
         match self {
@@ -370,7 +433,97 @@ impl CatalogSpeech {
                     "94139a0b2134fd40664ca72260026fa8a073336bb2f062239c8ecde2c8031763"
                 )
             ),
+            Self::ParakeetTdtV3 => speech_assets!(
+                "parakeet_tdt_v3",
+                "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/ed5d745623472f97cfc2e6c2916ee248798fc5a8/",
+                (
+                    652_282_294,
+                    "1afbe69c1ffdabee94755f42e4daf1d93549131a3da11356bda84fcef0f2c479"
+                ),
+                (
+                    11_845_274,
+                    "0222a86147299d4dee90edf95b6d13827edb42ad8b7c9cf0b2582f030937c0b5"
+                ),
+                (
+                    6_355_277,
+                    "cbd02f3696e9944970111fb439d9c3fd365a80374565f13f2b9c7007d253fc98"
+                ),
+                (
+                    93_939,
+                    "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
+                )
+            ),
         }
+    }
+}
+
+impl CatalogSpeech {
+    /// Whether a discrete GPU runs this model faster than the CPU (measured on an RTX 5070 Ti; Nemotron
+    /// Streaming and Parakeet TDT were no faster on any GPU).
+    #[must_use]
+    pub fn uses_gpu(self) -> bool {
+        self.gpu_assets().is_some()
+    }
+
+    /// The fp16 export that a GPU runs, kept in a folder of its own so the encoder finds its data file by the
+    /// name written in it. The tokens are the CPU files'. Exported by `speech/asr/export_unified_onnx.py --fp16`.
+    #[must_use]
+    pub fn gpu_assets(self) -> Option<SpeechAssets<'static>> {
+        let Self::Unified160ms = self else {
+            return None;
+        };
+        let file = |file_name, url, size, sha256| Asset {
+            kind: ModelKind::Speech,
+            file_name,
+            url,
+            size,
+            sha256,
+        };
+        Some(SpeechAssets {
+            encoder: file(
+                "unified_160ms.gpu/encoder.fp16.onnx",
+                "https://github.com/NotPellew/Thalvi/releases/download/speech-models-v2/encoder.fp16.onnx",
+                8_431_807,
+                "9a1cb2d08269264c7c6de0f2597c154c0607f7a30d94b97cc63020f721eee135",
+            ),
+            encoder_data: Some(file(
+                "unified_160ms.gpu/encoder.fp16.onnx.data",
+                "https://github.com/NotPellew/Thalvi/releases/download/speech-models-v2/encoder.fp16.onnx.data",
+                1_227_462_144,
+                "4961c570bf80837a1de4289e1673bb465c754961c57ec87b414f349f3fd5a492",
+            )),
+            decoder: file(
+                "unified_160ms.gpu/decoder.fp32.onnx",
+                "https://github.com/NotPellew/Thalvi/releases/download/speech-models-v2/decoder.fp32.onnx",
+                36_745_424,
+                "ad0af5918cae8d29b5fce9c9105bb932d5530f527c5c5b314532df8b21b23fdd",
+            ),
+            joiner: file(
+                "unified_160ms.gpu/joiner.fp32.onnx",
+                "https://github.com/NotPellew/Thalvi/releases/download/speech-models-v2/joiner.fp32.onnx",
+                14_768_803,
+                "955c2b24e16edcf9489c03141fa22c020626c1e1d566150da4113767c903917b",
+            ),
+            tokens: self.assets().tokens,
+        })
+    }
+
+    /// The files of `export`; a model without a GPU export has only the int8 files.
+    #[must_use]
+    pub fn assets_of(self, export: Export) -> SpeechAssets<'static> {
+        match export {
+            Export::Gpu => self.gpu_assets().unwrap_or_else(|| self.assets()),
+            Export::Cpu => self.assets(),
+        }
+    }
+
+    /// The files `device` loads: the GPU export on a GPU, the int8 files otherwise.
+    #[must_use]
+    pub fn assets_on(self, device: &Device) -> SpeechAssets<'static> {
+        self.assets_of(match device {
+            Device::Gpu(_) => Export::Gpu,
+            Device::Cpu(_) => Export::Cpu,
+        })
     }
 }
 
@@ -448,6 +601,12 @@ impl ModelStore {
         Self { dir: dir.into() }
     }
 
+    /// Where `asset` is or would be stored; the file is not checked.
+    #[must_use]
+    pub fn path(&self, asset: &Asset<'_>) -> PathBuf {
+        self.dir.join(asset.file_name)
+    }
+
     /// Returns the path of the verified file, downloading it first if it is missing. A stored file
     /// that does not match its checksum is deleted before anything else.
     ///
@@ -511,13 +670,16 @@ impl ModelStore {
             file: asset.file_name.to_owned(),
             source,
         };
-        tokio::fs::create_dir_all(&self.dir).await.map_err(io)?;
+        tokio::fs::create_dir_all(path.parent().unwrap_or(&self.dir))
+            .await
+            .map_err(io)?;
         let part = Partial(path.with_extension(format!(
             "{}-{}.part",
             std::process::id(),
             DOWNLOADS.fetch_add(1, Ordering::Relaxed)
         )));
         let mut response = reqwest::Client::builder()
+            .user_agent(concat!("thalvi/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
             .timeout(DOWNLOAD_BASE + Duration::from_secs(asset.size / SLOWEST_BYTES_PER_SECOND))
             .build()
@@ -605,11 +767,15 @@ impl ModelStore {
         models
     }
 
-    /// The catalog models with whether each is already downloaded.
-    pub async fn speech_models(&self) -> Vec<SpeechModelInfo> {
+    /// The catalog models with whether each is already downloaded; the files counted are those `device`
+    /// says the model loads.
+    pub async fn speech_models(
+        &self,
+        device: impl Fn(CatalogSpeech) -> Device,
+    ) -> Vec<SpeechModelInfo> {
         let mut models = Vec::new();
         for model in CatalogSpeech::ALL {
-            let assets = model.assets();
+            let assets = model.assets_on(&device(model));
             models.push(SpeechModelInfo {
                 name: model.name(),
                 title: model.title(),
@@ -650,9 +816,9 @@ impl ModelStore {
             if !matches!(stored(&path, &asset).await, Stored::Intact) {
                 self.fetch_reporting(&asset, |bytes| report(done + bytes))
                     .await?;
+                report(done + asset.size);
             }
             done += asset.size;
-            report(done);
         }
         progress(SpeechProgress::Done);
         Ok(())
@@ -670,13 +836,22 @@ pub enum SpeechProgress {
     Done,
 }
 
-/// The speech models being downloaded now, so a model is never fetched twice at once.
+/// The speech models being downloaded now and how far each is, so a model is never fetched twice at once.
 #[derive(Debug, Default)]
 pub struct SpeechDownloads {
-    running: Mutex<HashSet<String>>,
+    running: Mutex<HashMap<String, SpeechProgress>>,
 }
 
 impl SpeechDownloads {
+    /// How far the download of the model called `name` is, if one is running.
+    pub fn progress(&self, name: &str) -> Option<SpeechProgress> {
+        self.running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .copied()
+    }
+
     /// Runs [`ModelStore::fetch_speech`] for the model called `name` unless it is already running.
     ///
     /// # Errors
@@ -686,28 +861,39 @@ impl SpeechDownloads {
         name: &str,
         store: &ModelStore,
         assets: &SpeechAssets<'_>,
-        progress: impl FnMut(SpeechProgress),
+        mut progress: impl FnMut(SpeechProgress),
     ) -> Result<(), ModelError> {
-        if !self
+        match self
             .running
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(name.to_owned())
+            .entry(name.to_owned())
         {
-            return Err(ModelError::AlreadyDownloading {
-                name: name.to_owned(),
-            });
-        }
+            Entry::Occupied(_) => {
+                return Err(ModelError::AlreadyDownloading {
+                    name: name.to_owned(),
+                });
+            }
+            Entry::Vacant(slot) => slot.insert(SpeechProgress::Verifying),
+        };
         let _release = Release {
             running: &self.running,
             name,
         };
-        store.fetch_speech(assets, progress).await
+        store
+            .fetch_speech(assets, |event| {
+                self.running
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(name.to_owned(), event);
+                progress(event);
+            })
+            .await
     }
 }
 
 struct Release<'a> {
-    running: &'a Mutex<HashSet<String>>,
+    running: &'a Mutex<HashMap<String, SpeechProgress>>,
     name: &'a str,
 }
 

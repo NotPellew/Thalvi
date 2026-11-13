@@ -1,4 +1,4 @@
-//! Owns the streaming speech recognizer seam, the server `/transcription` client and the 16 to 24 kHz upsampler it needs.
+//! Owns the streaming speech recognizer seam and the 16 to 24 kHz upsampler used by direct recognizers.
 
 use std::{
     future::Future,
@@ -6,16 +6,10 @@ use std::{
         Arc, LazyLock, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
 
-use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async_with_config,
-    tungstenite::{self, Message, protocol::WebSocketConfig},
-};
+use tokio_tungstenite::tungstenite;
 
 use crate::frame::{FRAME_SAMPLES, Frame};
 use crate::models::ModelError;
@@ -23,9 +17,6 @@ use crate::report::UserError;
 
 /// Samples in one frame after upsampling to 24 kHz.
 pub const UPSAMPLED_SAMPLES: usize = FRAME_SAMPLES / 2 * 3;
-
-const MAX_MESSAGE_BYTES: usize = 100_000;
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Text the recognizer produced; only a `Final` can arm an ending.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,7 +30,6 @@ pub enum RecognizerEvent {
 enum Place {
     /// A recognizer that speaks the realtime ASR protocol, reached directly.
     Direct(String),
-    ThalviServer(ServerUrl),
     OnDevice(String),
 }
 
@@ -57,14 +47,6 @@ impl SpeechSource {
         Self {
             name: name.to_owned(),
             place: Place::Direct(address),
-        }
-    }
-
-    #[must_use]
-    pub fn thalvi_server(name: &str, server: &ServerUrl) -> Self {
-        Self {
-            name: name.to_owned(),
-            place: Place::ThalviServer(server.clone()),
         }
     }
 
@@ -105,9 +87,6 @@ impl SpeechSource {
             Place::Direct(_) => {
                 "Check that it is running, or fix its address under Settings → Speech."
             }
-            Place::ThalviServer(_) => {
-                "Start the Thalvi server, or fix its address under Settings → Speech."
-            }
             Place::OnDevice(_) => {
                 "Wait for it to finish loading, or pick another under Settings → Speech."
             }
@@ -118,7 +97,6 @@ impl SpeechSource {
     fn expected(&self) -> &'static str {
         match self.place {
             Place::Direct(_) => "a realtime speech recognizer",
-            Place::ThalviServer(_) => "a Thalvi server",
             Place::OnDevice(_) => "a speech model",
         }
     }
@@ -129,7 +107,6 @@ impl std::fmt::Display for SpeechSource {
         let name = &self.name;
         match &self.place {
             Place::Direct(address) => write!(f, "the speech server \"{name}\" at {address}"),
-            Place::ThalviServer(server) => write!(f, "the Thalvi server \"{name}\" at {server}"),
             Place::OnDevice(model) => write!(f, "the speech model \"{name}\" ({model})"),
         }
     }
@@ -174,6 +151,19 @@ impl ConnectFailure {
 #[error("{0}")]
 pub struct Detail(pub String);
 
+/// What kind of OpenAI-compatible transcription failure the user needs to fix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptionFailure {
+    /// The endpoint could not be reached.
+    Unreachable,
+    /// The endpoint did not answer before the request deadline.
+    Timeout,
+    /// The endpoint rejected the request with an HTTP error status.
+    HttpStatus,
+    /// The endpoint replied with a body that did not match its transcription API.
+    BadReply,
+}
+
 /// A failure the user can be told about in plain words; `Display` says what failed, why and
 /// what to do, naming the entry.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -202,6 +192,12 @@ pub enum RecognizerError {
         speech: SpeechSource,
         message: String,
     },
+    /// A transcription endpoint failed; the full message accompanies a short classified headline.
+    #[error("{message}")]
+    Transcription {
+        failure: TranscriptionFailure,
+        message: String,
+    },
     /// A speech model that could not be provided; the headline is the model error's own.
     #[error("{message}")]
     Model {
@@ -221,6 +217,12 @@ impl UserError for RecognizerError {
             Self::NotUnderstood { .. } => "Bad speech server reply — Settings",
             Self::Model { headline, .. } => headline,
             Self::Reported { .. } | Self::Said(_) => "Speech recognition failed — Settings",
+            Self::Transcription { failure, .. } => match failure {
+                TranscriptionFailure::Unreachable => "Can't reach speech server — Settings",
+                TranscriptionFailure::Timeout => "Speech server timed out — Settings",
+                TranscriptionFailure::HttpStatus => "Speech server error — Settings",
+                TranscriptionFailure::BadReply => "Bad speech server reply — Settings",
+            },
         }
     }
 }
@@ -243,6 +245,16 @@ impl RecognizerError {
 
 /// One open recognition stream; it exists only after the recognizer said it is ready.
 pub trait RecognizerSession: Send {
+    /// Whether audio is buffered until the user ends the capture.
+    fn buffers_audio(&self) -> bool {
+        false
+    }
+
+    /// Signals that all audio for a buffered capture has arrived.
+    fn finish_audio(&mut self) -> impl Future<Output = Result<(), RecognizerError>> + Send {
+        std::future::ready(Ok(()))
+    }
+
     /// Sends one 16 kHz frame.
     fn send_frame(
         &mut self,
@@ -266,73 +278,6 @@ pub trait Recognizer: Send + Sync {
 
     /// Resolves once the recognizer is ready for audio.
     fn connect(&self) -> impl Future<Output = Result<Self::Session, RecognizerError>> + Send;
-}
-
-/// Why a server URL was refused.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ServerUrlError {
-    #[error("server must be a ws or wss URL with a host and no credentials.")]
-    Invalid,
-    #[error("server must be the server root, without a path, query, or fragment.")]
-    NotRoot,
-}
-
-/// The validated root of the Thalvi server, as `ws://host:port` or `wss://host:port`.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(try_from = "String")]
-pub struct ServerUrl(String);
-
-impl Default for ServerUrl {
-    /// The local server, `ws://127.0.0.1:8080`.
-    fn default() -> Self {
-        Self("ws://127.0.0.1:8080".to_string())
-    }
-}
-
-impl ServerUrl {
-    /// # Errors
-    /// Fails when `value` is not a `ws` or `wss` server root without credentials.
-    pub fn parse(value: &str) -> Result<Self, ServerUrlError> {
-        let url = reqwest::Url::parse(value).map_err(|_| ServerUrlError::Invalid)?;
-        if !matches!(url.scheme(), "ws" | "wss")
-            || !url.username().is_empty()
-            || url.password().is_some()
-        {
-            return Err(ServerUrlError::Invalid);
-        }
-        if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
-            return Err(ServerUrlError::NotRoot);
-        }
-        Ok(Self(url.as_str().trim_end_matches('/').to_string()))
-    }
-
-    fn transcription(&self) -> String {
-        format!("{}/transcription", self.0)
-    }
-
-    /// The server's HTTP route at `path`, which starts with `/`.
-    #[must_use]
-    pub fn http(&self, path: &str) -> String {
-        let root = self
-            .0
-            .strip_prefix("ws")
-            .map_or_else(|| self.0.clone(), |rest| format!("http{rest}"));
-        format!("{root}{path}")
-    }
-}
-
-impl std::fmt::Display for ServerUrl {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl TryFrom<String> for ServerUrl {
-    type Error = ServerUrlError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::parse(&value)
-    }
 }
 
 /// Taps of the 16 to 24 kHz interpolation filter, at the 48 kHz rate between up by 3 and down by 2.
@@ -411,187 +356,36 @@ impl Upsampler {
     }
 }
 
-/// Connects to the Thalvi server's `/transcription` route.
-#[derive(Clone, Debug)]
-pub struct ServerRecognizer {
-    url: ServerUrl,
-    speech: SpeechSource,
-}
-
-impl ServerRecognizer {
-    /// The recognizer of the Thalvi server entry called `name`.
-    #[must_use]
-    pub fn new(name: &str, url: ServerUrl) -> Self {
-        let speech = SpeechSource::thalvi_server(name, &url);
-        Self { url, speech }
-    }
-}
-
-type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
-
-/// An open `/transcription` stream.
-pub struct ServerSession {
-    socket: Socket,
-    upsampler: Upsampler,
-    speech: SpeechSource,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ServerMessage {
-    Ready,
-    Partial { text: String },
-    Final { text: String },
-    SpeechStart,
-    SpeechEnd,
-    Error { message: Option<String> },
-}
-
-fn parse(text: &str, speech: &SpeechSource) -> Result<ServerMessage, RecognizerError> {
-    serde_json::from_str(text).map_err(|_| RecognizerError::NotUnderstood {
-        speech: speech.clone(),
-    })
-}
-
-fn dropped(speech: &SpeechSource) -> RecognizerError {
-    RecognizerError::Dropped {
-        speech: speech.clone(),
-    }
-}
-
-impl Recognizer for ServerRecognizer {
-    type Session = ServerSession;
-
-    async fn connect(&self) -> Result<ServerSession, RecognizerError> {
-        let config = WebSocketConfig::default().max_message_size(Some(MAX_MESSAGE_BYTES));
-        let speech = &self.speech;
-        let (mut socket, _) =
-            connect_async_with_config(self.url.transcription(), Some(config), true)
-                .await
-                .map_err(|error| RecognizerError::Unreachable {
-                    speech: speech.clone(),
-                    reason: ConnectFailure::of(&error),
-                    detail: Detail(error.to_string()),
-                })?;
-        loop {
-            match socket.next().await {
-                Some(Ok(Message::Text(text))) => match parse(&text, speech) {
-                    Ok(ServerMessage::Ready) => break,
-                    Ok(ServerMessage::Error {
-                        message: Some(message),
-                    }) => {
-                        return Err(RecognizerError::Reported {
-                            speech: speech.clone(),
-                            message,
-                        });
-                    }
-                    _ => {
-                        return Err(RecognizerError::NotUnderstood {
-                            speech: speech.clone(),
-                        });
-                    }
-                },
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                Some(Ok(Message::Close(_)) | Err(_)) | None => return Err(dropped(speech)),
-                Some(Ok(_)) => {
-                    return Err(RecognizerError::NotUnderstood {
-                        speech: speech.clone(),
-                    });
-                }
-            }
-        }
-        Ok(ServerSession {
-            socket,
-            upsampler: Upsampler::default(),
-            speech: speech.clone(),
-        })
-    }
-}
-
-impl RecognizerSession for ServerSession {
-    async fn send_frame(&mut self, frame: &Frame) -> Result<(), RecognizerError> {
-        let bytes: Vec<u8> = self
-            .upsampler
-            .push(frame)
-            .iter()
-            .flat_map(|sample| sample.to_le_bytes())
-            .collect();
-        self.socket
-            .send(Message::Binary(bytes.into()))
-            .await
-            .map_err(|_| dropped(&self.speech))
-    }
-
-    async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
-        loop {
-            match self.socket.next().await {
-                Some(Ok(Message::Text(text))) => match parse(&text, &self.speech)? {
-                    ServerMessage::Partial { text } => return Ok(RecognizerEvent::Partial(text)),
-                    ServerMessage::Final { text } => return Ok(RecognizerEvent::Final(text)),
-                    ServerMessage::Error { message } => {
-                        return Err(RecognizerError::Reported {
-                            speech: self.speech.clone(),
-                            message: message
-                                .unwrap_or_else(|| "Speech recognition failed.".to_string()),
-                        });
-                    }
-                    ServerMessage::SpeechStart | ServerMessage::SpeechEnd => {}
-                    ServerMessage::Ready => {
-                        return Err(RecognizerError::NotUnderstood {
-                            speech: self.speech.clone(),
-                        });
-                    }
-                },
-                Some(Ok(Message::Binary(_))) => {
-                    return Err(RecognizerError::NotUnderstood {
-                        speech: self.speech.clone(),
-                    });
-                }
-                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
-                Some(Ok(Message::Close(_)) | Err(_)) | None => {
-                    return Err(dropped(&self.speech));
-                }
-            }
-        }
-    }
-
-    async fn cancel(mut self) {
-        let _ = tokio::time::timeout(
-            CLOSE_TIMEOUT,
-            self.socket
-                .send(Message::Text(r#"{"type":"cancel"}"#.into())),
-        )
-        .await;
-        self.close().await;
-    }
-
-    async fn close(mut self) {
-        let _ = tokio::time::timeout(CLOSE_TIMEOUT, self.socket.close(None)).await;
-    }
-}
-
 /// What a [`FakeRecognizer`] was asked to do, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FakeCall {
     Frame(Box<Frame>),
+    FinishAudio,
     Cancel,
     Close,
 }
 
+type ReadySlot = Arc<Mutex<Option<oneshot::Receiver<Result<(), RecognizerError>>>>>;
+type EventsSlot =
+    Arc<Mutex<Option<mpsc::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>>>>;
+
 /// A scripted recognizer for tests; [`FakeControl`] drives it.
 pub struct FakeRecognizer {
-    ready: Mutex<Option<oneshot::Receiver<Result<(), RecognizerError>>>>,
-    events: Mutex<Option<mpsc::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>>>,
+    ready: ReadySlot,
+    events: EventsSlot,
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
+    buffers: Arc<AtomicBool>,
 }
 
 /// Test-side handle of a [`FakeRecognizer`].
 pub struct FakeControl {
     ready: Option<oneshot::Sender<Result<(), RecognizerError>>>,
     events: mpsc::UnboundedSender<Result<RecognizerEvent, RecognizerError>>,
+    slots: (ReadySlot, EventsSlot),
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
+    buffers: Arc<AtomicBool>,
 }
 
 /// The stream a [`FakeRecognizer`] hands out once ready.
@@ -599,6 +393,7 @@ pub struct FakeSession {
     events: mpsc::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>,
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
+    buffers: Arc<AtomicBool>,
 }
 
 impl FakeRecognizer {
@@ -609,18 +404,24 @@ impl FakeRecognizer {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let calls = Arc::new(Mutex::new(Vec::new()));
         let stalled = Arc::new(AtomicBool::new(false));
+        let buffers = Arc::new(AtomicBool::new(false));
+        let ready = Arc::new(Mutex::new(Some(ready_rx)));
+        let events = Arc::new(Mutex::new(Some(events_rx)));
         (
             Self {
-                ready: Mutex::new(Some(ready_rx)),
-                events: Mutex::new(Some(events_rx)),
+                ready: Arc::clone(&ready),
+                events: Arc::clone(&events),
                 calls: Arc::clone(&calls),
                 stalled: Arc::clone(&stalled),
+                buffers: Arc::clone(&buffers),
             },
             FakeControl {
                 ready: Some(ready_tx),
                 events: events_tx,
+                slots: (ready, events),
                 calls,
                 stalled,
+                buffers,
             },
         )
     }
@@ -646,11 +447,23 @@ impl Recognizer for FakeRecognizer {
             events,
             calls: Arc::clone(&self.calls),
             stalled: Arc::clone(&self.stalled),
+            buffers: Arc::clone(&self.buffers),
         })
     }
 }
 
 impl FakeControl {
+    /// Lets the recognizer connect once more, to a fresh session this control then drives; the
+    /// calls log carries over.
+    pub fn connect_again(&mut self) {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        *self.slots.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(ready_rx);
+        *self.slots.1.lock().unwrap_or_else(PoisonError::into_inner) = Some(events_rx);
+        self.ready = Some(ready_tx);
+        self.events = events_tx;
+    }
+
     pub fn ready(&mut self) {
         if let Some(ready) = self.ready.take() {
             let _ = ready.send(Ok(()));
@@ -672,6 +485,10 @@ impl FakeControl {
         self.stalled.store(true, Ordering::Relaxed);
     }
 
+    pub fn buffer_audio(&self) {
+        self.buffers.store(true, Ordering::Relaxed);
+    }
+
     /// Everything the session was asked to do so far.
     pub fn calls(&self) -> Vec<FakeCall> {
         self.calls
@@ -691,6 +508,19 @@ impl FakeSession {
 }
 
 impl RecognizerSession for FakeSession {
+    fn buffers_audio(&self) -> bool {
+        self.buffers.load(Ordering::Relaxed)
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "The fake only records the call in memory."
+    )]
+    async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
+        self.record(FakeCall::FinishAudio);
+        Ok(())
+    }
+
     fn send_frame(
         &mut self,
         frame: &Frame,
@@ -739,8 +569,7 @@ mod tests {
 
     #[test]
     fn a_failed_connection_is_told_apart_and_says_what_to_fix() {
-        let speech =
-            SpeechSource::thalvi_server("Office", &ServerUrl::parse("ws://127.0.0.1:9").unwrap());
+        let speech = SpeechSource::direct("Office", "ws://127.0.0.1:9".to_owned());
         let cases = [
             (
                 tungstenite::Error::Io(IoError::from(ErrorKind::ConnectionRefused)),
@@ -778,13 +607,31 @@ mod tests {
             assert_eq!(
                 failure.to_string(),
                 format!(
-                    "Thalvi could not reach the Thalvi server \"Office\" at ws://127.0.0.1:9 ({words}). Start the Thalvi server, or fix its address under Settings → Speech."
+                    "Thalvi could not reach the speech server \"Office\" at ws://127.0.0.1:9 ({words}). Check that it is running, or fix its address under Settings → Speech."
                 )
             );
             assert_eq!(
                 std::error::Error::source(&failure).map(ToString::to_string),
                 Some(error.to_string())
             );
+        }
+    }
+
+    #[test]
+    fn a_reply_that_is_not_speech_says_what_the_address_should_be() {
+        let cases = [
+            (
+                SpeechSource::direct("Office", "ws://127.0.0.1:9".to_owned()),
+                "Check that its address under Settings → Speech is a realtime speech recognizer.",
+            ),
+            (
+                SpeechSource::on_device("Offline", "nemotron_160ms".to_owned()),
+                "Check that its address under Settings → Speech is a speech model.",
+            ),
+        ];
+        for (speech, expected) in cases {
+            let words = RecognizerError::NotUnderstood { speech }.to_string();
+            assert!(words.ends_with(expected), "{words}");
         }
     }
 }

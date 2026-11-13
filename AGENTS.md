@@ -103,7 +103,7 @@ can't break and doesn't slow down the next change.
 CI runs these as required checks on `main`. `.github/scripts/gates <component>`
 runs a component's checks exactly as CI does and stops at the first failure.
 Components: `server`, `desktop-windows`, `web`, `desktop-ui`, `speech`,
-`issue-sync`; `all` runs every gate this OS can run and says which it skipped.
+`issue-sync`, `release`, `formal`; `all` runs every gate this OS can run and says which it skipped.
 CI jobs call the script after their toolchain setup, so a new check goes in the
 script, and a new component adds its pinned toolchain here, its case in the
 script and its CI job; one that ships on Windows also runs its gate on
@@ -121,6 +121,9 @@ Prerequisites the script does not install:
 - Speech servers: Docker with Compose, `pipx`, and `uv` (Python pinned in
   `speech/asr/.python-version`).
 - Issue sync: `pipx`.
+- Release (the updater signing and feed scripts): Node pinned in `.node-version`,
+  `minisign`, and `pipx`.
+- Formal source hashes: Python pinned in `.python-version` (standard library only).
 
 Two required checks are not in the script:
 
@@ -130,11 +133,20 @@ Two required checks are not in the script:
   --verbose --log-opts=HEAD .` on the full history. With gitleaks on `PATH`, the
   pre-commit hook scans what is staged.
 
-One more check runs on PRs that change Rust but advises rather than gates:
-`cargo mutants --in-place --in-diff <diff>` (cargo-mutants 27.1.0,
-`.cargo/mutants.toml`). A surviving mutant is an annotation: add the missing test,
-or judge it equivalent. Locally, run it with no desktop session and a throwaway
-`HOME`, since it runs tests against deliberately broken code.
+On a PR, CI runs only the steps its changed paths affect
+(`.github/scripts/changed`); the job names stay, so required checks still
+report. `.github/workflows/heavy.yml` runs every gate on each push to `main`,
+nightly and on request, plus mutation testing, which advises rather than gates:
+`cargo mutants --in-place --in-diff <diff>` over the Rust changed since the
+`verified` tag (cargo-mutants 27.1.0, `.cargo/mutants.toml`). Survivors are
+listed in the run summary: add the missing test, or judge the mutant equivalent
+and record that in `.cargo/mutants.toml` with a one-line reason. A shard that
+couldn't test (failing baseline, time limit) or had a mutant time out fails the
+run. A green full run
+moves `verified`; a failed one opens or updates the `ci-regression` issue.
+Run it locally only when the issue explicitly asks for mutation testing, and then
+only `--in-diff` against the base, with no desktop session and a throwaway `HOME`,
+since it runs tests against deliberately broken code.
 
 ## Git and PRs
 
@@ -142,21 +154,20 @@ or judge it equivalent. Locally, run it with no desktop session and a throwaway
   commits, so a branch's commits stay in the history. Tidying a branch
   before merge is fine; don't squash it into one commit.
 - Branches: `<type>/<slug>`, three hyphenated words or fewer, cut from
-  `development`. PRs target `development`.
-- A release bumps the version on `development` (`chore(desktop): release
-  X.Y.Z`), merges `development` into `main` through a PR, then tags
-  `desktop-vX.Y.Z` on `main`. A fix for a released version branches from
-  `main` and targets it; `main` is then merged back into `development`.
+  `main`.
+- A release bumps the version on `main` through a PR (`chore(desktop):
+  release X.Y.Z`), then tags `desktop-vX.Y.Z` on `main`.
 - The PR title becomes the merge commit's subject. The body states the
-  problem, then the fix. Say `Closes #N` when the PR resolves an issue,
-  `Refs #N` when it only touches one. The Issues workflow closes those
-  issues when the PR merges into `development`, and reopens them when a
-  merged `Reverts #N` PR takes it back out.
+  problem, then the fix. PRs target `main`. `Closes #N` closes the issue
+  when the PR merges. The Issues workflow reopens those issues when a merged
+  `Reverts #N` PR takes the change out. Use `Refs #N` when a PR only touches
+  one.
 - Use `.github/pull_request_template.md` for every PR body, including PRs
   created through CLI tools; preserve its headings and remove instructional
   comments.
 - Label every issue `area:desktop` or `area:conversation`, plus `windows`
-  when Windows behaviour is involved.
+  when Windows behaviour is involved. `ready` marks an issue the dispatcher
+  can take; `ci-regression` marks the one the heavy tier files.
 - When opening an issue, use the matching form in `.github/ISSUE_TEMPLATE/`.
   For CLI-created issues, use its field labels as Markdown headings. Blank
   issues remain available for cases neither form fits; issues are optional.

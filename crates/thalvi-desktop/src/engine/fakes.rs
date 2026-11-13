@@ -9,9 +9,11 @@ use tokio::time::Instant;
 
 use super::{CuePlayer, FrameSource, WakeDetector};
 use crate::audio::{AudioError, InputGate};
+use crate::capture::Ending;
 use crate::cues::{Cue, CueError, CueTiming};
-use crate::frame::{Frame, Queued};
-use crate::wake::{WakeError, WakeEvent, WakeFrame};
+use crate::frame::{FRAME_SAMPLES, Frame, Queued};
+use crate::spotter::{KeywordSpotter, SpotterError, SpotterHit};
+use crate::wake::{self, WakeError, WakeEvent, WakeFrame};
 
 /// Microphone frames a test feeds in, dropped while the gate is off or from before it changed,
 /// as the capture callback does.
@@ -73,38 +75,43 @@ impl FrameSource for FakeFrames {
 /// A wake detector that reports the event a test sets for the next frame.
 pub struct FakeWake {
     next: Rc<Cell<Option<Result<WakeEvent, ()>>>>,
-    scores: Rc<Cell<(f32, f32)>>,
+    score: Rc<Cell<f32>>,
     inference: Rc<Cell<Duration>>,
     resets: Rc<Cell<u32>>,
+    scored: Rc<Cell<u32>>,
 }
 
 /// Test-side handle of [`FakeWake`].
 pub struct WakeControl {
     next: Rc<Cell<Option<Result<WakeEvent, ()>>>>,
-    scores: Rc<Cell<(f32, f32)>>,
+    score: Rc<Cell<f32>>,
     inference: Rc<Cell<Duration>>,
     resets: Rc<Cell<u32>>,
+    scored: Rc<Cell<u32>>,
 }
 
 impl FakeWake {
     #[must_use]
     pub fn new() -> (Self, WakeControl) {
         let next = Rc::new(Cell::new(None));
-        let scores = Rc::new(Cell::new((0.0, 0.0)));
+        let score = Rc::new(Cell::new(0.0));
         let inference = Rc::new(Cell::new(Duration::ZERO));
         let resets = Rc::new(Cell::new(0));
+        let scored = Rc::new(Cell::new(0));
         (
             Self {
                 next: Rc::clone(&next),
-                scores: Rc::clone(&scores),
+                score: Rc::clone(&score),
                 inference: Rc::clone(&inference),
                 resets: Rc::clone(&resets),
+                scored: Rc::clone(&scored),
             },
             WakeControl {
                 next,
-                scores,
+                score,
                 inference,
                 resets,
+                scored,
             },
         )
     }
@@ -116,9 +123,16 @@ impl WakeControl {
         self.next.set(Some(Ok(event)));
     }
 
-    /// The frames scored from now on get these head scores.
-    pub fn score(&self, capture: f32, conversation: f32) {
-        self.scores.set((capture, conversation));
+    /// The frames scored from now on get this dictation score.
+    pub fn score(&self, score: f32) {
+        self.score.set(score);
+    }
+
+    /// Scores a frame and lets the dictation threshold decide whether it wakes.
+    pub fn score_and_detect(&self, score: f32, threshold: f32) {
+        self.score.set(score);
+        self.next
+            .set(wake::dictation_event(score, threshold).map(Ok));
     }
 
     /// The frames scored from now on report taking `took`.
@@ -131,6 +145,12 @@ impl WakeControl {
         self.next.set(Some(Err(())));
     }
 
+    /// How many frames the wake detector has scored so far.
+    #[must_use]
+    pub fn scored(&self) -> u32 {
+        self.scored.get()
+    }
+
     /// How many times the engine forgot the audio so far.
     #[must_use]
     pub fn resets(&self) -> u32 {
@@ -140,15 +160,15 @@ impl WakeControl {
 
 impl WakeDetector for FakeWake {
     fn process(&mut self, _frame: &Frame) -> Result<WakeFrame, WakeError> {
+        self.scored.set(self.scored.get() + 1);
         let event = match self.next.take() {
             Some(Err(())) => return Err(WakeError::Inference("scripted failure".to_owned())),
             Some(Ok(event)) => Some(event),
             None => None,
         };
-        let (capture, conversation) = self.scores.get();
+        let capture = self.score.get();
         Ok(WakeFrame {
             capture,
-            conversation,
             inference: self.inference.get(),
             event,
         })
@@ -295,5 +315,87 @@ impl CuePlayer for FakeCuePlayer {
             return Err(CueError::NoOutputDevice);
         }
         Ok(Some(timing))
+    }
+}
+
+#[derive(Default)]
+struct SpotScript {
+    /// Hits by the number of the frame, counted from the last reset, that brings them out.
+    hits: Vec<(u64, SpotterHit)>,
+    fail_at: Option<u64>,
+    frames: u64,
+    received: u64,
+    resets: u32,
+}
+
+/// A keyword spotter that hears what a test scripts, by frame number.
+pub struct FakeSpotter(Rc<RefCell<SpotScript>>);
+
+/// Test-side handle of [`FakeSpotter`].
+pub struct SpotterControl(Rc<RefCell<SpotScript>>);
+
+impl FakeSpotter {
+    #[must_use]
+    pub fn new() -> (Self, SpotterControl) {
+        let script = Rc::new(RefCell::new(SpotScript::default()));
+        (Self(Rc::clone(&script)), SpotterControl(script))
+    }
+}
+
+impl KeywordSpotter for FakeSpotter {
+    fn reset(&mut self) {
+        let mut script = self.0.borrow_mut();
+        script.frames = 0;
+        script.resets += 1;
+    }
+
+    fn push(&mut self, _frame: &Frame) -> Result<Option<SpotterHit>, SpotterError> {
+        let mut script = self.0.borrow_mut();
+        script.frames += 1;
+        script.received += 1;
+        if script.fail_at == Some(script.frames) {
+            return Err(SpotterError::Inference("scripted failure".to_owned()));
+        }
+        let frames = script.frames;
+        Ok(script
+            .hits
+            .iter()
+            .find(|(at, _)| *at == frames)
+            .map(|(_, hit)| hit.clone()))
+    }
+}
+
+impl SpotterControl {
+    /// The frame numbered `at` (from 1 since the last reset) brings out `phrase`, heard as
+    /// ending two frames earlier, as the real model's lag does.
+    pub fn hear(&self, at: u64, phrase: &str, ending: Ending) {
+        let frame = FRAME_SAMPLES as u64;
+        self.0.borrow_mut().hits.push((
+            at,
+            SpotterHit {
+                phrase: phrase.to_owned(),
+                ending,
+                start_sample: at.saturating_sub(8) * frame,
+                end_sample: at.saturating_sub(2) * frame,
+                confidence: 0.5,
+            },
+        ));
+    }
+
+    /// The frame numbered `at` makes the spotter fail.
+    pub fn fail_at(&self, at: u64) {
+        self.0.borrow_mut().fail_at = Some(at);
+    }
+
+    /// Frames given to the spotter in all.
+    #[must_use]
+    pub fn received(&self) -> u64 {
+        self.0.borrow().received
+    }
+
+    /// How many times the spotter was reset.
+    #[must_use]
+    pub fn resets(&self) -> u32 {
+        self.0.borrow().resets
     }
 }

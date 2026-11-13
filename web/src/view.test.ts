@@ -16,6 +16,7 @@ describe("shouldCollapse", () => {
     ["live voice exchange at the bottom stays big", live, false],
     ["speaking with voice on stays big", { ...live, display: "speaking" }, false],
     ["starting with voice on stays big", { ...live, display: "starting" }, false],
+    ["recognizer retrying with voice on stays big", { ...live, display: "recognizer_retrying" }, false],
     ["thinking with voice on stays big", { ...live, display: "thinking" }, false],
     ["working with voice on stays big", { ...live, display: "working" }, false],
     ["voice off collapses", { ...live, voice: false }, true],
@@ -38,6 +39,14 @@ describe("stateText", () => {
   it("only says voice is paused while reconnecting when voice is on", () => {
     expect(stateText("reconnecting", true).hint).toBe("Voice is paused. Trying again.");
     expect(stateText("reconnecting", false)).toEqual({ label: "Reconnecting", hint: "Trying again." });
+  });
+
+  it("distinguishes retrying speech recognition from reconnecting the server link", () => {
+    expect(stateText("recognizer_retrying", true)).toEqual({
+      label: "Reconnecting speech",
+      hint: "Can't reach speech recognition. Trying again.",
+    });
+    expect(stateText("recognizer_retrying", true)).not.toEqual(stateText("reconnecting", true));
   });
 });
 

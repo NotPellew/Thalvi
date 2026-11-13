@@ -1,32 +1,37 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
-import type { AudioStatus, Backend, Draft, HistoryEntry, LiveEntry, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, WakeModelInfo } from "./contract.ts";
-import type { Clock } from "./overlay.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, HoldKeyDefaults, LiveEntry, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 
 export const SETTINGS: Settings = {
   wake: {
     capture: { model: "hey_thalvi", threshold: 0.5 },
     conversation: { model: "hey_mycroft", threshold: 0.5 },
+    enabled: true,
   },
   cues: { wake: true, provisional: true, cancelled: true, accepted: true, error: true },
   ending_pause: { paste: 0.7, submit: 2.5, task: 2.5 },
   capture_limits: { idle: 60, max: 300 },
   endings: {
     "paste that": "paste",
+    "write that out": "write",
     submit: "submit",
     "do that": "task",
     "scratch that": "scratch",
     "never mind": "cancel",
   },
-  stt: { entries: [{ kind: "thalvi_server", id: "thalvi-server", name: "Thalvi server", active: true, address: "ws://127.0.0.1:8080" }] },
+  stt: { entries: [{ kind: "realtime", id: "direct", name: "Realtime speech server", active: true, address: "ws://127.0.0.1:8012", model: "nemotron" }] },
   apps: { slack: { classes: ["Slack"], executables: [], input_keys: ["ctrl", "k"] } },
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com", label: "docs" }],
   overlay: { show: true, draft: true },
   microphone: null,
   look: "neon",
+  update_channel: "stable",
   recordings: { metrics: true, text: false, audio: false },
   hold_key: "Alt+KeyZ",
+  write_key: "Alt+KeyX",
+  writing: null,
+  writing_default_prompt: "Write what I dictated as clear text.",
   history: { enabled: true, limit: 200 },
 };
 
@@ -91,10 +96,11 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
   const statusListeners: ((status: Status) => void)[] = [];
   const levelListeners: ((level: number) => void)[] = [];
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
-  const savedListeners: (() => void)[] = [];
   const elsewhereListeners: (() => void)[] = [];
   const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
   const pageListeners: ((page: string) => void)[] = [];
+  const updateListeners: ((state: UpdateState) => void)[] = [];
+  let updateState: UpdateState = { phase: { state: "idle" }, notes: null, notice: null };
   let audioState: AudioStatus = {
     selected: settings.microphone,
     active: initial.state === "paused" ? null : (settings.microphone ?? "Built-in"),
@@ -110,13 +116,10 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     onLevel: vi.fn((listener: (level: number) => void) => levelListeners.push(listener)),
     getAudio: vi.fn(() => Promise.resolve(structuredClone(audioState))),
     onAudio: vi.fn((listener: (audio: AudioStatus) => void) => audioListeners.push(listener)),
-    onSettingsSaved: vi.fn((listener: () => void) => savedListeners.push(listener)),
     onSettingsChangedElsewhere: vi.fn((listener: () => void) => elsewhereListeners.push(listener)),
     getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
     saveSettings: vi.fn<(settings: Settings) => Promise<void>>(() => Promise.resolve()),
     setListening: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
-    cancelCapture: vi.fn(() => Promise.resolve()),
-    overlayTakesClicks: vi.fn(() => Promise.resolve(true)),
     dismissError: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     copyReport: vi.fn<(message: string, causes: string[]) => Promise<void>>(() => Promise.resolve()),
     listMicrophones: vi.fn(() => Promise.resolve(["USB Microphone", "Built-in"])),
@@ -130,6 +133,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     discardDraft: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     onOpenPage: vi.fn((listener: (page: string) => void) => pageListeners.push(listener)),
     getHoldKeyUnavailable: vi.fn<() => Promise<string | null>>(() => Promise.resolve(null)),
+    getHoldKeyDefaults: vi.fn<() => Promise<HoldKeyDefaults>>(() => Promise.resolve({ hold_key: "Alt+KeyZ", write_key: "Alt+KeyX" })),
     getStartAtLogin: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),
     setStartAtLogin: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
     getMenuEntry: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),
@@ -137,12 +141,9 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     copyLoginLine: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     validateSpeechModelFolder: vi.fn<(path: string) => Promise<void>>(() => Promise.resolve()),
     listWakeModels: vi.fn<() => Promise<WakeModelInfo[]>>(() => Promise.resolve(structuredClone(WAKE_MODELS_INFO))),
-    validateWakeModels: vi.fn<(capture: string, conversation: string) => Promise<void>>((capture, conversation) => {
-      if (capture === conversation) return Promise.reject(new Error("The capture and conversation wake models must be different."));
-      for (const model of [capture, conversation]) {
-        if (!WAKE_MODELS_INFO.some((info) => info.name === model) && (model.includes("bad") || model.includes("missing") || !model.endsWith(".onnx"))) {
-          return Promise.reject(new Error(`The wake model ${model} could not be loaded: not a wake model.`));
-        }
+    validateWakeModels: vi.fn<(capture: string) => Promise<void>>((capture) => {
+      if (!WAKE_MODELS_INFO.some((info) => info.name === capture) && (capture.includes("bad") || capture.includes("missing") || !capture.endsWith(".onnx"))) {
+        return Promise.reject(new Error(`The wake model ${capture} could not be loaded: not a wake model.`));
       }
       return Promise.resolve();
     }),
@@ -151,18 +152,22 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     listSpeechModels: vi.fn<() => Promise<SpeechModelInfo[]>>(() => Promise.resolve([{ ...NEMOTRON }, { ...UNIFIED }])),
     downloadSpeechModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     onSpeechModelProgress: vi.fn((listener: (progress: SpeechModelProgress) => void) => speechListeners.push(listener)),
+    speechDevice: vi.fn<(name: string) => Promise<string>>(() => Promise.resolve("Will run on the CPU: this model runs on the CPU")),
     openSpeechModelSource: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     checkSpeechEntry: vi.fn<(entry: SpeechEntry) => Promise<void>>(() => Promise.resolve()),
-    wordListSupport: vi.fn<(entry: LiveEntry) => Promise<boolean>>(() => Promise.resolve(false)),
-    shareWordList: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+    wordListSupport: vi.fn<(entry: LiveEntry) => Promise<boolean>>(() => Promise.resolve(true)),
     appVersion: vi.fn(() => Promise.resolve("1.2.3")),
+    getUpdateState: vi.fn<() => Promise<UpdateState>>(() => Promise.resolve(structuredClone(updateState))),
+    onUpdate: vi.fn((listener: (state: UpdateState) => void) => updateListeners.push(listener)),
+    checkForUpdates: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+    openReleaseNotes: vi.fn<() => Promise<void>>(() => Promise.resolve()),
   } satisfies Backend;
   return {
     backend,
     emit: (status: Status) => {
       for (const listener of statusListeners) listener(status);
       const paused = status.state === "paused";
-      if ((status.state === "paused" || status.state === "listening") && paused !== audioState.paused) {
+      if ((status.state === "paused" || status.state === "listening" || status.state === "keyboardOnly") && paused !== audioState.paused) {
         emitAudio({
           selected: audioState.selected,
           active: paused ? null : (audioState.selected ?? "Built-in"),
@@ -181,11 +186,12 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     openPage: (page: string) => {
       for (const listener of pageListeners) listener(page);
     },
-    saved: () => {
-      for (const listener of savedListeners) listener();
-    },
     changedElsewhere: () => {
       for (const listener of elsewhereListeners) listener();
+    },
+    update: (next: UpdateState) => {
+      updateState = next;
+      for (const listener of updateListeners) listener(structuredClone(next));
     },
   };
 }
@@ -193,20 +199,4 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
 /** Lets pending promise callbacks run. */
 export async function settle(): Promise<void> {
   for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
-}
-
-/** A clock the test advances by hand; each advance runs the frames queued so far once. */
-export function manualClock(): Clock & { advance(ms: number): void } {
-  let time = 1000;
-  let queued: (() => void)[] = [];
-  return {
-    now: () => time,
-    frame: (callback) => queued.push(callback),
-    advance: (ms) => {
-      time += ms;
-      const run = queued;
-      queued = [];
-      for (const callback of run) callback();
-    },
-  };
 }

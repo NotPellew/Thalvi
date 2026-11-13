@@ -2,6 +2,8 @@
 
 use std::{fmt, time::Duration};
 
+use base64::{Engine, engine::general_purpose::STANDARD};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -10,6 +12,19 @@ use crate::{frame::Frame, recognizer::Upsampler};
 const TIMEOUT: Duration = Duration::from_secs(10);
 const SAMPLE_RATE: u32 = 24_000;
 const BOUNDARY: &str = "thalvi-capture-boundary-7d1f0c2a9b3e";
+
+/// `url` as an endpoint's base address without a trailing slash, when it is an `http` or `https`
+/// URL with a host and no credentials, query or fragment.
+pub(crate) fn base_url(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    (matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some()
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none())
+    .then(|| parsed.as_str().trim_end_matches('/').to_string())
+}
 
 /// Which transcription API the secondary endpoint speaks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -85,23 +100,14 @@ impl SecondaryStt {
                 api,
             });
         }
-        let parsed = reqwest::Url::parse(url.trim()).map_err(|_| SecondarySttError::Url)?;
-        if !matches!(parsed.scheme(), "http" | "https")
-            || parsed.host_str().is_none()
-            || !parsed.username().is_empty()
-            || parsed.password().is_some()
-            || parsed.query().is_some()
-            || parsed.fragment().is_some()
-        {
-            return Err(SecondarySttError::Url);
-        }
+        let url = base_url(url).ok_or(SecondarySttError::Url)?;
         let model = model.trim();
         if model.is_empty() {
             return Err(SecondarySttError::Model);
         }
         Ok(Self {
             enabled,
-            url: parsed.as_str().trim_end_matches('/').to_string(),
+            url,
             model: model.to_string(),
             api_key,
             api,
@@ -151,6 +157,72 @@ impl TryFrom<RawSecondaryStt> for SecondaryStt {
     fn try_from(raw: RawSecondaryStt) -> Result<Self, Self::Error> {
         Self::new(&raw.url, &raw.model, raw.api_key, raw.api, raw.enabled)
     }
+}
+
+/// Every assigned ISO 639-1 code.
+const ISO_639_1: &str = "aa ab ae af ak am an ar as av ay az ba be bg bi bm bn bo br bs ca ce ch co cr cs cu cv cy da de dv dz ee el en eo es et eu fa ff fi fj fo fr fy ga gd gl gn gu gv ha he hi ho hr ht hu hy hz ia id ie ig ii ik io is it iu ja jv ka kg ki kj kk kl km kn ko kr ks ku kv kw ky la lb lg li ln lo lt lu lv mg mh mi mk ml mn mr ms mt my na nb nd ne ng nl nn no nr nv ny oc oj om or os pa pi pl ps pt qu rm rn ro ru rw sa sc sd se sg si sk sl sm sn so sq sr ss st su sv sw ta te tg th ti tk tl tn to tr ts tt tw ty ug uk ur uz ve vi vo wa wo xh yi yo za zh zu";
+
+/// An assigned two-letter ISO 639-1 language code, kept lower-case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Language(&'static str);
+
+/// Why a language was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the language must be a two-letter ISO 639-1 code such as de, or empty.")]
+pub struct LanguageError;
+
+impl Language {
+    /// `text` as a language code, or none when it is blank.
+    ///
+    /// # Errors
+    /// Fails unless `text` is blank or an assigned ISO 639-1 code, in any case.
+    pub fn parse(text: &str) -> Result<Option<Self>, LanguageError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        ISO_639_1
+            .split(' ')
+            .find(|code| code.eq_ignore_ascii_case(text))
+            .map(|code| Some(Self(code)))
+            .ok_or(LanguageError)
+    }
+}
+
+impl fmt::Display for Language {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+/// How a live OpenAI-compatible entry sends the capture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LiveRequest {
+    /// A streaming multipart upload to `/audio/transcriptions`.
+    #[default]
+    Transcriptions,
+    /// One JSON request to `/chat/completions` with the WAV as `input_audio`.
+    Chat,
+}
+
+impl LiveRequest {
+    /// The name the file and the metrics use.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Transcriptions => "transcriptions",
+            Self::Chat => "chat",
+        }
+    }
+}
+
+/// A live OpenAI-compatible entry: where it listens, how it asks and in which language.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenAiLive {
+    pub settings: SecondaryStt,
+    pub request: LiveRequest,
+    pub language: Option<Language>,
 }
 
 /// Why the secondary transcription produced no text.
@@ -260,4 +332,175 @@ pub async fn transcribe(
         Some(Value::String(text)) => Ok(text.clone()),
         _ => Err(SecondaryError::BadResponse),
     }
+}
+
+/// Sends the capture as the entry's request kind. A transcriptions request streams: it emits
+/// cumulative text as SSE arrives. A chat request emits nothing before its one answer.
+///
+/// # Errors
+///
+/// Returns an error when the endpoint is unreachable, rejects the request, times out, or returns
+/// an unsupported response.
+pub async fn transcribe_events(
+    client: &reqwest::Client,
+    entry: &OpenAiLive,
+    frames: &[Frame],
+    emit: impl FnMut(crate::recognizer::RecognizerEvent),
+) -> Result<String, SecondaryError> {
+    match entry.request {
+        LiveRequest::Transcriptions => transcribe_stream(client, entry, frames, emit).await,
+        LiveRequest::Chat => transcribe_chat(client, entry, frames).await,
+    }
+}
+
+async fn transcribe_stream(
+    client: &reqwest::Client,
+    entry: &OpenAiLive,
+    frames: &[Frame],
+    mut emit: impl FnMut(crate::recognizer::RecognizerEvent),
+) -> Result<String, SecondaryError> {
+    let settings = &entry.settings;
+    let language = entry.language.map_or_else(String::new, |language| {
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\n{language}\r\n")
+    });
+    let mut body = format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{}\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"stream\"\r\n\r\ntrue\r\n{language}--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"capture.wav\"\r\nContent-Type: audio/wav\r\n\r\n", settings.model).into_bytes();
+    body.extend_from_slice(&wav(frames));
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    let mut request = client
+        .post(format!("{}/audio/transcriptions", settings.url))
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .header("Accept", "text/event-stream, application/json")
+        .body(body);
+    if !settings.api_key.is_empty() {
+        request = request.bearer_auth(settings.api_key());
+    }
+    let upload = async {
+        let response = request
+            .send()
+            .await
+            .map_err(|_| SecondaryError::Unreachable)?;
+        if !response.status().is_success() {
+            return Err(SecondaryError::Status(response.status().as_u16()));
+        }
+        if !response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("text/event-stream"))
+        {
+            let answer: Value = response
+                .json()
+                .await
+                .map_err(|_| SecondaryError::BadResponse)?;
+            let text = answer
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or(SecondaryError::BadResponse)?
+                .to_owned();
+            return Ok(text);
+        }
+        let mut stream = response.bytes_stream();
+        let mut pending = Vec::new();
+        let mut transcript = String::new();
+        let mut final_text = None;
+        while let Some(chunk) = stream.next().await {
+            pending.extend_from_slice(&chunk.map_err(|_| SecondaryError::Unreachable)?);
+            while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<_> = pending.drain(..=newline).collect();
+                let line = String::from_utf8_lossy(&line);
+                if let Some(data) = line.trim().strip_prefix("data: ") {
+                    if data == "[DONE]" {
+                        break;
+                    }
+                    let value: Value =
+                        serde_json::from_str(data).map_err(|_| SecondaryError::BadResponse)?;
+                    match value.get("type").and_then(Value::as_str) {
+                        Some("transcript.text.delta") => {
+                            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                                transcript.push_str(delta);
+                                emit(crate::recognizer::RecognizerEvent::Partial(
+                                    transcript.clone(),
+                                ));
+                            }
+                        }
+                        Some("transcript.text.done") => {
+                            if let Some(text) = value.get("text").and_then(Value::as_str) {
+                                final_text = Some(text.to_owned());
+                            }
+                        }
+                        None => {
+                            if let Some(text) = value.get("text").and_then(Value::as_str) {
+                                if !transcript.is_empty()
+                                    && !transcript.chars().last().is_some_and(char::is_whitespace)
+                                    && !text.chars().next().is_some_and(char::is_whitespace)
+                                {
+                                    transcript.push(' ');
+                                }
+                                transcript.push_str(text);
+                                emit(crate::recognizer::RecognizerEvent::Partial(
+                                    transcript.clone(),
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(final_text.unwrap_or(transcript))
+    };
+    tokio::time::timeout(TIMEOUT, upload)
+        .await
+        .map_err(|_| SecondaryError::Timeout)?
+}
+
+/// One non-streaming chat completion that carries the WAV as `input_audio`.
+async fn transcribe_chat(
+    client: &reqwest::Client,
+    entry: &OpenAiLive,
+    frames: &[Frame],
+) -> Result<String, SecondaryError> {
+    let settings = &entry.settings;
+    let mut body = json!({
+        "model": settings.model,
+        "messages": [{"role": "user", "content": [{
+            "type": "input_audio",
+            "input_audio": {"data": STANDARD.encode(wav(frames)), "format": "wav"},
+        }]}],
+    });
+    if let (Some(language), Some(object)) = (entry.language, body.as_object_mut()) {
+        object.insert("language".to_owned(), json!(language.to_string()));
+    }
+    let mut request = client
+        .post(format!("{}/chat/completions", settings.url))
+        .header("Accept", "application/json")
+        .json(&body);
+    if !settings.api_key.is_empty() {
+        request = request.bearer_auth(&settings.api_key);
+    }
+    let exchange = async {
+        let response = request
+            .send()
+            .await
+            .map_err(|_| SecondaryError::Unreachable)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(SecondaryError::Status(status.as_u16()));
+        }
+        let answer: Value = response
+            .json()
+            .await
+            .map_err(|_| SecondaryError::BadResponse)?;
+        answer
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or(SecondaryError::BadResponse)
+    };
+    tokio::time::timeout(TIMEOUT, exchange)
+        .await
+        .map_err(|_| SecondaryError::Timeout)?
 }

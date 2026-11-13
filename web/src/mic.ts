@@ -29,30 +29,32 @@ export async function openMic(
   });
   try {
     await ctx.audioWorklet.addModule(micWorkletUrl);
+    const source = ctx.createMediaStreamSource(stream);
+    const node = new AudioWorkletNode(ctx, "mic-encoder");
+    node.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
+      onFrame(event.data);
+    };
+    source.connect(node);
+    // Browsers only pull nodes that reach the destination; the worklet outputs silence.
+    node.connect(ctx.destination);
+    for (const track of stream.getAudioTracks()) track.onended = onEnded;
+    return {
+      stop() {
+        for (const track of stream.getAudioTracks()) track.onended = null;
+        source.disconnect();
+        node.disconnect();
+        node.port.onmessage = null;
+        stopTracks(stream);
+      },
+    };
   } catch (error) {
-    stream.getTracks().forEach((track) => {
-      track.stop();
-    });
+    stopTracks(stream);
     throw error;
   }
-  const source = ctx.createMediaStreamSource(stream);
-  const node = new AudioWorkletNode(ctx, "mic-encoder");
-  node.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
-    onFrame(event.data);
-  };
-  source.connect(node);
-  // Browsers only pull nodes that reach the destination; the worklet outputs silence.
-  node.connect(ctx.destination);
-  for (const track of stream.getAudioTracks()) track.onended = onEnded;
-  return {
-    stop() {
-      for (const track of stream.getAudioTracks()) track.onended = null;
-      source.disconnect();
-      node.disconnect();
-      node.port.onmessage = null;
-      stream.getTracks().forEach((track) => {
-        track.stop();
-      });
-    },
-  };
+}
+
+function stopTracks(stream: MediaStream): void {
+  stream.getTracks().forEach((track) => {
+    track.stop();
+  });
 }

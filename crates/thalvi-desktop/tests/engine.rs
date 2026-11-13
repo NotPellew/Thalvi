@@ -5,29 +5,34 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
 use thalvi_desktop::audio::{AudioError, InputGate};
-use thalvi_desktop::capture::{CaptureRequest, CaptureRoute};
+use thalvi_desktop::capture::{CaptureRequest, CaptureRoute, Ending};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::cues::{Cue, CueTiming};
 use thalvi_desktop::engine::fakes::{
-    CueControl, CueLog, FakeCuePlayer, FakeFrames, FakeWake, FrameFeed, WakeControl,
+    CueControl, CueLog, FakeCuePlayer, FakeFrames, FakeSpotter, FakeWake, FrameFeed,
+    SpotterControl, WakeControl,
 };
 use thalvi_desktop::engine::{
-    CaptureError, CaptureOutcome, Engine, EngineHandle, EngineState, ListenError, Parts,
-    WakeTrigger,
+    CaptureError, CaptureOutcome, Engine, EngineHandle, EngineState, FrameSource, ListenError,
+    Parts, WakeTrigger,
 };
+use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
-use thalvi_desktop::hold::{HoldInput, Refusal};
+use thalvi_desktop::hold::{HoldInput, HoldKind, Refusal};
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
 use thalvi_desktop::recognizer::{
-    FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, ServerUrl,
-    SpeechSource,
+    FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, SpeechSource,
 };
+use thalvi_desktop::spotter::KeywordSpotter;
 use thalvi_desktop::vad::VadDetector;
 use thalvi_desktop::wake::WakeEvent;
+use thalvi_desktop::writing::{DEFAULT_PROMPT, WritingError};
+use tokio::sync::{oneshot, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
 type TestEngine = Engine<FakeRecognizer, FakeWake, FakeCuePlayer>;
@@ -132,6 +137,26 @@ impl Rig {
     }
 
     fn recording(config: &str, recorder: Recorder) -> (Self, TestEngine, FakeFrames) {
+        let (rig, engine, frames) = Self::build(config, recorder, None, None);
+        (rig, engine, frames)
+    }
+
+    /// A rig whose engine also has an ending spotter that hears what the test scripts.
+    fn spotting(
+        config: &str,
+        recorder: Recorder,
+    ) -> (Self, SpotterControl, TestEngine, FakeFrames) {
+        let (spotter, control) = FakeSpotter::new();
+        let (rig, engine, frames) = Self::build(config, recorder, Some(spotter), None);
+        (rig, control, engine, frames)
+    }
+
+    fn build(
+        config: &str,
+        recorder: Recorder,
+        spotter: Option<FakeSpotter>,
+        spotter_off: Option<&str>,
+    ) -> (Self, TestEngine, FakeFrames) {
         let config = DesktopConfig::from_json_str(config).unwrap();
         let gate = InputGate::default();
         let (frames, feed) = FakeFrames::new(&gate);
@@ -150,6 +175,8 @@ impl Rig {
                 http: reqwest::Client::new(),
                 hold,
                 notice: Box::new(move |notice| sink.borrow_mut().push(notice.to_owned())),
+                spotter: spotter.map(|spotter| Box::new(spotter) as Box<dyn KeywordSpotter>),
+                spotter_off: spotter_off.map(str::to_owned),
             },
             &config,
             recorder,
@@ -330,6 +357,76 @@ async fn the_microphone_level_follows_the_capture_frames_and_is_zero_outside_it(
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_buffered_wake_capture_uploads_after_the_voice_pause() {
+    LocalSet::new()
+        .run_until(async {
+            let config = r#"{"ending_pause":{"paste":1.0}}"#;
+            let (mut rig, engine, frames) = Rig::new(config);
+            rig.server.buffer_audio();
+            let task = capture_task(engine, frames);
+            rig.open().await;
+
+            rig.feed_until(1200, Kind::Voice).await;
+            rig.feed_until(2120, Kind::Quiet).await;
+            assert!(matches!(rig.state(), EngineState::Capturing { .. }));
+            assert!(!rig.server.calls().contains(&FakeCall::FinishAudio));
+
+            rig.feed_until(3500, Kind::Quiet).await;
+            assert_eq!(
+                rig.state(),
+                EngineState::TranscribingLive {
+                    route: CaptureRoute::Paste
+                }
+            );
+            assert_eq!(
+                rig.server
+                    .calls()
+                    .iter()
+                    .filter(|call| matches!(call, FakeCall::FinishAudio))
+                    .count(),
+                1
+            );
+            rig.at(8_000).await;
+            assert_eq!(
+                rig.state(),
+                EngineState::TranscribingLive {
+                    route: CaptureRoute::Paste
+                },
+                "a buffered upload does not use the microphone watchdog"
+            );
+            assert!(!task.is_finished(), "the pending upload can still answer");
+            rig.finals("voice after a pause").await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "voice after a pause")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_buffered_hold_reports_a_microphone_stall_before_release() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            rig.server.buffer_audio();
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.feed_until(1000, Kind::Voice).await;
+            rig.at(3960).await;
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error: CaptureError::MicStopped,
+                    recoverable_text: None,
+                },
+                "a buffered upload starts only after release and cannot disable the live microphone watchdog"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_microphone_level_follows_wake_listening_and_resets_when_it_stops() {
     LocalSet::new()
         .run_until(async {
@@ -394,7 +491,8 @@ async fn the_wake_cue_and_the_connection_overlap_and_only_audio_after_both_is_se
                 rig.state(),
                 EngineState::Capturing {
                     committed: String::new(),
-                    partial: None
+                    partial: None,
+                    notice: None,
                 }
             );
 
@@ -639,7 +737,8 @@ async fn speech_while_an_ending_is_pending_is_held_until_it_lasts_then_cancels_t
                 rig.state(),
                 EngineState::Capturing {
                     committed: "Hello submit".to_owned(),
-                    partial: Some("more words".to_owned())
+                    partial: Some("more words".to_owned()),
+                    notice: None,
                 }
             );
 
@@ -741,7 +840,8 @@ async fn words_recognized_while_the_countdown_waits_for_quiet_still_cancel_the_e
                 rig.state(),
                 EngineState::Capturing {
                     committed: "Hello paste that".to_owned(),
-                    partial: Some("and also".to_owned())
+                    partial: Some("and also".to_owned()),
+                    notice: None,
                 }
             );
             rig.feed_until(6000, Kind::Quiet).await;
@@ -961,9 +1061,9 @@ async fn a_whole_capture_command_runs_after_the_task_pause_and_an_explicit_endin
             3500,
         ),
         (
-            &[(1000, "Open Google.com.")],
+            &[(1000, "Open Google dot com.")],
             CaptureRoute::Task,
-            "Open Google.com.",
+            "Open Google dot com.",
             &[1000],
             3500,
         ),
@@ -1044,6 +1144,39 @@ async fn a_whole_capture_command_runs_after_the_task_pause_and_an_explicit_endin
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_command_without_a_spoken_ending_does_not_agree_with_a_spotter_hit() {
+    LocalSet::new()
+        .run_until(async {
+            for (said, expected) in [
+                ("open google.com", "ended"),
+                ("open google.com do that", "agreed"),
+            ] {
+                let dir = record_dir("command-spotter");
+                let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+                let (mut rig, spot, engine, frames) = Rig::spotting(COMMANDS, recorder);
+                spot.hear(HEARD_AT_FRAME, "do that", Ending::Task);
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals(said).await;
+                rig.feed_until(3500, Kind::Quiet).await;
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Task, "open google.com"),
+                    "{said}"
+                );
+                let rows = read_lines(&dir.join("metrics.jsonl"));
+                let hit = rows
+                    .iter()
+                    .find(|row| row["event"] == "desktop_ending_spotter" && row["call"] == "hit")
+                    .unwrap();
+                assert_eq!(hit["outcome"], expected, "{said}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn speech_during_a_command_pause_cancels_it_and_the_capture_goes_on_as_dictation() {
     LocalSet::new()
         .run_until(async {
@@ -1059,7 +1192,8 @@ async fn speech_during_a_command_pause_cancels_it_and_the_capture_goes_on_as_dic
                 rig.state(),
                 EngineState::Capturing {
                     committed: "open google.com".to_owned(),
-                    partial: Some("and then".to_owned())
+                    partial: Some("and then".to_owned()),
+                    notice: None,
                 }
             );
             rig.feed_until(6000, Kind::Quiet).await;
@@ -1149,7 +1283,8 @@ async fn text_that_is_not_the_whole_command_never_runs_without_an_ending() {
                     rig.state(),
                     EngineState::Capturing {
                         committed: said.to_owned(),
-                        partial: None
+                        partial: None,
+                        notice: None,
                     },
                     "{said}"
                 );
@@ -1353,7 +1488,7 @@ async fn a_failed_capture_says_what_happened_keeps_the_text_and_returns_to_liste
     let recognizer = |message: &str| CaptureError::Recognizer(RecognizerError::said(message));
     let not_ready = || CaptureError::NotReady {
         waited: Duration::from_secs(8),
-        speech: SpeechSource::thalvi_server("Thalvi server", &ServerUrl::default()),
+        speech: SpeechSource::direct("Realtime speech server", "ws://127.0.0.1:8080".to_owned()),
     };
     // Fault, the error, the text kept, when the error cue plays, and whether a stream was open.
     let cases = [
@@ -1398,7 +1533,7 @@ async fn a_failed_capture_says_what_happened_keeps_the_text_and_returns_to_liste
     LocalSet::new()
         .run_until(async {
             for (fault, error, recoverable_text, error_cue_at, had_stream) in cases {
-                let (mut rig, engine, frames) = Rig::new("{}");
+                let (mut rig, engine, frames) = Rig::new(&with_second_passes(&[]));
                 let task = capture_task(engine, frames);
                 inflict(&mut rig, &task, fault).await;
                 assert_eq!(
@@ -1625,7 +1760,7 @@ async fn configured_capture_limits_replace_the_defaults() {
             assert!(!task.is_finished());
             rig.at(30_000).await;
             let idle = CaptureError::NoEnding(Duration::from_secs(20));
-            assert_eq!(idle.to_string(), "No words heard for 20 seconds.");
+            assert_eq!(idle.to_string(), "Didn't hear an ending for 20 seconds.");
             assert_eq!(
                 finished(task).await,
                 CaptureOutcome::Failed {
@@ -1672,8 +1807,12 @@ fn the_time_notices_read_whole_minutes_as_minutes_and_the_rest_as_seconds() {
     ] {
         let seconds = Duration::from_secs(seconds);
         assert_eq!(
-            CaptureError::NoEnding(seconds).to_string(),
+            CaptureError::NoWords(seconds).to_string(),
             format!("No words heard for {words}.")
+        );
+        assert_eq!(
+            CaptureError::NoEnding(seconds).to_string(),
+            format!("Didn't hear an ending for {words}.")
         );
         assert_eq!(
             CaptureError::TooLong(seconds).to_string(),
@@ -1683,49 +1822,17 @@ fn the_time_notices_read_whole_minutes_as_minutes_and_the_rest_as_seconds() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn wake_words_are_reported_and_an_ambiguous_one_only_once() {
+async fn a_dictation_wake_is_reported_and_closes_the_microphone_gate() {
     LocalSet::new()
         .run_until(async {
             let (rig, mut engine, mut frames) = Rig::new("{}");
-            let task = tokio::task::spawn_local(async move {
-                let first = engine.listen(&mut frames).await.unwrap();
-                let second = engine.listen(&mut frames).await.unwrap();
-                (first, second)
-            });
-            for _ in 0..25 {
-                rig.wake.fire(WakeEvent::Ambiguous);
-                rig.feed.send(audible(1));
-                settle().await;
-            }
-            assert_eq!(rig.notices(), ["Wake was ambiguous; still listening."]);
-            assert!(!task.is_finished());
-            rig.feed.send(audible(2));
-            settle().await;
-            rig.wake.fire(WakeEvent::Ambiguous);
-            rig.feed.send(audible(3));
-            settle().await;
-            assert_eq!(rig.notices().len(), 2, "a quiet frame re-arms the notice");
-
-            rig.wake.fire(WakeEvent::Conversation);
-            rig.feed.send(audible(4));
-            settle().await;
-            assert!(
-                rig.gate.is_enabled(),
-                "a conversation wake leaves the microphone on"
-            );
-            rig.wake.fire(WakeEvent::Capture);
-            rig.feed.send(audible(5));
-            let (first, second) = finished(task).await;
-            assert_eq!(
-                (first, second),
-                (WakeTrigger::Conversation, WakeTrigger::Capture)
-            );
+            let task = tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
+            rig.wake.score_and_detect(0.8, 0.7);
+            rig.feed.send(audible(1));
+            assert_eq!(finished(task).await.unwrap(), WakeTrigger::Capture);
             assert!(!rig.gate.is_enabled(), "a capture wake closes the gate");
-            assert_eq!(
-                rig.wake.resets(),
-                2,
-                "each listen starts from forgotten audio"
-            );
+            assert_eq!(rig.notices(), Vec::<String>::new());
+            assert_eq!(rig.wake.resets(), 1);
         })
         .await;
 }
@@ -1761,6 +1868,8 @@ enum Reply {
     Status(u16),
     /// Never answers.
     Stall,
+    /// Answers 200 with this body after this many milliseconds.
+    After(u64, &'static str),
 }
 
 /// A secondary transcription endpoint; reports how many frames each uploaded WAV holds.
@@ -1783,6 +1892,10 @@ async fn serve(reply: Reply) -> (String, tokio::sync::mpsc::UnboundedReceiver<us
                 Reply::Json(json) => (StatusCode::OK, json),
                 Reply::Status(code) => (StatusCode::from_u16(code).unwrap(), "{}"),
                 Reply::Stall => std::future::pending().await,
+                Reply::After(delay, json) => {
+                    tokio::time::sleep(ms(delay)).await;
+                    (StatusCode::OK, json)
+                }
             }
         }
     });
@@ -1796,13 +1909,13 @@ async fn serve(reply: Reply) -> (String, tokio::sync::mpsc::UnboundedReceiver<us
 
 fn with_secondary(url: &str, api: &str) -> String {
     format!(
-        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"secondary": {{"enabled": true, "url": "{url}", "model": "m", "api": "{api}"}}}}}}"#
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"entries": [{{"kind": "realtime", "id": "live", "name": "Realtime speech server", "active": true, "address": "ws://127.0.0.1:8080", "model": "m"}}, {{"kind": "second_pass", "id": "secondary", "name": "Second pass", "active": true, "address": "{url}", "model": "m", "api": "{api}"}}]}}}}"#
     )
 }
 
 fn with_secondary_off(url: &str) -> String {
     format!(
-        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"secondary": {{"enabled": false, "url": "{url}", "model": "m", "api": "openai"}}}}}}"#
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"entries": [{{"kind": "realtime", "id": "live", "name": "Realtime speech server", "active": true, "address": "ws://127.0.0.1:8080", "model": "m"}}, {{"kind": "second_pass", "id": "secondary", "name": "Second pass", "active": false, "address": "{url}", "model": "m", "api": "openai"}}]}}}}"#
     )
 }
 
@@ -1921,7 +2034,7 @@ async fn the_live_transcript_is_kept_with_a_notice_when_the_secondary_cannot_sta
         .await;
 }
 
-/// A config with the Thalvi server entry active and these second-pass entries, in order:
+/// A config with a direct speech entry active and these second-pass entries, in order:
 /// `(name, url, ticked)`.
 fn with_second_passes(entries: &[(&str, &str, bool)]) -> String {
     let second: Vec<String> = entries
@@ -1932,10 +2045,55 @@ fn with_second_passes(entries: &[(&str, &str, bool)]) -> String {
             )
         })
         .collect();
+    let second = if second.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", second.join(", "))
+    };
     format!(
-        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"entries": [{{"kind": "thalvi_server", "id": "s", "name": "Thalvi server", "active": true, "address": "ws://127.0.0.1:8080"}}, {}]}}}}"#,
-        second.join(", ")
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"entries": [{{"kind": "realtime", "id": "s", "name": "Realtime speech server", "active": true, "address": "ws://127.0.0.1:8080", "model": "m"}}{second}]}}}}"#
     )
+}
+
+/// What a capture gave and when, for the tests that watch the second passes after the paste.
+struct Pasted {
+    outcome: CaptureOutcome,
+    /// Milliseconds after the wake word.
+    at: u64,
+    /// The notices the user had been shown by then.
+    notices: Vec<String>,
+}
+
+/// Captures as `capture_task` does, then spends `busy` ms elsewhere, the way the app does while it
+/// delivers or writes, and keeps listening for 20 s, so second passes the paste did not wait for
+/// can finish and be recorded.
+fn capture_and_listen(
+    rig: &Rig,
+    mut engine: TestEngine,
+    mut frames: FakeFrames,
+    cancel_after: bool,
+    busy: u64,
+) -> JoinHandle<Pasted> {
+    let origin = tokio::time::Instant::now() - ms(rig.now());
+    let notices = Rc::clone(&rig.notices);
+    let handle = rig.handle.clone();
+    tokio::task::spawn_local(async move {
+        let trigger = engine.listen(&mut frames).await.unwrap();
+        assert_eq!(trigger, WakeTrigger::Capture);
+        let outcome = engine.capture(&mut frames).await;
+        let pasted = Pasted {
+            outcome,
+            at: u64::try_from(origin.elapsed().as_millis()).unwrap(),
+            notices: notices.borrow().clone(),
+        };
+        if cancel_after {
+            handle.cancel();
+        }
+        tokio::time::sleep(ms(busy)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(20), engine.listen(&mut frames)).await;
+        engine.finish().await;
+        pasted
+    })
 }
 
 #[tokio::test(start_paused = true)]
@@ -1952,7 +2110,7 @@ async fn the_first_ticked_entry_that_answers_replaces_the_text_and_the_rest_are_
             let (second, mut second_uploads) =
                 serve(Reply::Json(r#"{"text": "Second words paste that"}"#)).await;
             let (third, mut third_uploads) =
-                serve(Reply::Json(r#"{"text": "Third words paste that"}"#)).await;
+                serve(Reply::After(500, r#"{"text": "Third words paste that"}"#)).await;
             let (unticked, mut unticked_uploads) =
                 serve(Reply::Json(r#"{"text": "Unticked words paste that"}"#)).await;
             let config = with_second_passes(&[
@@ -1963,10 +2121,10 @@ async fn the_first_ticked_entry_that_answers_replaces_the_text_and_the_rest_are_
             ]);
             let recorder = Recorder::in_dir(all, &dir).unwrap();
             let (mut rig, engine, frames) = Rig::recording(&config, recorder);
-            let task = capture_task(engine, frames);
+            let task = capture_and_listen(&rig, engine, frames, false, 0);
             live_words(&mut rig).await;
             assert_eq!(
-                finished(task).await,
+                finished(task).await.outcome,
                 accepted(CaptureRoute::Paste, "Second words")
             );
             assert!(broken_uploads.recv().await.is_some());
@@ -2006,8 +2164,8 @@ async fn the_first_ticked_entry_that_answers_replaces_the_text_and_the_rest_are_
                 std::fs::read_to_string(folder.join("text.txt")).unwrap(),
                 "heard: live words paste that\n\
                  second transcription (Second): Second words paste that\n\
-                 second transcription (Third): Third words paste that\n\
-                 accepted (paste): Second words\n"
+                 accepted (paste): Second words\n\
+                 second transcription (Third): Third words paste that\n"
             );
         })
         .await;
@@ -2035,6 +2193,392 @@ async fn no_ticked_entry_that_answers_keeps_the_live_text_and_names_every_one_th
         .await;
 }
 
+enum Cancel {
+    Never,
+    /// This many milliseconds after the requests went out.
+    During(u64),
+    /// Right after the capture's outcome, while the engine listens again.
+    AfterPaste,
+}
+
+enum Expected {
+    /// Accepted with this text.
+    Text(&'static str),
+    /// Cancelled while the second passes ran.
+    Cancelled,
+}
+
+struct Order {
+    name: &'static str,
+    /// The ticked entries `A`, `B` in list order and how each endpoint answers.
+    passes: [Reply; 2],
+    cancel: Cancel,
+    expected: Expected,
+    /// Milliseconds from the requests going out to the outcome.
+    waited: u64,
+    /// The notices shown when the outcome came.
+    then: &'static [&'static str],
+    /// The notices shown 20 s later.
+    later: &'static [&'static str],
+    /// Each entry's metric in the order written: `(entry, outcome, used)`.
+    metrics: [(&'static str, &'static str, bool); 2],
+    /// The lines of `text.txt` after `heard:`.
+    lines: &'static [&'static str],
+}
+
+/// When the requests go out: the capture ends at 3500 and the accepted cue takes 100 ms.
+const SECOND_PASSES: u64 = 3600;
+
+const A_FAILED: &str = "The second transcription failed for \"A\". Using the answer of \"B\".";
+const B_ONLY_RECORDED: &str = "The second transcription for \"B\" failed; it was only recorded.";
+
+const A: &str = r#"{"text": "A words paste that"}"#;
+const B: &str = r#"{"text": "B words paste that"}"#;
+const DISAGREES: &str = r#"{"text": "words submit"}"#;
+
+const ORDERS: &[Order] = &[
+    Order {
+        name: "a fast entry is pasted at once and a slow one is recorded afterwards",
+        passes: [Reply::After(100, A), Reply::After(8000, B)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("A words"),
+        waited: 100,
+        then: &[],
+        later: &[],
+        metrics: [("A", "ok", true), ("B", "ok", false)],
+        lines: &[
+            "second transcription (A): A words paste that",
+            "accepted (paste): A words",
+            "second transcription (B): B words paste that",
+        ],
+    },
+    Order {
+        name: "an earlier entry wins even when a later one answered first",
+        passes: [Reply::After(1000, A), Reply::After(100, B)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("A words"),
+        waited: 1000,
+        then: &[],
+        later: &[],
+        metrics: [("A", "ok", true), ("B", "ok", false)],
+        lines: &[
+            "second transcription (A): A words paste that",
+            "second transcription (B): B words paste that",
+            "accepted (paste): A words",
+        ],
+    },
+    Order {
+        name: "a failing first entry hands the paste to the second",
+        passes: [Reply::Status(500), Reply::After(300, B)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("B words"),
+        waited: 300,
+        then: &[A_FAILED],
+        later: &[A_FAILED],
+        metrics: [("A", "error", false), ("B", "ok", true)],
+        lines: &[
+            "second transcription (B): B words paste that",
+            "accepted (paste): B words",
+        ],
+    },
+    Order {
+        name: "a first entry that disagrees with the ending hands the paste to the second",
+        passes: [Reply::After(200, DISAGREES), Reply::After(500, B)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("B words"),
+        waited: 500,
+        then: &[A_FAILED],
+        later: &[A_FAILED],
+        metrics: [("A", "error", false), ("B", "ok", true)],
+        lines: &[
+            "second transcription (A): words submit",
+            "second transcription (B): B words paste that",
+            "accepted (paste): B words",
+        ],
+    },
+    Order {
+        name: "a first entry that times out is waited for before the second is used",
+        passes: [Reply::Stall, Reply::After(100, B)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("B words"),
+        waited: 10_000,
+        then: &[A_FAILED],
+        later: &[A_FAILED],
+        metrics: [("A", "timeout", false), ("B", "ok", true)],
+        lines: &[
+            "second transcription (B): B words paste that",
+            "accepted (paste): B words",
+        ],
+    },
+    Order {
+        name: "no usable entry keeps the live text once the last one has answered",
+        passes: [Reply::Status(500), Reply::After(300, DISAGREES)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("live words"),
+        waited: 300,
+        then: &["The second transcription failed for \"A\", \"B\". Using the live transcript."],
+        later: &["The second transcription failed for \"A\", \"B\". Using the live transcript."],
+        metrics: [("A", "error", false), ("B", "error", false)],
+        lines: &[
+            "second transcription (B): words submit",
+            "accepted (paste): live words",
+        ],
+    },
+    Order {
+        name: "a recorded-only entry that fails after the paste says so apart and changes nothing",
+        passes: [Reply::After(100, A), Reply::After(500, "{}")],
+        cancel: Cancel::Never,
+        expected: Expected::Text("A words"),
+        waited: 100,
+        then: &[],
+        later: &[B_ONLY_RECORDED],
+        metrics: [("A", "ok", true), ("B", "error", false)],
+        lines: &[
+            "second transcription (A): A words paste that",
+            "accepted (paste): A words",
+        ],
+    },
+    Order {
+        name: "a recorded-only entry that times out after the paste is recorded as a timeout",
+        passes: [Reply::After(100, A), Reply::Stall],
+        cancel: Cancel::Never,
+        expected: Expected::Text("A words"),
+        waited: 100,
+        then: &[],
+        later: &[B_ONLY_RECORDED],
+        metrics: [("A", "ok", true), ("B", "timeout", false)],
+        lines: &[
+            "second transcription (A): A words paste that",
+            "accepted (paste): A words",
+        ],
+    },
+    Order {
+        name: "a recorded-only entry that failed before the paste is also told apart",
+        passes: [Reply::After(300, A), Reply::Status(500)],
+        cancel: Cancel::Never,
+        expected: Expected::Text("A words"),
+        waited: 300,
+        then: &[B_ONLY_RECORDED],
+        later: &[B_ONLY_RECORDED],
+        metrics: [("A", "ok", true), ("B", "error", false)],
+        lines: &[
+            "second transcription (A): A words paste that",
+            "accepted (paste): A words",
+        ],
+    },
+    Order {
+        name: "cancelling during the wait cancels and records every request",
+        passes: [Reply::After(5000, A), Reply::After(8000, B)],
+        cancel: Cancel::During(1000),
+        expected: Expected::Cancelled,
+        waited: 1000,
+        then: &[],
+        later: &[],
+        metrics: [("A", "cancelled", false), ("B", "cancelled", false)],
+        lines: &["cancelled"],
+    },
+    Order {
+        name: "cancelling after the paste leaves the recorded-only request running",
+        passes: [Reply::After(100, A), Reply::After(8000, B)],
+        cancel: Cancel::AfterPaste,
+        expected: Expected::Text("A words"),
+        waited: 100,
+        then: &[],
+        later: &[],
+        metrics: [("A", "ok", true), ("B", "ok", false)],
+        lines: &[
+            "second transcription (A): A words paste that",
+            "accepted (paste): A words",
+            "second transcription (B): B words paste that",
+        ],
+    },
+];
+
+#[tokio::test(start_paused = true)]
+async fn the_paste_waits_only_for_the_earliest_entry_that_gives_a_usable_answer() {
+    LocalSet::new()
+        .run_until(async {
+            for order in ORDERS {
+                check_order(order).await;
+            }
+        })
+        .await;
+}
+
+async fn check_order(order: &Order) {
+    let name = order.name;
+    let all = RecordKinds {
+        metrics: true,
+        text: true,
+        audio: false,
+    };
+    let dir = record_dir("order");
+    let (a, _a) = serve(order.passes[0]).await;
+    let (b, _b) = serve(order.passes[1]).await;
+    let config = with_second_passes(&[("A", &a, true), ("B", &b, true)]);
+    let recorder = Recorder::in_dir(all, &dir).unwrap();
+    let (mut rig, engine, frames) = Rig::recording(&config, recorder);
+    let task = capture_and_listen(
+        &rig,
+        engine,
+        frames,
+        matches!(order.cancel, Cancel::AfterPaste),
+        0,
+    );
+    live_words(&mut rig).await;
+    if let Cancel::During(after) = order.cancel {
+        rig.at(SECOND_PASSES + after).await;
+        rig.handle.cancel();
+    }
+    let pasted = finished(task).await;
+
+    let expected = match order.expected {
+        Expected::Text(text) => accepted(CaptureRoute::Paste, text),
+        Expected::Cancelled => CaptureOutcome::Cancelled {
+            dictated: Some("live words".to_owned()),
+        },
+    };
+    assert_eq!(pasted.outcome, expected, "{name}");
+    assert_eq!(
+        pasted.at,
+        SECOND_PASSES + order.waited,
+        "{name}: when it came"
+    );
+    assert_eq!(pasted.notices, order.then, "{name}: notices then");
+    assert_eq!(rig.notices(), order.later, "{name}: notices later");
+
+    let metrics: Vec<_> = read_lines(&dir.join("metrics.jsonl"))
+        .iter()
+        .filter(|line| line["event"] == "desktop_secondary_stt")
+        .map(|line| {
+            (
+                line["entry"].as_str().unwrap().to_owned(),
+                line["outcome"].as_str().unwrap().to_owned(),
+                line["used"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    let expected_metrics: Vec<_> = order
+        .metrics
+        .iter()
+        .map(|(entry, outcome, used)| ((*entry).to_owned(), (*outcome).to_owned(), *used))
+        .collect();
+    assert_eq!(metrics, expected_metrics, "{name}: metrics");
+    let folder = dictation_dirs(&dir).pop().unwrap();
+    let mut text = String::from("heard: live words paste that\n");
+    for line in order.lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    assert_eq!(
+        std::fs::read_to_string(folder.join("text.txt")).unwrap(),
+        text,
+        "{name}: text.txt"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recorded_only_entry_records_its_own_latency_however_long_the_engine_was_busy() {
+    LocalSet::new()
+        .run_until(async {
+            let all = RecordKinds {
+                metrics: true,
+                text: false,
+                audio: false,
+            };
+            let dir = record_dir("busy");
+            let (a, _a) = serve(Reply::After(100, A)).await;
+            let (b, _b) = serve(Reply::After(500, B)).await;
+            let config = with_second_passes(&[("A", &a, true), ("B", &b, true)]);
+            let recorder = Recorder::in_dir(all, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording(&config, recorder);
+            // The engine does something else for 5 s after the paste.
+            let task = capture_and_listen(&rig, engine, frames, false, 5000);
+            live_words(&mut rig).await;
+            finished(task).await;
+
+            let took: Vec<_> = read_lines(&dir.join("metrics.jsonl"))
+                .iter()
+                .filter(|line| line["event"] == "desktop_secondary_stt")
+                .map(|line| {
+                    (
+                        line["entry"].as_str().unwrap().to_owned(),
+                        line["duration_ms"].as_f64().unwrap().round(),
+                    )
+                })
+                .collect();
+            assert_eq!(took, [("A".to_owned(), 100.0), ("B".to_owned(), 500.0)]);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_pass_the_paste_did_not_wait_for_is_recorded_while_the_next_capture_runs() {
+    LocalSet::new()
+        .run_until(async {
+            // `(name, A's delay, B's delay, [(ms after the second wake, whether B's failure shows)])`.
+            // The second capture's ending is accepted 3500 ms after its wake word.
+            for (name, a, b, checks) in [
+                (
+                    "while it listens for words and their ending",
+                    300,
+                    2500,
+                    &[(1800, false), (2800, true)][..],
+                ),
+                (
+                    "while it waits for its own second passes",
+                    2000,
+                    6500,
+                    &[(3000, false)][..],
+                ),
+            ] {
+                let (a, _a) = serve(Reply::After(a, A)).await;
+                let (b, _b) = serve(Reply::After(b, "{}")).await;
+                let config = with_second_passes(&[("A", &a, true), ("B", &b, true)]);
+                let (mut rig, mut engine, mut frames) = Rig::new(&config);
+                let notices = Rc::clone(&rig.notices);
+                let seen = Rc::new(RefCell::new(Vec::new()));
+                let log = Rc::clone(&seen);
+                let task = tokio::task::spawn_local(async move {
+                    for _ in 0..2 {
+                        engine.listen(&mut frames).await.unwrap();
+                        let outcome = engine.capture(&mut frames).await;
+                        log.borrow_mut().push((outcome, notices.borrow().clone()));
+                    }
+                    engine.finish().await;
+                });
+                live_words(&mut rig).await;
+                while seen.borrow().is_empty() {
+                    rig.at(rig.now() + 100).await;
+                }
+                let wake = rig.now();
+                rig.server.connect_again();
+                rig.wake_word().await;
+                rig.server.ready();
+                settle().await;
+                rig.at(wake + 230).await;
+                rig.feed_until(wake + 1000, Kind::Quiet).await;
+                rig.finals("more words paste that").await;
+                for (after, shown) in checks {
+                    rig.feed_until(wake + after, Kind::Quiet).await;
+                    let expected: &[&str] = if *shown { &[B_ONLY_RECORDED] } else { &[] };
+                    assert_eq!(rig.notices(), expected, "{name}: at {after}");
+                }
+                rig.feed_until(wake + 3500, Kind::Quiet).await;
+                finished(task).await;
+
+                let seen = seen.borrow();
+                assert_eq!(
+                    seen[1].0,
+                    accepted(CaptureRoute::Paste, "A words"),
+                    "{name}"
+                );
+                assert_eq!(seen[1].1, [B_ONLY_RECORDED], "{name}: by the second paste");
+            }
+        })
+        .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn cancelling_during_the_secondary_transcription_abandons_it() {
     LocalSet::new()
@@ -2042,9 +2586,17 @@ async fn cancelling_during_the_secondary_transcription_abandons_it() {
             let (url, mut uploads) = serve(Reply::Stall).await;
             let (mut rig, engine, frames) = Rig::new(&with_secondary(&url, "openai"));
             let task = capture_task(engine, frames);
-            live_words(&mut rig).await;
+            tokio::time::timeout(Duration::from_secs(10), live_words(&mut rig))
+                .await
+                .expect("capture reaches the second transcription");
             rig.at(3600).await;
-            assert!(uploads.recv().await.is_some(), "the upload started");
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), uploads.recv())
+                    .await
+                    .expect("second transcription starts")
+                    .is_some(),
+                "the upload started"
+            );
             assert_eq!(
                 rig.state(),
                 EngineState::TranscribingSecondary {
@@ -2107,6 +2659,7 @@ async fn the_state_follows_the_capture() {
             let capturing = |committed: &str, partial: Option<&str>| EngineState::Capturing {
                 committed: committed.to_owned(),
                 partial: partial.map(str::to_owned),
+                notice: None,
             };
             assert_eq!(rig.state(), capturing("", None));
 
@@ -2232,7 +2785,7 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
                 .iter()
                 .find(|line| line["event"] == "desktop_transcription_ready")
                 .unwrap();
-            assert_eq!(ready["entry"], "Thalvi server");
+            assert_eq!(ready["entry"], "Realtime speech server");
 
             let folder = dictation_dirs(&dir).pop().unwrap();
             assert_eq!(
@@ -2258,7 +2811,11 @@ async fn the_delay_from_speech_to_the_recognizers_words_is_recorded_once_for_par
         .run_until(async {
             let dir = record_dir("lags");
             let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
-            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+            let (mut rig, spot, engine, frames) = Rig::spotting(
+                r#"{"stt":{"entries":[{"kind":"realtime","id":"test","name":"Metrics recognizer","active":true,"address":"ws://127.0.0.1:8080","model":"m"}]}}"#,
+                recorder,
+            );
+            spot.hear(HEARD_AT_FRAME, "paste that", Ending::Paste);
             let task = capture_task(engine, frames);
             rig.open().await;
             rig.feed_until(1000, Kind::Quiet).await;
@@ -2272,6 +2829,11 @@ async fn the_delay_from_speech_to_the_recognizers_words_is_recorded_once_for_par
             rig.at(3500).await;
             finished(task).await;
             let lines = read_lines(&dir.join("metrics.jsonl"));
+            let ready = lines
+                .iter()
+                .find(|line| line["event"] == "desktop_transcription_ready")
+                .unwrap();
+            assert_eq!(ready["entry"], "Metrics recognizer");
             let lags = |event: &str| -> Vec<f64> {
                 lines
                     .iter()
@@ -2347,7 +2909,7 @@ const AUDIO_AND_METRICS: RecordKinds = RecordKinds {
     audio: true,
 };
 
-/// Listens until a capture or conversation wake, then writes the recordings out.
+/// Listens until a dictation wake, then writes the recordings out.
 fn listen_task(
     mut engine: TestEngine,
     mut frames: FakeFrames,
@@ -2445,30 +3007,18 @@ fn wake_lines(dir: &std::path::Path, event: &str) -> Vec<serde_json::Value> {
 async fn a_near_miss_is_one_line_per_episode_with_its_peak_and_a_crossing_is_none() {
     LocalSet::new()
         .run_until(async {
-            // Per frame (capture, conversation); both thresholds are set to 0.5.
-            let frames = [
-                (0.0, 0.0),
-                (0.1, 0.0),
-                (0.2, 0.0),
-                (0.3004, 0.0),
-                (0.2, 0.0),
-                (0.0, 0.0),
-                (0.15, 0.0),
-                (0.1, 0.4),
-                (0.0, 0.1234),
-                (0.0, 0.0),
-                (0.3, 0.0),
-            ];
+            // Per-frame dictation scores; the threshold is set to 0.5.
+            let frames = [0.0, 0.1, 0.2, 0.3004, 0.2, 0.0, 0.15, 0.1, 0.0, 0.0, 0.3];
             let dir = record_dir("near-miss");
             let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
             let config = r#"{"wake":{"capture":{"model":"hey_thalvi","threshold":0.5}}}"#;
             let (rig, engine, frames_in) = Rig::recording(config, recorder);
             let task = listen_task(engine, frames_in, 1);
-            for (id, (capture, conversation)) in frames.into_iter().enumerate() {
-                rig.wake.score(capture, conversation);
+            for (id, score) in frames.into_iter().enumerate() {
+                rig.wake.score(score);
                 hear(&rig, id, id).await;
             }
-            rig.wake.score(0.6, 0.0);
+            rig.wake.score(0.6);
             rig.wake.fire(WakeEvent::Capture);
             hear(&rig, 99, 99).await;
             finished(task).await;
@@ -2488,7 +3038,6 @@ async fn a_near_miss_is_one_line_per_episode_with_its_peak_and_a_crossing_is_non
                 [
                     ("capture".to_owned(), json!(0.3), json!(0.5)),
                     ("capture".to_owned(), json!(0.15), json!(0.5)),
-                    ("conversation".to_owned(), json!(0.4), json!(0.5)),
                 ],
                 "a rise that ends in a wake is not a near miss"
             );
@@ -2509,12 +3058,12 @@ async fn a_wake_needs_a_sample_peak_of_1500_within_the_last_16_frames() {
             // (name, event, peak of the frame k frames before the wake frame (0 = the wake
             // frame), the peak elsewhere, the peak the refusal records or None for a wake)
             type Case = (&'static str, WakeEvent, usize, i16, i16, Option<u16>);
-            let cases: [Case; 7] = [
+            let cases: [Case; 6] = [
                 ("faint", WakeEvent::Capture, 0, 1_499, 0, Some(1_499)),
                 ("at the floor", WakeEvent::Capture, 0, 1_500, 0, None),
                 (
-                    "negative faint conversation",
-                    WakeEvent::Conversation,
+                    "negative faint",
+                    WakeEvent::Capture,
                     0,
                     -1_499,
                     0,
@@ -2527,14 +3076,6 @@ async fn a_wake_needs_a_sample_peak_of_1500_within_the_last_16_frames() {
                     -1_500,
                     0,
                     None,
-                ),
-                (
-                    "faint ambiguous",
-                    WakeEvent::Ambiguous,
-                    0,
-                    1_499,
-                    0,
-                    Some(1_499),
                 ),
                 (
                     "loud 15 frames back",
@@ -2558,7 +3099,7 @@ async fn a_wake_needs_a_sample_peak_of_1500_within_the_last_16_frames() {
                 let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
                 let (rig, engine, frames) = Rig::recording("{}", recorder);
                 let task = listen_task(engine, frames, 1);
-                rig.wake.score(0.9, 0.1234);
+                rig.wake.score(0.9);
                 for id in 0..=20 {
                     let loud = 20 - id == back;
                     rig.feed
@@ -2577,17 +3118,18 @@ async fn a_wake_needs_a_sample_peak_of_1500_within_the_last_16_frames() {
                         rig.feed.send(peaking(21, elsewhere));
                         settle().await;
                         assert!(!task.is_finished(), "{name}: still refused");
-                        rig.wake.fire(WakeEvent::Conversation);
+                        rig.wake.score(0.0);
                         rig.feed.send(audible(22));
+                        settle().await;
+                        rig.wake.score_and_detect(0.9, 0.7);
+                        rig.feed.send(audible(23));
                         finished(task).await;
                         let lines = wake_lines(&dir, "desktop_wake_refused");
                         assert_eq!(lines.len(), 1, "{name}: one line for the run of frames");
                         assert_eq!(lines[0]["level"], json!(level), "{name}");
                         assert_eq!(lines[0]["floor"], json!(1_500), "{name}");
                         assert_eq!(lines[0]["capture"], json!(0.9), "{name}");
-                        assert_eq!(lines[0]["conversation"], json!(0.123), "{name}");
-                        let head = format!("{event:?}").to_lowercase();
-                        assert_eq!(lines[0]["outcome"], head, "{name}");
+                        assert_eq!(lines[0]["outcome"], "capture", "{name}");
                     }
                 }
                 if refused.is_none() {
@@ -2705,75 +3247,36 @@ const ALL_KINDS: RecordKinds = RecordKinds {
 };
 
 #[tokio::test(start_paused = true)]
-async fn each_wake_gets_a_folder_with_the_last_two_seconds_and_a_wake_nothing_ends_a_line() {
+async fn a_dictation_wake_gets_a_folder_with_the_last_two_seconds() {
     LocalSet::new()
         .run_until(async {
-            // (events from frame 31 on, id of the last frame of each folder's clip)
-            type Case = (&'static str, &'static [WakeEvent], &'static [usize]);
-            let cases: [Case; 3] = [
-                ("capture", &[WakeEvent::Capture], &[31]),
-                ("conversation", &[WakeEvent::Conversation], &[31]),
-                (
-                    "ambiguous",
-                    &[
-                        WakeEvent::Ambiguous,
-                        WakeEvent::Ambiguous,
-                        WakeEvent::Ambiguous,
-                        WakeEvent::Capture,
-                    ],
-                    &[31, 34],
-                ),
-            ];
-            for (name, events, expected) in cases {
-                let dir = record_dir(name);
-                let recorder = Recorder::in_dir(AUDIO_AND_METRICS, &dir).unwrap();
-                let (rig, engine, frames) = Rig::recording("{}", recorder);
-                let task = listen_task(engine, frames, 1);
-                hear(&rig, 1, 30).await;
-                rig.wake.score(0.8, 0.1234);
-                for (offset, event) in events.iter().enumerate() {
-                    rig.wake.fire(*event);
-                    hear(&rig, 31 + offset, 31 + offset).await;
-                }
-                finished(task).await;
+            let dir = record_dir("dictation-wake-clip");
+            let recorder = Recorder::in_dir(AUDIO_AND_METRICS, &dir).unwrap();
+            let (rig, engine, frames) = Rig::recording("{}", recorder);
+            let task = listen_task(engine, frames, 1);
+            hear(&rig, 1, 30).await;
+            rig.wake.score(0.8);
+            rig.wake.fire(WakeEvent::Capture);
+            hear(&rig, 31, 31).await;
+            finished(task).await;
 
-                let clips = wake_clips(&dir);
-                let mut lasts: Vec<_> = clips
-                    .iter()
-                    .map(|(_, samples)| {
-                        let tags: Vec<i16> = samples
-                            .as_chunks::<FRAME_SAMPLES>()
-                            .0
-                            .iter()
-                            .map(|frame| frame[0])
-                            .collect();
-                        assert_eq!(tags.len(), 25, "{name}");
-                        assert_eq!(tags[24] - tags[0], 24, "{name}: the last 25 frames");
-                        usize::try_from(tags[24]).unwrap()
-                    })
-                    .collect();
-                lasts.sort_unstable();
-                assert_eq!(lasts, expected, "{name}");
-
-                let nothing = wake_lines(&dir, "desktop_wake_nothing");
-                if name == "ambiguous" {
-                    assert_eq!(nothing.len(), 1, "{name}: once per run of ambiguous frames");
-                    assert_eq!(nothing[0]["outcome"], "ambiguous");
-                    assert_eq!(nothing[0]["capture"], json!(0.8));
-                    assert_eq!(nothing[0]["conversation"], json!(0.123));
-                    assert!(
-                        clips
-                            .iter()
-                            .any(|(folder, _)| nothing[0]["dictation"] == folder.as_str()),
-                        "{name}: the line names the folder of its clip"
-                    );
-                } else {
-                    assert!(
-                        nothing.is_empty(),
-                        "{name}: the wake fired, so it is no line"
-                    );
-                }
-            }
+            let clips = wake_clips(&dir);
+            let [(_, samples)] = clips.as_slice() else {
+                panic!("one dictation wake clip expected: {clips:?}");
+            };
+            let tags: Vec<i16> = samples
+                .as_chunks::<FRAME_SAMPLES>()
+                .0
+                .iter()
+                .map(|frame| frame[0])
+                .collect();
+            assert_eq!(tags.len(), 25);
+            assert_eq!(tags[24] - tags[0], 24, "the last 25 frames");
+            assert_eq!(usize::try_from(tags[24]).unwrap(), 31);
+            assert_eq!(
+                wake_lines(&dir, "desktop_wake_nothing"),
+                Vec::<serde_json::Value>::new()
+            );
         })
         .await;
 }
@@ -2784,12 +3287,20 @@ async fn a_clip_holds_only_what_was_heard_since_listening_began() {
         .run_until(async {
             let dir = record_dir("fresh-clip");
             let recorder = Recorder::in_dir(AUDIO_AND_METRICS, &dir).unwrap();
-            let (rig, engine, frames) = Rig::recording("{}", recorder);
-            let task = listen_task(engine, frames, 2);
+            let (rig, mut engine, mut frames) = Rig::recording("{}", recorder);
+            let (first_listen_done, wait_for_first_listen) = tokio::sync::oneshot::channel();
+            let task = tokio::task::spawn_local(async move {
+                engine.listen(&mut frames).await.unwrap();
+                first_listen_done.send(()).unwrap();
+                engine.listen(&mut frames).await.unwrap();
+                engine.finish().await;
+            });
             hear(&rig, 1, 10).await;
-            rig.wake.fire(WakeEvent::Conversation);
+            rig.wake.fire(WakeEvent::Capture);
             hear(&rig, 11, 11).await;
+            wait_for_first_listen.await.unwrap();
             // Audio between two listens is never scored, so it must not join the next clip.
+            rig.gate.set_enabled(true);
             hear(&rig, 20, 21).await;
             rig.wake.fire(WakeEvent::Capture);
             hear(&rig, 22, 22).await;
@@ -2819,9 +3330,10 @@ async fn recordings_changed_between_listens_apply_to_the_next_one() {
                 engine.finish().await;
             });
             hear(&rig, 1, 10).await;
-            rig.wake.fire(WakeEvent::Conversation);
+            rig.wake.fire(WakeEvent::Capture);
             hear(&rig, 11, 11).await;
             hear(&rig, 20, 21).await;
+            rig.gate.set_enabled(true);
             rig.wake.fire(WakeEvent::Capture);
             hear(&rig, 22, 22).await;
             finished(task).await;
@@ -3074,7 +3586,8 @@ async fn a_final_that_continues_after_an_ending_cancels_it_with_a_cue() {
                 rig.state(),
                 EngineState::Capturing {
                     committed: "Hello submit and then some more".to_owned(),
-                    partial: None
+                    partial: None,
+                    notice: None,
                 }
             );
             rig.feed_until(6000, Kind::Quiet).await;
@@ -3143,6 +3656,13 @@ async fn the_capture_limits_still_end_a_capture_whose_recognizer_stopped_taking_
                     true,
                     15_000,
                     CaptureError::NoEnding(Duration::from_secs(10)),
+                ),
+                (
+                    "idle without words",
+                    r#"{"idle": 10, "max": 600}"#,
+                    false,
+                    CAPTURE_OPENS + 10_000,
+                    CaptureError::NoWords(Duration::from_secs(10)),
                 ),
                 (
                     "max",
@@ -3645,7 +4165,8 @@ async fn cancelling_a_hold_from_outside_ends_it_cancelled_and_the_release_does_n
                 rig.state(),
                 EngineState::Capturing {
                     committed: "draft words never mind".to_owned(),
-                    partial: None
+                    partial: None,
+                    notice: None,
                 }
             );
             rig.handle.cancel();
@@ -3671,7 +4192,7 @@ async fn cancelling_a_hold_from_outside_ends_it_cancelled_and_the_release_does_n
 
 #[tokio::test(start_paused = true)]
 async fn spoken_endings_are_text_during_a_hold_and_act_after_the_wake_word() {
-    const CUSTOM: &str = r#"{"endings": {"paste": "paste", "send it": "submit",
+    const CUSTOM: &str = r#"{"endings": {"paste": "paste", "write it": "write", "send it": "submit",
         "make it so": "task", "drop last": "scratch", "forget it": "cancel"}}"#;
     // (config, what is said, what the same words do after the wake word; a hold
     // always pastes everything that was said)
@@ -3979,6 +4500,96 @@ async fn a_hold_sends_only_the_audio_that_comes_after_its_start_cue() {
             rig.feed.send(quiet(9));
             settle().await;
             assert_eq!(tags(&rig.sent()), [9]);
+            rig.handle.cancel();
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled { dictated: None }
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_wake_word_starts_a_capture_only_with_wake_words_on_and_the_hold_key_always_does() {
+    #[derive(Clone, Copy)]
+    enum Input {
+        Wake,
+        Hold,
+        WakeThenHold,
+    }
+    use Input::{Hold, Wake, WakeThenHold};
+    const OFF: &str = r#"{"wake": {"enabled": false}}"#;
+    // (config, switched before listening, input, what listen returns, whether the wake model scored)
+    let cases = [
+        ("{}", None, Wake, Some(WakeTrigger::Capture), true),
+        ("{}", None, Hold, Some(WakeTrigger::Hold), true),
+        (OFF, None, Wake, None, false),
+        (OFF, None, Hold, Some(WakeTrigger::Hold), false),
+        (OFF, None, WakeThenHold, Some(WakeTrigger::Hold), false),
+        ("{}", Some(false), Wake, None, false),
+        (OFF, Some(true), Wake, Some(WakeTrigger::Capture), true),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for (case, (config, switched, input, expected, scored)) in cases.into_iter().enumerate()
+            {
+                let (rig, mut engine, mut frames) = Rig::new(config);
+                if let Some(on) = switched {
+                    engine.set_wake_words(on);
+                }
+                let task =
+                    tokio::task::spawn_local(
+                        async move { engine.listen(&mut frames).await.unwrap() },
+                    );
+                hear(&rig, 1, 3).await;
+                if matches!(input, Wake | WakeThenHold) {
+                    rig.wake.fire(WakeEvent::Capture);
+                    hear(&rig, 4, 5).await;
+                }
+                if matches!(input, Hold | WakeThenHold) {
+                    rig.press().await;
+                }
+                if let Some(trigger) = expected {
+                    assert_eq!(finished(task).await, trigger, "case {case}");
+                } else {
+                    assert!(!task.is_finished(), "case {case}: the wake word started it");
+                    task.abort();
+                }
+                assert_eq!(rig.wake.scored() > 0, scored, "case {case}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_that_waited_to_be_told_from_a_chord_keeps_the_words_said_meanwhile() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = hold_task(engine, frames);
+            settle().await;
+            // AltGr goes down alone; the user starts talking before the wait is over.
+            let wait = rig.key.press_alone(HoldKind::Dictate);
+            rig.at(80).await;
+            rig.feed.send(quiet(3));
+            settle().await;
+            rig.at(160).await;
+            rig.feed.send(quiet(4));
+            settle().await;
+            rig.at(200).await;
+            rig.key.confirm_alone(HoldKind::Dictate, wait);
+            settle().await;
+            rig.server.ready();
+            settle().await;
+            // The cue plays from 200 to 430; what is said during it is not sent.
+            rig.at(300).await;
+            rig.feed.send(quiet(5));
+            settle().await;
+            rig.at(440).await;
+            rig.at(450).await;
+            rig.feed.send(quiet(9));
+            settle().await;
+            assert_eq!(tags(&rig.sent()), [3, 4, 9]);
             rig.handle.cancel();
             assert_eq!(
                 finished(task).await,
@@ -4546,6 +5157,1292 @@ async fn cancelling_during_the_post_release_wait_cancels_at_once_and_delivers_no
             );
             assert_eq!(rig.started(Cue::Accepted).len(), 0);
             assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
+        })
+        .await;
+}
+
+// ---- Writing a dictation out through the chat endpoint ----
+
+/// What the fake chat endpoint does with a request.
+#[derive(Clone, Copy)]
+enum Chat {
+    /// Streams what the test pushes through the [`ChatFeed`].
+    Live,
+    Status(u16),
+    /// Takes the request and never answers.
+    Stall,
+    /// Answers with this event stream and ends it.
+    Stream(&'static str),
+}
+
+/// Pushes streamed answer text to the fake chat endpoint's client.
+struct ChatFeed(tokio::sync::mpsc::UnboundedSender<Vec<u8>>);
+
+impl ChatFeed {
+    fn text(&self, piece: &str) {
+        let event = json!({"choices": [{"delta": {"content": piece}}]});
+        self.0
+            .send(format!("data: {event}\n\n").into_bytes())
+            .unwrap();
+    }
+
+    /// Streams reasoning, the way llama.cpp sends it.
+    fn thinking(&self, piece: &str) {
+        let event = json!({"choices": [{"delta": {"reasoning_content": piece}}]});
+        self.0
+            .send(format!("data: {event}\n\n").into_bytes())
+            .unwrap();
+    }
+
+    fn finish(self) {
+        self.0.send(b"data: [DONE]\n\n".to_vec()).unwrap();
+    }
+}
+
+/// What the fake endpoint streams before the test stops feeding it.
+#[derive(Clone, Copy, Debug)]
+enum Streamed {
+    Nothing,
+    Thinking,
+    Text,
+}
+
+impl Streamed {
+    /// Feeds it, unless nothing, and waits until the engine shows it.
+    async fn feed(self, feed: &ChatFeed, rig: &Rig) {
+        match self {
+            Self::Nothing => {}
+            Self::Thinking => {
+                feed.thinking("Anna is late, so");
+                rig.state_is(EngineState::Thinking).await;
+            }
+            Self::Text => {
+                feed.text("Hi Anna, I am");
+                rig.state_is(EngineState::Writing {
+                    text: "Hi Anna, I am".to_owned(),
+                })
+                .await;
+            }
+        }
+    }
+}
+
+/// What the fake chat endpoint was asked.
+struct Asked {
+    path: String,
+    authorization: Option<String>,
+    body: serde_json::Value,
+}
+
+async fn chat(
+    reply: Chat,
+) -> (
+    String,
+    tokio::sync::mpsc::UnboundedReceiver<Asked>,
+    ChatFeed,
+) {
+    use std::sync::{Arc, Mutex};
+
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::extract::Request;
+    use axum::http::{StatusCode, header};
+    use axum::response::{IntoResponse, Response};
+
+    let (asked_tx, asked) = tokio::sync::mpsc::unbounded_channel();
+    let (feed_tx, feed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let feed_rx = Arc::new(Mutex::new(Some(feed_rx)));
+    let app = Router::new().fallback(move |request: Request| {
+        let asked_tx = asked_tx.clone();
+        let feed_rx = Arc::clone(&feed_rx);
+        async move {
+            let path = request.uri().path().to_owned();
+            let authorization = request
+                .headers()
+                .get(header::AUTHORIZATION)
+                .map(|value| value.to_str().unwrap().to_owned());
+            let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+            let _ = asked_tx.send(Asked {
+                path,
+                authorization,
+                body: serde_json::from_slice(&body).unwrap(),
+            });
+            let events = |body: Body| -> Response {
+                Response::builder()
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(body)
+                    .unwrap()
+            };
+            match reply {
+                Chat::Live => {
+                    let rx = feed_rx.lock().unwrap().take().unwrap();
+                    events(Body::from_stream(futures_util::stream::unfold(
+                        rx,
+                        |mut rx| async move {
+                            rx.recv()
+                                .await
+                                .map(|chunk| (Ok::<_, std::convert::Infallible>(chunk), rx))
+                        },
+                    )))
+                }
+                Chat::Status(code) => StatusCode::from_u16(code).unwrap().into_response(),
+                Chat::Stall => std::future::pending().await,
+                Chat::Stream(text) => events(Body::from(text)),
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (url, asked, ChatFeed(feed_tx))
+}
+
+/// The next request the fake chat endpoint got, failing instead of waiting forever when none comes.
+async fn request(asked: &mut tokio::sync::mpsc::UnboundedReceiver<Asked>) -> Asked {
+    tokio::time::timeout(Duration::from_secs(5), asked.recv())
+        .await
+        .expect("no request reached the writing endpoint")
+        .unwrap()
+}
+
+fn with_writing(url: &str) -> String {
+    format!(
+        r#"{{"ending_pause": {{"paste": 2.5}}, "writing": {{"url": "{url}", "model": "m", "api_key": "k"}}}}"#
+    )
+}
+
+const WORDS: &str = "tell Anna I'm late";
+
+/// The two ways to ask for a dictation to be written out.
+#[derive(Clone, Copy, Debug)]
+enum Ask {
+    /// The spoken ending "write that out" in a wake-word capture.
+    Ending,
+    /// Holding the write key.
+    Key,
+}
+
+impl Rig {
+    async fn press_write(&self) {
+        settle().await;
+        self.key.set_write(true);
+        settle().await;
+    }
+
+    async fn release_write(&self, at: u64) {
+        self.at(at).await;
+        self.key.set_write(false);
+        settle().await;
+    }
+
+    /// Waits, for a few seconds of the paused clock, until the engine is in `expected`.
+    async fn state_is(&self, expected: EngineState) {
+        let mut state = self.handle.state();
+        let reached = tokio::time::timeout(
+            Duration::from_secs(5),
+            state.wait_for(|state| *state == expected),
+        )
+        .await;
+        assert!(
+            reached.is_ok(),
+            "the state never became {expected:?}; it is {:?}",
+            self.state()
+        );
+    }
+}
+
+impl Ask {
+    fn start(self, engine: TestEngine, frames: FakeFrames) -> JoinHandle<CaptureOutcome> {
+        match self {
+            Self::Ending => capture_task(engine, frames),
+            Self::Key => hold_task(engine, frames),
+        }
+    }
+
+    /// Says `words` and asks for them to be written out, up to the moment the engine hands them
+    /// to the writing model.
+    async fn say(self, rig: &mut Rig, words: &str) {
+        match self {
+            Self::Ending => {
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals(&format!("{words} write that out")).await;
+                rig.feed_until(3499, Kind::Quiet).await;
+                // The pause is over at 3500 and the accepted cue ends 100 ms later.
+                rig.at(3600).await;
+            }
+            Self::Key => {
+                rig.press_write().await;
+                rig.server.ready();
+                settle().await;
+                rig.at(230).await;
+                rig.feed_until(1000, Kind::Voice).await;
+                rig.partial(words).await;
+                rig.release_write(1200).await;
+                rig.feed_until(1250, Kind::Voice).await;
+                rig.finals(words).await;
+                rig.at(1350).await;
+            }
+        }
+    }
+}
+
+fn writing_failed(error: WritingError, words: &str) -> CaptureOutcome {
+    CaptureOutcome::Failed {
+        error: CaptureError::Writing(error),
+        recoverable_text: Some(words.to_owned()),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_written_text_streams_into_the_state_after_any_thinking_and_only_it_is_pasted() {
+    LocalSet::new()
+        .run_until(async {
+            for ask in [Ask::Ending, Ask::Key] {
+                let (url, mut asked, feed) = chat(Chat::Live).await;
+                let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
+                let task = ask.start(engine, frames);
+                ask.say(&mut rig, WORDS).await;
+                request(&mut asked).await;
+                let writing = |text: &str| EngineState::Writing {
+                    text: text.to_owned(),
+                };
+                rig.state_is(writing("")).await;
+                feed.thinking("Anna is late, so");
+                rig.state_is(EngineState::Thinking).await;
+                feed.thinking(" an apology.");
+                feed.text("Hi Anna,");
+                rig.state_is(writing("Hi Anna,")).await;
+                feed.text(" I'm late, sorry.\n");
+                rig.state_is(writing("Hi Anna, I'm late, sorry.\n")).await;
+                assert!(!task.is_finished(), "{ask:?}: nothing is pasted mid-stream");
+                feed.finish();
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Paste, "Hi Anna, I'm late, sorry."),
+                    "{ask:?}"
+                );
+                assert_eq!(rig.notices(), Vec::<String>::new(), "{ask:?}");
+                assert_eq!(rig.state(), EngineState::Listening, "{ask:?}");
+                assert!(rig.gate.is_enabled(), "{ask:?}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_the_spoken_words_are_sent_with_the_default_prompt() {
+    LocalSet::new()
+        .run_until(async {
+            for (ask, words, key) in [
+                (Ask::Ending, WORDS, "k"),
+                // Every word of a hold is text, even the words of an ending.
+                (Ask::Key, "ok never mind write that out", "k"),
+                (Ask::Ending, WORDS, ""),
+            ] {
+                let (url, mut asked, _feed) = chat(Chat::Stream("data: [DONE]\n\n")).await;
+                let config = with_writing(&url)
+                    .replace(r#""api_key": "k""#, &format!(r#""api_key": "{key}""#));
+                let (mut rig, engine, frames) = Rig::new(&config);
+                let task = ask.start(engine, frames);
+                ask.say(&mut rig, words).await;
+                let asked = request(&mut asked).await;
+                finished(task).await;
+                let label = format!("{ask:?} {words:?}");
+                assert_eq!(asked.path, "/v1/chat/completions", "{label}");
+                assert_eq!(
+                    asked.authorization,
+                    (!key.is_empty()).then(|| format!("Bearer {key}")),
+                    "{label}"
+                );
+                let body = asked.body.as_object().unwrap();
+                let mut keys: Vec<&str> = body.keys().map(String::as_str).collect();
+                keys.sort_unstable();
+                assert_eq!(keys, ["messages", "model", "stream"], "{label}");
+                assert_eq!(body["model"], "m", "{label}");
+                assert_eq!(body["stream"], true, "{label}");
+                let messages = body["messages"].as_array().unwrap();
+                assert_eq!(messages.len(), 2, "{label}");
+                assert_eq!(messages[0]["role"], "system", "{label}");
+                assert_eq!(messages[0]["content"], DEFAULT_PROMPT, "{label}");
+                assert_eq!(
+                    messages[1],
+                    json!({"role": "user", "content": words}),
+                    "{label}"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_saved_prompt_is_the_system_message_and_the_words_stay_the_user_message() {
+    LocalSet::new()
+        .run_until(async {
+            let prompt = "Write short emails.\nSign off with “Best”.";
+            let (url, mut asked, _feed) = chat(Chat::Stream("data: [DONE]\n\n")).await;
+            let config = json!({
+                "ending_pause": {"paste": 2.5},
+                "writing": {"url": url, "model": "m", "prompt": prompt},
+            })
+            .to_string();
+            let (mut rig, engine, frames) = Rig::new(&config);
+            let task = Ask::Key.start(engine, frames);
+            Ask::Key.say(&mut rig, WORDS).await;
+            let asked = request(&mut asked).await;
+            finished(task).await;
+            assert_eq!(
+                asked.body["messages"],
+                json!([
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": WORDS},
+                ])
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_opening_of_the_words_picks_the_system_message_and_the_words_stay_whole() {
+    LocalSet::new()
+        .run_until(async {
+            let openings = json!([
+                {"phrase": "write me an email", "prompt": "EMAIL"},
+                {"phrase": "write me", "prompt": "ME"},
+                {"phrase": "write a message", "prompt": "MESSAGE"},
+            ]);
+            // (how it is asked, the words as recognized, the system message expected)
+            for (ask, words, prompt) in [
+                (Ask::Ending, "Write me an email, tell Anna I'm late", "EMAIL"),
+                (Ask::Key, "Write me an email, tell Anna I'm late", "EMAIL"),
+                (Ask::Ending, "write a message that I am late", "MESSAGE"),
+                (Ask::Key, "write me a poem", "ME"),
+                (Ask::Ending, "please write me an email", "FALLBACK"),
+                (Ask::Key, WORDS, "FALLBACK"),
+            ] {
+                let (url, mut asked, _feed) = chat(Chat::Stream("data: [DONE]\n\n")).await;
+                let config = json!({
+                    "ending_pause": {"paste": 2.5},
+                    "writing": {"url": url, "model": "m", "prompt": "FALLBACK", "openings": openings},
+                })
+                .to_string();
+                let (mut rig, engine, frames) = Rig::new(&config);
+                let task = ask.start(engine, frames);
+                ask.say(&mut rig, words).await;
+                let asked = request(&mut asked).await;
+                finished(task).await;
+                assert_eq!(
+                    asked.body["messages"],
+                    json!([
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": words},
+                    ]),
+                    "{ask:?} {words:?}"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn nothing_is_written_unless_it_is_asked_for() {
+    LocalSet::new()
+        .run_until(async {
+            // (how it is dictated, the words as recognized, what is pasted)
+            for (name, expected) in [
+                ("paste ending", accepted(CaptureRoute::Paste, WORDS)),
+                (
+                    "hold key",
+                    accepted(CaptureRoute::Paste, "tell Anna I'm late write that out"),
+                ),
+                (
+                    "write ending without words",
+                    accepted(CaptureRoute::Paste, ""),
+                ),
+            ] {
+                let (url, mut asked, _feed) = chat(Chat::Live).await;
+                // The dictated words begin with an opening phrase, which alone starts nothing.
+                let config = with_writing(&url).replace(
+                    r#""model": "m""#,
+                    r#""model": "m", "openings": [{"phrase": "tell anna", "prompt": "P"}]"#,
+                );
+                let (mut rig, engine, frames) = Rig::new(&config);
+                let task = if name == "hold key" {
+                    let task = hold_task(engine, frames);
+                    rig.hold().await;
+                    rig.say(1000, Say::Partial("tell Anna I'm late write that out"))
+                        .await;
+                    rig.release(1200).await;
+                    rig.say(1250, Say::Final("tell Anna I'm late write that out"))
+                        .await;
+                    task
+                } else {
+                    let task = capture_task(engine, frames);
+                    rig.open().await;
+                    rig.feed_until(1000, Kind::Quiet).await;
+                    let said = if name == "paste ending" {
+                        format!("{WORDS} paste that")
+                    } else {
+                        "write that out".to_owned()
+                    };
+                    rig.finals(&said).await;
+                    rig.feed_until(3500, Kind::Quiet).await;
+                    task
+                };
+                rig.at(4000).await;
+                assert_eq!(finished(task).await, expected, "{name}");
+                assert!(asked.try_recv().is_err(), "{name}: no request was made");
+                assert!(
+                    !matches!(rig.state(), EngineState::Writing { .. }),
+                    "{name}"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_writing_call_that_gives_no_text_pastes_nothing_and_keeps_the_words() {
+    use WritingError::{BadResponse, Empty, NotSetUp, Status, Unreachable};
+
+    LocalSet::new()
+        .run_until(async {
+            // Port 0 fails at once everywhere; Windows retries a refused port for seconds, past the paused clock's deadline.
+            let refused = "http://127.0.0.1:0/v1".to_owned();
+            // (name, endpoint, the reason, whether a request reached the endpoint)
+            let cases = [
+                ("no endpoint is set up", None, NotSetUp, false),
+                ("the endpoint is down", Some((refused, Chat::Live)), Unreachable, false),
+                ("it answers with an error status", Some((String::new(), Chat::Status(500))), Status(500), true),
+                (
+                    "it returns nothing",
+                    Some((String::new(), Chat::Stream("data: [DONE]\n\n"))),
+                    Empty,
+                    true,
+                ),
+                (
+                    "it returns only blanks",
+                    Some((
+                        String::new(),
+                        Chat::Stream("data: {\"choices\":[{\"delta\":{\"content\":\" \\n\"}}]}\n\ndata: [DONE]\n\n"),
+                    )),
+                    Empty,
+                    true,
+                ),
+                (
+                    "it sends what is not a chat reply",
+                    Some((String::new(), Chat::Stream("data: nonsense\n\n"))),
+                    BadResponse,
+                    true,
+                ),
+            ];
+            for (name, endpoint, reason, reached) in cases {
+                let (config, mut asked) = match endpoint {
+                    None => (r#"{"ending_pause": {"paste": 2.5}}"#.to_owned(), None),
+                    Some((url, reply)) if url.is_empty() => {
+                        let (url, asked, _feed) = chat(reply).await;
+                        (with_writing(&url), Some(asked))
+                    }
+                    Some((url, _)) => (with_writing(&url), None),
+                };
+                let (mut rig, engine, frames) = Rig::new(&config);
+                let task = capture_task(engine, frames);
+                Ask::Ending.say(&mut rig, WORDS).await;
+                assert_eq!(
+                    finished(task).await,
+                    writing_failed(reason, WORDS),
+                    "{name}"
+                );
+                if let Some(asked) = asked.as_mut() {
+                    assert_eq!(asked.try_recv().is_ok(), reached, "{name}");
+                }
+                assert_eq!(rig.state(), EngineState::Listening, "{name}");
+                assert!(rig.gate.is_enabled(), "{name}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_user_is_told_in_plain_words_where_to_set_up_writing() {
+    let error = CaptureError::Writing(WritingError::NotSetUp);
+    assert_eq!(
+        error.to_string(),
+        "No writing model is set up. Add one under Settings → Speech → Writing. Nothing was pasted."
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn writing_that_takes_longer_than_fifteen_seconds_pastes_none_of_what_arrived() {
+    LocalSet::new()
+        .run_until(async {
+            // (name, the reply, what it streams first, the reason given)
+            let cases = [
+                (
+                    "no reply at all",
+                    Chat::Stall,
+                    Streamed::Nothing,
+                    WritingError::Timeout,
+                ),
+                (
+                    "a reply that stops",
+                    Chat::Live,
+                    Streamed::Text,
+                    WritingError::Timeout,
+                ),
+                (
+                    "a model still thinking",
+                    Chat::Live,
+                    Streamed::Thinking,
+                    WritingError::StillThinking,
+                ),
+            ];
+            for (name, reply, streamed, reason) in cases {
+                let (url, mut asked, feed) = chat(reply).await;
+                let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
+                let task = capture_task(engine, frames);
+                Ask::Ending.say(&mut rig, WORDS).await;
+                request(&mut asked).await;
+                let began = rig.now();
+                streamed.feed(&feed, &rig).await;
+                rig.at(began + 14_999).await;
+                assert!(!task.is_finished(), "{name}: still within the 15 s");
+                rig.at(began + 15_000).await;
+                assert_eq!(
+                    finished(task).await,
+                    writing_failed(reason, WORDS),
+                    "{name}"
+                );
+                assert_eq!(rig.state(), EngineState::Listening, "{name}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_before_the_paste_drops_the_written_text() {
+    LocalSet::new()
+        .run_until(async {
+            for ask in [Ask::Ending, Ask::Key] {
+                for streamed in [Streamed::Nothing, Streamed::Thinking, Streamed::Text] {
+                    let label = format!("{ask:?}, {streamed:?}");
+                    let reply = match streamed {
+                        Streamed::Nothing => Chat::Stall,
+                        Streamed::Thinking | Streamed::Text => Chat::Live,
+                    };
+                    let (url, mut asked, feed) = chat(reply).await;
+                    let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
+                    let task = ask.start(engine, frames);
+                    ask.say(&mut rig, WORDS).await;
+                    request(&mut asked).await;
+                    streamed.feed(&feed, &rig).await;
+                    rig.handle.cancel();
+                    assert_eq!(
+                        finished(task).await,
+                        CaptureOutcome::Cancelled {
+                            dictated: Some(WORDS.to_owned())
+                        },
+                        "{label}"
+                    );
+                    assert_eq!(rig.state(), EngineState::Listening, "{label}");
+                    assert_eq!(rig.notices(), Vec::<String>::new(), "{label}");
+                }
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_writing_call_records_its_times_to_first_reasoning_and_first_text_total_time_and_outcome()
+ {
+    LocalSet::new()
+        .run_until(async {
+            let all = RecordKinds {
+                metrics: true,
+                text: false,
+                audio: false,
+            };
+            // (the reply, the outcome recorded, whether reasoning and then text arrived)
+            let cases = [
+                (Some(Chat::Live), "ok", true),
+                (Some(Chat::Status(503)), "status", false),
+                (None, "not_set_up", false),
+            ];
+            for (index, (reply, outcome, first)) in cases.into_iter().enumerate() {
+                let dir = record_dir(&format!("writing-{index}"));
+                let (config, feed) = match reply {
+                    Some(reply) => {
+                        let (url, mut asked, feed) = chat(reply).await;
+                        tokio::task::spawn_local(
+                            async move { while asked.recv().await.is_some() {} },
+                        );
+                        (with_writing(&url), Some(feed))
+                    }
+                    None => (r#"{"ending_pause": {"paste": 2.5}}"#.to_owned(), None),
+                };
+                let recorder = Recorder::in_dir(all, &dir).unwrap();
+                let (mut rig, engine, frames) = Rig::recording(&config, recorder);
+                let task = capture_task(engine, frames);
+                Ask::Ending.say(&mut rig, WORDS).await;
+                if let Some(feed) = feed.filter(|_| first) {
+                    feed.thinking("Anna is late");
+                    rig.state_is(EngineState::Thinking).await;
+                    rig.at(rig.now() + 200).await;
+                    feed.text("Hi Anna.");
+                    rig.state_is(EngineState::Writing {
+                        text: "Hi Anna.".to_owned(),
+                    })
+                    .await;
+                    rig.at(rig.now() + 400).await;
+                    feed.finish();
+                }
+                finished(task).await;
+                let lines = read_lines(&dir.join("metrics.jsonl"));
+                let calls: Vec<_> = lines
+                    .iter()
+                    .filter(|line| line["event"] == "desktop_writing")
+                    .collect();
+                assert_eq!(calls.len(), 1, "{outcome}: {lines:?}");
+                let call = calls[0];
+                assert_eq!(call["outcome"], outcome);
+                if outcome == "not_set_up" {
+                    assert!(call.get("model").is_none(), "{call}");
+                    continue;
+                }
+                assert_eq!(call["model"], "m", "{call}");
+                for field in ["first_reasoning_ms", "first_token_ms"] {
+                    assert_eq!(call[field].is_f64(), first, "{field}: {call}");
+                }
+                if first {
+                    let near = |field: &str, ms: f64| {
+                        assert!(
+                            (call[field].as_f64().unwrap() - ms).abs() < 50.0,
+                            "{field}: {call}"
+                        );
+                    };
+                    near("first_reasoning_ms", 0.0);
+                    near("first_token_ms", 200.0);
+                    near("duration_ms", 600.0);
+                }
+                for words in [WORDS, "Hi Anna", "Anna is late"] {
+                    assert!(
+                        !call.to_string().contains(words),
+                        "{call}: no text in metrics"
+                    );
+                }
+            }
+        })
+        .await;
+}
+
+/// The ending phrase the fake spotter hears, from the frame numbered 9, which the engine sends
+/// 880 ms after the wake word; the phrase ends two frames earlier, at 7 frames of audio.
+const HEARD_AT_FRAME: u64 = 9;
+
+fn hearing(config: &str) -> (Rig, SpotterControl, TestEngine, FakeFrames) {
+    let (rig, spot, engine, frames) = Rig::spotting(config, Recorder::disabled());
+    spot.hear(HEARD_AT_FRAME, "paste that", Ending::Paste);
+    (rig, spot, engine, frames)
+}
+
+/// The words the overlay holds for the open capture.
+fn drafted(rig: &Rig) -> String {
+    match rig.state() {
+        EngineState::Capturing { committed, .. } => committed,
+        other => panic!("not capturing: {other:?}"),
+    }
+}
+
+/// The notice the overlay shows with the open capture, if any.
+fn shown(rig: &Rig) -> Option<String> {
+    match rig.state() {
+        EngineState::Capturing { notice, .. } => notice,
+        _ => None,
+    }
+}
+
+/// The metrics of a capture whose heard ending was told: the hit and the capture's totals, no words.
+fn assert_recorded_as_notified(dir: &std::path::Path, name: &str) {
+    let metrics = read_lines(&dir.join("metrics.jsonl"));
+    let hit = metrics
+        .iter()
+        .find(|line| line["event"] == "desktop_ending_spotter" && line["call"] == "hit")
+        .unwrap_or_else(|| panic!("{name}: no hit line in {metrics:?}"));
+    assert_eq!(
+        (hit["outcome"].as_str(), hit["ending"].as_str()),
+        (Some("notified"), Some("paste")),
+        "{name}"
+    );
+    assert!(
+        metrics
+            .iter()
+            .any(|line| line["event"] == "desktop_ending_spotter"
+                && line["call"] == "capture"
+                && line["frames"].as_u64().is_some_and(|frames| frames > 9)
+                && line["hits"] == 1),
+        "{name}: capture summary"
+    );
+    let written = std::fs::read_to_string(dir.join("metrics.jsonl")).unwrap();
+    assert!(
+        !written.contains("haste") && !written.contains("report"),
+        "{name}: no words in metrics"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_heard_ending_the_transcript_lacks_is_told_once_after_the_quiet_interval_and_changes_nothing()
+ {
+    use Act::{Audio, Final};
+    use Kind::{Quiet, Voice};
+    // (what happens after the spotter hears the phrase, when the notice comes)
+    let cases: [(&str, Vec<Act>, u64); 2] = [
+        (
+            "quiet after the final",
+            vec![
+                Audio(1000, Quiet),
+                Final(1000, "Write the report tomorrow haste that"),
+            ],
+            1000 + 700,
+        ),
+        (
+            // The detector keeps judging speech for two frames after the voice stops.
+            "speech after the final restarts the interval at the first quiet frame",
+            vec![
+                Audio(1000, Voice),
+                Final(1000, "Write the report tomorrow haste that"),
+                Audio(1600, Voice),
+            ],
+            1840 + 700,
+        ),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for (name, script, notice_at) in cases {
+                let dir = record_dir("disputed");
+                let recorder = Recorder::in_dir(
+                    RecordKinds {
+                        metrics: true,
+                        text: false,
+                        audio: false,
+                    },
+                    &dir,
+                )
+                .unwrap();
+                let (mut rig, spot, engine, frames) = Rig::spotting("{}", recorder);
+                spot.hear(HEARD_AT_FRAME, "paste that", Ending::Paste);
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(920, Quiet).await;
+                assert_eq!(spot.received(), HEARD_AT_FRAME, "{name}");
+                assert_eq!(spot.resets(), 1, "{name}: each wake starts a fresh search");
+                rig.play(&script).await;
+                rig.feed_until(notice_at - 1, Quiet).await;
+                assert_eq!(
+                    (shown(&rig), rig.started(Cue::Cancelled).len()),
+                    (None, 0),
+                    "{name}: early"
+                );
+                rig.at(notice_at).await;
+                let notice = shown(&rig).unwrap_or_else(|| panic!("{name}: nothing shown"));
+                assert!(
+                    notice.contains("\u{201c}paste that\u{201d}")
+                        && !notice.contains("haste")
+                        && !notice.contains("report"),
+                    "{name}: names the ending, quotes no dictated words: {notice}"
+                );
+                assert_eq!(rig.started(Cue::Cancelled), [notice_at], "{name}");
+                assert_eq!(rig.started(Cue::Provisional).len(), 0, "{name}");
+                // It stays while the capture goes on, until words are heard.
+                rig.feed_until(notice_at + 800, Quiet).await;
+                assert!(!task.is_finished(), "{name}: the capture goes on");
+                assert_eq!(shown(&rig), Some(notice), "{name}: still shown");
+                assert_eq!(rig.started(Cue::Cancelled).len(), 1, "{name}: told once");
+                assert!(rig.notices().is_empty(), "{name}: {:?}", rig.notices());
+                assert_eq!(
+                    drafted(&rig),
+                    "Write the report tomorrow haste that",
+                    "{name}"
+                );
+                // Saying it again delivers everything: nothing was cut at the heard phrase.
+                let again = notice_at + 800;
+                rig.finals("Paste that.").await;
+                rig.feed_until(again + 700, Quiet).await;
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Paste, "Write the report tomorrow haste that"),
+                    "{name}"
+                );
+                assert_recorded_as_notified(&dir, name);
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_heard_ending_is_never_told_when_the_transcript_carries_it_or_the_user_speaks_on() {
+    use Act::{Audio, Final, Partial};
+    use Kind::{Quiet, Voice};
+    /// How the capture ends once the script has run.
+    enum End {
+        Delivers(CaptureRoute, &'static str, u64),
+        Cancelled(&'static str),
+    }
+    let cases: [(&str, Vec<Act>, End, &[u64]); 6] = [
+        (
+            // 2.2 s after the phrase ended, long after a 0.8 s timer would have called it missed.
+            "a late final carries the ending: late agreement",
+            vec![
+                Audio(1000, Quiet),
+                Audio(3000, Quiet),
+                Final(3000, "Write the report paste that"),
+            ],
+            End::Delivers(CaptureRoute::Paste, "Write the report", 3000 + 700),
+            &[3000],
+        ),
+        (
+            "the final came before the spotter: both signals deliver once",
+            vec![
+                Audio(800, Quiet),
+                Final(800, "Write the report paste that"),
+                Audio(1000, Quiet),
+            ],
+            End::Delivers(CaptureRoute::Paste, "Write the report", 800 + 700),
+            &[800],
+        ),
+        (
+            "the transcript says another ending: it wins",
+            vec![Audio(1000, Quiet), Final(1000, "Write the report submit")],
+            End::Delivers(CaptureRoute::Submit, "Write the report", 1000 + 2500),
+            &[1000],
+        ),
+        (
+            "words follow the disputed final",
+            vec![
+                Audio(1000, Quiet),
+                Final(1000, "Write the report tomorrow haste that"),
+                Audio(1200, Voice),
+                Partial(1200, "and then"),
+                Audio(3000, Quiet),
+            ],
+            End::Cancelled("Write the report tomorrow haste that"),
+            &[],
+        ),
+        (
+            "a final with words follows the disputed one",
+            vec![
+                Audio(1000, Quiet),
+                Final(1000, "Write the report tomorrow haste that"),
+                Audio(1300, Quiet),
+                Final(1300, "and one more thing"),
+                Audio(3000, Quiet),
+            ],
+            End::Cancelled("Write the report tomorrow haste that and one more thing"),
+            &[],
+        ),
+        (
+            "nothing but artifacts follows the heard phrase",
+            vec![
+                Audio(1000, Quiet),
+                Final(1000, "[noise]"),
+                Audio(1500, Quiet),
+            ],
+            End::Cancelled(""),
+            &[],
+        ),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for (name, script, end, provisional) in cases {
+                let (mut rig, _spot, engine, frames) = hearing("{}");
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.play(&script).await;
+                assert_eq!(shown(&rig), None, "{name}");
+                let outcome = match end {
+                    End::Delivers(route, text, at) => {
+                        rig.feed_until(at, Quiet).await;
+                        accepted(route, text)
+                    }
+                    End::Cancelled(text) => {
+                        rig.handle.cancel();
+                        settle().await;
+                        CaptureOutcome::Cancelled {
+                            dictated: (!text.is_empty()).then(|| text.to_owned()),
+                        }
+                    }
+                };
+                assert_eq!(finished(task).await, outcome, "{name}");
+                assert_eq!(rig.started(Cue::Cancelled).len(), 0, "{name}");
+                assert_eq!(rig.started(Cue::Provisional), provisional, "{name}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_gives_the_spotter_no_frames_and_the_capture_runs_as_before() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, spot, engine, frames) = Rig::spotting("{}", Recorder::disabled());
+            spot.hear(HEARD_AT_FRAME, "paste that", Ending::Paste);
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.say(1000, Say::Final("write the report tomorrow haste that"))
+                .await;
+            rig.release(1200).await;
+            rig.at(1450).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "write the report tomorrow haste that")
+            );
+            assert_eq!((spot.received(), spot.resets()), (0, 0));
+            assert_eq!(rig.notices(), Vec::<String>::new());
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_while_a_dispute_waits_for_quiet_cancels_and_tells_nothing() {
+    use Act::{Audio, Final};
+    use Kind::Quiet;
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, _spot, engine, frames) = hearing("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.play(&[
+                Audio(1000, Quiet),
+                Final(1000, "Write the report tomorrow haste that"),
+                Audio(1300, Quiet),
+            ])
+            .await;
+            rig.handle.cancel();
+            settle().await;
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("Write the report tomorrow haste that".to_owned())
+                }
+            );
+            rig.at(5000).await;
+            assert_eq!(rig.started(Cue::Cancelled).len(), 0);
+            assert_eq!(rig.notices(), Vec::<String>::new());
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_spotter_that_fails_mid_capture_is_one_notice_and_the_transcript_ending_still_delivers() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, spot, engine, frames) = Rig::spotting("{}", Recorder::disabled());
+            spot.fail_at(5);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            let notice = shown(&rig).expect("the overlay says so");
+            assert!(
+                notice.starts_with("Ending phrase detection stopped:")
+                    && notice.ends_with("Endings still work from the transcript."),
+                "{notice}"
+            );
+            rig.finals("Hello paste that").await;
+            rig.feed_until(1700, Kind::Quiet).await;
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "Hello"));
+            assert!(rig.notices().is_empty(), "{:?}", rig.notices());
+            assert_eq!(spot.received(), 5, "no frame reaches a failed spotter");
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_notice_stays_on_the_overlay_until_words_are_heard_and_artifacts_do_not_clear_it() {
+    use Act::{Audio, Final, Partial};
+    use Kind::Quiet;
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, _spot, engine, frames) = hearing("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.play(&[
+                Audio(1000, Quiet),
+                Final(1000, "Write the report tomorrow haste that"),
+                Audio(1700, Quiet),
+            ])
+            .await;
+            let notice = shown(&rig).expect("told after the quiet interval");
+            rig.partial("[noise]").await;
+            rig.finals("(breathing)").await;
+            assert_eq!(shown(&rig), Some(notice), "artifacts are not words");
+            rig.play(&[Partial(1800, "and then")]).await;
+            assert_eq!(shown(&rig), None, "words clear it");
+            assert_eq!(rig.notices(), Vec::<String>::new());
+            rig.handle.cancel();
+            let _ = finished(task).await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_spotter_that_could_not_load_is_told_once_with_the_first_capture_until_words_are_heard() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::build(
+                "{}",
+                Recorder::disabled(),
+                None,
+                Some("Spoken endings can only use plain letters. Endings still work from the transcript."),
+            );
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            assert_eq!(
+                shown(&rig).as_deref(),
+                Some("Spoken endings can only use plain letters. Endings still work from the transcript.")
+            );
+            rig.feed_until(1000, Kind::Voice).await;
+            rig.partial("Hello").await;
+            assert_eq!(shown(&rig), None);
+            assert_eq!(rig.notices(), Vec::<String>::new());
+            rig.handle.cancel();
+            let _ = finished(task).await;
+        })
+        .await;
+}
+
+/// A clip of `frames` frames numbered from 100, whose first is loud enough to be a wake word.
+fn clip(frames: usize) -> Clip {
+    Clip::from_frames(
+        (0..frames)
+            .map(|n| if n == 0 { audible(100) } else { quiet(100 + n) })
+            .collect(),
+    )
+}
+
+/// A feeder on `rig`'s microphone, and whether a clip is playing.
+fn feeder_for(rig: &Rig) -> (Feeder, Arc<watch::Sender<bool>>) {
+    let feeding = Arc::new(watch::channel(false).0);
+    (Feeder::new(&rig.gate, Arc::clone(&feeding)), feeding)
+}
+
+/// Starts `clip` with the wake word heard on its first frame.
+fn feed_wake(rig: &Rig, feeder: &Feeder, clip: Clip) -> oneshot::Receiver<FeedEnd> {
+    let (feed, ended) = Feed::new(clip);
+    rig.wake.fire(WakeEvent::Capture);
+    feeder.start(feed);
+    ended
+}
+
+/// Like [`capture_task`], on a source that also plays clips, which it hands back at the end.
+fn fed_capture_task(
+    mut engine: TestEngine,
+    mut frames: Fed<FakeFrames>,
+) -> JoinHandle<(CaptureOutcome, Fed<FakeFrames>)> {
+    tokio::task::spawn_local(async move {
+        let trigger = engine.listen(&mut frames).await.unwrap();
+        assert_eq!(trigger, WakeTrigger::Capture);
+        let outcome = engine.capture(&mut frames).await;
+        engine.finish().await;
+        (outcome, frames)
+    })
+}
+
+fn capture_flow_sources(dir: &std::path::Path) -> Vec<String> {
+    read_lines(&dir.join("metrics.jsonl"))
+        .iter()
+        .filter(|row| row["event"] == "desktop_capture_flow")
+        .map(|row| row["source"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fed_file_replaces_the_microphone_at_real_time_pace_and_delivers_like_speech() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("fed");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+            let (feeder, feeding) = feeder_for(&rig);
+            let task = fed_capture_task(engine, feeder.wrap(frames));
+            let mut ended = feed_wake(&rig, &feeder, clip(50));
+            settle().await;
+            assert!(*feeding.borrow());
+            rig.server.ready();
+            settle().await;
+            // The room keeps sending frames, numbered below the file's, all through.
+            rig.feed_until(230, Kind::Quiet).await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello paste that").await;
+            rig.feed_until(1699, Kind::Quiet).await;
+            rig.at(1700).await;
+            assert_eq!(rig.started(Cue::Accepted), [1700]);
+
+            let (outcome, mut fed) = finished(task).await;
+            assert_eq!(outcome, accepted(CaptureRoute::Paste, "Hello"));
+            // The file's frames from the end of the wake cue to the ending, one every 80 ms, and none of the room's.
+            let sent = tags(&rig.sent());
+            let first = 103;
+            assert_eq!(
+                sent,
+                (first..first + i16::try_from(sent.len()).unwrap()).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                sent.len(),
+                10,
+                "the frames at 240 ms through 960 ms, before the ending"
+            );
+            assert_eq!(capture_flow_sources(&dir), ["file"]);
+
+            // The file is fed when its last frame is given to the engine, 49 frames in.
+            rig.at(49 * FRAME_MS - 1).await;
+            assert!(ended.try_recv().is_err());
+            assert!(*feeding.borrow());
+            rig.at(49 * FRAME_MS).await;
+            assert_eq!(ended.try_recv(), Ok(FeedEnd::Played));
+            assert!(!*feeding.borrow());
+            // Frames nobody read while the file played wait their turn, as the microphone's do;
+            // then the microphone is heard again.
+            rig.feed.send(quiet(900));
+            let mut rest = Vec::new();
+            while rest.last() != Some(&900) {
+                let queued = tokio::time::timeout(ms(10), fed.next()).await;
+                rest.push(queued.unwrap().unwrap().frame[0]);
+            }
+            rest.pop();
+            assert_eq!(rest.last(), Some(&149), "the file's last frame");
+            assert!(rest.windows(2).all(|pair| pair[1] == pair[0] + 1));
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_spoken_capture_is_recorded_as_coming_from_the_microphone() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("spoken");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello paste that").await;
+            rig.feed_until(2700, Kind::Quiet).await;
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "Hello"));
+            assert_eq!(capture_flow_sources(&dir), ["microphone"]);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fed_frame_is_lost_while_the_microphone_gate_is_off() {
+    LocalSet::new()
+        .run_until(async {
+            let (rig, _engine, frames) = Rig::new("{}");
+            let (feeder, _feeding) = feeder_for(&rig);
+            let mut fed = feeder.wrap(frames);
+            rig.gate.set_enabled(false);
+            let (lost, mut lost_end) = Feed::new(clip(3));
+            feeder.start(lost);
+            settle().await;
+            rig.at(300).await;
+            assert_eq!(lost_end.try_recv(), Ok(FeedEnd::Played));
+            let next = tokio::time::timeout(ms(10), fed.next()).await;
+            assert!(next.is_err(), "nothing reached the engine");
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancel_stops_the_feed_and_the_capture_it_started_and_a_second_file_waits_its_turn() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let (feeder, feeding) = feeder_for(&rig);
+            let task = fed_capture_task(engine, feeder.wrap(frames));
+            let mut ended = feed_wake(&rig, &feeder, clip(50));
+            settle().await;
+            rig.server.ready();
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Hello").await;
+
+            let (second, mut refused) = Feed::new(clip(5));
+            feeder.start(second);
+            assert_eq!(
+                refused.try_recv(),
+                Ok(FeedEnd::Refused("A file is already being fed."))
+            );
+
+            rig.handle.cancel();
+            feeder.cancel();
+            let (outcome, mut fed) = finished(task).await;
+            assert_eq!(
+                outcome,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("Hello".to_owned())
+                }
+            );
+            settle().await;
+            assert_eq!(ended.try_recv(), Ok(FeedEnd::Cancelled));
+            assert!(!*feeding.borrow());
+            // What the file still held is gone; the next frame is the microphone's.
+            rig.at(1500).await;
+            rig.feed.send(quiet(900));
+            assert_eq!(
+                tokio::time::timeout(ms(10), fed.next())
+                    .await
+                    .map(|queued| queued.unwrap().frame[0]),
+                Ok(900)
+            );
+
+            // Cancelled before any wake, a feed stops just the same, and what it had played unread is gone.
+            let (unheard, mut unheard_end) = Feed::new(clip(50));
+            feeder.start(unheard);
+            rig.at(1900).await;
+            assert!(*feeding.borrow());
+            feeder.cancel();
+            settle().await;
+            assert_eq!(unheard_end.try_recv(), Ok(FeedEnd::Cancelled));
+            assert!(!*feeding.borrow());
+            rig.feed.send(quiet(901));
+            let next = tokio::time::timeout(ms(10), fed.next()).await;
+            assert_eq!(next.unwrap().unwrap().frame[0], 901);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_buffered_wake_capture_keeps_its_spoken_route() {
+    LocalSet::new()
+        .run_until(async {
+            let config = r#"{"ending_pause":{"paste":1.0}}"#;
+            let (mut rig, engine, frames) = Rig::new(config);
+            rig.server.buffer_audio();
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1200, Kind::Voice).await;
+            rig.feed_until(3500, Kind::Quiet).await;
+            assert!(matches!(rig.state(), EngineState::TranscribingLive { .. }));
+            rig.finals("Run tests submit").await;
+            let got = finished(task).await;
+            assert_eq!(got, accepted(CaptureRoute::Submit, "Run tests"));
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_long_buffered_hold_is_not_cut_off_as_idle() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            rig.server.buffer_audio();
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.feed_until(61_000, Kind::Voice).await;
+            rig.release(61_100).await;
+            rig.finals("a long dictation").await;
+            let got = finished(task).await;
+            assert!(matches!(got, CaptureOutcome::Accepted(_)), "{got:?}");
         })
         .await;
 }

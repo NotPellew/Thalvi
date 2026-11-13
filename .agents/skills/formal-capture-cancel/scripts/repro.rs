@@ -13,10 +13,11 @@ use thalvi_desktop::draft::Draft;
 use thalvi_desktop::draft::Drafts;
 use thalvi_desktop::engine::fakes::{FakeFrames, FakeWake};
 use thalvi_desktop::engine::{CaptureOutcome, CuePlayer, Engine, Parts};
+use thalvi_desktop::feed::Feed;
 use thalvi_desktop::frame::Frame;
 use thalvi_desktop::history::{Capture, Outcome, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
-use thalvi_desktop::host::{App, Host, HostError, TypedText, WebUrl};
+use thalvi_desktop::host::{App, Delivered, Host, HostError, PasteText, WebUrl};
 use thalvi_desktop::metrics::Recorder;
 use thalvi_desktop::recognizer::{
     FakeRecognizer, FakeSession, Recognizer, RecognizerError, RecognizerEvent, RecognizerSession,
@@ -32,18 +33,18 @@ impl RecordingHost {
 }
 impl Host for RecordingHost {
     type Target = String;
-    fn copies_only(&self) -> bool {
+    fn overlay_takes_clicks(&self) -> bool {
         false
     }
-    fn overlay_takes_clicks(&self) -> bool {
+    fn copies_only(&self) -> bool {
         false
     }
     fn capture_target(&self) -> Result<String, HostError> {
         Ok("Editor".to_owned())
     }
-    fn deliver(&self, _: &String, _: &TypedText, _: bool) -> Result<thalvi_desktop::host::Delivered, HostError> {
+    fn deliver(&self, _: &String, _: &PasteText, _: bool) -> Result<Delivered, HostError> {
         self.called("deliver");
-        Ok(thalvi_desktop::host::Delivered::InWindow)
+        Ok(Delivered::InWindow)
     }
     fn copy(&self, _: &str) -> Result<(), HostError> {
         self.called("copy");
@@ -61,11 +62,18 @@ impl Host for RecordingHost {
         self.called("open_folder");
         Ok(())
     }
-    fn prepare_overlay(&self, _: f64, _: f64) -> Result<f64, HostError> {
-        Ok(0.0)
-    }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Stop {
+    Stopped,
+    Busy,
+    Refused(String),
+}
+enum Flow {
+    Continue,
+    Quit,
+}
 // INSERT_RUNNER_SOURCE
 
 struct ReloadEngine {
@@ -80,7 +88,19 @@ impl ReloadEngine {
     }
 
     fn set_recordings(&mut self, _: thalvi_desktop::metrics::RecordKinds) {
-        panic!("this replay changes the server, not the recording switches");
+        panic!("this replay changes the live speech entry, not the recording switches");
+    }
+
+    fn set_wake_words(&mut self, _: bool) {}
+}
+/// What `Runner::apply` tells the status; this replay does not read it.
+struct ReloadView {
+    wake_words: bool,
+}
+struct ReloadPublisher;
+impl ReloadPublisher {
+    fn update(&self, change: impl FnOnce(&mut ReloadView)) {
+        change(&mut ReloadView { wake_words: true });
     }
 }
 struct ReloadSession {
@@ -95,6 +115,7 @@ struct ReloadRunner {
     refused: RefCell<Vec<(Refusal, u64)>>,
     entered: Option<oneshot::Sender<()>>,
     release: Option<oneshot::Receiver<bool>>,
+    publisher: ReloadPublisher,
 }
 impl ReloadRunner {
     // INSERT_RELOAD_SOURCE
@@ -114,7 +135,10 @@ impl ReloadRunner {
 #[tokio::test]
 async fn settings_apply_reports_presses_during_successful_and_failed_rebuilds() {
     let config = DesktopConfig::from_json_str("{}").unwrap();
-    let next = DesktopConfig::from_json_str(r#"{"server":"ws://127.0.0.1:9012"}"#).unwrap();
+    let next = DesktopConfig::from_json_str(
+        r#"{"stt":{"entries":[{"kind":"realtime","id":"r","name":"Realtime","active":true,"address":"ws://127.0.0.1:9012","model":"m"}]}}"#,
+    )
+    .unwrap();
     for rebuilt in [true, false] {
         for (tapped, before_apply) in [(true, false), (false, false), (true, true), (false, true)] {
             let (input, key) = HoldInput::new();
@@ -133,6 +157,7 @@ async fn settings_apply_reports_presses_during_successful_and_failed_rebuilds() 
                 refused: RefCell::default(),
                 entered: Some(entered),
                 release: Some(release),
+                publisher: ReloadPublisher,
             };
             if before_apply {
                 input.set(true);
@@ -264,6 +289,8 @@ async fn closing_capture(cancel: bool) {
             http: reqwest::Client::new(),
             hold,
             notice: Box::new(|_| {}),
+            spotter: None,
+            spotter_off: None,
         },
         &config,
         Recorder::disabled(),
@@ -344,7 +371,7 @@ async fn closing_capture(cancel: bool) {
         if cancel {
             !delivered && calls.is_empty()
         } else {
-            delivered && calls == ["deliver", "copy"]
+            delivered && calls == ["deliver"]
         },
         "CANCEL_REACHED_DELIVERY: a consumed Cancel must prevent host delivery"
     );
@@ -397,6 +424,7 @@ async fn no_rebuild_apply_handoff_keeps_holds_and_reports_taps() {
                 refused: RefCell::default(),
                 entered: None,
                 release: None,
+                publisher: ReloadPublisher,
             };
             let (mut engine, _) = Engine::new(
                 Parts {
@@ -407,6 +435,8 @@ async fn no_rebuild_apply_handoff_keeps_holds_and_reports_taps() {
                     http: reqwest::Client::new(),
                     hold,
                     notice: Box::new(|_| {}),
+                    spotter: None,
+                    spotter_off: None,
                 },
                 &config,
                 Recorder::disabled(),

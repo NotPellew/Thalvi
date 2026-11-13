@@ -8,9 +8,10 @@ use crate::status::Status;
 use crate::tray::Icon;
 
 /// Every state a bar can show, in the order of the tray icons.
-const ICONS: [Icon; 6] = [
+const ICONS: [Icon; 7] = [
     Icon::Paused,
     Icon::Listening,
+    Icon::Keyboard,
     Icon::Capturing,
     Icon::Pending,
     Icon::Working,
@@ -22,6 +23,10 @@ fn describe(icon: Icon) -> (&'static str, &'static str) {
     match icon {
         Icon::Paused => ("paused", "Thalvi is paused. Click to resume."),
         Icon::Listening => ("listening", "Thalvi is listening. Click to pause."),
+        Icon::Keyboard => (
+            "keyboard",
+            "Thalvi is listening for the hold keys only. Click to pause.",
+        ),
         Icon::Capturing => (
             "capturing",
             "Thalvi is taking dictation. Click to cancel it and pause.",
@@ -139,6 +144,7 @@ mod tests {
             target: Some("kitty".to_owned()),
             committed: "my password is".to_owned(),
             partial: Some("hunter2".to_owned()),
+            notice: None,
         });
         assert_eq!(state(), "capturing");
         sender.send_replace(Status::Failed {
@@ -155,13 +161,15 @@ mod tests {
         assert_eq!(state(), "loading");
         sender.send_replace(Status::Listening);
         assert_eq!(state(), "listening");
+        sender.send_replace(Status::KeyboardOnly);
+        assert_eq!(state(), "keyboard");
         drop(sender);
         assert_eq!(state(), "error", "an engine that stopped confirms nothing");
     }
 
     #[test]
     fn the_bar_ignores_whether_an_error_can_be_copied() {
-        for word in ["paused", "loading", "listening"] {
+        for word in ["paused", "loading", "listening", "keyboard"] {
             assert_eq!(answered(word, true), answered(word, false));
         }
     }

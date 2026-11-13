@@ -10,11 +10,12 @@ use crate::cues::Cues;
 use crate::entries::{Entries, EntryError, RawStt};
 use crate::history::HistoryConfig;
 use crate::hold::HoldKey;
-use crate::host::{App, Modifier, Shortcut, WebUrl};
+use crate::host::{App, Desktop, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
 use crate::phrases::WordList;
-use crate::recognizer::{ServerUrl, SpeechSource};
+use crate::recognizer::SpeechSource;
 use crate::wake::WakeConfig;
+use crate::writing::Writing;
 
 /// Why the desktop config could not be used. Messages are shown to the user as written.
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +56,8 @@ pub struct DesktopConfig {
     /// The input device to open; `None` is the system default.
     pub microphone: Option<String>,
     pub look: Look,
+    /// Which builds the app updates itself to.
+    pub update_channel: UpdateChannel,
     /// What is recorded on this computer; nothing unless the user turns it on.
     pub recordings: RecordKinds,
     /// The dictation history kept on this computer; on unless the user turns it off.
@@ -65,8 +68,13 @@ pub struct DesktopConfig {
     /// Whether the user wants Thalvi in the app menu. The app rewrites the `AppImage`'s menu
     /// entry from this on start, because the `AppImage` may have moved.
     pub show_in_menu: bool,
-    /// The key held to dictate; where it is bound depends on the desktop.
+    /// The key held to dictate, as in effect: the desktop's default unless the config names another.
     pub hold_key: HoldKey,
+    /// The key held to dictate and have the words written out as proper text, as in effect like
+    /// `hold_key`.
+    pub write_key: HoldKey,
+    /// The chat endpoint that writes dictation out; without one, asking for it says where to set it up.
+    pub writing: Option<Writing>,
 }
 
 #[derive(Deserialize)]
@@ -74,7 +82,7 @@ pub struct DesktopConfig {
 struct RawDesktopConfig {
     /// The address a config written before the speech server list kept; read only to migrate it.
     #[serde(default)]
-    server: Option<ServerUrl>,
+    server: Option<String>,
     #[serde(default)]
     wake: WakeConfig,
     #[serde(default, deserialize_with = "cues")]
@@ -98,6 +106,8 @@ struct RawDesktopConfig {
     #[serde(default)]
     look: Look,
     #[serde(default)]
+    update_channel: UpdateChannel,
+    #[serde(default)]
     recordings: RecordKinds,
     #[serde(default)]
     history: HistoryConfig,
@@ -106,7 +116,11 @@ struct RawDesktopConfig {
     #[serde(default)]
     show_in_menu: bool,
     #[serde(default)]
-    hold_key: HoldKey,
+    hold_key: Option<HoldKey>,
+    #[serde(default)]
+    write_key: Option<HoldKey>,
+    #[serde(default)]
+    writing: Option<Writing>,
 }
 
 impl DesktopConfig {
@@ -140,6 +154,38 @@ impl TryFrom<String> for Look {
     }
 }
 
+/// Which builds the app keeps itself on: `Stable` unless the user picks the development builds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", rename_all = "lowercase")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Development,
+}
+
+impl UpdateChannel {
+    /// The name the config file and the metrics use.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Development => "development",
+        }
+    }
+}
+
+impl TryFrom<String> for UpdateChannel {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, String> {
+        match name.as_str() {
+            "stable" => Ok(Self::Stable),
+            "development" => Ok(Self::Development),
+            _ => Err("update_channel must be stable or development.".to_owned()),
+        }
+    }
+}
+
 /// What the status overlay shows; both are on by default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -161,50 +207,85 @@ impl Default for OverlayConfig {
     }
 }
 
+/// The hold and write keys the running desktop starts with.
+type KeyDefaults = (HoldKey, HoldKey);
+
+/// The key in effect for a stored one: the default when none is stored, or when it is the value
+/// every config stored before defaults were set per desktop.
+fn in_effect(
+    stored: Option<HoldKey>,
+    formerly_always_stored: &HoldKey,
+    default: &HoldKey,
+) -> HoldKey {
+    stored
+        .filter(|key| key != formerly_always_stored)
+        .unwrap_or_else(|| default.clone())
+}
+
+/// The key to store: none when it is the default, which a config then follows if it changes.
+fn to_store<'a>(key: &'a HoldKey, default: &HoldKey) -> Option<&'a HoldKey> {
+    (key != default).then_some(key)
+}
+
 impl TryFrom<RawDesktopConfig> for DesktopConfig {
     type Error = String;
 
     fn try_from(raw: RawDesktopConfig) -> Result<Self, String> {
-        let apps = raw
-            .apps
-            .into_iter()
-            .map(|(name, app)| app.validate(&name).map(|app| (name, app)))
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let mut scripts: Vec<Script> = Vec::new();
-        for script in raw.scripts {
-            let script = script.validate(&apps)?;
-            if scripts.iter().any(|known| known.phrase == script.phrase) {
-                return Err("Script phrases must be distinct.".to_owned());
-            }
-            scripts.push(script);
-        }
-        let microphone = raw
-            .microphone
-            .map(|name| nonempty(&name, "microphone"))
-            .transpose()?;
-        let (entries, phrases) = raw
-            .stt
-            .entries(raw.server)
-            .map_err(|error: EntryError| error.to_string())?;
-        Ok(Self {
-            wake: raw.wake,
-            cues: raw.cues,
-            ending_pause: raw.ending_pause,
-            capture_limits: raw.capture_limits,
-            endings: raw.endings,
-            stt: SttConfig { entries, phrases },
-            apps,
-            scripts,
-            overlay: raw.overlay,
-            microphone,
-            look: raw.look,
-            recordings: raw.recordings,
-            history: raw.history,
-            start_at_login: raw.start_at_login,
-            show_in_menu: raw.show_in_menu,
-            hold_key: raw.hold_key,
-        })
+        build(raw, &Desktop::default_hold_keys())
     }
+}
+
+fn build(
+    raw: RawDesktopConfig,
+    (hold_default, write_default): &KeyDefaults,
+) -> Result<DesktopConfig, String> {
+    let hold_key = in_effect(raw.hold_key, &HoldKey::alt_z(), hold_default);
+    let write_key = in_effect(raw.write_key, &HoldKey::alt_x(), write_default);
+    let apps = raw
+        .apps
+        .into_iter()
+        .map(|(name, app)| app.validate(&name).map(|app| (name, app)))
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let mut scripts: Vec<Script> = Vec::new();
+    for script in raw.scripts {
+        let script = script.validate(&apps)?;
+        if scripts.iter().any(|known| known.phrase == script.phrase) {
+            return Err("Script phrases must be distinct.".to_owned());
+        }
+        scripts.push(script);
+    }
+    let microphone = raw
+        .microphone
+        .map(|name| nonempty(&name, "microphone"))
+        .transpose()?;
+    if write_key == hold_key {
+        return Err("The write key must differ from the dictate key.".to_owned());
+    }
+    let (entries, phrases) = raw
+        .stt
+        .entries(raw.server)
+        .map_err(|error: EntryError| error.to_string())?;
+    Ok(DesktopConfig {
+        wake: raw.wake,
+        cues: raw.cues,
+        ending_pause: raw.ending_pause,
+        capture_limits: raw.capture_limits,
+        endings: raw.endings,
+        stt: SttConfig { entries, phrases },
+        apps,
+        scripts,
+        overlay: raw.overlay,
+        microphone,
+        look: raw.look,
+        update_channel: raw.update_channel,
+        recordings: raw.recordings,
+        history: raw.history,
+        start_at_login: raw.start_at_login,
+        show_in_menu: raw.show_in_menu,
+        hold_key,
+        write_key,
+        writing: raw.writing,
+    })
 }
 
 /// A spoken phrase and the action it runs, as configured under `scripts`.
@@ -420,11 +501,16 @@ struct FileForm<'a> {
     overlay: &'a OverlayConfig,
     microphone: Option<&'a str>,
     look: Look,
+    update_channel: UpdateChannel,
     recordings: RecordKinds,
     history: HistoryConfig,
     start_at_login: bool,
     show_in_menu: bool,
-    hold_key: &'a HoldKey,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hold_key: Option<&'a HoldKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    write_key: Option<&'a HoldKey>,
+    writing: &'a Option<Writing>,
 }
 
 #[derive(Serialize)]
@@ -469,6 +555,18 @@ struct FileScript<'a> {
 
 impl Serialize for DesktopConfig {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.serialize_for(serializer, &Desktop::default_hold_keys())
+    }
+}
+
+impl DesktopConfig {
+    /// The file form for a desktop whose default keys are `defaults`: the hold and write keys are
+    /// in it only when they differ.
+    fn serialize_for<S: Serializer>(
+        &self,
+        serializer: S,
+        (hold_default, write_default): &KeyDefaults,
+    ) -> Result<S::Ok, S::Error> {
         let scripts = self
             .scripts
             .iter()
@@ -509,11 +607,14 @@ impl Serialize for DesktopConfig {
             overlay: &self.overlay,
             microphone: self.microphone.as_deref(),
             look: self.look,
+            update_channel: self.update_channel,
             recordings: self.recordings,
             history: self.history,
             start_at_login: self.start_at_login,
             show_in_menu: self.show_in_menu,
-            hold_key: &self.hold_key,
+            hold_key: to_store(&self.hold_key, hold_default),
+            write_key: to_store(&self.write_key, write_default),
+            writing: &self.writing,
         }
         .serialize(serializer)
     }
@@ -583,6 +684,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
+    use serde_json::json;
+
     use super::*;
     use crate::capture::{CaptureRoute, Ending};
     use crate::cues::Cue;
@@ -591,6 +694,7 @@ mod tests {
     use crate::secondary::{SecondaryApi, SecondaryStt};
     use crate::transducer::SpeechChoice;
     use crate::wake::HeadModel;
+    use crate::writing::DEFAULT_PROMPT;
 
     fn parse(json: &str) -> Result<DesktopConfig, ConfigError> {
         DesktopConfig::from_json_str(json)
@@ -602,7 +706,7 @@ mod tests {
         assert_eq!(config.stt, SttConfig::default());
         assert_eq!(
             config.stt.entries.active_live().kind,
-            LiveKind::ThalviServer(ServerUrl::parse("ws://127.0.0.1:8080").unwrap())
+            LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms))
         );
         assert_eq!(config.stt.entries.second_pass(), []);
         assert_eq!(config.wake, WakeConfig::default());
@@ -617,16 +721,259 @@ mod tests {
         );
         assert!(!config.start_at_login);
         assert!(!config.show_in_menu);
-        assert_eq!(config.hold_key, HoldKey::default());
+        assert_eq!(
+            (config.hold_key, config.write_key),
+            Desktop::default_hold_keys()
+        );
+        assert_eq!(config.writing, None);
+    }
+
+    const WINDOWS: fn() -> KeyDefaults = || (HoldKey::alt_z(), HoldKey::alt_x());
+    const HYPRLAND: fn() -> KeyDefaults = || (HoldKey::f9(), HoldKey::f10());
+
+    /// The config `json` as a desktop with `defaults` loads it.
+    fn loaded(json: &str, defaults: &KeyDefaults) -> Result<DesktopConfig, String> {
+        build(
+            serde_json::from_str(json).map_err(|error| error.to_string())?,
+            defaults,
+        )
+    }
+
+    #[test]
+    fn wake_words_are_on_unless_the_file_turns_them_off_and_only_off_is_stored() {
+        for (json, enabled) in [
+            ("{}", true),
+            (r#"{"wake": {}}"#, true),
+            (r#"{"wake": {"enabled": true}}"#, true),
+            (r#"{"wake": {"enabled": false}}"#, false),
+            (
+                r#"{"wake": {"capture": {"model": "hey_jarvis"}, "enabled": false}}"#,
+                false,
+            ),
+        ] {
+            let config = DesktopConfig::from_json_str(json).unwrap();
+            assert_eq!(config.wake.enabled(), enabled, "{json}");
+            let written = serde_json::to_value(&config).unwrap();
+            assert_eq!(
+                written["wake"].get("enabled"),
+                (!enabled).then_some(&serde_json::json!(false)),
+                "{json}"
+            );
+            let again = DesktopConfig::from_json_str(&written.to_string()).unwrap();
+            assert_eq!(again.wake, config.wake, "{json}");
+        }
+        assert!(DesktopConfig::from_json_str(r#"{"wake": {"enabled": "no"}}"#).is_err());
+    }
+
+    #[test]
+    fn the_write_key_is_checked_once_and_must_differ_from_the_hold_key() {
+        let key = |json: &str| loaded(json, &WINDOWS()).map(|config| config.write_key.to_string());
+        assert_eq!(key(r#"{"write_key": "Ctrl+KeyY"}"#).unwrap(), "Ctrl+KeyY");
+        let error = key(r#"{"write_key": "KeyX"}"#).unwrap_err();
+        assert!(error.contains("needs a modifier"), "{error}");
+        for json in [
+            r#"{"write_key": "Alt+KeyZ"}"#,
+            r#"{"hold_key": "Alt+KeyX"}"#,
+            r#"{"hold_key": "F9", "write_key": "F9"}"#,
+        ] {
+            let error = key(json).unwrap_err();
+            assert!(
+                error.contains("must differ from the dictate key"),
+                "{json}: {error}"
+            );
+        }
+        assert_eq!(
+            key(r#"{"hold_key": "Alt+KeyX", "write_key": "Alt+KeyZ"}"#).unwrap(),
+            "Alt+KeyZ",
+            "the keys may swap places"
+        );
+        let error = loaded(r#"{"hold_key": "F10"}"#, &HYPRLAND()).unwrap_err();
+        assert!(
+            error.contains("must differ from the dictate key"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_hold_keys_are_the_desktops_defaults_and_are_stored_only_when_they_differ() {
+        // (desktop, stored in the file, in effect, stored again)
+        type Case = (
+            fn() -> KeyDefaults,
+            &'static str,
+            (&'static str, &'static str),
+            (Option<&'static str>, Option<&'static str>),
+        );
+        let cases: [Case; 9] = [
+            (HYPRLAND, "{}", ("F9", "F10"), (None, None)),
+            (WINDOWS, "{}", ("Alt+KeyZ", "Alt+KeyX"), (None, None)),
+            (
+                HYPRLAND,
+                r#"{"hold_key": "Alt+KeyZ", "write_key": "Alt+KeyX"}"#,
+                ("F9", "F10"),
+                (None, None),
+            ),
+            (
+                WINDOWS,
+                r#"{"hold_key": "Alt+KeyZ", "write_key": "Alt+KeyX"}"#,
+                ("Alt+KeyZ", "Alt+KeyX"),
+                (None, None),
+            ),
+            (
+                HYPRLAND,
+                r#"{"hold_key": "F9", "write_key": "F10"}"#,
+                ("F9", "F10"),
+                (None, None),
+            ),
+            (
+                HYPRLAND,
+                r#"{"hold_key": "F8"}"#,
+                ("F8", "F10"),
+                (Some("F8"), None),
+            ),
+            (
+                WINDOWS,
+                r#"{"write_key": "F10"}"#,
+                ("Alt+KeyZ", "F10"),
+                (None, Some("F10")),
+            ),
+            (
+                WINDOWS,
+                r#"{"hold_key": "F9", "write_key": "Ctrl+F10"}"#,
+                ("F9", "Ctrl+F10"),
+                (Some("F9"), Some("Ctrl+F10")),
+            ),
+            (
+                HYPRLAND,
+                r#"{"hold_key": null, "write_key": "F11"}"#,
+                ("F9", "F11"),
+                (None, Some("F11")),
+            ),
+        ];
+        for (desktop, json, in_effect, stored) in cases {
+            let defaults = desktop();
+            let config = loaded(json, &defaults).unwrap();
+            assert_eq!(
+                (config.hold_key.to_string(), config.write_key.to_string()),
+                (in_effect.0.to_owned(), in_effect.1.to_owned()),
+                "{json}"
+            );
+            let written = config
+                .serialize_for(serde_json::value::Serializer, &defaults)
+                .unwrap();
+            assert_eq!(
+                (
+                    written.get("hold_key").and_then(|key| key.as_str()),
+                    written.get("write_key").and_then(|key| key.as_str())
+                ),
+                stored,
+                "{json}"
+            );
+            assert_eq!(loaded(&written.to_string(), &defaults).unwrap(), config);
+        }
+    }
+
+    #[test]
+    fn the_writing_endpoint_is_absent_by_default_and_refused_when_it_cannot_be_used() {
+        let writing = |json: &str| parse(json).map(|config| config.writing);
+        assert_eq!(writing(r#"{"writing": null}"#).unwrap(), None);
+        let endpoint = writing(r#"{"writing": {"url": "http://127.0.0.1:9/v1/", "model": " m "}}"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(endpoint.model(), "m");
+        assert_eq!(
+            endpoint.prompt(),
+            DEFAULT_PROMPT,
+            "no prompt means the default"
+        );
+        for (json, expected) in [
+            (
+                r#"{"writing": {"url": "http://x", "model": "m", "prompt": " \n"}}"#,
+                "writing.prompt must not be blank",
+            ),
+            (
+                r#"{"writing": {"url": "ftp://x", "model": "m"}}"#,
+                "writing.url must be",
+            ),
+            (
+                r#"{"writing": {"url": "http://x", "model": " "}}"#,
+                "writing.model must be",
+            ),
+            (
+                r#"{"writing": {"url": "http://x"}}"#,
+                "missing field `model`",
+            ),
+            (
+                r#"{"writing": {"url": "http://x", "model": "m", "tone": 1}}"#,
+                "unknown field `tone`",
+            ),
+            (
+                r#"{"writing": {"url": "http://x", "model": "m", "openings": [{"phrase": "?!", "prompt": "p"}]}}"#,
+                "writing.openings needs a phrase",
+            ),
+            (
+                r#"{"writing": {"url": "http://x", "model": "m", "openings": [{"phrase": "a b", "prompt": " "}]}}"#,
+                "writing.openings has a blank prompt for “a b”",
+            ),
+            (
+                r#"{"writing": {"url": "http://x", "model": "m", "openings": [{"phrase": "A b", "prompt": "p"}, {"phrase": "a, B!", "prompt": "q"}]}}"#,
+                "writing.openings has “a b” twice.",
+            ),
+        ] {
+            let error = writing(json).unwrap_err().to_string();
+            assert!(error.contains(expected), "{json}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_writing_prompt_is_kept_only_when_it_differs_from_the_default() {
+        let stored = |prompt: &str| {
+            let json = json!({"writing": {"url": "http://x", "model": "m", "prompt": prompt}});
+            let config = parse(&json.to_string()).unwrap();
+            let written = serde_json::to_value(&config).unwrap();
+            assert_eq!(parse(&written.to_string()).unwrap(), config);
+            (
+                config.writing.unwrap().prompt().to_owned(),
+                written["writing"].get("prompt").cloned(),
+            )
+        };
+        assert_eq!(stored(DEFAULT_PROMPT), (DEFAULT_PROMPT.to_owned(), None));
+        assert_eq!(
+            stored("  Be brief.\n"),
+            ("Be brief.".to_owned(), Some(json!("Be brief.")))
+        );
+    }
+
+    #[test]
+    fn writing_openings_round_trip_normalized_and_an_empty_list_is_not_written() {
+        let endpoint = json!({"url": "http://x", "model": "m"});
+        let written = |openings: serde_json::Value| {
+            let mut writing = endpoint.clone();
+            writing["openings"] = openings;
+            let config = parse(&json!({"writing": writing}).to_string()).unwrap();
+            let written = serde_json::to_value(&config).unwrap();
+            assert_eq!(parse(&written.to_string()).unwrap(), config);
+            written["writing"].clone()
+        };
+        assert_eq!(
+            written(json!([{"phrase": "Write me an e-mail", "prompt": " Short. "}]))["openings"],
+            json!([{"phrase": "write me an e mail", "prompt": "Short."}])
+        );
+        assert!(written(json!([])).get("openings").is_none());
+        let plain = parse(&json!({"writing": endpoint}).to_string()).unwrap();
+        assert!(
+            serde_json::to_value(&plain).unwrap()["writing"]
+                .get("openings")
+                .is_none()
+        );
     }
 
     #[test]
     fn the_hold_key_is_checked_once_when_the_config_loads() {
-        let key = |json: &str| parse(json).map(|config| config.hold_key.to_string());
+        let key = |json: &str| loaded(json, &WINDOWS()).map(|config| config.hold_key.to_string());
         assert_eq!(key(r#"{"hold_key": "Ctrl+KeyY"}"#).unwrap(), "Ctrl+KeyY");
-        let error = key(r#"{"hold_key": "KeyZ"}"#).unwrap_err().to_string();
+        let error = key(r#"{"hold_key": "KeyZ"}"#).unwrap_err();
         assert!(error.contains("needs a modifier"), "{error}");
-        let error = key(r#"{"hold_key": "Alt+Hyper"}"#).unwrap_err().to_string();
+        let error = key(r#"{"hold_key": "Alt+Hyper"}"#).unwrap_err();
         assert!(error.contains("not a key name"), "{error}");
     }
 
@@ -710,7 +1057,7 @@ mod tests {
         for (json, kind) in [
             (
                 r#"{"stt": {"engine": "server"}}"#,
-                LiveKind::ThalviServer(ServerUrl::default()),
+                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
             ),
             (
                 r#"{"stt": {"engine": "local"}}"#,
@@ -723,6 +1070,10 @@ mod tests {
             (
                 r#"{"stt": {"engine": "local", "model": "unified_160ms"}}"#,
                 LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::Unified160ms)),
+            ),
+            (
+                r#"{"stt": {"engine": "local", "model": "parakeet_tdt_v3"}}"#,
+                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ParakeetTdtV3)),
             ),
             (
                 r#"{"stt": {"engine": "local", "model": "/models/mine"}}"#,
@@ -769,7 +1120,7 @@ mod tests {
                 "ending_pause": {"paste": 1, "submit": 3},
                 "capture_limits": {"idle": 90},
                 "endings": {
-                    "Send It": "submit", "paste": "paste", "do it": "task",
+                    "Send It": "submit", "paste": "paste", "write it": "write", "do it": "task",
                     "scratch": "scratch", "cancel": "cancel"
                 },
                 "recordings": {"metrics": true, "audio": true}
@@ -778,7 +1129,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             config.stt.entries.active_live().kind,
-            LiveKind::ThalviServer(ServerUrl::parse("wss://thalvi.example:9000").unwrap())
+            LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0]))
         );
         assert_eq!(
             config
@@ -833,6 +1184,7 @@ mod tests {
             Endings::try_from(BTreeMap::from([
                 ("send it".to_owned(), Ending::Submit),
                 ("paste".to_owned(), Ending::Paste),
+                ("write it".to_owned(), Ending::Write),
                 ("do it".to_owned(), Ending::Task),
                 ("scratch".to_owned(), Ending::Scratch),
                 ("cancel".to_owned(), Ending::Cancel),
@@ -1032,7 +1384,7 @@ mod tests {
             ),
             (
                 r#"{"stt": {"engine": "local", "model": "whisper"}}"#,
-                "Unknown speech model \"whisper\". Use nemotron_160ms, unified_160ms or the path of a folder",
+                "Unknown speech model \"whisper\". Use nemotron_160ms, unified_160ms, parakeet_tdt_v3 or the path of a folder",
             ),
             (r#"{"stt": {"engine": "cloud"}}"#, "unknown variant `cloud`"),
         ] {
@@ -1043,7 +1395,7 @@ mod tests {
 
     #[test]
     fn invalid_settings_are_rejected_in_plain_words() {
-        let valid_endings = r#""paste": "paste", "send": "submit", "do it": "task",
+        let valid_endings = r#""paste": "paste", "write": "write", "send": "submit", "do it": "task",
             "scratch": "scratch", "cancel": "cancel""#;
         for (json, expected) in [
             (r#"{"discord": {}}"#.to_owned(), "unknown field `discord`"),
@@ -1075,10 +1427,6 @@ mod tests {
             (
                 r#"{"wake": {"capture_model": "x.onnx"}}"#.to_owned(),
                 "unknown field `capture_model`",
-            ),
-            (
-                r#"{"wake": {"capture": {"model": "hey_mycroft"}}}"#.to_owned(),
-                "wake models must be different",
             ),
             (
                 r#"{"wake": {"conversation": {"model": "hey_jarvis", "threshold": 0}}}"#.to_owned(),
@@ -1115,7 +1463,7 @@ mod tests {
             ),
             (
                 r#"{"endings": {"enter": "submit"}}"#.to_owned(),
-                "Configure paste, submit, task, scratch, and cancel",
+                "Configure paste, write, submit, task, scratch, and cancel",
             ),
             (
                 format!(r#"{{"endings": {{{valid_endings}, "Do  It": "task"}}}}"#),
@@ -1313,7 +1661,7 @@ mod tests {
             "cues": {"wake": false, "error": false},
             "ending_pause": {"paste": 1, "submit": 3, "task": 2.5},
             "capture_limits": {"idle": 90, "max": 120},
-            "endings": {"Send It": "submit", "paste": "paste", "do it": "task",
+            "endings": {"Send It": "submit", "paste": "paste", "write it": "write", "do it": "task",
                         "scratch": "scratch", "cancel": "cancel"},
             "apps": {"editor": {"classes": ["Code"], "executables": ["Code.exe"],
                                 "input_keys": ["ctrl", "Shift", "p"]},
@@ -1328,11 +1676,14 @@ mod tests {
             "overlay": {"show": false, "draft": true},
             "microphone": " USB Mic ",
             "look": "gunmetal",
+            "update_channel": "development",
             "recordings": {"metrics": true, "text": false, "audio": true},
             "history": {"enabled": false, "limit": 50},
             "start_at_login": true,
             "show_in_menu": true,
-            "hold_key": "Ctrl+Shift+F9"
+            "hold_key": "Ctrl+Shift+F9",
+            "write_key": "Ctrl+F10",
+            "writing": {"url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k"}
         }"#;
         for json in ["{}", full] {
             let config = parse(json).unwrap();
@@ -1391,6 +1742,29 @@ mod tests {
             let error = parse(json).unwrap_err().to_string();
             assert!(
                 error.contains("look must be gunmetal, holo or neon."),
+                "{json}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_update_channel_defaults_to_stable_and_rejects_unknown_names() {
+        assert_eq!(parse("{}").unwrap().update_channel, UpdateChannel::Stable);
+        for (name, channel) in [
+            ("stable", UpdateChannel::Stable),
+            ("development", UpdateChannel::Development),
+        ] {
+            let config = parse(&format!(r#"{{"update_channel": "{name}"}}"#)).unwrap();
+            assert_eq!(config.update_channel, channel);
+            assert_eq!(channel.name(), name, "the name the metrics use");
+        }
+        for json in [
+            r#"{"update_channel": "nightly"}"#,
+            r#"{"update_channel": "Stable"}"#,
+        ] {
+            let error = parse(json).unwrap_err().to_string();
+            assert!(
+                error.contains("update_channel must be stable or development."),
                 "{json}: {error}"
             );
         }

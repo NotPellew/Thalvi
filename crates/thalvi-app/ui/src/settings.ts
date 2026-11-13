@@ -5,11 +5,16 @@ import { errorText } from "./contract.ts";
 import { createControls } from "./controls.ts";
 import { el } from "./dom.ts";
 import { applyLook } from "./look.ts";
-import { buildPages, type Page, type PageContext, type SwitchRead } from "./settings-pages.ts";
+import { type ApplyOptions, buildPages, type Page, type PageContext, type SwitchRead } from "./settings-pages.ts";
 
 export const ELSEWHERE_TEXT = "Changed outside this window — Revert loads the saved settings";
 
-export const SAVED_TEXT = "Saved — applies after the current capture; the saved microphone is not active until it opens";
+export const SAVED_TEXT = "Saved — applies after the current capture";
+
+/** What the footer says after a setting that takes effect at once, such as a hold key, was saved. */
+export const SAVED_AT_ONCE_TEXT = "Saved — applies at once";
+
+export const SAVED_MICROPHONE_TEXT = `${SAVED_TEXT}; the saved microphone is not active until it opens`;
 
 export function mountSettings(root: HTMLElement, backend: Backend): void {
   const search = el("input", { type: "search", "aria-label": "Search settings", placeholder: "Search settings", class: "search" });
@@ -38,6 +43,10 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   let saveFailure = "";
   let saving = false;
   let saved = false;
+  // Whether the last save was of settings that apply at once, so it need not wait for a capture to end.
+  let savedAtOnce = false;
+  // The microphone the last save chose (null is the system default); unset when that save left it alone.
+  let savedMicrophone: { name: string | null } | null = null;
   let changedElsewhere = false;
   let audio: AudioStatus = { selected: null, active: null, paused: false };
   const live: PageContext["live"] = {
@@ -49,6 +58,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     opened: () => undefined,
     refresh: () => undefined,
     saved: () => undefined,
+    update: () => undefined,
   };
 
   function applyView(): void {
@@ -86,7 +96,19 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     const dirty = draft !== null && JSON.stringify(draft) !== baseline;
     message.textContent = saving ? "Saving…" : changedElsewhere ? ELSEWHERE_TEXT : dirty ? "Unsaved changes"
       : copyNote !== "" ? copyNote
-      : saved && failure.textContent === "" ? SAVED_TEXT : "";
+      : saved && failure.textContent === "" ? savedText() : "";
+  }
+
+  function savedText(): string {
+    if (savedAtOnce) return SAVED_AT_ONCE_TEXT;
+    const open = savedMicrophone !== null && audio.active !== null && audio.selected === savedMicrophone.name;
+    return savedMicrophone === null || open ? SAVED_TEXT : SAVED_MICROPHONE_TEXT;
+  }
+
+  function markSaved(before: Settings | undefined, after: Settings, atOnce = false): void {
+    saved = true;
+    savedAtOnce = atOnce;
+    savedMicrophone = before === undefined || before.microphone === after.microphone ? null : { name: after.microphone };
   }
 
   let lastState: Status["state"] | null = null;
@@ -106,6 +128,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     live.audio(next);
     live.listening(!next.paused);
     if (next.paused || next.active === null) live.level(0);
+    feedback();
   }
 
   async function load(): Promise<void> {
@@ -123,6 +146,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     }
     const microphones = await backend.listMicrophones().catch((error: unknown) => ({ error: errorText(error) }));
     const holdKeyUnavailable = await backend.getHoldKeyUnavailable();
+    const holdKeyDefaults = await backend.getHoldKeyDefaults();
     const startAtLogin = await backend.getStartAtLogin().catch((error: unknown): SwitchRead => ({ kind: "unreadable", message: errorText(error) }));
     const menuEntry = await backend.getMenuEntry().catch((error: unknown): SwitchRead => ({ kind: "unreadable", message: errorText(error) }));
     audio = await backend.getAudio().catch(() => ({
@@ -135,7 +159,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     applyLook(root, draft.look);
     checks = [];
     pages = buildPages({
-      draft, backend, root, controls: createControls(feedback), microphones, audio, holdKeyUnavailable, startAtLogin, menuEntry, live, checks,
+      draft, backend, root, controls: createControls(feedback), microphones, audio, holdKeyUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, checks,
       saved: () => (baseline === "" ? null : (JSON.parse(baseline) as Settings)),
       applyNow,
     });
@@ -154,14 +178,15 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   }
 
   /** Saves the saved settings with `change` applied; unsaved edits stay in the draft and unsaved. */
-  async function applyNow(change: (settings: Settings) => void): Promise<void> {
+  async function applyNow(change: (settings: Settings) => void, options: ApplyOptions = {}): Promise<void> {
     if (baseline === "") return;
     if (saving) {
       saveFailure = "Wait for the save in progress to finish.";
       feedback();
       throw new Error(saveFailure);
     }
-    const next = JSON.parse(baseline) as Settings;
+    const before = JSON.parse(baseline) as Settings;
+    const next = structuredClone(before);
     change(next);
     saveFailure = "";
     saving = true;
@@ -170,11 +195,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       await backend.saveSettings(next);
       baseline = JSON.stringify(next);
       if (draft !== null) change(draft);
-      saved = true;
+      markSaved(before, next, options.atOnce === true);
       changedElsewhere = false;
     } catch (error) {
-      saveFailure = errorText(error);
-      throw error;
+      const explained = options.explain ? options.explain(errorText(error)) : errorText(error);
+      saveFailure = explained;
+      throw options.explain ? new Error(explained) : error;
     } finally {
       saving = false;
       feedback();
@@ -231,18 +257,14 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     revert.disabled = true;
     const pending = checks.map((check) => check()).filter((check) => check !== null);
     const sent = pending.length === 0 ? backend.saveSettings(sending) : Promise.all(pending).then(() => backend.saveSettings(sending));
-    const listBefore = baseline === "" ? undefined : (JSON.parse(baseline) as Settings).stt.phrases;
+    const before = baseline === "" ? undefined : (JSON.parse(baseline) as Settings);
     sent
       .then(() => {
         baseline = JSON.stringify(sending);
-        saved = true;
+        markSaved(before, sending);
         changedElsewhere = false;
         live.saved();
-        if (JSON.stringify(listBefore ?? []) === JSON.stringify(sending.stt.phrases ?? [])) return undefined;
-        // The server keeps its own copy for dictation and conversations; a miss is said, the save stands.
-        return backend.shareWordList().catch((error: unknown) => {
-          saveFailure = errorText(error);
-        });
+        return undefined;
       })
       .catch((error: unknown) => {
         saved = false;
@@ -262,8 +284,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   backend.onAudio(showAudio);
   backend.onSpeechModelProgress((progress) => {
     live.speechModel(progress);
+    if (progress.status === "done") live.refresh();
   });
   backend.onOpenPage(open);
+  backend.onUpdate((state) => {
+    live.update(state);
+  });
   backend.onSettingsChangedElsewhere(() => {
     if (!saving && draft !== null && JSON.stringify(draft) === baseline) void load();
     else changedElsewhere = true;

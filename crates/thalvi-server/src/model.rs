@@ -6,7 +6,7 @@ use std::pin::Pin;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -382,7 +382,10 @@ impl OpenAiChatModel {
             request = request.bearer_auth(&self.api_key);
         }
         let response = request.send().await.map_err(|error| {
-            ModelError(format!("the language model could not be reached: {error}"))
+            ModelError(format!(
+                "the language model could not be reached: {}",
+                error.without_url()
+            ))
         })?;
         if !response.status().is_success() {
             let status = response.status();
@@ -391,7 +394,9 @@ impl OpenAiChatModel {
                 "the language model returned an error ({status})"
             )));
         }
-        Ok(decode_events(response.bytes_stream()))
+        Ok(decode_events(
+            response.bytes_stream().map_err(reqwest::Error::without_url),
+        ))
     }
 }
 
@@ -637,6 +642,31 @@ mod tests {
             String::new(),
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn model_transport_errors_do_not_include_the_endpoint_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let port = listener.local_addr().expect("listener address").port();
+        drop(listener);
+
+        let model = OpenAiChatModel::new(
+            format!("http://127.0.0.1:{port}/v1"),
+            "m".to_string(),
+            String::new(),
+            None,
+        );
+        let error = model
+            .post_stream(&model.request_body(&[], None))
+            .await
+            .err()
+            .expect("closed local port should fail");
+        let message = error.to_string();
+        assert!(message.contains("could not be reached"), "{message}");
+        assert!(!message.contains("127.0.0.1"), "{message}");
+        assert!(!message.contains(&port.to_string()), "{message}");
     }
 
     async fn decode(

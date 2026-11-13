@@ -8,9 +8,11 @@ import type {
   Ending,
   HistoryEntry,
   HistoryOutcome,
+  HoldKeyDefaults,
   ScriptActionKind,
   LiveEntry,
   OnDeviceEntry,
+  OpenAiRequest,
   SecondaryApi,
   SecondPassEntry,
   Settings,
@@ -18,8 +20,12 @@ import type {
   SpeechModelProgress,
   Status,
   SpeechEntry,
+  UpdateChannel,
+  UpdateState,
   WakeModelInfo,
   SwitchState,
+  WritingOpening,
+  WritingSettings,
 } from "./contract.ts";
 import { errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
@@ -37,6 +43,8 @@ export interface PageContext {
   audio: AudioStatus;
   /** Why this desktop offers no hold key, or null where it does. */
   holdKeyUnavailable: string | null;
+  /** The keys this desktop starts with. */
+  holdKeyDefaults: HoldKeyDefaults;
   /** Whether the OS starts Thalvi at login, or why that could not be read. */
   startAtLogin: SwitchRead;
   /** Whether Thalvi is in the app menu, or why that could not be read. */
@@ -56,13 +64,22 @@ export interface PageContext {
     refresh: () => void;
     /** Settings were saved, so what a page marks as unsaved is out of date. */
     saved: () => void;
+    /** The update's state changed. */
+    update: (state: UpdateState) => void;
   };
   /** Checks a page adds that must pass before Save sends; each returns null when it has nothing to check. */
   checks: (() => Promise<void> | null)[];
   /** The settings as last saved, or null before they are read. */
   saved: () => Settings | null;
   /** Saves the last saved settings with `change` applied, leaving other unsaved edits in the draft; says why in the footer when it fails. */
-  applyNow: (change: (settings: Settings) => void) => Promise<void>;
+  applyNow: (change: (settings: Settings) => void, options?: ApplyOptions) => Promise<void>;
+}
+
+export interface ApplyOptions {
+  /** The change takes effect as it is saved, so the footer does not say it waits for a capture. */
+  atOnce?: boolean;
+  /** Rewrites the reason a refused change is shown with, in the footer and to the caller. */
+  explain?: (reason: string) => string;
 }
 
 /** An OS switch as read, or why it could not be. */
@@ -76,6 +93,7 @@ export interface Page {
 
 const ENDINGS: readonly (readonly [Ending, string])[] = [
   ["paste", "Paste"],
+  ["write", "Write out, then paste"],
   ["submit", "Paste and Enter"],
   ["task", "Run task"],
   ["scratch", "Scratch the draft"],
@@ -90,7 +108,13 @@ const APIS: readonly (readonly [SecondaryApi, string])[] = [
   ["openai", "OpenAI-style"],
   ["meta", "Meta"],
 ];
+const OPEN_AI_REQUESTS: readonly (readonly [OpenAiRequest, string])[] = [
+  ["transcriptions", "Transcriptions"],
+  ["chat", "Chat with audio"],
+];
 const SPEECH_MODEL = "nemotron_160ms";
+/** Like the config, a speech model name with a path separator is a folder of the user's own. */
+const isModelFolder = (name: string): boolean => /[\\/]/.test(name);
 const CUES: readonly (readonly [keyof Settings["cues"], string, string])[] = [
   ["wake", "Wake", "Thalvi heard the wake phrase and is listening."],
   ["provisional", "Ending heard", "An ending phrase was heard; the countdown has begun."],
@@ -107,12 +131,12 @@ const CUSTOM_MODEL = "__custom";
 const OUTCOMES: Record<HistoryOutcome, string> = { accepted: "Delivered", cancelled: "Cancelled", failed: "Failed" };
 const DRAFT_OUTCOMES: Record<DraftOutcome, string> = {
   delivered: "Delivered.",
-  cancelled: "You cancelled this one, so nothing was typed.",
+  cancelled: "You cancelled this one, so nothing was pasted.",
   failed: "This was not delivered.",
-  maybePartial: "Typing stopped partway: some of this text may already be in the window. Check it there, or use Copy text.",
+  maybePartial: "Thalvi may or may not have pasted this text. Check the window before trying again, or use Copy text.",
 };
 /** While one of these runs the status changes with every word; the draft is read again once it ends. */
-const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "working"];
+const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working"];
 const WHEN = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 export function row(label: string, hint: string | null, control: Field | HTMLElement): HTMLElement {
@@ -121,6 +145,7 @@ export function row(label: string, hint: string | null, control: Field | HTMLEle
   const labelable =
     field.field instanceof HTMLInputElement ||
     field.field instanceof HTMLSelectElement ||
+    field.field instanceof HTMLTextAreaElement ||
     field.field instanceof HTMLButtonElement;
   const name =
     labelable && field.field
@@ -172,6 +197,11 @@ function normalize(phrase: string): string {
   return phrase.toLowerCase().split(/\s+/).filter(Boolean).join(" ");
 }
 
+/** Reads a phrase the way the desktop does: lowercase, runs of anything but letters and digits one space. */
+function openingWords(phrase: string): string {
+  return phrase.toLowerCase().split(/[^\p{Alphabetic}\p{N}]+/u).filter(Boolean).join(" ");
+}
+
 function miniField(label: string, field: Field): HTMLElement {
   return el("label", { class: "mini" }, el("span", {}, label), field.node);
 }
@@ -181,14 +211,13 @@ function fileName(path: string): string {
 }
 
 interface WakeHead {
-  key: "capture" | "conversation";
   custom: boolean;
   customPath: string;
   render: () => void;
   sayProblem: (message: string) => void;
 }
 
-/** Both wake pickers: catalog phrases with download badges, or a custom `.onnx` file. */
+/** The dictation wake picker: catalog phrases with download badges, or a custom `.onnx` file. */
 function wakeHeads(context: PageContext): HTMLElement[] {
   const { draft, controls, backend, checks, live } = context;
   const infos = new Map<string, WakeModelInfo>();
@@ -196,43 +225,43 @@ function wakeHeads(context: PageContext): HTMLElement[] {
   const heads: WakeHead[] = [];
   let latestCheck = 0;
 
+  function dictationHead(): WakeHead {
+    const head = heads[0];
+    if (!head) throw new Error("The dictation wake picker is not initialized.");
+    return head;
+  }
+
   function validate(target?: WakeHead): Promise<void> {
-    for (const head of heads) {
-      if (head.custom && head.customPath === "") {
-        const message = "Pick a wake model file with Browse… first.";
-        (target ?? head).sayProblem(message);
-        return Promise.reject(new Error(message));
-      }
+    const head = dictationHead();
+    if (head.custom && head.customPath === "") {
+      const message = "Pick a wake model file with Browse… first.";
+      (target ?? head).sayProblem(message);
+      return Promise.reject(new Error(message));
     }
     const check = ++latestCheck;
-    return backend.validateWakeModels(draft.wake.capture.model, draft.wake.conversation.model).then(
+    return backend.validateWakeModels(draft.wake.capture.model).then(
       () => {
-        if (check === latestCheck) for (const head of heads) head.sayProblem("");
+        if (check === latestCheck) head.sayProblem("");
       },
       (error: unknown) => {
         if (check === latestCheck) {
           if (target) target.sayProblem(errorText(error));
-          else for (const head of heads) head.sayProblem(errorText(error));
+          else head.sayProblem(errorText(error));
         }
         throw error;
       },
     );
   }
-  // Catalog choices are known-good names and the picker disables the other head's phrase, so
-  // only a custom file or an equal pair needs the Rust check before Save.
-  checks.push(() =>
-    heads.some((head) => head.custom) || draft.wake.capture.model === draft.wake.conversation.model ? validate() : null,
-  );
+  checks.push(() => (dictationHead().custom ? validate() : null));
 
-  function head(key: "capture" | "conversation", title: string): HTMLElement[] {
-    const config = draft.wake[key];
-    const name = key === "capture" ? "dictation" : "conversation";
+  function head(title: string): HTMLElement[] {
+    const config = draft.wake.capture;
+    const name = "dictation";
     const picker = el("select", { id: uid("f") });
     const badge = el("span", { class: "badge" });
     const problem = note();
     const chosenFile = el("span", { class: "unit" });
     const state: WakeHead = {
-      key,
       custom: !WAKE_MODELS.some(([model]) => model === config.model),
       customPath: "",
       render: () => undefined,
@@ -276,13 +305,11 @@ function wakeHeads(context: PageContext): HTMLElement[] {
     });
     const customRow = el("div", { class: "trow file" }, el("span", { class: "unit" }, "Custom model"), browse, chosenFile);
     state.render = () => {
-      const other = heads.find((candidate) => candidate.key !== key);
       picker.replaceChildren(
         ...WAKE_MODELS.map(([model, label]) => {
           const info = infos.get(model);
           const status = downloading.has(model) ? "Downloading…" : info ? (info.cached ? "Ready" : "Not downloaded") : "";
           const option = el("option", { value: model }, status === "" ? label : `${label} — ${status}`);
-          option.disabled = other !== undefined && draft.wake[other.key].model === model && config.model !== model;
           return option;
         }),
         el("option", { value: CUSTOM_MODEL }, "Custom model…"),
@@ -342,7 +369,7 @@ function wakeHeads(context: PageContext): HTMLElement[] {
     ];
   }
 
-  const nodes = [...head("capture", "Dictation wake word"), ...head("conversation", "Conversation wake word")];
+  const nodes = head("Dictation wake word");
   function refresh(): void {
     backend.listWakeModels().then(
       (models) => {
@@ -356,7 +383,11 @@ function wakeHeads(context: PageContext): HTMLElement[] {
       },
     );
   }
-  live.refresh = refresh;
+  const before = live.refresh;
+  live.refresh = () => {
+    before();
+    refresh();
+  };
   refresh();
   for (const state of heads) state.render();
   return nodes;
@@ -394,13 +425,17 @@ function endingsTable({ draft, controls }: PageContext): HTMLElement {
       say(problem, "Type the phrase to add first.");
       return;
     }
+    if (Object.hasOwn(draft.endings, words)) {
+      say(problem, `“${words}” is already in the list.`);
+      return;
+    }
     say(problem, "");
     draft.endings[words] = chosen;
     (phrase.field as HTMLInputElement).value = "";
     controls.touched();
     render();
   });
-  return el("div", { class: "stack wide" }, list, el("div", { class: "trow add" }, phrase.node, action.node, add), problem);
+  return el("div", { class: "stack wide" }, list, el("div", { class: "trow add phrase-add" }, phrase.node, action.node, add), problem);
 }
 
 /** The word list as chips with a remove button each, and one box whose + (or Enter) adds its word. */
@@ -466,12 +501,131 @@ function wordListTable(draft: Settings, controls: Controls): { node: HTMLElement
   };
 }
 
-/** The hold key has no setting here; the group appears only where the desktop gives the app no way to see it. */
-function holdKey({ holdKeyUnavailable }: PageContext): HTMLElement[] {
-  if (holdKeyUnavailable === null) return [];
+/** The Wake words switch: off, Thalvi keeps listening but only the hold keys start a capture. It applies as it is clicked. */
+function wakeSwitch({ draft, controls, backend, applyNow }: PageContext): HTMLElement[] {
+  const toggle = controls.toggle(draft.wake.enabled, () => undefined);
+  const input = toggle.field as HTMLInputElement;
+  const problem = note();
+  const state = el("small", { class: "unit", role: "status" });
+  let paused = false;
+  const show = (): void => {
+    state.textContent = paused
+      ? "Paused: neither the hold keys nor the wake words start anything."
+      : input.checked
+        ? "Listening for the wake words and the hold keys."
+        : "Listening for the hold keys only.";
+  };
+  const follow = (status: Status): void => {
+    paused = status.state === "paused";
+    show();
+  };
+  backend.onStatus(follow);
+  backend.getStatus().then(follow, () => undefined);
+  show();
+  input.addEventListener("change", () => {
+    say(problem, "");
+    const wanted = input.checked;
+    show();
+    applyNow((settings) => {
+      settings.wake.enabled = wanted;
+    }).catch((error: unknown) => {
+      input.checked = !wanted;
+      show();
+      say(problem, errorText(error));
+    });
+  });
   return [
-    group("Hold key"),
-    row("Hold a key to dictate", null, unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null })),
+    group("Wake words"),
+    row("Wake words", "Off: Thalvi keeps listening, but only the hold keys start a dictation. This applies at once, without Save.", {
+      node: el("span", { class: "stack" }, toggle.node, state, problem),
+      field: input,
+    }),
+  ];
+}
+
+/** The key a `keydown` names as the settings file does, such as `Alt+KeyZ`; null for a modifier alone, except AltGr. */
+function recordedKey(event: KeyboardEvent): string | null {
+  // Windows reports AltGr as a left Ctrl it adds, then the right Alt with both flags set; neither is the user's.
+  const altGr = event.code === "AltRight";
+  if (!altGr && /^(?:Control|Shift|Alt|Meta)(?:Left|Right)$/.test(event.code)) return null;
+  const modifiers = [!altGr && event.ctrlKey && "Ctrl", event.shiftKey && "Shift", !altGr && event.altKey && "Alt", event.metaKey && "Win"].filter((name) => name !== false);
+  return [...modifiers, event.code].join("+");
+}
+
+/** Text with every key written as the keyboard shows it, not as the settings file names it: `Alt+KeyZ` is "Alt+Z" and `AltRight` is "AltGr". */
+function keyLabel(text: string): string {
+  return text.replace(/(?:Key|Digit)(?=[A-Z0-9](?![A-Za-z0-9]))/g, "").replaceAll("AltRight", "AltGr");
+}
+
+/** Why `recorded` was refused, in the words of the rows; a name that is no key at all can't be used, however it is spelled. */
+function holdKeyNotice(reason: string, recorded: string): string {
+  if (reason.startsWith(`The key "${recorded}" is not a key name`)) {
+    return `${keyLabel(recorded)} can't be used as a hold key. Use a letter, a digit, Space or F1 to F12, alone or with Ctrl, Shift, Alt or Win.`;
+  }
+  return keyLabel(reason);
+}
+
+/** One hold key: the key in effect, a recorder that applies the next combination pressed, and a way back to the default. `notices` holds every hold key row's notice, which any new attempt clears. */
+function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key", { draft, applyNow, holdKeyDefaults }: PageContext, notices: HTMLElement[]): HTMLElement {
+  const shown = el("kbd", { class: "key" });
+  const problem = note();
+  notices.push(problem);
+  const clearNotices = (): void => {
+    for (const notice of notices) say(notice, "");
+  };
+  const restore = button("Restore default", () => {
+    set(holdKeyDefaults[field]);
+  }, "quiet");
+  const change = button("Change…", () => {
+    clearNotices();
+    shown.textContent = "Press the new key. Escape cancels.";
+    change.disabled = true;
+    restore.disabled = true;
+    const record = (event: KeyboardEvent): void => {
+      event.preventDefault();
+      event.stopPropagation();
+      const name = recordedKey(event);
+      if (name === null && event.code !== "Escape") return;
+      window.removeEventListener("keydown", record, true);
+      change.disabled = false;
+      change.focus();
+      if (event.code === "Escape" || name === null) render();
+      else set(name);
+    };
+    window.addEventListener("keydown", record, true);
+  });
+
+  function render(): void {
+    shown.textContent = keyLabel(draft[field]);
+    restore.disabled = draft[field] === holdKeyDefaults[field];
+  }
+
+  function set(name: string): void {
+    clearNotices();
+    applyNow((settings) => {
+      settings[field] = name;
+    }, { atOnce: true, explain: (reason) => holdKeyNotice(reason, name) }).then(render, (error: unknown) => {
+      say(problem, errorText(error));
+      render();
+    });
+  }
+
+  render();
+  return row(label, hint, el("span", { class: "stack" }, el("span", { class: "trow" }, shown, change, restore), problem));
+}
+
+/** Where the desktop gives the app no way to see a key, the group says why and has no controls. */
+function holdKeys(context: PageContext): HTMLElement[] {
+  const { holdKeyUnavailable } = context;
+  if (holdKeyUnavailable !== null) {
+    const why = (): HTMLElement => unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null });
+    return [group("Hold keys"), row("Dictate key", null, why()), row("Write key", null, why())];
+  }
+  const notices: HTMLElement[] = [];
+  return [
+    group("Hold keys"),
+    holdKeyRow("Dictate key", "Hold it, speak, let go to paste.", "hold_key", context, notices),
+    holdKeyRow("Write key", "Hold it, speak, let go to have the words written out, then pasted.", "write_key", context, notices),
   ];
 }
 
@@ -486,8 +640,9 @@ function capture(context: PageContext): HTMLElement[] {
       }),
     );
   return [
+    ...wakeSwitch(context),
     ...wakeHeads(context),
-    ...holdKey(context),
+    ...holdKeys(context),
     group("Endings"),
     row("Ending phrases", "Say one to finish a capture. Every action needs at least one phrase.", endingsTable(context)),
     group("Quiet before acting"),
@@ -508,14 +663,17 @@ interface ModelCard {
   node: HTMLElement;
   /** Shows a download step, from this card's button or any other start. */
   progress: (event: SpeechModelProgress) => void;
+  setSelected: (on: boolean) => void;
 }
 
 /** One catalog speech model: what it is, whether it is downloaded, and how to get it. */
 function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
   const badge = el("span", { class: "badge" });
+  const selected = el("span", { class: "badge", "data-on": "true", hidden: true }, "Selected");
   const source = el("a", { href: info.source, target: "_blank", rel: "noreferrer" }, "Source");
   const meter = el("progress", { max: "100", value: "0", "aria-label": `Download of ${info.title}`, hidden: true });
   const status = el("span", { class: "unit", role: "status" });
+  const device = el("small", { class: "device" });
   const problem = note();
   const download = button("Download", () => {
     say(problem, "");
@@ -552,26 +710,53 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
         ? "Checking files…"
         : `Downloading… ${String(event.percent)}%`;
     download.disabled = running;
-    if (event.status === "done") cached(true);
+    if (event.status === "done") {
+      cached(true);
+      showDevice();
+    }
     if (event.status === "failed") say(problem, event.message ?? "The download failed.");
   }
 
+  function showDevice(): void {
+    backend.speechDevice(info.name).then(
+      (line) => {
+        device.textContent = line;
+      },
+      (error: unknown) => {
+        device.textContent = errorText(error);
+      },
+    );
+  }
+  showDevice();
+
   cached(info.cached);
+  const details = el(
+    "details",
+    { class: "model-details" },
+    el("summary", {}, "Details"),
+    el("small", {}, `ID: ${info.name}. License: ${info.license}. Source: ${info.source}. `),
+    source,
+  );
   return {
     node: el(
       "div",
       { class: "model" },
-      el("div", { class: "trow" }, el("span", { class: "unit" }, formatSize(info.size)), badge),
+      el("div", { class: "trow" }, el("span", { class: "phrase" }, info.title), el("span", { class: "unit" }, formatSize(info.size)), badge, selected),
       el("small", {}, info.description),
       el(
         "small",
         { class: "facts" },
-        `License: ${info.license}. Languages: ${info.languages.join(", ")}.${info.languages.length > 1 ? " The language is detected automatically." : ""}`,
+        `Languages: ${info.languages.join(", ")}.${info.languages.length > 1 ? " The language is detected automatically." : ""}`,
       ),
-      el("div", { class: "trow" }, source, download, meter, status),
+      device,
+      details,
+      el("div", { class: "trow" }, download, meter, status),
       problem,
     ),
     progress: show,
+    setSelected: (on) => {
+      selected.hidden = !on;
+    },
   };
 }
 
@@ -587,13 +772,13 @@ function modelOption(info: SpeechModelInfo): HTMLOptionElement {
 
 const KIND_NAMES: Record<SpeechEntry["kind"], string> = {
   realtime: "Realtime speech server",
-  thalvi_server: "Thalvi server",
+  open_ai: "OpenAI-compatible",
   on_device: "On this computer",
   second_pass: "Second pass",
 };
 const LIVE_KINDS: readonly (readonly [LiveEntry["kind"], string])[] = [
   ["realtime", "Realtime speech server"],
-  ["thalvi_server", "Through a Thalvi server"],
+  ["open_ai", "OpenAI-compatible"],
   ["on_device", "On this computer"],
 ];
 
@@ -602,7 +787,7 @@ function isLive(entry: SpeechEntry): entry is LiveEntry {
 }
 
 function hasKey(entry: SpeechEntry): boolean {
-  if (entry.kind !== "realtime" && entry.kind !== "second_pass") return false;
+  if (entry.kind !== "realtime" && entry.kind !== "open_ai" && entry.kind !== "second_pass") return false;
   return entry.api_key === undefined ? entry.has_key === true : entry.api_key !== "";
 }
 
@@ -610,8 +795,8 @@ function summary(entry: SpeechEntry): string {
   switch (entry.kind) {
     case "realtime":
       return `${entry.address} · ${entry.model}`;
-    case "thalvi_server":
-      return entry.address;
+    case "open_ai":
+      return `${entry.address} · ${entry.model}`;
     case "on_device":
       return entry.model ?? SPEECH_MODEL;
     case "second_pass":
@@ -624,8 +809,8 @@ function blankEntry(kind: SpeechEntry["kind"], name: string): SpeechEntry {
   switch (kind) {
     case "realtime":
       return { ...base, kind, address: "", model: "" };
-    case "thalvi_server":
-      return { ...base, kind, address: "ws://127.0.0.1:8080" };
+    case "open_ai":
+      return { ...base, kind, address: "", model: "", request: "transcriptions", language: "" };
     case "on_device":
       return { ...base, kind };
     case "second_pass":
@@ -634,15 +819,15 @@ function blankEntry(kind: SpeechEntry["kind"], name: string): SpeechEntry {
 }
 
 /** The model and folder rows of an On this computer entry; they write into `working`. */
-function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageContext): { rows: HTMLElement[]; validate: () => Promise<void> } {
+function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageContext, sharedModels?: Promise<SpeechModelInfo[]>): { rows: HTMLElement[]; validate: () => Promise<void> } {
   const catalog = new Map<string, ModelCard>();
   const listed: SpeechModelInfo[] = [];
   // Only narrows the model list; it is not saved and does not reach recognition.
   let language = ALL_LANGUAGES;
   let chosen = working.model ?? "";
   const isCatalog = (name: string): boolean => name === SPEECH_MODEL || listed.some((info) => info.name === name);
-  // Like the config, a name with a path separator is a folder. The entry stays picked while its path is still empty.
-  let ownFolderPicked = /[\\/]/.test(chosen);
+  // The entry stays picked while its path is still empty.
+  let ownFolderPicked = isModelFolder(chosen);
   const speechModel = controls.text(
     ownFolderPicked ? chosen : "",
     (value) => {
@@ -654,7 +839,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
   );
   const modelInput = speechModel.field as HTMLInputElement;
   const folderResult = el("p", { class: "note", role: "status", hidden: true });
-  const languagePicker = el("select", { id: uid("f"), "aria-label": "Language" });
+  const languagePicker = el("select", { id: uid("f"), "aria-label": "Show models for" });
   languagePicker.append(el("option", { value: ALL_LANGUAGES }, "All languages"));
   const modelPicker = el("select", { id: uid("f"), "aria-label": "Speech model" });
   modelPicker.append(el("option", { value: "", disabled: true }, "Loading models…"));
@@ -680,7 +865,10 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
     const active = chosen === "" ? SPEECH_MODEL : chosen;
     const own = ownFolderPicked;
     modelPicker.value = own ? OWN_FOLDER : active;
-    for (const [name, card] of catalog) card.node.hidden = own || name !== active;
+    for (const [name, card] of catalog) {
+      card.node.hidden = own || name !== active;
+      card.setSelected(!own && name === active);
+    }
     ownFolder.dataset["active"] = String(own);
   }
 
@@ -709,7 +897,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
     syncModel();
   });
 
-  backend.listSpeechModels().then(
+  (sharedModels ?? backend.listSpeechModels()).then(
     (models) => {
       for (const info of models) {
         listed.push(info);
@@ -773,7 +961,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
 
   return {
     rows: [
-      row("Language", "Narrows the list of models below. It does not change what is recognized.", { node: languagePicker, field: languagePicker }),
+      row("Show models for", "Filters this list. Each model recognizes the languages on its card.", { node: languagePicker, field: languagePicker }),
       row(
         "Speech model",
         `For recognition on this computer. Pick a model; it downloads on first use, or with its Download button. A model you pick applies from the next capture. Or point to your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.`,
@@ -801,6 +989,128 @@ function speech(context: PageContext): HTMLElement[] {
   const secondList = el("div", { class: "table" });
   const editor = el("div", { class: "editor", hidden: true });
   const problem = note();
+  let editingId: string | null = null;
+  let editingSecond = false;
+  let editingAdd = false;
+  const nextDictation = el("p", { class: "next-dictation", role: "status" }, "");
+  const retryProblem = note();
+  const useServer = button("Use a speech server instead", () => {
+    openEditor(null, "realtime");
+  });
+  const retry = button("Retry", retryDownload);
+  const summaryActions = el("div", { class: "trow", hidden: true }, useServer, retry, retryProblem);
+  let currentStatus: Status = { state: "listening" };
+  const modelTitles = new Map<string, string>();
+  const speechModels: Promise<SpeechModelInfo[]> = backend.listSpeechModels();
+  speechModels.then(
+    (models) => {
+      for (const info of models) modelTitles.set(info.name, info.title);
+      render();
+    },
+    () => undefined,
+  );
+  backend.onStatus((status) => {
+    currentStatus = status;
+    updateSummary();
+  });
+  backend.getStatus().then(
+    (status) => {
+      currentStatus = status;
+      updateSummary();
+    },
+    () => undefined,
+  );
+
+  function modelTitleFor(entry: OnDeviceEntry): string {
+    const model = entry.model ?? SPEECH_MODEL;
+    return modelTitles.get(model) ?? model;
+  }
+
+  function summaryEntry(): LiveEntry | undefined {
+    const draftActive = activeLive();
+    const savedActive = savedEntries().filter(isLive).find((entry) => entry.active);
+    if (draftActive === undefined) return savedActive;
+    if (savedActive === undefined) return draftActive;
+    if (draftActive.id !== savedActive.id) return savedActive;
+    return isSaved(draftActive) ? draftActive : savedActive;
+  }
+
+  function statusState(status: Status): string {
+    switch (status.state) {
+      case "listening":
+      case "keyboardOnly":
+      case "starting":
+      case "capturing":
+      case "pending":
+      case "writing":
+      case "thinking":
+      case "working":
+      case "done":
+        return "Ready";
+      case "transcribing":
+        return "Transcribing…";
+      case "loading":
+        return status.notice;
+      case "paused":
+        return "Paused — resume to dictate";
+      case "failed":
+        return status.headline;
+    }
+  }
+
+  function updateSummary(): void {
+    const entry = summaryEntry();
+    if (entry === undefined) {
+      nextDictation.textContent = "";
+      return;
+    }
+    const modelPart = entry.kind === "on_device" ? ` · ${modelTitleFor(entry)}` : "";
+    nextDictation.textContent = `Next dictation: ${entry.name}${modelPart} — ${statusState(currentStatus)}`;
+    const preparing = entry.kind === "on_device" && (currentStatus.state === "loading" || currentStatus.state === "failed");
+    summaryActions.hidden = !preparing;
+    // Only a catalog model can be downloaded again; a folder of the user's own is fixed on disk.
+    retry.hidden = currentStatus.state !== "failed" || (entry.kind === "on_device" && isModelFolder(entry.model ?? SPEECH_MODEL));
+    if (!preparing) say(retryProblem, "");
+  }
+
+  function retryDownload(): void {
+    const entry = summaryEntry();
+    if (entry?.kind !== "on_device") return;
+    say(retryProblem, "");
+    retry.disabled = true;
+    // The model card's downloader checks every file again and fetches what is missing or corrupt.
+    backend
+      .downloadSpeechModel(entry.model ?? SPEECH_MODEL)
+      .then(() => backend.setListening(true))
+      .catch((error: unknown) => {
+        say(retryProblem, errorText(error));
+      })
+      .finally(() => {
+        retry.disabled = false;
+      });
+  }
+
+  function entryDescription(entry: SpeechEntry): string {
+    switch (entry.kind) {
+      case "realtime":
+        return "Dictation through a realtime speech server.";
+      case "open_ai":
+        return "Transcribes each capture with an OpenAI-compatible speech server.";
+      case "on_device":
+        return `Recognition with ${modelTitleFor(entry)}.`;
+      case "second_pass":
+        return "Transcribes each accepted capture again.";
+    }
+  }
+
+  function entryDetails(entry: SpeechEntry): HTMLElement {
+    return el(
+      "details",
+      { class: "entry-details" },
+      el("summary", {}, "Details"),
+      el("small", {}, `ID: ${entry.id}. ${summary(entry)}.`),
+    );
+  }
 
   function uniqueName(base: string): string {
     const taken = new Set(entries().map((entry) => entry.name.toLowerCase()));
@@ -858,29 +1168,31 @@ function speech(context: PageContext): HTMLElement[] {
   }
 
   function remove(entry: SpeechEntry): void {
+    if (editingId === entry.id) closeEditor(false);
     draft.stt.entries = entries().filter((known) => known.id !== entry.id);
     controls.touched();
     render();
   }
 
   function badges(entry: SpeechEntry): HTMLElement[] {
-    const found: HTMLElement[] = [el("span", { class: "badge" }, KIND_NAMES[entry.kind])];
-    if (isLive(entry) && entry.active) found.push(el("span", { class: "badge", "data-on": "true" }, "Active"));
+    const found: HTMLElement[] = [];
+    if (KIND_NAMES[entry.kind] !== entry.name) found.push(el("span", { class: "badge" }, KIND_NAMES[entry.kind]));
+    if (isLive(entry) && entry.active) found.push(el("span", { class: "badge", "data-on": "true" }, "In use"));
     if (hasKey(entry)) found.push(el("span", { class: "badge" }, "Key saved"));
     if (!isSaved(entry)) found.push(el("span", { class: "badge", "data-saved": "false" }, "Not saved"));
     return found;
   }
 
   function liveRow(entry: LiveEntry): HTMLElement {
-    const use = button(entry.active ? "In use" : "Use", () => {
+    const use = button("Use", () => {
       useLive(entry.id);
     }, "quiet");
-    use.disabled = entry.active;
     use.setAttribute("aria-label", `Use ${entry.name}`);
     const edit = button("Edit", () => {
       openEditor(entry);
     }, "quiet");
     edit.setAttribute("aria-label", `Edit ${entry.name}`);
+    edit.setAttribute("aria-expanded", String(editingId === entry.id));
     const drop = button("Remove", () => {
       remove(entry);
     }, "quiet");
@@ -892,11 +1204,29 @@ function speech(context: PageContext): HTMLElement[] {
       { class: "trow server", "data-id": entry.id },
       el("span", { class: "phrase" }, entry.name),
       ...badges(entry),
-      el("small", { class: "unit" }, summary(entry)),
-      use,
+      el("small", { class: "unit" }, entryDescription(entry)),
+      ...deviceLine(entry),
+      ...(entry.active ? [] : [use]),
       edit,
       drop,
+      entryDetails(entry),
     );
+  }
+
+  /** Where an on-device catalog model runs; a model folder of the user's own has no line. */
+  function deviceLine(entry: LiveEntry): HTMLElement[] {
+    const model = entry.kind === "on_device" ? (entry.model ?? SPEECH_MODEL) : "";
+    if (model === "" || isModelFolder(model)) return [];
+    const line = el("small", { class: "device" });
+    backend.speechDevice(model).then(
+      (text) => {
+        line.textContent = text;
+      },
+      (error: unknown) => {
+        line.textContent = errorText(error);
+      },
+    );
+    return [line];
   }
 
   function secondRow(entry: SecondPassEntry, index: number, count: number): HTMLElement {
@@ -918,6 +1248,7 @@ function speech(context: PageContext): HTMLElement[] {
       openEditor(entry);
     }, "quiet");
     edit.setAttribute("aria-label", `Edit ${entry.name}`);
+    edit.setAttribute("aria-expanded", String(editingId === entry.id));
     const drop = button("Remove", () => {
       remove(entry);
     }, "quiet");
@@ -928,29 +1259,79 @@ function speech(context: PageContext): HTMLElement[] {
       ticked.node,
       el("span", { class: "phrase" }, entry.name),
       ...badges(entry),
-      el("small", { class: "unit" }, summary(entry)),
+      el("small", { class: "unit" }, entryDescription(entry)),
       up,
       down,
       edit,
       drop,
+      entryDetails(entry),
     );
   }
 
+  function editButtonFor(id: string): HTMLButtonElement | null {
+    for (const list of [liveList, secondList]) {
+      const row = list.querySelector<HTMLElement>(`.trow.server[data-id="${id}"]`);
+      const found = row?.querySelector<HTMLButtonElement>('button[aria-label^="Edit "]');
+      if (found) return found;
+    }
+    return null;
+  }
+
   function render(): void {
-    liveList.replaceChildren(...entries().filter(isLive).map(liveRow));
+    if (editingId !== null && !entries().some((entry) => entry.id === editingId)) {
+      editingId = null;
+      editor.hidden = true;
+      editor.replaceChildren();
+    }
+    const liveChildren: HTMLElement[] = [];
+    for (const entry of entries().filter(isLive)) {
+      liveChildren.push(liveRow(entry));
+      if (editingId === entry.id && !editingSecond) liveChildren.push(editor);
+    }
+    if (editingAdd && !editingSecond) liveChildren.push(editor);
     const second = entries().filter((entry): entry is SecondPassEntry => entry.kind === "second_pass");
-    secondList.replaceChildren(...second.map((entry, index) => secondRow(entry, index, second.length)));
-    secondList.hidden = second.length === 0;
+    const secondChildren: HTMLElement[] = [];
+    second.forEach((entry, index) => {
+      secondChildren.push(secondRow(entry, index, second.length));
+      if (editingId === entry.id && editingSecond) secondChildren.push(editor);
+    });
+    if (editingAdd && editingSecond) secondChildren.push(editor);
+    if (!liveChildren.includes(editor) && !secondChildren.includes(editor)) liveChildren.push(editor);
+    liveList.replaceChildren(...liveChildren);
+    secondList.replaceChildren(...secondChildren);
+    secondList.hidden = second.length === 0 && !((editingId !== null && editingSecond) || (editingAdd && editingSecond));
+    updateSummary();
   }
   context.live.saved = render;
+  // The model loads behind this long-lived window, so what runs where is asked again when the app's state changes.
+  const before = context.live.refresh;
+  context.live.refresh = () => {
+    before();
+    render();
+  };
 
-  function closeEditor(): void {
+  function closeEditor(returnFocus = true): void {
+    const wasId = editingId;
+    editingId = null;
+    editingAdd = false;
     editor.replaceChildren();
     editor.hidden = true;
     context.live.speechModel = () => undefined;
+    for (const list of [liveList, secondList]) {
+      for (const btn of list.querySelectorAll('button[aria-label^="Edit "]')) btn.setAttribute("aria-expanded", "false");
+    }
+    if (returnFocus && wasId !== null) {
+      editButtonFor(wasId)?.focus();
+      queueMicrotask(() => {
+        editButtonFor(wasId)?.focus();
+      });
+    }
   }
 
   function openEditor(existing: SpeechEntry | null, kind?: SpeechEntry["kind"]): void {
+    editingAdd = existing === null;
+    editingId = existing?.id ?? null;
+    editingSecond = existing ? existing.kind === "second_pass" : kind === "second_pass";
     const working: SpeechEntry = existing ? structuredClone(existing) : blankEntry(kind ?? "realtime", uniqueName(KIND_NAMES[kind ?? "realtime"]));
     const message = note();
     let validate: () => Promise<void> = () => Promise.resolve();
@@ -965,7 +1346,7 @@ function speech(context: PageContext): HTMLElement[] {
       }, { placeholder }));
     const modelRow = (): HTMLElement =>
       row("Model", "The model named in each request.", controls.text("model" in working ? (working.model ?? "") : "", (value) => {
-        if (working.kind === "realtime" || working.kind === "second_pass") working.model = value;
+        if (working.kind === "realtime" || working.kind === "open_ai" || working.kind === "second_pass") working.model = value;
       }));
     const key: { input?: HTMLInputElement } = {};
     let clearKey = false;
@@ -993,11 +1374,21 @@ function speech(context: PageContext): HTMLElement[] {
       case "realtime":
         rows.push(address("The ws:// or wss:// address of a speech server that speaks Meta's realtime protocol, such as the self-hosted one.", "ws://127.0.0.1:8012"), modelRow(), keyRow());
         break;
-      case "thalvi_server":
-        rows.push(address("The Thalvi server's address. Its own recognizer key stays in the server's .env.", "ws://127.0.0.1:8080"));
+      case "open_ai":
+        rows.push(
+          address("Where each capture is sent for transcription.", "http://127.0.0.1:9000/v1"),
+          modelRow(),
+          row("Request", "Transcriptions uses /audio/transcriptions. Chat with audio sends the recording to /chat/completions, for servers that offer only that.", controls.select(OPEN_AI_REQUESTS, working.request, (value) => {
+            working.request = value;
+          })),
+          row("Language", "Two-letter code such as de. Leave empty to let the server detect it.", controls.text(working.language, (value) => {
+            working.language = value;
+          }, { placeholder: "Detect automatically" })),
+          keyRow(),
+        );
         break;
       case "on_device": {
-        const built = onDeviceRows(working, context);
+        const built = onDeviceRows(working, context, speechModels);
         rows.push(...built.rows);
         validate = built.validate;
         break;
@@ -1018,7 +1409,7 @@ function speech(context: PageContext): HTMLElement[] {
       say(message, "");
       const typed = key.input?.value ?? "";
       const entry = structuredClone(working);
-      if (entry.kind === "realtime" || entry.kind === "second_pass") {
+      if (entry.kind === "realtime" || entry.kind === "open_ai" || entry.kind === "second_pass") {
         if (typed !== "") entry.api_key = typed;
         else if (clearKey) entry.api_key = "";
       }
@@ -1047,68 +1438,184 @@ function speech(context: PageContext): HTMLElement[] {
           },
         );
     }, "primary");
-    const cancel = button("Cancel", closeEditor, "quiet");
+    const cancel = button("Cancel", () => {
+      closeEditor();
+    }, "quiet");
+    const headingId = uid("editor");
+    const heading = el(
+      "h4",
+      { id: headingId },
+      existing
+        ? `Editing “${existing.name}” · ${existing.kind === "second_pass" ? "second pass" : "live dictation"}`
+        : `Add ${working.kind === "open_ai" ? "an" : "a"} ${KIND_NAMES[working.kind].toLowerCase()}`,
+    );
+    editor.setAttribute("aria-labelledby", headingId);
     editor.replaceChildren(
-      el("h4", {}, existing ? `Edit ${existing.name}` : `Add a ${KIND_NAMES[working.kind].toLowerCase()}`),
+      heading,
       ...rows,
       el("div", { class: "trow add" }, done, cancel),
       message,
     );
     editor.hidden = false;
+    render();
+    editor.querySelector<HTMLElement>("input, select, textarea")?.focus();
   }
 
   const kindPicker = controls.select(LIVE_KINDS, "realtime", () => undefined, "Kind of speech server to add");
-  const addLive = button("Add", () => {
+  function addSelected(): void {
     openEditor(null, (kindPicker.field as HTMLSelectElement).value as LiveEntry["kind"]);
-  });
+  }
+  const addLive = button("Add", addSelected);
   addLive.setAttribute("aria-label", "Add a speech server");
   const addSecond = button("Add a second-pass API", () => {
     openEditor(null, "second_pass");
   });
-  const liveBlock = el("div", { class: "stack wide" }, liveList, el("div", { class: "trow add" }, kindPicker.node, addLive));
+  const liveBlock = el("div", { class: "stack wide" }, liveList, problem, el("div", { class: "trow add" }, kindPicker.node, addLive));
   const secondBlock = el("div", { class: "stack wide" }, secondList, addSecond);
+
+  const writing = draft.writing;
+  const writingUrl = controls.text(writing?.url ?? "", () => { syncWriting(); }, { placeholder: "http://127.0.0.1:8000/v1" });
+  const writingModel = controls.text(writing?.model ?? "", () => { syncWriting(); });
+  const writingKey = controls.text(writing?.api_key ?? "", () => { syncWriting(true); }, { type: "password", placeholder: writing?.has_key === true ? "A key is saved" : "" });
+  const writingInputs = [writingUrl, writingModel, writingKey].map((field) => field.field as HTMLInputElement);
+  const defaultPrompt = draft.writing_default_prompt;
+  const promptArea = el("textarea", { id: uid("f"), rows: "8", spellcheck: "false" });
+  promptArea.value = writing?.prompt ?? defaultPrompt;
+  const restorePrompt = button("Restore default prompt", () => {
+    promptArea.value = defaultPrompt;
+    syncWriting();
+    controls.touched();
+  }, "quiet");
+  promptArea.addEventListener("input", () => {
+    syncWriting();
+    controls.touched();
+  });
+  const writingPromptField = { node: el("div", { class: "stack wide" }, promptArea, restorePrompt), field: promptArea };
+  const clearWritingKey = button("Clear saved writing key", () => {
+    const input = writingKey.field as HTMLInputElement;
+    input.value = "";
+    input.placeholder = "Cleared on Save";
+    syncWriting(true);
+    clearWritingKey.hidden = true;
+    controls.touched();
+  });
+  clearWritingKey.hidden = writing?.has_key !== true;
+  const writingKeyField = { node: el("div", { class: "stack" }, writingKey.node, clearWritingKey), field: writingKey.field };
+
+  /** The prompt is sent only when it is not the default, so an unchanged one follows future defaults. */
+  function syncWriting(replaceKey = false): void {
+    const [urlInput, modelInput, keyInput] = writingInputs;
+    const custom = promptArea.value.trim() !== defaultPrompt.trim();
+    restorePrompt.disabled = !custom;
+    if (!custom && writingInputs.every((input) => input.value.trim() === "") && (draft.writing?.openings ?? []).length === 0) {
+      draft.writing = null;
+      return;
+    }
+    const next: WritingSettings = { ...draft.writing, url: urlInput?.value ?? "", model: modelInput?.value ?? "", ...(replaceKey ? { api_key: keyInput?.value ?? "" } : {}) };
+    if (custom) next.prompt = promptArea.value;
+    else delete next.prompt;
+    draft.writing = next;
+  }
+  restorePrompt.disabled = promptArea.value.trim() === defaultPrompt.trim();
+
+  const openingsList = el("div", { class: "stack wide" });
+  const openingProblem = note();
+  const openingPhrase = controls.text("", () => undefined, { label: "New opening phrase", placeholder: "write me an email" });
+
+  function setOpenings(openings: WritingOpening[]): void {
+    const next: WritingSettings = { url: "", model: "", ...draft.writing };
+    if (openings.length > 0) next.openings = openings;
+    else delete next.openings;
+    draft.writing = next;
+    syncWriting();
+    controls.touched();
+    renderOpenings();
+  }
+
+  function renderOpenings(): void {
+    const openings = draft.writing?.openings ?? [];
+    openingsList.replaceChildren(
+      ...openings.map((opening) => {
+        const prompt = el("textarea", { id: uid("f"), rows: "5", spellcheck: "false", "aria-label": `Prompt for “${opening.phrase}”` });
+        prompt.value = opening.prompt;
+        prompt.addEventListener("input", () => {
+          opening.prompt = prompt.value;
+          controls.touched();
+        });
+        const remove = button("Remove", () => {
+          setOpenings(openings.filter((known) => known !== opening));
+        }, "quiet");
+        remove.setAttribute("aria-label", `Remove “${opening.phrase}”`);
+        return el("div", { class: "stack wide" }, el("div", { class: "trow" }, el("span", { class: "phrase" }, `“${opening.phrase}”`), remove), prompt);
+      }),
+    );
+  }
+  renderOpenings();
+  const addOpening = button("Add", () => {
+    const input = openingPhrase.field as HTMLInputElement;
+    const phrase = openingWords(input.value);
+    if (phrase === "") {
+      say(openingProblem, "Type the phrase to add first.");
+      return;
+    }
+    const openings = draft.writing?.openings ?? [];
+    if (openings.some((known) => known.phrase === phrase)) {
+      say(openingProblem, `“${phrase}” is already in the list.`);
+      return;
+    }
+    say(openingProblem, "");
+    input.value = "";
+    setOpenings([...openings, { phrase, prompt: promptArea.value }]);
+  });
+  const openingsField = el(
+    "div",
+    { class: "stack wide" },
+    openingsList,
+    el("div", { class: "trow add phrase-add" }, openingPhrase.node, addOpening),
+    openingProblem,
+  );
 
   const words = wordListTable(draft, controls);
   const wordProblem = note();
+  words.node.append(wordProblem);
   const wordRow = row(
     "Word list",
-    "Names and terms to spell your way, added one at a time. Recognition on this computer favours them, and so does a recognizer that supports it.",
+    "Names and terms to spell your way, added one at a time. Recognition on this computer and recognizers reached directly can favour them.",
     words.node,
   );
-  words.node.append(wordProblem);
-  let asked = 0;
+  let wordListRequest = 0;
   function checkWordList(): void {
-    const ask = (asked += 1);
-    wordRow.classList.add("off");
-    say(wordProblem, "");
+    const request = (wordListRequest += 1);
     const active = activeLive();
-    if (active === undefined || active.kind === "on_device") {
-      wordRow.classList.remove("off");
+    wordRow.classList.remove("off");
+    say(wordProblem, "");
+    if (active === undefined || active.kind !== "realtime") {
       words.enable(true);
       return;
     }
-    backend
-      .wordListSupport(active)
-      .then((supported) => {
-        if (ask !== asked) return;
+    backend.wordListSupport(active).then(
+      (supported) => {
+        if (request !== wordListRequest) return;
         wordRow.classList.toggle("off", !supported);
         words.enable(true);
-      })
-      .catch((error: unknown) => {
-        if (ask !== asked) return;
-        wordRow.classList.remove("off");
+      },
+      (error: unknown) => {
+        if (request !== wordListRequest) return;
         words.enable(false);
         say(wordProblem, errorText(error));
-      });
+      },
+    );
   }
   render();
   checkWordList();
 
   return [
     group("Live dictation"),
+    nextDictation,
+    summaryActions,
     row(
       "Speech servers",
-      "One is in use for dictation. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Conversation mode always uses the Thalvi server's own recognizer.",
+      "One is in use for dictation. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Web conversations use the server's own recognizer.",
       liveBlock,
     ),
     wordRow,
@@ -1118,8 +1625,24 @@ function speech(context: PageContext): HTMLElement[] {
       "Ticked servers transcribe each accepted capture again. The first one in this order that answers replaces the live text; the rest are only recorded. Ticking applies at once.",
       secondBlock,
     ),
-    problem,
-    editor,
+    group("Writing"),
+    row(
+      "Writing endpoint address",
+      "A chat completions endpoint that writes a dictation out as proper text when you say “write that out” or hold the write key. Only the words you said are sent. Saving never calls it.",
+      writingUrl,
+    ),
+    row("Writing model", "The model the endpoint should use.", writingModel),
+    row("Writing API key", "Stored in the desktop config file; unchanged keeps the saved key.", writingKeyField),
+    row(
+      "Writing prompt",
+      "The instructions the writing model gets with every dictation; the words you said go in as the message itself. Blank is not allowed. Saving never calls the model.",
+      writingPromptField,
+    ),
+    row(
+      "Opening phrases",
+      "When a dictation you write out begins with one of these phrases, its prompt is used instead of the Writing prompt; the longest matching phrase wins. A new rule starts as a copy of the Writing prompt. Case and punctuation are ignored. Saving never calls the model.",
+      openingsField,
+    ),
   ];
 }
 
@@ -1654,8 +2177,109 @@ function about({ backend }: PageContext): HTMLElement[] {
   ];
 }
 
+const CHANNELS: readonly (readonly [UpdateChannel, string])[] = [
+  ["stable", "Stable"],
+  ["development", "Development"],
+];
+
+/** Whether a version such as `0.2.0-dev.3` is a pre-release; build metadata after `+` does not count. */
+function isPrerelease(version: string): boolean {
+  return (version.split("+")[0] ?? "").includes("-");
+}
+
+/** What the update is doing, in the words the Updates rows show; a failure is told apart from being up to date. */
+function updateText(update: UpdateState, version: string): string {
+  const phase = update.phase;
+  switch (phase.state) {
+    case "idle":
+      return "Thalvi has not checked for updates yet. It checks by itself shortly after it starts.";
+    case "checking":
+      return "Checking for updates…";
+    case "upToDate":
+      return `Thalvi ${version} is up to date.`;
+    case "downloading":
+      return `Downloading ${phase.version}${phase.percent === null ? "" : ` — ${String(phase.percent)}%`}…`;
+    case "ready":
+      return `${phase.version} is downloaded. Thalvi installs it and restarts when it is idle: not during a dictation.`;
+    case "installing":
+      return `Installing ${phase.version}. Thalvi restarts in a moment.`;
+    case "failed":
+    case "unsupported":
+      return phase.message;
+  }
+}
+
+function updates({ draft, backend, controls, live }: PageContext): HTMLElement[] {
+  let installed = "";
+  let latest: UpdateState = { phase: { state: "idle" }, notes: null, notice: null };
+  const status = el("output", { class: "note ok", role: "status" });
+  const notice = el("p", { class: "note ok", role: "status", hidden: true });
+  const problem = note();
+  const switchNote = el("p", { class: "note ok", hidden: true });
+  const check = button("Check for updates", () => {
+    say(problem, "");
+    backend.checkForUpdates().catch((error: unknown) => {
+      say(problem, errorText(error));
+    });
+  });
+  const notes = button("Release notes", () => {
+    say(problem, "");
+    backend.openReleaseNotes().catch((error: unknown) => {
+      say(problem, errorText(error));
+    });
+  }, "quiet");
+  notes.hidden = true;
+
+  function showSwitchNote(): void {
+    const stays = isPrerelease(installed) && draft.update_channel === "stable";
+    switchNote.hidden = !stays;
+    switchNote.textContent = stays
+      ? `You are on the development build ${installed}. On Stable, Thalvi stays on this build until a newer stable release is published.`
+      : "";
+  }
+
+  function show(next: UpdateState): void {
+    latest = next;
+    const phase = next.phase;
+    status.textContent = updateText(next, installed);
+    status.className = phase.state === "failed" || phase.state === "unsupported" ? "note" : "note ok";
+    check.textContent = phase.state === "failed" ? "Retry" : "Check for updates";
+    check.disabled = phase.state === "checking" || phase.state === "downloading" || phase.state === "installing" || phase.state === "unsupported";
+    notes.hidden = next.notes === null;
+    const told = next.notice !== null && (phase.state === "idle" || phase.state === "upToDate");
+    notice.hidden = !told;
+    notice.textContent = told ? (next.notice ?? "") : "";
+  }
+
+  backend
+    .appVersion()
+    .then((value) => {
+      installed = value;
+      showSwitchNote();
+      show(latest);
+    })
+    .catch(() => undefined);
+  backend.getUpdateState().then(show, (error: unknown) => {
+    say(problem, errorText(error));
+  });
+  live.update = show;
+  show(latest);
+
+  const channel = controls.select(CHANNELS, draft.update_channel, (value) => {
+    draft.update_channel = value;
+    showSwitchNote();
+  });
+  return [
+    group("Updates"),
+    row("Update channel", "Stable follows released versions. Development also follows the builds the developer approves for testing. Applies after Save; Thalvi never goes back to an older version.",
+      { node: el("span", { class: "stack" }, channel.node, switchNote), field: channel.field }),
+    row("Check for updates", "Thalvi checks by itself once a day and installs while idle. A check sends only what is needed to find the right version; it takes effect now and is not part of Save.",
+      { node: el("span", { class: "stack" }, status, notice, el("span", { class: "num" }, check, notes), problem), field: check }),
+  ];
+}
+
 function app(context: PageContext): HTMLElement[] {
-  return [...startup(context), ...recordings(context), ...about(context)];
+  return [...startup(context), ...updates(context), ...recordings(context), ...about(context)];
 }
 
 const PAGES: readonly (readonly [string, string, (context: PageContext) => HTMLElement[]])[] = [

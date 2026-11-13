@@ -15,7 +15,7 @@ use axum::Router;
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::routing::get;
 use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde_json::{Value, json};
 use thalvi_server::api;
 use thalvi_server::briefing::{Briefing, BriefingContext};
@@ -50,6 +50,7 @@ struct FakeFactoryInner {
     attempts: AtomicUsize,
     audio: Arc<Mutex<Vec<Vec<u8>>>>,
     connect_gate: Mutex<Option<Arc<Notify>>>,
+    connect_errors: Mutex<VecDeque<RecognizerError>>,
 }
 
 impl FakeFactory {
@@ -63,6 +64,14 @@ impl FakeFactory {
 
     fn hold_connect(&self, gate: Arc<Notify>) {
         *self.inner.connect_gate.lock().unwrap() = Some(gate);
+    }
+
+    fn fail_connects(&self, count: usize, message: &str) {
+        self.inner
+            .connect_errors
+            .lock()
+            .unwrap()
+            .extend((0..count).map(|_| RecognizerError::Retryable(message.to_string())));
     }
 
     fn push(&self, connection: usize, item: Result<RecognizerEvent, RecognizerError>) {
@@ -100,6 +109,9 @@ impl RecognizerFactory for FakeFactory {
 
     async fn connect(&self) -> Result<Self::Rec, RecognizerError> {
         self.inner.attempts.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = self.inner.connect_errors.lock().unwrap().pop_front() {
+            return Err(error);
+        }
         let gate = self.inner.connect_gate.lock().unwrap().take();
         if let Some(gate) = gate {
             gate.notified().await;
@@ -129,6 +141,214 @@ impl Recognizer for FakeRecognizer {
     }
 
     async fn close(&mut self) {}
+}
+
+async fn recv_with_paused_clock(client: &mut ClientSocket) -> Received {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(message) = client.next().now_or_never() {
+            let message = message.expect("client socket closed").unwrap();
+            return match message {
+                ClientMessage::Text(text) => Received::Json(serde_json::from_str(&text).unwrap()),
+                ClientMessage::Binary(bytes) => Received::Audio(bytes),
+                other => panic!("unexpected client message: {other:?}"),
+            };
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "client message timed out"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn collect_with_paused_clock(
+    client: &mut ClientSocket,
+    stop: impl Fn(&Received) -> bool,
+) -> Vec<Received> {
+    let mut received = Vec::new();
+    loop {
+        let item = recv_with_paused_clock(client).await;
+        let done = stop(&item);
+        received.push(item);
+        if done {
+            return received;
+        }
+    }
+}
+
+async fn voice_on_with_paused_clock(harness: &mut Harness) {
+    send_voice(harness, true).await;
+    let received = collect_with_paused_clock(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+    })
+    .await;
+    assert!(has_state(&received, "starting"));
+}
+
+async fn fatal_recognizer_error_keeps_text_fallback() {
+    let mut harness = start().await;
+    tokio::time::pause();
+    voice_on_with_paused_clock(&mut harness).await;
+    harness.factory.push(
+        0,
+        Err(RecognizerError::Fatal(
+            "invalid request (code 1008)".to_string(),
+        )),
+    );
+    let received = collect_with_paused_clock(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
+    )
+    .await;
+    assert!(received.iter().any(|item| matches!(item,
+        Received::Json(v) if v["type"] == "error"
+            && v["message"].as_str().is_some_and(|message| message.contains("won't retry"))
+    )));
+    assert!(received.iter().any(|item| matches!(item,
+        Received::Json(v) if v["type"] == "input" && v["source"] == "text" && v["ready"] == true
+    )));
+    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::time::resume();
+    expect_quiet_until_marker(&mut harness).await;
+    assert_eq!(harness.factory.attempts(), 1);
+    harness.server.abort();
+}
+
+/// Reads up to the loss's mic-not-ready message and checks the reply's state was left alone.
+async fn keep_reply_state_through_loss(client: &mut ClientSocket, received: &mut Vec<Received>) {
+    received.extend(
+        collect_with_paused_clock(client, |item| {
+            matches!(item, Received::Json(v) if v["type"] == "input" && v["source"] == "mic" && v["ready"] == false)
+        })
+        .await,
+    );
+    assert!(
+        !received
+            .iter()
+            .any(|item| matches!(item, Received::Json(v) if v["type"] == "state")),
+        "a recognizer loss must not replace the reply state: {received:?}"
+    );
+}
+
+fn assert_retrying_follows_reply_end(received: &[Received]) {
+    let position = |wanted: &dyn Fn(&Value) -> bool| {
+        received
+            .iter()
+            .position(|item| matches!(item, Received::Json(v) if wanted(v)))
+    };
+    let reply_end = position(&|v| v["type"] == "reply_end");
+    let retrying = position(&|v| v["type"] == "state" && v["state"] == "recognizer_retrying");
+    assert!(
+        matches!((reply_end, retrying), (Some(end), Some(state)) if end < state),
+        "the retrying state waits for the reply to end: {received:?}"
+    );
+}
+
+#[tokio::test]
+async fn recognizer_outages_report_one_plain_notice_and_retry_until_ready() {
+    const RETRY_NOTICE: &str = "Can't reach speech recognition. Trying again…";
+    const RAW_ERROR: &str =
+        "recognizer connect failed: IO error: ws://127.0.0.1:9 Connection refused (os error 111)";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Outage {
+        FirstConnect,
+        Ready,
+        Reply,
+    }
+
+    fatal_recognizer_error_keeps_text_fallback().await;
+    for outage in [Outage::FirstConnect, Outage::Ready, Outage::Reply] {
+        let mut harness = start().await;
+        tokio::time::pause();
+        if outage == Outage::FirstConnect {
+            harness.factory.fail_connects(2, RAW_ERROR);
+            send_voice(&mut harness, true).await;
+        } else {
+            voice_on_with_paused_clock(&mut harness).await;
+            harness.factory.fail_connects(2, RAW_ERROR);
+        }
+
+        let reply_gate = Arc::new(Notify::new());
+        if outage == Outage::Reply {
+            harness
+                .model
+                .add_script(vec![ModelChunk::Wait(Arc::clone(&reply_gate))]);
+            harness.factory.complete_turn(0, "question");
+            let _ = collect_with_paused_clock(&mut harness.client, |item| {
+                matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "thinking")
+            })
+            .await;
+        }
+
+        if outage != Outage::FirstConnect {
+            harness
+                .factory
+                .push(0, Err(RecognizerError::Retryable(RAW_ERROR.to_string())));
+        }
+
+        let mut received = collect_with_paused_clock(
+            &mut harness.client,
+            |item| matches!(item, Received::Json(v) if v["type"] == "error"),
+        )
+        .await;
+        let last_error = received.iter().rev().find_map(|item| match item {
+            Received::Json(v) if v["type"] == "error" => v["message"].as_str(),
+            Received::Json(_) | Received::Audio(_) => None,
+        });
+        assert_eq!(last_error, Some(RETRY_NOTICE), "{outage:?}: {received:?}");
+        if outage == Outage::Reply {
+            keep_reply_state_through_loss(&mut harness.client, &mut received).await;
+            reply_gate.notify_one();
+        }
+        received.extend(
+            collect_with_paused_clock(&mut harness.client, |item| {
+                matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "recognizer_retrying")
+            })
+            .await,
+        );
+        assert!(has_state(&received, "recognizer_retrying"), "{outage:?}");
+        if outage == Outage::Reply {
+            assert_retrying_follows_reply_end(&received);
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while harness.factory.attempts() < 3 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{outage:?}: reconnect timed out"
+            );
+        }
+        tokio::time::resume();
+        received.extend(
+            collect_until(&mut harness.client, |item| {
+                matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+            })
+            .await,
+        );
+        let notices: Vec<&str> = received
+            .iter()
+            .filter_map(|item| match item {
+                Received::Json(v) if v["type"] == "error" => v["message"].as_str(),
+                Received::Json(_) | Received::Audio(_) => None,
+            })
+            .collect();
+        assert_eq!(notices, vec![RETRY_NOTICE], "{outage:?}: {received:?}");
+        for item in &received {
+            let Received::Json(value) = item else {
+                continue;
+            };
+            assert!(
+                !value.to_string().contains(RAW_ERROR),
+                "{outage:?}: {value}"
+            );
+        }
+        expect_quiet_until_marker(&mut harness).await;
+        harness.server.abort();
+    }
 }
 
 // ---------- fake model ----------
@@ -840,7 +1060,7 @@ async fn recognizer_loss_reports_reconnects_and_later_turns_work() {
         matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
     })
     .await;
-    assert!(has_state(&received, "starting"));
+    assert!(has_state(&received, "recognizer_retrying"));
 
     harness
         .model

@@ -2,15 +2,14 @@
 
 mod toolkit;
 
-pub use self::toolkit::keep_unfocused;
 use self::toolkit::{Gtk, Toolkit};
 
 use std::fmt;
 use std::path::Path;
 
 use super::command::{CommandRunner, SystemRunner, tool};
-use super::{App, Delivered, HoldSource, Host, HostError, TypedText, WebUrl};
-use crate::hold::HoldKey;
+use super::{App, Delivered, HoldSource, Host, HostError, PasteText, WebUrl};
+use crate::hold::{HoldChange, HoldKey, HoldKind};
 
 /// Where GNOME dictation goes: there is no window to bind, so the text waits on the clipboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,12 +43,13 @@ impl Gnome {
         clippy::unnecessary_wraps,
         reason = "the same signature as the other hosts, whose hook can fail"
     )]
-    pub fn watch_hold_key(
-        _key: &HoldKey,
-        _on_change: impl Fn(bool) + Send + 'static,
+    pub fn watch_hold_keys(
+        _keys: &[(HoldKind, HoldKey)],
+        _on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
+        _on_problem: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         Ok(HoldSource::Unavailable(
-            "GNOME Wayland does not tell Thalvi when a key is let go, so holding a key to dictate is unavailable. The wake word still works.",
+            "GNOME Wayland does not tell Thalvi when a key is let go, so holding a key to dictate or write is unavailable. The wake word still works.",
         ))
     }
 }
@@ -60,6 +60,15 @@ impl<R: CommandRunner, T: Toolkit> Gnome<R, T> {
             .run("gio", &["open", what], None)
             .map(|_| ())
             .map_err(|error| tool(&error))
+    }
+
+    /// The top of the work area, below the panel, in logical pixels; the app runs on the X11
+    /// backend here, where a window can be placed below it.
+    ///
+    /// # Errors
+    /// Why the work area could not be read.
+    pub(super) fn overlay_top(&self) -> Result<f64, HostError> {
+        self.toolkit.work_area_top()
     }
 }
 
@@ -82,7 +91,7 @@ impl<R: CommandRunner, T: Toolkit> Host for Gnome<R, T> {
     fn deliver(
         &self,
         _target: &Clipboard,
-        text: &TypedText,
+        text: &PasteText,
         _enter: bool,
     ) -> Result<Delivered, HostError> {
         if text.as_str().is_empty() {
@@ -116,11 +125,6 @@ impl<R: CommandRunner, T: Toolkit> Host for Gnome<R, T> {
 
     fn open_folder(&self, path: &Path) -> Result<(), HostError> {
         self.gio_open(&path.to_string_lossy())
-    }
-
-    // The app runs on the X11 backend here, where a window can be placed below the panel.
-    fn prepare_overlay(&self, _width: f64, _height: f64) -> Result<f64, HostError> {
-        self.toolkit.work_area_top()
     }
 }
 
@@ -173,8 +177,14 @@ mod tests {
         host.toolkit.clipboard.lock().unwrap().clone()
     }
 
-    fn typed(text: &str) -> TypedText {
-        TypedText::new(text).unwrap()
+    fn typed(text: &str) -> PasteText {
+        PasteText::new(text).unwrap()
+    }
+
+    #[test]
+    fn the_overlay_hangs_below_the_top_panel() {
+        let host = host(|_, _| Ok(String::new()));
+        assert_eq!(host.overlay_top(), Ok(32.0));
     }
 
     #[test]
@@ -207,7 +217,7 @@ mod tests {
     #[test]
     fn the_overlay_goes_below_the_panel_at_the_work_areas_top() {
         let host = host(|_, _| Ok(String::new()));
-        assert_eq!(host.prepare_overlay(460.0, 200.0), Ok(32.0));
+        assert_eq!(host.overlay_top(), Ok(32.0));
     }
 
     #[test]
@@ -279,7 +289,8 @@ mod tests {
 
     #[test]
     fn the_hold_key_is_no_failure_on_gnome_but_says_why_it_does_nothing() {
-        let source = Gnome::watch_hold_key(&HoldKey::default(), |_| {});
+        let source =
+            Gnome::watch_hold_keys(&[(HoldKind::Dictate, HoldKey::alt_z())], |_, _| {}, drop);
         assert!(matches!(source, Ok(HoldSource::Unavailable(reason)) if reason.contains("let go")));
     }
 }

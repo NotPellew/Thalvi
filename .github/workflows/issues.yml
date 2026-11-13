@@ -4,7 +4,7 @@ name: Issues
 # this file.
 on:
   push:
-    branches: [development]
+    branches: [main]
 
 permissions:
   contents: read
@@ -21,9 +21,8 @@ jobs:
         with:
           persist-credentials: false
           sparse-checkout: .github/scripts
-      # gh issue close and reopen skip an issue already in that state without
-      # commenting, but act on PRs too.
-      - name: close the issues merged PRs close, reopen those a reverted PR closed
+      # gh issue reopen skips an issue already open without commenting, but acts on PRs too.
+      - name: reopen the issues a reverted PR closed
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -31,16 +30,15 @@ jobs:
         run: |
           status=0
           refs() { .github/scripts/issue-refs.sh "$1" "$GH_REPO"; }
-          issue() {
-            local action=$1 number=$2 pr
-            shift 2
-            pr=$(gh api "repos/$GH_REPO/issues/$number" --jq '.pull_request != null') &&
-              if [[ $pr == false ]]; then gh issue "$action" "$number" "$@"; fi
+          reopen() {
+            local pr
+            pr=$(gh api "repos/$GH_REPO/issues/$1" --jq '.pull_request != null') &&
+              if [[ $pr == false ]]; then gh issue reopen "$1" --comment "$2"; fi
           }
           prs=
           for sha in $COMMITS; do
             if ! found=$(gh api "repos/$GH_REPO/commits/$sha/pulls" \
-              --jq '.[] | select(.merged_at != null and .base.ref == "development") | .number'); then
+              --jq '.[] | select(.merged_at != null and .base.ref == "main") | .number'); then
               echo "::error::could not find the PR of commit $sha"
               status=1
               continue
@@ -54,11 +52,6 @@ jobs:
               status=1
               continue
             fi
-            closes=$(refs closes <<< "$body")
-            for number in $closes; do
-              issue close "$number" --reason completed --comment "Fixed by #$PR, merged into \`development\`. If #$PR is taken out of \`development\` before it reaches \`main\`, reopen this issue." ||
-                { echo "::error::could not close #$number"; status=1; }
-            done
             reverts=$(refs reverts <<< "$body")
             for reverted in $reverts; do
               if ! reverted_body=$(gh pr view "$reverted" --json body --jq .body); then
@@ -68,7 +61,7 @@ jobs:
               fi
               closes=$(refs closes <<< "$reverted_body")
               for number in $closes; do
-                issue reopen "$number" --comment "Reopened by #$PR, which reverted #$reverted out of \`development\`." ||
+                reopen "$number" "Reopened by #$PR, which reverted #$reverted out of \`main\`." ||
                   { echo "::error::could not reopen #$number"; status=1; }
               done
             done

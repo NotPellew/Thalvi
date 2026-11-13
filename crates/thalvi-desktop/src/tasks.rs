@@ -34,7 +34,7 @@ impl UserError for NotConfigured {
 }
 
 /// The refusal for every Discord message: live Discord actions are switched off.
-const DISCORD_OFF: &str = "Discord messages are switched off for now. Nothing was typed or sent.";
+const DISCORD_OFF: &str = "Discord messages are switched off for now. Nothing was pasted or sent.";
 
 /// Chooses the task `text` asks for: a configured phrase, else `open <host>`.
 ///
@@ -118,7 +118,8 @@ fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> 
     None
 }
 
-/// `open <host>` with a plain web address: letters, digits and hyphens in dotted labels.
+/// `open <host>` with a plain web address: letters, digits and hyphens in dotted labels, the
+/// dots written either as `.` or as the spoken word "dot".
 fn spoken_url(text: &str) -> Option<Task> {
     let text = text.trim();
     let rest = text
@@ -133,8 +134,20 @@ fn spoken_url(text: &str) -> Option<Task> {
     if value.is_empty() {
         return None;
     }
+    let words: Vec<&str> = value.split_whitespace().collect();
+    let is_dot = |word: &&str| word.eq_ignore_ascii_case("dot");
+    let value = match words.iter().rposition(is_dot) {
+        None => value.to_owned(),
+        // A recognizer writes the host as words, "Google dot com"; its case carries no intent.
+        Some(last) if last + 2 == words.len() => words
+            .iter()
+            .map(|word| if is_dot(word) { "." } else { word })
+            .collect::<String>()
+            .to_ascii_lowercase(),
+        Some(_) => return None,
+    };
     let candidate = if value.contains("://") {
-        value.to_owned()
+        value.clone()
     } else {
         format!("https://{value}")
     };
@@ -172,7 +185,7 @@ fn spoken_url(text: &str) -> Option<Task> {
     }
     Some(Task::OpenUrl {
         url: WebUrl::parse(&candidate).ok()?,
-        label: value.to_owned(),
+        label: value,
     })
 }
 
@@ -300,6 +313,24 @@ mod tests {
             ("opengoogle.com", None),
             ("opens example.com", None),
             ("open\u{7f}example.com", None),
+            (
+                "Open Google dot com.",
+                Some(("https://google.com/", "google.com")),
+            ),
+            (
+                "open stack overflow DOT com",
+                Some(("https://stackoverflow.com/", "stackoverflow.com")),
+            ),
+            (
+                "open Google Dot co dot uk",
+                Some(("https://google.co.uk/", "google.co.uk")),
+            ),
+            ("open example dot com extra", None),
+            ("open dot com", None),
+            ("open Google dot", None),
+            ("open dot", None),
+            ("open Google slash maps", None),
+            ("open my site", None),
         ] {
             let expected = expected.map(|(url, label)| open(url, label));
             assert_eq!(decide(spoken, &config.scripts).ok(), expected, "{spoken:?}");

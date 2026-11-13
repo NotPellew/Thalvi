@@ -1,15 +1,20 @@
 //! The Linux desktop host: picks Hyprland or GNOME Wayland at startup and forwards every call to it.
 
+mod layer;
+mod xwayland;
+
 use std::fmt;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
-use super::gnome::{self, Clipboard, Gnome};
+use super::gnome::{Clipboard, Gnome};
 use super::hyprland::{Hyprland, Window};
 use super::{
-    App, Delivered, HoldSource, Host, HostError, RequestServer, TypedText, WebUrl, channel,
+    App, Delivered, HoldSource, Host, HostError, OverlayEvent, OverlayFrame, PasteText,
+    RequestServer, WebUrl, channel,
 };
-use crate::hold::HoldKey;
+use crate::hold::{HoldChange, HoldKey, HoldKind};
 
 /// The desktop session Thalvi runs in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,12 +143,17 @@ impl Desktop {
         )
     }
 
-    /// Settles a window's platform hints before it first appears, so it never takes focus.
-    pub fn settle_overlay_window(&self, window: &gtk::ApplicationWindow) {
+    /// Where the status overlay's surface goes. Call on the toolkit's thread.
+    ///
+    /// # Errors
+    /// Why GNOME did not say where its top panel ends.
+    pub fn overlay_plan(&self) -> Result<OverlayPlan, HostError> {
         match self {
-            // Hyprland's window rules from `prepare_overlay` do this.
-            Self::Hyprland(_) => {}
-            Self::Gnome(_) => gnome::keep_unfocused(window),
+            // The compositor keeps a layer surface clear of the bars.
+            Self::Hyprland(_) => Ok(OverlayPlan::Layer),
+            Self::Gnome(host) => Ok(OverlayPlan::Xwayland {
+                top: host.overlay_top()?,
+            }),
         }
     }
 
@@ -192,18 +202,39 @@ impl Desktop {
         channel::ask_at(dir, request, timeout)
     }
 
-    /// Reports the hold key as the desktop allows: through binds on Hyprland, not at all on GNOME.
+    /// The keys a config without hold keys gets on this desktop: the hold key, then the write key.
+    /// GNOME offers no hold key, so these are Hyprland's.
+    #[must_use]
+    pub fn default_hold_keys() -> (HoldKey, HoldKey) {
+        Hyprland::default_hold_keys()
+    }
+
+    /// Refuses the keys this desktop can never bind, without binding anything; a key that is
+    /// merely taken is found only when the keys are watched.
+    ///
+    /// # Errors
+    /// [`HostError::Unsupported`] saying why a key cannot be used.
+    pub fn check_hold_keys(keys: &[(HoldKind, HoldKey)]) -> Result<(), HostError> {
+        match Session::detect() {
+            Ok(Session::Hyprland) => Hyprland::check_hold_keys(keys),
+            Ok(Session::Gnome) | Err(_) => Ok(()),
+        }
+    }
+
+    /// Reports the hold keys as the desktop allows: through binds Thalvi adds to Hyprland, not at
+    /// all on GNOME. Problems found after this returns go to `on_problem`.
     ///
     /// # Errors
     /// [`HostError::Unsupported`] when this desktop cannot detect a key's release, or is none
     /// Thalvi supports.
-    pub fn watch_hold_key(
-        key: &HoldKey,
-        on_change: impl Fn(bool) + Send + 'static,
+    pub fn watch_hold_keys(
+        keys: &[(HoldKind, HoldKey)],
+        on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
+        on_problem: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         match Session::detect()? {
-            Session::Hyprland => Hyprland::watch_hold_key(key, on_change),
-            Session::Gnome => Gnome::watch_hold_key(key, on_change),
+            Session::Hyprland => Hyprland::watch_hold_keys(keys, on_change, on_problem),
+            Session::Gnome => Gnome::watch_hold_keys(keys, on_change, on_problem),
         }
     }
 
@@ -248,7 +279,7 @@ impl Desktop {
 
 /// A target from the other desktop, which the app never hands to this one.
 fn foreign() -> HostError {
-    HostError::NothingTyped("The target belongs to another desktop. Nothing was typed.".to_owned())
+    HostError::NothingTyped("The target belongs to another desktop. Nothing was pasted.".to_owned())
 }
 
 impl Host for Desktop {
@@ -278,7 +309,7 @@ impl Host for Desktop {
     fn deliver(
         &self,
         target: &Target,
-        text: &TypedText,
+        text: &PasteText,
         enter: bool,
     ) -> Result<Delivered, HostError> {
         match (self, target) {
@@ -317,11 +348,121 @@ impl Host for Desktop {
             Self::Gnome(host) => host.open_folder(path),
         }
     }
+}
 
-    fn prepare_overlay(&self, width: f64, height: f64) -> Result<f64, HostError> {
-        match self {
-            Self::Hyprland(host) => host.prepare_overlay(width, height),
-            Self::Gnome(host) => host.prepare_overlay(width, height),
+/// Where the status overlay's surface goes: worked out on the toolkit's thread, opened on the
+/// overlay's own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OverlayPlan {
+    /// A layer-shell surface on the overlay layer, hanging from the top edge.
+    Layer,
+    /// An override-redirect `XWayland` window `top` logical pixels below the screen's top edge.
+    Xwayland { top: f64 },
+}
+
+impl OverlayPlan {
+    /// Opens the hidden surface, `width` × `height` points; the calling thread then owns it.
+    ///
+    /// # Errors
+    /// Why the desktop gave no surface; the overlay then stays off.
+    pub fn open(
+        self,
+        width: f32,
+        height: f32,
+        takes_clicks: bool,
+    ) -> Result<OverlaySurface, HostError> {
+        let (sender, events) = mpsc::channel();
+        let backing = match self {
+            Self::Layer => Backing::Layer(Box::new(layer::Layer::open(width, height)?)),
+            Self::Xwayland { top } => Backing::Xwayland(xwayland::Window::open(
+                (width, height),
+                top,
+                takes_clicks,
+                sender.clone(),
+            )?),
+        };
+        Ok(OverlaySurface {
+            backing,
+            events,
+            waker: OverlayWaker(sender),
+        })
+    }
+}
+
+/// Wakes the overlay's thread from any thread.
+#[derive(Clone, Debug)]
+pub struct OverlayWaker(mpsc::Sender<OverlayEvent>);
+
+impl OverlayWaker {
+    pub fn wake(&self) {
+        let _ = self.0.send(OverlayEvent::Woken);
+    }
+}
+
+/// The status overlay's surface: hidden until shown, never taking the keyboard.
+pub struct OverlaySurface {
+    backing: Backing,
+    events: mpsc::Receiver<OverlayEvent>,
+    waker: OverlayWaker,
+}
+
+enum Backing {
+    Layer(Box<layer::Layer>),
+    Xwayland(xwayland::Window),
+}
+
+impl OverlaySurface {
+    #[must_use]
+    pub fn waker(&self) -> OverlayWaker {
+        self.waker.clone()
+    }
+
+    /// Physical pixels per point; frames are drawn at this scale.
+    #[must_use]
+    pub fn scale(&self) -> f32 {
+        match &self.backing {
+            Backing::Layer(layer) => layer.scale(),
+            Backing::Xwayland(window) => window.scale(),
+        }
+    }
+
+    /// Shows `frame` on a surface that was hidden.
+    ///
+    /// # Errors
+    /// Why the desktop did not show it.
+    pub fn show(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
+        match &mut self.backing {
+            Backing::Layer(layer) => layer.show(frame),
+            Backing::Xwayland(window) => window.show(frame),
+        }
+    }
+
+    /// Replaces what a shown surface shows.
+    ///
+    /// # Errors
+    /// Why the desktop did not take the frame.
+    pub fn present(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
+        match &mut self.backing {
+            Backing::Layer(layer) => layer.present(frame),
+            Backing::Xwayland(window) => window.present(frame),
+        }
+    }
+
+    pub fn hide(&mut self) {
+        match &mut self.backing {
+            Backing::Layer(layer) => layer.hide(),
+            Backing::Xwayland(window) => window.hide(),
+        }
+    }
+
+    /// Waits for a press, a wake or `deadline`; with no deadline, for one of the first two.
+    pub fn wait(&mut self, deadline: Option<Instant>) -> OverlayEvent {
+        match deadline {
+            Some(at) => self
+                .events
+                .recv_timeout(at.saturating_duration_since(Instant::now()))
+                .unwrap_or(OverlayEvent::Due),
+            None => self.events.recv().unwrap_or(OverlayEvent::Due),
         }
     }
 }
@@ -421,7 +562,7 @@ mod tests {
     #[test]
     fn a_target_names_its_window_or_the_clipboard_and_belongs_to_one_desktop() {
         let desktop = Desktop::Hyprland(Hyprland::system());
-        let text = TypedText::new("hi").unwrap();
+        let text = PasteText::new("hi").unwrap();
         assert_eq!(Target::Clipboard(Clipboard).to_string(), "the clipboard");
         assert_eq!(
             desktop.deliver(&Target::Clipboard(Clipboard), &text, false),

@@ -1,40 +1,139 @@
 name: CI
 
+# Pull requests run the steps their changed paths affect; heavy.yml calls this
+# workflow on main, nightly and on request to run them all.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
+    inputs:
+      scope:
+        description: A crate, web or desktop-ui to narrow the run to; all runs everything
+        type: string
+        default: all
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
+  # Its outputs are 'true', 'false', or for tests cargo package arguments or `none`; the jobs below
+  # run a step unless an output says 'false', so a failed detection runs everything.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      server: ${{ steps.units.outputs.server }}
+      windows: ${{ steps.units.outputs.windows }}
+      bundle: ${{ steps.units.outputs.bundle }}
+      tests: ${{ steps.units.outputs.tests }}
+      windows_tests: ${{ steps.units.outputs.windows_tests }}
+      web: ${{ steps.units.outputs.web }}
+      desktop_ui: ${{ steps.units.outputs.desktop_ui }}
+      speech: ${{ steps.units.outputs.speech }}
+      issues: ${{ steps.units.outputs.issues }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: units
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          SCOPE: ${{ inputs.scope || 'all' }}
+        run: |
+          units=all
+          if [[ $EVENT == pull_request ]]; then
+            units=$(.github/scripts/changed "$BASE" "$HEAD") || { echo "::warning::.github/scripts/changed failed, so everything runs"; units=all; }
+          fi
+          echo "Changed units: $units"
+          server=false windows=false bundle=false tests=none windows_tests=none
+          web=false desktop_ui=false speech=false issues=false
+          has() { [[ " $units " == *" $1 "* ]]; }
+          if [[ $SCOPE == thalvi-app || $SCOPE == thalvi-asr || $SCOPE == thalvi-desktop || $SCOPE == thalvi-server ]]; then
+            server=true tests="-p $SCOPE"
+            if [[ $SCOPE == thalvi-app || $SCOPE == thalvi-desktop ]]; then windows=true windows_tests="-p $SCOPE"; fi
+          elif [[ $SCOPE == web ]]; then
+            web=true
+          elif [[ $SCOPE == desktop-ui ]]; then
+            desktop_ui=true
+          elif [[ $SCOPE != all ]]; then
+            echo "::error::Unknown scope $SCOPE"
+            exit 1
+          elif [[ $units == all ]]; then
+            server=true windows=true bundle=true tests=--workspace windows_tests="-p thalvi-desktop -p thalvi-app"
+            web=true desktop_ui=true speech=true issues=true
+          else
+            packages=() windows_packages=()
+            if has server; then packages+=(-p thalvi-server); fi
+            if has desktop; then packages+=(-p thalvi-desktop) windows_packages+=(-p thalvi-desktop); fi
+            if has app; then packages+=(-p thalvi-app) windows_packages+=(-p thalvi-app); fi
+            if has app || has desktop-ui; then bundle=true windows=true; fi
+            if (( ${#packages[@]} )); then server=true tests="${packages[*]}"; fi
+            if [[ $bundle == true ]]; then server=true; fi
+            if (( ${#windows_packages[@]} )); then windows_tests="${windows_packages[*]}"; fi
+            if has web; then web=true; fi
+            if has desktop-ui; then desktop_ui=true; fi
+            if has speech; then speech=true; fi
+            if has issues; then issues=true; fi
+          fi
+          tee -a "$GITHUB_OUTPUT" <<EOF
+          server=$server
+          windows=$windows
+          bundle=$bundle
+          tests=$tests
+          windows_tests=$windows_tests
+          web=$web
+          desktop_ui=$desktop_ui
+          speech=$speech
+          issues=$issues
+          EOF
+
   server:
     name: server
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, respects rust-toolchain.toml
+      - if: needs.changes.outputs.server == 'false'
+        run: echo 'No change affects this job, so its steps are skipped.'
+      - if: needs.changes.outputs.server != 'false'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.changes.outputs.server != 'false'
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, respects rust-toolchain.toml
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - if: needs.changes.outputs.server != 'false'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          path: target/tmp/models
-          key: wake-models-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+          shared-key: linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - if: needs.changes.outputs.server != 'false'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/thalvi/test-models
+          key: spotter-models-${{ runner.os }}-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
+      - if: needs.changes.outputs.server != 'false'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+      - if: needs.changes.outputs.server != 'false'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: crates/thalvi-app/ui/package-lock.json
-      - run: .github/scripts/gates server
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - if: needs.changes.outputs.server != 'false'
+        run: .github/scripts/gates server
+        env:
+          TESTS: ${{ needs.changes.outputs.tests }}
+          BUNDLE: ${{ needs.changes.outputs.bundle }}
+      - if: needs.changes.outputs.server != 'false' && needs.changes.outputs.bundle != 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-linux
           path: target/release/bundle/appimage/*.AppImage
@@ -43,26 +142,42 @@ jobs:
 
   desktop-windows:
     name: desktop-windows
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, respects rust-toolchain.toml
+      - if: needs.changes.outputs.windows == 'false'
+        run: echo 'No change affects this job, so its steps are skipped.'
+      - if: needs.changes.outputs.windows != 'false'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.changes.outputs.windows != 'false'
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, respects rust-toolchain.toml
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - if: needs.changes.outputs.windows != 'false'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          path: target/tmp/models
-          key: wake-models-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - if: needs.changes.outputs.windows != 'false'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/AppData/Local/thalvi/test-models
+          key: spotter-models-${{ runner.os }}-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
+      - if: needs.changes.outputs.windows != 'false'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: crates/thalvi-app/ui/package-lock.json
-      - run: .github/scripts/gates desktop-windows
+      - if: needs.changes.outputs.windows != 'false'
+        run: .github/scripts/gates desktop-windows
         shell: bash
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        env:
+          TESTS: ${{ needs.changes.outputs.windows_tests }}
+          BUNDLE: ${{ needs.changes.outputs.bundle }}
+      - if: needs.changes.outputs.windows != 'false' && needs.changes.outputs.bundle != 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-windows
           path: target/release/bundle/nsis/*-setup.exe
@@ -71,25 +186,31 @@ jobs:
 
   desktop-windows-smoke:
     name: desktop-windows-smoke
-    needs: desktop-windows
+    needs: [changes, desktop-windows]
+    if: ${{ !cancelled() && needs.desktop-windows.result == 'success' }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.changes.outputs.bundle == 'false'
+        run: echo 'The app is unchanged, so there is no installer to try.'
+      - if: needs.changes.outputs.bundle != 'false'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout: .github/scripts
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - if: needs.changes.outputs.bundle != 'false'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: desktop-windows
           path: installer
-      - name: install and run the app
+      - if: needs.changes.outputs.bundle != 'false'
+        name: install and run the app
         shell: pwsh
         run: |
           $installer = (Get-ChildItem installer -Filter *-setup.exe | Select-Object -First 1).FullName
           .github/scripts/windows-smoke.ps1 -Installer $installer -OutDir smoke
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: always() && needs.changes.outputs.bundle != 'false'
         with:
           name: desktop-windows-smoke
           path: smoke
@@ -97,21 +218,78 @@ jobs:
 
   web:
     name: web
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - if: needs.changes.outputs.web == 'false'
+        run: echo 'No change affects this job, so its steps are skipped.'
+      - if: needs.changes.outputs.web != 'false'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.changes.outputs.web != 'false'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - run: .github/scripts/gates web
+      - if: needs.changes.outputs.web != 'false'
+        run: .github/scripts/gates web
 
   desktop-ui:
     name: desktop-ui
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    steps:
+      - if: needs.changes.outputs.desktop_ui == 'false'
+        run: echo 'No change affects this job, so its steps are skipped.'
+      - if: needs.changes.outputs.desktop_ui != 'false'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.changes.outputs.desktop_ui != 'false'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/thalvi-app/ui/package-lock.json
+      - if: needs.changes.outputs.desktop_ui != 'false'
+        run: .github/scripts/gates desktop-ui
+
+  speech:
+    name: speech
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: needs.changes.outputs.speech == 'false'
+        run: echo 'No change affects this job, so its steps are skipped.'
+      - if: needs.changes.outputs.speech != 'false'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.changes.outputs.speech != 'false'
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - if: needs.changes.outputs.speech != 'false'
+        run: .github/scripts/gates speech
+
+  issues:
+    name: issues
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: needs.changes.outputs.issues == 'false'
+        run: echo 'No change affects this job, so its steps are skipped.'
+      - if: needs.changes.outputs.issues != 'false'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.changes.outputs.issues != 'false'
+        run: .github/scripts/gates issue-sync
+
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -119,24 +297,19 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: crates/thalvi-app/ui/package-lock.json
-      - run: .github/scripts/gates desktop-ui
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends minisign
+      - run: .github/scripts/gates release
 
-  speech:
-    name: speech
+  formal:
+    name: formal
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      - run: .github/scripts/gates speech
-
-  issues:
-    name: issues
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: .github/scripts/gates issue-sync
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version-file: .python-version
+      - run: .github/scripts/gates formal
 
   dependencies:
     name: dependencies

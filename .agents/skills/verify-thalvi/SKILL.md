@@ -1,6 +1,6 @@
 ---
 name: verify-thalvi
-description: Launch and drive Thalvi's web client (typed and spoken conversation, conversation list, history search, voice picker) against local fake endpoints, or a self-hosted model and speech engine, or the real desktop app in a sandboxed nested Hyprland (overlay, Settings window, downloads), and capture evidence. Use to confirm a server, web or desktop change works the way a user would see it, beyond the unit tests.
+description: Launch and drive Thalvi's web client (typed and spoken conversation, conversation list, private conversations, history search, voice picker) against local fake endpoints, or a self-hosted model and speech engine, or the real desktop app in a sandboxed nested Hyprland (overlay, Settings window, downloads), and capture evidence. Use to confirm a server, web or desktop change works the way a user would see it, beyond the unit tests.
 ---
 
 # Verify Thalvi
@@ -164,8 +164,9 @@ Handles that stay stable:
 | Speak replies switch | `button.o-speak` (`role=switch`, `aria-checked` follows the server's `reply_audio` confirmation) |
 | Composer | `#o-message` (label `Message`), `button[aria-label="Send"]` |
 | Turns | `.o-turns > .o-user`, `.o-turns > .o-assistant` |
-| Failure notice | `.o-notice` (`role=alert`); hidden when there is none |
-| Conversations sheet | `button[aria-label="Conversations"]`, dialog `.o-library` |
+| Failure notice | `.o-notice` (`role=alert`), hidden when there is none; text in `.o-notice-text`, plus `.o-notice-copy` and `button[aria-label="Dismiss"]` |
+| Conversations sheet | `button[aria-label="Conversations"]`, dialog `.o-library`, `button.o-lib-new`, `button.o-lib-new-private` |
+| Private indicator | `.o-private` badge and `.o-private-note`; hidden in ordinary conversations |
 | Voice picker | `button.o-voice-chip`, `select[aria-label="Voice to try"]`, `.o-vp-preview`, `.o-vp-apply`, `.o-vp-note` |
 | Speed | `.o-speed-chip`, `button[aria-label="Playback speed 1.5×"]` |
 
@@ -173,7 +174,8 @@ Waits:
 
 - Prefer `$V reply $R --after "<unique user text>"`. It waits until the last
   turn is Thalvi's, right after the matching user turn, and the state is `idle`
-  or `listening`. Use a phrase not already present in this conversation.
+  or `listening`. Use a phrase not already present in this conversation. It
+  prints that turn's `innerText`, speaker label first (`"THALVI\n…"`).
 - `$V reply $R "<expected text>"` checks the most recent assistant turn and a
   settled state. It can match an older answer before or after a new user echo.
   Never use a generic suffix such as `That is all.` for successive turns.
@@ -241,11 +243,14 @@ Evidence goes in `R/evidence/`, outside the repository. Never commit it.
   - `model_call`: round, outcome, `total_ms`, error;
   - `tts_sentence`: voice, `first_byte_ms`, `audio_ms`;
   - `reply`: outcome, `first_token_ms`, `first_audio_ms`, text;
+  - `tool`: tool name, outcome, `total_ms`, `matches`;
   - `turn`, `stt_connect`;
   - `interrupt`: turn and reason (`cancel` or `speech start`);
   - `voice_preview`: synthesis outcome and timings, in its own preview log.
 
   Preview metrics establish synthesis, not successful client playback.
+  A private conversation records these metrics only, never turn text or
+  audio, whatever `THALVI_RECORD` says.
 
   With `--local`, these are the real latencies of the self-hosted model and
   speech engine. Report them as that, never as Meta's latency.

@@ -81,6 +81,26 @@ it("shows Speak replies as a switch that follows the server's confirmation and w
   expect(clicks).toEqual(["click"]);
 });
 
+it("keeps Voice and typing available while speech recognition retries", () => {
+  vi.stubGlobal("ResizeObserver", class { observe() { return undefined; } });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const view = createView(root);
+  const voice = root.querySelector<HTMLButtonElement>(".o-voice");
+  const orb = root.querySelector<HTMLButtonElement>(".o-orb");
+  const composer = root.querySelector<HTMLTextAreaElement>("textarea");
+  if (!voice || !orb || !composer) throw new Error("voice controls are missing");
+  const clicks: string[] = [];
+  view.onVoice(() => clicks.push("off"));
+
+  view.render({ ...INITIAL, link: "online", voice: true, phase: "recognizer_retrying" });
+
+  expect([voice.disabled, orb.disabled, composer.disabled]).toEqual([false, false, false]);
+  expect(orb.getAttribute("aria-label")).toBe("End voice");
+  orb.click();
+  expect(clicks).toEqual(["off"]);
+});
+
 type SessionMessage = Parameters<typeof reduce>[1];
 
 function noticeView() {

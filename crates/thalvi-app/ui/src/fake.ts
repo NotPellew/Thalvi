@@ -1,6 +1,6 @@
-// Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the overlay to the n-th status of the script and `?look=holo` or `?look=gunmetal` picks the look.
+// Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the status to the n-th of the script and `?look=holo` or `?look=gunmetal` picks the look.
 
-import type { AudioStatus, Backend, Draft, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, Draft, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 import { LOOKS } from "./look.ts";
 
 const UNIFIED_LANGUAGES = [
@@ -35,26 +35,32 @@ const SETTINGS: Settings = {
   wake: {
     capture: { model: "hey_thalvi", threshold: 0.7 },
     conversation: { model: "hey_mycroft", threshold: 0.5 },
+    enabled: true,
   },
   cues: { wake: true, provisional: true, cancelled: true, accepted: true, error: true },
   ending_pause: { paste: 0.7, submit: 2.5, task: 2.5 },
   capture_limits: { idle: 60, max: 300 },
   endings: {
     "paste that": "paste",
+    "write that out": "write",
     "finish dictation": "paste",
     submit: "submit",
     "do that": "task",
     "scratch that": "scratch",
     "never mind": "cancel",
   },
-  stt: { entries: [{ kind: "thalvi_server", id: "thalvi-server", name: "Thalvi server", active: true, address: "ws://127.0.0.1:8080" }] },
+  stt: { entries: [{ kind: "on_device", id: "on-device", name: "On this computer", active: true, model: "nemotron_160ms" }] },
   apps: { slack: { classes: ["Slack"], executables: ["slack.exe"], input_keys: [] } },
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com/docs", label: "docs" }],
   overlay: { show: true, draft: true },
   microphone: null,
   look: "gunmetal",
+  update_channel: "stable",
   recordings: { metrics: true, text: false, audio: false },
   hold_key: "Alt+KeyZ",
+  write_key: "Alt+KeyX",
+  writing: null,
+  writing_default_prompt: "Write what I dictated as clear text.",
   history: { enabled: true, limit: 200 },
 };
 
@@ -66,9 +72,10 @@ function script(): Status[] {
   return [
     { state: "listening" },
     { state: "starting", target: slack },
-    { state: "capturing", target: slack, committed: "", partial: words.slice(0, 3).join(" ") },
-    { state: "capturing", target: slack, committed: words.slice(0, 7).join(" "), partial: words.slice(7, 10).join(" ") },
-    { state: "capturing", target: slack, committed: SENTENCE.repeat(3), partial: "and bring the" },
+    { state: "capturing", target: slack, committed: "", partial: words.slice(0, 3).join(" "), notice: null },
+    { state: "capturing", target: slack, committed: words.slice(0, 7).join(" "), partial: words.slice(7, 10).join(" "), notice: null },
+    { state: "capturing", target: slack, committed: SENTENCE.repeat(3), partial: "and bring the", notice: null },
+    { state: "capturing", target: slack, committed: SENTENCE, partial: null, notice: "Heard \u201cpaste that\u201d, but the transcript did not end with it. Nothing was removed; say the ending again." },
     { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: true, pauseMs: 2500, copies: false },
     { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: false, pauseMs: 2500, copies: false },
     { state: "working", target: slack, route: "submit", cancellable: false },
@@ -76,14 +83,14 @@ function script(): Status[] {
     { state: "paused" },
     { state: "listening" },
     { state: "starting", target: slack },
-    { state: "capturing", target: slack, committed: "Remind me to call", partial: null },
+    { state: "capturing", target: slack, committed: "Remind me to call", partial: null, notice: null },
     { state: "pending", target: slack, route: "paste", text: "Remind me to call", waitingForQuiet: false, pauseMs: 700, copies: false },
     { state: "done", target: slack, route: "paste", notice: "Pasted" },
     { state: "starting", target: null },
-    { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:8080 (connection refused). Start the Thalvi server, or fix Settings → Speech → Server address.", headline: "Can't reach speech server — Settings", causes: [], kind: "other" },
+    { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:8080 (connection refused). Check that it is running, or fix its address under Settings → Speech.", headline: "Can't reach speech server — Settings", causes: [], kind: "other" },
     { state: "loading", notice: "Loading the speech model." },
     { state: "starting", target: "Firefox" },
-    { state: "capturing", target: "Firefox", committed: "", partial: null },
+    { state: "capturing", target: "Firefox", committed: "", partial: null, notice: null },
     { state: "pending", target: "Firefox", route: "task", text: "open the calendar", waitingForQuiet: false, pauseMs: 2500, copies: false },
     { state: "working", target: "Firefox", route: "task", cancellable: true },
     { state: "done", target: "Firefox", route: "task", notice: "Opened the calendar" },
@@ -98,7 +105,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
   let level = 0;
   const requested = params.get("look");
   const look = LOOKS.find(([name]) => name === requested)?.[0] ?? "gunmetal";
-  const savedListeners: (() => void)[] = [];
   const statusListeners: ((status: Status) => void)[] = [];
   const levelListeners: ((level: number) => void)[] = [];
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
@@ -122,7 +128,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
     {
       name: "unified_160ms",
       title: "Nemotron Unified",
-      description: "From NVIDIA: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it needs a fast CPU and text appears about half a second later. Exported by Thalvi.",
+      description: "From NVIDIA: fewest word errors in our tests, with punctuation and capitals. It reads the last six seconds again every 160 ms, so it runs on a discrete GPU on Linux, and otherwise needs a fast CPU. Text appears about half a second later. Exported by Thalvi.",
       size: 646_518_349,
       source: "https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b",
       license: "OpenMDW-1.1",
@@ -180,6 +186,12 @@ export function fakeBackend(params: URLSearchParams): Backend {
   };
   let startAtLogin = false;
   let menuEntry = false;
+  const updateListeners: ((state: UpdateState) => void)[] = [];
+  let update: UpdateState = { phase: { state: "idle" }, notes: null, notice: null };
+  const tell = (next: UpdateState): void => {
+    update = next;
+    for (const listener of updateListeners) listener(structuredClone(next));
+  };
   const hyprland = params.has("hyprland");
   const installer = params.has("installer");
   let saved = { ...structuredClone(SETTINGS), look };
@@ -189,7 +201,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
     onLevel: (listener) => levelListeners.push(listener),
     getAudio: () => Promise.resolve(structuredClone(audioState)),
     onAudio: (listener) => audioListeners.push(listener),
-    onSettingsSaved: (listener) => savedListeners.push(listener),
     onSettingsChangedElsewhere: () => undefined,
     getSettings: () => Promise.resolve(structuredClone(saved)),
     saveSettings: (next) => {
@@ -201,7 +212,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
       }
       saved = structuredClone(next);
       emitAudio({ selected: next.microphone, active: audioState.paused ? null : activeFor(next.microphone), paused: audioState.paused });
-      for (const listener of savedListeners) listener();
       return Promise.resolve();
     },
     setListening: (on) => {
@@ -209,11 +219,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
       emit(on ? { state: "listening" } : { state: "paused" });
       return Promise.resolve();
     },
-    cancelCapture: () => {
-      emit({ state: "listening" });
-      return Promise.resolve();
-    },
-    overlayTakesClicks: () => Promise.resolve(true),
     dismissError: () => Promise.resolve(),
     copyReport: () => Promise.resolve(),
     listMicrophones: () => Promise.resolve([...microphones]),
@@ -239,6 +244,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
     },
     onOpenPage: () => undefined,
     getHoldKeyUnavailable: () => Promise.resolve(null),
+    getHoldKeyDefaults: () => Promise.resolve({ hold_key: "Alt+KeyZ", write_key: "Alt+KeyX" }),
     getStartAtLogin: () =>
       Promise.resolve(
         hyprland
@@ -267,12 +273,9 @@ export function fakeBackend(params: URLSearchParams): Backend {
     validateSpeechModelFolder: (path) =>
       path.includes("missing") ? Promise.reject(new Error("Missing required file: tokens.txt")) : Promise.resolve(),
     listWakeModels: () => Promise.resolve(structuredClone(wakeModels)),
-    validateWakeModels: (capture, conversation) => {
-      if (capture === conversation) return Promise.reject(new Error("The capture and conversation wake models must be different."));
-      for (const model of [capture, conversation]) {
-        if (!wakeModels.some((info) => info.name === model) && (model.includes("bad") || model.includes("missing") || !model.endsWith(".onnx"))) {
-          return Promise.reject(new Error(`The wake model ${model} could not be loaded: not a wake model.`));
-        }
+    validateWakeModels: (capture) => {
+      if (!wakeModels.some((info) => info.name === capture) && (capture.includes("bad") || capture.includes("missing") || !capture.endsWith(".onnx"))) {
+        return Promise.reject(new Error(`The wake model ${capture} could not be loaded: not a wake model.`));
       }
       return Promise.resolve();
     },
@@ -301,6 +304,8 @@ export function fakeBackend(params: URLSearchParams): Backend {
         }, 400);
       }),
     onSpeechModelProgress: (listener) => speechListeners.push(listener),
+    speechDevice: (name) =>
+      Promise.resolve(name === "unified_160ms" ? "Will run on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)" : "Will run on the CPU: this model runs on the CPU"),
     openSpeechModelSource: () => Promise.resolve(),
     checkSpeechEntry: (entry) => {
       const wanted = entry.kind === "second_pass" ? /^https?:\/\// : /^wss?:\/\//;
@@ -308,8 +313,17 @@ export function fakeBackend(params: URLSearchParams): Backend {
         ? Promise.reject(new Error(`Speech server "${entry.name}": the address must start with ${entry.kind === "second_pass" ? "http:// or https://" : "ws:// or wss://"}.`))
         : Promise.resolve();
     },
-    wordListSupport: () => Promise.resolve(true),
-    shareWordList: () => Promise.resolve(),
+    wordListSupport: (entry) => Promise.resolve(entry.kind !== "realtime"),
     appVersion: () => Promise.resolve("0.1.0 (fake)"),
+    getUpdateState: () => Promise.resolve(structuredClone(update)),
+    onUpdate: (listener) => updateListeners.push(listener),
+    checkForUpdates: () => {
+      tell({ phase: { state: "checking" }, notes: null, notice: null });
+      setTimeout(() => {
+        tell({ phase: { state: "upToDate" }, notes: null, notice: null });
+      }, 800);
+      return Promise.resolve();
+    },
+    openReleaseNotes: () => Promise.resolve(),
   };
 }

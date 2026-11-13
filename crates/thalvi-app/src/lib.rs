@@ -14,5 +14,7 @@ mod startup;
 mod status;
 mod switch;
 mod tray;
+mod update;
+mod updater;
 
 pub use app::run;

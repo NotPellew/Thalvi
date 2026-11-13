@@ -14,7 +14,7 @@ up [--size WxH] [--gnome] [--mic] [--offline]
                            start the compositors (or headless GNOME Shell); prints RUN_DIR=<R> last. --mic gives a
                            Hyprland run the private microphone a --gnome run always has; --offline puts every sandbox
                            of the run in a network namespace with only loopback
-app-start R BIN [--config F] [--env K=V]... [--tag NAME] [--trace] [--hosted]
+app-start R BIN [--config F] [--env K=V]... [--tag NAME] [--trace] [--hosted] [--nvidia]
                            start BIN (a thalvi-desktop binary) in its own sandbox; stdout/stderr go to R/out/app-NAME.log;
                            --trace records every socket the app and its children open to R/out/trace-NAME.txt (strace);
                            --hosted starts it from Hyprland, in the compositor's PID namespace, so its windows have
@@ -25,7 +25,8 @@ ctl R ARGS...              run `thalvi-desktop ARGS` against the running app (pa
 hypr R ARGS...             hyprctl against the inner compositor (not in --gnome runs)
 shot R NAME                screenshot of the inner compositor to R/out/NAME.png
 burst R NAME N GAP         N screenshots NAME-001.png... GAP seconds apart (0.1 works); NAME-times.txt stamps each (not in --gnome runs)
-say R WAV                  runs with a microphone: play WAV into it, in real time (queues behind earlier ones)
+say R WAV                  runs with a microphone: play WAV into it, in real time (queues behind earlier ones);
+                           prints QUEUED=NAME, and R/out/mic.log gets `played NAME` when it has played
 gnome R ARGS...            --gnome runs: windows | focus | key NAME | type TEXT | clip | victim LOG (what holds focus, keys, clipboard)
 sh R CMD...                run any command in a sandbox joined to the same private dirs
 proof R                    write R/out/isolation.txt: what the sandbox cannot reach
@@ -266,6 +267,11 @@ outer=rig-outer
 for _ in $(seq 100); do [ -S "$RUN/$outer" ] && break; sleep 0.1; done
 [ -S "$RUN/$outer" ] || { echo "kwin made no display" >> /tmp/out/supervisor.log; exit 1; }
 echo "$outer" > /tmp/out/outer.display
+for _ in $(seq 100); do
+  WAYLAND_DISPLAY=$outer wayland-info 2>/dev/null | grep -q "interface: 'wl_output'" && break
+  sleep 0.1
+done
+WAYLAND_DISPLAY=$outer wayland-info 2>/dev/null | grep -q "interface: 'wl_output'" || { echo "kwin exposed no wl_output" >> /tmp/out/supervisor.log; exit 1; }
 unset HYPRLAND_INSTANCE_SIGNATURE
 WAYLAND_DISPLAY=$outer Hyprland --i-am-really-stupid --config /home/rig/hypr.conf > /tmp/out/hyprland.log 2>&1 &
 for _ in $(seq 150); do
@@ -275,6 +281,12 @@ for _ in $(seq 150); do
   sleep 0.1
 done
 [ -n "${sig:-}" ] && [ -n "${inner:-}" ] || { echo "Hyprland did not come up" >> /tmp/out/supervisor.log; exit 1; }
+for _ in $(seq 100); do
+  monitors=$(WAYLAND_DISPLAY=$inner HYPRLAND_INSTANCE_SIGNATURE=$sig hyprctl monitors -j 2>/dev/null || true)
+  printf '%s' "$monitors" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin) else 1)' >/dev/null 2>&1 && break
+  sleep 0.1
+done
+printf '%s' "${monitors:-}" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin) else 1)' >/dev/null 2>&1 || { echo "Hyprland started without an output (hyprctl monitors -j stayed empty)" >> /tmp/out/supervisor.log; exit 1; }
 echo "$sig" > /tmp/out/inner.sig
 echo "$inner" > /tmp/out/inner.display
 echo ready >> /tmp/out/supervisor.log
@@ -296,11 +308,17 @@ EOF
   echo "RUN_DIR=$r"
 }
 
+# The binary finds the libraries built beside it (libwebgpu_dawn.so) through rpath $ORIGIN, so they go next to it.
+lib_binds() {
+  local lib
+  for lib in "$(dirname "$1")"/*.so; do [ ! -e "$lib" ] || printf '%s\0' --ro-bind "$lib" "$2/${lib##*/}"; done
+}
+
 cmd_app_start() {
   local r=$1 bin=$2; shift 2
-  local config="" tag trace=0 hosted=0
+  local config="" tag trace=0 hosted=0 nvidia=0
   tag=$(date +%H%M%S)
-  local -a envs=() plain=() wrap=()
+  local -a envs=() plain=() wrap=() gpu=()
   while [ $# -gt 0 ]; do
     case $1 in
       --config) config=$2; shift 2 ;;
@@ -308,14 +326,26 @@ cmd_app_start() {
       --tag) tag=$2; shift 2 ;;
       --trace) trace=1; shift ;;
       --hosted) hosted=1; shift ;;
+      --nvidia) nvidia=1; shift ;;
       *) die "app-start: unknown argument $1" ;;
     esac
   done
   [ -x "$bin" ] || die "no executable $bin"
+  # The app computes on the NVIDIA GPU, which the compositors never touch. NVIDIA's Vulkan driver fails to load
+  # while the Mesa-only EGL vendor list of the sandbox is set.
+  if [ "$nvidia" = 1 ]; then
+    [ "$hosted" = 0 ] || die "app-start: --nvidia does not combine with --hosted"
+    local node
+    gpu+=(--unsetenv __EGL_VENDOR_LIBRARY_FILENAMES)
+    for node in /dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-modeset; do
+      [ ! -e "$node" ] || gpu+=(--dev-bind "$node" "$node")
+    done
+  fi
   [ -z "$config" ] || { mkdir -p "$r/home/.config/thalvi"; cp "$config" "$r/home/.config/thalvi/desktop.json"; }
-  local -a args extra
+  local -a args extra libs
   mapfile -d '' args < <(sandbox_args "$r")
   mapfile -d '' extra < <(inner_env "$r")
+  mapfile -d '' libs < <(lib_binds "$bin" /tmp)
   # Every socket the app or a child makes: creation, connect, bind and datagram sends (a lookup or a UDP send shows here).
   local calls=socket,socketpair,connect,bind,sendto,sendmmsg
   [ "$trace" = 0 ] || wrap=(strace -f --seccomp-bpf -qq -tt -s 200 -e "trace=$calls" -o "/tmp/out/trace-$tag.txt")
@@ -323,6 +353,7 @@ cmd_app_start() {
     not_gnome "$r" "app-start --hosted"
     # Hyprland starts the app, so the app shares the compositor's sandbox and PID namespace (see cmd_victim).
     cp "$bin" "$r/home/app-bin"
+    find "$(dirname "$bin")" -maxdepth 1 -name '*.so' -exec cp {} "$r/home/" \;
     [ ! -e "$r/mic" ] || plain+=(PIPEWIRE_REMOTE=rig-pipewire)
     cat > "$r/home/app-run.sh" <<EOF
 #!/usr/bin/env bash
@@ -335,8 +366,8 @@ EOF
     touch "$r/app.hosted"
   else
     rm -f "$r/app.hosted"
-    launch_held "$r/out/app-$tag.log" "$r/app.pid" bwrap "${args[@]}" "${extra[@]}" "${envs[@]}" \
-      --ro-bind "$bin" /tmp/thalvi-desktop "${wrap[@]}" /tmp/thalvi-desktop
+    launch_held "$r/out/app-$tag.log" "$r/app.pid" bwrap "${args[@]}" "${extra[@]}" "${envs[@]}" "${gpu[@]}" \
+      --ro-bind "$bin" /tmp/thalvi-desktop "${libs[@]}" "${wrap[@]}" /tmp/thalvi-desktop
   fi
   echo "$bin" > "$r/app.bin"
   echo "APP_LOG=$r/out/app-$tag.log"
@@ -417,6 +448,7 @@ cmd_say() {
   local name; name=$r/home/mic-queue/$(date +%s%N)
   ffmpeg -loglevel error -y -i "$wav" -ar 16000 -ac 1 -f s16le "$name.tmp" || die "say: ffmpeg could not read $wav"
   mv "$name.tmp" "$name.raw"
+  echo "QUEUED=${name##*/}.raw"
 }
 
 main() {
@@ -428,7 +460,9 @@ main() {
     victim) cmd_victim "$@" ;;
     down) cmd_down "$@" ;;
     proof) cmd_proof "$@" ;;
-    ctl) local r=$1 bin; shift; bin=$(cat "$r/app.bin" 2>/dev/null || true); [ -n "$bin" ] || die "ctl: no app.bin (app-start records it)"; run_inner "$r" --ro-bind "$bin" /tmp/thalvi-desktop /tmp/thalvi-desktop "$@" ;;
+    ctl) local r=$1 bin libs; shift; bin=$(cat "$r/app.bin" 2>/dev/null || true); [ -n "$bin" ] || die "ctl: no app.bin (app-start records it)"
+      mapfile -d '' libs < <(lib_binds "$bin" /tmp)
+      run_inner "$r" --ro-bind "$bin" /tmp/thalvi-desktop "${libs[@]}" /tmp/thalvi-desktop "$@" ;;
     hypr) local r=$1; shift; not_gnome "$r" hypr; run_inner "$r" hyprctl "$@" ;;
     shot)
       local r=$1

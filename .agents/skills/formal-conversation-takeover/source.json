@@ -1,0 +1,27 @@
+{
+  "sync_commit": "8218dba22ec6c24255c73aa3e073071fb4d76bd4",
+  "files": {
+    "crates/thalvi-server/src/store.rs": {
+      "sha256": "ce3aae59197a3867117f131904563751e5571752a342b7f1a1c88aeed8853ff6",
+      "functions": [
+        "SessionStore::attach",
+        "SessionStore::release",
+        "SessionStore::save",
+        "SessionStore::delete",
+        "write_loop (DiskOp::Remove)",
+        "Attachment::detached"
+      ]
+    },
+    "crates/thalvi-server/src/session.rs": {
+      "sha256": "40ab340f541aa01c08207f33f220d6547a9675abc8a0ee3e18162d64960959b1",
+      "functions": [
+        "Retention::open",
+        "Persistence::finish",
+        "Persistence::sync",
+        "Saved::sync",
+        "handle_session",
+        "close_session"
+      ]
+    }
+  }
+}

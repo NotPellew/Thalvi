@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>closed context probe</title>
+<!-- Measures WebMic.cfg's browser constants: openMic from web/src/mic.ts, step for step, after the
+     context closes while getUserMedia is pending, as releaseUnused does on "ended". -->
+<button id="go">go</button>
+<p id="out">…</p>
+<script type="module">
+const worklet = URL.createObjectURL(new Blob(
+  ['registerProcessor("mic-encoder", class extends AudioWorkletProcessor { process() { return true; } });'],
+  { type: "text/javascript" },
+));
+document.getElementById("go").onclick = async () => {
+  const log = [];
+  let stream = null;
+  const ctx = new AudioContext({ latencyHint: "interactive" });
+  await ctx.resume();
+  const opening = (async () => {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    try {
+      await ctx.audioWorklet.addModule(worklet);
+      log.push("addModule resolved");
+    } catch (error) {
+      log.push(`addModule rejected ${error.name}`);
+      stream.getTracks().forEach((track) => track.stop());
+      throw error;
+    }
+    const source = ctx.createMediaStreamSource(stream);
+    const node = new AudioWorkletNode(ctx, "mic-encoder");
+    source.connect(node);
+  })();
+  void ctx.close();
+  try {
+    await opening;
+    log.push("openMic resolved");
+  } catch (error) {
+    log.push(`openMic threw ${error.name}`);
+  }
+  await new Promise((done) => setTimeout(done, 500));
+  log.push(`tracks ${stream ? stream.getTracks().map((track) => track.readyState).join(",") : "none"}`);
+  log.push(navigator.userAgent);
+  document.getElementById("out").textContent = log.join(" | ");
+};
+</script>

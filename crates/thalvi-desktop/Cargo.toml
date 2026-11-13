@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
 cpal.workspace = true
 dirs.workspace = true
@@ -29,8 +30,13 @@ webrtc-vad.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk.workspace = true
+ort = { workspace = true, features = ["webgpu", "api-24", "copy-dylibs"] }
 nix.workspace = true
 rustix.workspace = true
+smithay-client-toolkit.workspace = true
+wayland-client.workspace = true
+x11rb.workspace = true
+xkbcommon.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
