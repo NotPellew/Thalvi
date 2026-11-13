@@ -1049,6 +1049,8 @@ function speech(context: PageContext): HTMLElement[] {
         return "Ready";
       case "transcribing":
         return "Transcribing…";
+      case "merging":
+        return "Merging…";
       case "loading":
         return status.notice;
       case "paused":

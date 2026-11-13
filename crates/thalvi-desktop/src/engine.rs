@@ -687,7 +687,7 @@ impl Merging {
 
 /// Why a capture was delivered as the live text and not merged.
 enum Skipped {
-    /// These extras gave no usable text in time, and so fewer than two texts were left.
+    /// Fewer than two texts were left; the string says why each extra gave none.
     TooFew(String),
     Timeout,
     Failed(WritingError),
@@ -706,7 +706,7 @@ impl Skipped {
 
     fn reason(&self) -> String {
         match self {
-            Self::TooFew(left_out) => format!("{left_out} gave no usable text in time"),
+            Self::TooFew(left_out) => format!("fewer than two texts arrived: {left_out}"),
             Self::Timeout => "the chat model took too long".to_owned(),
             Self::Failed(WritingError::Unreachable) => {
                 "the chat model could not be reached".to_owned()
@@ -2235,7 +2235,7 @@ where
         let Some(merging) = self.merging.clone() else {
             return CaptureOutcome::Accepted(request);
         };
-        if scratched {
+        if scratched || !has_words(&request.text) {
             return CaptureOutcome::Accepted(request);
         }
         self.set_state(EngineState::Merging {
@@ -2268,7 +2268,13 @@ where
         for (entry, slot) in merging.extras.iter().zip(&slots) {
             match slot.as_ref().and_then(|judged| judged.agreed.as_ref()) {
                 Some(text) => inputs.push(text.clone()),
-                None => left_out.push(format!("\"{}\"", entry.name)),
+                None => left_out.push(match slot {
+                    None => format!("\"{}\" was too slow", entry.name),
+                    Some(judged) if judged.answer.heard.is_err() => {
+                        format!("\"{}\" failed", entry.name)
+                    }
+                    Some(_) => format!("\"{}\" heard another ending", entry.name),
+                }),
             }
         }
         let left_out = left_out.join(", ");
@@ -2294,9 +2300,7 @@ where
                 self.merge_metric("merged", started, &merging, inputs.len(), Some(chat));
                 self.recorder.text(dictation, format!("merged: {text}"));
                 if !left_out.is_empty() {
-                    (self.notice)(&format!(
-                        "Merged without {left_out}: no usable text in time."
-                    ));
+                    (self.notice)(&format!("Merged without some texts: {left_out}."));
                 }
                 CaptureOutcome::Accepted(CaptureRequest {
                     route: request.route,

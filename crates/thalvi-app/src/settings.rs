@@ -166,10 +166,8 @@ fn check_keys(
 fn check_endpoint_kept(settings: &mut Value, current: &DesktopConfig) -> Result<(), String> {
     let removed = current.writing.is_some() && settings.get("writing").is_none_or(Value::is_null);
     let extra_on = entries_of(settings).any(|entry| {
-        matches!(
-            entry.get("kind").and_then(Value::as_str),
-            Some("extra" | "second_pass")
-        ) && entry.get("active") == Some(&Value::Bool(true))
+        entry.get("kind").and_then(Value::as_str) == Some("extra")
+            && entry.get("active") == Some(&Value::Bool(true))
     });
     if removed && extra_on {
         return Err(

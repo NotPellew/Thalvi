@@ -1134,6 +1134,7 @@ describe("the next dictation summary and state words", () => {
     ["pending", { state: "pending", target: null, route: "paste", text: "hi", waitingForQuiet: false, pauseMs: 0, copies: false }, "Ready"],
     ["writing", { state: "writing", target: null, text: "" }, "Ready"],
     ["thinking", { state: "thinking", target: null }, "Ready"],
+    ["merging", { state: "merging", target: null, route: "paste" }, "Merging…"],
     ["working", { state: "working", target: null, route: "paste", cancellable: true }, "Ready"],
     ["done", { state: "done", target: null, route: "paste", notice: "Pasted" }, "Ready"],
     ["loading", { state: "loading", notice: "Loading the speech model." }, "Loading the speech model."],

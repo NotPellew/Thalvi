@@ -2115,7 +2115,7 @@ const SKIPS: &[Skip] = &[
         extra: Reply::Status(500),
         chat: Chat::Stall,
         waited: 0,
-        notice: "Merge skipped: \"A\" gave no usable text in time. Used the live text.",
+        notice: "Merge skipped: fewer than two texts arrived: \"A\" failed. Used the live text.",
         outcome: "too_few",
         extra_metric: ("error", false),
     },
@@ -2124,7 +2124,7 @@ const SKIPS: &[Skip] = &[
         extra: Reply::Json(DISAGREES),
         chat: Chat::Stall,
         waited: 0,
-        notice: "Merge skipped: \"A\" gave no usable text in time. Used the live text.",
+        notice: "Merge skipped: fewer than two texts arrived: \"A\" heard another ending. Used the live text.",
         outcome: "too_few",
         extra_metric: ("error", false),
     },
@@ -2133,7 +2133,7 @@ const SKIPS: &[Skip] = &[
         extra: Reply::After(6000, A),
         chat: Chat::Stall,
         waited: 5000,
-        notice: "Merge skipped: \"A\" gave no usable text in time. Used the live text.",
+        notice: "Merge skipped: fewer than two texts arrived: \"A\" was too slow. Used the live text.",
         outcome: "too_few",
         extra_metric: ("ok", false),
     },
@@ -2238,7 +2238,7 @@ async fn an_extra_that_misses_the_merge_is_left_out_and_still_recorded() {
             assert_eq!(pasted.at, MERGE_STARTS + 5000);
             assert_eq!(
                 pasted.notices,
-                ["Merged without \"B\": no usable text in time."]
+                ["Merged without some texts: \"B\" was too slow."]
             );
             assert_eq!(
                 request(&mut asked).await.body["messages"][1]["content"],
@@ -2416,6 +2416,27 @@ async fn writing_out_a_merged_capture_is_a_second_chat_call_on_the_merged_text()
             let write = request(&mut asked).await;
             assert_eq!(write.body["messages"][0]["content"], DEFAULT_PROMPT);
             assert_eq!(write.body["messages"][1]["content"], "tell Anna I'm late");
+            assert_eq!(rig.notices().len(), 0);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capture_with_no_words_of_its_own_is_not_merged_nor_waits_for_the_extras() {
+    LocalSet::new()
+        .run_until(async {
+            let (a, mut uploads) = serve(Reply::Stall).await;
+            let (chat_url, mut asked, _feed) = chat(Chat::Stall).await;
+            let (mut rig, engine, frames) = Rig::new(&with_extras(&chat_url, &[("A", &a, true)]));
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("paste that").await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3500).await;
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, ""));
+            assert!(uploads.try_recv().is_err(), "nothing was uploaded");
+            assert!(asked.try_recv().is_err(), "nothing was merged");
             assert_eq!(rig.notices().len(), 0);
         })
         .await;
