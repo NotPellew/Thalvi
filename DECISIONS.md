@@ -49,10 +49,10 @@ areas your change touches. Editing rules are in
   and all, in 8 of 8 dictations, no new errors on 48 takes with a two-entry list, about 1 ms more per
   step. Rejected: a beam of 4 (0 of 8 at alpha 1, twice the step time), NeMo's alpha 1 (0 of 8).
 - **Self-hosted; parts swap by endpoint.** Config sets each part's address on a
-  standard protocol (Chat Completions, OpenAI speech, MCP); Meta's realtime ASR
-  and Qwen3-TTS's framed PCM stream are the custom adapters. Why: any provider
-  or local server plugs in without code. Rejected: a plugin system (no faster,
-  much more code).
+  standard protocol (Chat Completions, OpenAI speech, MCP, versioned JSON for
+  briefings); Meta's realtime ASR and Qwen3-TTS's framed PCM stream are the
+  custom adapters. Why: any provider or local server plugs in without code.
+  Rejected: a plugin system (no faster, much more code).
 - **Same-site browser requests only.** The server refuses a request whose `Origin` names another
   host than its `Host`; native clients send none. Why: browsers skip cross-origin checks on
   WebSockets, so any page could open `/session`. Rejected for now: a token (no accounts), a host
@@ -193,6 +193,12 @@ areas your change touches. Editing rules are in
   listed, titled, retired or searched from others, metrics only whatever `THALVI_RECORD` says; closing ends it
   and a `private-` id can't be resumed. Desktop clients send the same flag and keep nothing derived locally.
   Why: a type that cannot write beats a flag that must not. Rejected: a private flag on saved sessions, reconnecting into a fresh saved one.
+- **Briefing headlines are a bounded JSON snapshot, fetched off the reply path.** `BRIEFING_URL` and
+  `BRIEFING_TOKEN` name `GET /v1/briefings/latest`; the server prefetches and refreshes in the background,
+  and an ordinary conversation captures the fresh (24 h) snapshot when it opens, as its own data-only model
+  message. Private conversations hold no handle to it. Why: a cold or failed fetch must never delay a
+  reply. Rejected: an MCP client for one source, blocking the first reply, headlines on disk or in
+  history, briefing access in private conversations.
 - **Opt-in retirement with editable learnings.** `THALVI_RETIRE_DAYS` replaces
   old transcripts with summaries and keeps durable facts in a separate editable
   store. Why: bound retention without losing useful context. Rejected:
