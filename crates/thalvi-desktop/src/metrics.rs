@@ -58,7 +58,10 @@ pub enum Event {
     PartialLag,
     /// From the last speech heard before a final result to that result.
     FinalLag,
-    SecondaryStt,
+    /// One extra recognizer's transcription of a capture: its latency and outcome.
+    ExtraStt,
+    /// Merging the texts of a capture: the latency it adds after the ending, the chat call's own latency, and how it ended.
+    Merge,
     LiveStt,
     LiveSttFirstText,
     LiveSttDelta,
@@ -108,7 +111,8 @@ impl Event {
             Self::TranscriptionReady => "desktop_transcription_ready",
             Self::PartialLag => "desktop_partial_lag",
             Self::FinalLag => "desktop_final_lag",
-            Self::SecondaryStt => "desktop_secondary_stt",
+            Self::ExtraStt => "desktop_extra_stt",
+            Self::Merge => "desktop_merge",
             Self::LiveStt => "desktop_live_stt",
             Self::LiveSttFirstText => "desktop_live_stt_first_text",
             Self::LiveSttDelta => "desktop_live_stt_delta",
@@ -783,7 +787,8 @@ mod tests {
             (Event::WakeNothing, "desktop_wake_nothing"),
             (Event::WakeReset, "desktop_wake_reset"),
             (Event::TranscriptionReady, "desktop_transcription_ready"),
-            (Event::SecondaryStt, "desktop_secondary_stt"),
+            (Event::ExtraStt, "desktop_extra_stt"),
+            (Event::Merge, "desktop_merge"),
             (Event::LiveStt, "desktop_live_stt"),
             (Event::LiveSttFirstText, "desktop_live_stt_first_text"),
             (Event::LiveSttDelta, "desktop_live_stt_delta"),
@@ -832,7 +837,7 @@ mod tests {
         let dir = TempDir::new("line");
         let recorder = Recorder::in_dir(METRICS, dir.root()).unwrap();
         recorder.metric(
-            Event::SecondaryStt,
+            Event::ExtraStt,
             "timeout",
             Some(Duration::from_micros(1500)),
             json!({"model": "m", "api": "openai"}),
@@ -848,7 +853,7 @@ mod tests {
         assert_eq!(
             first,
             json!({
-                "event": "desktop_secondary_stt", "outcome": "timeout",
+                "event": "desktop_extra_stt", "outcome": "timeout",
                 "duration_ms": 1.5, "model": "m", "api": "openai"
             })
         );

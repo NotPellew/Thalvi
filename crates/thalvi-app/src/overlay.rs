@@ -57,6 +57,7 @@ impl Visibility {
             | Status::Thinking { .. }
             | Status::Working { .. }
             | Status::Transcribing { .. }
+            | Status::Merging { .. }
             | Status::Loading {
                 downloading: true, ..
             } => Self::Show,

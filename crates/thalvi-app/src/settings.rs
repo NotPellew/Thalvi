@@ -93,6 +93,7 @@ impl Store {
     pub fn check(mut settings: Value, current: &DesktopConfig) -> Result<DesktopConfig, String> {
         prepare(&mut settings, current);
         check_keys(&settings, current, Desktop::check_hold_keys)?;
+        check_endpoint_kept(&mut settings, current)?;
         load(&settings)
     }
 
@@ -158,6 +159,24 @@ fn check_keys(
     }
     check(&[(HoldKind::Dictate, hold), (HoldKind::Write, write)])
         .map_err(|error| format!("{error} The keys that were set before still work."))
+}
+
+/// Refuses removing the writing endpoint while an extra recognizer is on: the loader would refuse
+/// it too, but only as "needs a writing model", which does not say what to do first.
+fn check_endpoint_kept(settings: &mut Value, current: &DesktopConfig) -> Result<(), String> {
+    let removed = current.writing.is_some() && settings.get("writing").is_none_or(Value::is_null);
+    let extra_on = entries_of(settings).any(|entry| {
+        matches!(
+            entry.get("kind").and_then(Value::as_str),
+            Some("extra" | "second_pass")
+        ) && entry.get("active") == Some(&Value::Bool(true))
+    });
+    if removed && extra_on {
+        return Err(
+            "Switch off the extra recognizers before removing the writing model.".to_owned(),
+        );
+    }
+    Ok(())
 }
 
 /// Validates `settings` as the loader does at startup.
@@ -230,6 +249,7 @@ pub fn judge(
     ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
     prepare(&mut settings, current);
     check_keys(&settings, current, Desktop::check_hold_keys)?;
+    check_endpoint_kept(&mut settings, current)?;
     let config = load(&settings)?;
     let mut before = serde_json::to_value(current).map_err(|error| error.to_string())?;
     let known: Vec<Value> = entries_of(&mut before)
@@ -334,7 +354,7 @@ fn unmask_keys(settings: &mut Value, current: &DesktopConfig) {
         entry.remove("has_key");
         let keyed = matches!(
             entry.get("kind").and_then(Value::as_str),
-            Some("realtime" | "open_ai" | "second_pass")
+            Some("realtime" | "open_ai" | "extra")
         );
         if keyed && !entry.contains_key("api_key") {
             let saved = entry
@@ -712,8 +732,8 @@ mod tests {
         settings["stt"] = json!({"entries": [
             entry("live", "realtime", Some("live-secret")),
             entry("open-ai", "open_ai", Some("open-ai-secret")),
-            entry("second", "second_pass", Some("second-secret")),
-            entry("blank", "second_pass", None),
+            entry("second", "extra", Some("second-secret")),
+            entry("blank", "extra", None),
         ]});
         store.save(settings, &store_defaults()).unwrap();
         let saved = store.load().unwrap();
@@ -747,6 +767,48 @@ mod tests {
             ["live-secret", "open-ai-secret", "second-secret", ""]
         );
         assert_eq!(keys(&after_edit), ["replaced", "open-ai-replaced", "", ""]);
+    }
+
+    #[test]
+    fn an_extra_cannot_be_switched_on_without_the_writing_model_nor_the_model_removed_under_it() {
+        let (store, dir) = store("extras");
+        let extra = |on: bool| {
+            json!({"kind": "extra", "id": "x", "name": "X", "active": on,
+                "address": "http://127.0.0.1:9/v1", "model": "m"})
+        };
+        let with = |settings: &Value, on: bool, writing: Option<&Value>| {
+            let mut settings = settings.clone();
+            settings["stt"] = json!({"entries": [
+                {"kind": "on_device", "id": "d", "name": "D", "active": true},
+                extra(on),
+            ]});
+            match writing {
+                Some(writing) => settings["writing"] = writing.clone(),
+                None => {
+                    settings.as_object_mut().unwrap().remove("writing");
+                }
+            }
+            settings
+        };
+        let endpoint = json!({"url": "http://127.0.0.1:8000/v1", "model": "m"});
+        let base = settings_json(&store_defaults()).unwrap();
+
+        let on_without = Store::check(with(&base, true, None), &store_defaults()).unwrap_err();
+        assert_eq!(
+            on_without,
+            "Extra recognizers need a writing model. Set one up under Settings → Speech → Writing first, or switch the extras off."
+        );
+        let on = store
+            .save(with(&base, true, Some(&endpoint)), &store_defaults())
+            .unwrap();
+        let removed = Store::check(with(&base, true, None), &on).unwrap_err();
+        assert_eq!(
+            removed,
+            "Switch off the extra recognizers before removing the writing model."
+        );
+        // Switching them off and removing the model together is allowed.
+        Store::check(with(&base, false, None), &on).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -887,9 +949,10 @@ mod tests {
 
         let (store, dir) = store("private");
         let mut settings = settings_json(&store_defaults()).unwrap();
+        settings["writing"] = json!({"url": "http://127.0.0.1:8000/v1", "model": "m"});
         settings["stt"] = json!({"entries": [
             {"kind": "realtime", "id": "s", "name": "Realtime", "active": true, "address": "ws://127.0.0.1:8012", "model": "m"},
-            {"kind": "second_pass", "id": "p", "name": "P", "active": true, "address": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k"}
+            {"kind": "extra", "id": "p", "name": "P", "active": true, "address": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k"}
         ]});
         // A leftover from an earlier crash must not lend its permissions to the new file.
         std::fs::create_dir_all(store.path.parent().unwrap()).unwrap();
@@ -1037,7 +1100,7 @@ mod tests {
             )
         );
 
-        let loose = json!({"kind": "second_pass", "id": "p", "name": "P", "active": false,
+        let loose = json!({"kind": "extra", "id": "p", "name": "P", "active": false,
             "address": "not a url", "model": "m"});
         let strict = judged(
             &store_defaults(),

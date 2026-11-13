@@ -54,7 +54,7 @@ pub enum Status {
     Thinking {
         target: Option<String>,
     },
-    /// A second transcription or the delivery is running.
+    /// The delivery is running, or the user's capture is being finished.
     Working {
         target: Option<String>,
         route: CaptureRoute,
@@ -66,6 +66,11 @@ pub enum Status {
         target: Option<String>,
         route: CaptureRoute,
         cancellable: bool,
+    },
+    /// The extra recognizers' texts are being merged with the live text; it can still be cancelled.
+    Merging {
+        target: Option<String>,
+        route: CaptureRoute,
     },
     Done {
         target: Option<String>,
@@ -280,10 +285,9 @@ impl View {
                         .unwrap_or(u64::MAX),
                     copies: self.copies,
                 },
-                EngineState::TranscribingSecondary { route } => Status::Working {
+                EngineState::Merging { route } => Status::Merging {
                     target,
                     route: *route,
-                    cancellable: true,
                 },
                 EngineState::TranscribingLive { route } => Status::Transcribing {
                     target,
@@ -457,13 +461,12 @@ mod tests {
                 },
             ),
             (
-                EngineState::TranscribingSecondary {
+                EngineState::Merging {
                     route: CaptureRoute::Task,
                 },
-                Status::Working {
+                Status::Merging {
                     target: Some(kitty()),
                     route: CaptureRoute::Task,
-                    cancellable: true,
                 },
             ),
         ];
