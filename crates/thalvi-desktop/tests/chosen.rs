@@ -25,6 +25,7 @@ fn chosen(entry: &Value) -> Chosen {
     Chosen::new(
         config.stt.entries.active_live(),
         ModelStore::in_dir(env!("CARGO_TARGET_TMPDIR")),
+        reqwest::Client::new(),
         Recorder::disabled().metrics(),
         &WordList::new(Vec::new()).expect("list"),
         Adapters::default(),
