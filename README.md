@@ -102,7 +102,12 @@ here** moves it to this device.
   in the background. A new saved conversation starts with the headlines fetched
   within the last 24 hours, or is told none are available; its first reply never
   waits for the fetch. Private conversations neither see headlines nor contact
-  the source.
+  the source. In a saved conversation Thalvi can also call the read-only
+  `search_briefing` (up to 10 items from the last seven days, via
+  `POST /v1/briefings/search`) and `read_briefing_item` (details and sources,
+  via `GET /v1/briefings/items/{id}`); each call gets five seconds, and a
+  failure becomes a plain "Couldn't reach the briefing." the conversation
+  carries on from.
 - **Retirement:** with `THALVI_RETIRE_DAYS=90`, conversations inactive for 90
   days are replaced by a summary on startup and then daily. Lasting preferences
   and facts go to `$THALVI_DATA_DIR/learnings.json`, which you can read and

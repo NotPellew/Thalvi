@@ -226,6 +226,10 @@ areas your change touches. Editing rules are in
   message. Private conversations hold no handle to it. Why: a cold or failed fetch must never delay a
   reply. Rejected: an MCP client for one source, blocking the first reply, headlines on disk or in
   history, briefing access in private conversations.
+- **Briefing search is two bounded read-only tools on the same source.** `search_briefing` and
+  `read_briefing_item` call `POST /v1/briefings/search` and `GET /v1/briefings/items/{id}` inside the
+  three-round tool loop; each call has its own 5 s deadline and 64 KiB cap, and a failure is a plain tool
+  result. Why: rounds don't bound calls within a round. Rejected: searching on every turn, an `ask_agent` tool.
 - **Opt-in retirement with editable learnings.** `THALVI_RETIRE_DAYS` replaces
   old transcripts with summaries and keeps durable facts in a separate editable
   store. Why: bound retention without losing useful context. Rejected:
