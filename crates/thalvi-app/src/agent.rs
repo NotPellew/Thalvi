@@ -855,9 +855,12 @@ async fn metrics_summary(running: &impl Running) -> String {
         Ok(dir) => dir,
         Err(error) => return refused(&error, Value::Null),
     };
-    let summary = tokio::task::spawn_blocking(move || metrics::summarize(&dir, SUMMARY_WINDOW))
-        .await
-        .unwrap_or_default();
+    let summary =
+        match tokio::task::spawn_blocking(move || metrics::summarize(&dir, SUMMARY_WINDOW)).await {
+            Ok(Ok(summary)) => summary,
+            Ok(Err(error)) => return refused(&error.to_string(), Value::Null),
+            Err(_) => return refused("Thalvi couldn't summarize the metrics.", Value::Null),
+        };
     done(json!({
         "enabled": true,
         "window_hours": SUMMARY_WINDOW.as_secs() / 3600,
@@ -1946,6 +1949,33 @@ mod tests {
         assert_eq!(reply["stages"]["delivery"]["count"], 0);
         assert_eq!(reply["stages"]["delivery"]["p50_ms"], Value::Null);
         assert_eq!(reply["captures"], json!({"cancelled": 1, "ok": 1}));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            struct Readable(PathBuf);
+            impl Drop for Readable {
+                fn drop(&mut self) {
+                    let _ =
+                        std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+
+            let log = recordings.join("metrics.jsonl");
+            let _restore = Readable(log.clone());
+            std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let failed = rig.ask(&Request::MetricsSummary);
+            assert_eq!(failed["ok"], false);
+            assert_eq!(failed["error"], "Thalvi couldn't read the metrics log.");
+            assert!(failed.get("stages").is_none());
+
+            std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(
+                rig.ask(&Request::MetricsSummary)["captures"],
+                reply["captures"]
+            );
+        }
     }
 
     /// A mono 16-bit PCM WAV of `samples` silent samples at `rate`.

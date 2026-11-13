@@ -613,18 +613,30 @@ pub struct Summary {
     pub captures: BTreeMap<String, usize>,
 }
 
+/// A metrics log exists but could not be read.
+#[derive(Debug, thiserror::Error)]
+#[error("Thalvi couldn't read the metrics log.")]
+pub struct UnreadableLog;
+
 /// Summarizes the metrics in `dir` written within `window` before now.
 ///
-/// Lines that are not metrics are skipped, so a damaged log still gives what can be read.
-#[must_use]
-pub fn summarize(dir: &Path, window: Duration) -> Summary {
+/// Lines that are not metrics are skipped, so a damaged log still gives what can be read. A log
+/// that is absent counts as empty; one that exists but can't be read fails the whole summary,
+/// since counts without it would look complete.
+///
+/// # Errors
+///
+/// [`UnreadableLog`] when the current log or a rotated one can't be read.
+pub fn summarize(dir: &Path, window: Duration) -> Result<Summary, UnreadableLog> {
     let since = now_ms().saturating_sub(u64::try_from(window.as_millis()).unwrap_or(u64::MAX));
     let path = dir.join("metrics.jsonl");
     let mut summary = Summary::default();
     let mut times: [Vec<f64>; 4] = Default::default();
     for file in [backup(&path, 2), backup(&path, 1), path] {
-        let Ok(text) = std::fs::read_to_string(file) else {
-            continue;
+        let text = match std::fs::read_to_string(file) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(UnreadableLog),
         };
         for line in text.lines() {
             let Ok(line) = serde_json::from_str::<Value>(line) else {
@@ -669,7 +681,7 @@ pub fn summarize(dir: &Path, window: Duration) -> Summary {
         stage.p50_ms = percentile(&took, 50);
         stage.p95_ms = percentile(&took, 95);
     }
-    summary
+    Ok(summary)
 }
 
 /// The nearest-rank percentile of sorted `values`.
@@ -1146,7 +1158,7 @@ mod tests {
         }
         std::fs::write(dir.root().join("metrics.jsonl"), lines.join("\n")).unwrap();
 
-        let summary = summarize(&dir.root(), SUMMARY_WINDOW);
+        let summary = summarize(&dir.root(), SUMMARY_WINDOW).unwrap();
         // 19 ok connects of 10..190 and one error of 900: 20 values, p50 is the 10th, p95 the 19th.
         assert_eq!(summary.stages.connect.count, 20);
         assert_eq!(
@@ -1174,7 +1186,59 @@ mod tests {
             summary.captures,
             BTreeMap::from([("cancelled".to_owned(), 1), ("ok".to_owned(), 2)])
         );
-        let quiet = summarize(&dir.0, SUMMARY_WINDOW);
-        assert_eq!(quiet, Summary::default(), "no log, nothing to say");
+    }
+
+    #[test]
+    fn a_log_that_cannot_be_read_fails_the_summary_but_an_absent_or_damaged_one_does_not() {
+        type Files<'a> = Vec<(u8, Option<&'a [u8]>)>;
+        let ok_line = json!({"ts_ms": now_ms(), "event": "desktop_capture_flow", "outcome": "ok"})
+            .to_string();
+        let damaged = format!("not json\n{ok_line}\n{{");
+        let one_capture = Some(BTreeMap::from([("ok".to_owned(), 1)]));
+        let none = Some(BTreeMap::new());
+        // `None` content is a directory, which can't be read as a file on any platform.
+        let cases: [(&str, Files, _); 7] = [
+            ("all absent", vec![], none.clone()),
+            ("readable and empty", vec![(0, Some(b""))], none.clone()),
+            (
+                "malformed lines skipped",
+                vec![(0, Some(damaged.as_bytes()))],
+                one_capture.clone(),
+            ),
+            ("invalid UTF-8", vec![(0, Some(b"\xff\xfe"))], None),
+            ("unreadable current log", vec![(0, None)], None),
+            (
+                "unreadable rotated log beside a good current one",
+                vec![(1, None), (0, Some(ok_line.as_bytes()))],
+                None,
+            ),
+            (
+                "rotated log is counted",
+                vec![(2, Some(ok_line.as_bytes()))],
+                one_capture,
+            ),
+        ];
+        for (label, files, expected) in cases {
+            let dir = TempDir::new("unreadable");
+            std::fs::create_dir_all(dir.root()).unwrap();
+            let log = dir.root().join("metrics.jsonl");
+            for (number, contents) in files {
+                let path = if number == 0 {
+                    log.clone()
+                } else {
+                    backup(&log, number)
+                };
+                match contents {
+                    Some(bytes) => std::fs::write(path, bytes).unwrap(),
+                    None => std::fs::create_dir(path).unwrap(),
+                }
+            }
+            let summary = summarize(&dir.root(), SUMMARY_WINDOW);
+            assert_eq!(
+                summary.ok().map(|summary| summary.captures),
+                expected,
+                "{label}"
+            );
+        }
     }
 }
