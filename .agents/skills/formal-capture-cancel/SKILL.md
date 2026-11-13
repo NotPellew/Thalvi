@@ -117,6 +117,9 @@ them (recording, a notice) is synchronous and never delivers, so it is the model
 a cancel returns `Cancelled` before any text can leave it, a failed or unfaithful merge returns the live text as
 `Accepted` like any other post-accept result, and `write` after it is unchanged. The model is unchanged and only the
 `engine.rs` hash moved.
+The merge's note (`Engine::take_merge_note`, `noted` in `runner.rs`) is read right after `capture` returns, beside
+`take_ignored`, and only appends text to the final status; it adds no await, control drain or delivery admission, so
+the model is unchanged and only the `engine.rs` and `runner.rs` hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

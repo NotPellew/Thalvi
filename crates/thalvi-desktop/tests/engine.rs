@@ -1941,6 +1941,8 @@ struct Pasted {
     at: u64,
     /// The notices the user had been shown by then.
     notices: Vec<String>,
+    /// What the merge left for the caller to show beside the delivery.
+    note: Option<String>,
 }
 
 /// Captures as `capture_task` does, then spends `busy` ms elsewhere, the way the app does while it
@@ -1962,6 +1964,7 @@ fn capture_and_listen(
             outcome,
             at: u64::try_from(origin.elapsed().as_millis()).unwrap(),
             notices: notices.borrow().clone(),
+            note: engine.take_merge_note(),
         };
         tokio::time::sleep(ms(busy)).await;
         let _ = tokio::time::timeout(Duration::from_secs(20), engine.listen(&mut frames)).await;
@@ -2208,6 +2211,11 @@ async fn a_merge_that_cannot_be_used_delivers_the_live_text_with_a_plain_notice(
                 );
                 assert_eq!(pasted.at, MERGE_STARTS + skip.waited, "{name}");
                 assert_eq!(pasted.notices, [skip.notice], "{name}");
+                assert_eq!(
+                    pasted.note.as_deref(),
+                    Some(skip.notice),
+                    "{name}: kept for the overlay, which the delivery would otherwise overwrite"
+                );
                 assert_eq!(merge_event(&dir)["outcome"], skip.outcome, "{name}");
                 extras_were(
                     &extra_metrics(&dir),
@@ -2240,6 +2248,7 @@ async fn an_extra_that_misses_the_merge_is_left_out_and_still_recorded() {
                 pasted.notices,
                 ["Merged without some texts: \"B\" was too slow."]
             );
+            assert_eq!(pasted.note, pasted.notices.first().cloned());
             assert_eq!(
                 request(&mut asked).await.body["messages"][1]["content"],
                 r#"["live words","A words"]"#

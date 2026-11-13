@@ -468,6 +468,8 @@ pub struct Engine<R, W, C> {
     held_for: Option<Duration>,
     /// The presses of the dictation key that started nothing, until the caller takes them.
     ignored: Vec<Refusal>,
+    /// What the last merge told the user, until the caller takes it to show beside the delivery.
+    merge_note: Option<String>,
 }
 
 /// A press of the dictation key that opened a capture.
@@ -978,6 +980,7 @@ where
             hold_end: None,
             held_for: None,
             ignored: Vec::new(),
+            merge_note: None,
         };
         (engine, handle)
     }
@@ -998,6 +1001,12 @@ where
     /// work either way. Taking `&mut self` keeps it from running during a capture.
     pub fn set_wake_words(&mut self, on: bool) {
         self.wake_words = on;
+    }
+
+    /// What the merge of the capture that just ended told the user, if it did: the delivery that
+    /// follows would otherwise replace the notice on the overlay.
+    pub fn take_merge_note(&mut self) -> Option<String> {
+        self.merge_note.take()
     }
 
     /// The presses of the dictation key that started nothing since this was last called: each
@@ -2300,7 +2309,7 @@ where
                 self.merge_metric("merged", started, &merging, inputs.len(), Some(chat));
                 self.recorder.text(dictation, format!("merged: {text}"));
                 if !left_out.is_empty() {
-                    (self.notice)(&format!("Merged without some texts: {left_out}."));
+                    self.tell_merge(format!("Merged without some texts: {left_out}."));
                 }
                 CaptureOutcome::Accepted(CaptureRequest {
                     route: request.route,
@@ -2309,7 +2318,7 @@ where
             }
             Asked::Skipped { why, chat } => {
                 self.merge_metric(why.outcome(), started, &merging, inputs.len(), chat);
-                (self.notice)(&format!(
+                self.tell_merge(format!(
                     "Merge skipped: {}. Used the live text.",
                     why.reason()
                 ));
@@ -2317,6 +2326,11 @@ where
             }
             Asked::Cancelled => CaptureOutcome::cancelled_with(request.text),
         }
+    }
+
+    fn tell_merge(&mut self, note: String) {
+        (self.notice)(&note);
+        self.merge_note = Some(note);
     }
 
     /// Records the extras that had answered as they did, the others and the merge as cancelled;
