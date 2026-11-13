@@ -1101,7 +1101,7 @@ function speech(context: PageContext): HTMLElement[] {
       case "on_device":
         return `Recognition with ${modelTitleFor(entry)}.`;
       case "extra":
-        return "Transcribes each accepted capture again for the chat model to merge.";
+        return `Audio goes to ${new URL(entry.address).host}`;
     }
   }
 
@@ -1165,7 +1165,7 @@ function speech(context: PageContext): HTMLElement[] {
   function badges(entry: SpeechEntry): HTMLElement[] {
     const found: HTMLElement[] = [];
     if (KIND_NAMES[entry.kind] !== entry.name) found.push(el("span", { class: "badge" }, KIND_NAMES[entry.kind]));
-    if (isLive(entry) && entry.active) found.push(el("span", { class: "badge", "data-on": "true" }, "In use"));
+    if (isLive(entry) && entry.active) found.push(el("span", { class: "badge", "data-on": "true" }, "Live"));
     if (hasKey(entry)) found.push(el("span", { class: "badge" }, "Key saved"));
     if (!isSaved(entry)) found.push(el("span", { class: "badge", "data-saved": "false" }, "Not saved"));
     return found;
@@ -1217,17 +1217,33 @@ function speech(context: PageContext): HTMLElement[] {
     return [line];
   }
 
-  const NEEDS_WRITING = "Set up the writing model under Writing first.";
+  const extraState = el("p", { class: "next-dictation", role: "status" }, "");
+  const needsEndpoint = el(
+    "div",
+    { class: "note why", id: uid("n") },
+    "Extra recognizers can't be switched on until a chat model endpoint is set, because the chat model merges their texts. ",
+    button("Go to the endpoint setting", () => {
+      (writingUrl.field as HTMLInputElement).focus();
+    }, "quiet"),
+  );
 
   /** An extra can be switched on only while the draft has a writing endpoint; one already on can always be switched off. */
   function lockTick(input: HTMLInputElement): void {
     const locked = !input.checked && draft.writing === null;
     input.disabled = locked;
-    input.title = locked ? NEEDS_WRITING : "";
+    if (locked) input.setAttribute("aria-describedby", needsEndpoint.id);
+    else input.removeAttribute("aria-describedby");
   }
 
-  function lockTicks(): void {
+  /** What the group says follows the draft: the endpoint, and which extras are on. */
+  function syncExtras(): void {
     for (const input of extraList.querySelectorAll<HTMLInputElement>(".trow.server input[type=checkbox]")) lockTick(input);
+    const on = entries().filter((entry) => entry.kind === "extra" && entry.active).map((entry) => entry.name);
+    extraState.textContent =
+      on.length === 0
+        ? "Off. Dictation pastes the live text."
+        : `On: ${on.join(", ")}. The chat model merges ${on.length === 1 ? "its text" : "their texts"} with the live one.`;
+    needsEndpoint.hidden = draft.writing !== null;
   }
 
   function extraRow(entry: ExtraEntry): HTMLElement {
@@ -1235,8 +1251,7 @@ function speech(context: PageContext): HTMLElement[] {
       tick(entry.id, on);
     });
     const tickInput = ticked.field as HTMLInputElement;
-    tickInput.setAttribute("aria-label", `Run ${entry.name}`);
-    lockTick(tickInput);
+    tickInput.setAttribute("aria-label", `Also transcribe with ${entry.name}`);
     const edit = button("Edit", () => {
       openEditor(entry);
     }, "quiet");
@@ -1291,6 +1306,7 @@ function speech(context: PageContext): HTMLElement[] {
     liveList.replaceChildren(...liveChildren);
     extraList.replaceChildren(...extraChildren);
     extraList.hidden = extras.length === 0 && !((editingId !== null && editingExtra) || (editingAdd && editingExtra));
+    syncExtras();
     updateSummary();
   }
   context.live.saved = render;
@@ -1462,7 +1478,7 @@ function speech(context: PageContext): HTMLElement[] {
     openEditor(null, "extra");
   });
   const liveBlock = el("div", { class: "stack wide" }, liveList, problem, el("div", { class: "trow add" }, kindPicker.node, addLive));
-  const extraBlock = el("div", { class: "stack wide" }, extraList, addExtra);
+  const extraBlock = el("div", { class: "stack wide" }, extraState, needsEndpoint, extraList, addExtra);
 
   const writing = draft.writing;
   const writingUrl = controls.text(writing?.url ?? "", () => { syncWriting(); }, { placeholder: "http://127.0.0.1:8000/v1" });
@@ -1500,14 +1516,14 @@ function speech(context: PageContext): HTMLElement[] {
     restorePrompt.disabled = !custom;
     if (!custom && writingInputs.every((input) => input.value.trim() === "") && (draft.writing?.openings ?? []).length === 0) {
       draft.writing = null;
-      lockTicks();
+      syncExtras();
       return;
     }
     const next: WritingSettings = { ...draft.writing, url: urlInput?.value ?? "", model: modelInput?.value ?? "", ...(replaceKey ? { api_key: keyInput?.value ?? "" } : {}) };
     if (custom) next.prompt = promptArea.value;
     else delete next.prompt;
     draft.writing = next;
-    lockTicks();
+    syncExtras();
   }
   restorePrompt.disabled = promptArea.value.trim() === defaultPrompt.trim();
 
@@ -1608,14 +1624,14 @@ function speech(context: PageContext): HTMLElement[] {
     summaryActions,
     row(
       "Speech servers",
-      "One is in use for dictation. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Web conversations use the server's own recognizer.",
+      "The one marked Live shows your words and hears the ending phrases. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Web conversations use the server's own recognizer.",
       liveBlock,
     ),
     wordRow,
     group("Extra recognizers"),
     row(
       "Extra recognizers",
-      "Switched-on extra recognizers transcribe the same capture, and the chat model merges their texts with the live text; if that fails, the live text is pasted. They need the writing model below. Switching one on or off applies at once.",
+      "Each recognizer switched on here also transcribes your dictation. The chat model merges their texts with the live one, and the merged text is pasted. If the merge fails or takes too long, the live text is pasted. Switching one on or off applies at once.",
       extraBlock,
     ),
     group("Writing"),
