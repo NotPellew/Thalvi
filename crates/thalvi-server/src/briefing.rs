@@ -13,6 +13,8 @@ use crate::config::BriefingConfig;
 use crate::recorder::Recorder;
 
 const LATEST_PATH: &str = "/v1/briefings/latest";
+const SEARCH_PATH: &str = "/v1/briefings/search";
+const ITEMS_PATH: &str = "/v1/briefings/items";
 const FRESH_FOR: TimeDelta = TimeDelta::hours(24);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -65,6 +67,8 @@ pub enum FetchError {
     Invalid,
     /// The briefing was generated more than 24 hours ago.
     Stale,
+    /// The source has no such item (status 404).
+    NotFound,
 }
 
 impl FetchError {
@@ -79,6 +83,7 @@ impl FetchError {
         match self {
             Self::Timeout => "timed out",
             Self::Unreachable => "unreachable",
+            Self::NotFound => "not found",
             Self::BadStatus => "bad status",
             Self::TooLarge => "response too large",
             Self::Invalid => "invalid response",
@@ -129,7 +134,7 @@ impl Snapshot {
 /// The authenticated JSON client for the briefing source.
 struct Client {
     http: reqwest::Client,
-    url: String,
+    base_url: String,
     authorization: HeaderValue,
 }
 
@@ -145,25 +150,47 @@ impl Client {
             .map_err(|_| "could not build the briefing client".to_string())?;
         Ok(Self {
             http,
-            url: format!("{}{LATEST_PATH}", config.base_url),
+            base_url: config.base_url.clone(),
             authorization,
         })
     }
 
     async fn fetch(&self) -> Result<Snapshot, FetchError> {
-        tokio::time::timeout(FETCH_TIMEOUT, self.get())
+        let body = self
+            .request(self.http.get(self.url(LATEST_PATH)), FetchError::BadStatus)
+            .await?;
+        Snapshot::parse(&body, Utc::now())
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.base_url)
+    }
+
+    /// Sends one authenticated request and returns its body, within five seconds in all and
+    /// at most 64 KiB. A 404 answer is `missing`.
+    async fn request(
+        &self,
+        request: reqwest::RequestBuilder,
+        missing: FetchError,
+    ) -> Result<Vec<u8>, FetchError> {
+        tokio::time::timeout(FETCH_TIMEOUT, self.exchange(request, missing))
             .await
             .map_err(|_| FetchError::Timeout)?
     }
 
-    async fn get(&self) -> Result<Snapshot, FetchError> {
-        let mut response = self
-            .http
-            .get(&self.url)
+    async fn exchange(
+        &self,
+        request: reqwest::RequestBuilder,
+        missing: FetchError,
+    ) -> Result<Vec<u8>, FetchError> {
+        let mut response = request
             .header(AUTHORIZATION, self.authorization.clone())
             .send()
             .await
             .map_err(|_| FetchError::Unreachable)?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(missing);
+        }
         if !response.status().is_success() {
             return Err(FetchError::BadStatus);
         }
@@ -178,8 +205,23 @@ impl Client {
             }
             body.extend_from_slice(&chunk);
         }
-        Snapshot::parse(&body, Utc::now())
+        Ok(body)
     }
+}
+
+/// Escapes everything but unreserved characters so `value` stays one path segment.
+fn percent_encode(value: &str) -> String {
+    use std::fmt::Write as _;
+    value
+        .bytes()
+        .fold(String::with_capacity(value.len()), |mut out, byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                out.push(char::from(byte));
+            } else {
+                let _ = write!(out, "%{byte:02X}");
+            }
+            out
+        })
 }
 
 /// What a conversation tells the model about the briefing, fixed when it opens.
@@ -266,6 +308,28 @@ impl Briefing {
         fresh.map_or(BriefingContext::Unavailable, BriefingContext::Headlines)
     }
 
+    /// Asks the source for items matching `query`; returns the size-bounded response body.
+    pub(crate) async fn search_body(&self, query: &str) -> Result<Vec<u8>, FetchError> {
+        let request = self
+            .client
+            .http
+            .post(self.client.url(SEARCH_PATH))
+            .json(&json!({ "query": query }));
+        self.client.request(request, FetchError::BadStatus).await
+    }
+
+    /// Asks the source for one item; returns the size-bounded response body. `id` must not be
+    /// `.` or `..`, which URL parsing would resolve away.
+    pub(crate) async fn item_body(&self, id: &str) -> Result<Vec<u8>, FetchError> {
+        let path = format!("{ITEMS_PATH}/{}", percent_encode(id));
+        self.client
+            .request(
+                self.client.http.get(self.client.url(&path)),
+                FetchError::NotFound,
+            )
+            .await
+    }
+
     /// Fetches in the background unless a fetch is already running.
     fn refresh(self: &Arc<Self>) {
         {
@@ -313,176 +377,13 @@ impl Briefing {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::convert::Infallible;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use axum::Router;
-    use axum::body::Body;
-    use axum::extract::State;
-    use axum::http::{HeaderMap, Uri, header};
-    use axum::response::Response;
-    use axum::routing::get;
-    use bytes::Bytes;
-    use chrono::SecondsFormat;
-    use futures_util::StreamExt;
-    use tokio::sync::{Notify, watch};
+    use tokio::sync::Notify;
 
     use super::*;
+    use crate::briefing_fake::{Reply, Source, TOKEN, hours_ago};
     use crate::recorder::{RecordKinds, RecordingConfig, start_recording};
-
-    const TOKEN: &str = "secret-token-1234";
-
-    #[derive(Clone)]
-    struct Reply {
-        status: u16,
-        body: Vec<u8>,
-        hold: Option<Arc<Notify>>,
-        redirect: bool,
-        stall_body: bool,
-        endless_body: bool,
-    }
-
-    impl Reply {
-        fn raw(status: u16, body: impl Into<Vec<u8>>) -> Self {
-            Self {
-                status,
-                body: body.into(),
-                hold: None,
-                redirect: false,
-                stall_body: false,
-                endless_body: false,
-            }
-        }
-
-        fn ok(generated_at: &str, items: &[(&str, &str)]) -> Self {
-            Self::raw(200, briefing_json(generated_at, items))
-        }
-
-        fn hours_ago(hours: i64, items: &[(&str, &str)]) -> Self {
-            Self::ok(&hours_ago(hours), items)
-        }
-
-        fn held_by(mut self, gate: &Arc<Notify>) -> Self {
-            self.hold = Some(Arc::clone(gate));
-            self
-        }
-    }
-
-    fn hours_ago(hours: i64) -> String {
-        (Utc::now() - TimeDelta::hours(hours)).to_rfc3339_opts(SecondsFormat::Secs, true)
-    }
-
-    fn briefing_json(generated_at: &str, items: &[(&str, &str)]) -> String {
-        let items: Vec<_> = items
-            .iter()
-            .map(|(id, headline)| json!({"id": id, "headline": headline}))
-            .collect();
-        json!({"generated_at": generated_at, "items": items}).to_string()
-    }
-
-    struct Seen {
-        uri: String,
-        authorization: Option<String>,
-    }
-
-    struct SourceState {
-        script: Mutex<VecDeque<Reply>>,
-        hits: watch::Sender<usize>,
-        seen: Mutex<Vec<Seen>>,
-    }
-
-    /// A loopback briefing source that plays `script` in order and repeats its last reply.
-    struct Source {
-        config: BriefingConfig,
-        hits: watch::Receiver<usize>,
-        state: Arc<SourceState>,
-    }
-
-    impl Source {
-        async fn start(script: Vec<Reply>) -> Self {
-            let (hits, hits_rx) = watch::channel(0);
-            let state = Arc::new(SourceState {
-                script: Mutex::new(script.into()),
-                hits,
-                seen: Mutex::new(Vec::new()),
-            });
-            let app = Router::new()
-                .route(LATEST_PATH, get(serve))
-                .with_state(Arc::clone(&state));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            Self {
-                config: BriefingConfig {
-                    base_url: format!("http://{addr}"),
-                    token: TOKEN.to_string(),
-                },
-                hits: hits_rx,
-                state,
-            }
-        }
-
-        async fn hits_reach(&mut self, count: usize) {
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                self.hits.wait_for(|hits| *hits >= count),
-            )
-            .await
-            .expect("the source was not asked often enough")
-            .unwrap();
-        }
-
-        fn hits(&self) -> usize {
-            *self.hits.borrow()
-        }
-    }
-
-    async fn serve(
-        State(state): State<Arc<SourceState>>,
-        headers: HeaderMap,
-        uri: Uri,
-    ) -> Response {
-        state.seen.lock().unwrap().push(Seen {
-            uri: uri.to_string(),
-            authorization: headers
-                .get(header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string),
-        });
-        state.hits.send_modify(|hits| *hits += 1);
-        let reply = {
-            let mut script = state.script.lock().unwrap();
-            if script.len() > 1 {
-                script.pop_front()
-            } else {
-                script.front().cloned()
-            }
-            .expect("a script with one reply")
-        };
-        if let Some(gate) = &reply.hold {
-            gate.notified().await;
-        }
-        let builder = Response::builder().status(reply.status);
-        let builder = if reply.redirect {
-            builder.header(header::LOCATION, "http://127.0.0.1:1/elsewhere")
-        } else {
-            builder
-        };
-        let body = if reply.endless_body {
-            Body::from_stream(futures_util::stream::repeat_with(|| {
-                Ok::<_, Infallible>(Bytes::from(vec![b' '; 8192]))
-            }))
-        } else if reply.stall_body {
-            let first = Ok::<_, Infallible>(Bytes::from(reply.body));
-            Body::from_stream(
-                futures_util::stream::iter([first]).chain(futures_util::stream::pending()),
-            )
-        } else {
-            Body::from(reply.body)
-        };
-        builder.body(body).unwrap()
-    }
 
     async fn fetch_one(reply: Reply) -> Result<Snapshot, FetchError> {
         let source = Source::start(vec![reply]).await;

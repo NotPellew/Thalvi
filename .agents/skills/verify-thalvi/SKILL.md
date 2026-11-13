@@ -209,6 +209,8 @@ In fake mode, the fake model's reply depends on the last user turn:
 | `make it fail` | Answers HTTP 500 |
 | `long story` | Streams about 15 s of text, slowly enough to stop or interrupt |
 | `search for <words>` (tools offered) | Calls `search_history` with `<words>`, then reports the tool result |
+| `ask the briefing about <words>` (briefing tools offered) | Calls `search_briefing` with `<words>`, then reports the result |
+| `read the briefing about <words>` (briefing tools offered) | Calls `search_briefing`, then `read_briefing_item` on the first match, then reports the result |
 | anything else | Replies `Fake reply to: <turn>. That is all.` |
 
 With `--local`, these phrases are ordinary questions to a real model. Assert
@@ -259,8 +261,9 @@ Evidence goes in `R/evidence/`, outside the repository. Never commit it.
   of these:
   - model request (`llm_request`: user turn, tools offered, tool results, plan,
     and `messages`, the complete messages the server sent)
-  - briefing source request and answer (`briefing_request`: mode, authorized;
-    `briefing_response`: status)
+  - briefing source request and answer (`briefing_request`: mode, authorized,
+    path; `briefing_response`: status, path; `briefing_aborted`: a held request
+    the server hung up on)
   - cancelled stream (`llm_cancelled`, `tts_cancelled`)
   - speech request (`tts_request`: voice, input)
 

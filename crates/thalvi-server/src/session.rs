@@ -14,6 +14,7 @@ use tokio::time::Instant;
 use tracing::Instrument;
 
 use crate::briefing::{Briefing, BriefingContext};
+use crate::briefing_tools;
 use crate::history::{self, HistoryMatch};
 use crate::model::{ChatEvent, ChatMessage, ChatModel, Role, ToolCall, ToolDefinition, ToolResult};
 use crate::recognizer::{Recognizer, RecognizerEvent, RecognizerFactory, validate_frame};
@@ -58,9 +59,16 @@ struct ReplyContext {
     voice_name: String,
     /// Saved conversations the history tool may search; none for a private conversation.
     past: Option<Arc<SessionStore>>,
-    /// What the model is told about the briefing, fixed when the conversation opened.
-    briefing: BriefingContext,
+    briefing: BriefingAccess,
     session_id: String,
+}
+
+/// What a conversation can reach of the briefing, fixed when it opened: what its model is
+/// told and the source its tools query. A private conversation has neither.
+#[derive(Clone, Default)]
+struct BriefingAccess {
+    context: BriefingContext,
+    source: Option<Arc<Briefing>>,
 }
 
 /// The voices a connection may pick from and the one it starts with.
@@ -83,7 +91,7 @@ impl ReplySettings {
         ack_enabled: bool,
         voices: VoiceChoices,
         past: Option<Arc<SessionStore>>,
-        briefing: BriefingContext,
+        briefing: BriefingAccess,
         session_id: String,
     ) -> Self {
         Self {
@@ -425,7 +433,7 @@ struct Opened<M> {
     history: Vec<ChatMessage>,
     next_turn: u64,
     past: Option<Arc<SessionStore>>,
-    briefing: BriefingContext,
+    briefing: BriefingAccess,
 }
 
 impl<M: ChatModel + 'static> Retention<M> {
@@ -454,7 +462,12 @@ impl<M: ChatModel + 'static> Retention<M> {
                     history,
                     next_turn,
                     past,
-                    briefing: briefing.map_or(BriefingContext::Off, |briefing| briefing.open()),
+                    briefing: BriefingAccess {
+                        context: briefing
+                            .as_ref()
+                            .map_or(BriefingContext::Off, Briefing::open),
+                        source: briefing,
+                    },
                 }
             }
             Self::Private { id } => Opened {
@@ -463,7 +476,7 @@ impl<M: ChatModel + 'static> Retention<M> {
                 history: Vec::new(),
                 next_turn: 0,
                 past: None,
-                briefing: BriefingContext::Off,
+                briefing: BriefingAccess::default(),
             },
         }
     }
@@ -1786,7 +1799,7 @@ async fn send_failed(
 
 /// What one reply's model calls and tool calls need besides the calls themselves.
 struct ToolRun {
-    briefing: BriefingContext,
+    briefing: BriefingAccess,
     past: Option<Arc<SessionStore>>,
     session_id: String,
     recorder: Recorder,
@@ -1852,6 +1865,16 @@ impl Drop for ModelCall<'_> {
     }
 }
 
+/// The tools a reply may call: history search, plus the briefing tools when the conversation
+/// has a briefing source.
+fn offered_tools(run: &ToolRun) -> Vec<ToolDefinition> {
+    let mut definitions = vec![history::tool_definition()];
+    if run.briefing.source.is_some() {
+        definitions.extend(briefing_tools::definitions());
+    }
+    definitions
+}
+
 async fn produce_sentences<M>(
     model: Arc<M>,
     history: Vec<ChatMessage>,
@@ -1865,8 +1888,8 @@ where
     M: ChatModel,
 {
     let (clip, caption) = audio.unzip();
-    let briefing = &tools.briefing;
-    let definitions = [history::tool_definition()];
+    let briefing = &tools.briefing.context;
+    let definitions = offered_tools(&tools);
     let mut results: Vec<ToolResult> = Vec::new();
     let mut splitter = SentenceSplitter::new();
     let mut first_sentence_sent = false;
@@ -1992,6 +2015,11 @@ async fn run_tool_call(
     run: &ToolRun,
     events: &mpsc::Sender<ReplyEvent>,
 ) -> Option<ToolResult> {
+    if briefing_tools::is_briefing_tool(&call.name)
+        && let Some(source) = &run.briefing.source
+    {
+        return run_briefing_call(call, source, run, events).await;
+    }
     let known = call.name == history::tool_definition().name;
     let label = if known {
         SEARCH_LABEL
@@ -2039,6 +2067,85 @@ async fn run_tool_call(
     run.recorder.emit("tool", fields);
     events.send(event).await.ok()?;
     Some(ToolResult { call, content })
+}
+
+/// Records one briefing tool call's metric once: its outcome, or `interrupted` when the reply
+/// is dropped while the source is still being asked.
+struct BriefingToolRecord<'a> {
+    run: &'a ToolRun,
+    tool: &'static str,
+    started: Instant,
+    recorded: bool,
+}
+
+impl BriefingToolRecord<'_> {
+    fn finish(&mut self, outcome: &str, matches: Option<usize>) {
+        if self.recorded {
+            return;
+        }
+        self.recorded = true;
+        let mut fields = json!({
+            "turn": self.run.turn,
+            "tool": self.tool,
+            "total_ms": u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "outcome": outcome,
+        });
+        if let Some(count) = matches {
+            fields["matches"] = json!(count);
+        }
+        self.run.recorder.emit("tool", fields);
+    }
+}
+
+impl Drop for BriefingToolRecord<'_> {
+    fn drop(&mut self) {
+        self.finish("interrupted", None);
+    }
+}
+
+/// Runs one briefing tool call against the source as a task step. A failure becomes a failed
+/// step and a plain result for the model. None when the reply is gone.
+async fn run_briefing_call(
+    call: ToolCall,
+    source: &Briefing,
+    run: &ToolRun,
+    events: &mpsc::Sender<ReplyEvent>,
+) -> Option<ToolResult> {
+    let label = briefing_tools::label(&call.name);
+    let step = |status, detail| {
+        ReplyEvent::Task(TaskStep {
+            id: call.id.clone(),
+            label,
+            status,
+            detail,
+        })
+    };
+    events.send(step(TaskStatus::Running, None)).await.ok()?;
+    let mut record = BriefingToolRecord {
+        run,
+        tool: if call.name == briefing_tools::SEARCH {
+            briefing_tools::SEARCH
+        } else {
+            briefing_tools::READ
+        },
+        started: Instant::now(),
+        recorded: false,
+    };
+    let finished = briefing_tools::run(source, &call).await;
+    record.finish(finished.outcome.as_str(), finished.matches);
+    let status = if finished.outcome.is_failure() {
+        TaskStatus::Failed
+    } else {
+        TaskStatus::Done
+    };
+    events
+        .send(step(status, Some(finished.detail)))
+        .await
+        .ok()?;
+    Some(ToolResult {
+        call,
+        content: finished.content,
+    })
 }
 
 /// True when the guard should discard the answer.
@@ -2825,7 +2932,7 @@ mod tests {
             ack,
             voice_name: "af_heart".to_string(),
             past: Some(Arc::new(store)),
-            briefing: crate::briefing::BriefingContext::Off,
+            briefing: super::BriefingAccess::default(),
             session_id: "unit".to_string(),
         }
     }
@@ -3642,7 +3749,7 @@ mod tests {
                 sentences,
                 Arc::new(AtomicBool::new(false)),
                 super::ToolRun {
-                    briefing: crate::briefing::BriefingContext::Off,
+                    briefing: super::BriefingAccess::default(),
                     past: store,
                     session_id: "unit".to_string(),
                     recorder: recording.recorder.clone(),
