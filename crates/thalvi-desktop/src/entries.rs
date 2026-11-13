@@ -544,7 +544,7 @@ impl RawEntry {
                 ),
                 active,
             ),
-            Self::LegacyServer { .. } if strict => {
+            Self::LegacyServer { .. } => {
                 return Err(fields(&name, "this speech server kind was removed."));
             }
             Self::OnDevice { active, model, .. } => live(
