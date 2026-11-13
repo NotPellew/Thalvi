@@ -251,9 +251,10 @@ areas your change touches. Editing rules are in
 - **Commit checks run on `pull_request`.** They need only read access, and
   changes to them take effect in the PR that makes them. Rejected:
   `pull_request_target`, which runs the base branch's workflow definition.
-- **Releases wait for approval.** `publish` runs in a `release` environment only the developer can approve.
-  Why: agent tokens can push tags, and a tag builds and publishes to users. Rejected: a tag ruleset (the token
-  acts as the developer, so any bypass for the developer also lets agents through).
+- **Releases wait for approval.** `publish` runs in a `release` environment only the developer can approve. `verified` is only
+  a pointer. A release checks the GitHub API for a successful heavy run on its commit and refuses otherwise; a development build
+  (`X.Y.Z-dev.N`) needs only a commit on `main` and the approval. Why: agent tokens can push tags, and a tag builds and publishes
+  to users. Rejected: a tag ruleset (the token acts as the developer, so any bypass for the developer also lets agents through).
 - **The approved `publish` job signs for the updater.** It signs the downloaded packages with `tauri signer sign`
   after an `--ignore-scripts` install, checks each signature against the committed public key, and writes `latest.json`.
   Why: the key in the `release` environment never reaches a job that runs build scripts. Rejected: signing inside
@@ -262,12 +263,15 @@ areas your change touches. Editing rules are in
   history in CI and staged changes in a hook. Why: nothing else watched Rust advisories, the binaries link
   every crate, and on a public repo a pushed secret has leaked. Rejected: bans (nothing to ban), flagging
   unmaintained transitive crates (no upgrade exists), a hook that refuses when gitleaks is missing.
-- **Rust caches are saved only on `main`.** CI runs on pushes to `main` and saves the Rust caches there; PRs,
+- **Rust caches are saved only on `main`.** The heavy tier runs on pushes to `main` and saves the Rust caches there; PRs,
   and mutation runs on the Linux one, only read them. Why: a PR can read only its own and its base branch's caches,
   so per-PR copies left every new PR cold and filled the 10 GB limit. Rejected: saving on every PR.
-- **Mutation testing advises on the diff.** cargo-mutants reports survivors in a PR's changed Rust as
-  annotations, on Linux; locally it runs only when an issue asks, `--in-diff` against the base (13 Nov 2026). Why: it found
-  real gaps but can't tell them from equivalent mutants, and 250 local runs wrote 577 GiB in 4.5 hours.
+- **PRs run what changed; `main` runs everything.** A PR runs the steps its paths affect, and anything unmapped
+  runs all; `heavy.yml` runs every gate plus mutants on `main`, nightly and on request. Why: PRs get a fast answer,
+  and a slip past detection is caught on `main` with the commits since `verified`. Rejected: mutants on every PR.
+- **Mutation testing advises on the diff.** cargo-mutants reports survivors in the Rust changed since the last
+  verified commit, in the heavy tier, on Linux; locally it runs only when an issue asks, `--in-diff` against the base (13 Nov 2026).
+  Why: it found real gaps but can't tell them from equivalent mutants, and 250 local runs wrote 577 GiB in 4.5 hours.
   Rejected: a required gate, whole-workspace runs (3,197 mutants, about 18 hours on a CI runner), Windows runs, local runs by default.
 - **Property tests only where event order is the rule.** Today only the hold hook. Why: it found what tables
   missed there; on streaming and capture code it found nothing tables wouldn't. Rejected: properties everywhere.

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Prints the units the changes from BASE to HEAD affect, space-separated, or
+# `all` when any change can affect everything or the diff can't be read.
+# Units: server desktop app desktop-ui web speech issues.
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+  echo "usage: $0 BASE HEAD" >&2
+  exit 2
+fi
+
+if [[ $(git rev-parse --is-shallow-repository) == true ]] ||
+  ! files=$(git diff --name-only "$1...$2") || [[ -z $files ]]; then
+  echo all
+  exit 0
+fi
+
+units=()
+while IFS= read -r file; do
+  case $file in
+    crates/thalvi-server/*) units+=(server) ;;
+    crates/thalvi-desktop/*) units+=(desktop app) ;;
+    crates/thalvi-app/ui/*) units+=(desktop-ui) ;;
+    crates/thalvi-app/src/*) units+=(app) ;;
+    web/*) units+=(web) ;;
+    speech/* | compose.yaml) units+=(speech) ;;
+    .github/scripts/issue-refs*) units+=(issues) ;;
+    *)
+      echo all
+      exit 0
+      ;;
+  esac
+done <<< "$files"
+
+for unit in server desktop app desktop-ui web speech issues; do
+  if [[ " ${units[*]} " == *" $unit "* ]]; then echo "$unit"; fi
+done | paste -sd ' '

@@ -26,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      actions: read
       contents: read
     outputs:
       version: ${{ steps.build.outputs.version }}
@@ -55,12 +56,28 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-      # main only receives commits through PRs whose required checks passed.
+      # main only receives commits through PRs whose required checks passed. A release also needs a full green heavy run
+      # on its commit; only those run the `verified` job, and the tag itself is ignored.
       - id: commit
-        name: Require a commit from main
+        name: Require a commit from main, and for a release its green heavy run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ steps.build.outputs.prerelease }}
         run: |
           sha=$(git rev-parse HEAD)
           git merge-base --is-ancestor "$sha" origin/main || { echo "::error::$sha is not on main"; exit 1; }
+          if [[ $PRERELEASE == false ]]; then
+            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/heavy.yml/runs?head_sha=$sha&branch=main&status=success&per_page=100" --jq '.workflow_runs[].id')
+            green=
+            for run in $runs; do
+              if [[ $(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs" --jq '[.jobs[] | select(.name == "verified" and .conclusion == "success")] | length') -gt 0 ]]; then
+                green=$run
+                break
+              fi
+            done
+            [[ -n $green ]] || { echo "::error::$sha has no green full heavy run on main; wait for one or run Heavy on main"; exit 1; }
+            echo "Heavy run $green passed on $sha."
+          fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
   package:

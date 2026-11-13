@@ -34,23 +34,41 @@ node_checks() {
   in_dir "$dir" npm run build
 }
 
+# TESTS (cargo package arguments, or `none`) and BUNDLE=false narrow a gate to what a change affects.
+tests() {
+  local packages=${TESTS:-$1}
+  if [[ $packages == none ]]; then
+    echo "SKIPPED cargo test: no tested crate changed"
+  else
+    # shellcheck disable=SC2086 # cargo package arguments
+    step cargo test $packages --locked
+  fi
+}
+
+bundle() {
+  if [[ ${BUNDLE:-true} == false ]]; then
+    echo "SKIPPED the $1 package: the app is unchanged"
+  else
+    in_dir crates/thalvi-app "${@:2}" npm exec --prefix ui -- tauri build --bundles "$1" -- --locked
+  fi
+}
+
 gate_server() {
   desktop_ui
   step cargo fmt --all -- --check
   step cargo lint
-  step cargo test --workspace --locked
+  tests --workspace
   RUSTDOCFLAGS="-D warnings" step cargo docs
   # linuxdeploy looks for libwebgpu_dawn.so, which the build links into the target folder, on this path.
-  in_dir crates/thalvi-app env LD_LIBRARY_PATH="${CARGO_TARGET_DIR:-$PWD/target}/release" \
-    npm exec --prefix ui -- tauri build --bundles appimage -- --locked
+  bundle appimage env LD_LIBRARY_PATH="${CARGO_TARGET_DIR:-$PWD/target}/release"
 }
 
 gate_desktop_windows() {
   desktop_ui
   step cargo fmt --all -- --check
   step cargo lint
-  step cargo test -p thalvi-desktop -p thalvi-app --locked
-  in_dir crates/thalvi-app npm exec --prefix ui -- tauri build --bundles nsis -- --locked
+  tests "-p thalvi-desktop -p thalvi-app"
+  bundle nsis
 }
 
 gate_web() {
@@ -70,8 +88,10 @@ gate_speech() {
 }
 
 gate_issue_sync() {
-  step "${SHELLCHECK[@]}" .github/scripts/gates .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh
+  step "${SHELLCHECK[@]}" .github/scripts/gates .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh \
+    .github/scripts/changed .github/scripts/changed.test.sh
   step .github/scripts/issue-refs.test.sh
+  step .github/scripts/changed.test.sh
 }
 
 gate_release() {

@@ -133,15 +133,20 @@ Two required checks are not in the script:
   --verbose --log-opts=HEAD .` on the full history. With gitleaks on `PATH`, the
   pre-commit hook scans what is staged.
 
-One more check runs on PRs that change Rust but advises rather than gates:
-`cargo mutants --in-place --in-diff <diff>` (cargo-mutants 27.1.0,
-`.cargo/mutants.toml`). A surviving mutant is an annotation: add the missing test,
-or judge it equivalent and record that in `.cargo/mutants.toml` with a one-line
-reason. The check stays green with survivors, so count them from each shard's
-"M missed" log line; a shard that couldn't test (failing baseline, time limit)
-fails. Run it locally only when the issue explicitly asks for mutation testing,
-and then only `--in-diff` against the base, with no desktop session and a
-throwaway `HOME`, since it runs tests against deliberately broken code.
+On a PR, CI runs only the steps its changed paths affect
+(`.github/scripts/changed`); the job names stay, so required checks still
+report. `.github/workflows/heavy.yml` runs every gate on each push to `main`,
+nightly and on request, plus mutation testing, which advises rather than gates:
+`cargo mutants --in-place --in-diff <diff>` over the Rust changed since the
+`verified` tag (cargo-mutants 27.1.0, `.cargo/mutants.toml`). Survivors are
+listed in the run summary: add the missing test, or judge the mutant equivalent
+and record that in `.cargo/mutants.toml` with a one-line reason. A shard that
+couldn't test (failing baseline, time limit) or had a mutant time out fails the
+run. A green full run
+moves `verified`; a failed one opens or updates the `ci-regression` issue.
+Run it locally only when the issue explicitly asks for mutation testing, and then
+only `--in-diff` against the base, with no desktop session and a throwaway `HOME`,
+since it runs tests against deliberately broken code.
 
 ## Git and PRs
 
@@ -161,7 +166,8 @@ throwaway `HOME`, since it runs tests against deliberately broken code.
   created through CLI tools; preserve its headings and remove instructional
   comments.
 - Label every issue `area:desktop` or `area:conversation`, plus `windows`
-  when Windows behaviour is involved.
+  when Windows behaviour is involved. `ready` marks an issue the dispatcher
+  can take; `ci-regression` marks the one the heavy tier files.
 - When opening an issue, use the matching form in `.github/ISSUE_TEMPLATE/`.
   For CLI-created issues, use its field labels as Markdown headings. Blank
   issues remain available for cases neither form fits; issues are optional.
