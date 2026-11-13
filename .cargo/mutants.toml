@@ -58,22 +58,22 @@ exclude_re = [
     "replace != with == in Overlaying::settle",
     # The looks' decoration (frame, shadows, mesh, glows, shine, the wave's strands, how fast the bars ease) is judged in screenshots of the real app; the tests pin what the overlay shows, not each pixel.
     "crates/thalvi-app/src/overlay/(module|neon).rs.*(\\b(background|accents|trapezoid|closed|shade|hexes|glow|halo|rule|button_face|shine|draw_wave|shadow|Neon::draw)\\b|:\\d+:\\d+: replace [-+*/%<>=!&|]+ with [-+*/%<>=!&|]+$)",
-    # Where neon's bars and dot, the module looks' bottom line and neon's pill parts land is judged in screenshots; tests pin that the bars follow the voice and the line shrinks with the countdown.
-    "crates/thalvi-app/src/overlay/(module|neon).rs:\\d+:\\d+: replace [-+*/%<>=!&|]+ with [-+*/%<>=!&|]+ in (Neon::marks|line_strip|Neon::pill)$",
+    # Where neon's bars and dot, the module looks' bottom line, neon's pill parts and its card's padding land is judged in screenshots; tests pin that the bars follow the voice, the line shrinks with the countdown and the card's ending, caret, scrolling and bar.
+    "crates/thalvi-app/src/overlay/(module|neon).rs:\\d+:\\d+: replace [-+*/%<>=!&|]+ with [-+*/%<>=!&|]+ in (Neon::marks|line_strip|Neon::pill|card)$",
+    # The neon dot's pulse and ring and the bars fading while working are judged in screenshots; tests pin each tone's dot and bar colours.
+    "delete match arm Tone::Working in Neon::marks",
+    "delete ! in Neon::marks",
     # Equivalent: with no fade width, x / 0.0 is infinite (NaN at the edge) and .min(1.0) makes either 1.
     "replace > with >= in fade_at",
     # The wave's strand shape is judged in screenshots, like the strands; tests pin where new and old sound sit.
     "crates/thalvi-app/src/overlay/view.rs:\\d+:\\d+: replace [-+*/%<>=!&|]+ with [-+*/%<>=!&|]+ in Wave::amplitude$",
     "delete - in Wave::amplitude",
-    # Equivalent: tiny-skia's defaults are the values set (butt caps, anti-aliasing); they are spelled out for the reader.
-    "delete field (line_cap|anti_alias) from struct",
     # Equivalent: the shaping cache's bound only changes how much shaping is kept, never what is drawn.
     "replace >= with < in Text::shape",
     # Equivalent: they differ only for a float exactly at the threshold, or when both sides are equal and nothing changes.
     "replace < with <= in Wave::settled",
     "replace > with >= in Wave::step",
     "replace > with >= in ticker",
-    "replace < with <= in Module::draw",
     # Reads the process environment, which a test cannot set (unsafe_code is denied); the socket path it joins is tested through Events::connect.
     "delete ! in Events::system",
     # The updater's Tauri wiring, tray lines and commands run only inside the app; the driver and marker they carry are tested in update.rs.
