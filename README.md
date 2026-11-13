@@ -292,7 +292,8 @@ server; add a server to use one. **Live dictation** uses exactly one of them, an
 capture, and a capture already running keeps its recognizer. At the top of
 Live dictation, **Next dictation** names the entry (and, on this computer, the
 model) that will handle the next dictation and whether it is ready. The entry
-in use is marked **In use** and has no **Use** button. IDs and addresses are
+in use is the live recognizer, marked **Live**: it shows your words and hears the
+ending phrases, and it has no **Use** button. IDs and addresses are
 under each entry's collapsed **Details**. The kinds are:
 
 - **Realtime speech server:** a recognizer that speaks Meta's realtime ASR
@@ -356,7 +357,9 @@ under OpenMDW-1.1, exported to ONNX by Thalvi. Parakeet is NVIDIA's
 default) are OpenAI-style or Meta transcription APIs that hear each accepted capture
 besides the recognizer you chose. That one stays live: it shows the words, hears
 the ending phrases and decides what happens to the text (paste, submit, task,
-write). Every extra transcribes the same capture, and the chat model of **Writing**
+write). Each extra has a switch labelled "Also transcribe with" its name and says where
+its audio goes ("Audio goes to" the address's host), and the group says "Off. Dictation
+pastes the live text." until one is on, then which are on. Every extra transcribes the same capture, and the chat model of **Writing**
 (same `url`, `model` and key, its own fixed prompt) merges the live text and the
 extras' texts into one, choosing between what the recognizers heard; the overlay says
 "Merging…" meanwhile, and cancel works as ever. The merged text is pasted only if
@@ -367,7 +370,8 @@ pasted and the overlay says why. An extra that answers too late is left out of t
 merge and still recorded, in the capture's `text.txt` and the metrics. "Write that
 out" and the write key write out the merged text, with a second chat call.
 Extras can be switched on only while Writing has an endpoint, and the endpoint
-cannot be removed while one is on. Switching one off keeps its address and key.
+cannot be removed while one is on; without one, the group says so and **Go to the
+endpoint setting** moves to it. Switching one off keeps its address and key.
 An extra is stored as an entry of kind `extra`; an old `second_pass` entry loads as
 one, and is written as `extra` the next time the settings are saved.
 
