@@ -1,15 +1,15 @@
 name: Desktop release
 
-# A desktop-vX.Y.Z tag on main publishes a release; a push to development publishes a
+# A desktop-vX.Y.Z tag on main publishes a release; a push to main publishes a
 # development build (X.Y.Z-dev.N prerelease). Both publish only after the release environment's approval.
 on:
   push:
-    branches: [development]
+    branches: [main]
     tags: ["desktop-v*", "!desktop-v*-dev.*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to release, such as desktop-v0.1.0; leave empty on development for a development build
+        description: Existing tag to release, such as desktop-v0.1.0; leave empty on main for a development build
         required: false
 
 permissions:
@@ -46,25 +46,21 @@ jobs:
           if [[ -n $TAG ]]; then
             [[ "$TAG" =~ ^desktop-v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || { echo "::error::$TAG is not a desktop-vX.Y.Z tag"; exit 1; }
             [ "$version" = "${BASH_REMATCH[1]}" ] || { echo "::error::$TAG does not match the app version $version in Cargo.toml"; exit 1; }
-            echo "branch=main" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           else
-            [ "$GITHUB_REF" = refs/heads/development ] || { echo "::error::Development builds come from development, not $GITHUB_REF; to release, give a desktop-vX.Y.Z tag"; exit 1; }
+            [ "$GITHUB_REF" = refs/heads/main ] || { echo "::error::Development builds come from main, not $GITHUB_REF; to release, give a desktop-vX.Y.Z tag"; exit 1; }
             version="$version-dev.$GITHUB_RUN_NUMBER"
             TAG="desktop-v$version"
-            echo "branch=development" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-      # main and development only receive commits through PRs whose required checks passed.
+      # main only receives commits through PRs whose required checks passed.
       - id: commit
-        name: Require a commit from ${{ steps.build.outputs.branch }}
-        env:
-          BRANCH: ${{ steps.build.outputs.branch }}
+        name: Require a commit from main
         run: |
           sha=$(git rev-parse HEAD)
-          git merge-base --is-ancestor "$sha" "origin/$BRANCH" || { echo "::error::$sha is not on $BRANCH"; exit 1; }
+          git merge-base --is-ancestor "$sha" origin/main || { echo "::error::$sha is not on main"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
   package:
