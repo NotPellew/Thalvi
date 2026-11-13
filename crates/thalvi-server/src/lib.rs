@@ -1,6 +1,7 @@
 //! Thalvi voice-loop server: sessions, recognizer, model, and speech.
 
 pub mod api;
+pub mod briefing;
 pub mod config;
 pub mod heard;
 pub mod history;
