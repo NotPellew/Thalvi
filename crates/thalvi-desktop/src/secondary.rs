@@ -159,9 +159,12 @@ impl TryFrom<RawSecondaryStt> for SecondaryStt {
     }
 }
 
-/// A two-letter ISO 639-1 language code, kept lower-case.
+/// Every assigned ISO 639-1 code.
+const ISO_639_1: &str = "aa ab ae af ak am an ar as av ay az ba be bg bi bm bn bo br bs ca ce ch co cr cs cu cv cy da de dv dz ee el en eo es et eu fa ff fi fj fo fr fy ga gd gl gn gu gv ha he hi ho hr ht hu hy hz ia id ie ig ii ik io is it iu ja jv ka kg ki kj kk kl km kn ko kr ks ku kv kw ky la lb lg li ln lo lt lu lv mg mh mi mk ml mn mr ms mt my na nb nd ne ng nl nn no nr nv ny oc oj om or os pa pi pl ps pt qu rm rn ro ru rw sa sc sd se sg si sk sl sm sn so sq sr ss st su sv sw ta te tg th ti tk tl tn to tr ts tt tw ty ug uk ur uz ve vi vo wa wo xh yi yo za zh zu";
+
+/// An assigned two-letter ISO 639-1 language code, kept lower-case.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Language([char; 2]);
+pub struct Language(&'static str);
 
 /// Why a language was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -172,25 +175,23 @@ impl Language {
     /// `text` as a language code, or none when it is blank.
     ///
     /// # Errors
-    /// Fails unless `text` is blank or exactly two ASCII letters.
+    /// Fails unless `text` is blank or an assigned ISO 639-1 code, in any case.
     pub fn parse(text: &str) -> Result<Option<Self>, LanguageError> {
         let text = text.trim();
         if text.is_empty() {
             return Ok(None);
         }
-        let mut letters = text.chars();
-        match (letters.next(), letters.next(), letters.next()) {
-            (Some(a), Some(b), None) if a.is_ascii_alphabetic() && b.is_ascii_alphabetic() => {
-                Ok(Some(Self([a.to_ascii_lowercase(), b.to_ascii_lowercase()])))
-            }
-            _ => Err(LanguageError),
-        }
+        ISO_639_1
+            .split(' ')
+            .find(|code| code.eq_ignore_ascii_case(text))
+            .map(|code| Some(Self(code)))
+            .ok_or(LanguageError)
     }
 }
 
 impl fmt::Display for Language {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", self.0[0], self.0[1])
+        f.write_str(self.0)
     }
 }
 

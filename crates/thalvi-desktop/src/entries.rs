@@ -947,7 +947,7 @@ mod tests {
                 "{what}"
             );
         }
-        for bad in ["deu", "d1", "e", "é", "d e"] {
+        for bad in ["deu", "d1", "e", "é", "d e", "zz"] {
             assert_eq!(
                 check(&entry(json!({"language": bad}))),
                 Err("Speech server \"ASR\": the language must be a two-letter ISO 639-1 code such as de, or empty.".to_owned()),
