@@ -6,11 +6,15 @@ use tokio::sync::{Notify, mpsc};
 use crate::{
     frame::Frame,
     metrics::{Event, Metrics},
-    recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession},
+    recognizer::{
+        Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
+        TranscriptionFailure,
+    },
     secondary::{SecondaryStt, transcribe_events},
 };
 
 pub struct OpenAiRecognizer {
+    speech: SpeechSource,
     settings: SecondaryStt,
     client: reqwest::Client,
     metrics: Metrics,
@@ -19,12 +23,14 @@ pub struct OpenAiRecognizer {
 impl OpenAiRecognizer {
     #[must_use]
     pub fn new(
-        _name: &str,
+        name: &str,
         settings: SecondaryStt,
         client: reqwest::Client,
         metrics: Metrics,
     ) -> Self {
+        let speech = SpeechSource::direct(name, settings.address().to_owned());
         Self {
+            speech,
             settings,
             client,
             metrics,
@@ -33,6 +39,7 @@ impl OpenAiRecognizer {
 }
 
 pub struct OpenAiSession {
+    speech: SpeechSource,
     settings: SecondaryStt,
     frames: Vec<Frame>,
     finished: bool,
@@ -56,6 +63,7 @@ impl Recognizer for OpenAiRecognizer {
     async fn connect(&self) -> Result<Self::Session, RecognizerError> {
         let (sender, events) = mpsc::unbounded_channel();
         Ok(OpenAiSession {
+            speech: self.speech.clone(),
             settings: self.settings.clone(),
             frames: Vec::new(),
             finished: false,
@@ -103,6 +111,7 @@ impl RecognizerSession for OpenAiSession {
         if !self.started {
             self.started = true;
             let client = self.client.clone();
+            let speech = self.speech.clone();
             let settings = self.settings.clone();
             let frames = self.frames.clone();
             let metrics = self.metrics.clone();
@@ -158,15 +167,38 @@ impl RecognizerSession for OpenAiSession {
                         let _ = sender.send(Ok(RecognizerEvent::Final(text)));
                     }
                     Err(error) => {
-                        let message = match error {
-                        crate::secondary::SecondaryError::Timeout => "The speech server took too long to transcribe this capture. Nothing was delivered.".to_owned(),
-                        crate::secondary::SecondaryError::Unreachable => "Thalvi could not reach the speech server. Nothing was delivered.".to_owned(),
-                        crate::secondary::SecondaryError::Status(code) => format!("The speech server returned HTTP {code}. Nothing was delivered."),
-                        crate::secondary::SecondaryError::BadResponse => "The speech server returned an unreadable transcription. Nothing was delivered.".to_owned(),
+                        let (failure, message) = match error {
+                            crate::secondary::SecondaryError::Timeout => (
+                                TranscriptionFailure::Timeout,
+                                format!(
+                                    "{} took too long to transcribe this capture. Nothing was delivered. Check the address and API key under Settings → Speech.",
+                                    speech.subject()
+                                ),
+                            ),
+                            crate::secondary::SecondaryError::Unreachable => (
+                                TranscriptionFailure::Unreachable,
+                                format!(
+                                    "{} could not be reached. Nothing was delivered. Check the address and API key under Settings → Speech.",
+                                    speech.subject()
+                                ),
+                            ),
+                            crate::secondary::SecondaryError::Status(code) => (
+                                TranscriptionFailure::HttpStatus,
+                                format!(
+                                    "{} returned HTTP {code}. Nothing was delivered. Check the address and API key under Settings → Speech.",
+                                    speech.subject()
+                                ),
+                            ),
+                            crate::secondary::SecondaryError::BadResponse => (
+                                TranscriptionFailure::BadReply,
+                                format!(
+                                    "{} returned an unreadable transcription. Nothing was delivered. Check the address and API key under Settings → Speech.",
+                                    speech.subject()
+                                ),
+                            ),
                         };
-                        let _ = sender.send(Err(RecognizerError::said(format!(
-                            "{message} Check the address and API key under Settings → Speech."
-                        ))));
+                        let _ =
+                            sender.send(Err(RecognizerError::Transcription { failure, message }));
                     }
                 }
             }));

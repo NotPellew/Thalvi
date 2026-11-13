@@ -24,6 +24,7 @@ use thalvi_desktop::openai_live::OpenAiRecognizer;
 use thalvi_desktop::phrases::WordList;
 use thalvi_desktop::recognizer::Upsampler;
 use thalvi_desktop::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
+use thalvi_desktop::report::UserError;
 use thalvi_desktop::secondary::{
     SecondaryApi, SecondaryError, SecondaryStt, SecondarySttError, transcribe,
 };
@@ -407,6 +408,7 @@ async fn a_failed_capture_reports_plainly_and_the_next_capture_can_succeed() {
         .await
         .expect("the failed request returns an event")
         .expect_err("server failure is shown");
+    assert_eq!(failure.headline(), "Speech server error — Settings");
     assert!(failure.to_string().contains("HTTP 500"));
 
     let mut next = recognizer.connect().await.expect("next capture session");
@@ -450,11 +452,8 @@ async fn an_unreachable_or_slow_live_endpoint_says_what_failed() {
         .await
         .expect("the unreachable endpoint returns an error")
         .expect_err("endpoint is down");
-    assert!(
-        failure
-            .to_string()
-            .contains("could not reach the speech server")
-    );
+    assert_eq!(failure.headline(), "Can't reach speech server — Settings");
+    assert!(failure.to_string().contains("could not be reached"));
 
     let app = Router::new().fallback(std::future::pending::<()>);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -477,7 +476,29 @@ async fn an_unreachable_or_slow_live_endpoint_says_what_failed() {
         .await
         .expect("the slow endpoint returns its bounded deadline")
         .expect_err("request deadline");
+    assert_eq!(failure.headline(), "Speech server timed out — Settings");
     assert!(failure.to_string().contains("took too long to transcribe"));
+}
+
+#[tokio::test]
+async fn a_malformed_live_reply_has_the_bad_reply_headline_and_full_message() {
+    let (url, _) = serve(200, "not json").await;
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        settings(&url, SecondaryApi::OpenAi, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut session = recognizer.connect().await.expect("connected");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    let failure = tokio::time::timeout(Duration::from_secs(5), session.next_event())
+        .await
+        .expect("the malformed reply returns an error")
+        .expect_err("malformed response");
+    assert_eq!(failure.headline(), "Bad speech server reply — Settings");
+    assert!(failure.to_string().contains("unreadable transcription"));
+    assert!(failure.to_string().contains("Nothing was delivered"));
 }
 
 fn ramp(index: usize) -> Frame {

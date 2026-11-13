@@ -151,6 +151,19 @@ impl ConnectFailure {
 #[error("{0}")]
 pub struct Detail(pub String);
 
+/// What kind of OpenAI-compatible transcription failure the user needs to fix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptionFailure {
+    /// The endpoint could not be reached.
+    Unreachable,
+    /// The endpoint did not answer before the request deadline.
+    Timeout,
+    /// The endpoint rejected the request with an HTTP error status.
+    HttpStatus,
+    /// The endpoint replied with a body that did not match its transcription API.
+    BadReply,
+}
+
 /// A failure the user can be told about in plain words; `Display` says what failed, why and
 /// what to do, naming the entry.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -179,6 +192,12 @@ pub enum RecognizerError {
         speech: SpeechSource,
         message: String,
     },
+    /// A transcription endpoint failed; the full message accompanies a short classified headline.
+    #[error("{message}")]
+    Transcription {
+        failure: TranscriptionFailure,
+        message: String,
+    },
     /// A speech model that could not be provided; the headline is the model error's own.
     #[error("{message}")]
     Model {
@@ -198,6 +217,12 @@ impl UserError for RecognizerError {
             Self::NotUnderstood { .. } => "Bad speech server reply — Settings",
             Self::Model { headline, .. } => headline,
             Self::Reported { .. } | Self::Said(_) => "Speech recognition failed — Settings",
+            Self::Transcription { failure, .. } => match failure {
+                TranscriptionFailure::Unreachable => "Can't reach speech server — Settings",
+                TranscriptionFailure::Timeout => "Speech server timed out — Settings",
+                TranscriptionFailure::HttpStatus => "Speech server error — Settings",
+                TranscriptionFailure::BadReply => "Bad speech server reply — Settings",
+            },
         }
     }
 }
