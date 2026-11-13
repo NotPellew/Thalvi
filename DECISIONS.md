@@ -251,10 +251,10 @@ areas your change touches. Editing rules are in
 - **Commit checks run on `pull_request`.** They need only read access, and
   changes to them take effect in the PR that makes them. Rejected:
   `pull_request_target`, which runs the base branch's workflow definition.
-- **Releases wait for approval.** `publish` runs in a `release` environment only the developer can approve. `verified` is
-  only a pointer. A release checks the GitHub API for a successful heavy run on its commit and refuses otherwise. Why: agent
-  tokens can push tags, and a tag builds and publishes to users. Rejected: a tag ruleset (the token acts as the developer,
-  so any bypass for the developer also lets agents through).
+- **Releases wait for approval.** `publish` runs in a `release` environment only the developer can approve. `verified` is only
+  a pointer. A release checks the GitHub API for a successful heavy run on its commit and refuses otherwise; a development build
+  (`X.Y.Z-dev.N`) needs only a commit on `main` and the approval. Why: agent tokens can push tags, and a tag builds and publishes
+  to users. Rejected: a tag ruleset (the token acts as the developer, so any bypass for the developer also lets agents through).
 - **The approved `publish` job signs for the updater.** It signs the downloaded packages with `tauri signer sign`
   after an `--ignore-scripts` install, checks each signature against the committed public key, and writes `latest.json`.
   Why: the key in the `release` environment never reaches a job that runs build scripts. Rejected: signing inside

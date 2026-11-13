@@ -141,7 +141,8 @@ nightly and on request, plus mutation testing, which advises rather than gates:
 `verified` tag (cargo-mutants 27.1.0, `.cargo/mutants.toml`). Survivors are
 listed in the run summary: add the missing test, or judge the mutant equivalent
 and record that in `.cargo/mutants.toml` with a one-line reason. A shard that
-couldn't test (failing baseline, time limit) fails the run. A green full run
+couldn't test (failing baseline, time limit) or had a mutant time out fails the
+run. A green full run
 moves `verified`; a failed one opens or updates the `ci-regression` issue.
 Locally, run mutants with no desktop session and a throwaway `HOME`, since it
 runs tests against deliberately broken code.
