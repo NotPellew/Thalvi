@@ -2166,6 +2166,15 @@ const SKIPS: &[Skip] = &[
         extra_metric: ("ok", false),
     },
     Skip {
+        name: "the chat model answers with punctuation only",
+        extra: Reply::After(100, A),
+        chat: Chat::Stream(says!("...")),
+        waited: 100,
+        notice: "Merge skipped: the chat model returned no text. Used the live text.",
+        outcome: "error",
+        extra_metric: ("ok", false),
+    },
+    Skip {
         name: "the chat model uses a word no recognizer heard",
         extra: Reply::After(100, A),
         chat: Chat::Stream(says!("Live A wörds")),
@@ -2322,21 +2331,23 @@ async fn nothing_is_uploaded_merged_or_shown_while_no_extra_is_switched_on() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn cancelling_while_merging_delivers_nothing_and_records_every_call_as_cancelled() {
+async fn cancelling_while_merging_delivers_nothing_and_records_the_unfinished_calls_as_cancelled() {
     LocalSet::new()
         .run_until(async {
-            for (name, extra, chat_reply, cancel_at) in [
+            for (name, extra, chat_reply, cancel_at, extra_outcome) in [
                 (
                     "while waiting for the extras",
                     Reply::Stall,
                     Chat::Stall,
                     1000,
+                    "cancelled",
                 ),
                 (
                     "while the chat model works",
                     Reply::After(100, A),
                     Chat::Stall,
                     1000,
+                    "ok",
                 ),
             ] {
                 let dir = record_dir("cancel");
@@ -2377,7 +2388,7 @@ async fn cancelling_while_merging_delivers_nothing_and_records_every_call_as_can
                 assert!(rig.gate.is_enabled(), "{name}");
                 assert_eq!(rig.notices().len(), 0, "{name}");
                 assert_eq!(merge_event(&dir)["outcome"], "cancelled", "{name}");
-                extras_were(&extra_metrics(&dir), &[("A", "cancelled", false)]);
+                extras_were(&extra_metrics(&dir), &[("A", extra_outcome, false)]);
             }
         })
         .await;

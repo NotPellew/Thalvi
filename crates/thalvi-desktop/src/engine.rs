@@ -2315,7 +2315,8 @@ where
         }
     }
 
-    /// Records every extra and the merge as cancelled; nothing is delivered.
+    /// Records the extras that had answered as they did, the others and the merge as cancelled;
+    /// nothing is delivered.
     fn merge_cancelled(
         &self,
         merging: &Merging,
@@ -2323,8 +2324,11 @@ where
         started: Instant,
         text: String,
     ) -> CaptureOutcome {
-        for entry in &merging.extras {
-            self.record_extra(entry, "cancelled", started.elapsed(), false);
+        for (entry, slot) in merging.extras.iter().zip(slots) {
+            match slot {
+                Some(judged) => self.record_answer(judged, false),
+                None => self.record_extra(entry, "cancelled", started.elapsed(), false),
+            }
         }
         let heard = slots
             .iter()
@@ -2382,7 +2386,7 @@ where
             why,
             chat: Some(asked.elapsed()),
         };
-        if text.is_empty() {
+        if !has_words(text) {
             skipped(Skipped::Failed(WritingError::Empty))
         } else if !merge::faithful(inputs, text) {
             skipped(Skipped::Unfaithful)
