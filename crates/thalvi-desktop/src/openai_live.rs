@@ -38,7 +38,7 @@ impl OpenAiRecognizer {
     }
 }
 
-fn failure(speech: &SpeechSource, error: SecondaryError) -> RecognizerError {
+fn failure(speech: &SpeechSource, error: &SecondaryError) -> RecognizerError {
     let subject = speech.subject();
     let (failure, message) = match error {
         SecondaryError::Timeout => (
@@ -198,7 +198,7 @@ impl RecognizerSession for OpenAiSession {
                         let _ = sender.send(Ok(RecognizerEvent::Final(text)));
                     }
                     Err(error) => {
-                        let _ = sender.send(Err(failure(&speech, error)));
+                        let _ = sender.send(Err(failure(&speech, &error)));
                     }
                 }
             }));
