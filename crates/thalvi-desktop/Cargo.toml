@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
 cpal.workspace = true
 dirs.workspace = true

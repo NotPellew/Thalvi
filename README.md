@@ -289,7 +289,10 @@ under each entry's collapsed **Details**. The kinds are:
   (address, model, API key).
 - **OpenAI-compatible:** sends each capture to an OpenAI-compatible
   `/v1/audio/transcriptions` endpoint when you release the dictation key. A
-  wake-word capture ends after a pause in speech (address, model, API key).
+  wake-word capture ends after a pause in speech (address, model, API key). Set
+  **Request** to Chat with audio for a server that takes the recording only on
+  `/v1/chat/completions` (no streaming); set **Language** to a two-letter code
+  such as `de` to stop the server guessing it.
 - **On this computer:** dictates without the server or a network; the default.
   Use **Show models for** to filter the list of models (each model recognizes the
   languages on its card), then pick a model.

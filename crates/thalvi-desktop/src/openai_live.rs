@@ -10,28 +10,23 @@ use crate::{
         Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
         TranscriptionFailure,
     },
-    secondary::{SecondaryError, SecondaryStt, transcribe_events},
+    secondary::{OpenAiLive, SecondaryError, transcribe_events},
 };
 
 pub struct OpenAiRecognizer {
     speech: SpeechSource,
-    settings: SecondaryStt,
+    live: OpenAiLive,
     client: reqwest::Client,
     metrics: Metrics,
 }
 
 impl OpenAiRecognizer {
     #[must_use]
-    pub fn new(
-        name: &str,
-        settings: SecondaryStt,
-        client: reqwest::Client,
-        metrics: Metrics,
-    ) -> Self {
-        let speech = SpeechSource::direct(name, settings.address().to_owned());
+    pub fn new(name: &str, live: OpenAiLive, client: reqwest::Client, metrics: Metrics) -> Self {
+        let speech = SpeechSource::direct(name, live.settings.address().to_owned());
         Self {
             speech,
-            settings,
+            live,
             client,
             metrics,
         }
@@ -71,7 +66,7 @@ fn failure(speech: &SpeechSource, error: &SecondaryError) -> RecognizerError {
 
 pub struct OpenAiSession {
     speech: SpeechSource,
-    settings: SecondaryStt,
+    live: OpenAiLive,
     frames: Vec<Frame>,
     finished: bool,
     client: reqwest::Client,
@@ -95,7 +90,7 @@ impl Recognizer for OpenAiRecognizer {
         let (sender, events) = mpsc::unbounded_channel();
         Ok(OpenAiSession {
             speech: self.speech.clone(),
-            settings: self.settings.clone(),
+            live: self.live.clone(),
             frames: Vec::new(),
             finished: false,
             client: self.client.clone(),
@@ -143,7 +138,7 @@ impl RecognizerSession for OpenAiSession {
             self.started = true;
             let client = self.client.clone();
             let speech = self.speech.clone();
-            let settings = self.settings.clone();
+            let live = self.live.clone();
             let frames = self.frames.clone();
             let metrics = self.metrics.clone();
             let released_at = self.released_at.unwrap_or_else(Instant::now);
@@ -156,7 +151,7 @@ impl RecognizerSession for OpenAiSession {
                 let started = Instant::now();
                 let mut first_text = true;
                 let mut deltas = 0_u32;
-                let result = transcribe_events(&client, &settings, &frames, |event| {
+                let result = transcribe_events(&client, &live, &frames, |event| {
                     if matches!(event, RecognizerEvent::Partial(_)) {
                         deltas = deltas.saturating_add(1);
                         metrics.metric(Event::LiveSttDelta, "ok", None, serde_json::json!({}));
@@ -183,7 +178,11 @@ impl RecognizerSession for OpenAiSession {
                     Event::LiveStt,
                     outcome,
                     Some(started.elapsed()),
-                    serde_json::json!({"model": settings.model(), "deltas": deltas}),
+                    serde_json::json!({
+                        "model": live.settings.model(),
+                        "request": live.request.name(),
+                        "deltas": deltas,
+                    }),
                 );
                 match result {
                     Ok(text) => {

@@ -29,7 +29,7 @@ pub enum Chosen {
 /// An open recognition of any kind.
 pub enum ChosenSession {
     Realtime(Box<RealtimeSession>),
-    OpenAi(OpenAiSession),
+    OpenAi(Box<OpenAiSession>),
     Local(LocalSession, SpeechSource),
 }
 
@@ -49,9 +49,9 @@ impl Chosen {
             LiveKind::Realtime(realtime) => {
                 Self::Realtime(RealtimeRecognizer::new(&entry.name, realtime, phrases))
             }
-            LiveKind::OpenAi(settings) => Self::OpenAi(OpenAiRecognizer::new(
+            LiveKind::OpenAi(live) => Self::OpenAi(OpenAiRecognizer::new(
                 &entry.name,
-                settings.clone(),
+                live.clone(),
                 http,
                 metrics.clone(),
             )),
@@ -96,7 +96,10 @@ impl Recognizer for Chosen {
                 .connect()
                 .await
                 .map(|session| ChosenSession::Realtime(Box::new(session))),
-            Self::OpenAi(recognizer) => recognizer.connect().await.map(ChosenSession::OpenAi),
+            Self::OpenAi(recognizer) => recognizer
+                .connect()
+                .await
+                .map(|session| ChosenSession::OpenAi(Box::new(session))),
             Self::Local { recognizer, speech } => recognizer
                 .connect()
                 .await
