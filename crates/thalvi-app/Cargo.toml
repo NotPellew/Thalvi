@@ -16,6 +16,8 @@ path = "src/main.rs"
 tauri-build.workspace = true
 
 [dependencies]
+cosmic-text.workspace = true
+tiny-skia.workspace = true
 dirs.workspace = true
 reqwest.workspace = true
 semver.workspace = true

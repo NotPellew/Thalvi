@@ -2,7 +2,6 @@
 
 mod toolkit;
 
-pub use self::toolkit::keep_unfocused;
 use self::toolkit::{Gtk, Toolkit};
 
 use std::fmt;
@@ -62,6 +61,15 @@ impl<R: CommandRunner, T: Toolkit> Gnome<R, T> {
             .map(|_| ())
             .map_err(|error| tool(&error))
     }
+
+    /// The top of the work area, below the panel, in logical pixels; the app runs on the X11
+    /// backend here, where a window can be placed below it.
+    ///
+    /// # Errors
+    /// Why the work area could not be read.
+    pub(super) fn overlay_top(&self) -> Result<f64, HostError> {
+        self.toolkit.work_area_top()
+    }
 }
 
 impl<R: CommandRunner, T: Toolkit> Host for Gnome<R, T> {
@@ -117,11 +125,6 @@ impl<R: CommandRunner, T: Toolkit> Host for Gnome<R, T> {
 
     fn open_folder(&self, path: &Path) -> Result<(), HostError> {
         self.gio_open(&path.to_string_lossy())
-    }
-
-    // The app runs on the X11 backend here, where a window can be placed below the panel.
-    fn prepare_overlay(&self, _width: f64, _height: f64) -> Result<f64, HostError> {
-        self.toolkit.work_area_top()
     }
 }
 
@@ -179,6 +182,12 @@ mod tests {
     }
 
     #[test]
+    fn the_overlay_hangs_below_the_top_panel() {
+        let host = host(|_, _| Ok(String::new()));
+        assert_eq!(host.overlay_top(), Ok(32.0));
+    }
+
+    #[test]
     fn dictation_waits_on_the_clipboard_without_any_key_or_focus_command() {
         let host = host(|_, _| Ok(String::new()));
         assert_eq!(host.capture_target(), Ok(Clipboard));
@@ -208,7 +217,7 @@ mod tests {
     #[test]
     fn the_overlay_goes_below_the_panel_at_the_work_areas_top() {
         let host = host(|_, _| Ok(String::new()));
-        assert_eq!(host.prepare_overlay(460.0, 200.0), Ok(32.0));
+        assert_eq!(host.overlay_top(), Ok(32.0));
     }
 
     #[test]

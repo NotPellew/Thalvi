@@ -32,6 +32,9 @@ gtk.workspace = true
 ort = { workspace = true, features = ["webgpu", "api-24", "copy-dylibs"] }
 nix.workspace = true
 rustix.workspace = true
+smithay-client-toolkit.workspace = true
+wayland-client.workspace = true
+x11rb.workspace = true
 xkbcommon.workspace = true
 
 [target.'cfg(windows)'.dependencies]

@@ -98,6 +98,8 @@ The Wake words switch (#377) skips `Engine::scan`'s wake scoring when off (`wake
 view's `wake_words` only picks the status word. `Requests`, `drive`, `Runner::capture`, `Settling::settle`
 and every mapped engine function are unchanged, and no await, control drain or delivery admission was added,
 so the model is unchanged and only the `runner.rs` and `engine.rs` hashes moved.
+The CPU-drawn overlay (#384) drops `prepare_overlay` from the host interface, which removes it from `runner.rs`'s
+test host only; no mapped function changed, so only the hash moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

@@ -62,9 +62,6 @@ impl Host for RecordingHost {
         self.called("open_folder");
         Ok(())
     }
-    fn prepare_overlay(&self, _: f64, _: f64) -> Result<f64, HostError> {
-        Ok(0.0)
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

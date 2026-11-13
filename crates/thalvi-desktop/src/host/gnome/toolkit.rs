@@ -1,10 +1,9 @@
-//! GNOME's use of the app's own GTK (the X11 backend): the clipboard, the work area and the overlay window's hints, all on the GTK main thread.
+//! GNOME's use of the app's own GTK (the X11 backend): the clipboard and the work area, all on the GTK main thread.
 
 use std::sync::mpsc;
 use std::time::Duration;
 
 use gtk::glib::MainContext;
-use gtk::prelude::GtkWindowExt;
 use gtk::{gdk, gdk::prelude::MonitorExt};
 
 use crate::host::HostError;
@@ -67,17 +66,6 @@ impl Toolkit for Gtk {
         })
         .unwrap_or_else(|()| Err(unanswered()))
     }
-}
-
-/// Keeps a window from ever taking focus and puts it above others, out of the taskbar and pager.
-/// Call before the window first appears: Mutter decides focus when it maps.
-pub fn keep_unfocused(window: &gtk::ApplicationWindow) {
-    window.set_accept_focus(false);
-    window.set_focus_on_map(false);
-    window.set_keep_above(true);
-    window.set_skip_taskbar_hint(true);
-    window.set_skip_pager_hint(true);
-    window.set_type_hint(gdk::WindowTypeHint::Notification);
 }
 
 /// Runs `work` on `context`'s thread and waits up to `limit` for what it returns; `Err(())` when

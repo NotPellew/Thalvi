@@ -98,8 +98,8 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   with class `unavailable` (not running yet), then `loading`; repeat it under a
   bounded loop until the class is neither, open Settings, then wait for its window in
   `$H hypr $R clients` before sending keys.
-- The overlay and Settings share the window class `thalvi-desktop`, so a `class:`
-  selector can move the overlay instead. Select Settings by its title.
+- The overlay is a layer surface (`$H hypr $R layers` lists `Thalvi overlay`), not
+  a window, so `$H hypr $R clients` shows only Settings.
 - A screenshot right after a key can show the previous frame. Wait for the change
   to appear before keeping it as evidence.
 - There is no pointer, so Settings is keyboard-driven. The first `Tab` focuses the
@@ -111,7 +111,7 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   page needs about ten `Shift+Tab` presses from the sidebar to reach Save.
 - A long page scrolls inside its own pane: focus a field in the page and press
   `Next` (Page Down) to scroll it, `Home` to return.
-- The overlay is a pill hanging at the top centre of the screen. Move the
+- The overlay hangs at the top centre of the screen, above windows. Move the
   Settings window away from it (`movewindowpixel`) or float it small, and look at
   frames, not the log: a log line and a visible notice differ by a frame or two.
   A download that fails at once (a refused connection) never shows its notice

@@ -25,11 +25,6 @@ export function tauriBackend(): Backend {
         listener(event.payload);
       });
     },
-    onSettingsSaved: (listener) => {
-      void listen("thalvi://settings", () => {
-        listener();
-      });
-    },
     onSettingsChangedElsewhere: (listener) => {
       void listen("thalvi://settings-elsewhere", () => {
         listener();
@@ -38,8 +33,6 @@ export function tauriBackend(): Backend {
     getSettings: () => invoke<Settings>("get_settings"),
     saveSettings: (settings) => invoke<undefined>("save_settings", { settings }),
     setListening: (on) => invoke<undefined>("set_listening", { on }),
-    cancelCapture: () => invoke<undefined>("cancel_capture"),
-    overlayTakesClicks: () => invoke<boolean>("overlay_takes_clicks"),
     dismissError: () => invoke<undefined>("dismiss_error"),
     copyReport: (message, causes) => invoke<undefined>("copy_report", { message, causes }),
     listMicrophones: () => invoke<string[]>("list_microphones"),

@@ -13,8 +13,8 @@ use xkbcommon::xkb::{self, Keycode, Keysym};
 
 use super::command::{CommandError, CommandRunner, SystemRunner, tool, wl_copy};
 use super::{
-    App, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, OVERLAY_TITLE, PasteText,
-    Shortcut, WebUrl,
+    App, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, PasteText, Shortcut,
+    WebUrl,
 };
 use crate::hold::{HoldChange, HoldKey, HoldKind};
 use hold_binds::{Events, Installed};
@@ -114,7 +114,6 @@ const BROWSERS: [(&str, &str); 6] = [
 
 const NO_FOCUSED_WINDOW: &str = "The desktop did not identify the focused window.";
 const INVALID_WINDOW_LIST: &str = "The desktop returned an invalid window list.";
-const INVALID_MONITOR_LIST: &str = "The desktop returned an invalid monitor list.";
 const NOTHING_TYPED: &str = " Nothing was pasted.";
 const ENTER_FAILED: &str = "The text was pasted, but Thalvi may not have pressed Enter. Check the window before trying again.";
 
@@ -148,15 +147,6 @@ impl Row {
             },
         ))
     }
-}
-
-/// One monitor as `hyprctl -j monitors` prints it.
-#[derive(Deserialize)]
-struct Monitor {
-    #[serde(default)]
-    focused: bool,
-    /// Space panels reserve, in logical pixels, in the order left, top, right, bottom.
-    reserved: [i64; 4],
 }
 
 /// The keyboard as `hyprctl -j devices` prints it: the names its keymap is compiled from.
@@ -504,50 +494,6 @@ impl<R: CommandRunner> Host for Hyprland<R> {
             .run("xdg-open", &[&path.to_string_lossy()], None)
             .map(|_| ())
             .map_err(|error| tool(&error))
-    }
-
-    fn prepare_overlay(&self, width: f64, height: f64) -> Result<f64, HostError> {
-        let monitors: Vec<Monitor> = serde_json::from_str(&self.json("monitors")?)
-            .map_err(|_| HostError::NothingTyped(INVALID_MONITOR_LIST.to_owned()))?;
-        let top = monitors
-            .iter()
-            .find(|monitor| monitor.focused)
-            .or(monitors.first())
-            .map_or(0, |monitor| monitor.reserved[1].max(0));
-        // Named rules can be restored after a config reload without accumulating one per capture.
-        let rules = [
-            ("match:title", format!("^({OVERLAY_TITLE})$")),
-            ("float", "on".to_owned()),
-            ("pin", "on".to_owned()),
-            ("no_initial_focus", "on".to_owned()),
-            ("no_focus", "on".to_owned()),
-            ("size", format!("{width} {height}")),
-            ("move", format!("((monitor_w*0.5)-({width}*0.5)) {top}")),
-            ("border_size", "0".to_owned()),
-            ("no_shadow", "on".to_owned()),
-            ("no_anim", "on".to_owned()),
-            ("no_blur", "on".to_owned()),
-        ];
-        let batch = rules
-            .iter()
-            .map(|(name, value)| format!("keyword windowrule[thalvi-overlay]:{name} {value}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        let response = self
-            .run
-            .run("hyprctl", &["--batch", &batch], None)
-            .map_err(|error| tool(&error))?;
-        let replies: Vec<_> = response
-            .lines()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-        if replies.len() != rules.len() || replies.iter().any(|reply| *reply != "ok") {
-            return Err(HostError::NothingTyped(
-                "The desktop could not prepare the status overlay.".to_owned(),
-            ));
-        }
-        Ok(f64::from(i32::try_from(top).unwrap_or(0)))
     }
 }
 
@@ -1228,92 +1174,6 @@ mod tests {
                 "Desktop tool xdg-open is not installed.".to_owned()
             ))
         );
-    }
-
-    #[test]
-    fn the_overlay_window_is_pinned_below_the_panel_without_taking_focus() {
-        let monitor = |focused: bool, top: i64| {
-            format!(r#"{{"name": "M", "focused": {focused}, "reserved": [0, {top}, 0, 0]}}"#)
-        };
-        let cases = [
-            ("no panel", format!("[{}]", monitor(true, 0)), 0),
-            ("a 40 px bar", format!("[{}]", monitor(true, 40)), 40),
-            (
-                "the focused monitor's bar, not another's",
-                format!("[{}, {}]", monitor(false, 0), monitor(true, 40)),
-                40,
-            ),
-        ];
-        for (name, monitors, top) in cases {
-            let ready = host(move |argv, _| {
-                Ok(if argv.iter().any(|arg| arg == "monitors") {
-                    monitors.clone()
-                } else {
-                    "ok\n\n".repeat(11)
-                })
-            });
-            assert_eq!(
-                ready.prepare_overlay(460.0, 200.0),
-                Ok(f64::from(top)),
-                "{name}"
-            );
-            assert_eq!(
-                commands(&ready),
-                [
-                    "hyprctl -j monitors".to_owned(),
-                    format!(
-                        "hyprctl --batch \
-                         keyword windowrule[thalvi-overlay]:match:title ^(Thalvi overlay)$; \
-                         keyword windowrule[thalvi-overlay]:float on; \
-                         keyword windowrule[thalvi-overlay]:pin on; \
-                         keyword windowrule[thalvi-overlay]:no_initial_focus on; \
-                         keyword windowrule[thalvi-overlay]:no_focus on; \
-                         keyword windowrule[thalvi-overlay]:size 460 200; \
-                         keyword windowrule[thalvi-overlay]:move ((monitor_w*0.5)-(460*0.5)) {top}; \
-                         keyword windowrule[thalvi-overlay]:border_size 0; \
-                         keyword windowrule[thalvi-overlay]:no_shadow on; \
-                         keyword windowrule[thalvi-overlay]:no_anim on; \
-                         keyword windowrule[thalvi-overlay]:no_blur on"
-                    )
-                ],
-                "{name}"
-            );
-        }
-
-        let garbled = host(|_, _| Ok("not json".to_owned()));
-        assert_eq!(
-            garbled.prepare_overlay(460.0, 200.0),
-            Err(HostError::NothingTyped(
-                "The desktop returned an invalid monitor list.".to_owned()
-            ))
-        );
-        let missing = host(|_, _| Err(CommandError::NotInstalled("hyprctl".to_owned())));
-        assert_eq!(
-            missing.prepare_overlay(460.0, 200.0),
-            Err(HostError::Unsupported(
-                "Desktop tool hyprctl is not installed.".to_owned()
-            ))
-        );
-
-        for reply in [
-            String::new(),
-            "ok\n".repeat(10),
-            format!("{}invalid field\n", "ok\n".repeat(10)),
-        ] {
-            let rejected = host(move |argv, _| {
-                Ok(if argv.iter().any(|arg| arg == "monitors") {
-                    "[]".to_owned()
-                } else {
-                    reply.clone()
-                })
-            });
-            assert_eq!(
-                rejected.prepare_overlay(460.0, 200.0),
-                Err(HostError::NothingTyped(
-                    "The desktop could not prepare the status overlay.".to_owned()
-                ))
-            );
-        }
     }
 
     #[test]
