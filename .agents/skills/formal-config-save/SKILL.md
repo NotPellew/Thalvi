@@ -162,10 +162,7 @@ current output.
 1. Read the diff and the commit messages since the sync commit for every covered
    file. Follow new writers of the config file or of `AppState::config`, and any
    lock or queue added around them. A shared atomic-write helper does not make a
-   writer of another file a config writer; check the target path. At this sync,
-   commits `2a6556a` and `32f7665` add an update-channel form setting and an
-   updater marker at `update.json`; only the form setting uses the modeled
-   Settings writer.
+   writer of another file a config writer; check the target path.
 2. Update the model from the code **before** running TLC. A fix that serializes
    the writers changes the faithful configuration, for example by setting
    `Serialized = TRUE` if one lock spans the read, the file write and the apply.
