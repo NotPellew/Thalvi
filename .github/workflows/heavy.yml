@@ -1,0 +1,205 @@
+name: Heavy
+
+# Every gate with no path detection, plus mutation testing over the Rust changed since the
+# `verified` tag. A green full run on main moves `verified`; a failed one files a ci-regression issue.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Narrow tests and mutants to one crate or UI package; a scoped run never moves verified
+        type: choice
+        default: all
+        options: [all, thalvi-app, thalvi-asr, thalvi-desktop, thalvi-server, web, desktop-ui]
+
+run-name: ${{ inputs.scope && inputs.scope != 'all' && format('Heavy, scoped to {0} (verified unchanged)', inputs.scope) || github.event.head_commit.message || 'Heavy' }}
+
+# A run waiting here is replaced by a newer one, so pushes during a run coalesce into one more run.
+concurrency:
+  group: heavy-${{ github.ref_name }}-${{ inputs.scope || 'all' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  SCOPE: ${{ inputs.scope || 'all' }}
+
+jobs:
+  start:
+    name: start
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      base: ${{ steps.range.outputs.base }}
+      superseded: ${{ steps.range.outputs.superseded }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: range
+        run: |
+          superseded=false
+          if [[ $GITHUB_EVENT_NAME == push && $(git ls-remote origin "$GITHUB_REF" | cut -f1) != "$GITHUB_SHA" ]]; then
+            superseded=true
+            echo "A newer push to $GITHUB_REF_NAME will test this commit too, so this run skips." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          # The first run has no verified tag, so it tests the change that just landed.
+          if base=$(git rev-parse -q --verify 'refs/tags/verified^{commit}') && git merge-base --is-ancestor "$base" "$GITHUB_SHA"; then
+            echo "Testing the commits since verified ($base)." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            base=$(git rev-parse "$GITHUB_SHA^")
+            echo "No verified tag below $GITHUB_SHA, so this run tests the commits since its parent $base." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: ci
+    needs: start
+    if: needs.start.outputs.superseded == 'false'
+    uses: ./.github/workflows/ci.yml
+    with:
+      scope: ${{ inputs.scope || 'all' }}
+
+  mutants:
+    name: mutants (${{ matrix.shard }})
+    needs: start
+    if: needs.start.outputs.superseded == 'false' && (inputs.scope || 'all') != 'web' && (inputs.scope || 'all') != 'desktop-ui'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: diff
+        env:
+          BASE: ${{ needs.start.outputs.base }}
+        run: |
+          git diff "$BASE" "$GITHUB_SHA" -- '*.rs' > "$RUNNER_TEMP/changed.diff"
+          if [[ -s $RUNNER_TEMP/changed.diff ]]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+            echo "No Rust changed since $BASE, so shard ${{ matrix.shard }} has no mutants to test."
+          fi
+      - if: steps.diff.outputs.rust == 'true'
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, respects rust-toolchain.toml
+      - if: steps.diff.outputs.rust == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: linux
+          save-if: false
+      - if: steps.diff.outputs.rust == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/thalvi/test-models
+          key: spotter-models-${{ runner.os }}-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
+      - if: steps.diff.outputs.rust == 'true'
+        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-mutants@27.1.0
+      - if: steps.diff.outputs.rust == 'true'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+      - if: steps.diff.outputs.rust == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/thalvi-app/ui/package-lock.json
+      - if: steps.diff.outputs.rust == 'true'
+        run: npm ci --prefix crates/thalvi-app/ui && npm run build --prefix crates/thalvi-app/ui
+      - if: steps.diff.outputs.rust == 'true'
+        timeout-minutes: 60
+        run: |
+          # Bound mutants that allocate forever before their test timeout.
+          ulimit -c 0
+          ulimit -v 4194304
+          packages=()
+          if [[ $SCOPE != all ]]; then packages=(--package "$SCOPE"); fi
+          status=0
+          cargo mutants --in-place --colors never --in-diff "$RUNNER_TEMP/changed.diff" "${packages[@]}" --shard ${{ matrix.shard }}/8 || status=$?
+          {
+            for outcome in missed timeout; do
+              if [[ -s mutants.out/$outcome.txt ]]; then
+                echo "### Shard ${{ matrix.shard }}: $(wc -l < "mutants.out/$outcome.txt") $outcome"
+                sed 's/^/- /' "mutants.out/$outcome.txt"
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Missed mutants (2) and mutant timeouts (3) only advise; anything else, such as a failing baseline (4), means the shard tested nothing.
+          case "$status" in
+            0|2|3) ;;
+            *) echo "::error::cargo mutants exited with $status, so this shard's results can't be trusted."; exit "$status" ;;
+          esac
+      - if: always() && steps.diff.outputs.rust == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-${{ matrix.shard }}
+          path: mutants.out/
+          retention-days: 7
+
+  verified:
+    name: verified
+    needs: [start, ci, mutants]
+    if: github.ref == 'refs/heads/main' && (inputs.scope || 'all') == 'all' && needs.ci.result == 'success' && needs.mutants.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: move verified forward to this commit
+        run: |
+          current=$(git ls-remote origin refs/tags/verified | cut -f1)
+          if [[ -n $current ]] && ! git merge-base --is-ancestor "$current" "$GITHUB_SHA"; then
+            echo "verified is at $current, which is newer than $GITHUB_SHA, so it stays." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            git push --force origin "$GITHUB_SHA:refs/tags/verified"
+            echo "verified now points at $GITHUB_SHA." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  report:
+    name: report
+    needs: [start, ci, mutants]
+    if: failure() && github.ref == 'refs/heads/main' && (inputs.scope || 'all') == 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: open or update the ci-regression issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BASE: ${{ needs.start.outputs.base }}
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          failed=$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" \
+            --jq '.jobs[] | select(.conclusion == "failure") | "- " + .name')
+          # shellcheck disable=SC2016 # Markdown backticks
+          body=$(printf '%s failed on `main` at %s.\n\nFailed jobs:\n%s\n\nCommits since `verified`:\n```\n%s\n```\n' \
+            "$run_url" "$GITHUB_SHA" "$failed" "$(git log --oneline "${BASE:-$GITHUB_SHA^}..$GITHUB_SHA")")
+          issue=$(gh issue list --label ci-regression --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [[ -n $issue ]]; then
+            gh issue comment "$issue" --body "$body"
+          else
+            gh issue create --title "CI regression on main" --label ready --label ci-regression --body "$body"
+          fi
