@@ -5,7 +5,7 @@ use std::f32::consts::{PI, TAU};
 use std::time::Duration;
 
 use super::paint::{Canvas, Fill, Layout, Rgba, Style, TRANSPARENT, Text, TextBounds};
-use super::view::{FRAME, HEIGHT, Line, Tone, View, WAVE_H, WAVE_W, WIDTH, done_message};
+use super::view::{FRAME, HEIGHT, Line, Tone, View, WAVE_H, WAVE_W, WIDTH, done_message, spaced};
 use crate::status::Status;
 
 const MODULE_W: f32 = 370.0;
@@ -144,7 +144,7 @@ impl Module {
             );
         } else if has_text {
             rule(canvas);
-            ticker(canvas, text, &view.line, view.clock % 1.0 < 0.5);
+            ticker(canvas, text, &view.line, view.caret_on());
         }
         if view.cancellable() {
             cancel_button(canvas, text, self.finish);
@@ -545,20 +545,12 @@ fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool) {
             partial,
             caret,
         } => {
-            let gap = if committed.is_empty() || partial.is_empty() {
-                ""
-            } else {
-                " "
-            };
-            let committed = format!("{committed}{gap}");
+            let committed = spaced(committed, partial);
             let spans = [(committed.as_str(), INK), (partial.as_str(), QUIET)];
             let (used, _) = text.measure(&spans, style, Layout::Line, scale);
-            let long = used + 3.0 > width;
-            let start = if long {
-                left + width - used - 3.0
-            } else {
-                left
-            };
+            // A line too long to fit ends 3 points short of the right edge, leaving room for the caret.
+            let start = (right - 3.0 - used).min(left);
+            let long = start < left;
             canvas.set_text_bounds(Some(TextBounds {
                 left,
                 right,

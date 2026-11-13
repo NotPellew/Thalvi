@@ -341,6 +341,11 @@ impl View {
             )
     }
 
+    /// Whether a blinking caret shows now: for the first half of every second.
+    pub(super) fn caret_on(&self) -> bool {
+        self.clock % 1.0 < 0.5
+    }
+
     pub fn animating(&self) -> bool {
         self.wave.is_some() || self.countdown.is_some() || self.sweep
     }
@@ -376,6 +381,15 @@ pub(super) fn copies_text(route: CaptureRoute, copies: bool) -> bool {
 }
 
 /// The action, its target, and whole seconds rounded up.
+/// The committed words with the space that parts them from the partial, when both have words.
+pub(super) fn spaced(committed: &str, partial: &str) -> String {
+    if committed.is_empty() || partial.is_empty() {
+        committed.to_owned()
+    } else {
+        format!("{committed} ")
+    }
+}
+
 pub(super) fn countdown_label(countdown: &Countdown, left_ms: u64) -> String {
     let seconds = left_ms.div_ceil(1000).max(1);
     let to = countdown.target.as_deref().map(|target| {

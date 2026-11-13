@@ -6,7 +6,7 @@ use std::f32::consts::PI;
 use thalvi_desktop::capture::CaptureRoute;
 
 use super::paint::{Canvas, Fill, Layout, Rgba, Style, Text};
-use super::view::{Tone, View, WIDTH, copies_text, done_message};
+use super::view::{Tone, View, WIDTH, copies_text, done_message, spaced};
 use crate::status::Status;
 
 /// Space around the pill and the card inside the overlay.
@@ -464,12 +464,7 @@ fn card(
     } else {
         colors.fg
     };
-    let gap = if words.committed.is_empty() || words.partial.is_empty() {
-        ""
-    } else {
-        " "
-    };
-    let committed = format!("{}{gap}", words.committed);
+    let committed = spaced(&words.committed, &words.partial);
     let spans = [
         (committed.as_str(), committed_color),
         (words.partial.as_str(), colors.muted),
@@ -520,7 +515,7 @@ fn card(
             (x + 4.0, last_top),
         );
     }
-    if words.caret && view.clock % 1.0 < 0.5 {
+    if words.caret && view.caret_on() {
         canvas.rect(
             (
                 text_left + last + 1.0,

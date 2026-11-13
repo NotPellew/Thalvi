@@ -17,8 +17,8 @@ use cosmic_text::{
 };
 use thalvi_desktop::host::OverlayFrame;
 use tiny_skia::{
-    Color, FillRule, GradientStop, LineCap, LinearGradient, Mask, Paint, PathBuilder, Pixmap,
-    PixmapPaint, Point, Shader, SpreadMode, Stroke, Transform,
+    Color, FillRule, GradientStop, LinearGradient, Mask, Paint, PathBuilder, Pixmap, PixmapPaint,
+    Point, Shader, SpreadMode, Stroke, Transform,
 };
 
 /// Shaped lines kept for reuse; the overlay shows a handful at a time.
@@ -85,7 +85,6 @@ impl Fill<'_> {
         };
         Paint {
             shader,
-            anti_alias: true,
             ..Paint::default()
         }
     }
@@ -178,9 +177,9 @@ impl Canvas {
         let Some(path) = polyline(points, false) else {
             return;
         };
+        // tiny-skia's default caps are the square-cut ends.
         let stroke = Stroke {
             width,
-            line_cap: LineCap::Butt,
             ..Stroke::default()
         };
         let transform = self.transform();
@@ -354,8 +353,9 @@ fn polyline(points: &[(f32, f32)], close: bool) -> Option<tiny_skia::Path> {
 fn rounded(left: f32, top: f32, width: f32, height: f32, radius: f32) -> Option<tiny_skia::Path> {
     let (right, bottom) = (left + width, top + height);
     let corner = radius.min(width / 2.0).min(height / 2.0);
+    let start = (left + corner, top);
     let mut path = PathBuilder::new();
-    path.move_to(left + corner, top);
+    path.move_to(start.0, start.1);
     path.line_to(right - corner, top);
     path.quad_to(right, top, right, top + corner);
     path.line_to(right, bottom - corner);
@@ -363,7 +363,7 @@ fn rounded(left: f32, top: f32, width: f32, height: f32, radius: f32) -> Option<
     path.line_to(left + corner, bottom);
     path.quad_to(left, bottom, left, bottom - corner);
     path.line_to(left, top + corner);
-    path.quad_to(left, top, left + corner, top);
+    path.quad_to(left, top, start.0, start.1);
     path.close();
     path.finish()
 }
