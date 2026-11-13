@@ -30,6 +30,11 @@ jobs:
         run: |
           status=0
           refs() { .github/scripts/issue-refs.sh "$1" "$GH_REPO"; }
+          reopen() {
+            local pr
+            pr=$(gh api "repos/$GH_REPO/issues/$1" --jq '.pull_request != null') &&
+              if [[ $pr == false ]]; then gh issue reopen "$1" --comment "$2"; fi
+          }
           prs=
           for sha in $COMMITS; do
             if ! found=$(gh api "repos/$GH_REPO/commits/$sha/pulls" \
@@ -56,10 +61,7 @@ jobs:
               fi
               closes=$(refs closes <<< "$reverted_body")
               for number in $closes; do
-                pr=$(gh api "repos/$GH_REPO/issues/$number" --jq '.pull_request != null') &&
-                  if [[ $pr == false ]]; then
-                    gh issue reopen "$number" --comment "Reopened by #$PR, which reverted #$reverted out of \`main\`."
-                  fi ||
+                reopen "$number" "Reopened by #$PR, which reverted #$reverted out of \`main\`." ||
                   { echo "::error::could not reopen #$number"; status=1; }
               done
             done
