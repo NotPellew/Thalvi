@@ -34,10 +34,9 @@ areas your change touches. Editing rules are in
   5.8–6.6% word errors on the developer's takes (Meta-free, en/de/es), fits next to TTS on an 8 GB
   RTX 2080. Rejected: Voxtral 4B Realtime (too big), Nemotron 3.5 streaming (15%), Qwen3-ASR (2 s chunks).
 - **The desktop connects to its recognizer itself, from a list of speech servers.** `stt.entries` holds realtime
-  ASR, OpenAI-compatible buffered transcription, on-device and second-pass entries; one live entry is active,
-  ticked second passes run in list order and the first that answers wins; `STT_URL` stays for web conversations. Why:
-  switch recognizers with one click,
-  no `.env` edit or restart. Rejected: one setting per recognizer, a silent fallback between entries, several live entries (#228).
+  ASR, OpenAI-compatible buffered transcription, on-device and extra entries; one live entry is active, and every extra switched on
+  feeds the chat-model merge; `STT_URL` stays for web conversations. Why: switch recognizers with one click, no `.env` edit or
+  restart, and no ranking to manage. Rejected: one setting per recognizer, a silent fallback between entries, several live entries, ranking extras, a first-answer-wins fallback (#228).
 - **A fresh install recognizes on this computer.** With no `stt.entries` the one active entry is On this computer
   with Nemotron Streaming; the first start writes the defaults, opens Settings on Speech and downloads the model.
   Why: the packaged app ships no server. Rejected: a setup wizard, waiting for a click before downloading.
@@ -138,10 +137,7 @@ areas your change touches. Editing rules are in
   Rejected: two wtype calls, a delay per application.
 - **Musical earcons.** Five two- or three-note cues (wake, provisional ending, cancelled, accepted, error), each switchable under `cues` in the desktop config; the mic drops frames while a cue plays.
   Why: distinct contours tell capture state apart without looking, and the mic never hears them. Rejected: one beep for every state, and a post-delivery cue.
-- **Second-pass transcription is explicitly opt-in.** A second-pass entry runs only
-  when ticked (`active`), and unticking keeps its settings and key. Why: avoid uploading
-  every dictation and adding latency without an explicit choice. Rejected:
-  treating an endpoint's presence as enablement.
+- **Extra recognizers are opt-in and need a chat endpoint.** An extra runs only when switched on (`active`), only while `writing` is set, and switching it off keeps its settings and key. Why: no upload or latency without an explicit choice, and no extra without something to merge it. Rejected: treating an endpoint's presence as enablement, a separate merge switch, a first-answer-wins fallback (#228).
 - **Resident controls and private request socket.** Commands reach the running app over a request/reply
   socket in the private runtime folder (a user-only pipe on Windows): one JSON line each way, size-bounded,
   known commands only. An agent can feed a WAV file in place of the microphone and set the app up (models, speech servers, word list, quit). Why: controls must not start a microphone, an agent needs an answer, and testing and setup must not need computer use.
