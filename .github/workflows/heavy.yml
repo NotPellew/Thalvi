@@ -43,17 +43,24 @@ jobs:
           persist-credentials: false
       - id: range
         run: |
+          set -euo pipefail
           superseded=false
-          if [[ $GITHUB_EVENT_NAME == push && $(git ls-remote origin "$GITHUB_REF" | cut -f1) != "$GITHUB_SHA" ]]; then
-            superseded=true
-            echo "A newer push to $GITHUB_REF_NAME will test this commit too, so this run skips." | tee -a "$GITHUB_STEP_SUMMARY"
+          if [[ $GITHUB_EVENT_NAME == push ]]; then
+            head=$(git ls-remote origin "$GITHUB_REF" | cut -f1)
+            [[ $head =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not read the head of $GITHUB_REF"; exit 1; }
+            if [[ $head != "$GITHUB_SHA" ]]; then
+              superseded=true
+              echo "A newer push to $GITHUB_REF_NAME will test this commit too, so this run skips." | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
           fi
-          # The first run has no verified tag, so it tests the change that just landed.
-          if base=$(git rev-parse -q --verify 'refs/tags/verified^{commit}') && git merge-base --is-ancestor "$base" "$GITHUB_SHA"; then
+          if base=$(git rev-parse -q --verify 'refs/tags/verified^{commit}'); then
+            git merge-base --is-ancestor "$base" "$GITHUB_SHA" ||
+              { echo "::error::verified ($base) is not an ancestor of $GITHUB_SHA, so there is no range to test; run on a commit that contains it"; exit 1; }
             echo "Testing the commits since verified ($base)." | tee -a "$GITHUB_STEP_SUMMARY"
           else
+            # The first run has no verified tag, so it tests the change that just landed.
             base=$(git rev-parse "$GITHUB_SHA^")
-            echo "No verified tag below $GITHUB_SHA, so this run tests the commits since its parent $base." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "No verified tag yet, so this run tests the commits since its parent $base." | tee -a "$GITHUB_STEP_SUMMARY"
           fi
           echo "base=$base" >> "$GITHUB_OUTPUT"
           echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
@@ -136,9 +143,10 @@ jobs:
               fi
             done
           } >> "$GITHUB_STEP_SUMMARY"
-          # Missed mutants (2) and mutant timeouts (3) only advise; anything else, such as a failing baseline (4), means the shard tested nothing.
+          # Missed mutants (2) only advise; timeouts (3), a failing baseline (4) or any other error fail the shard.
           case "$status" in
-            0|2|3) ;;
+            0|2) ;;
+            3) echo "::error::Some mutants timed out; they are listed in the summary."; exit "$status" ;;
             *) echo "::error::cargo mutants exited with $status, so this shard's results can't be trusted."; exit "$status" ;;
           esac
       - if: always() && steps.diff.outputs.rust == 'true'
@@ -162,13 +170,19 @@ jobs:
           fetch-depth: 0
       - name: move verified forward to this commit
         run: |
+          set -euo pipefail
           current=$(git ls-remote origin refs/tags/verified | cut -f1)
-          if [[ -n $current ]] && ! git merge-base --is-ancestor "$current" "$GITHUB_SHA"; then
-            echo "verified is at $current, which is newer than $GITHUB_SHA, so it stays." | tee -a "$GITHUB_STEP_SUMMARY"
-          else
-            git push --force origin "$GITHUB_SHA:refs/tags/verified"
-            echo "verified now points at $GITHUB_SHA." | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ -z $current || $current =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not read verified: $current"; exit 1; }
+          if [[ -n $current ]]; then
+            git fetch -q origin "$current"
+            if ! git merge-base --is-ancestor "$current" "$GITHUB_SHA"; then
+              echo "verified is at $current, which is not below $GITHUB_SHA, so it stays." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
           fi
+          # The lease refuses the push if verified moved since it was read; empty means it must not exist yet.
+          git push --force-with-lease="refs/tags/verified:$current" origin "$GITHUB_SHA:refs/tags/verified"
+          echo "verified now points at $GITHUB_SHA." | tee -a "$GITHUB_STEP_SUMMARY"
 
   report:
     name: report
