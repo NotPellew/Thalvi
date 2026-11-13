@@ -15,7 +15,7 @@ if [[ $(git rev-parse --is-shallow-repository) == true ]] ||
   exit 0
 fi
 
-units=()
+units=( # broken
 while IFS= read -r file; do
   case $file in
     crates/thalvi-server/*) units+=(server) ;;
