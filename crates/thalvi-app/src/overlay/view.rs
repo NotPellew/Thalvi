@@ -178,6 +178,7 @@ impl View {
 
     pub fn set_draft(&mut self, show: bool) {
         self.show_draft = show;
+        self.line = self.line_of(&self.status);
     }
 
     fn working(&mut self, label: &str) {
@@ -190,43 +191,21 @@ impl View {
     fn take(&mut self, next: &Status, now: f64) -> (bool, Option<Countdown>) {
         let mut wave = false;
         let mut countdown = None;
+        self.line = self.line_of(next);
         match next {
-            Status::Paused | Status::Listening | Status::KeyboardOnly => {
-                self.line = Line::None;
-                self.tone = Tone::Live;
-            }
-            Status::Starting { .. } => {
-                self.line = Line::None;
-                self.tone = Tone::Live;
-                wave = true;
-            }
-            Status::Capturing {
-                committed,
-                partial,
-                notice,
-                ..
-            } => {
-                self.line = match notice {
-                    Some(notice) => Line::Notice(notice.clone()),
-                    None if self.show_draft => Line::Words {
-                        committed: committed.clone(),
-                        partial: partial.clone().unwrap_or_default(),
-                        caret: true,
-                    },
-                    None => Line::None,
-                };
+            Status::Paused | Status::Listening | Status::KeyboardOnly => self.tone = Tone::Live,
+            Status::Starting { .. } | Status::Capturing { .. } => {
                 self.tone = Tone::Live;
                 wave = true;
             }
             Status::Pending {
                 target,
                 route,
-                text: words,
                 waiting_for_quiet,
                 pause_ms,
                 copies,
+                ..
             } => {
-                self.line = self.words(words, false);
                 if *waiting_for_quiet {
                     self.tone = Tone::Quiet;
                     wave = true;
@@ -245,34 +224,14 @@ impl View {
                     });
                 }
             }
-            Status::Writing { text: words, .. } => {
-                self.line = self.words(words, true);
-                self.working("WRITING…");
-            }
-            Status::Thinking { .. } => {
-                self.line = Line::None;
-                self.working("THINKING…");
-            }
-            Status::Transcribing { .. } => {
-                self.line = Line::None;
-                self.working("TRANSCRIBING…");
-            }
-            Status::Merging { .. } => {
-                self.line = Line::None;
-                self.working("MERGING…");
-            }
+            Status::Writing { .. } => self.working("WRITING…"),
+            Status::Thinking { .. } => self.working("THINKING…"),
+            Status::Transcribing { .. } => self.working("TRANSCRIBING…"),
+            Status::Merging { .. } => self.working("MERGING…"),
             Status::Working { .. } => self.working("WORKING"),
-            Status::Loading { notice, .. } => {
-                self.line = Line::Notice(notice.clone());
-                self.working("LOADING");
-            }
-            Status::Done { .. } => {
-                // The confirmation takes the line's place, so its caret stops blinking.
-                self.line = Line::None;
-                self.tone = Tone::Done;
-            }
-            Status::Failed { kind, headline, .. } => {
-                self.line = Line::Notice((*headline).to_owned());
+            Status::Loading { .. } => self.working("LOADING"),
+            Status::Done { .. } => self.tone = Tone::Done,
+            Status::Failed { kind, .. } => {
                 self.tone = Tone::Failed;
                 self.label = Some(
                     match kind {
@@ -304,15 +263,37 @@ impl View {
         }
     }
 
-    fn words(&self, words: &str, caret: bool) -> Line {
-        if self.show_draft {
-            Line::Words {
-                committed: words.to_owned(),
-                partial: String::new(),
-                caret,
+    /// The line `status` shows with the draft switch as it is now.
+    fn line_of(&self, status: &Status) -> Line {
+        let words = |committed: &str, partial: &str, caret| {
+            if self.show_draft {
+                Line::Words {
+                    committed: committed.to_owned(),
+                    partial: partial.to_owned(),
+                    caret,
+                }
+            } else {
+                Line::None
             }
-        } else {
-            Line::None
+        };
+        match status {
+            Status::Capturing {
+                notice: Some(notice),
+                ..
+            }
+            | Status::Loading { notice, .. } => Line::Notice(notice.clone()),
+            Status::Capturing {
+                committed, partial, ..
+            } => words(committed, partial.as_deref().unwrap_or_default(), true),
+            Status::Pending { text, .. } => words(text, "", false),
+            Status::Writing { text, .. } => words(text, "", true),
+            Status::Failed { headline, .. } => Line::Notice((*headline).to_owned()),
+            // The words of the status before it stay while it works.
+            Status::Working { .. } => match &self.line {
+                Line::Words { .. } if !self.show_draft => Line::None,
+                line => line.clone(),
+            },
+            _ => Line::None,
         }
     }
 
@@ -709,6 +690,73 @@ mod tests {
             view.set_status(status.clone(), 0.0);
             assert_eq!(view.line, line, "{status:?} draft {draft}");
         }
+    }
+
+    #[test]
+    fn flipping_the_draft_switch_rebuilds_the_current_line_and_nothing_else() {
+        let words = |committed: &str, partial: &str, caret| Line::Words {
+            committed: committed.to_owned(),
+            partial: partial.to_owned(),
+            caret,
+        };
+        let pending = Status::Pending {
+            target: None,
+            route: CaptureRoute::Paste,
+            text: "hello".to_owned(),
+            waiting_for_quiet: false,
+            pause_ms: 2000,
+            copies: false,
+        };
+        let capturing = Status::Capturing {
+            target: None,
+            committed: "hello".to_owned(),
+            partial: Some("wor".to_owned()),
+            notice: None,
+        };
+        let writing = Status::Writing {
+            target: None,
+            text: "hello".to_owned(),
+        };
+        for (status, shown) in [
+            (pending, words("hello", "", false)),
+            (capturing, words("hello", "wor", true)),
+            (writing, words("hello", "", true)),
+        ] {
+            let mut view = View::new(false);
+            view.set_status(status.clone(), 0.0);
+            view.poll(0.5, 0.0);
+            let timing = |view: &View| (view.tone, view.label.clone(), view.countdown.clone());
+            let before = timing(&view);
+            assert_eq!(view.line, shown, "{status:?}");
+            view.set_draft(false);
+            assert_eq!(view.line, Line::None, "{status:?} off");
+            view.set_draft(true);
+            assert_eq!(view.line, shown, "{status:?} on again");
+            assert_eq!(timing(&view), before, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn turning_the_draft_off_while_a_delivery_works_clears_the_words_it_keeps() {
+        let mut view = View::new(false);
+        view.set_status(
+            Status::Writing {
+                target: None,
+                text: "hello".to_owned(),
+            },
+            0.0,
+        );
+        view.set_status(
+            Status::Working {
+                target: None,
+                route: CaptureRoute::Paste,
+                cancellable: false,
+            },
+            0.0,
+        );
+        assert_ne!(view.line, Line::None);
+        view.set_draft(false);
+        assert_eq!(view.line, Line::None);
     }
 
     #[test]

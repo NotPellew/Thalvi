@@ -339,6 +339,25 @@ mod tests {
     }
 
     #[test]
+    fn flipping_the_draft_switch_redraws_a_pending_countdown_in_every_look() {
+        for (look, dark) in LOOKS {
+            let mut painter = Painter::new(1.0, look, dark).unwrap();
+            let mut shown = view(&pending(), false);
+            shown.poll(1.0, 0.0);
+            let with = painter.draw(&shown, 1.0).bgra.clone();
+            shown.set_draft(false);
+            let without = painter.draw(&shown, 1.0).bgra.clone();
+            assert_ne!(with, without, "{look:?} dark {dark}: off");
+            shown.set_draft(true);
+            assert_eq!(
+                painter.draw(&shown, 1.0).bgra,
+                with,
+                "{look:?} dark {dark}: on"
+            );
+        }
+    }
+
+    #[test]
     fn the_cancel_button_shows_only_on_a_capture_the_desktop_lets_be_clicked() {
         for (look, dark) in LOOKS {
             let mut painter = Painter::new(1.0, look, dark).unwrap();
