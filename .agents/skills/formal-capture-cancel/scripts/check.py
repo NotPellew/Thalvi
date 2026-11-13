@@ -93,7 +93,7 @@ def run(java, jar, evidence, label, scenario='all', drop=False, forget=False):
     passed = done.returncode == 0 and 'Model checking completed. No error has been found.' in output
     if not violation and not passed:
         raise RuntimeError(f'TLC did not produce a verdict; read {run_dir / "tlc.txt"}')
-    print(f'{label}: {"COUNTEREXAMPLE" if violation else "PASS"} ({run_dir / "tlc.txt"})', flush=True)
+    print(f'{label}: {"COUNTEREXAMPLE (" + str(run_dir / "tlc.txt") + ")" if violation else "PASS"}', flush=True)
     for line in output.splitlines():
         if 'states generated' in line or line.startswith('Finished in'):
             print(line, flush=True)
@@ -108,21 +108,28 @@ def main():
     jar = fetch(TLC_NAME, TLC_URL, TLC_SHA)
     java = java_command()
     evidence = Path(tempfile.mkdtemp(prefix='thalvi-formal-', dir='/var/tmp'))
-    print(f'EVIDENCE={evidence}', flush=True)
-    if args.self_test:
-        if run(java, jar, evidence, 'faithful-fence', scenario='fence'):
-            raise RuntimeError('faithful fence control unexpectedly fails')
-        if not run(java, jar, evidence, 'removed-completion-guard', scenario='fence', drop=True):
-            raise RuntimeError('removed completion guard escaped the invariant')
-        if not run(java, jar, evidence, 'forgot-earlier-stop', scenario='fence', forget=True):
-            raise RuntimeError('overwritten drain stop escaped the invariant')
-        print('SELF-TEST PASS: faithful fence control passed; both mutations failed. '
-              'Run without --self-test for the full model verdict.')
-        return 0
-    violation = run(java, jar, evidence, 'faithful')
-    print('FAIL: cancellation can reach delivery; replay the trace using SKILL.md.' if violation
-          else 'PASS: no delivery after a stop in this bounded model; see SKILL.md for scope.')
-    return 1 if violation else 0
+    keep = True
+    try:
+        if args.self_test:
+            if run(java, jar, evidence, 'faithful-fence', scenario='fence'):
+                raise RuntimeError('faithful fence control unexpectedly fails')
+            if not run(java, jar, evidence, 'removed-completion-guard', scenario='fence', drop=True):
+                raise RuntimeError('removed completion guard escaped the invariant')
+            if not run(java, jar, evidence, 'forgot-earlier-stop', scenario='fence', forget=True):
+                raise RuntimeError('overwritten drain stop escaped the invariant')
+            print('SELF-TEST PASS: faithful fence control passed; both mutations failed. '
+                  'Run without --self-test for the full model verdict.')
+            return 0
+        violation = run(java, jar, evidence, 'faithful')
+        keep = violation
+        print('FAIL: cancellation can reach delivery; replay the trace using SKILL.md.' if violation
+              else 'PASS: no delivery after a stop in this bounded model; see SKILL.md for scope.')
+        return 1 if violation else 0
+    finally:
+        if keep:
+            print(f'EVIDENCE={evidence}', flush=True)
+        else:
+            shutil.rmtree(evidence)
 
 
 if __name__ == '__main__':
