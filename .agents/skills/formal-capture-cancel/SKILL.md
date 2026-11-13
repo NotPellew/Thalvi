@@ -157,8 +157,9 @@ error; the passing focused control explores 19,720.
 Each TLC invocation has a 120 s limit and 512 MB heap limit. State counts are
 receipts for this model, not acceptance criteria for a changed model.
 
-The command prints `EVIDENCE=/var/tmp/thalvi-formal-...`, retaining TLC output,
-trace, copied model/config and generated states there. Exit 0 prints `PASS`;
+A passing run deletes its `/var/tmp/thalvi-formal-...` folder. A counterexample, a
+run blocked once the folder exists (not source drift), and `--self-test` keep it and print `EVIDENCE=/var/tmp/thalvi-formal-...`
+(TLC output, trace, copied model/config and generated states). Exit 0 prints `PASS`;
 exit 1 prints `COUNTEREXAMPLE` and `FAIL`; exit 2 prints `BLOCKED` for source
 drift, a tool error, or timeout. The current faithful result is exit 0.
 Never turn a failure into a success verdict.

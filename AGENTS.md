@@ -144,8 +144,9 @@ and record that in `.cargo/mutants.toml` with a one-line reason. A shard that
 couldn't test (failing baseline, time limit) or had a mutant time out fails the
 run. A green full run
 moves `verified`; a failed one opens or updates the `ci-regression` issue.
-Locally, run mutants with no desktop session and a throwaway `HOME`, since it
-runs tests against deliberately broken code.
+Run it locally only when the issue explicitly asks for mutation testing, and then
+only `--in-diff` against the base, with no desktop session and a throwaway `HOME`,
+since it runs tests against deliberately broken code.
 
 ## Git and PRs
 
