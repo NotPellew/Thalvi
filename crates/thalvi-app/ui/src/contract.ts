@@ -50,6 +50,8 @@ export interface AudioStatus {
 export type Ending = "paste" | "write" | "submit" | "task" | "scratch" | "cancel";
 export type ScriptActionKind = "open_url" | "focus_app" | "discord_message";
 export type SecondaryApi = "openai" | "meta";
+/** How a live OpenAI-compatible entry sends each capture. */
+export type OpenAiRequest = "transcriptions" | "chat";
 export type Look = "gunmetal" | "holo" | "neon";
 /** Which builds Thalvi keeps itself updated to. */
 export type UpdateChannel = "stable" | "development";
@@ -90,6 +92,9 @@ export interface OpenAiEntry extends EntryBase {
   kind: "open_ai";
   address: string;
   model: string;
+  request: OpenAiRequest;
+  /** A two-letter ISO 639-1 code, or empty to let the server detect it. */
+  language: string;
   api_key?: string;
   has_key?: boolean;
 }

@@ -867,13 +867,17 @@ describe("the speech server list", () => {
     type(control("Address", "input"), "http://127.0.0.1:9000/v1");
     type(control("Model", "input"), "whisper-large");
     type(control("API key", "input"), "local-secret");
+    expect([control("Request", "select").value, control("Language", "input").value]).toEqual(["transcriptions", ""]);
+    choose(control("Request", "select"), "chat");
+    type(control("Language", "input"), "de");
     await saveServer();
     expect(stub.backend.checkSpeechEntry.mock.calls.at(-1)?.[0]).toMatchObject({
       kind: "open_ai", name: "Local Whisper", address: "http://127.0.0.1:9000/v1", model: "whisper-large", api_key: "local-secret",
+      request: "chat", language: "de",
     });
     button("Save").click();
     await settle();
-    expect(sent(stub).stt.entries.find((entry) => entry.name === "Local Whisper")).toMatchObject({ kind: "open_ai", api_key: "local-secret" });
+    expect(sent(stub).stt.entries.find((entry) => entry.name === "Local Whisper")).toMatchObject({ kind: "open_ai", api_key: "local-secret", request: "chat", language: "de" });
 
     use("Local Whisper");
     await settle();

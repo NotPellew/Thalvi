@@ -109,6 +109,7 @@ engine's arms and the word-list sharing; no mapped await boundary, control drain
 model is unchanged and only the hashes moved.
 Its later tests of a reply that isn't speech live in `recognizer.rs`'s test module; only that hash moved.
 Buffered OpenAI captures no longer expire at the idle deadline, and a wake upload's final spoken ending carries its armed route and text to delivery. Neither change alters the cancellation-first select, control drains, or delivery admission, so the model is unchanged and only the `engine.rs` hash moved.
+The Chat request kind and language (#419) change only what `OpenAiSession`'s upload task sends and records; `OpenAiSession::cancel` and `close` still abort it, so the model is unchanged and only the `openai_live.rs` hash moved.
 Merging every recognizer's text (#228) replaces `Engine::reconcile` with `Engine::merge`: the same post-accept
 stage, now waiting for every switched-on extra (up to a cutoff) and then asking the chat endpoint to merge. Its two
 awaits, the collection loop's `select!` and the merge call's `bounded`, both poll cancellation first, and what follows
@@ -164,8 +165,9 @@ error; the passing focused control explores 19,720.
 Each TLC invocation has a 120 s limit and 512 MB heap limit. State counts are
 receipts for this model, not acceptance criteria for a changed model.
 
-The command prints `EVIDENCE=/var/tmp/thalvi-formal-...`, retaining TLC output,
-trace, copied model/config and generated states there. Exit 0 prints `PASS`;
+A passing run deletes its `/var/tmp/thalvi-formal-...` folder. A counterexample, a
+run blocked once the folder exists (not source drift), and `--self-test` keep it and print `EVIDENCE=/var/tmp/thalvi-formal-...`
+(TLC output, trace, copied model/config and generated states). Exit 0 prints `PASS`;
 exit 1 prints `COUNTEREXAMPLE` and `FAIL`; exit 2 prints `BLOCKED` for source
 drift, a tool error, or timeout. The current faithful result is exit 0.
 Never turn a failure into a success verdict.

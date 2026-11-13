@@ -26,20 +26,25 @@ with Pillow (for image checks), and a non-NVIDIA render node (`/dev/dri`). Run
 
 ## Build the commit
 
-Build from your own detached copy, never from a checkout someone else uses. Use
-`dev-job` so scratch is managed; copy the binary out before the job ends.
+Build in the change's own worktree, never in a checkout someone else uses, and
+keep that worktree's `target/` between runs: the second build of the same commit
+compiles nothing. Follow the machine's own build rules (a build runner, lean
+build settings) when the run's brief carries them.
 
 ```sh
-job=$(dev-job new thalvi-desktop-build)
-dev-job run --job "$job" -- bash -c '
-  git worktree add --detach "$DEV_JOB_SCRATCH/src" <sha> &&
-  (cd "$DEV_JOB_SCRATCH/src/crates/thalvi-app/ui" && npm ci && npm run build) &&
-  (cd "$DEV_JOB_SCRATCH/src" && cargo build -p thalvi-app --locked) &&
-  mkdir -p /var/tmp/thalvi-rig/bin/<name> &&
-  cp "$CARGO_TARGET_DIR/debug/thalvi-desktop" /var/tmp/thalvi-rig/bin/<name>/ &&
-  cp -L "$CARGO_TARGET_DIR/debug/libwebgpu_dawn.so" /var/tmp/thalvi-rig/bin/<name>/'
-dev-job finish "$job"
+cd <worktree>   # at the commit to verify
+ui=crates/thalvi-app/ui
+[ -f $ui/dist/settings.html ] && [ -z "$(find $ui/src $ui/settings.html $ui/vite.config.ts $ui/package-lock.json -newer $ui/dist/settings.html)" ] ||
+  (cd $ui && { [ -d node_modules ] || npm ci; } && npm run build)
+cargo build -p thalvi-app --locked
+T=${CARGO_TARGET_DIR:-target}
+mkdir -p /var/tmp/thalvi-rig/bin/<name> &&
+cp $T/debug/thalvi-desktop /var/tmp/thalvi-rig/bin/<name>/ &&
+cp -L $T/debug/libwebgpu_dawn.so /var/tmp/thalvi-rig/bin/<name>/
 ```
+
+The UI is rebuilt only when a source is newer than the last build: Tauri embeds
+`ui/dist`, so rebuilding unchanged files would recompile the app.
 
 The binary loads `libwebgpu_dawn.so` from its own folder (rpath `$ORIGIN`);
 `app-start` and `ctl` bind every `.so` beside it into the sandbox, and without it
