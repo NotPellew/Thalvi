@@ -497,6 +497,7 @@ mod tests {
         let statuses = [
             (Status::Paused, Visibility::Hide),
             (Status::Listening, Visibility::Hide),
+            (Status::KeyboardOnly, Visibility::Hide),
             (
                 Status::Starting {
                     target: target.clone(),

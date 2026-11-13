@@ -185,7 +185,7 @@ impl View {
         let mut wave = false;
         let mut countdown = None;
         match next {
-            Status::Paused | Status::Listening => {
+            Status::Paused | Status::Listening | Status::KeyboardOnly => {
                 self.line = Line::None;
                 self.tone = Tone::Live;
             }

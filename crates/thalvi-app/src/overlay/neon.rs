@@ -365,7 +365,9 @@ fn pill_words(view: &View) -> (Tone, String, Option<&str>) {
         ),
         Status::Failed { headline, .. } => (Tone::Failed, words(headline), None),
         Status::Loading { notice, .. } => (Tone::Working, notice.clone(), None),
-        Status::Paused | Status::Listening => (Tone::Live, String::new(), None),
+        Status::Paused | Status::Listening | Status::KeyboardOnly => {
+            (Tone::Live, String::new(), None)
+        }
     }
 }
 
