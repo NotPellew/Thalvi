@@ -288,7 +288,7 @@ describe("save", () => {
       return stub;
     }
     const activeNames = (): (string | null)[] =>
-      Array.from(root.querySelectorAll(".trow.server")).filter((row) => row.textContent.includes("In use")).map((row) => row.querySelector(".phrase")?.textContent ?? null);
+      Array.from(root.querySelectorAll(".trow.server")).filter((row) => row.textContent.includes("Live")).map((row) => row.querySelector(".phrase")?.textContent ?? null);
 
     it("loads the new settings and stays on the current page when nothing is unsaved", async () => {
       const stub = await openChanged();
@@ -757,9 +757,11 @@ const META: SpeechEntry = {
   api: "meta",
 };
 
+const WRITING = { url: "http://127.0.0.1:8000/v1", model: "glimmer" };
+
 /** A realtime recognizer in use, another recognizer, the on-device model, and two extra recognizers, with a writing endpoint set. */
 function several(): Settings {
-  return { ...SETTINGS, writing: { url: "http://127.0.0.1:8000/v1", model: "glimmer" }, stt: { entries: [{ ...SERVER }, { ...CYBREX }, device(undefined, false), { ...OPENAI }, { ...META }] } };
+  return { ...SETTINGS, writing: WRITING, stt: { entries: [{ ...SERVER }, { ...CYBREX }, device(undefined, false), { ...OPENAI }, { ...META }] } };
 }
 
 function entryNamed(name: string): HTMLElement {
@@ -791,7 +793,7 @@ describe("the speech server list", () => {
     expect(Array.from(root.querySelectorAll('select[aria-label="Kind of speech server to add"] option')).map((option) => option.getAttribute("value"))).not.toContain("thalvi_server");
     expect(names(live as HTMLElement)).toEqual(["Realtime speech server", "Cybrex2", "On this computer"]);
     expect(names(extra as HTMLElement)).toEqual(["OpenAI", "Meta"]);
-    expect(badgesOf("Realtime speech server")).toEqual(["In use"]);
+    expect(badgesOf("Realtime speech server")).toEqual(["Live"]);
     expect(badgesOf("Cybrex2")).toEqual(["Realtime speech server", "Key saved"]);
     expect(badgesOf("On this computer")).toEqual([]);
     expect(entryNamed("Cybrex2").querySelector("details")?.textContent).toContain("ws://100.64.0.2:8012 · nemotron");
@@ -818,8 +820,8 @@ describe("the speech server list", () => {
       ["OpenAI", true],
       ["Meta", false],
     ]);
-    expect(badgesOf("Cybrex2")).toContain("In use");
-    expect(badgesOf("Realtime speech server")).not.toContain("In use");
+    expect(badgesOf("Cybrex2")).toContain("Live");
+    expect(badgesOf("Realtime speech server")).not.toContain("Live");
     expect(root.querySelector('button[aria-label="Use Cybrex2"]')).toBeNull();
     expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
   });
@@ -830,8 +832,8 @@ describe("the speech server list", () => {
     use("Cybrex2");
     await settle();
     expect(root.querySelector(".err")?.textContent).toBe("The settings could not be saved to /config: disk full.");
-    expect(badgesOf("Realtime speech server")).toContain("In use");
-    expect(badgesOf("Cybrex2")).not.toContain("In use");
+    expect(badgesOf("Realtime speech server")).toContain("Live");
+    expect(badgesOf("Cybrex2")).not.toContain("Live");
   });
 
   it("adds a server once its fields are accepted, shown as not saved until Save", async () => {
@@ -881,7 +883,7 @@ describe("the speech server list", () => {
 
     use("Local Whisper");
     await settle();
-    expect(badgesOf("Local Whisper")).toContain("In use");
+    expect(badgesOf("Local Whisper")).toContain("Live");
     stub.backend.getSettings.mockResolvedValueOnce({
       ...sent(stub),
       stt: { entries: sent(stub).stt.entries.map((entry) => {
@@ -1006,17 +1008,56 @@ describe("extra recognizers", () => {
     expect(root.querySelector(".err")?.textContent).toBe("The settings could not be saved.");
   });
 
-  it("has no way to reorder them, and the tick is locked with a hint while no writing endpoint is set", async () => {
+  const extraGroup = (): HTMLElement => root.querySelector('[data-label="extra recognizers"]') as HTMLElement;
+  const stateText = (): string => extraGroup().querySelector(".next-dictation")?.textContent ?? "";
+  const endpointNote = (): HTMLElement => extraGroup().querySelector(".note.why") as HTMLElement;
+
+  it("labels each switch and says where its audio goes, with no way to reorder them", async () => {
+    await openSeveral();
+    expect(root.querySelector('button[aria-label^="Move "]')).toBeNull();
+    expect(tickOf("OpenAI").getAttribute("aria-label")).toBe("Also transcribe with OpenAI");
+    expect(entryNamed("OpenAI").querySelector(".unit")?.textContent).toBe("Audio goes to api.openai.com");
+    expect(entryNamed("Meta").querySelector(".unit")?.textContent).toBe("Audio goes to meta.example");
+    expect(extraGroup().textContent).toContain("The chat model merges their texts with the live one, and the merged text is pasted. If the merge fails or takes too long, the live text is pasted.");
+  });
+
+  const states = [
+    ["no chat endpoint and none on", null, [false, false], "Off. Dictation pastes the live text.", true],
+    ["a chat endpoint and none on", WRITING, [false, false], "Off. Dictation pastes the live text.", false],
+    ["one on", WRITING, [true, false], "On: OpenAI. The chat model merges its text with the live one.", false],
+    ["several on", WRITING, [true, true], "On: OpenAI, Meta. The chat model merges their texts with the live one.", false],
+  ] as const;
+  it.each(states)("says what the group does with %s", async (_case, writing, [openai, meta], text, needsEndpoint) => {
+    await open({ ...several(), writing, stt: { entries: [{ ...SERVER }, { ...OPENAI, active: openai }, { ...META, active: meta }] } });
+    goTo("speech");
+    expect(stateText()).toBe(text);
+    expect(endpointNote().hidden).toBe(!needsEndpoint);
+    expect(tickOf("Meta").disabled).toBe(needsEndpoint && !meta);
+  });
+
+  it("follows the switches, the entries and the chat endpoint right away, and leads to the endpoint", async () => {
     await open({ ...several(), writing: null });
     goTo("speech");
-    expect(root.querySelector('button[aria-label^="Move "]')).toBeNull();
     expect(tickOf("Meta").disabled).toBe(true);
-    expect(tickOf("Meta").title).toBe("Set up the writing model under Writing first.");
+    expect(tickOf("Meta").getAttribute("aria-describedby")).toBe(endpointNote().id);
     expect([tickOf("OpenAI").checked, tickOf("OpenAI").disabled]).toEqual([true, false]);
+    expect(stateText()).toBe("On: OpenAI. The chat model merges its text with the live one.");
+    button("Go to the endpoint setting").click();
+    expect(document.activeElement).toBe(control("Writing endpoint address", "input"));
+
     type(control("Writing endpoint address", "input"), "http://127.0.0.1:8000/v1");
+    expect(endpointNote().hidden).toBe(true);
     expect(tickOf("Meta").disabled).toBe(false);
-    expect(tickOf("Meta").title).toBe("");
+    flip(tickOf("Meta"));
+    await settle();
+    expect(stateText()).toBe("On: OpenAI, Meta. The chat model merges their texts with the live one.");
+    (root.querySelector('button[aria-label="Remove OpenAI"]') as HTMLButtonElement).click();
+    expect(stateText()).toBe("On: Meta. The chat model merges its text with the live one.");
+    flip(tickOf("Meta"));
+    await settle();
+    expect(stateText()).toBe("Off. Dictation pastes the live text.");
     type(control("Writing endpoint address", "input"), "");
+    expect(endpointNote().hidden).toBe(false);
     expect(tickOf("Meta").disabled).toBe(true);
   });
 
@@ -1237,7 +1278,7 @@ describe("the next dictation summary and state words", () => {
   });
 
   it.each([
-    ["Realtime speech server", ["In use"], false],
+    ["Realtime speech server", ["Live"], false],
     ["Cybrex2", ["Realtime speech server", "Key saved"], true],
     ["On this computer", [], true],
     ["OpenAI", ["Extra recognizer", "Key saved"], false],
