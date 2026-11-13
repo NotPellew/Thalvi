@@ -235,11 +235,11 @@ areas your change touches. Editing rules are in
   branches may be rewritten before merge. Why: the commits show the work being
   iterated, which is enough; no full audit trail. Rejected: squash merge (hides
   the iteration), a force-push block on all branches (more friction).
-- **Work lands on `development`; releases merge it into `main`.** PRs target `development`; a release PR merges it
-  into `main`, and only a tag on `main` publishes a release. An approved push to `development` publishes an `X.Y.Z-dev.N`
-  prerelease, never Latest, for the Development update choice. Why: `main` stays what Stable users run, a release is one
-  reviewable diff, and testers get fixes as they land. Rejected: PRs straight to `main`, a version commit per dev build.
-- **No review gate.** The `main` and `development` rulesets require PRs and passing checks but
+- **Work lands on `main`; a tag releases it.** PRs target `main`, the only long-lived branch, and only a tag on `main`
+  publishes a release. An approved push to `main` publishes an `X.Y.Z-dev.N` prerelease, never Latest, for the Development
+  update choice. Why: GitHub closes issues natively, and testers get fixes as they land. Rejected: a second
+  integration branch (a workflow faked issue closing for it), a version commit per dev build.
+- **No review gate.** The `main` ruleset requires PRs and passing checks but
   no approvals. Why: Thalvi has one author, and GitHub does not let authors
   approve their own PRs. Revisit if a second contributor joins.
 - **Issues are optional.** Why: in a 9-day solo build, PRs and the commit
@@ -262,10 +262,9 @@ areas your change touches. Editing rules are in
   history in CI and staged changes in a hook. Why: nothing else watched Rust advisories, the binaries link
   every crate, and on a public repo a pushed secret has leaked. Rejected: bans (nothing to ban), flagging
   unmaintained transitive crates (no upgrade exists), a hook that refuses when gitleaks is missing.
-- **Rust caches are saved only on `development`.** CI runs on pushes to `development` and saves the Rust
-  caches there; PRs, and mutation runs on the Linux one, only read them. Why: a PR can read only its own and its
-  base branch's caches, so per-PR copies left every new PR cold and filled the 10 GB limit. Rejected: saving on
-  every PR, saving on `main` (frozen, so its caches go stale and are evicted).
+- **Rust caches are saved only on `main`.** CI runs on pushes to `main` and saves the Rust caches there; PRs,
+  and mutation runs on the Linux one, only read them. Why: a PR can read only its own and its base branch's caches,
+  so per-PR copies left every new PR cold and filled the 10 GB limit. Rejected: saving on every PR.
 - **Mutation testing advises on the diff.** cargo-mutants reports survivors in a PR's changed Rust as
   annotations, on Linux. Why: agents write code and tests, and it found real gaps, but it can't tell those from
   equivalent mutants. Rejected: a required gate, whole-workspace runs (3,197 mutants, about 18 hours on a CI runner), Windows runs.
