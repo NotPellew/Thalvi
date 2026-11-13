@@ -10,7 +10,7 @@ use crate::{
         Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
         TranscriptionFailure,
     },
-    secondary::{SecondaryStt, transcribe_events},
+    secondary::{SecondaryError, SecondaryStt, transcribe_events},
 };
 
 pub struct OpenAiRecognizer {
@@ -36,6 +36,37 @@ impl OpenAiRecognizer {
             metrics,
         }
     }
+}
+
+fn failure(speech: &SpeechSource, error: SecondaryError) -> RecognizerError {
+    let subject = speech.subject();
+    let (failure, message) = match error {
+        SecondaryError::Timeout => (
+            TranscriptionFailure::Timeout,
+            format!(
+                "{subject} took too long to transcribe this capture. Nothing was delivered. Check the address and API key under Settings → Speech."
+            ),
+        ),
+        SecondaryError::Unreachable => (
+            TranscriptionFailure::Unreachable,
+            format!(
+                "{subject} could not be reached. Nothing was delivered. Check the address and API key under Settings → Speech."
+            ),
+        ),
+        SecondaryError::Status(code) => (
+            TranscriptionFailure::HttpStatus,
+            format!(
+                "{subject} returned HTTP {code}. Nothing was delivered. Check the address and API key under Settings → Speech."
+            ),
+        ),
+        SecondaryError::BadResponse => (
+            TranscriptionFailure::BadReply,
+            format!(
+                "{subject} returned an unreadable transcription. Nothing was delivered. Check the address and API key under Settings → Speech."
+            ),
+        ),
+    };
+    RecognizerError::Transcription { failure, message }
 }
 
 pub struct OpenAiSession {
@@ -167,38 +198,7 @@ impl RecognizerSession for OpenAiSession {
                         let _ = sender.send(Ok(RecognizerEvent::Final(text)));
                     }
                     Err(error) => {
-                        let (failure, message) = match error {
-                            crate::secondary::SecondaryError::Timeout => (
-                                TranscriptionFailure::Timeout,
-                                format!(
-                                    "{} took too long to transcribe this capture. Nothing was delivered. Check the address and API key under Settings → Speech.",
-                                    speech.subject()
-                                ),
-                            ),
-                            crate::secondary::SecondaryError::Unreachable => (
-                                TranscriptionFailure::Unreachable,
-                                format!(
-                                    "{} could not be reached. Nothing was delivered. Check the address and API key under Settings → Speech.",
-                                    speech.subject()
-                                ),
-                            ),
-                            crate::secondary::SecondaryError::Status(code) => (
-                                TranscriptionFailure::HttpStatus,
-                                format!(
-                                    "{} returned HTTP {code}. Nothing was delivered. Check the address and API key under Settings → Speech.",
-                                    speech.subject()
-                                ),
-                            ),
-                            crate::secondary::SecondaryError::BadResponse => (
-                                TranscriptionFailure::BadReply,
-                                format!(
-                                    "{} returned an unreadable transcription. Nothing was delivered. Check the address and API key under Settings → Speech.",
-                                    speech.subject()
-                                ),
-                            ),
-                        };
-                        let _ =
-                            sender.send(Err(RecognizerError::Transcription { failure, message }));
+                        let _ = sender.send(Err(failure(&speech, error)));
                     }
                 }
             }));
