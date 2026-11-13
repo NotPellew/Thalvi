@@ -633,13 +633,13 @@ mod tests {
         let counting = bottom(&drawn(&words("hello", false, ending), 0.0));
         assert_eq!(counting - plain, 12, "room for the countdown bar");
         let mut committed = "hello".to_owned();
-        let grown = loop {
-            committed.push_str(" ab");
-            let height = bottom(&drawn(&words(&committed, false, ending), 0.0));
-            if height > counting {
-                break height;
-            }
-        };
+        let grown = (0..200)
+            .find_map(|_| {
+                committed.push_str(" ab");
+                let height = bottom(&drawn(&words(&committed, false, ending), 0.0));
+                (height > counting).then_some(height)
+            })
+            .expect("200 more words grow the card");
         assert_eq!(
             bottom(&drawn(&words(&committed, false, None), 0.0)),
             plain,
@@ -829,5 +829,164 @@ mod tests {
         };
         assert!(span(|p| p.0).abs_diff(2 * 110) <= 3, "centred on x + 10");
         assert!(span(|p| p.1).abs_diff(2 * 50) <= 5, "centred on the middle");
+    }
+
+    /// Neon's whole drawing of `status`, with the draft card off.
+    fn look(status: Status) -> Vec<[u8; 4]> {
+        let mut canvas = Canvas::new(WIDTH, HEIGHT, 1.0).unwrap();
+        let mut view = View::new(false);
+        view.set_draft(false);
+        view.set_status(status, 0.0);
+        with_text(|text| Neon::new(true).draw(&mut canvas, text, &view));
+        pixels(&canvas)
+    }
+
+    /// Whether `pixel` is `color` laid over the pill's glass at a third of its strength or more:
+    /// thin or faint glyphs never reach the colour itself.
+    fn tinted([b, g, r, _]: [u8; 4], color: Rgba) -> bool {
+        let glass = DARK.glass;
+        let from = |value: u8, base: u8| f32::from(value) - f32::from(base) * glass.a;
+        let seen = [from(r, glass.r), from(g, glass.g), from(b, glass.b)];
+        let full = [
+            from(color.r, glass.r),
+            from(color.g, glass.g),
+            from(color.b, glass.b),
+        ];
+        let along = seen.iter().zip(&full).map(|(s, f)| s * f).sum::<f32>()
+            / full.iter().map(|f| f * f).sum::<f32>();
+        let off = seen
+            .iter()
+            .zip(&full)
+            .map(|(s, f)| (s - along * f).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        along > 0.33 && off < 24.0
+    }
+
+    /// The pill's left and right edge and its middle row.
+    fn pill(pixels: &[[u8; 4]]) -> (usize, usize, usize) {
+        let solid: Vec<usize> = (0..60 * COLUMNS).filter(|i| pixels[*i][3] > 200).collect();
+        let columns = solid.iter().map(|i| i % COLUMNS);
+        let rows = solid.iter().map(|i| i / COLUMNS);
+        (
+            columns.clone().min().unwrap(),
+            columns.max().unwrap(),
+            usize::midpoint(rows.clone().min().unwrap(), rows.max().unwrap()),
+        )
+    }
+
+    /// How many of `columns` hold a pixel of `color` in the band through the pill's middle, where
+    /// its border touches only the outermost columns.
+    fn count(pixels: &[[u8; 4]], color: Rgba, columns: std::ops::Range<usize>) -> usize {
+        let (_, _, middle) = pill(pixels);
+        columns
+            .filter(|x| (middle - 5..=middle + 5).any(|y| tinted(pixels[y * COLUMNS + x], color)))
+            .count()
+    }
+
+    fn capturing() -> Status {
+        Status::Capturing {
+            target: None,
+            committed: String::new(),
+            partial: None,
+            notice: None,
+        }
+    }
+
+    #[test]
+    fn neons_dot_and_bars_take_the_tone_and_its_ending_words_their_own() {
+        let pending = |waiting_for_quiet| Status::Pending {
+            target: None,
+            route: CaptureRoute::Paste,
+            text: String::new(),
+            waiting_for_quiet,
+            pause_ms: 2000,
+            copies: false,
+        };
+        let working = Status::Working {
+            target: None,
+            route: CaptureRoute::Paste,
+            cancellable: false,
+        };
+        let done = Status::Done {
+            target: None,
+            route: CaptureRoute::Paste,
+            notice: "Delivered.".to_owned(),
+        };
+        let failed = Status::Failed {
+            kind: crate::status::FailureKind::Other,
+            notice: String::new(),
+            headline: "No words heard",
+            causes: Vec::new(),
+        };
+        // The dot spans about 10 columns; the nine bars add 27 more.
+        // The bars start 31 points into the pill and span 51; the label sits inside its border.
+        let bars = |pixels: &[[u8; 4]]| {
+            let (left, _, _) = pill(pixels);
+            left + 31..left + 31 + 51
+        };
+        let label = |pixels: &[[u8; 4]]| {
+            let (left, right, _) = pill(pixels);
+            left + 4..right - 4
+        };
+        let all = 0..COLUMNS;
+        let (live, waiting, counting, busy) = (
+            look(capturing()),
+            look(pending(true)),
+            look(pending(false)),
+            look(working),
+        );
+        let (delivered, refused) = (look(done), look(failed));
+        for (state, pixels, tinted, at, plain) in [
+            ("live", &live, Some(DARK.neon), bars(&live), DARK.amber),
+            (
+                "counting down",
+                &counting,
+                Some(DARK.amber),
+                bars(&counting),
+                DARK.neon,
+            ),
+            ("waiting for quiet", &waiting, None, all.clone(), DARK.neon),
+            ("working", &busy, Some(DARK.blue), all.clone(), DARK.neon),
+            (
+                "delivered",
+                &delivered,
+                Some(DARK.neon),
+                label(&delivered),
+                DARK.amber,
+            ),
+            (
+                "failed",
+                &refused,
+                Some(DARK.warn),
+                label(&refused),
+                DARK.neon,
+            ),
+        ] {
+            if let Some(tint) = tinted {
+                let tinted = count(pixels, tint, at.clone());
+                assert!(tinted > 5, "{state}: {tinted} tinted columns");
+            }
+            assert_eq!(count(pixels, plain, all.clone()), 0, "{state}");
+        }
+        assert_eq!(count(&waiting, DARK.amber, all), 0, "waiting for quiet");
+    }
+
+    #[test]
+    fn a_listening_pill_makes_room_for_its_bars_and_a_finished_one_drops_them() {
+        let width = |pixels: Vec<[u8; 4]>| {
+            let columns: Vec<usize> = (0..pixels.len())
+                .filter(|i| i / COLUMNS < 60 && pixels[*i][3] > 200)
+                .map(|i| i % COLUMNS)
+                .collect();
+            columns.iter().max().unwrap() - columns.iter().min().unwrap()
+        };
+        let done = Status::Done {
+            target: None,
+            route: CaptureRoute::Paste,
+            notice: "Delivered.".to_owned(),
+        };
+        let (listening, finished) = (width(look(capturing())), width(look(done)));
+        assert!(listening > finished + 20, "{listening} {finished}");
     }
 }

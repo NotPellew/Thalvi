@@ -734,16 +734,7 @@ mod tests {
 
     #[test]
     fn the_ticker_starts_a_short_line_at_the_left_and_keeps_a_long_lines_newest_words_in_view() {
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "the slot's columns"
-        )]
-        let (left, right) = ((SLOT.0 + 24.0) as usize, (SLOT.0 + SLOT_W - 24.0) as usize);
-        let inked = |ink: &[u8]| {
-            let columns: Vec<usize> = (0..ink.len()).filter(|x| ink[*x] > 0).collect();
-            (columns[0], columns[columns.len() - 1])
-        };
+        let (left, right) = edges();
         let short = ink(&words("hello", false), true);
         let (first, last) = inked(&short);
         #[expect(
@@ -757,6 +748,30 @@ mod tests {
         assert!(
             (left..=left + 5).contains(&first) && last <= left + used + 1,
             "{first}..{last} for {used}"
+        );
+        // A line well over a third of the width that still fits, whatever the font.
+        let medium = with_text(|text| {
+            let mut medium = "hello".to_owned();
+            while text
+                .measure(&[(medium.as_str(), INK)], TICKER, Layout::Line, 1.0)
+                .0
+                < (SLOT_W - 48.0) / 2.0
+            {
+                medium.push_str(" and");
+            }
+            medium
+        });
+        let medium = ink(&words(&medium, false), true);
+        let (first, _) = inked(&medium);
+        let (short_first, _) = inked(&short);
+        let from = first.min(short_first);
+        let strongest = |ink: &[u8]| ink[from..from + 10].iter().copied().max().unwrap_or(0);
+        assert!(
+            first.abs_diff(short_first) <= 4
+                && strongest(&short) >= 150
+                && u16::from(strongest(&medium)) * 10 >= u16::from(strongest(&short)) * 8,
+            "lines that fit start at the left unfaded: {first} {short_first} {}",
+            strongest(&short)
         );
         let long = ink(
             &words("the newest words stay in view ".repeat(6).trim_end(), false),
@@ -783,6 +798,28 @@ mod tests {
             short,
             "no caret without one"
         );
+    }
+
+    /// The ticker's left and right edge, in pixels.
+    fn edges() -> (usize, usize) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the slot's columns"
+        )]
+        let edges = ((SLOT.0 + 24.0) as usize, (SLOT.0 + SLOT_W - 24.0) as usize);
+        edges
+    }
+
+    /// The first and last inked column.
+    fn inked(ink: &[u8]) -> (usize, usize) {
+        let columns: Vec<usize> = (0..ink.len()).filter(|x| ink[*x] > 0).collect();
+        (columns[0], columns[columns.len() - 1])
+    }
+
+    #[test]
+    fn a_notice_fades_at_its_end_only_when_it_runs_past_it() {
+        let (left, right) = edges();
         let notice = ink(
             &Line::Notice("a notice long enough to run past the end ".repeat(3)),
             true,
@@ -969,6 +1006,14 @@ mod tests {
         )]
         let row = (SLOT.1 + 52.0 + 4.0) as usize;
         assert_eq!(top, row);
+        let long = words(&"the newest words stay in view ".repeat(6), true);
+        let on = painted(|canvas, text| ticker(canvas, text, &long, true));
+        let off = painted(|canvas, text| ticker(canvas, text, &long, false));
+        let ((x, _), _) = changed(&on, &off);
+        assert!(
+            (x - (SLOT.0 + SLOT_W - 24.0 - 2.0 + 1.0)).abs() <= 1.0,
+            "after a long line the caret stays 2 points inside the right edge: {x}"
+        );
     }
 
     #[test]

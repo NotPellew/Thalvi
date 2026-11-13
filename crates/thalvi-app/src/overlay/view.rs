@@ -739,4 +739,25 @@ mod tests {
             assert_eq!(view.animating(), animating, "{status:?}");
         }
     }
+
+    #[test]
+    fn a_caret_shows_for_the_first_half_of_every_second() {
+        for (clock, on) in [(0.2, true), (0.5, false), (0.7, false), (1.2, true)] {
+            let mut view = View::new(false);
+            view.clock = clock;
+            assert_eq!(view.caret_on(), on, "{clock}");
+        }
+    }
+
+    #[test]
+    fn a_space_parts_the_committed_words_from_the_partial_only_when_both_have_words() {
+        for (committed, partial, spaced_out) in [
+            ("hello", "wor", "hello "),
+            ("hello", "", "hello"),
+            ("", "wor", ""),
+            ("", "", ""),
+        ] {
+            assert_eq!(spaced(committed, partial), spaced_out);
+        }
+    }
 }
