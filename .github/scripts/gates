@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 SHELLCHECK=(pipx run --spec shellcheck-py==0.11.0.1 shellcheck)
-components=(server desktop-windows web desktop-ui speech issue-sync release)
+components=(server desktop-windows web desktop-ui speech issue-sync release formal)
 
 step() {
   printf '\n==> %s\n' "$*"
@@ -82,6 +82,10 @@ gate_release() {
   step .github/scripts/newer-version.test.sh
 }
 
+gate_formal() {
+  step python3 .github/scripts/formal-source-hashes.py
+}
+
 run_component() {
   case $1 in
     server) gate_server ;;
@@ -91,6 +95,7 @@ run_component() {
     speech) gate_speech ;;
     issue-sync) gate_issue_sync ;;
     release) gate_release ;;
+    formal) gate_formal ;;
   esac
 }
 
@@ -98,13 +103,13 @@ run_all() {
   local runnable skipped reason component
   case $(uname -s) in
     Linux)
-      runnable=(server web desktop-ui speech issue-sync release)
+      runnable=(server web desktop-ui speech issue-sync release formal)
       skipped=(desktop-windows)
       reason="needs Windows"
       ;;
     MINGW* | MSYS* | CYGWIN*)
       runnable=(desktop-windows)
-      skipped=(server web desktop-ui speech issue-sync release)
+      skipped=(server web desktop-ui speech issue-sync release formal)
       reason="CI runs it on Linux"
       ;;
     *)
