@@ -3,7 +3,6 @@
 #![expect(clippy::expect_used, reason = "a test fails by panicking")]
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use thalvi_desktop::capture::{Ending, Endings};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
@@ -29,8 +28,14 @@ const LONG_CLIP: Asset<'static> = Asset {
     sha256: "5143a6ba93c4b274e2c4ac22deb75c2c48936c853f0519add1de828b6c79cc5a",
 };
 
+/// The per-user cache the spotter unit tests also use, so a fresh target dir downloads nothing.
 fn store() -> ModelStore {
-    ModelStore::in_dir(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("models"))
+    ModelStore::in_dir(
+        dirs::cache_dir()
+            .expect("a per-user cache dir")
+            .join("thalvi")
+            .join("test-models"),
+    )
 }
 
 async fn clip_frames() -> Vec<Frame> {
