@@ -33,6 +33,14 @@ use thalvi_desktop::secondary::{
 use thalvi_desktop::transducer::SpeechChoice;
 use tokio::sync::mpsc;
 
+/// The next request the fake received, or none when nothing arrives in time.
+async fn received(rx: &mut mpsc::UnboundedReceiver<Captured>) -> Option<Captured> {
+    tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .ok()
+        .flatten()
+}
+
 struct Captured {
     path: String,
     headers: HeaderMap,
@@ -218,7 +226,7 @@ async fn speaches_streams_transcribed_segments_as_cumulative_text() {
         ]
     );
     assert_eq!(
-        rx.recv().await.expect("one upload").path,
+        received(&mut rx).await.expect("one upload").path,
         "/v1/audio/transcriptions"
     );
     assert!(rx.try_recv().is_err(), "one request per capture");
@@ -287,7 +295,7 @@ async fn openai_streaming_emits_cumulative_text() {
             RecognizerEvent::Final("cleaned transcript".to_owned())
         ]
     );
-    let captured = rx.recv().await.expect("one upload");
+    let captured = received(&mut rx).await.expect("one upload");
     assert_eq!(captured.path, "/v1/audio/transcriptions");
     assert_eq!(captured.headers["user-agent"], "thalvi-second-pass-client");
     assert_eq!(captured.headers["authorization"], "Bearer stream-key");
@@ -364,7 +372,7 @@ async fn openai_plain_json_still_works() {
     let events = [event];
     assert_eq!(events, [RecognizerEvent::Final("plain answer".to_owned())]);
     assert_eq!(
-        rx.recv().await.expect("one upload").path,
+        received(&mut rx).await.expect("one upload").path,
         "/v1/audio/transcriptions"
     );
     assert!(rx.try_recv().is_err(), "one upload for one capture");
@@ -416,7 +424,7 @@ async fn chosen_live_openai_entry_buffers_and_forwards_the_whole_capture() {
         ]
     );
 
-    let captured = rx.recv().await.expect("one upload");
+    let captured = received(&mut rx).await.expect("one upload");
     assert_eq!(captured.path, "/v1/audio/transcriptions");
     let uploaded = parts(&captured)
         .into_iter()
@@ -482,11 +490,11 @@ async fn a_failed_capture_reports_plainly_and_the_next_capture_can_succeed() {
         RecognizerEvent::Final("recovered".to_owned())
     );
     assert_eq!(
-        rx.recv().await.expect("first upload").path,
+        received(&mut rx).await.expect("first upload").path,
         "/v1/audio/transcriptions"
     );
     assert_eq!(
-        rx.recv().await.expect("next upload").path,
+        received(&mut rx).await.expect("next upload").path,
         "/v1/audio/transcriptions"
     );
     assert!(rx.try_recv().is_err());
@@ -628,7 +636,7 @@ async fn each_api_gets_its_request_and_a_24_khz_wav_of_the_whole_capture() {
         .await;
         assert_eq!(text.as_deref(), Ok("polished words"), "{api:?}");
 
-        let captured = rx.recv().await.expect("a request");
+        let captured = received(&mut rx).await.expect("a request");
         assert_eq!(captured.path, path);
         assert_eq!(captured.headers["accept"], "application/json");
         let parts = parts(&captured);
@@ -695,7 +703,7 @@ async fn the_bearer_header_is_sent_only_with_a_key() {
             )
             .await
             .expect("transcribed");
-            let captured = rx.recv().await.expect("a request");
+            let captured = received(&mut rx).await.expect("a request");
             assert_eq!(
                 captured
                     .headers
@@ -915,7 +923,7 @@ async fn chat_entry_sends_the_wav_as_input_audio_and_delivers_the_reply() {
     dictate(&recognizer(live(&plain, "")))
         .await
         .expect("transcriptions");
-    let sent_wav = parts(&plain_rx.recv().await.expect("upload"))
+    let sent_wav = parts(&received(&mut plain_rx).await.expect("upload"))
         .into_iter()
         .find(|(headers, _)| headers.contains("name=\"file\""))
         .expect("WAV part")
@@ -950,7 +958,7 @@ async fn chat_entry_sends_the_wav_as_input_audio_and_delivers_the_reply() {
             "{language}"
         );
 
-        let captured = rx.recv().await.expect("one request");
+        let captured = received(&mut rx).await.expect("one request");
         assert_eq!(captured.path, "/v1/chat/completions");
         assert_eq!(captured.headers["content-type"], "application/json");
         match (key.is_empty(), captured.headers.get("authorization")) {
@@ -993,7 +1001,7 @@ async fn transcriptions_entry_sends_language_only_when_set() {
             ..live(&url, "")
         };
         dictate(&recognizer(entry)).await.expect("transcription");
-        let found = parts(&rx.recv().await.expect("upload"))
+        let found = parts(&received(&mut rx).await.expect("upload"))
             .into_iter()
             .find(|(headers, _)| headers.contains("name=\"language\""))
             .map(|(_, value)| String::from_utf8(value).unwrap());
