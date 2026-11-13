@@ -251,6 +251,12 @@ impl View {
                 self.label = Some("THINKING…".to_owned());
                 self.sweep = true;
             }
+            Status::Transcribing { .. } => {
+                self.line = Line::None;
+                self.tone = Tone::Working;
+                self.label = Some("TRANSCRIBING…".to_owned());
+                self.sweep = true;
+            }
             Status::Working { .. } => {
                 self.tone = Tone::Working;
                 self.label = Some("WORKING".to_owned());
