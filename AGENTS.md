@@ -139,8 +139,9 @@ One more check runs on PRs that change Rust but advises rather than gates:
 or judge it equivalent and record that in `.cargo/mutants.toml` with a one-line
 reason. The check stays green with survivors, so count them from each shard's
 "M missed" log line; a shard that couldn't test (failing baseline, time limit)
-fails. Locally, run it with no desktop session and a throwaway `HOME`, since it
-runs tests against deliberately broken code.
+fails. Run it locally only when the issue explicitly asks for mutation testing,
+and then only `--in-diff` against the base, with no desktop session and a
+throwaway `HOME`, since it runs tests against deliberately broken code.
 
 ## Git and PRs
 
