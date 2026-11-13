@@ -251,15 +251,16 @@ impl View {
                 self.label = Some("THINKING…".to_owned());
                 self.sweep = true;
             }
-            Status::Transcribing { .. } => {
-                self.line = Line::None;
+            Status::Transcribing { .. } | Status::Working { .. } => {
                 self.tone = Tone::Working;
-                self.label = Some("TRANSCRIBING…".to_owned());
-                self.sweep = true;
-            }
-            Status::Working { .. } => {
-                self.tone = Tone::Working;
-                self.label = Some("WORKING".to_owned());
+                self.label = Some(
+                    if matches!(next, Status::Transcribing { .. }) {
+                        "TRANSCRIBING…"
+                    } else {
+                        "WORKING"
+                    }
+                    .to_owned(),
+                );
                 self.sweep = true;
             }
             Status::Loading { notice, .. } => {
