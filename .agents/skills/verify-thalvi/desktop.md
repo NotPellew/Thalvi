@@ -19,7 +19,8 @@ H=.agents/skills/verify-thalvi/scripts/thalvi-desktop-rig
 ```
 
 Needs `bwrap`, `kwin_wayland`, `Hyprland`, `hyprctl`, `wayland-info`, `grim`, `wtype`, python3
-with Pillow (for image checks), and a non-NVIDIA render node (`/dev/dri`). Run
+with Pillow (for image checks), and a non-NVIDIA render node (`/dev/dri`); a VM whose GPU has no
+3D works in software (see A VM without GPU acceleration). Run
 `$H help` for the commands. A GNOME run (below) instead needs `gnome-shell`,
 `pipewire`, `wireplumber`, `ffmpeg`, `xdpyinfo`, python3 with `gi` and GTK 3, and
 `wl-clipboard` for tests.
@@ -200,6 +201,21 @@ only loopback, so nothing leaves the machine and abstract unix sockets are the r
 - An AppImage cannot mount in the sandbox (no FUSE). Extract it with `--appimage-extract` and give `app-start` a
   wrapper script that `exec`s the extracted `AppRun`; `ctl` runs the same wrapper.
 
+## A VM without GPU acceleration
+
+A virtio GPU without 3D (bit 0 of `/sys/class/drm/renderD*/device/virtio*/features` is `0`, no
+virgl) has no hardware GL, so Mesa draws in software, and that needs dumb buffers, which a render
+node refuses. `up` detects this and binds the host's primary node (`/dev/dri/card0`) at the render
+node's path, so both compositors and `grim` work; the user must be in the `video` group.
+`THALVI_RIG_RENDER=software` forces the mode and `hardware` keeps the render node.
+
+- Every pixel is drawn on the CPU: 20 back-to-back `grim` frames took 2.1 s on a 4-core VM. Judge
+  nothing about frame rates or animation smoothness from such a run.
+- On-device speech cannot use a GPU there: Mesa's software Vulkan (lavapipe) counts as no usable
+  GPU, so `ctl models` shows `Will run on the CPU: no usable GPU` for a model that could use one.
+  A check of GPU recognition (`--nvidia`) needs a machine with the GPU.
+- On a machine with a GPU nothing changes; the mode is chosen only for such a virtio GPU.
+
 ## GNOME
 
 `$H up --gnome` starts a headless `gnome-shell` instead of kwin and Hyprland, in the
@@ -269,6 +285,10 @@ app against the real session.
   Hyprland cannot start without a host, so the host is `kwin_wayland --virtual`.
 - NVIDIA's EGL fails inside the sandbox (no device nodes), so only an AMD or
   Intel render node is bound, with Mesa forced.
+- A software run binds the primary node at the render node's path because Mesa's `kms_swrast`
+  fails on a render node (`DRM_IOCTL_MODE_CREATE_DUMB: Permission denied`). Binding only the
+  primary node under its own name made kwin fall back from OpenGL and Hyprland exit (`Missing
+  protocols`); binding both nodes made Mesa pick the render node again.
 - `bwrap --die-with-parent` follows the process that launched it, so each
   sandbox is started under a detached holder shell; killing the holder takes the
   sandbox down.
