@@ -28,9 +28,10 @@ use crate::capture::{
 use crate::claim::{Effect, Resolution, Watch};
 use crate::config::{DesktopConfig, Script};
 use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues};
-use crate::entries::SecondPassEntry;
+use crate::entries::ExtraEntry;
 use crate::frame::{FRAME_SAMPLES, Frame, Order, Queued};
 use crate::hold::{Cutoff, HoldKind, KeyState, Press, Presses, Refusal};
+use crate::merge;
 use crate::metrics::{Dictation, Event, RecordKinds, Recorder};
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
@@ -209,7 +210,8 @@ pub enum EngineState {
         /// The quiet pause has not started because the user is still speaking.
         waiting_for_quiet: bool,
     },
-    TranscribingSecondary {
+    /// The extra recognizers' texts are being merged with the live text, as far as they arrive in time.
+    Merging {
         route: CaptureRoute,
     },
     TranscribingLive {
@@ -427,9 +429,9 @@ pub struct Engine<R, W, C> {
     pauses: EndingPauses,
     scripts: Vec<Script>,
     limits: CaptureLimits,
-    /// The ticked second-pass entries in list order.
-    secondary: Vec<SecondPassEntry>,
-    /// Second-pass requests the paste did not wait for, one set per capture. Each runs as its own
+    /// The extras that are switched on and the chat endpoint that merges their texts; none when no extra is.
+    merging: Option<Merging>,
+    /// Extra requests the merge did not wait for, one set per capture. Each runs as its own
     /// task, so its latency is its own, and is recorded when a loop of the engine collects it.
     /// Dropping the engine aborts them.
     recorded_only: Vec<JoinSet<Answer>>,
@@ -466,6 +468,8 @@ pub struct Engine<R, W, C> {
     held_for: Option<Duration>,
     /// The presses of the dictation key that started nothing, until the caller takes them.
     ignored: Vec<Refusal>,
+    /// What the last merge told the user, until the caller takes it to show beside the delivery.
+    merge_note: Option<String>,
 }
 
 /// A press of the dictation key that opened a capture.
@@ -663,15 +667,84 @@ enum Step {
     Tail,
     /// The dictation key changed; false when it can no longer change.
     Key(bool),
-    /// A second pass that was not waited for finished.
+    /// An extra that was not waited for finished.
     Recorded(Answer),
+}
+
+/// The extras that are switched on, and the chat endpoint that merges their texts with the live text.
+#[derive(Clone)]
+struct Merging {
+    writing: Writing,
+    extras: Vec<ExtraEntry>,
+}
+
+impl Merging {
+    /// `None` unless an extra is on; the config guarantees a chat endpoint then.
+    fn of(config: &DesktopConfig) -> Option<Self> {
+        let extras: Vec<_> = config.stt.entries.ticked().cloned().collect();
+        let writing = config.writing.clone()?;
+        (!extras.is_empty()).then_some(Self { writing, extras })
+    }
+}
+
+/// Why a capture was delivered as the live text and not merged.
+enum Skipped {
+    /// Fewer than two texts were left; the string says why each extra gave none.
+    TooFew(String),
+    Timeout,
+    Failed(WritingError),
+    Unfaithful,
+}
+
+impl Skipped {
+    fn outcome(&self) -> &'static str {
+        match self {
+            Self::TooFew(_) => "too_few",
+            Self::Timeout => "timeout",
+            Self::Failed(_) => "error",
+            Self::Unfaithful => "unfaithful",
+        }
+    }
+
+    fn reason(&self) -> String {
+        match self {
+            Self::TooFew(left_out) => format!("fewer than two texts arrived: {left_out}"),
+            Self::Timeout => "the chat model took too long".to_owned(),
+            Self::Failed(WritingError::Unreachable) => {
+                "the chat model could not be reached".to_owned()
+            }
+            Self::Failed(WritingError::Status(code)) => {
+                format!("the chat model failed with status {code}")
+            }
+            Self::Failed(WritingError::BadResponse) => {
+                "the chat model sent an answer Thalvi could not read".to_owned()
+            }
+            Self::Failed(_) => "the chat model returned no text".to_owned(),
+            Self::Unfaithful => {
+                "the chat model used a word none of the recognizers heard".to_owned()
+            }
+        }
+    }
+}
+
+/// How asking the chat model to merge ended.
+enum Asked {
+    Merged {
+        text: String,
+        chat: Duration,
+    },
+    Skipped {
+        why: Skipped,
+        chat: Option<Duration>,
+    },
+    Cancelled,
 }
 
 /// One entry's reply to a capture, with what is needed to judge and record it when it arrives.
 struct Answer {
-    /// The entry's place among the ticked ones.
+    /// The entry's place among the switched-on ones.
     index: usize,
-    entry: SecondPassEntry,
+    entry: ExtraEntry,
     dictation: Dictation,
     route: CaptureRoute,
     has_endings: bool,
@@ -698,7 +771,7 @@ fn settled(joined: Result<Answer, JoinError>) -> Option<Answer> {
     }
 }
 
-/// The next answer of a second pass the paste did not wait for; never ready while none is running.
+/// The next answer of an extra the merge did not wait for; never ready while none is running.
 async fn next_recorded(sets: &mut Vec<JoinSet<Answer>>) -> Answer {
     std::future::poll_fn(|cx| {
         let mut at = 0;
@@ -718,26 +791,6 @@ async fn next_recorded(sets: &mut Vec<JoinSet<Answer>>) -> Answer {
         Poll::Pending
     })
     .await
-}
-
-/// Which entry the paste takes, as far as the answers so far say.
-enum Usable {
-    /// An earlier entry may still give a usable answer.
-    Waiting,
-    Entry(usize),
-    Nobody,
-}
-
-/// The earliest entry that gave a usable answer, once every entry before it has answered.
-fn earliest_usable(slots: &[Option<Judged>]) -> Usable {
-    for (index, slot) in slots.iter().enumerate() {
-        match slot {
-            None => return Usable::Waiting,
-            Some(judged) if judged.agreed.is_some() => return Usable::Entry(index),
-            Some(_) => {}
-        }
-    }
-    Usable::Nobody
 }
 
 /// Whether any of the frames heard after the start cue holds speech.
@@ -901,7 +954,7 @@ where
             pauses: config.ending_pause,
             scripts: config.scripts.clone(),
             limits: config.capture_limits,
-            secondary: config.stt.entries.ticked().cloned().collect(),
+            merging: Merging::of(config),
             recorded_only: Vec::new(),
             writing: config.writing.clone(),
             speech: config.speech_source(),
@@ -927,6 +980,7 @@ where
             hold_end: None,
             held_for: None,
             ignored: Vec::new(),
+            merge_note: None,
         };
         (engine, handle)
     }
@@ -949,13 +1003,19 @@ where
         self.wake_words = on;
     }
 
+    /// What the merge of the capture that just ended told the user, if it did: the delivery that
+    /// follows would otherwise replace the notice on the overlay.
+    pub fn take_merge_note(&mut self) -> Option<String> {
+        self.merge_note.take()
+    }
+
     /// The presses of the dictation key that started nothing since this was last called: each
     /// was already told through the notice and the metrics.
     pub fn take_ignored(&mut self) -> Vec<Refusal> {
         std::mem::take(&mut self.ignored)
     }
 
-    /// Writes the recordings still queued and abandons second passes still running; call once at
+    /// Writes the recordings still queued and abandons extras still running; call once at
     /// shutdown.
     pub async fn finish(self) {
         drop(self.recorded_only);
@@ -1504,7 +1564,7 @@ where
             text: self.capture_session(held.is_some()),
             partial: None,
             sent: Vec::new(),
-            keep_sent: !self.secondary.is_empty() || self.recorder.kinds().audio || buffers_audio,
+            keep_sent: self.merging.is_some() || self.recorder.kinds().audio || buffers_audio,
             held: VecDeque::new(),
             speech_run: 0,
             relayed: false,
@@ -2122,7 +2182,7 @@ where
                 self.gate.set_enabled(false);
                 if self.end_with(Cue::Accepted, decided, session, true).await {
                     match self
-                        .reconcile(request, &sent, scratched, has_endings, dictation)
+                        .merge(request, &sent, scratched, has_endings, dictation)
                         .await
                     {
                         CaptureOutcome::Accepted(request)
@@ -2170,11 +2230,10 @@ where
         completed
     }
 
-    /// Replaces the accepted text with the first ticked entry's second transcription that agrees
-    /// with the ending the user spoke, as soon as that is known: the entries after it are not
-    /// waited for. They run on and are recorded when they finish. Keeps the live transcript when
-    /// none agrees, and says so.
-    async fn reconcile(
+    /// Merges the live text with the texts of the switched-on extras that arrive in time: the chat
+    /// model chooses between what the recognizers heard, and the live text is kept, with a notice,
+    /// when that cannot be done faithfully. The route is the live transcript's and stays it.
+    async fn merge(
         &mut self,
         request: CaptureRequest,
         sent: &[Frame],
@@ -2182,29 +2241,25 @@ where
         has_endings: bool,
         dictation: &Dictation,
     ) -> CaptureOutcome {
-        if self.secondary.is_empty() || scratched {
+        let Some(merging) = self.merging.clone() else {
+            return CaptureOutcome::Accepted(request);
+        };
+        if scratched || !has_words(&request.text) {
             return CaptureOutcome::Accepted(request);
         }
-        self.set_state(EngineState::TranscribingSecondary {
+        self.set_state(EngineState::Merging {
             route: request.route,
         });
         let started = Instant::now();
-        let mut running = self.ask_all(&request, sent, has_endings, dictation);
-        let mut slots: Vec<Option<Judged>> = self.secondary.iter().map(|_| None).collect();
-        let winner = loop {
-            match earliest_usable(&slots) {
-                Usable::Waiting => {}
-                Usable::Entry(index) => break Some(index),
-                Usable::Nobody => break None,
-            }
+        let mut running = self.ask_all(&merging.extras, &request, sent, has_endings, dictation);
+        let mut slots: Vec<Option<Judged>> = merging.extras.iter().map(|_| None).collect();
+        while slots.iter().any(Option::is_none) {
             tokio::select! {
                 biased;
                 _ = self.cancel.changed() => {
-                    for entry in &self.secondary {
-                        self.record_second_pass(entry, "cancelled", started.elapsed(), false);
-                    }
-                    return CaptureOutcome::cancelled_with(request.text);
+                    return self.merge_cancelled(&merging, &slots, started, request.text);
                 }
+                () = tokio::time::sleep_until(started + merge::EXTRAS_WAIT) => break,
                 answer = next_recorded(&mut self.recorded_only) => self.record_late(answer),
                 Some(joined) = running.join_next() => {
                     let Some(answer) = settled(joined) else {
@@ -2216,54 +2271,177 @@ where
                     }
                 }
             }
-        };
-        let winner_name = winner
-            .and_then(|index| self.secondary.get(index))
-            .map(|entry| format!("\"{}\"", entry.name));
-        let mut failed = Vec::new();
-        let mut apart = Vec::new();
-        for (index, judged) in slots.iter().enumerate() {
-            let Some(judged) = judged else {
-                continue;
-            };
-            self.record_answer(judged, winner == Some(index));
-            if judged.outcome != "ok" {
-                if winner.is_some_and(|winner| index > winner) {
-                    apart.push(judged.answer.entry.name.as_str());
-                } else {
-                    failed.push(format!("\"{}\"", judged.answer.entry.name));
-                }
+        }
+        let mut inputs = vec![request.text.clone()];
+        let mut left_out = Vec::new();
+        for (entry, slot) in merging.extras.iter().zip(&slots) {
+            match slot.as_ref().and_then(|judged| judged.agreed.as_ref()) {
+                Some(text) => inputs.push(text.clone()),
+                None => left_out.push(match slot {
+                    None => format!("\"{}\" was too slow", entry.name),
+                    Some(judged) if judged.answer.heard.is_err() => {
+                        format!("\"{}\" failed", entry.name)
+                    }
+                    Some(_) => format!("\"{}\" heard another ending", entry.name),
+                }),
             }
         }
-        if !failed.is_empty() {
-            let used = winner_name.map_or_else(
-                || "the live transcript".to_owned(),
-                |name| format!("the answer of {name}"),
-            );
-            (self.notice)(&format!(
-                "The second transcription failed for {}. Using {used}.",
-                failed.join(", ")
-            ));
+        let left_out = left_out.join(", ");
+        let asked = if inputs.len() < 2 {
+            Asked::Skipped {
+                why: Skipped::TooFew(left_out.clone()),
+                chat: None,
+            }
+        } else {
+            self.ask_merge(&merging.writing, &inputs, started + merge::LIMIT)
+                .await
+        };
+        if matches!(asked, Asked::Cancelled) {
+            return self.merge_cancelled(&merging, &slots, started, request.text);
         }
-        for name in apart {
-            self.tell_only_recorded(name);
+        let merged = matches!(asked, Asked::Merged { .. });
+        for judged in slots.iter().flatten() {
+            self.record_answer(judged, merged && judged.agreed.is_some());
         }
-        let text = winner
-            .and_then(|index| slots.get_mut(index)?.as_mut())
-            .and_then(|judged| judged.agreed.take());
         self.recorded_only.push(running);
-        match text {
-            Some(text) => CaptureOutcome::Accepted(CaptureRequest {
-                route: request.route,
-                text,
-            }),
-            None => CaptureOutcome::Accepted(request),
+        match asked {
+            Asked::Merged { text, chat } => {
+                self.merge_metric("merged", started, &merging, inputs.len(), Some(chat));
+                self.recorder.text(dictation, format!("merged: {text}"));
+                if !left_out.is_empty() {
+                    self.tell_merge(format!("Merged without some texts: {left_out}."));
+                }
+                CaptureOutcome::Accepted(CaptureRequest {
+                    route: request.route,
+                    text,
+                })
+            }
+            Asked::Skipped { why, chat } => {
+                self.merge_metric(why.outcome(), started, &merging, inputs.len(), chat);
+                self.tell_merge(format!(
+                    "Merge skipped: {}. Used the live text.",
+                    why.reason()
+                ));
+                CaptureOutcome::Accepted(request)
+            }
+            Asked::Cancelled => CaptureOutcome::cancelled_with(request.text),
         }
     }
 
-    /// Sends the capture to every ticked entry at once, each request in a task of its own.
+    fn tell_merge(&mut self, note: String) {
+        (self.notice)(&note);
+        self.merge_note = Some(note);
+    }
+
+    /// Records the extras that had answered as they did, the others and the merge as cancelled;
+    /// nothing is delivered.
+    fn merge_cancelled(
+        &self,
+        merging: &Merging,
+        slots: &[Option<Judged>],
+        started: Instant,
+        text: String,
+    ) -> CaptureOutcome {
+        for (entry, slot) in merging.extras.iter().zip(slots) {
+            match slot {
+                Some(judged) => self.record_answer(judged, false),
+                None => self.record_extra(entry, "cancelled", started.elapsed(), false),
+            }
+        }
+        let heard = slots
+            .iter()
+            .flatten()
+            .filter(|judged| judged.agreed.is_some())
+            .count();
+        self.merge_metric("cancelled", started, merging, heard + 1, None);
+        CaptureOutcome::cancelled_with(text)
+    }
+
+    /// Asks the chat endpoint to merge `inputs`, the live text first, within `deadline`, and checks
+    /// that its text invents no word.
+    async fn ask_merge(
+        &mut self,
+        writing: &Writing,
+        inputs: &[String],
+        deadline: Instant,
+    ) -> Asked {
+        let asked = Instant::now();
+        let stopped = |stop: Option<WritingError>| match stop {
+            None => Asked::Cancelled,
+            Some(error) => Asked::Skipped {
+                why: match error {
+                    WritingError::Timeout => Skipped::Timeout,
+                    error => Skipped::Failed(error),
+                },
+                chat: Some(asked.elapsed()),
+            },
+        };
+        let mut reply = match bounded(
+            &mut self.cancel,
+            deadline,
+            writing.start_merge(&self.http, inputs),
+        )
+        .await
+        .finish()
+        {
+            Ok(reply) => reply,
+            Err(stop) => return stopped(stop),
+        };
+        let mut text = String::new();
+        loop {
+            match bounded(&mut self.cancel, deadline, reply.next())
+                .await
+                .finish()
+            {
+                Ok(Some(Piece::Text(piece))) => text.push_str(&piece),
+                Ok(Some(Piece::Thinking)) => {}
+                Ok(None) => break,
+                Err(stop) => return stopped(stop),
+            }
+        }
+        let text = text.trim();
+        let skipped = |why| Asked::Skipped {
+            why,
+            chat: Some(asked.elapsed()),
+        };
+        if !has_words(text) {
+            skipped(Skipped::Failed(WritingError::Empty))
+        } else if !merge::faithful(inputs, text) {
+            skipped(Skipped::Unfaithful)
+        } else {
+            Asked::Merged {
+                text: text.to_owned(),
+                chat: asked.elapsed(),
+            }
+        }
+    }
+
+    /// Records one merge: `chat` is the chat call's own latency, the duration what the merge added
+    /// after the ending.
+    fn merge_metric(
+        &self,
+        outcome: &str,
+        started: Instant,
+        merging: &Merging,
+        inputs: usize,
+        chat: Option<Duration>,
+    ) {
+        self.recorder.metric(
+            Event::Merge,
+            outcome,
+            Some(started.elapsed()),
+            json!({
+                "model": merging.writing.model(),
+                "inputs": inputs,
+                "chat_ms": chat.map(millis),
+            }),
+        );
+    }
+
+    /// Sends the capture to every extra at once, each request in a task of its own.
     fn ask_all(
         &self,
+        extras: &[ExtraEntry],
         request: &CaptureRequest,
         sent: &[Frame],
         has_endings: bool,
@@ -2271,7 +2449,7 @@ where
     ) -> JoinSet<Answer> {
         let sent: Arc<[Frame]> = Arc::from(sent);
         let mut running = JoinSet::new();
-        for (index, entry) in self.secondary.iter().enumerate() {
+        for (index, entry) in extras.iter().enumerate() {
             let (http, entry, sent, dictation) = (
                 self.http.clone(),
                 entry.clone(),
@@ -2317,25 +2495,16 @@ where
         if let Ok(raw) = &answer.heard {
             self.recorder.text(
                 &answer.dictation,
-                format!("second transcription ({}): {raw}", answer.entry.name),
+                format!("extra ({}): {raw}", answer.entry.name),
             );
         }
-        self.record_second_pass(&answer.entry, judged.outcome, answer.took, used);
+        self.record_extra(&answer.entry, judged.outcome, answer.took, used);
     }
 
-    /// Records a second pass that finished after the paste, and tells the user when it failed.
+    /// Records an extra that finished after the merge did not wait for it.
     fn record_late(&self, answer: Answer) {
         let judged = self.judge(answer);
         self.record_answer(&judged, false);
-        if judged.outcome != "ok" {
-            self.tell_only_recorded(&judged.answer.entry.name);
-        }
-    }
-
-    fn tell_only_recorded(&self, name: &str) {
-        (self.notice)(&format!(
-            "The second transcription for \"{name}\" failed; it was only recorded."
-        ));
     }
 
     /// Has the writing model put `words` into proper text and hands it on as a paste. Nothing is
@@ -2443,15 +2612,9 @@ where
         }
     }
 
-    fn record_second_pass(
-        &self,
-        entry: &SecondPassEntry,
-        outcome: &'static str,
-        took: Duration,
-        used: bool,
-    ) {
+    fn record_extra(&self, entry: &ExtraEntry, outcome: &'static str, took: Duration, used: bool) {
         self.recorder.metric(
-            Event::SecondaryStt,
+            Event::ExtraStt,
             outcome,
             Some(took),
             json!({
@@ -2466,7 +2629,7 @@ where
         );
     }
 
-    /// The secondary transcript without its ending phrase, when it ends the way the user did.
+    /// An extra's transcript without its ending phrase, when it ends the way the user did.
     /// A capture without endings (a hold) agrees with the whole transcript as dictated text.
     fn agreed(&self, raw: &str, route: CaptureRoute, has_endings: bool) -> Option<String> {
         if !has_endings {
@@ -2484,7 +2647,7 @@ where
             }
             _ => return None,
         };
-        // A second pass can hear the spoken ending twice ("Yes. Submit. Submit."); every trailing copy is the ending.
+        // An extra can hear the spoken ending twice ("Yes. Submit. Submit."); every trailing copy is the ending.
         loop {
             let mut parser = CaptureSession::new(self.endings.clone(), self.pauses, Vec::new());
             match parser.on_final(&text, Instant::now(), false) {

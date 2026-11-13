@@ -265,6 +265,9 @@ fn build(
         .stt
         .entries(raw.server)
         .map_err(|error: EntryError| error.to_string())?;
+    if entries.ticked().next().is_some() && raw.writing.is_none() {
+        return Err(EntryError::ExtrasNeedWriting.to_string());
+    }
     Ok(DesktopConfig {
         wake: raw.wake,
         cues: raw.cues,
@@ -465,7 +468,7 @@ fn nonempty(value: &str, label: &str) -> Result<String, String> {
 /// Speech-to-text settings.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SttConfig {
-    /// The speech servers: the live one dictation uses, and the second passes that may replace its text.
+    /// The speech servers: the live one dictation uses, and the extras whose texts are merged with it.
     pub entries: Entries,
     /// Spellings recognition favours, on this computer and on a recognizer that boosts phrases.
     pub phrases: WordList,
@@ -689,7 +692,7 @@ mod tests {
     use super::*;
     use crate::capture::{CaptureRoute, Ending};
     use crate::cues::Cue;
-    use crate::entries::{LiveKind, SecondPassEntry};
+    use crate::entries::{ExtraEntry, LiveKind};
     use crate::models::{CatalogHead, CatalogSpeech};
     use crate::secondary::{SecondaryApi, SecondaryStt};
     use crate::transducer::SpeechChoice;
@@ -708,7 +711,7 @@ mod tests {
             config.stt.entries.active_live().kind,
             LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms))
         );
-        assert_eq!(config.stt.entries.second_pass(), []);
+        assert_eq!(config.stt.entries.extras(), []);
         assert_eq!(config.wake, WakeConfig::default());
         assert_eq!(config.cues, Cues::default());
         assert_eq!(config.ending_pause, EndingPauses::default());
@@ -978,32 +981,32 @@ mod tests {
     }
 
     #[test]
-    fn secondary_is_off_by_default_and_round_trips_off_on_and_default() {
+    fn extras_are_off_by_default_and_round_trip_off_on_and_default() {
+        let writing = r#""writing": {"url": "http://c/v1", "model": "c"}"#;
         let endpoint =
             r#""url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k", "api": "meta""#;
         for (json, expected) in [
             ("{}".to_owned(), None),
             (
-                format!(r#"{{"stt": {{"secondary": {{{endpoint}}}}}}}"#),
+                format!(r#"{{{writing}, "stt": {{"secondary": {{{endpoint}}}}}}}"#),
                 Some(false),
             ),
             (
-                format!(r#"{{"stt": {{"secondary": {{"enabled": false, {endpoint}}}}}}}"#),
+                format!(
+                    r#"{{{writing}, "stt": {{"secondary": {{"enabled": false, {endpoint}}}}}}}"#
+                ),
                 Some(false),
             ),
             (
-                format!(r#"{{"stt": {{"secondary": {{"enabled": true, {endpoint}}}}}}}"#),
+                format!(
+                    r#"{{{writing}, "stt": {{"secondary": {{"enabled": true, {endpoint}}}}}}}"#
+                ),
                 Some(true),
             ),
         ] {
             let config = parse(&json).unwrap();
             assert_eq!(
-                config
-                    .stt
-                    .entries
-                    .second_pass()
-                    .first()
-                    .map(SecondPassEntry::ticked),
+                config.stt.entries.extras().first().map(ExtraEntry::ticked),
                 expected,
                 "{json}"
             );
@@ -1027,9 +1030,9 @@ mod tests {
             off_blank
                 .stt
                 .entries
-                .second_pass()
+                .extras()
                 .first()
-                .map(SecondPassEntry::ticked),
+                .map(ExtraEntry::ticked),
             Some(false)
         );
         let on_blank =
@@ -1049,6 +1052,69 @@ mod tests {
         ] {
             let error = parse(json).unwrap_err().to_string();
             assert!(error.contains(expected), "{json}: {error}");
+        }
+    }
+
+    #[test]
+    fn an_extra_that_is_on_needs_the_writing_endpoint_and_old_second_passes_load_as_extras() {
+        let writing = r#""writing": {"url": "http://c/v1", "model": "c"}"#;
+        let extra = |kind: &str, on: bool| {
+            format!(
+                r#""stt": {{"entries": [{{"kind": "on_device", "id": "d", "name": "D", "active": true}}, {{"kind": "{kind}", "id": "x", "name": "X", "active": {on}, "address": "http://x/v1", "model": "m"}}]}}"#
+            )
+        };
+        let refused = "Extra recognizers need a writing model. Set one up under Settings → Speech → Writing first, or switch the extras off.";
+        for (name, json, error) in [
+            (
+                "on without writing",
+                format!("{{{}}}", extra("extra", true)),
+                Some(refused),
+            ),
+            (
+                "on with null writing",
+                format!(r#"{{"writing": null, {}}}"#, extra("extra", true)),
+                Some(refused),
+            ),
+            (
+                "an old second pass that is on",
+                format!("{{{}}}", extra("second_pass", true)),
+                Some(refused),
+            ),
+            (
+                "an old second-pass setting that is on",
+                r#"{"stt": {"secondary": {"enabled": true, "url": "http://x/v1", "model": "m"}}}"#
+                    .to_owned(),
+                Some(refused),
+            ),
+            (
+                "off without writing",
+                format!("{{{}}}", extra("extra", false)),
+                None,
+            ),
+            (
+                "on with writing",
+                format!("{{{writing}, {}}}", extra("extra", true)),
+                None,
+            ),
+            (
+                "an old second pass with writing",
+                format!("{{{writing}, {}}}", extra("second_pass", true)),
+                None,
+            ),
+        ] {
+            let result = parse(&json);
+            if let Some(error) = error {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    format!("The desktop config is not valid: {error}"),
+                    "{name}"
+                );
+                continue;
+            }
+            let config = result.unwrap();
+            assert_eq!(config.stt.entries.extras().len(), 1, "{name}");
+            let written = serde_json::to_value(&config).unwrap();
+            assert_eq!(written["stt"]["entries"][1]["kind"], "extra", "{name}");
         }
     }
 
@@ -1135,7 +1201,7 @@ mod tests {
             config
                 .stt
                 .entries
-                .second_pass()
+                .extras()
                 .first()
                 .map(|entry| &entry.settings),
             Some(

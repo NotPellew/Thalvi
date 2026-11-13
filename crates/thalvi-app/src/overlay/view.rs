@@ -257,6 +257,10 @@ impl View {
                 self.line = Line::None;
                 self.working("TRANSCRIBING…");
             }
+            Status::Merging { .. } => {
+                self.line = Line::None;
+                self.working("MERGING…");
+            }
             Status::Working { .. } => self.working("WORKING"),
             Status::Loading { notice, .. } => {
                 self.line = Line::Notice(notice.clone());

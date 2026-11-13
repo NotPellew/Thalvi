@@ -88,6 +88,12 @@ Sync commit: `a03b86c0f995a8ec683157ed28765e668c183c66`. [source.json](source.js
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 
+Extra recognizers (#228) add `check_endpoint_kept` to `Store::check` and `judge`, a pure refusal on the settings value and
+`current` that runs before `load`; the loader also refuses a switched-on extra without a writing endpoint. Both only
+decide whether a save is refused, as any invalid form already is, and `agent.rs` gained status words. No lock, read
+of the running config, write or send changed, so the model is unchanged and only the `settings.rs` and `agent.rs`
+hashes moved.
+
 | Code | Model action and boundary |
 | --- | --- |
 | `crates/thalvi-app/src/commands.rs`: `save` (from `save_settings`, the Settings window) | Writer `S` on the main thread, one at a time with other main-thread writers. Via `AppState::save_form` into `SyncedConfig::save_form`: `Lock` before `Snap`, `Unlock` after `Send`. `Snap`: the config read for `Store::check`'s `current`, under the lock; the Settings save sets its field (the look). This abstracts any one Settings form field, including `update_channel`; that setting has no separate writer. `Store::write` runs through `AppState::take_effect`'s `write`, after any changed hold keys are watched; a desktop that refuses them ends the save before `Create`, like any refused save. |

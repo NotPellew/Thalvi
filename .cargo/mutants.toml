@@ -23,8 +23,6 @@ exclude_re = [
     "replace [<>] with [<>]= in (kaldi_filters|log_add)",
     # Bins past Nyquist are in no filter either way.
     "replace / with \\* in kaldi_filters",
-    # The winner of a second pass answered ok, so it is never in the list of failures either way.
-    "replace > with >= in .*::reconcile",
     # The encoder window is 45 samples, which no chunk length divisible by 4 can equal.
     "replace > with >= in Network::load",
     # The pinned decoder accepts -1 and 1 alike as the first context token.

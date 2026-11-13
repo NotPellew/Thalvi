@@ -347,14 +347,24 @@ under OpenMDW-1.1, exported to ONNX by Thalvi. Parakeet is NVIDIA's
 [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), in sherpa-onnx's int8 export.
 
-**Second-pass transcription** (Settings → Speech → Second pass, none ticked by
-default) sends each accepted capture again to every ticked OpenAI-style or Meta
-transcription API. The first ticked one in list order (move them with the
-arrows) that answers replaces the live text, and Thalvi pastes as soon as that
-one is known: an earlier entry that fails or disagrees is waited for, a later
-one never. The others keep running and are only recorded, in the capture's
-`text.txt` and the metrics, for comparing later; one that fails says so in a
-notice. Unticking keeps the address and key.
+**Extra recognizers** (Settings → Speech → Extra recognizers, none switched on by
+default) are OpenAI-style or Meta transcription APIs that hear each accepted capture
+besides the recognizer you chose. That one stays live: it shows the words, hears
+the ending phrases and decides what happens to the text (paste, submit, task,
+write). Every extra transcribes the same capture, and the chat model of **Writing**
+(same `url`, `model` and key, its own fixed prompt) merges the live text and the
+extras' texts into one, choosing between what the recognizers heard; the overlay says
+"Merging…" meanwhile, and cancel works as ever. The merged text is pasted only if
+every word of it appears in at least one recognizer's text. Otherwise, or when
+fewer than two texts arrive, an extra or the chat call fails, or the eight seconds
+from the end of the capture run out (the extras get five of them), the live text is
+pasted and the overlay says why. An extra that answers too late is left out of the
+merge and still recorded, in the capture's `text.txt` and the metrics. "Write that
+out" and the write key write out the merged text, with a second chat call.
+Extras can be switched on only while Writing has an endpoint, and the endpoint
+cannot be removed while one is on. Switching one off keeps its address and key.
+An extra is stored as an entry of kind `extra`; an old `second_pass` entry loads as
+one, and is written as `extra` the next time the settings are saved.
 
 ### Microphone
 
@@ -455,7 +465,7 @@ the network, and a command never starts the app or the microphone.
 
 | Command | Answer |
 | --- | --- |
-| `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false, "feeding": false, "overlay": {"state": "hidden"}, "recognizer": {"name": "On this computer", "kind": "on_device", "model": "nemotron_160ms", "status": "ready"}}`. `state` is `paused`, `loading`, `listening`, `keyboard` (listening with wake words off), `capturing`, `pending`, `transcribing`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}` (`reason` is left out for a delivery failure, whose notice can hold the dictated text), and `awaiting_confirmation: true` marks a submit that waits for you. `overlay.state` is what the overlay shows: `hidden` (also when the overlay is off), `listening`, `quiet`, `countdown`, `writing`, `working`, `delivered`, `error` (with the `headline` shown) or `loading`. `recognizer` is the speech entry that handles the next dictation (`model` only for a catalog model) and whether it is `ready`, `loading`, `failed` or `paused`, as the Speech page says. Nothing that was said is in it. |
+| `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false, "feeding": false, "overlay": {"state": "hidden"}, "recognizer": {"name": "On this computer", "kind": "on_device", "model": "nemotron_160ms", "status": "ready"}}`. `state` is `paused`, `loading`, `listening`, `keyboard` (listening with wake words off), `capturing`, `pending`, `transcribing`, `merging`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}` (`reason` is left out for a delivery failure, whose notice can hold the dictated text), and `awaiting_confirmation: true` marks a submit that waits for you. `overlay.state` is what the overlay shows: `hidden` (also when the overlay is off), `listening`, `quiet`, `countdown`, `writing`, `merging`, `working`, `delivered`, `error` (with the `headline` shown) or `loading`. `recognizer` is the speech entry that handles the next dictation (`model` only for a catalog model) and whether it is `ready`, `loading`, `failed` or `paused`, as the Speech page says. Nothing that was said is in it. |
 | `feed <wav-file>` | Plays the file's audio in place of the microphone, at the pace of speech, through the same wake word, recognition, endings and delivery as spoken audio; the microphone is ignored while it plays. Replies when the file has been fed: `{"ok": true, "took_effect": true, "state": "…"}`, with the state then; a capture it started carries on. Refused with `"Thalvi is paused."`, `"A capture is running."`, or the reason for a file that is missing, unreadable, not a mono or stereo 16-bit PCM WAV, or longer than the capture limit. Needs an absolute path (the command makes it absolute). `cancel` stops the feed and any capture it started. Capture metrics record `"source": "file"`. |
 | `models` | `{"ok": true, "models": [{"kind": "speech", "name", "title", "size", "downloaded", "progress_percent", "runs_on"}, …]}`: the wake and speech catalog models, `progress_percent` only while one downloads, `runs_on` (the Speech page's hardware line) only for speech models. |
 | `model-download <wake\|speech> <name>` | Downloads the model; replies when it is ready, `{"ok": true, "downloaded": true}`, or has failed, `{"ok": false, "downloaded": false, "error": "…"}`. `models` shows the progress meanwhile. |

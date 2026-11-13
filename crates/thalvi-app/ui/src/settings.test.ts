@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry, Status, UpdateState } from "./contract.ts";
 import settingsCss from "./settings.css?raw";
 import settingsLooksCss from "./settings-looks.css?raw";
+import { fakeBackend } from "./fake.ts";
 import { ELSEWHERE_TEXT, mountSettings, SAVED_AT_ONCE_TEXT, SAVED_MICROPHONE_TEXT, SAVED_TEXT } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO } from "./testing.ts";
 
@@ -132,7 +133,7 @@ describe("pages", () => {
         title: "Speech",
         groups: {
           "Live dictation": ["speech servers", "word list"],
-          "Second pass": ["second-pass servers"],
+          "Extra recognizers": ["extra recognizers"],
           Writing: ["writing endpoint address", "writing model", "writing api key", "writing prompt", "opening phrases"],
         },
       },
@@ -737,7 +738,7 @@ const CYBREX: SpeechEntry = {
   has_key: true,
 };
 const OPENAI: SpeechEntry = {
-  kind: "second_pass",
+  kind: "extra",
   id: "openai",
   name: "OpenAI",
   active: true,
@@ -747,7 +748,7 @@ const OPENAI: SpeechEntry = {
   has_key: true,
 };
 const META: SpeechEntry = {
-  kind: "second_pass",
+  kind: "extra",
   id: "meta",
   name: "Meta",
   active: false,
@@ -756,9 +757,9 @@ const META: SpeechEntry = {
   api: "meta",
 };
 
-/** A realtime recognizer in use, another recognizer, the on-device model, and two second-pass servers. */
+/** A realtime recognizer in use, another recognizer, the on-device model, and two extra recognizers, with a writing endpoint set. */
 function several(): Settings {
-  return { ...SETTINGS, stt: { entries: [{ ...SERVER }, { ...CYBREX }, device(undefined, false), { ...OPENAI }, { ...META }] } };
+  return { ...SETTINGS, writing: { url: "http://127.0.0.1:8000/v1", model: "glimmer" }, stt: { entries: [{ ...SERVER }, { ...CYBREX }, device(undefined, false), { ...OPENAI }, { ...META }] } };
 }
 
 function entryNamed(name: string): HTMLElement {
@@ -786,10 +787,10 @@ describe("the speech server list", () => {
 
   it("lists each server with its kind and where it is, and marks the one in use", async () => {
     await openSeveral();
-    const [live, second] = lists();
+    const [live, extra] = lists();
     expect(Array.from(root.querySelectorAll('select[aria-label="Kind of speech server to add"] option')).map((option) => option.getAttribute("value"))).not.toContain("thalvi_server");
     expect(names(live as HTMLElement)).toEqual(["Realtime speech server", "Cybrex2", "On this computer"]);
-    expect(names(second as HTMLElement)).toEqual(["OpenAI", "Meta"]);
+    expect(names(extra as HTMLElement)).toEqual(["OpenAI", "Meta"]);
     expect(badgesOf("Realtime speech server")).toEqual(["In use"]);
     expect(badgesOf("Cybrex2")).toEqual(["Realtime speech server", "Key saved"]);
     expect(badgesOf("On this computer")).toEqual([]);
@@ -972,7 +973,7 @@ describe("the speech server list", () => {
 
 });
 
-describe("second-pass servers", () => {
+describe("extra recognizers", () => {
   async function openSeveral() {
     const stub = await open(several());
     goTo("speech");
@@ -985,7 +986,7 @@ describe("second-pass servers", () => {
     expect([tickOf("OpenAI").checked, tickOf("Meta").checked]).toEqual([true, false]);
     flip(tickOf("Meta"));
     await settle();
-    expect(sent(stub).stt.entries.filter((entry) => entry.kind === "second_pass").map((entry) => [entry.name, entry.active])).toEqual([
+    expect(sent(stub).stt.entries.filter((entry) => entry.kind === "extra").map((entry) => [entry.name, entry.active])).toEqual([
       ["OpenAI", true],
       ["Meta", true],
     ]);
@@ -1005,22 +1006,25 @@ describe("second-pass servers", () => {
     expect(root.querySelector(".err")?.textContent).toBe("The settings could not be saved.");
   });
 
-  it("tries them in list order, which the arrows change and Save keeps", async () => {
-    const stub = await openSeveral();
-    expect((entryNamed("OpenAI").querySelector('button[aria-label="Move OpenAI up"]') as HTMLButtonElement).disabled).toBe(true);
-    (entryNamed("Meta").querySelector('button[aria-label="Move Meta up"]') as HTMLButtonElement).click();
-    expect(names(lists()[1] as HTMLElement)).toEqual(["Meta", "OpenAI"]);
-    expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
-    button("Save").click();
-    await settle();
-    expect(sent(stub).stt.entries.filter((entry) => entry.kind === "second_pass").map((entry) => entry.name)).toEqual(["Meta", "OpenAI"]);
+  it("has no way to reorder them, and the tick is locked with a hint while no writing endpoint is set", async () => {
+    await open({ ...several(), writing: null });
+    goTo("speech");
+    expect(root.querySelector('button[aria-label^="Move "]')).toBeNull();
+    expect(tickOf("Meta").disabled).toBe(true);
+    expect(tickOf("Meta").title).toBe("Set up the writing model under Writing first.");
+    expect([tickOf("OpenAI").checked, tickOf("OpenAI").disabled]).toEqual([true, false]);
+    type(control("Writing endpoint address", "input"), "http://127.0.0.1:8000/v1");
+    expect(tickOf("Meta").disabled).toBe(false);
+    expect(tickOf("Meta").title).toBe("");
+    type(control("Writing endpoint address", "input"), "");
+    expect(tickOf("Meta").disabled).toBe(true);
   });
 
-  it("adds a second-pass API, ticks it in the draft only, and saves it with Save", async () => {
+  it("adds an extra recognizer, ticks it in the draft only, and saves it with Save", async () => {
     const stub = await openSeveral();
-    button("Add a second-pass API").click();
+    button("Add an extra recognizer").click();
     await settle();
-    expect(control("Name", "input").value).toBe("Second pass");
+    expect(control("Name", "input").value).toBe("Extra recognizer");
     type(control("Address", "input"), "http://127.0.0.1:9000/v1");
     type(control("Model", "input"), "whisper");
     choose(control("API", "select"), "meta");
@@ -1028,18 +1032,33 @@ describe("second-pass servers", () => {
     expect(control("API key", "input").type).toBe("password");
     await saveServer();
     expect(stub.backend.checkSpeechEntry).toHaveBeenLastCalledWith(
-      expect.objectContaining({ kind: "second_pass", address: "http://127.0.0.1:9000/v1", model: "whisper", api: "meta", api_key: "k" }),
+      expect.objectContaining({ kind: "extra", address: "http://127.0.0.1:9000/v1", model: "whisper", api: "meta", api_key: "k" }),
     );
-    expect(badgesOf("Second pass")).toContain("Not saved");
-    flip(tickOf("Second pass"));
+    expect(badgesOf("Extra recognizer")).toContain("Not saved");
+    flip(tickOf("Extra recognizer"));
     await settle();
     expect(stub.backend.saveSettings).not.toHaveBeenCalled();
     button("Save").click();
     await settle();
-    expect(sent(stub).stt.entries.at(-1)).toMatchObject({ name: "Second pass", active: true, api: "meta", api_key: "k" });
+    expect(sent(stub).stt.entries.at(-1)).toMatchObject({ name: "Extra recognizer", active: true, api: "meta", api_key: "k" });
   });
 });
 
+
+describe("the fake backend's rule for extra recognizers", () => {
+  const writing = { url: "http://127.0.0.1:8000/v1", model: "glimmer" };
+  const settings = (endpoint: Settings["writing"], on: boolean): Settings => ({ ...SETTINGS, writing: endpoint, stt: { entries: [{ ...SERVER }, { ...OPENAI, active: on }] } });
+
+  it.each([
+    ["no writing model was set", null, "Extra recognizers need a writing model. Set one up under Settings → Speech → Writing first, or switch the extras off."],
+    ["the writing model is removed", writing, "Switch off the extra recognizers before removing the writing model."],
+  ] as const)("refuses a switched-on extra when %s", async (_case, before, message) => {
+    const backend = fakeBackend(new URLSearchParams());
+    await backend.saveSettings(settings(before, before !== null));
+    await expect(backend.saveSettings(settings(null, true))).rejects.toThrow(message);
+    await expect(backend.saveSettings(settings(null, false))).resolves.toBeUndefined();
+  });
+});
 
 describe("the attached speech editor", () => {
   async function openSeveral() {
@@ -1053,7 +1072,7 @@ describe("the attached speech editor", () => {
   it.each([
     ["Cybrex2", 0, "Editing “Cybrex2” · live dictation"],
     ["On this computer", 0, "Editing “On this computer” · live dictation"],
-    ["OpenAI", 1, "Editing “OpenAI” · second pass"],
+    ["OpenAI", 1, "Editing “OpenAI” · extra recognizer"],
   ] as const)("opens the editor right after the %s row in its own list", async (name, listIndex, heading) => {
     await openSeveral();
     edit(name);
@@ -1115,6 +1134,7 @@ describe("the next dictation summary and state words", () => {
     ["pending", { state: "pending", target: null, route: "paste", text: "hi", waitingForQuiet: false, pauseMs: 0, copies: false }, "Ready"],
     ["writing", { state: "writing", target: null, text: "" }, "Ready"],
     ["thinking", { state: "thinking", target: null }, "Ready"],
+    ["merging", { state: "merging", target: null, route: "paste" }, "Merging…"],
     ["working", { state: "working", target: null, route: "paste", cancellable: true }, "Ready"],
     ["done", { state: "done", target: null, route: "paste", notice: "Pasted" }, "Ready"],
     ["loading", { state: "loading", notice: "Loading the speech model." }, "Loading the speech model."],
@@ -1220,7 +1240,7 @@ describe("the next dictation summary and state words", () => {
     ["Realtime speech server", ["In use"], false],
     ["Cybrex2", ["Realtime speech server", "Key saved"], true],
     ["On this computer", [], true],
-    ["OpenAI", ["Second pass", "Key saved"], false],
+    ["OpenAI", ["Extra recognizer", "Key saved"], false],
   ] as const)("shows badges and Use for %s", async (name, badges, hasUse) => {
     await open(several());
     goTo("speech");

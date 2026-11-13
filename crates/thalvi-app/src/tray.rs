@@ -49,6 +49,7 @@ impl Icon {
             Status::Pending { .. } => Self::Pending,
             Status::Working { .. }
             | Status::Transcribing { .. }
+            | Status::Merging { .. }
             | Status::Writing { .. }
             | Status::Thinking { .. }
             | Status::Loading { .. } => Self::Working,
@@ -167,6 +168,7 @@ pub fn title(status: &Status) -> String {
         ),
         Status::Working { .. } => "working".to_owned(),
         Status::Transcribing { .. } => "transcribing".to_owned(),
+        Status::Merging { .. } => "merging".to_owned(),
         Status::Writing { .. } => "writing".to_owned(),
         Status::Thinking { .. } => "thinking".to_owned(),
         Status::Loading { .. } => "starting".to_owned(),
@@ -203,6 +205,7 @@ pub fn can_cancel(status: &Status) -> bool {
                 cancellable: true,
                 ..
             }
+            | Status::Merging { .. }
     )
 }
 

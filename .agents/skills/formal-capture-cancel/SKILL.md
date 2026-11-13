@@ -110,6 +110,16 @@ model is unchanged and only the hashes moved.
 Its later tests of a reply that isn't speech live in `recognizer.rs`'s test module; only that hash moved.
 Buffered OpenAI captures no longer expire at the idle deadline, and a wake upload's final spoken ending carries its armed route and text to delivery. Neither change alters the cancellation-first select, control drains, or delivery admission, so the model is unchanged and only the `engine.rs` hash moved.
 The Chat request kind and language (#419) change only what `OpenAiSession`'s upload task sends and records; `OpenAiSession::cancel` and `close` still abort it, so the model is unchanged and only the `openai_live.rs` hash moved.
+Merging every recognizer's text (#228) replaces `Engine::reconcile` with `Engine::merge`: the same post-accept
+stage, now waiting for every switched-on extra (up to a cutoff) and then asking the chat endpoint to merge. Its two
+awaits, the collection loop's `select!` and the merge call's `bounded`, both poll cancellation first, and what follows
+them (recording, a notice) is synchronous and never delivers, so it is the model's `secondary` stage under a new name:
+a cancel returns `Cancelled` before any text can leave it, a failed or unfaithful merge returns the live text as
+`Accepted` like any other post-accept result, and `write` after it is unchanged. The model is unchanged and only the
+`engine.rs` hash moved.
+The merge's note (`Engine::take_merge_note`, `noted` in `runner.rs`) is read right after `capture` returns, beside
+`take_ignored`, and only appends text to the final status; it adds no await, control drain or delivery admission, so
+the model is unchanged and only the `engine.rs` and `runner.rs` hashes moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
@@ -128,7 +138,7 @@ Matching hashes establish synchronization only, not correctness of the model.
 | Same file: `Runner::capture`, `Settling::settle` | `FinishEmpty` admits an Accepted result only if `ended` is clear. This is delivery admission at the last empty receive, not an atomic physical host effect. An ended capture skips `Delivery::finish` and is kept as cancelled. |
 | `crates/thalvi-desktop/src/engine.rs`: `EngineHandle::cancel`, `Engine::capture` | `cancelPending` represents the watch version change; capture entry consumes the old version. `Accept` and `ActiveCancelled` abstract capture work before the ending. |
 | Same file: `Engine::conclude`, `Engine::end_cue`, `Engine::end_with` | `CueReturns`, `CloseReturns`; the cue's cancellation-biased select and recognizer release are separate futures joined together. A completed cue retains its bool while close is still Pending. Neither completion is a transaction encompassing the other. |
-| Same file: `Engine::reconcile`, `Engine::write`, `bounded` | `secondary`, `writing`, `SecondaryReturns`, `WritingReturns`; disabled stages are skipped, each enabled stage polls cancellation first before handing the result to the next stage. |
+| Same file: `Engine::merge`, `Engine::write`, `bounded` | `secondary` (the merge of the extras' texts), `writing`, `SecondaryReturns`, `WritingReturns`; disabled stages are skipped, each enabled stage polls cancellation first before handing the result to the next stage. |
 | `crates/thalvi-desktop/src/recognizer.rs`: `RecognizerSession`; `crates/thalvi-desktop/src/realtime.rs`: `RealtimeSession::close`; `crates/thalvi-desktop/src/openai_live.rs`: `OpenAiSession::cancel`, `OpenAiSession::close` | `CloseReturns` may occur before or after the cue. Network close is awaited under a timeout, so it can remain Pending; `OpenAiSession::close` aborts its upload task and returns at once. |
 | `crates/thalvi-desktop/src/delivery.rs`: `Delivery::finish`, `paste_in`, `call` | `delivered` abstracts admission to a valid configured host action. Actual host execution is outside the proof; once admitted it can run via `spawn_blocking`. Other changes to this file are not covered by the model. |
 
@@ -226,7 +236,7 @@ Shortest trace of the fixed bug (secondary disabled), kept to read the model:
 3. `engine.rs::conclude` reaches Accepted and starts `end_with` (`Accept`).
 4. `engine.rs::end_cue` finishes successfully while recognizer close remains Pending (`CueReturns`).
 5. `runner.rs::drive` receives Cancel, `Requests::take` returns true, and `EngineHandle::cancel` changes the watch version (`Receive`).
-6. `recognizer.rs::ServerSession::close` completes or times out; `engine.rs::end_with` returns the cue's earlier true, and disabled `reconcile` returns Accepted (`CloseReturns`).
+6. `recognizer.rs::ServerSession::close` completes or times out; `engine.rs::end_with` returns the cue's earlier true, and disabled `merge` returns Accepted (`CloseReturns`).
 7. `runner.rs::drive` finds an empty completion queue because it consumed Cancel already; `Runner::capture` admits Accepted to `Delivery::finish` (`FinishEmpty`).
 
 Cancel enqueued after step 4 reached the same bug; the CPU replay uses that

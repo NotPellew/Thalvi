@@ -1,4 +1,4 @@
-//! Owns the list of speech servers in Settings → Speech: their kinds, validation, the one active live entry, the ticked second-pass entries, and the migration from the single-recognizer settings.
+//! Owns the list of speech servers in Settings → Speech: their kinds, validation, the one active live entry, the switched-on extra recognizers, and the migration from the single-recognizer settings.
 
 use std::{fmt, path::PathBuf};
 
@@ -35,6 +35,10 @@ pub enum EntryError {
         "stt.entries replaces stt.engine, stt.model, stt.secondary and the top-level server; remove them."
     )]
     Mixed,
+    #[error(
+        "Extra recognizers need a writing model. Set one up under Settings → Speech → Writing first, or switch the extras off."
+    )]
+    ExtrasNeedWriting,
     #[error("stt.model only applies when stt.engine is local.")]
     ModelWithoutLocal,
     #[error("server must be a ws or wss URL")]
@@ -148,15 +152,15 @@ impl LiveEntry {
     }
 }
 
-/// An entry whose transcription of the finished capture may replace the live text; it runs when ticked.
+/// An entry whose transcription of the finished capture is merged with the live text; it runs when switched on.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SecondPassEntry {
+pub struct ExtraEntry {
     pub id: String,
     pub name: String,
     pub settings: SecondaryStt,
 }
 
-impl SecondPassEntry {
+impl ExtraEntry {
     /// Whether the entry runs after each capture.
     #[must_use]
     pub fn ticked(&self) -> bool {
@@ -164,22 +168,20 @@ impl SecondPassEntry {
     }
 }
 
-/// The speech servers: any number of live and second-pass entries, exactly one live entry active.
+/// The speech servers: any number of live and extra entries, exactly one live entry active.
 #[derive(Clone, Debug)]
 pub struct Entries {
     live: Vec<LiveEntry>,
     /// Index into `live`; always in range.
     active: usize,
-    second_pass: Vec<SecondPassEntry>,
+    extras: Vec<ExtraEntry>,
     dropped_legacy_server: bool,
     dropped_active_legacy_server: bool,
 }
 
 impl PartialEq for Entries {
     fn eq(&self, other: &Self) -> bool {
-        self.live == other.live
-            && self.active == other.active
-            && self.second_pass == other.second_pass
+        self.live == other.live && self.active == other.active && self.extras == other.extras
     }
 }
 
@@ -195,7 +197,7 @@ impl Default for Entries {
                 kind: LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
             }],
             active: 0,
-            second_pass: Vec::new(),
+            extras: Vec::new(),
             dropped_legacy_server: false,
             dropped_active_legacy_server: false,
         }
@@ -204,8 +206,8 @@ impl Default for Entries {
 
 const ON_DEVICE_ID: &str = "on-device";
 const ON_DEVICE_NAME: &str = "On this computer";
-const SECOND_PASS_ID: &str = "second-pass";
-const SECOND_PASS_NAME: &str = "Second pass";
+const EXTRA_ID: &str = "extra";
+const EXTRA_NAME: &str = "Extra recognizer";
 
 impl Entries {
     /// The live entry that dictation uses now.
@@ -219,10 +221,10 @@ impl Entries {
         &self.live
     }
 
-    /// Every second-pass entry in list order, ticked or not.
+    /// Every extra entry, switched on or not; their order means nothing.
     #[must_use]
-    pub fn second_pass(&self) -> &[SecondPassEntry] {
-        &self.second_pass
+    pub fn extras(&self) -> &[ExtraEntry] {
+        &self.extras
     }
 
     /// Whether loading this config dropped a saved Thalvi server entry.
@@ -237,9 +239,9 @@ impl Entries {
         self.dropped_active_legacy_server
     }
 
-    /// The ticked second-pass entries in list order.
-    pub fn ticked(&self) -> impl Iterator<Item = &SecondPassEntry> {
-        self.second_pass.iter().filter(|entry| entry.ticked())
+    /// The extra entries that are switched on.
+    pub fn ticked(&self) -> impl Iterator<Item = &ExtraEntry> {
+        self.extras.iter().filter(|entry| entry.ticked())
     }
 
     /// The API key saved for the entry with `id`; empty when it has none or there is no such entry.
@@ -254,7 +256,7 @@ impl Entries {
                 LiveKind::OnDevice(_) => None,
             })
             .or_else(|| {
-                self.second_pass
+                self.extras
                     .iter()
                     .find(|entry| entry.id == id)
                     .map(|entry| entry.settings.api_key())
@@ -267,7 +269,7 @@ impl Entries {
     fn new(raw: Vec<RawEntry>) -> Result<Self, EntryError> {
         let mut live = Vec::new();
         let mut active = Vec::new();
-        let mut second_pass = Vec::new();
+        let mut extras = Vec::new();
         let mut seen: Vec<(String, String)> = Vec::new();
         let mut dropped_legacy_server = false;
         let mut removed_active = false;
@@ -294,7 +296,7 @@ impl Entries {
                     active.push(on);
                     live.push(entry);
                 }
-                Built::SecondPass(entry) => second_pass.push(entry),
+                Built::Extra(entry) => extras.push(entry),
                 Built::RemovedLegacyServer { .. } => {}
             }
         }
@@ -325,14 +327,14 @@ impl Entries {
         Ok(Self {
             live,
             active,
-            second_pass,
+            extras,
             dropped_legacy_server,
             dropped_active_legacy_server: removed_active,
         })
     }
 
     /// The entries a config written before the list existed meant: its on-device model and
-    /// second pass, ticked or not, with the key kept.
+    /// extra recognizer, switched on or not, with the key kept.
     fn migrated(
         engine: Option<EngineName>,
         model: Option<String>,
@@ -376,10 +378,10 @@ impl Entries {
         Ok(Self {
             live,
             active: 0,
-            second_pass: secondary
-                .map(|settings| SecondPassEntry {
-                    id: SECOND_PASS_ID.to_owned(),
-                    name: SECOND_PASS_NAME.to_owned(),
+            extras: secondary
+                .map(|settings| ExtraEntry {
+                    id: EXTRA_ID.to_owned(),
+                    name: EXTRA_NAME.to_owned(),
                     settings,
                 })
                 .into_iter()
@@ -464,7 +466,8 @@ enum RawEntry {
         #[serde(default)]
         model: Option<String>,
     },
-    SecondPass {
+    #[serde(alias = "second_pass")]
+    Extra {
         id: String,
         name: String,
         #[serde(default)]
@@ -480,7 +483,7 @@ enum RawEntry {
 
 enum Built {
     Live { entry: LiveEntry, on: bool },
-    SecondPass(SecondPassEntry),
+    Extra(ExtraEntry),
     RemovedLegacyServer { active: bool },
 }
 
@@ -488,14 +491,14 @@ impl Built {
     fn identity(&self) -> (&str, &str) {
         match self {
             Self::Live { entry, .. } => (&entry.id, &entry.name),
-            Self::SecondPass(entry) => (&entry.id, &entry.name),
+            Self::Extra(entry) => (&entry.id, &entry.name),
             Self::RemovedLegacyServer { .. } => ("", ""),
         }
     }
 }
 
 impl RawEntry {
-    /// Checks the fields. A second-pass entry that is not ticked is kept as written unless
+    /// Checks the fields. An extra entry that is switched off is kept as written unless
     /// `strict`, which is how an entry is checked where it is added or edited.
     fn build(self, strict: bool) -> Result<Built, EntryError> {
         if let Self::LegacyServer { active, .. } = &self
@@ -508,7 +511,7 @@ impl RawEntry {
             | Self::OpenAi { id, name, .. }
             | Self::LegacyServer { id, name, .. }
             | Self::OnDevice { id, name, .. }
-            | Self::SecondPass { id, name, .. } => (id.trim().to_owned(), name.trim().to_owned()),
+            | Self::Extra { id, name, .. } => (id.trim().to_owned(), name.trim().to_owned()),
         };
         if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
             return Err(EntryError::Name);
@@ -554,7 +557,7 @@ impl RawEntry {
                         SecondaryApi::OpenAi,
                         true,
                     )
-                    .map_err(|e| fields(&name, second_pass_reason(&e)))?,
+                    .map_err(|e| fields(&name, extra_reason(&e)))?,
                     request,
                     language: Language::parse(&language).map_err(|e| fields(&name, e))?,
                 }),
@@ -567,17 +570,17 @@ impl RawEntry {
                 LiveKind::OnDevice(speech_choice(model.as_deref()).map_err(|e| fields(&name, e))?),
                 active,
             ),
-            Self::SecondPass {
+            Self::Extra {
                 active,
                 address,
                 model,
                 api_key,
                 api,
                 ..
-            } => Built::SecondPass(SecondPassEntry {
+            } => Built::Extra(ExtraEntry {
                 settings: SecondaryStt::new(&address, &model, api_key, api, active || strict)
                     .map(|settings| settings.with_enabled(active))
-                    .map_err(|e| fields(&name, second_pass_reason(&e)))?,
+                    .map_err(|e| fields(&name, extra_reason(&e)))?,
                 id,
                 name,
             }),
@@ -585,7 +588,7 @@ impl RawEntry {
     }
 }
 
-fn second_pass_reason(error: &SecondarySttError) -> &'static str {
+fn extra_reason(error: &SecondarySttError) -> &'static str {
     match error {
         SecondarySttError::Url => {
             "the address must be an http or https URL with a host, no credentials, query or fragment."
@@ -674,7 +677,7 @@ impl Serialize for Entries {
                 active: bool,
                 model: String,
             },
-            SecondPass {
+            Extra {
                 id: &'a str,
                 name: &'a str,
                 active: bool,
@@ -713,7 +716,7 @@ impl Serialize for Entries {
                 },
             }
         });
-        let second = self.second_pass.iter().map(|entry| File::SecondPass {
+        let second = self.extras.iter().map(|entry| File::Extra {
             id: &entry.id,
             name: &entry.name,
             active: entry.ticked(),
@@ -758,10 +761,10 @@ mod tests {
                 entry.id == entries.active_live().id,
             )
         });
-        let second = entries.second_pass().iter().map(|entry| {
+        let second = entries.extras().iter().map(|entry| {
             (
                 entry.id.clone(),
-                "second_pass",
+                "extra",
                 entry.settings.address().to_owned(),
                 entry.ticked(),
             )
@@ -811,10 +814,12 @@ mod tests {
                 vec![row("on-device", "on_device", "/m", true)],
             ),
             (
-                format!(r#"{{"stt": {{"secondary": {{"enabled": true, {SECOND}}}}}}}"#),
+                format!(
+                    r#"{{"writing": {{"url": "http://127.0.0.1:9/v1", "model": "c"}}, "stt": {{"secondary": {{"enabled": true, {SECOND}}}}}}}"#
+                ),
                 vec![
                     row("on-device", "on_device", "nemotron_160ms", true),
-                    row("second-pass", "second_pass", "http://127.0.0.1:9/v1", true),
+                    row("extra", "extra", "http://127.0.0.1:9/v1", true),
                 ],
             ),
             (
@@ -823,7 +828,7 @@ mod tests {
                 ),
                 vec![
                     row("on-device", "on_device", "nemotron_160ms", true),
-                    row("second-pass", "second_pass", "http://127.0.0.1:9/v1", false),
+                    row("extra", "extra", "http://127.0.0.1:9/v1", false),
                 ],
             ),
         ];
@@ -835,21 +840,17 @@ mod tests {
             r#"{{"stt": {{"engine": "local", "secondary": {{"enabled": false, {SECOND}}}}}}}"#
         ))
         .unwrap();
-        assert_eq!(
-            kept.key_of("second-pass"),
-            "k",
-            "an unticked entry keeps its key"
-        );
+        assert_eq!(kept.key_of("extra"), "k", "an unticked entry keeps its key");
         let blank = entries(
             r#"{"stt": {"secondary": {"enabled": false, "url": "", "model": "", "api_key": "k"}}}"#,
         )
         .unwrap();
-        assert_eq!(blank.key_of("second-pass"), "k");
+        assert_eq!(blank.key_of("extra"), "k");
     }
 
     #[test]
     fn entries_round_trip_with_their_order_keys_and_inactive_setups() {
-        let json = json!({"stt": {"entries": [
+        let json = json!({"writing": {"url": "http://c/v1", "model": "c"}, "stt": {"entries": [
             {"kind": "realtime", "id": "a", "name": "Cybrex2", "active": false,
              "address": "ws://100.64.0.2:8012", "model": "nemotron", "api_key": "live-key"},
             {"kind": "open_ai", "id": "o", "name": "OpenAI local", "active": true,
@@ -857,7 +858,7 @@ mod tests {
             {"kind": "thalvi_server", "id": "b", "name": "Office", "active": true,
              "address": "ws://127.0.0.1:8080"},
             {"kind": "on_device", "id": "c", "name": "Offline", "active": false, "model": "/m"},
-            {"kind": "second_pass", "id": "z", "name": "Zed", "active": false,
+            {"kind": "extra", "id": "z", "name": "Zed", "active": false,
              "address": "http://z/v1", "model": "m", "api_key": "zk", "api": "meta"},
             {"kind": "second_pass", "id": "y", "name": "Why", "active": true,
              "address": "http://y/v1", "model": "m"}
@@ -867,12 +868,12 @@ mod tests {
         let got = &config.stt.entries;
         assert_eq!(got.active_live().name, "OpenAI local");
         assert_eq!(
-            got.second_pass()
+            got.extras()
                 .iter()
                 .map(|e| e.name.as_str())
                 .collect::<Vec<_>>(),
             ["Zed", "Why"],
-            "list order is kept"
+            "order is kept"
         );
         assert_eq!(
             got.ticked().map(|e| e.name.as_str()).collect::<Vec<_>>(),
@@ -969,7 +970,7 @@ mod tests {
                    "address": address, "model": model})
         };
         let second = |address: &str, model: &str| {
-            json!({"kind": "second_pass", "id": "p", "name": "P", "active": true,
+            json!({"kind": "extra", "id": "p", "name": "P", "active": true,
                    "address": address, "model": model})
         };
         let cases = [
@@ -1042,7 +1043,7 @@ mod tests {
 
     #[test]
     fn an_entry_is_checked_whole_where_it_is_added_but_kept_as_written_when_unticked() {
-        let blank_second = json!({"kind": "second_pass", "id": "p", "name": "P", "active": false,
+        let blank_second = json!({"kind": "extra", "id": "p", "name": "P", "active": false,
                                   "address": "", "model": "", "api_key": "k"});
         // Saved from an old config this way, so it still loads …
         let loaded = entries(
@@ -1060,7 +1061,7 @@ mod tests {
                 .unwrap_err()
                 .contains("the address must be an http or https URL")
         );
-        let good = json!({"kind": "second_pass", "id": "p", "name": "P", "active": false,
+        let good = json!({"kind": "extra", "id": "p", "name": "P", "active": false,
                           "address": "http://h/v1", "model": "m"});
         assert_eq!(check(&good), Ok(()));
         let bad_live = json!({"kind": "realtime", "id": "r", "name": "R", "active": false,
@@ -1134,11 +1135,15 @@ mod tests {
     }
 
     #[test]
-    fn lists_are_equal_only_when_entries_active_one_and_second_passes_all_match() {
+    fn lists_are_equal_only_when_entries_active_one_and_extras_all_match() {
         let live = |id: &str, name: &str, active: bool| json!({"kind": "on_device", "id": id, "name": name, "active": active});
-        let second = json!({"kind": "second_pass", "id": "p", "name": "P", "active": true,
+        let second = json!({"kind": "extra", "id": "p", "name": "P", "active": true,
                             "address": "http://h/v1", "model": "m"});
-        let list = |entries: Vec<Value>| entries_of(&json!({"stt": {"entries": entries}}));
+        let list = |entries: Vec<Value>| {
+            entries_of(
+                &json!({"writing": {"url": "http://c/v1", "model": "c"}, "stt": {"entries": entries}}),
+            )
+        };
         let base = list(vec![live("a", "A", true), live("b", "B", false)]);
         assert_eq!(
             base,
@@ -1154,7 +1159,7 @@ mod tests {
                 list(vec![live("a", "A", false), live("b", "B", true)]),
             ),
             (
-                "a second pass",
+                "an extra",
                 list(vec![live("a", "A", true), live("b", "B", false), second]),
             ),
         ];
