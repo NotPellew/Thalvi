@@ -592,12 +592,12 @@ approves the `release` environment, `publish` signs them for the updater and
 publishes them with their `.sig` files and `latest.json`, which
 `releases/latest/download/latest.json` serves to Stable.
 
-Each push to `development` (or running the workflow on it) builds a
+Each push to `main` (or running the workflow on it) builds a
 development build numbered `X.Y.Z-dev.N` from the version in `Cargo.toml`; a
 newer push replaces a build still waiting. Once approved, it publishes as a
 prerelease and the `desktop-dev` release's `latest.json`, the Development feed,
 names it, or the latest release when that is newer. The last five development
-builds are kept. Since `X.Y.Z-dev.N` sorts below `X.Y.Z`, bump `development`
+builds are kept. Since `X.Y.Z-dev.N` sorts below `X.Y.Z`, bump `main`
 to the next version right after a release.
 
 - **Key:** made once with `npm exec --prefix crates/thalvi-app/ui -- tauri
