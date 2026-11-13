@@ -2,6 +2,7 @@
 
 use std::{fmt, time::Duration};
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -158,6 +159,71 @@ impl TryFrom<RawSecondaryStt> for SecondaryStt {
     }
 }
 
+/// A two-letter ISO 639-1 language code, kept lower-case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Language([char; 2]);
+
+/// Why a language was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the language must be a two-letter ISO 639-1 code such as de, or empty.")]
+pub struct LanguageError;
+
+impl Language {
+    /// `text` as a language code, or none when it is blank.
+    ///
+    /// # Errors
+    /// Fails unless `text` is blank or exactly two ASCII letters.
+    pub fn parse(text: &str) -> Result<Option<Self>, LanguageError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        let mut letters = text.chars();
+        match (letters.next(), letters.next(), letters.next()) {
+            (Some(a), Some(b), None) if a.is_ascii_alphabetic() && b.is_ascii_alphabetic() => {
+                Ok(Some(Self([a.to_ascii_lowercase(), b.to_ascii_lowercase()])))
+            }
+            _ => Err(LanguageError),
+        }
+    }
+}
+
+impl fmt::Display for Language {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", self.0[0], self.0[1])
+    }
+}
+
+/// How a live OpenAI-compatible entry sends the capture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LiveRequest {
+    /// A streaming multipart upload to `/audio/transcriptions`.
+    #[default]
+    Transcriptions,
+    /// One JSON request to `/chat/completions` with the WAV as `input_audio`.
+    Chat,
+}
+
+impl LiveRequest {
+    /// The name the file and the metrics use.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Transcriptions => "transcriptions",
+            Self::Chat => "chat",
+        }
+    }
+}
+
+/// A live OpenAI-compatible entry: where it listens, how it asks and in which language.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenAiLive {
+    pub settings: SecondaryStt,
+    pub request: LiveRequest,
+    pub language: Option<Language>,
+}
+
 /// Why the secondary transcription produced no text.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SecondaryError {
@@ -267,7 +333,8 @@ pub async fn transcribe(
     }
 }
 
-/// Sends the same WAV request with streaming enabled and emits cumulative text as SSE arrives.
+/// Sends the capture as the entry's request kind. A transcriptions request streams: it emits
+/// cumulative text as SSE arrives. A chat request emits nothing before its one answer.
 ///
 /// # Errors
 ///
@@ -275,11 +342,27 @@ pub async fn transcribe(
 /// an unsupported response.
 pub async fn transcribe_events(
     client: &reqwest::Client,
-    settings: &SecondaryStt,
+    entry: &OpenAiLive,
+    frames: &[Frame],
+    emit: impl FnMut(crate::recognizer::RecognizerEvent),
+) -> Result<String, SecondaryError> {
+    match entry.request {
+        LiveRequest::Transcriptions => transcribe_stream(client, entry, frames, emit).await,
+        LiveRequest::Chat => transcribe_chat(client, entry, frames).await,
+    }
+}
+
+async fn transcribe_stream(
+    client: &reqwest::Client,
+    entry: &OpenAiLive,
     frames: &[Frame],
     mut emit: impl FnMut(crate::recognizer::RecognizerEvent),
 ) -> Result<String, SecondaryError> {
-    let mut body = format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{}\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"stream\"\r\n\r\ntrue\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"capture.wav\"\r\nContent-Type: audio/wav\r\n\r\n", settings.model).into_bytes();
+    let settings = &entry.settings;
+    let language = entry.language.map_or_else(String::new, |language| {
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\n{language}\r\n")
+    });
+    let mut body = format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{}\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"stream\"\r\n\r\ntrue\r\n{language}--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"capture.wav\"\r\nContent-Type: audio/wav\r\n\r\n", settings.model).into_bytes();
     body.extend_from_slice(&wav(frames));
     body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
     let mut request = client
@@ -369,6 +452,54 @@ pub async fn transcribe_events(
         Ok(final_text.unwrap_or(transcript))
     };
     tokio::time::timeout(TIMEOUT, upload)
+        .await
+        .map_err(|_| SecondaryError::Timeout)?
+}
+
+/// One non-streaming chat completion that carries the WAV as `input_audio`.
+async fn transcribe_chat(
+    client: &reqwest::Client,
+    entry: &OpenAiLive,
+    frames: &[Frame],
+) -> Result<String, SecondaryError> {
+    let settings = &entry.settings;
+    let mut body = json!({
+        "model": settings.model,
+        "messages": [{"role": "user", "content": [{
+            "type": "input_audio",
+            "input_audio": {"data": STANDARD.encode(wav(frames)), "format": "wav"},
+        }]}],
+    });
+    if let (Some(language), Some(object)) = (entry.language, body.as_object_mut()) {
+        object.insert("language".to_owned(), json!(language.to_string()));
+    }
+    let mut request = client
+        .post(format!("{}/chat/completions", settings.url))
+        .header("Accept", "application/json")
+        .json(&body);
+    if !settings.api_key.is_empty() {
+        request = request.bearer_auth(&settings.api_key);
+    }
+    let exchange = async {
+        let response = request
+            .send()
+            .await
+            .map_err(|_| SecondaryError::Unreachable)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(SecondaryError::Status(status.as_u16()));
+        }
+        let answer: Value = response
+            .json()
+            .await
+            .map_err(|_| SecondaryError::BadResponse)?;
+        answer
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or(SecondaryError::BadResponse)
+    };
+    tokio::time::timeout(TIMEOUT, exchange)
         .await
         .map_err(|_| SecondaryError::Timeout)?
 }

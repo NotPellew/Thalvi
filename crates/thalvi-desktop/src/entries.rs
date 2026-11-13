@@ -7,7 +7,9 @@ use serde_json::Value;
 
 use crate::models::CatalogSpeech;
 use crate::recognizer::SpeechSource;
-use crate::secondary::{SecondaryApi, SecondaryStt, SecondarySttError};
+use crate::secondary::{
+    Language, LiveRequest, OpenAiLive, SecondaryApi, SecondaryStt, SecondarySttError,
+};
 use crate::transducer::SpeechChoice;
 
 /// The longest entry name, in characters.
@@ -117,7 +119,7 @@ pub enum LiveKind {
     /// Meta's realtime ASR protocol, spoken by the desktop itself.
     Realtime(Realtime),
     /// OpenAI-compatible audio transcription, uploaded when capture ends.
-    OpenAi(SecondaryStt),
+    OpenAi(OpenAiLive),
     /// The model on this computer.
     OnDevice(SpeechChoice),
 }
@@ -138,8 +140,8 @@ impl LiveEntry {
             LiveKind::Realtime(realtime) => {
                 SpeechSource::direct(&self.name, realtime.address.clone())
             }
-            LiveKind::OpenAi(settings) => {
-                SpeechSource::direct(&self.name, settings.address().to_owned())
+            LiveKind::OpenAi(live) => {
+                SpeechSource::direct(&self.name, live.settings.address().to_owned())
             }
             LiveKind::OnDevice(choice) => SpeechSource::on_device(&self.name, choice.label()),
         }
@@ -248,7 +250,7 @@ impl Entries {
             .find(|entry| entry.id == id)
             .and_then(|entry| match &entry.kind {
                 LiveKind::Realtime(realtime) => Some(realtime.api_key()),
-                LiveKind::OpenAi(settings) => Some(settings.api_key()),
+                LiveKind::OpenAi(live) => Some(live.settings.api_key()),
                 LiveKind::OnDevice(_) => None,
             })
             .or_else(|| {
@@ -438,6 +440,10 @@ enum RawEntry {
         model: String,
         #[serde(default)]
         api_key: String,
+        #[serde(default)]
+        request: LiveRequest,
+        #[serde(default)]
+        language: String,
     },
     #[serde(rename = "thalvi_server")]
     LegacyServer {
@@ -536,12 +542,22 @@ impl RawEntry {
                 address,
                 model,
                 api_key,
+                request,
+                language,
                 ..
             } => live(
-                LiveKind::OpenAi(
-                    SecondaryStt::new(&address, &model, api_key, SecondaryApi::OpenAi, true)
-                        .map_err(|e| fields(&name, second_pass_reason(&e)))?,
-                ),
+                LiveKind::OpenAi(OpenAiLive {
+                    settings: SecondaryStt::new(
+                        &address,
+                        &model,
+                        api_key,
+                        SecondaryApi::OpenAi,
+                        true,
+                    )
+                    .map_err(|e| fields(&name, second_pass_reason(&e)))?,
+                    request,
+                    language: Language::parse(&language).map_err(|e| fields(&name, e))?,
+                }),
                 active,
             ),
             Self::LegacyServer { .. } => {
@@ -649,6 +665,8 @@ impl Serialize for Entries {
                 address: &'a str,
                 model: &'a str,
                 api_key: &'a str,
+                request: LiveRequest,
+                language: String,
             },
             OnDevice {
                 id: &'a str,
@@ -677,13 +695,15 @@ impl Serialize for Entries {
                     model: &realtime.model,
                     api_key: &realtime.api_key,
                 },
-                LiveKind::OpenAi(settings) => File::OpenAi {
+                LiveKind::OpenAi(live) => File::OpenAi {
                     id,
                     name,
                     active,
-                    address: settings.address(),
-                    model: settings.model(),
-                    api_key: settings.api_key(),
+                    address: live.settings.address(),
+                    model: live.settings.model(),
+                    api_key: live.settings.api_key(),
+                    request: live.request,
+                    language: live.language.map(|l| l.to_string()).unwrap_or_default(),
                 },
                 LiveKind::OnDevice(choice) => File::OnDevice {
                     id,
@@ -728,7 +748,7 @@ mod tests {
         let live = entries.live().iter().map(|entry| {
             let (kind, place) = match &entry.kind {
                 LiveKind::Realtime(realtime) => ("realtime", realtime.address().to_owned()),
-                LiveKind::OpenAi(settings) => ("open_ai", settings.address().to_owned()),
+                LiveKind::OpenAi(live) => ("open_ai", live.settings.address().to_owned()),
                 LiveKind::OnDevice(choice) => ("on_device", choice.label()),
             };
             (
@@ -873,6 +893,67 @@ mod tests {
             config,
             "{written}"
         );
+    }
+
+    #[test]
+    fn an_open_ai_entry_keeps_its_request_kind_and_language() {
+        let entry = |extra: Value| {
+            let mut entry = json!({"kind": "open_ai", "id": "o", "name": "ASR", "active": true,
+                                   "address": "http://h/v1", "model": "m"});
+            entry
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            entry
+        };
+        let cases = [
+            ("old file", json!({}), LiveRequest::Transcriptions, None),
+            (
+                "chat in German",
+                json!({"request": "chat", "language": "de"}),
+                LiveRequest::Chat,
+                Language::parse("de").unwrap(),
+            ),
+            (
+                "upper case and blanks",
+                json!({"request": "transcriptions", "language": " DE "}),
+                LiveRequest::Transcriptions,
+                Language::parse("de").unwrap(),
+            ),
+            (
+                "blank language",
+                json!({"language": "  "}),
+                LiveRequest::Transcriptions,
+                None,
+            ),
+        ];
+        for (what, extra, request, language) in cases {
+            let config = entries_of(&json!({"stt": {"entries": [entry(extra)]}}));
+            let LiveKind::OpenAi(live) = &config.active_live().kind else {
+                panic!("{what}: not an open_ai entry");
+            };
+            assert_eq!((live.request, live.language), (request, language), "{what}");
+            let written = serde_json::to_value(&config).unwrap();
+            let saved = &written[0];
+            assert_eq!(saved["request"], json!(request.name()), "{what}");
+            assert_eq!(
+                saved["language"],
+                json!(language.map(|l| l.to_string()).unwrap_or_default()),
+                "{what}"
+            );
+            assert_eq!(
+                entries_of(&json!({"stt": {"entries": written}})),
+                config,
+                "{what}"
+            );
+        }
+        for bad in ["deu", "d1", "e", "é", "d e"] {
+            assert_eq!(
+                check(&entry(json!({"language": bad}))),
+                Err("Speech server \"ASR\": the language must be a two-letter ISO 639-1 code such as de, or empty.".to_owned()),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
