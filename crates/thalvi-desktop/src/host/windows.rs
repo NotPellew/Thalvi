@@ -1,5 +1,6 @@
 //! Windows host: window identity, the clipboard and `SendInput` key presses, over a small Win32 seam.
 
+mod overlay;
 mod pipe;
 mod win32;
 
@@ -12,7 +13,8 @@ use super::{
     App, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, PasteText, RequestServer,
     WebUrl,
 };
-use crate::hold::{HoldKey, HoldKind};
+use crate::hold::{HoldChange, HoldKey, HoldKind};
+pub use overlay::{OverlayPlan, OverlaySurface, OverlayWaker};
 pub use win32::Real;
 
 /// A window handle as a plain number, so targets stay `Send`.
@@ -57,8 +59,6 @@ pub trait Win32: Send + Sync {
     fn send_input(&self, events: &[KeyEvent]) -> usize;
     fn set_clipboard(&self, text: &str) -> bool;
     fn open_url(&self, url: &str) -> bool;
-    /// The top of the primary monitor's work area, below a taskbar docked there, in logical pixels.
-    fn work_area_top(&self) -> Option<f64>;
 }
 
 /// A window as bound at wake.
@@ -104,6 +104,19 @@ impl Windows {
         (HoldKey::alt_z(), HoldKey::alt_x())
     }
 
+    /// Refuses the keys this desktop can never bind, without binding anything; Windows takes
+    /// every key a hold key can be, and refuses one only when the hook is installed.
+    ///
+    /// # Errors
+    /// Never.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as the other hosts, which refuse keys they can't bind"
+    )]
+    pub fn check_hold_keys(_keys: &[(HoldKind, HoldKey)]) -> Result<(), HostError> {
+        Ok(())
+    }
+
     /// Reports each press and release of `keys` to `on_change` until the guard is dropped, and
     /// keeps them from the focused app. `on_change` runs inside the keyboard hook: it must not block.
     ///
@@ -111,7 +124,7 @@ impl Windows {
     /// [`HostError::Unsupported`] when Windows refuses the keyboard hook.
     pub fn watch_hold_keys(
         keys: &[(HoldKind, HoldKey)],
-        on_change: impl Fn(HoldKind, bool) + Send + 'static,
+        on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
         _on_problem: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         win32::watch_hold_keys(keys.to_vec(), Box::new(on_change)).map(HoldSource::Watching)
@@ -131,10 +144,17 @@ impl Windows {
         win32::message_box(title, message);
     }
 
-    /// Shows or hides the overlay window `window` without activating it, which Tauri's `show`
-    /// would.
-    pub fn set_overlay_visible(window: Hwnd, visible: bool) {
-        win32::set_visible_unfocused(window, visible);
+    /// Where the status overlay's window goes.
+    ///
+    /// # Errors
+    /// Never on Windows; the signature matches the Linux desktops'.
+    #[expect(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "one signature for every desktop's host"
+    )]
+    pub fn overlay_plan(&self) -> Result<OverlayPlan, HostError> {
+        Ok(OverlayPlan)
     }
 }
 
@@ -319,15 +339,6 @@ impl<A: Win32> Host for Windows<A> {
             Err(nothing_typed("Windows could not open the folder."))
         }
     }
-
-    fn prepare_overlay(&self, _width: f64, _height: f64) -> Result<f64, HostError> {
-        // The app shows the window with `set_overlay_visible`, because tao's `show` activates it
-        // despite WS_EX_NOACTIVATE; it sizes and positions it below the taskbar with the top
-        // returned here.
-        self.api.work_area_top().ok_or_else(|| {
-            HostError::Unsupported("Windows did not say where the taskbar is.".to_owned())
-        })
-    }
 }
 
 fn nothing_typed(notice: &str) -> HostError {
@@ -465,7 +476,6 @@ mod tests {
         clipboard_open: bool,
         opened: Vec<String>,
         browser_open: bool,
-        work_area_top: Option<f64>,
     }
 
     struct Fake(Mutex<State>);
@@ -482,7 +492,6 @@ mod tests {
                 stack: vec![NOTEPAD, OTHER, EDITOR],
                 clipboard_open: true,
                 browser_open: true,
-                work_area_top: Some(0.0),
                 ..State::default()
             }))
         }
@@ -540,9 +549,6 @@ mod tests {
                 state.opened.push(url.to_owned());
             }
             state.browser_open
-        }
-        fn work_area_top(&self) -> Option<f64> {
-            self.read(|state| state.work_area_top)
         }
     }
 
@@ -636,31 +642,11 @@ mod tests {
             fn open_url(&self, url: &str) -> bool {
                 self.0.open_url(url)
             }
-            fn work_area_top(&self) -> Option<f64> {
-                self.0.work_area_top()
-            }
         }
         assert!(matches!(
             Windows::new(Blind(Fake::desktop())),
             Err(HostError::Unsupported(_))
         ));
-    }
-
-    #[test]
-    fn the_overlay_hangs_from_the_top_of_the_work_area_below_a_taskbar() {
-        let desktop = windows(Fake::desktop());
-        assert_eq!(desktop.prepare_overlay(460.0, 200.0), Ok(0.0));
-
-        desktop.api.with(|state| state.work_area_top = Some(32.0));
-        assert_eq!(desktop.prepare_overlay(460.0, 200.0), Ok(32.0));
-
-        desktop.api.with(|state| state.work_area_top = None);
-        assert_eq!(
-            desktop.prepare_overlay(460.0, 200.0),
-            Err(HostError::Unsupported(
-                "Windows did not say where the taskbar is.".to_owned()
-            ))
-        );
     }
 
     #[test]

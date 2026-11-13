@@ -133,7 +133,7 @@ mod tests {
     use chrono::TimeZone as _;
 
     use super::*;
-    use crate::recognizer::{ConnectFailure, Detail, RecognizerError, ServerUrl, SpeechSource};
+    use crate::recognizer::{ConnectFailure, Detail, RecognizerError, SpeechSource};
 
     fn config(json: &str) -> DesktopConfig {
         DesktopConfig::from_json_str(json).unwrap()
@@ -152,12 +152,12 @@ mod tests {
             (
                 "Hyprland",
                 vec!["connection refused (os error 111)".to_owned()],
-                r#"{"server": "ws://127.0.0.1:9", "microphone": "USB Mic"}"#,
+                r#"{"stt":{"entries":[{"kind":"realtime","id":"r","name":"Office","active":true,"address":"ws://127.0.0.1:9","model":"m"}]},"microphone":"USB Mic"}"#,
                 "\
                  Error: Thalvi could not reach the speech server.\n\n\
                  Technical cause:\n- connection refused (os error 111)\n\n\
                  Time: 2026-11-03 12:34:56 UTC\nThalvi: 1.2.3\nSystem: linux, Hyprland\n\n\
-                 Settings:\n- Speech recognition: the Thalvi server \"Thalvi server\" at ws://127.0.0.1:9\n- Microphone: USB Mic\n- Second transcription: off\n",
+                 Settings:\n- Speech recognition: the speech server \"Office\" at ws://127.0.0.1:9\n- Microphone: USB Mic\n- Second transcription: off\n",
             ),
             (
                 "",
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn the_cause_chain_lists_each_source_below_the_error_itself() {
         let error = RecognizerError::Unreachable {
-            speech: SpeechSource::thalvi_server("Office", &ServerUrl::default()),
+            speech: SpeechSource::direct("Office", "ws://127.0.0.1:8080".to_owned()),
             reason: ConnectFailure::Refused,
             detail: Detail("IO error: Connection refused (os error 111)".to_owned()),
         };

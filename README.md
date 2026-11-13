@@ -204,12 +204,9 @@ STT_API_KEY=
 ```
 
 With it, Settings → Speech shows a **Word list**: names and terms, one per
-line, whose spelling recognition should favour (such as "Cybrex2"). Saving
-sends the list to the Thalvi server in use, which keeps it and uses it for
-dictation and conversations; a realtime speech server entry gets it at each
-connection. Meta's recognizer doesn't support it, so the field is hidden
-then. Dictation on this computer always uses the list, so the field shows
-whenever speech is recognized there.
+line, whose spelling recognition should favour (such as "Cybrex2"). The list
+is used by local recognition and sent to direct realtime speech servers at
+each connection. Web conversations continue to use `STT_URL` through `/session`.
 
 ### Voices
 
@@ -267,7 +264,8 @@ is needed.
   recordings stay.
 - **Linux:** install `wtype` and `wl-copy`, then
   `chmod +x Thalvi_<version>_amd64.AppImage` and run it. Keep it on a path
-  without spaces. To update, replace the file; settings and models stay.
+  without spaces. Thalvi updates the AppImage in place (see
+  [Updates](#updates)); settings and models stay.
 
 Start it once and it stays in the tray; starting it again opens Settings. The
 first start writes the default config, opens Settings on Speech, and downloads
@@ -288,16 +286,18 @@ under each entry's collapsed **Details**. The kinds are:
 
 - **Realtime speech server:** a recognizer that speaks Meta's realtime ASR
   protocol, such as the self-hosted one below, which the app connects to itself
-  (address, model, API key), with no Thalvi server running.
-- **Through a Thalvi server:** streams to the server's `/transcription`
-  (by default `ws://127.0.0.1:8080`), which uses the recognizer in its `.env`.
+  (address, model, API key).
+- **OpenAI-compatible:** sends each capture to an OpenAI-compatible
+  `/v1/audio/transcriptions` endpoint when you release the dictation key. A
+  wake-word capture ends after a pause in speech (address, model, API key).
 - **On this computer:** dictates without the server or a network; the default.
   Use **Show models for** to filter the list of models (each model recognizes the
   languages on its card), then pick a model.
 
 Web conversations always use the server's own `STT_URL`. An existing config
 with `stt.engine`, `stt.model`, `stt.secondary` and `server` becomes entries
-the first time Thalvi reads it, with nothing to enter again. An API key is shown
+the first time Thalvi reads it; a saved Thalvi server speech entry is dropped,
+and if active, On this computer becomes active with a one-time notice. An API key is shown
 as saved and never again; leave it blank to keep it. A server that cannot be
 reached is named in the error, and Thalvi never falls back to another one.
 
@@ -368,6 +368,36 @@ Settings → App → Startup, both off by default and applied right away:
 - **Show Thalvi in the app menu** (AppImage) adds a menu entry and icon under
   `~/.local/share`. On Windows the installer owns the Start menu entry.
 
+### Updates
+
+Thalvi keeps itself on one update channel, chosen in Settings → App → Updates
+(saved with Save): **Stable** (the default) follows released versions;
+**Development** also follows the builds the developer approves for testing.
+Stable never installs a development build, and neither channel ever installs an
+older version, so switching from Development to Stable keeps the development
+build until a newer stable release exists.
+
+- **Supported installs:** the Windows installer's per-user folder, and the Linux
+  AppImage in a folder you can write to. A copy that cannot replace itself, such
+  as a build from source or an AppImage in a read-only folder, says so under
+  Updates and in words you can follow; it does not keep trying.
+- **How it runs:** a check a few seconds after Thalvi is usable, then at most
+  once a day while it runs; **Check for updates** checks at once, and a failed
+  check says so and is retried by the button only. The download is verified
+  against the public key built into the app before anything is installed. A
+  check sends only what is needed to find the right version and is counted, with
+  its time and outcome, in the opt-in metrics.
+- **Restart:** a downloaded update installs, and Thalvi restarts, only while it
+  is idle: no capture, key held, ending countdown or delivery in progress. Until
+  then the tray and Settings show that it is waiting. Nothing is pasted or sent
+  by an update, a paused microphone stays paused, and no window takes focus. The
+  tray and Settings say "Updated to X" once afterwards.
+- **If it fails:** a download, signature or installer failure leaves the
+  installed version working and says what happened under Updates and in the
+  tray. If an install did not take, the next start says so. To recover, download
+  the version you want from [Releases](https://github.com/NotPellew/Thalvi/releases)
+  and install it as in [Install](#install); settings and models stay.
+
 ### Recordings
 
 Settings → App has a switch each for metrics, text and audio recordings, all
@@ -395,7 +425,7 @@ never API keys.
 
 `thalvi-desktop toggle`, `pause`, `resume`, `cancel` and `copy-error` control
 the running app (with the AppImage, run it with that word). `status` prints
-Waybar JSON. They work on Hyprland, GNOME and Windows, and start nothing when
+Waybar JSON, with the class `keyboard` while wake words are off. They work on Hyprland, GNOME and Windows, and start nothing when
 Thalvi is not running. The
 examples in [`integrations/hyprland/`](integrations/hyprland/) add a Waybar
 microphone button (left click toggles listening without moving focus, right
@@ -405,8 +435,10 @@ current capture and closes the microphone.
 
 ### For agents
 
-A program you run, such as a coding agent, can read and change the settings, see
-what Thalvi is doing and control it with `thalvi-desktop` commands. Each prints
+A program you run, such as a coding agent, can set Thalvi up, read and change the
+settings, feed it audio from a file in place of the microphone, see what Thalvi is
+doing and what its overlay shows, and control it with `thalvi-desktop` commands.
+Nothing that was dictated is ever in an answer. Each prints
 one JSON object and exits 0, or non-zero when the answer is `"ok": false`.
 They talk to the running app over a private socket in your runtime folder on
 Linux, or a named pipe only your user can open on Windows; nothing listens on
@@ -414,10 +446,16 @@ the network, and a command never starts the app or the microphone.
 
 | Command | Answer |
 | --- | --- |
-| `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false}`. `state` is `paused`, `loading`, `listening`, `capturing`, `pending`, `transcribing`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}`, and `awaiting_confirmation: true` marks a submit that waits for you. Nothing that was said is in it. |
+| `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false, "feeding": false, "overlay": {"state": "hidden"}, "recognizer": {"name": "On this computer", "kind": "on_device", "model": "nemotron_160ms", "status": "ready"}}`. `state` is `paused`, `loading`, `listening`, `keyboard` (listening with wake words off), `capturing`, `pending`, `transcribing`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}` (`reason` is left out for a delivery failure, whose notice can hold the dictated text), and `awaiting_confirmation: true` marks a submit that waits for you. `overlay.state` is what the overlay shows: `hidden` (also when the overlay is off), `listening`, `quiet`, `countdown`, `writing`, `working`, `delivered`, `error` (with the `headline` shown) or `loading`. `recognizer` is the speech entry that handles the next dictation (`model` only for a catalog model) and whether it is `ready`, `loading`, `failed` or `paused`, as the Speech page says. Nothing that was said is in it. |
+| `feed <wav-file>` | Plays the file's audio in place of the microphone, at the pace of speech, through the same wake word, recognition, endings and delivery as spoken audio; the microphone is ignored while it plays. Replies when the file has been fed: `{"ok": true, "took_effect": true, "state": "…"}`, with the state then; a capture it started carries on. Refused with `"Thalvi is paused."`, `"A capture is running."`, or the reason for a file that is missing, unreadable, not a mono or stereo 16-bit PCM WAV, or longer than the capture limit. Needs an absolute path (the command makes it absolute). `cancel` stops the feed and any capture it started. Capture metrics record `"source": "file"`. |
+| `models` | `{"ok": true, "models": [{"kind": "speech", "name", "title", "size", "downloaded", "progress_percent", "runs_on"}, …]}`: the wake and speech catalog models, `progress_percent` only while one downloads, `runs_on` (the Speech page's hardware line) only for speech models. |
+| `model-download <wake\|speech> <name>` | Downloads the model; replies when it is ready, `{"ok": true, "downloaded": true}`, or has failed, `{"ok": false, "downloaded": false, "error": "…"}`. `models` shows the progress meanwhile. |
+| `speech-check '<json>'` | Checks one speech server entry exactly as Settings does before saving it: `{"ok": true, "ready": true}`, or `{"ok": false, "ready": false, "error": "…"}`. Saves nothing; keys are never repeated. |
+| `show [page]` | Opens Settings, at `speech`, `microphone`, `capture`, `feedback`, `tasks`, `history` or `app` when one is named: `{"ok": true, "took_effect": true}`. |
+| `quit` | Quits as the tray's Quit does: `{"ok": true, "took_effect": true}`. |
 | `settings get` | `{"ok": true, "settings": {…}}`, every setting Settings offers plus `start_at_login` and `show_in_menu`. Speech server keys appear only as `"has_key": true/false`. |
 | `settings check '<json>'` | `{"ok": true, "valid": true}`, or `{"ok": false, "valid": false, "error": "…"}` with the message Settings shows. Saves nothing. |
-| `settings set '<json>'` | `{"ok": true, "changed": true, "applies": "now"}`, or `"next_capture"` while a capture runs. A refusal is `{"ok": false, "error": "…", "changed": false}` and changes nothing. A word list the Thalvi server could not take comes back as `"warning"`. |
+| `settings set '<json>'` | `{"ok": true, "changed": true, "applies": "now"}`, or `"next_capture"` while a capture runs. A refusal is `{"ok": false, "error": "…", "changed": false}` and changes nothing. |
 | `pause`, `resume`, `toggle`, `cancel`, `hold-start`, `hold-end`, `write-start`, `write-end`, `copy-error` | `{"ok": true, "took_effect": true, "state": "…"}`, or `{"ok": false, "took_effect": false, "error": "…", "state": "…"}`, such as when Thalvi is already paused. `hold-start` starts a dictation that `hold-end` or `cancel` ends; `write-start` and `write-end` do the same with writing on release. |
 | `metrics summary` | `{"ok": true, "enabled": true, "window_hours": 24, "stages": {"connect", "partial_lag", "final", "delivery"}, "captures": {"ok": 3, …}}`; each stage has `count`, `outcomes`, `p50_ms` and `p95_ms`. `"enabled": false` and a message when metrics are off. |
 
@@ -434,6 +472,17 @@ for it shows as `awaiting_confirmation` in `state`. Any other failure of a
 command is `{"ok": false, "error": "…"}`; a command with no running app says so
 and exits 1, and one that is not a command exits 2.
 
+### Wake words off
+
+Settings → Capture → **Wake words** is a switch, on by default. Off, Thalvi keeps
+listening for the hold keys and the microphone stays open, but no wake word starts
+anything, plays a cue or delivers, and the wake model scores nothing. It applies at
+once, without Save or a restart, survives restarts and pause and resume, and is
+stored as `"wake": {"enabled": false}` only when it is off. The tray, `state` and
+Settings tell the three states apart: listening with wake words, listening for the
+hold keys only (the tray tooltip says "hold keys only"), and paused. Pausing still
+stops the hold keys too.
+
 ### Hold a key to dictate
 
 Hold a key, speak, and let go: the text is pasted into the window focused when
@@ -443,9 +492,17 @@ phrase ends or cancels a hold: words such as "never mind" are dictated as text.
 To abandon a hold, use the `cancel` command: the tray's **Cancel**, or a key
 bound to `thalvi-desktop cancel` (the Hyprland examples bind SUPER+Escape).
 
+Choose the keys under **Settings → Capture → Hold keys**: **Change…** records the
+next combination you press in the Settings window (Escape cancels), and **Restore
+default** goes back to the desktop's own key. A key applies at once, with no Save.
+Thalvi refuses a key that is not a key it can use, the same key for both actions,
+and one the desktop will not bind, says why under the row, and keeps the keys that
+worked. A key other than the default is stored as `hold_key` in the config. GNOME
+shows why it has no hold key and no controls.
+
 - **Hyprland:** F9, with no modifier. Thalvi binds the key in Hyprland itself while
   it runs and binds it again after `hyprctl reload`, so `hyprland.conf` needs no
-  lines for it. Set another of F1 to F12 as `hold_key` in the config. Hyprland types
+  lines for it. Pick another of F1 to F12. Hyprland types
   any modifier you still hold into the pasted text and skips the release when a
   modifier comes up first, so the key must be a single key. If another bind already
   uses the key, or `hold-start` lines from an older `hyprland-binds.conf` are still in
@@ -453,11 +510,16 @@ bound to `thalvi-desktop cancel` (the Hyprland examples bind SUPER+Escape).
   another key; a key that cannot be bound keeps the previous one working.
 - **Windows:** Alt and the key left of X (Z on a QWERTY keyboard, Y on QWERTZ).
   The app watches the keyboard itself and keeps the key from the focused app; the
-  hold ends when the key and Alt are both up. Set another as `hold_key` in the
-  config, such as `Ctrl+Shift+F9`, named by its place on the keyboard (`Alt+KeyZ`,
-  `Digit1`, `Space`, `F9`). While an administrator window is focused, Windows
+  hold ends when the key and Alt are both up. Pick another, such as `Ctrl+Shift+F9`;
+  the config names it by its place on the keyboard (`Alt+KeyZ`, `Digit1`, `Space`,
+  `F9`). While an administrator window is focused, Windows
   shows Thalvi no keys and lets it send no keys, so the key reaches that window
   as usual and no dictation starts.
+  **AltGr alone** (`AltRight`, the right Alt key) can be the dictate or write key
+  too. It is never kept from the focused app, so AltGr with another key still
+  types its character, as `@`, `€` and `{` do on a German keyboard, with no cue or
+  overlay. The hold starts when AltGr has been down for 0.2 s with no other key; the
+  words said meanwhile are kept. Hyprland refuses it.
 
 ### Write a dictation out
 
@@ -481,6 +543,13 @@ If it is not set up, fails, answers with nothing, or takes longer than 15 second
 Thalvi says what happened, and your own words go on the clipboard to paste with
 Ctrl+V.
 
+A model that reasons before it answers, such as Qwen3, shows "Thinking…" until its
+text starts; what it reasons is never shown or pasted. The 15 seconds include the
+thinking, and it often takes longer, so turn thinking off on the model server: for a
+llama.cpp server, start `llama-server` with `--reasoning-budget 0`. Thalvi does not
+ask the model itself, because some endpoints refuse a request with a setting they
+don't know.
+
 **Opening phrases** (`writing.openings`, under the Writing prompt in Settings) give
 a kind of text its own prompt, such as "write me an email" or "write a message".
 When the words you said begin with a phrase, whole words only and ignoring case and
@@ -490,10 +559,11 @@ match uses the Writing prompt. Rules apply only when you write out with "write t
 out" or the write key. A new rule starts as a copy of the Writing prompt, and a
 rule edited in Settings applies from the next capture.
 
-- **Hyprland:** F10, with no modifier, bound by Thalvi like the hold key
-  (`write_key` in the config).
-- **Windows:** Alt and X (`write_key` in the config), kept from the focused app
-  like the hold key. It must differ from `hold_key`.
+- **Hyprland:** F10, with no modifier, bound by Thalvi like the hold key.
+- **Windows:** Alt and X, kept from the focused app like the hold key.
+
+Change the write key in the **Write key** row of the same **Hold keys** group
+(`write_key` in the config). It must differ from the dictate key.
 
 ### Config
 
@@ -512,6 +582,32 @@ Needs Rust (`rust-toolchain.toml`) and Node (`.node-version`), plus:
 npm ci --prefix crates/thalvi-app/ui && npm run build --prefix crates/thalvi-app/ui
 cargo run --release -p thalvi-app   # or: cargo install --path crates/thalvi-app
 ```
+
+### Release
+
+A `desktop-vX.Y.Z` tag on `main` builds both packages; after the developer
+approves the `release` environment, `publish` signs them for the updater and
+publishes them with their `.sig` files and `latest.json`, which
+`releases/latest/download/latest.json` serves to Stable.
+
+Each push to `main` (or running the workflow on it) builds a
+development build numbered `X.Y.Z-dev.N` from the version in `Cargo.toml`; a
+newer push replaces a build still waiting. Once approved, it publishes as a
+prerelease and the `desktop-dev` release's `latest.json`, the Development feed,
+names it, or the latest release when that is newer. The last five development
+builds are kept. Since `X.Y.Z-dev.N` sorts below `X.Y.Z`, bump `main`
+to the next version right after a release.
+
+- **Key:** made once with `npm exec --prefix crates/thalvi-app/ui -- tauri
+  signer generate` and a password. The public key is `plugins.updater.pubkey`
+  in `crates/thalvi-app/tauri.conf.json`; the private key and its password are
+  the `release` environment's `TAURI_SIGNING_PRIVATE_KEY` and
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets, with an offline backup.
+  Without either secret, or with a key that does not match the public key, the
+  release fails and publishes nothing.
+- **Lost or leaked key:** make a new pair, commit the new public key and replace
+  the secrets. Installed apps cannot verify releases signed with the new key, so
+  their users reinstall once from the release page.
 
 ## Measure a setup
 

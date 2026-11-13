@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use thalvi_desktop::config::{ConfigError, DesktopConfig};
 use thalvi_desktop::entries::{self, LiveKind};
+use thalvi_desktop::hold::{HoldKey, HoldKind};
+use thalvi_desktop::host::{Desktop, HostError};
 use thalvi_desktop::transducer::{SpeechChoice, check_folder};
-use thalvi_desktop::wake::validate_wake_models;
+use thalvi_desktop::wake::validate_wake_model;
 use thalvi_desktop::writing::{DEFAULT_PROMPT, Writing};
 
 /// Where the config lives.
@@ -34,19 +36,28 @@ impl Store {
         Ok(Self { path, required })
     }
 
-    /// The config to start with, and whether this is the first start: no file at the per-user path.
+    /// A file named `name` beside the config.
+    #[must_use]
+    pub fn sibling(&self, name: &str) -> PathBuf {
+        self.path.with_file_name(name)
+    }
+
+    /// The config to start with, whether this is the first start, and whether the active legacy
+    /// Thalvi server entry was removed.
     /// A first start writes the defaults as a save with nothing changed would. A path given on the
     /// command line must exist, so a missing one is an error before it can be a first start.
     ///
     /// # Errors
     /// Why the file cannot be read or is not valid, or why the defaults cannot be written.
-    pub fn start(&self) -> Result<(DesktopConfig, bool), String> {
+    pub fn start(&self) -> Result<(DesktopConfig, bool, bool), String> {
         let first_start = !self.path.exists();
         let config = self.load()?;
-        if first_start {
-            self.save_switches(&config)?;
+        let removed_entry = config.stt.entries.dropped_legacy_server();
+        let removed_active_entry = config.stt.entries.dropped_active_legacy_server();
+        if first_start || removed_entry {
+            self.write(&config)?;
         }
-        Ok((config, first_start))
+        Ok((config, first_start, removed_active_entry))
     }
 
     /// The config in effect: the file if there is one, else the defaults.
@@ -81,6 +92,7 @@ impl Store {
     /// The loader's message when the settings are invalid.
     pub fn check(mut settings: Value, current: &DesktopConfig) -> Result<DesktopConfig, String> {
         prepare(&mut settings, current);
+        check_keys(&settings, current, Desktop::check_hold_keys)?;
         load(&settings)
     }
 
@@ -122,6 +134,30 @@ fn prepare(settings: &mut Value, current: &DesktopConfig) {
         settings.insert("show_in_menu".to_owned(), Value::Bool(current.show_in_menu));
     }
     unmask_keys(settings, current);
+}
+
+/// Refuses changed hold keys this desktop can never bind, before the loader reads them: it takes
+/// the key every config once stored (Alt+KeyZ, Alt+KeyX) for the desktop's default, so a refusal
+/// after it would never see that key. A key that is no key name is the loader's to refuse.
+fn check_keys(
+    settings: &Value,
+    current: &DesktopConfig,
+    check: impl FnOnce(&[(HoldKind, HoldKey)]) -> Result<(), HostError>,
+) -> Result<(), String> {
+    let asked = |name: &str, current: &HoldKey| {
+        settings
+            .get(name)
+            .and_then(Value::as_str)
+            .and_then(|key| HoldKey::parse(key).ok())
+            .unwrap_or_else(|| current.clone())
+    };
+    let hold = asked("hold_key", &current.hold_key);
+    let write = asked("write_key", &current.write_key);
+    if (&hold, &write) == (&current.hold_key, &current.write_key) {
+        return Ok(());
+    }
+    check(&[(HoldKind::Dictate, hold), (HoldKind::Write, write)])
+        .map_err(|error| format!("{error} The keys that were set before still work."))
 }
 
 /// Validates `settings` as the loader does at startup.
@@ -193,6 +229,7 @@ pub fn judge(
 ) -> Result<DesktopConfig, String> {
     ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
     prepare(&mut settings, current);
+    check_keys(&settings, current, Desktop::check_hold_keys)?;
     let config = load(&settings)?;
     let mut before = serde_json::to_value(current).map_err(|error| error.to_string())?;
     let known: Vec<Value> = entries_of(&mut before)
@@ -216,16 +253,12 @@ pub fn judge(
             check_folder(folder).map_err(|error| error.to_string())?;
         }
     }
-    if settings.get("wake") != before.get("wake") {
-        let model = |head: &str| {
-            settings
-                .pointer(&format!("/wake/{head}/model"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
-        };
-        validate_wake_models(&model("capture"), &model("conversation"))
-            .map_err(|error| error.to_string())?;
+    if settings.pointer("/wake/capture") != before.pointer("/wake/capture") {
+        let model = settings
+            .pointer("/wake/capture/model")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        validate_wake_model(model).map_err(|error| error.to_string())?;
     }
     Ok(config)
 }
@@ -244,6 +277,10 @@ pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
         // The file keeps a key only when it is not the desktop's default; the form shows the key in effect.
         settings.insert("hold_key".to_owned(), config.hold_key.to_string().into());
         settings.insert("write_key".to_owned(), config.write_key.to_string().into());
+    }
+    // The file keeps the switch only when it is off; the form always shows it.
+    if let Some(wake) = settings.get_mut("wake").and_then(Value::as_object_mut) {
+        wake.insert("enabled".to_owned(), config.wake.enabled().into());
     }
     for entry in entries_of(&mut settings) {
         if let Some(key) = entry.remove("api_key") {
@@ -297,7 +334,7 @@ fn unmask_keys(settings: &mut Value, current: &DesktopConfig) {
         entry.remove("has_key");
         let keyed = matches!(
             entry.get("kind").and_then(Value::as_str),
-            Some("realtime" | "second_pass")
+            Some("realtime" | "open_ai" | "second_pass")
         );
         if keyed && !entry.contains_key("api_key") {
             let saved = entry
@@ -316,7 +353,7 @@ fn unmask_keys(settings: &mut Value, current: &DesktopConfig) {
     }
 }
 
-fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -349,7 +386,6 @@ mod tests {
     use serde_json::json;
     use thalvi_desktop::config::Look;
     use thalvi_desktop::entries::LiveKind;
-    use thalvi_desktop::host::Desktop;
     use thalvi_desktop::transducer::SpeechChoice;
 
     use super::*;
@@ -359,6 +395,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("nested").join("desktop.json");
         (Store::new(Some(path)).unwrap(), dir)
+    }
+
+    #[test]
+    fn the_update_marker_is_kept_beside_the_config() {
+        let (store, dir) = store("sibling");
+        assert_eq!(
+            store.sibling("update.json"),
+            dir.join("nested").join("update.json")
+        );
     }
 
     #[test]
@@ -391,6 +436,7 @@ mod tests {
                 "recordings",
                 "scripts",
                 "stt",
+                "update_channel",
                 "wake",
                 "write_key",
                 "writing",
@@ -415,6 +461,7 @@ mod tests {
         settings["microphone"] = json!("USB Mic");
         settings["look"] = json!("holo");
         settings["recordings"] = json!({"metrics": true, "text": false, "audio": true});
+        settings["wake"]["conversation"] = json!({"model": "hey_jarvis", "threshold": 0.65});
 
         let saved = store.save(settings, &store_defaults()).unwrap();
         let reloaded = store.load().unwrap();
@@ -427,6 +474,13 @@ mod tests {
         assert!(!saved.overlay.draft);
         assert_eq!(saved.microphone.as_deref(), Some("USB Mic"));
         assert_eq!(saved.look, Look::Holo);
+        assert_eq!(
+            saved.wake.conversation().model,
+            thalvi_desktop::wake::HeadModel::Catalog(
+                thalvi_desktop::models::CatalogHead::HeyJarvis
+            )
+        );
+        assert_eq!(saved.wake.conversation().threshold.get(), 0.65);
         assert_eq!(reloaded, saved);
         assert_eq!(
             (
@@ -456,12 +510,77 @@ mod tests {
             (None, None)
         );
 
-        settings["hold_key"] = json!("Ctrl+F8");
+        settings["hold_key"] = json!("F8");
         let saved = store.save(settings, &store_defaults()).unwrap();
         let (kept, absent) = (file()["hold_key"].clone(), file().get("write_key").cloned());
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(saved.hold_key.to_string(), "Ctrl+F8");
-        assert_eq!((kept, absent), (json!("Ctrl+F8"), None));
+        assert_eq!(saved.hold_key.to_string(), "F8");
+        assert_eq!((kept, absent), (json!("F8"), None));
+    }
+
+    #[test]
+    fn a_changed_hold_key_the_desktop_can_never_bind_is_refused_even_when_it_was_the_old_default() {
+        let refuse_modifiers = |keys: &[(HoldKind, HoldKey)]| match keys
+            .iter()
+            .find(|(_, key)| !key.modifiers().is_empty())
+        {
+            Some((_, key)) => Err(HostError::Unsupported(format!("No {key} here."))),
+            None => Ok(()),
+        };
+        let mut current = store_defaults();
+        current.hold_key = HoldKey::f9();
+        current.write_key = HoldKey::f10();
+        let asked = |hold: &str, write: &str| {
+            let mut settings = settings_json(&current).unwrap();
+            settings["hold_key"] = json!(hold);
+            settings["write_key"] = json!(write);
+            check_keys(&settings, &current, refuse_modifiers)
+        };
+
+        for (hold, write, refused) in [
+            ("F9", "F10", None),
+            ("F8", "F10", None),
+            ("Alt+KeyZ", "F10", Some("No Alt+KeyZ here.")),
+            ("F9", "Alt+KeyX", Some("No Alt+KeyX here.")),
+            ("Ctrl+F8", "F10", Some("No Ctrl+F8 here.")),
+            ("Alt+Hyper", "F10", None),
+        ] {
+            assert_eq!(
+                asked(hold, write),
+                refused.map_or(Ok(()), |reason| Err(format!(
+                    "{reason} The keys that were set before still work."
+                ))),
+                "{hold} {write}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_form_always_shows_the_wake_switch_and_the_file_keeps_it_only_when_off() {
+        let (store, dir) = store("wake-words");
+        let file = || -> Value {
+            serde_json::from_str(&std::fs::read_to_string(&store.path).unwrap()).unwrap()
+        };
+        let mut settings = settings_json(&store_defaults()).unwrap();
+        assert_eq!(settings["wake"]["enabled"], json!(true));
+
+        settings["wake"]["enabled"] = json!(false);
+        let off = store.save(settings.clone(), &store_defaults()).unwrap();
+        let kept = file()["wake"]["enabled"].clone();
+        let reloaded = store.load().unwrap();
+        assert_eq!(
+            settings_json(&off).unwrap()["wake"]["enabled"],
+            json!(false)
+        );
+
+        settings["wake"]["enabled"] = json!(true);
+        store.save(settings, &store_defaults()).unwrap();
+        let absent = file()["wake"].get("enabled").cloned();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!off.wake.enabled());
+        assert_eq!(kept, json!(false));
+        assert!(!reloaded.wake.enabled(), "it survives a restart");
+        assert_eq!(absent, None);
     }
 
     #[test]
@@ -474,10 +593,11 @@ mod tests {
             required: false,
         };
 
-        let (config, first) = store.start().unwrap();
+        let (config, first, removed) = store.start().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let file: Value = serde_json::from_str(&text).unwrap();
         assert!(first, "no file yet");
+        assert!(!removed);
         assert_eq!(
             file["stt"]["entries"],
             json!([{"kind": "on_device", "id": "on-device", "name": "On this computer", "active": true, "model": "nemotron_160ms"}])
@@ -489,22 +609,28 @@ mod tests {
         );
         assert!(!text.contains("\"prompt\""), "{text}");
 
-        let (again, first) = store.start().unwrap();
+        let (again, first, removed) = store.start().unwrap();
         assert!(!first, "the written file ends the first start");
+        assert!(!removed);
         assert_eq!(again, config);
 
         let server = r#"{"stt": {"entries": [{"kind": "thalvi_server", "id": "s", "name": "Thalvi server", "active": true, "address": "ws://127.0.0.1:8080"}]}}"#;
         std::fs::write(&path, server).unwrap();
-        let (kept, first) = store.start().unwrap();
+        let (kept, first, removed) = store.start().unwrap();
         assert!(!first);
+        assert!(removed, "the active legacy entry needs one notice");
         assert!(matches!(
             kept.stt.entries.active_live().kind,
-            LiveKind::ThalviServer(_)
+            LiveKind::OnDevice(SpeechChoice::Catalog(_))
         ));
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            server,
-            "an existing file is not rewritten"
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["stt"]["entries"][0]["kind"], "on_device");
+        assert_eq!(saved["stt"]["entries"][0]["active"].as_bool(), Some(true));
+        assert!(saved.to_string().find("thalvi_server").is_none());
+        let (_, _, removed_again) = store.start().unwrap();
+        assert!(
+            !removed_again,
+            "the normalized config does not repeat the notice"
         );
 
         let required = Store {
@@ -585,11 +711,13 @@ mod tests {
         let mut settings = settings_json(&store_defaults()).unwrap();
         settings["stt"] = json!({"entries": [
             entry("live", "realtime", Some("live-secret")),
+            entry("open-ai", "open_ai", Some("open-ai-secret")),
             entry("second", "second_pass", Some("second-secret")),
             entry("blank", "second_pass", None),
         ]});
         store.save(settings, &store_defaults()).unwrap();
         let saved = store.load().unwrap();
+        assert_eq!(saved.stt.entries.key_of("open-ai"), "open-ai-secret");
 
         let form = settings_json(&saved).unwrap();
         assert!(!form.to_string().contains("secret"), "{form}");
@@ -599,21 +727,26 @@ mod tests {
             .iter()
             .map(|entry| entry["has_key"].clone())
             .collect();
-        assert_eq!(has, [json!(true), json!(true), json!(false)]);
+        assert_eq!(has, [json!(true), json!(true), json!(true), json!(false)]);
 
         // An untouched form keeps both keys; a replaced key changes and a cleared one empties.
         let keys = |config: &DesktopConfig| {
-            ["live", "second", "blank"].map(|id| config.stt.entries.key_of(id).to_owned())
+            ["live", "open-ai", "second", "blank"]
+                .map(|id| config.stt.entries.key_of(id).to_owned())
         };
         let after_untouched = store.save(form.clone(), &saved).unwrap();
         let mut edited = form;
         edited["stt"]["entries"][0]["api_key"] = json!("replaced");
-        edited["stt"]["entries"][1]["api_key"] = json!("");
+        edited["stt"]["entries"][1]["api_key"] = json!("open-ai-replaced");
+        edited["stt"]["entries"][2]["api_key"] = json!("");
         let after_edit = store.save(edited, &after_untouched).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert_eq!(keys(&after_untouched), ["live-secret", "second-secret", ""]);
-        assert_eq!(keys(&after_edit), ["replaced", "", ""]);
+        assert_eq!(
+            keys(&after_untouched),
+            ["live-secret", "open-ai-secret", "second-secret", ""]
+        );
+        assert_eq!(keys(&after_edit), ["replaced", "open-ai-replaced", "", ""]);
     }
 
     #[test]
@@ -755,7 +888,7 @@ mod tests {
         let (store, dir) = store("private");
         let mut settings = settings_json(&store_defaults()).unwrap();
         settings["stt"] = json!({"entries": [
-            {"kind": "thalvi_server", "id": "s", "name": "Thalvi server", "active": true, "address": "ws://127.0.0.1:8080"},
+            {"kind": "realtime", "id": "s", "name": "Realtime", "active": true, "address": "ws://127.0.0.1:8012", "model": "m"},
             {"kind": "second_pass", "id": "p", "name": "P", "active": true, "address": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k"}
         ]});
         // A leftover from an earlier crash must not lend its permissions to the new file.
@@ -893,13 +1026,15 @@ mod tests {
         config = DesktopConfig::from_json_str(&form.to_string()).unwrap();
         assert!(judged(&config, &json!({"look": "neon"}), true).is_ok());
 
-        let mut equal = settings_json(&store_defaults()).unwrap();
-        let head = equal["wake"]["capture"]["model"].clone();
-        equal["wake"]["conversation"]["model"] = head;
-        let wake = judge(equal, &store_defaults(), true).unwrap_err();
+        let mut saved_conversation = settings_json(&store_defaults()).unwrap();
+        saved_conversation["wake"]["conversation"]["model"] = json!("hey_jarvis");
+        saved_conversation["look"] = json!("neon");
+        let config = judge(saved_conversation, &store_defaults(), true).unwrap();
         assert_eq!(
-            wake,
-            "The capture and conversation wake models must be different."
+            config.wake.conversation().model,
+            thalvi_desktop::wake::HeadModel::Catalog(
+                thalvi_desktop::models::CatalogHead::HeyJarvis
+            )
         );
 
         let loose = json!({"kind": "second_pass", "id": "p", "name": "P", "active": false,

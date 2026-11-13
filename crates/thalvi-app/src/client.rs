@@ -15,6 +15,21 @@ const BAR_WAIT: Duration = Duration::from_millis(500);
 /// How long a command waits for the app, which may wait for a control to show its effect.
 const COMMAND_WAIT: Duration = Duration::from_secs(10);
 
+/// How long a file is waited for while it is fed: up to the longest capture limit, 3,600 seconds.
+const FEED_WAIT: Duration = Duration::from_secs(3_610);
+
+/// How long a model download is waited for.
+const DOWNLOAD_WAIT: Duration = Duration::from_secs(3_600);
+
+/// How long the app may take to answer `request`.
+fn wait_for(request: &Request) -> Duration {
+    match request {
+        Request::Feed { .. } => FEED_WAIT,
+        Request::ModelDownload { .. } => DOWNLOAD_WAIT,
+        _ => COMMAND_WAIT,
+    }
+}
+
 const NOT_RUNNING: &str =
     "Thalvi is not running, so there is nothing to control. Start Thalvi first.";
 
@@ -26,7 +41,7 @@ pub fn run(request: &Request) -> ExitCode {
         println!("{}", control::bar_json(reply));
         return ExitCode::SUCCESS;
     }
-    let (line, granted) = outcome(Desktop::send_request(&request.line(), COMMAND_WAIT));
+    let (line, granted) = outcome(Desktop::send_request(&request.line(), wait_for(request)));
     println!("{line}");
     if granted {
         ExitCode::SUCCESS
@@ -39,7 +54,7 @@ pub fn run(request: &Request) -> ExitCode {
 #[must_use]
 pub fn opened_running_app() -> bool {
     matches!(
-        Desktop::send_request(&Request::Show.line(), COMMAND_WAIT),
+        Desktop::send_request(&Request::Show { page: None }.line(), COMMAND_WAIT),
         Ok(Some(_))
     )
 }
@@ -71,6 +86,30 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_file_or_a_download_is_waited_for_much_longer_than_a_control() {
+        let waits = [
+            (
+                Request::Feed {
+                    path: "/a.wav".to_owned(),
+                },
+                FEED_WAIT,
+            ),
+            (
+                Request::ModelDownload {
+                    kind: crate::agent::Catalog::Speech,
+                    name: "m".to_owned(),
+                },
+                DOWNLOAD_WAIT,
+            ),
+            (Request::Models, COMMAND_WAIT),
+            (Request::Cancel, COMMAND_WAIT),
+        ];
+        for (request, wait) in waits {
+            assert_eq!(wait_for(&request), wait, "{request:?}");
+        }
+    }
 
     #[test]
     fn a_reply_is_printed_as_it_came_and_only_an_ok_one_succeeds() {

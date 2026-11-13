@@ -20,6 +20,7 @@ use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
 };
+use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{Desktop, Host};
@@ -31,13 +32,14 @@ use thalvi_desktop::speech_device::SpeechDevices;
 use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
 use thalvi_desktop::transducer::TransducerSource;
 use thalvi_desktop::wake::{WakeConfig, WakeEngine};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::status::{
     Failure, FailureKind, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, Status, View,
     WAKE_DOWNLOAD_NOTICE, load_notice,
 };
+use crate::update::Stop;
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -49,14 +51,43 @@ pub enum Control {
     SetListening(bool),
     /// Toggle the runner-owned listening intent, including while starting.
     ToggleListening,
-    /// Cancels the capture in progress.
+    /// Cancels the capture in progress, and stops a file being fed.
     Cancel,
+    /// Plays a file's audio in place of the microphone's.
+    Feed(Feed),
     /// Takes new settings in between captures.
     Apply(Box<DesktopConfig>),
     /// The desktop refused to report the hold key; the notice says so in plain words.
     HoldKeyFailed(String),
+    /// Stops for an update, but only if nothing is going on.
+    RestartIfIdle(Restart),
     /// Cancels any capture, closes the microphone and the recognizer, and stops.
     Quit,
+}
+
+/// A request to stop for an update: `prepare` saves what the next start needs, given whether
+/// listening is paused, and runs only once the engine has found itself idle.
+pub struct Restart {
+    prepare: Box<dyn FnOnce(bool) -> Result<(), String> + Send>,
+    reply: oneshot::Sender<Stop>,
+}
+
+impl Restart {
+    pub fn new(
+        prepare: impl FnOnce(bool) -> Result<(), String> + Send + 'static,
+        reply: oneshot::Sender<Stop>,
+    ) -> Self {
+        Self {
+            prepare: Box::new(prepare),
+            reply,
+        }
+    }
+}
+
+impl std::fmt::Debug for Restart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Restart")
+    }
 }
 
 /// The saved microphone choice, the device actually open, and whether listening is paused.
@@ -76,12 +107,14 @@ pub struct EngineLink {
     status: watch::Receiver<Status>,
     level: watch::Receiver<f32>,
     audio: watch::Receiver<AudioStatus>,
+    feeding: watch::Receiver<bool>,
     stopped: Mutex<std_mpsc::Receiver<()>>,
     key: HoldInput,
 }
 
 impl EngineLink {
-    /// Starts the engine thread; it loads the wake word models before it listens.
+    /// Starts the engine thread; it loads the wake word models before it listens. Listening starts
+    /// `paused` when the user had paused it before an update restarted the app.
     ///
     /// # Errors
     /// Fails when the thread or its runtime cannot start.
@@ -91,6 +124,7 @@ impl EngineLink {
         history: Arc<History>,
         drafts: Arc<Drafts>,
         devices: Arc<SpeechDevices>,
+        paused: bool,
     ) -> Result<Self, String> {
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
@@ -101,8 +135,9 @@ impl EngineLink {
         let (audio_tx, audio) = watch::channel(AudioStatus {
             selected: config.microphone.clone(),
             active: None,
-            paused: false,
+            paused,
         });
+        let (feeding_tx, feeding) = watch::channel(false);
         let (key, key_state) = HoldInput::new();
         let (ready_tx, ready) = std_mpsc::channel();
         let (stopped_tx, stopped) = std_mpsc::channel();
@@ -122,6 +157,7 @@ impl EngineLink {
                 };
                 let _ = ready_tx.send(Ok(()));
                 let publisher = Publisher::new(status_tx, config.ending_pause);
+                publisher.update(|view| view.wake_words = config.wake.enabled());
                 let runner = Runner::new(
                     config,
                     delivery,
@@ -134,6 +170,8 @@ impl EngineLink {
                         history,
                         drafts,
                         devices,
+                        feeding: Arc::new(feeding_tx),
+                        paused,
                     },
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
@@ -148,6 +186,7 @@ impl EngineLink {
             status,
             level,
             audio,
+            feeding,
             stopped: Mutex::new(stopped),
             key,
         })
@@ -198,11 +237,30 @@ impl EngineLink {
         self.audio.clone()
     }
 
+    /// Whether a file's audio is being fed in place of the microphone's.
+    #[must_use]
+    pub fn feeding_updates(&self) -> watch::Receiver<bool> {
+        self.feeding.clone()
+    }
+
+    /// Feeds `clip` in place of the microphone and says how it went, once it has.
+    pub async fn feed(&self, clip: Clip) -> FeedEnd {
+        let (feed, ended) = Feed::new(clip);
+        self.send(Control::Feed(feed));
+        // The engine is gone only while the app quits or after it failed.
+        ended.await.unwrap_or(FeedEnd::Cancelled)
+    }
+
     /// Stops the engine and waits until the microphone and the recognizer are closed.
     ///
     /// Blocks for at most a few seconds.
     pub fn quit(&self) {
         self.send(Control::Quit);
+        self.wait_stopped();
+    }
+
+    /// Waits until the engine has closed the microphone and the recognizer, for at most a few seconds.
+    pub fn wait_stopped(&self) {
         let stopped = self.stopped.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = stopped.recv_timeout(QUIT_TIMEOUT);
     }
@@ -293,6 +351,7 @@ impl Publisher {
                 copies: false,
                 pauses,
                 loading: None,
+                wake_words: true,
             }),
             out,
         })
@@ -407,7 +466,8 @@ struct Session {
     device: Option<String>,
     metrics: Metrics,
     microphone: Option<Microphone>,
-    frames: Option<Frames>,
+    frames: Option<Fed<Frames>>,
+    feeder: Feeder,
 }
 
 impl Session {
@@ -420,6 +480,7 @@ impl Session {
 
     fn close_microphone(&mut self) {
         self.engine.stop_listening();
+        self.feeder.cancel();
         self.frames = None;
         if let Some(microphone) = &mut self.microphone {
             microphone.pause();
@@ -442,7 +503,10 @@ impl Session {
             causes: vec![error.to_string()],
         })?;
         self.microphone = Some(microphone);
-        self.frames = Some(frames.map_err(|error| Failure::of(&error))?);
+        self.frames = Some(
+            self.feeder
+                .wrap(frames.map_err(|error| Failure::of(&error))?),
+        );
         Ok(())
     }
 
@@ -471,6 +535,10 @@ struct Shared {
     drafts: Arc<Drafts>,
     /// Where the speech model runs, for Settings.
     devices: Arc<SpeechDevices>,
+    /// Whether a file's audio is being fed in place of the microphone's.
+    feeding: Arc<watch::Sender<bool>>,
+    /// Whether listening starts paused.
+    paused: bool,
 }
 
 struct Runner {
@@ -492,6 +560,7 @@ struct Runner {
     history: Arc<History>,
     drafts: Arc<Drafts>,
     devices: Arc<SpeechDevices>,
+    feeding: Arc<watch::Sender<bool>>,
     http: reqwest::Client,
     /// Loads the current engine's speech model.
     loading: Option<JoinHandle<()>>,
@@ -513,7 +582,7 @@ impl Runner {
         Self {
             config,
             session: None,
-            paused: false,
+            paused: shared.paused,
             stopping: false,
             reopen_failures: None,
             pending: None,
@@ -526,6 +595,7 @@ impl Runner {
             history: shared.history,
             drafts: shared.drafts,
             devices: shared.devices,
+            feeding: shared.feeding,
             http: reqwest::Client::new(),
             loading: None,
             key: Presses::new(shared.key.clone()),
@@ -619,6 +689,7 @@ impl Runner {
         let recognizer = Chosen::new(
             config.stt.entries.active_live(),
             store,
+            self.http.clone(),
             metrics.clone(),
             &config.stt.phrases,
             self.devices.adapters(),
@@ -648,6 +719,7 @@ impl Runner {
             self.audio.subscribe(),
         ));
         println!("Transcribing through {}.", config.speech_source());
+        let feeder = Feeder::new(&gate, Arc::clone(&self.feeding));
         Ok(Session {
             engine,
             local,
@@ -657,6 +729,7 @@ impl Runner {
             metrics,
             microphone: None,
             frames: None,
+            feeder,
         })
     }
 
@@ -791,10 +864,6 @@ impl Runner {
             Woke::Trigger(Ok(WakeTrigger::Capture | WakeTrigger::Hold)) => {
                 Box::pin(self.capture()).await
             }
-            Woke::Trigger(Ok(WakeTrigger::Conversation)) => {
-                println!("Conversation wake heard. This build has no conversation.");
-                Flow::Continue
-            }
             Woke::Trigger(Err(error)) => {
                 tracing::warn!(?error, "listening stopped");
                 self.close_microphone();
@@ -835,9 +904,25 @@ impl Runner {
         match control {
             Control::SetListening(on) => self.set_listening(on).await,
             Control::ToggleListening => self.set_listening(self.paused).await,
-            Control::Cancel => {}
+            Control::Cancel => {
+                if let Some(session) = &self.session {
+                    session.feeder.cancel();
+                }
+            }
+            Control::Feed(feed) => match &self.session {
+                Some(Session {
+                    frames: Some(_),
+                    feeder,
+                    ..
+                }) => feeder.start(feed),
+                _ => feed.refuse("Thalvi is not listening."),
+            },
             Control::Apply(config) => self.apply(*config).await,
             Control::HoldKeyFailed(notice) => self.hold_problem = Some(notice),
+            Control::RestartIfIdle(restart) => {
+                let held = self.key_state.borrow().down;
+                return answer_restart(restart, self.paused, held, *self.feeding.borrow());
+            }
             Control::Quit => return Flow::Quit,
         }
         Flow::Continue
@@ -897,7 +982,10 @@ impl Runner {
         if retunes_only(&self.config, &config) {
             if let Some(session) = self.session.as_mut() {
                 session.engine.set_recordings(config.recordings);
+                session.engine.set_wake_words(config.wake.enabled());
             }
+            self.publisher
+                .update(|view| view.wake_words = config.wake.enabled());
             self.take_history(&config);
             self.config = config;
             return;
@@ -927,8 +1015,10 @@ impl Runner {
                 if let Some(old) = self.session.replace(session) {
                     old.close().await;
                 }
-                self.publisher
-                    .update(|view| view.pauses = config.ending_pause);
+                self.publisher.update(|view| {
+                    view.pauses = config.ending_pause;
+                    view.wake_words = config.wake.enabled();
+                });
                 self.take_history(&config);
                 self.config = config;
                 self.load_speech_model();
@@ -969,6 +1059,7 @@ impl Runner {
                 handle,
                 gate,
                 frames: Some(frames),
+                feeder,
                 ..
             }) = session.as_mut()
             else {
@@ -977,7 +1068,10 @@ impl Runner {
             let outcome = Box::pin(drive(
                 engine.capture(frames),
                 control,
-                || handle.cancel(),
+                || {
+                    handle.cancel();
+                    feeder.cancel();
+                },
                 &mut requests,
             ))
             .await;
@@ -1207,7 +1301,30 @@ fn retunes_only(old: &DesktopConfig, new: &DesktopConfig) -> bool {
     *old == DesktopConfig {
         recordings: old.recordings,
         history: old.history,
+        update_channel: old.update_channel,
+        wake: new.wake.clone().with_enabled(old.wake.enabled()),
         ..new.clone()
+    }
+}
+
+/// Answers a request to stop for an update. Only an idle engine agrees, with no hold key down and
+/// no clip being fed, and only after `prepare` has saved what the next start needs; a refusal
+/// leaves the engine running.
+fn answer_restart(restart: Restart, paused: bool, held: bool, feeding: bool) -> Flow {
+    let Restart { prepare, reply } = restart;
+    if held || feeding {
+        let _ = reply.send(Stop::Busy);
+        return Flow::Continue;
+    }
+    match prepare(paused) {
+        Ok(()) => {
+            let _ = reply.send(Stop::Stopped);
+            Flow::Quit
+        }
+        Err(message) => {
+            let _ = reply.send(Stop::Refused(message));
+            Flow::Continue
+        }
     }
 }
 
@@ -1292,6 +1409,14 @@ impl Requests {
             }
             Some(Control::HoldKeyFailed(notice)) => {
                 self.hold_problem = Some(notice);
+                false
+            }
+            Some(Control::Feed(feed)) => {
+                feed.refuse("Thalvi was busy. Try again in a moment.");
+                false
+            }
+            Some(Control::RestartIfIdle(restart)) => {
+                let _ = restart.reply.send(Stop::Busy);
                 false
             }
             Some(Control::Quit) | None => {
@@ -1757,7 +1882,6 @@ mod tests {
             models::MELSPECTROGRAM,
             models::EMBEDDING,
             CatalogHead::HeyThalvi.asset(),
-            CatalogHead::HeyMycroft.asset(),
         ];
         let failed = Mode::Failed(Failure {
             kind: FailureKind::Other,
@@ -1767,8 +1891,14 @@ mod tests {
         });
         // A retry after a failed download starts from Paused (the tray) or Failed (Settings).
         let starts = [Mode::Starting, Mode::Idle, Mode::Paused, failed];
-        for (case, files, downloads) in [("cached", cached.len(), false), ("missing one", 3, true)]
-        {
+        for (case, files, downloads) in [
+            (
+                "cached dictation assets with saved conversation head missing",
+                cached.len(),
+                false,
+            ),
+            ("missing dictation head", cached.len() - 1, true),
+        ] {
             let dir = std::env::temp_dir().join(format!(
                 "thalvi-wake-load-{}-{}",
                 case.replace(' ', "-"),
@@ -1947,15 +2077,92 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_arrives_while_a_capture_runs_is_refused_and_ends_nothing() {
+        let (feed, mut ended) = Feed::new(Clip::from_frames(Vec::new()));
+        let mut requests = Requests::default();
+        assert!(!requests.take(Some(Control::Feed(feed))));
+        assert!(!requests.ended);
+        assert_eq!(
+            ended.try_recv(),
+            Ok(FeedEnd::Refused("Thalvi was busy. Try again in a moment."))
+        );
+    }
+
+    /// What an engine answers to a request to stop for an update, whether it quits, and what the
+    /// request saved for the next start.
+    fn restart_answer(
+        paused: bool,
+        (held, fed): (bool, bool),
+        save_fails: bool,
+    ) -> (Stop, bool, Vec<bool>) {
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let (reply, mut answer) = oneshot::channel();
+        let restart = Restart::new(
+            {
+                let saved = Arc::clone(&saved);
+                move |paused| {
+                    saved.lock().unwrap().push(paused);
+                    if save_fails {
+                        Err("The restart note could not be saved.".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            reply,
+        );
+        let flow = answer_restart(restart, paused, held, fed);
+        let saved = saved.lock().unwrap().clone();
+        (
+            answer.try_recv().unwrap(),
+            matches!(flow, Flow::Quit),
+            saved,
+        )
+    }
+
+    #[test]
+    fn only_an_idle_engine_stops_for_an_update_after_saving_whether_it_was_paused() {
+        let refused = || Stop::Refused("The restart note could not be saved.".to_owned());
+        for (paused, held, fed, save_fails, answer, quits, saved) in [
+            (false, false, false, false, Stop::Stopped, true, vec![false]),
+            (true, false, false, false, Stop::Stopped, true, vec![true]),
+            (false, true, false, false, Stop::Busy, false, vec![]),
+            (true, false, true, false, Stop::Busy, false, vec![]),
+            (false, false, false, true, refused(), false, vec![false]),
+        ] {
+            assert_eq!(
+                restart_answer(paused, (held, fed), save_fails),
+                (answer, quits, saved),
+                "paused {paused}, held {held}, fed {fed}, save fails {save_fails}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_to_stop_for_an_update_during_a_capture_is_told_busy_and_ends_nothing() {
+        let (reply, mut answer) = oneshot::channel();
+        let mut requests = Requests::default();
+        let restart = Restart::new(|_| panic!("a busy engine saves nothing"), reply);
+        assert!(!requests.take(Some(Control::RestartIfIdle(restart))));
+        assert!(!requests.ended && !requests.quit);
+        assert_eq!(answer.try_recv(), Ok(Stop::Busy));
+    }
+
+    #[test]
     fn only_the_recordings_and_the_history_are_taken_without_rebuilding_the_engine() {
         let old = DesktopConfig::from_json_str("{}").unwrap();
         for (change, rebuilds) in [
             (r#"{"recordings": {"text": true}}"#, false),
+            (r#"{"update_channel": "development"}"#, false),
             (r#"{"history": {"enabled": false}}"#, false),
             (
                 r#"{"history": {"limit": 5}, "recordings": {"audio": true}}"#,
                 false,
             ),
+            // The wake switch is a retune: the model stays loaded and the microphone open.
+            (r#"{"wake": {"enabled": false}}"#, false),
+            (r#"{"wake": {"enabled": false}, "look": "neon"}"#, true),
+            (r#"{"wake": {"capture": {"model": "hey_jarvis"}}}"#, true),
             (r#"{"look": "neon"}"#, true),
             (r#"{"history": {"limit": 5}, "look": "neon"}"#, true),
         ] {
@@ -2353,10 +2560,6 @@ mod tests {
             self.called("open_folder");
             Ok(())
         }
-
-        fn prepare_overlay(&self, _: f64, _: f64) -> Result<f64, thalvi_desktop::host::HostError> {
-            Ok(0.0)
-        }
     }
 
     fn request(route: CaptureRoute, text: &str) -> CaptureOutcome {
@@ -2637,9 +2840,15 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_switch_of_the_live_server_waits_for_the_end_of_the_running_capture() {
-        let running = DesktopConfig::from_json_str(r#"{"stt": {"engine": "server"}}"#).unwrap();
-        let switched = DesktopConfig::from_json_str(r#"{"stt": {"engine": "local"}}"#).unwrap();
+    async fn a_switch_of_the_live_entry_waits_for_the_end_of_the_running_capture() {
+        let running = DesktopConfig::from_json_str(
+            r#"{"stt":{"entries":[{"kind":"on_device","id":"first","name":"First","active":true,"model":"nemotron_160ms"}]}}"#,
+        )
+        .unwrap();
+        let switched = DesktopConfig::from_json_str(
+            r#"{"stt":{"entries":[{"kind":"on_device","id":"second","name":"Second","active":true,"model":"unified_160ms"}]}}"#,
+        )
+        .unwrap();
         assert_ne!(
             running.stt.entries.active_live().id,
             switched.stt.entries.active_live().id

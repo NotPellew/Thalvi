@@ -11,7 +11,7 @@ use thalvi_desktop::host::HostError;
 use thalvi_desktop::metrics::RecorderError;
 use thalvi_desktop::models::{ModelError, ModelKind};
 use thalvi_desktop::recognizer::{
-    ConnectFailure, Detail, RecognizerError, ServerUrl, SpeechSource,
+    ConnectFailure, Detail, RecognizerError, SpeechSource, TranscriptionFailure,
 };
 use thalvi_desktop::report::{MAX_HEADLINE_CHARS, UserError};
 use thalvi_desktop::tasks::NotConfigured;
@@ -32,7 +32,7 @@ fn download() -> reqwest::Error {
 }
 
 fn office() -> SpeechSource {
-    SpeechSource::thalvi_server("Office", &ServerUrl::default())
+    SpeechSource::direct("Office", "ws://127.0.0.1:8080".to_owned())
 }
 
 fn unreachable() -> RecognizerError {
@@ -63,6 +63,34 @@ fn recognition() -> Cases {
         (
             Box::new(RecognizerError::said("No model.")),
             "Speech recognition failed — Settings",
+        ),
+        (
+            Box::new(RecognizerError::Transcription {
+                failure: TranscriptionFailure::Unreachable,
+                message: "Nothing was delivered.".to_owned(),
+            }),
+            "Can't reach speech server — Settings",
+        ),
+        (
+            Box::new(RecognizerError::Transcription {
+                failure: TranscriptionFailure::Timeout,
+                message: "Nothing was delivered.".to_owned(),
+            }),
+            "Speech server timed out — Settings",
+        ),
+        (
+            Box::new(RecognizerError::Transcription {
+                failure: TranscriptionFailure::HttpStatus,
+                message: "Nothing was delivered.".to_owned(),
+            }),
+            "Speech server error — Settings",
+        ),
+        (
+            Box::new(RecognizerError::Transcription {
+                failure: TranscriptionFailure::BadReply,
+                message: "Nothing was delivered.".to_owned(),
+            }),
+            "Bad speech server reply — Settings",
         ),
         (
             Box::new(RecognizerError::from(ModelError::Download {

@@ -1,19 +1,24 @@
 name: Desktop release
 
+# A desktop-vX.Y.Z tag on main publishes a release; a push to main publishes a
+# development build (X.Y.Z-dev.N prerelease). Both publish only after the release environment's approval.
 on:
   push:
-    tags: ["desktop-v*"]
+    branches: [main]
+    tags: ["desktop-v*", "!desktop-v*-dev.*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to release, such as desktop-v0.1.0
-        required: true
+        description: Existing tag to release, such as desktop-v0.1.0; leave empty on main for a development build
+        required: false
 
 permissions:
   contents: read
 
-env:
-  TAG: ${{ inputs.tag || github.ref_name }}
+# A newer development build replaces one still waiting for approval; releases never cancel each other.
+concurrency:
+  group: desktop-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' && !inputs.tag }}
 
 jobs:
   gate:
@@ -23,25 +28,39 @@ jobs:
     permissions:
       contents: read
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      version: ${{ steps.build.outputs.version }}
+      tag: ${{ steps.build.outputs.tag }}
+      prerelease: ${{ steps.build.outputs.prerelease }}
       sha: ${{ steps.commit.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.TAG }}
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
           fetch-depth: 0
-      - id: version
+      - id: build
+        env:
+          TAG: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
         run: |
-          [[ "$TAG" =~ ^desktop-v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || { echo "::error::$TAG is not a desktop-vX.Y.Z tag"; exit 1; }
           version=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "thalvi-app") | .version')
-          [ "$version" = "${BASH_REMATCH[1]}" ] || { echo "::error::$TAG does not match the app version $version in Cargo.toml"; exit 1; }
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::The app version $version in Cargo.toml is not X.Y.Z"; exit 1; }
+          if [[ -n $TAG ]]; then
+            [[ "$TAG" =~ ^desktop-v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || { echo "::error::$TAG is not a desktop-vX.Y.Z tag"; exit 1; }
+            [ "$version" = "${BASH_REMATCH[1]}" ] || { echo "::error::$TAG does not match the app version $version in Cargo.toml"; exit 1; }
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            [ "$GITHUB_REF" = refs/heads/main ] || { echo "::error::Development builds come from main, not $GITHUB_REF; to release, give a desktop-vX.Y.Z tag"; exit 1; }
+            version="$version-dev.$GITHUB_RUN_NUMBER"
+            TAG="desktop-v$version"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
       # main only receives commits through PRs whose required checks passed.
       - id: commit
         name: Require a commit from main
         run: |
           sha=$(git rev-parse HEAD)
-          git merge-base --is-ancestor "$sha" origin/main || { echo "::error::$TAG points at $sha, which is not on main"; exit 1; }
+          git merge-base --is-ancestor "$sha" origin/main || { echo "::error::$sha is not on main"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
   package:
@@ -74,9 +93,11 @@ jobs:
           cache-dependency-path: crates/thalvi-app/ui/package-lock.json
       - run: npm ci --prefix crates/thalvi-app/ui
       - run: npm run build --prefix crates/thalvi-app/ui
-      - run: npm exec --prefix ui -- tauri build --bundles ${{ matrix.bundle }} -- --locked
+      - run: npm exec --prefix ui -- tauri build --bundles ${{ matrix.bundle }} --config "{\"version\":\"$VERSION\"}" -- --locked
         working-directory: crates/thalvi-app
+        shell: bash
         env:
+          VERSION: ${{ needs.gate.outputs.version }}
           # linuxdeploy looks for libwebgpu_dawn.so, which the build links into the target folder, on this path.
           LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -89,23 +110,86 @@ jobs:
     name: publish
     needs: [gate, package]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     environment: release
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.gate.outputs.version }}
+      TAG: ${{ needs.gate.outputs.tag }}
+      SHA: ${{ needs.gate.outputs.sha }}
+      PRERELEASE: ${{ needs.gate.outputs.prerelease }}
     steps:
       - name: Require the tag to still name the built commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BUILT: ${{ needs.gate.outputs.sha }}
+        if: needs.gate.outputs.prerelease == 'false'
         run: |
           tagged=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)
-          [ "$tagged" = "$BUILT" ] || { echo "::error::$TAG moved from $BUILT to $tagged during the release"; exit 1; }
+          [ "$tagged" = "$SHA" ] || { echo "::error::$TAG moved from $SHA to $tagged during the release"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      # The signing step runs this CLI with the private key, so no package script may run first.
+      - run: npm ci --ignore-scripts --prefix crates/thalvi-app/ui
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends minisign
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: packages
           merge-multiple: true
-      - name: Create the release
+      - name: Sign the packages for the updater and write latest.json
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "$TAG" packages/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "Thalvi Desktop ${TAG#desktop-v}" --generate-notes
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: .github/scripts/updater-feed crates/thalvi-app/tauri.conf.json "$VERSION" "$TAG" packages
+      - name: Create the release
+        run: |
+          if [ "$PRERELEASE" = true ]; then
+            gh release create "$TAG" packages/* --repo "$GITHUB_REPOSITORY" --target "$SHA" --prerelease --latest=false --title "Thalvi Desktop $VERSION (development build)" --generate-notes
+          else
+            gh release create "$TAG" packages/* --repo "$GITHUB_REPOSITORY" --verify-tag --latest --title "Thalvi Desktop $VERSION" --generate-notes
+          fi
+
+  # The development feed names the newest published release or development build; Stable reads releases/latest.
+  # Each run recomputes it from the releases, so one serialized run after any publish leaves it right.
+  feed:
+    name: development feed
+    needs: [gate, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: desktop-feed
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - name: Point the development feed at the newest version
+        run: |
+          newest=""
+          while read -r version; do
+            if .github/scripts/newer-version "$version" "$newest"; then newest=$version; fi
+          done < <(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,isDraft \
+            --jq '.[] | select(.isDraft | not) | .tagName | capture("^desktop-v(?<v>[0-9]+\\.[0-9]+\\.[0-9]+(-dev\\.[0-9]+)?)$").v')
+          [ -n "$newest" ] || { echo "::error::No published desktop release or development build to name"; exit 1; }
+          gh release download "desktop-v$newest" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir feed
+          [ "$(jq -er .version feed/latest.json)" = "$newest" ] || { echo "::error::desktop-v$newest's latest.json names another version"; exit 1; }
+          gh release view desktop-dev --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create desktop-dev --repo "$GITHUB_REPOSITORY" --target "${{ needs.gate.outputs.sha }}" --prerelease --latest=false \
+              --title "Thalvi Desktop development feed" --notes "The update feed for the Development choice in Thalvi's Settings. The builds are the desktop-v*-dev.* prereleases."
+          gh release upload desktop-dev feed/latest.json --repo "$GITHUB_REPOSITORY" --clobber
+          echo "The development feed names $newest."
+      - name: Keep the last five development builds
+        if: needs.gate.outputs.prerelease == 'true'
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | test("^desktop-v[0-9.]+-dev\\.[0-9]+$"))] | sort_by(.createdAt) | reverse | .[5:][] | .tagName' |
+            while read -r old; do gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag; done

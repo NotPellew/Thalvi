@@ -18,7 +18,7 @@ the CLI below) and no Windows, and no microphone unless it is a GNOME run or `up
 H=.agents/skills/verify-thalvi/scripts/thalvi-desktop-rig
 ```
 
-Needs `bwrap`, `kwin_wayland`, `Hyprland`, `hyprctl`, `grim`, `wtype`, python3
+Needs `bwrap`, `kwin_wayland`, `Hyprland`, `hyprctl`, `wayland-info`, `grim`, `wtype`, python3
 with Pillow (for image checks), and a non-NVIDIA render node (`/dev/dri`). Run
 `$H help` for the commands. A GNOME run (below) instead needs `gnome-shell`,
 `pipewire`, `wireplumber`, `ffmpeg`, `xdpyinfo`, python3 with `gi` and GTK 3, and
@@ -59,9 +59,9 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   between cases by deleting `$R/home/.local/share/thalvi` (that is the app's
   private data directory, models included) and rewriting
   `$R/home/.config/thalvi/desktop.json` (`--config` copies a file there).
-- Without `--config` the defaults apply: speech goes to a Thalvi server at
-  `ws://127.0.0.1:8080`, which on the host can be the developer's own. Always
-  point the live entry at an unreachable address:
+- Without `--config`, speech uses On this computer. To verify migration of an
+  old saved config, pass an active legacy Thalvi server entry with an unreachable
+  address so it cannot connect to the developer's server:
   `{"stt":{"entries":[{"kind":"thalvi_server","id":"rig","name":"Rig","active":true,"address":"ws://127.0.0.1:1"}]}}`.
   An on-device entry (`{"kind":"on_device","id":"dev","name":"On this computer","active":true,"model":"nemotron_160ms"}`)
   downloads about 650 MB at start; add `--env HTTPS_PROXY=http://127.0.0.1:1`
@@ -83,7 +83,10 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
 | Need | Command |
 | --- | --- |
 | Tray actions | `$H ctl $R pause`, `resume`, `toggle`, `cancel`, `status` (the relaunch path the tray and key binds use) |
-| Open Settings | `$H ctl $R` with no argument |
+| Open Settings | `$H ctl $R` with no argument, or `$H ctl $R show capture` for one page |
+| What Thalvi and its overlay show | `$H ctl $R state` (state, `overlay`, `recognizer`; never what was said) |
+| Set up from a fresh config | `$H ctl $R models`, `$H ctl $R model-download speech nemotron_160ms` (replies when ready), `$H ctl $R speech-check '<entry json>'`, `$H ctl $R settings set '<json>'` |
+| Quit the app like the tray | `$H ctl $R quit`; the log ends with `Stopped.` |
 | Keys into the focused window | `$H sh $R wtype -k Tab` (also `-M shift -k Tab -m shift`, `-k Return`, `-k Down`, `-k Next` for Page Down) |
 | Window size | `$H hypr $R dispatch setfloating "title:^Thalvi settings\$"`, then `$H hypr $R dispatch resizewindowpixel "exact 400 680,title:^Thalvi settings\$"`; repeat until `$H hypr $R clients` shows `size: 400,680` |
 | Screenshot | `$H shot $R name` (whole screen, `$R/out/name.png`); crop with Pillow, view with the image reader |
@@ -95,8 +98,8 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   with class `unavailable` (not running yet), then `loading`; repeat it under a
   bounded loop until the class is neither, open Settings, then wait for its window in
   `$H hypr $R clients` before sending keys.
-- The overlay and Settings share the window class `thalvi-desktop`, so a `class:`
-  selector can move the overlay instead. Select Settings by its title.
+- The overlay is a layer surface (`$H hypr $R layers` lists `Thalvi overlay`), not
+  a window, so `$H hypr $R clients` shows only Settings.
 - A screenshot right after a key can show the previous frame. Wait for the change
   to appear before keeping it as evidence.
 - There is no pointer, so Settings is keyboard-driven. The first `Tab` focuses the
@@ -108,7 +111,7 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   page needs about ten `Shift+Tab` presses from the sidebar to reach Save.
 - A long page scrolls inside its own pane: focus a field in the page and press
   `Next` (Page Down) to scroll it, `Home` to return.
-- The overlay is a pill hanging at the top centre of the screen. Move the
+- The overlay hangs at the top centre of the screen, above windows. Move the
   Settings window away from it (`movewindowpixel`) or float it small, and look at
   frames, not the log: a log line and a visible notice differ by a frame or two.
   A download that fails at once (a refused connection) never shows its notice
@@ -117,6 +120,18 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   an app's environment is fixed when it starts.
 - `Hyprland` only renders a window that is mapped; open Settings before taking
   screenshots of it.
+
+## Feed a file instead of speaking
+
+`$H ctl $R feed /var/tmp/thalvi-rig/wake.wav` plays a WAV file into the app in place of its
+microphone, at the pace of speech and through the same wake word, recognition, endings and
+delivery, so a dictation needs no `--mic`, no `say` and no GNOME run. The reply comes when the last
+frame has been fed (`state` shows what the capture is doing then); `ctl cancel` stops a feed. The
+file is read by the app inside its sandbox, so keep it under `/var/tmp`, not in a home folder, and
+make it a 16-bit PCM WAV no longer than the capture limit. The engine drops audio while its
+wake cue plays, whether it comes from the microphone or a file, so leave about half a second of
+silence after the wake phrase. Captures fed from a file carry `"source": "file"` in
+`metrics.jsonl`. Pair it with `victim` and `--hosted` to see the text land.
 
 ## Speak, type and go offline (Hyprland)
 
@@ -230,6 +245,7 @@ log's stamps and state what frame first shows a notice and which first does not.
 ## Teardown
 
 ```sh
+$H ctl $R quit     # the app quits as the tray's Quit does; the next two make sure
 $H app-stop $R     # the app only
 $H down $R         # app and compositors; $R/out stays
 ```

@@ -139,17 +139,19 @@ impl Judge {
         let response = request
             .send()
             .await
-            .map_err(|error| format!("the judge could not be reached: {error}"))?;
+            .map_err(|error| format!("the judge could not be reached: {}", error.without_url()))?;
         if !response.status().is_success() {
             return Err(format!(
                 "the judge returned an error ({})",
                 response.status()
             ));
         }
-        let body: Value = response
-            .json()
-            .await
-            .map_err(|error| format!("the judge sent an unreadable reply: {error}"))?;
+        let body: Value = response.json().await.map_err(|error| {
+            format!(
+                "the judge sent an unreadable reply: {}",
+                error.without_url()
+            )
+        })?;
         Ok(body["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or_default()

@@ -267,6 +267,11 @@ outer=rig-outer
 for _ in $(seq 100); do [ -S "$RUN/$outer" ] && break; sleep 0.1; done
 [ -S "$RUN/$outer" ] || { echo "kwin made no display" >> /tmp/out/supervisor.log; exit 1; }
 echo "$outer" > /tmp/out/outer.display
+for _ in $(seq 100); do
+  WAYLAND_DISPLAY=$outer wayland-info 2>/dev/null | grep -q "interface: 'wl_output'" && break
+  sleep 0.1
+done
+WAYLAND_DISPLAY=$outer wayland-info 2>/dev/null | grep -q "interface: 'wl_output'" || { echo "kwin exposed no wl_output" >> /tmp/out/supervisor.log; exit 1; }
 unset HYPRLAND_INSTANCE_SIGNATURE
 WAYLAND_DISPLAY=$outer Hyprland --i-am-really-stupid --config /home/rig/hypr.conf > /tmp/out/hyprland.log 2>&1 &
 for _ in $(seq 150); do
@@ -276,6 +281,12 @@ for _ in $(seq 150); do
   sleep 0.1
 done
 [ -n "${sig:-}" ] && [ -n "${inner:-}" ] || { echo "Hyprland did not come up" >> /tmp/out/supervisor.log; exit 1; }
+for _ in $(seq 100); do
+  monitors=$(WAYLAND_DISPLAY=$inner HYPRLAND_INSTANCE_SIGNATURE=$sig hyprctl monitors -j 2>/dev/null || true)
+  printf '%s' "$monitors" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin) else 1)' >/dev/null 2>&1 && break
+  sleep 0.1
+done
+printf '%s' "${monitors:-}" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin) else 1)' >/dev/null 2>&1 || { echo "Hyprland started without an output (hyprctl monitors -j stayed empty)" >> /tmp/out/supervisor.log; exit 1; }
 echo "$sig" > /tmp/out/inner.sig
 echo "$inner" > /tmp/out/inner.display
 echo ready >> /tmp/out/supervisor.log

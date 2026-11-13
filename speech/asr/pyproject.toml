@@ -7,7 +7,7 @@ dependencies = ["numpy>=2", "websockets>=17"]
 
 [project.optional-dependencies]
 # The model runtime, pinned to the commit the recognizer was measured with (issue #212).
-nemo = ["nemo_toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech.git@979cc6c6a3ba7a07195b441b3854b918d08bd2c2"]
+nemo = ["nemo_toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech.git@8bc3920bddc1222feca7f34361ee36d70cc033a6"]
 
 [dependency-groups]
 dev = ["pytest>=9", "ruff>=0.15"]

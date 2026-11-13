@@ -4,36 +4,51 @@ use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
 
+use semver::Version;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    AppHandle, Emitter, Manager, RunEvent, Theme, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::Delivery;
 use thalvi_desktop::device::Adapters;
 use thalvi_desktop::draft::Drafts;
+use thalvi_desktop::feed::{Clip, FeedEnd};
 use thalvi_desktop::history;
 use thalvi_desktop::hold::HoldKind;
-use thalvi_desktop::host::{Desktop, HoldSource, HoldWatch, HostError, RequestServer, refusal};
-use thalvi_desktop::metrics::Recorder;
+use thalvi_desktop::host::{
+    Desktop, HoldSource, HoldWatch, Host, HostError, RequestServer, refusal,
+};
+use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::SpeechDownloads;
 use thalvi_desktop::speech_device::SpeechDevices;
 use tokio::sync::watch;
 
-use crate::agent::{self, Running, Switch};
+use crate::agent::{self, Catalog, ModelRow, Running, Switch};
 use crate::client;
 use crate::commands;
 use crate::launch::{Launch, relaunch_shows_settings};
 use crate::menu_entry::{self, MenuEntry};
-use crate::overlay::{self, Overlay, Visibility};
-use crate::runner::{AudioStatus, Control, EngineLink};
+use crate::overlay::{Overlay, Visibility};
+use crate::runner::{AudioStatus, Control, EngineLink, Restart};
 use serde_json::Value;
 
 use crate::settings::{Store, ensure_microphone_change_allowed};
 use crate::startup::{self, APP_NAME, LOGIN_ARG, Registration};
 use crate::status::{Failure, FailureKind, LastError, Status};
 use crate::tray::{self, CopyItem, Tray};
+use crate::update::{self, Arrival, Inbox, Marker, Restarter, Snapshot, Stop, TrayClick, Updates};
+use crate::updater::PluginSource;
 
 const SETTINGS: &str = "settings";
+
+/// The settings page with the update's state and the channel choice.
+const APP_PAGE: &str = "app";
+
+/// Sent when the update's state changes, with the new `Snapshot`.
+const UPDATE_EVENT: &str = "thalvi://update";
 
 /// The settings page that holds the last dictation, and the event that opens a page.
 const HISTORY_PAGE: &str = "history";
@@ -71,8 +86,8 @@ impl SyncedConfig {
     }
 
     /// Builds a settings form from the config read under the save lock, then validates, writes and
-    /// applies it, all under that lock. `form` returns the value to hand back and the form to save,
-    /// or `None` to save nothing. `take_effect` gets the config in use, the validated one and
+    /// applies it, all under that lock; whether it saved. `form` returns the value to hand back and
+    /// the form to save, or `None` to save nothing. `take_effect` gets the config in use, the validated one and
     /// `write`, which replaces the file; it writes before it installs the config in the running
     /// app, as `AppState::take_effect` does, and an error from it before writing leaves the file.
     pub(crate) fn save_form<T>(
@@ -84,18 +99,17 @@ impl SyncedConfig {
             &DesktopConfig,
             &dyn Fn() -> Result<(), String>,
         ) -> Result<(), String>,
-    ) -> Result<(T, Option<(DesktopConfig, bool)>), String> {
+    ) -> Result<(T, bool), String> {
         let _save = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         let current = self.config();
         let (value, settings) = form(&current)?;
         let Some(settings) = settings else {
-            return Ok((value, None));
+            return Ok((value, false));
         };
         ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
         let config = Store::check(settings, &current)?;
         take_effect(&current, &config, &|| self.store.write(&config))?;
-        let look_changed = config.look != current.look;
-        Ok((value, Some((config, look_changed))))
+        Ok((value, true))
     }
 
     fn remember(&self, change: impl FnOnce(&mut DesktopConfig)) -> Result<(), String> {
@@ -137,13 +151,35 @@ pub struct AppState {
     /// Reports the hold key where the app sees the keyboard itself; empty elsewhere.
     hold_watch: Mutex<Option<HoldWatch>>,
     hold_unavailable: Option<&'static str>,
+    /// Asks for update checks and tells what the update is doing.
+    pub updates: Updates,
+    /// Set when the engine is about to close for an update, which is not a failure to show.
+    restarting: AtomicBool,
+}
+
+/// What starting the app made: the state, whether it is the first start, and what the update
+/// driver and the metrics are to hear about.
+struct Started {
+    state: AppState,
+    first_start: bool,
+    /// Whether loading dropped the active legacy Thalvi server entry, which the user is told once.
+    removed_active_entry: bool,
+    inbox: Inbox,
+    /// What the last update came to, and how long the restart took.
+    arrival: Option<(Arrival, Duration)>,
 }
 
 impl AppState {
-    /// Reads the config and starts the engine; also whether this is the first start.
-    fn start(config: Option<std::path::PathBuf>) -> Result<(Self, bool), String> {
+    /// Reads the config and starts the engine. `running` is the app's version as the updater sees it,
+    /// which a development build sets at build time, so not the crate's version.
+    fn start(config: Option<std::path::PathBuf>, running: &Version) -> Result<Started, String> {
         let store = Store::new(config)?;
-        let (config, first_start) = store.start()?;
+        let (config, first_start, removed_active_entry) = store.start()?;
+        let marker = Marker::take(&store.sibling(Marker::FILE));
+        let arrival = marker.as_ref().map(|marker| marker.arrival(running));
+        let (updates, inbox) = update::channel(Snapshot::start(
+            arrival.as_ref().map(|(arrival, _)| arrival.clone()),
+        ));
         let history = Arc::new(history::Store::per_user());
         let drafts = Arc::new(Drafts::default());
         let delivery = Arc::new(Delivery::new(
@@ -156,6 +192,8 @@ impl AppState {
             Arc::clone(&history),
             Arc::clone(&drafts),
             Arc::clone(&speech_devices),
+            // An update restarts the app as it was: a paused microphone stays closed.
+            marker.as_ref().is_some_and(|marker| marker.paused),
         )?;
         let mut held = watch_hold_keys(&config, &link, false);
         if let Some(notice) = held.refusal.take() {
@@ -179,8 +217,16 @@ impl AppState {
             request_server: Mutex::new(None),
             hold_watch: Mutex::new(held.watch),
             hold_unavailable: held.unavailable,
+            updates,
+            restarting: AtomicBool::new(false),
         };
-        Ok((state, first_start))
+        Ok(Started {
+            state,
+            first_start,
+            removed_active_entry,
+            inbox,
+            arrival,
+        })
     }
 
     #[must_use]
@@ -196,7 +242,7 @@ impl AppState {
     pub fn save_form<T>(
         &self,
         form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
-    ) -> Result<(T, Option<(DesktopConfig, bool)>), String> {
+    ) -> Result<(T, bool), String> {
         self.saves
             .save_form(form, self.link.audio().paused, |current, config, write| {
                 self.take_effect(current, config, write)
@@ -312,8 +358,11 @@ impl AppState {
     fn apply(&self, config: &DesktopConfig) {
         self.overlay_shown
             .store(config.overlay.show, Ordering::SeqCst);
+        self.overlay.show_draft(config.overlay.draft);
+        self.overlay.set_look(config.look);
         self.saves.set(config);
         self.link.send(Control::Apply(Box::new(config.clone())));
+        self.updates.config_changed();
     }
 }
 
@@ -365,10 +414,7 @@ fn watch_hold_keys(config: &DesktopConfig, link: &EngineLink, keeping: bool) -> 
     held(
         Desktop::watch_hold_keys(
             &keys,
-            move |kind, down| match kind {
-                HoldKind::Dictate => input.set(down),
-                HoldKind::Write => input.set_write(down),
-            },
+            move |kind, change| input.apply(kind, change),
             link.hold_problems(),
         ),
         keeping,
@@ -471,19 +517,19 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_audio,
-            commands::overlay_takes_clicks,
             commands::get_settings,
             commands::save_settings,
             commands::set_listening,
-            commands::cancel_capture,
             commands::dismiss_error,
             commands::copy_report,
             commands::list_microphones,
             commands::open_recordings,
             commands::get_hold_key_unavailable,
+            commands::get_hold_key_defaults,
             commands::get_start_at_login,
             commands::set_start_at_login,
             commands::copy_login_line,
@@ -499,7 +545,6 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::open_speech_model_source,
             commands::check_speech_entry,
             commands::word_list_support,
-            commands::share_word_list,
             commands::get_history,
             commands::delete_history_entry,
             commands::clear_history,
@@ -507,6 +552,9 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::edit_draft,
             commands::copy_text,
             commands::discard_draft,
+            commands::get_update_state,
+            commands::check_for_updates,
+            commands::open_release_notes,
         ])
         .setup(move |app| {
             // Tauri turns an error from this hook into a panic, so it is reported here instead.
@@ -533,16 +581,146 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
 /// Reads the config and starts the engine, the tray and the windows.
 fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), String> {
     // Only the first instance gets here, so a relaunch never reads the config.
-    let (state, first_start) = AppState::start(config)?;
+    let Started {
+        state,
+        first_start,
+        removed_active_entry,
+        inbox,
+        arrival,
+    } = AppState::start(config, &app.package_info().version)?;
     state.restore_login(app);
     state.restore_menu_entry(&menu_entry::System::from_env());
+    start_overlay(app, &state);
     app.manage(state);
     serve_requests(app);
     create_windows(app).map_err(|error| error.to_string())?;
     if first_start {
         show_settings(app);
     }
-    follow_engine(app).map_err(|error| error.to_string())
+    if removed_active_entry {
+        Desktop::show_error(
+            "Speech settings updated",
+            "Your Thalvi server speech entry was removed: Thalvi now connects to speech servers directly. On this computer is in use instead.",
+        );
+    }
+    follow_engine(app).map_err(|error| error.to_string())?;
+    follow_updates(app);
+    run_updates(app, inbox, arrival);
+    Ok(())
+}
+
+/// Starts the update driver and records how the last update came out. Nothing here waits for the
+/// engine: the first check comes after the app is usable, in the background.
+fn run_updates(app: &AppHandle, inbox: Inbox, arrival: Option<(Arrival, Duration)>) {
+    let config = {
+        let app = app.clone();
+        move || app.state::<AppState>().config()
+    };
+    let recordings = config().recordings;
+    if let Some((arrival, took)) = arrival {
+        let channel = config().update_channel;
+        tauri::async_runtime::spawn(async move {
+            if recordings.metrics
+                && let Ok(recorder) = Recorder::per_user(recordings)
+            {
+                let (outcome, fields) = arrival.metric(channel);
+                recorder.metric(Event::Update, outcome, Some(took), fields);
+                recorder.finish().await;
+            }
+        });
+    }
+    let mut status = app.state::<AppState>().link.status_updates();
+    let usable = async move {
+        let _ = status
+            .wait_for(|status| !matches!(status, Status::Loading { .. }))
+            .await;
+    };
+    let current = app.package_info().version.clone();
+    tauri::async_runtime::spawn(update::drive(
+        inbox,
+        PluginSource::new(app.clone()),
+        AppRestarter(app.clone()),
+        config,
+        current,
+        Recorder::per_user(recordings).ok(),
+        usable,
+    ));
+}
+
+/// Carries the update's state to the tray and the settings window.
+fn follow_updates(app: &AppHandle) {
+    let mut changes = app.state::<AppState>().updates.changes();
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let snapshot = changes.borrow_and_update().clone();
+            if let Some(tray) = handle.state::<AppState>().tray.get() {
+                tray.update(&snapshot);
+            }
+            let _ = handle.emit(UPDATE_EVENT, &snapshot);
+            if changes.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// Stops Thalvi for an update and starts it again. The engine decides whether Thalvi is idle.
+struct AppRestarter(AppHandle);
+
+impl Restarter for AppRestarter {
+    async fn stop_if_idle(&self, from: &Version, to: &Version) -> Stop {
+        let state = self.0.state::<AppState>();
+        let marker = state.saves.store.sibling(Marker::FILE);
+        let (from, to) = (from.clone(), to.clone());
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let app = self.0.clone();
+        state.link.send(Control::RestartIfIdle(Restart::new(
+            move |paused| {
+                Marker::new(&from, &to, paused).write(&marker)?;
+                app.state::<AppState>()
+                    .restarting
+                    .store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            reply,
+        )));
+        let stop = answer
+            .await
+            .unwrap_or_else(|_| Stop::Refused("Thalvi's engine is not running.".to_owned()));
+        if stop == Stop::Stopped {
+            let app = self.0.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                let state = app.state::<AppState>();
+                // As a quit does: bars read "not running", and Hyprland keeps no binds of ours.
+                drop(
+                    state
+                        .request_server
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take(),
+                );
+                drop(
+                    state
+                        .hold_watch
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take(),
+                );
+                state.link.wait_stopped();
+            })
+            .await;
+        }
+        stop
+    }
+
+    fn relaunch(&self, failure: Option<&str>) {
+        if let Some(failure) = failure {
+            let state = self.0.state::<AppState>();
+            Marker::failed(&state.saves.store.sibling(Marker::FILE), failure);
+        }
+        self.0.restart();
+    }
 }
 
 /// Starts answering requests from outside. The app works without; status bars then report Thalvi
@@ -567,16 +745,30 @@ fn serve_requests(app: &AppHandle) {
     }
 }
 
-fn create_windows(app: &AppHandle) -> tauri::Result<()> {
-    let state = app.state::<AppState>();
-    match overlay::create(app, &state.host) {
-        Ok(_) => {}
+/// Starts the overlay's thread on this desktop's overlay surface; its cancel button reaches the
+/// engine. Where the desktop gives no surface, the overlay stays off.
+fn start_overlay(app: &AppHandle, state: &AppState) {
+    // GNOME's panel height comes from GTK, so the plan is made here, on the toolkit's thread.
+    let plan = match state.host.overlay_plan() {
+        Ok(plan) => plan,
         Err(error) => {
-            // An overlay the desktop cannot keep unfocused would take focus from the user's app.
             println!("{error} The status overlay stays off.");
             state.overlay_shown.store(false, Ordering::SeqCst);
+            return;
         }
-    }
+    };
+    let config = state.config();
+    state.overlay.show_draft(config.overlay.draft);
+    state.overlay.set_look(config.look);
+    let handle = app.clone();
+    state
+        .overlay
+        .start(plan, state.host.overlay_takes_clicks(), move || {
+            handle.state::<AppState>().link.send(Control::Cancel);
+        });
+}
+
+fn create_windows(app: &AppHandle) -> tauri::Result<()> {
     let settings =
         WebviewWindowBuilder::new(app, SETTINGS, WebviewUrl::App("settings.html".into()))
             .title("Thalvi settings")
@@ -585,12 +777,25 @@ fn create_windows(app: &AppHandle) -> tauri::Result<()> {
             // Built at start, when a login start may hold the foreground; `show_settings` focuses it.
             .focused(false)
             .build()?;
-    let window = settings.clone();
-    settings.on_window_event(move |event| {
-        if let WindowEvent::CloseRequested { api, .. } = event {
+    // The overlay follows the system's theme as the settings window sees it, as the web views did.
+    if let Ok(theme) = settings.theme() {
+        app.state::<AppState>()
+            .overlay
+            .set_dark(theme == Theme::Dark);
+    }
+    let (window, handle) = (settings.clone(), app.clone());
+    settings.on_window_event(move |event| match event {
+        WindowEvent::CloseRequested { api, .. } => {
             api.prevent_close();
             let _ = window.hide();
         }
+        WindowEvent::ThemeChanged(theme) => {
+            handle
+                .state::<AppState>()
+                .overlay
+                .set_dark(*theme == Theme::Dark);
+        }
+        _ => {}
     });
     Ok(())
 }
@@ -601,7 +806,12 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
     let mut status = state.link.status_updates();
     let mut level = state.link.level_updates();
     let mut audio = state.link.audio_updates();
-    let tray = Tray::new(app, &status.borrow(), state.link.audio().paused)?;
+    let tray = Tray::new(
+        app,
+        &status.borrow(),
+        state.link.audio().paused,
+        &state.updates.snapshot(),
+    )?;
     let _ = state.tray.set(tray);
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -628,6 +838,9 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
                 }
             };
             if changed.is_err() {
+                if handle.state::<AppState>().restarting.load(Ordering::SeqCst) {
+                    break;
+                }
                 let failed = Status::Failed {
                     kind: FailureKind::Other,
                     notice: "Thalvi stopped unexpectedly. Restart it.".to_owned(),
@@ -643,6 +856,7 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
     tauri::async_runtime::spawn(async move {
         while level.changed().await.is_ok() {
             let level = *level.borrow_and_update();
+            handle.state::<AppState>().overlay.level(level);
             let _ = handle.emit("thalvi://level", Level { level });
         }
     });
@@ -652,12 +866,19 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
 fn show(app: &AppHandle, status: &Status) {
     let state = app.state::<AppState>();
     state.last_error.record(status);
+    if matches!(
+        status,
+        Status::Paused | Status::Listening | Status::Done { .. } | Status::Failed { .. }
+    ) {
+        // A downloaded update may install when Thalvi has become quiet.
+        state.updates.quiet();
+    }
     if let Some(tray) = state.tray.get() {
         tray.show(status);
     }
     let _ = app.emit("thalvi://status", status);
     let enabled = state.overlay_shown.load(Ordering::SeqCst);
-    state.overlay.apply(app, Visibility::of(status, enabled));
+    state.overlay.show(status, Visibility::of(status, enabled));
 }
 
 /// Opens the settings window; only an explicit user action calls this.
@@ -721,8 +942,11 @@ impl Running for Live {
         }
     }
 
-    fn show_settings(&self) {
+    fn show_settings(&self, page: Option<&str>) {
         show_settings(&self.0);
+        if let Some(page) = page {
+            let _ = self.0.emit(OPEN_PAGE_EVENT, page);
+        }
     }
 
     async fn copy_error(&self) -> Result<(), String> {
@@ -737,15 +961,11 @@ impl Running for Live {
         &self,
         form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<serde_json::Value>), String>,
     ) -> Result<T, String> {
-        let (value, saved) = commands::save(&self.0, &self.0.state::<AppState>(), form)?;
+        let (value, saved) = commands::save(&self.0.state::<AppState>(), form)?;
         if saved {
             let _ = self.0.emit(CHANGED_ELSEWHERE_EVENT, ());
         }
         Ok(value)
-    }
-
-    async fn share_word_list(&self) -> Result<(), String> {
-        commands::share(&self.0.state::<AppState>()).await
     }
 
     fn set_switch(&self, switch: Switch, on: bool) -> Result<(), String> {
@@ -764,6 +984,48 @@ impl Running for Live {
     fn recordings(&self) -> Result<std::path::PathBuf, String> {
         Recorder::dir().map_err(|error| error.to_string())
     }
+
+    fn feeding(&self) -> watch::Receiver<bool> {
+        self.0.state::<AppState>().link.feeding_updates()
+    }
+
+    async fn feed(&self, clip: Clip) -> FeedEnd {
+        self.0.state::<AppState>().link.feed(clip).await
+    }
+
+    async fn models(&self) -> Result<Vec<ModelRow>, String> {
+        let state = self.0.state::<AppState>();
+        let mut rows: Vec<ModelRow> = commands::wake_models()
+            .await?
+            .iter()
+            .map(ModelRow::wake)
+            .collect();
+        for info in commands::speech_models(&state).await? {
+            let line = commands::speech_device_line(&state, info.name).await?;
+            let progress = state.speech_downloads.progress(info.name);
+            rows.push(ModelRow::speech(&info, line, progress));
+        }
+        Ok(rows)
+    }
+
+    async fn download_model(&self, kind: Catalog, name: &str) -> Result<(), String> {
+        let state = self.0.state::<AppState>();
+        match kind {
+            Catalog::Wake => commands::download_wake(&state, name).await,
+            Catalog::Speech => commands::download_speech(&self.0, &state, name).await,
+        }
+    }
+
+    fn overlay_on(&self) -> bool {
+        self.0
+            .state::<AppState>()
+            .overlay_shown
+            .load(Ordering::SeqCst)
+    }
+
+    fn quit(&self) {
+        quit(&self.0);
+    }
 }
 
 /// Handles a tray menu item.
@@ -778,36 +1040,46 @@ pub fn on_menu(app: &AppHandle, id: &str) {
             });
         }
         tray::SETTINGS => show_settings(app),
+        tray::UPDATE => match app.state::<AppState>().updates.snapshot().tray().1 {
+            TrayClick::Check => app.state::<AppState>().updates.check_now(),
+            TrayClick::Settings => {
+                show_settings(app);
+                let _ = app.emit(OPEN_PAGE_EVENT, APP_PAGE);
+            }
+        },
         tray::LAST_DICTATION => {
             show_settings(app);
             let _ = app.emit(OPEN_PAGE_EVENT, HISTORY_PAGE);
         }
-        tray::QUIT => {
-            let app = app.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                let state = app.state::<AppState>();
-                // Bars read "not running" while the microphone and the recognizer close.
-                drop(
-                    state
-                        .request_server
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .take(),
-                );
-                // Exiting never drops managed state, and Hyprland keeps binds the app added.
-                drop(
-                    state
-                        .hold_watch
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .take(),
-                );
-                state.link.quit();
-                app.exit(0);
-            });
-        }
+        tray::QUIT => quit(app),
         _ => {}
     }
+}
+
+/// Closes the request socket, the hold keys, the microphone and the recognizer, then exits.
+fn quit(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        // Bars read "not running" while the microphone and the recognizer close.
+        drop(
+            state
+                .request_server
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
+        // Exiting never drops managed state, and Hyprland keeps binds the app added.
+        drop(
+            state
+                .hold_watch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
+        state.link.quit();
+        app.exit(0);
+    });
 }
 
 #[cfg(test)]
@@ -996,40 +1268,6 @@ mod tests {
         assert_eq!(error, "F7 is already bound in Hyprland.");
         assert!(!written, "nothing is written");
         assert_eq!(saves.config(), start, "the running config is unchanged");
-    }
-
-    #[test]
-    fn a_save_says_whether_the_look_changed() {
-        let dir = std::env::temp_dir().join(format!("thalvi-app-look-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let start = DesktopConfig::from_json_str("{}").unwrap();
-        let saves = SyncedConfig::new(
-            Store::new(Some(dir.join("desktop.json"))).unwrap(),
-            start.clone(),
-        );
-        let changed = |look: &str| {
-            let mut settings = crate::settings::settings_json(&saves.config()).unwrap();
-            settings["look"] = serde_json::json!(look);
-            let ((), result) = saves
-                .save_form(
-                    |_| Ok(((), Some(settings))),
-                    true,
-                    |_, config, write| {
-                        write()?;
-                        saves.set(config);
-                        Ok(())
-                    },
-                )
-                .unwrap();
-            result.map(|(_, look_changed)| look_changed)
-        };
-
-        let results = [changed("holo"), changed("holo")];
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert_ne!(start.look, thalvi_desktop::config::Look::Holo);
-        assert_eq!(results, [Some(true), Some(false)]);
     }
 
     #[test]

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, development]
+    branches: [main]
   pull_request:
 
 concurrency:
@@ -25,12 +25,11 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: linux
-          save-if: ${{ github.ref == 'refs/heads/development' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: target/tmp/models
-          key: wake-models-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
-          enableCrossOsArchive: true
+          path: ~/.cache/thalvi/test-models
+          key: spotter-models-${{ runner.os }}-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -56,12 +55,11 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          save-if: ${{ github.ref == 'refs/heads/development' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: target/tmp/models
-          key: wake-models-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
-          enableCrossOsArchive: true
+          path: ~/AppData/Local/thalvi/test-models
+          key: spotter-models-${{ runner.os }}-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
@@ -144,6 +142,31 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: .github/scripts/gates issue-sync
+
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/thalvi-app/ui/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends minisign
+      - run: .github/scripts/gates release
+
+  formal:
+    name: formal
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version-file: .python-version
+      - run: .github/scripts/gates formal
 
   dependencies:
     name: dependencies

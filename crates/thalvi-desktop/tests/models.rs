@@ -692,6 +692,33 @@ async fn a_speech_download_reports_progress_up_to_done() {
 }
 
 #[tokio::test]
+async fn a_running_speech_download_shows_each_step_it_reports() {
+    let (address, _server) = serve().await;
+    let dir = dir("speech-shown");
+    let url = format!("http://{address}/good.onnx");
+    let sha = sha256(GOOD);
+    let assets = speech([&url; 4], &sha);
+    let downloads = SpeechDownloads::default();
+    let store = ModelStore::in_dir(&dir);
+
+    let mut shown = Vec::new();
+    downloads
+        .run("m", &store, &assets, |event| {
+            shown.push((event, downloads.progress("m")));
+        })
+        .await
+        .expect("downloads");
+
+    assert_eq!(shown.len(), 6);
+    assert!(shown.iter().all(|(event, seen)| *seen == Some(*event)));
+    assert_eq!(
+        downloads.progress("m"),
+        None,
+        "a finished download is not shown"
+    );
+}
+
+#[tokio::test]
 async fn a_speech_fetch_of_files_already_on_disk_reports_no_download() {
     let (address, _server) = serve().await;
     let dir = dir("speech-intact");
@@ -769,6 +796,8 @@ async fn a_speech_model_is_downloaded_once_at_a_time() {
     tokio::time::timeout(Duration::from_secs(5), started.recv())
         .await
         .expect("the first download starts");
+    assert_eq!(downloads.progress("m"), Some(SpeechProgress::Verifying));
+    assert_eq!(downloads.progress("other"), None);
 
     let assets = speech([&good; 4], &sha);
     let refused = downloads
@@ -786,6 +815,11 @@ async fn a_speech_model_is_downloaded_once_at_a_time() {
 
     first.abort();
     assert!(first.await.expect_err("cancelled").is_cancelled());
+    assert_eq!(
+        downloads.progress("m"),
+        None,
+        "a cancelled download is not shown"
+    );
     downloads
         .run("m", &store, &assets, |_| {})
         .await

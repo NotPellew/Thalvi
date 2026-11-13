@@ -13,7 +13,7 @@ use crate::hold::HoldKey;
 use crate::host::{App, Desktop, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
 use crate::phrases::WordList;
-use crate::recognizer::{ServerUrl, SpeechSource};
+use crate::recognizer::SpeechSource;
 use crate::wake::WakeConfig;
 use crate::writing::Writing;
 
@@ -56,6 +56,8 @@ pub struct DesktopConfig {
     /// The input device to open; `None` is the system default.
     pub microphone: Option<String>,
     pub look: Look,
+    /// Which builds the app updates itself to.
+    pub update_channel: UpdateChannel,
     /// What is recorded on this computer; nothing unless the user turns it on.
     pub recordings: RecordKinds,
     /// The dictation history kept on this computer; on unless the user turns it off.
@@ -80,7 +82,7 @@ pub struct DesktopConfig {
 struct RawDesktopConfig {
     /// The address a config written before the speech server list kept; read only to migrate it.
     #[serde(default)]
-    server: Option<ServerUrl>,
+    server: Option<String>,
     #[serde(default)]
     wake: WakeConfig,
     #[serde(default, deserialize_with = "cues")]
@@ -103,6 +105,8 @@ struct RawDesktopConfig {
     microphone: Option<String>,
     #[serde(default)]
     look: Look,
+    #[serde(default)]
+    update_channel: UpdateChannel,
     #[serde(default)]
     recordings: RecordKinds,
     #[serde(default)]
@@ -146,6 +150,38 @@ impl TryFrom<String> for Look {
             "holo" => Ok(Self::Holo),
             "gunmetal" => Ok(Self::Gunmetal),
             _ => Err("look must be gunmetal, holo or neon.".to_owned()),
+        }
+    }
+}
+
+/// Which builds the app keeps itself on: `Stable` unless the user picks the development builds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", rename_all = "lowercase")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Development,
+}
+
+impl UpdateChannel {
+    /// The name the config file and the metrics use.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Development => "development",
+        }
+    }
+}
+
+impl TryFrom<String> for UpdateChannel {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, String> {
+        match name.as_str() {
+            "stable" => Ok(Self::Stable),
+            "development" => Ok(Self::Development),
+            _ => Err("update_channel must be stable or development.".to_owned()),
         }
     }
 }
@@ -223,7 +259,7 @@ fn build(
         .map(|name| nonempty(&name, "microphone"))
         .transpose()?;
     if write_key == hold_key {
-        return Err("The write key must differ from the hold key.".to_owned());
+        return Err("The write key must differ from the dictate key.".to_owned());
     }
     let (entries, phrases) = raw
         .stt
@@ -241,6 +277,7 @@ fn build(
         overlay: raw.overlay,
         microphone,
         look: raw.look,
+        update_channel: raw.update_channel,
         recordings: raw.recordings,
         history: raw.history,
         start_at_login: raw.start_at_login,
@@ -464,6 +501,7 @@ struct FileForm<'a> {
     overlay: &'a OverlayConfig,
     microphone: Option<&'a str>,
     look: Look,
+    update_channel: UpdateChannel,
     recordings: RecordKinds,
     history: HistoryConfig,
     start_at_login: bool,
@@ -569,6 +607,7 @@ impl DesktopConfig {
             overlay: &self.overlay,
             microphone: self.microphone.as_deref(),
             look: self.look,
+            update_channel: self.update_channel,
             recordings: self.recordings,
             history: self.history,
             start_at_login: self.start_at_login,
@@ -701,6 +740,32 @@ mod tests {
     }
 
     #[test]
+    fn wake_words_are_on_unless_the_file_turns_them_off_and_only_off_is_stored() {
+        for (json, enabled) in [
+            ("{}", true),
+            (r#"{"wake": {}}"#, true),
+            (r#"{"wake": {"enabled": true}}"#, true),
+            (r#"{"wake": {"enabled": false}}"#, false),
+            (
+                r#"{"wake": {"capture": {"model": "hey_jarvis"}, "enabled": false}}"#,
+                false,
+            ),
+        ] {
+            let config = DesktopConfig::from_json_str(json).unwrap();
+            assert_eq!(config.wake.enabled(), enabled, "{json}");
+            let written = serde_json::to_value(&config).unwrap();
+            assert_eq!(
+                written["wake"].get("enabled"),
+                (!enabled).then_some(&serde_json::json!(false)),
+                "{json}"
+            );
+            let again = DesktopConfig::from_json_str(&written.to_string()).unwrap();
+            assert_eq!(again.wake, config.wake, "{json}");
+        }
+        assert!(DesktopConfig::from_json_str(r#"{"wake": {"enabled": "no"}}"#).is_err());
+    }
+
+    #[test]
     fn the_write_key_is_checked_once_and_must_differ_from_the_hold_key() {
         let key = |json: &str| loaded(json, &WINDOWS()).map(|config| config.write_key.to_string());
         assert_eq!(key(r#"{"write_key": "Ctrl+KeyY"}"#).unwrap(), "Ctrl+KeyY");
@@ -713,7 +778,7 @@ mod tests {
         ] {
             let error = key(json).unwrap_err();
             assert!(
-                error.contains("must differ from the hold key"),
+                error.contains("must differ from the dictate key"),
                 "{json}: {error}"
             );
         }
@@ -723,7 +788,10 @@ mod tests {
             "the keys may swap places"
         );
         let error = loaded(r#"{"hold_key": "F10"}"#, &HYPRLAND()).unwrap_err();
-        assert!(error.contains("must differ from the hold key"), "{error}");
+        assert!(
+            error.contains("must differ from the dictate key"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -989,7 +1057,7 @@ mod tests {
         for (json, kind) in [
             (
                 r#"{"stt": {"engine": "server"}}"#,
-                LiveKind::ThalviServer(ServerUrl::default()),
+                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
             ),
             (
                 r#"{"stt": {"engine": "local"}}"#,
@@ -1061,7 +1129,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             config.stt.entries.active_live().kind,
-            LiveKind::ThalviServer(ServerUrl::parse("wss://thalvi.example:9000").unwrap())
+            LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0]))
         );
         assert_eq!(
             config
@@ -1361,10 +1429,6 @@ mod tests {
                 "unknown field `capture_model`",
             ),
             (
-                r#"{"wake": {"capture": {"model": "hey_mycroft"}}}"#.to_owned(),
-                "wake models must be different",
-            ),
-            (
                 r#"{"wake": {"conversation": {"model": "hey_jarvis", "threshold": 0}}}"#.to_owned(),
                 "A wake threshold must be above 0",
             ),
@@ -1612,6 +1676,7 @@ mod tests {
             "overlay": {"show": false, "draft": true},
             "microphone": " USB Mic ",
             "look": "gunmetal",
+            "update_channel": "development",
             "recordings": {"metrics": true, "text": false, "audio": true},
             "history": {"enabled": false, "limit": 50},
             "start_at_login": true,
@@ -1677,6 +1742,29 @@ mod tests {
             let error = parse(json).unwrap_err().to_string();
             assert!(
                 error.contains("look must be gunmetal, holo or neon."),
+                "{json}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_update_channel_defaults_to_stable_and_rejects_unknown_names() {
+        assert_eq!(parse("{}").unwrap().update_channel, UpdateChannel::Stable);
+        for (name, channel) in [
+            ("stable", UpdateChannel::Stable),
+            ("development", UpdateChannel::Development),
+        ] {
+            let config = parse(&format!(r#"{{"update_channel": "{name}"}}"#)).unwrap();
+            assert_eq!(config.update_channel, channel);
+            assert_eq!(channel.name(), name, "the name the metrics use");
+        }
+        for json in [
+            r#"{"update_channel": "nightly"}"#,
+            r#"{"update_channel": "Stable"}"#,
+        ] {
+            let error = parse(json).unwrap_err().to_string();
+            assert!(
+                error.contains("update_channel must be stable or development."),
                 "{json}: {error}"
             );
         }

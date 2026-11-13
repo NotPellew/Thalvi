@@ -316,7 +316,7 @@ mod tests {
     use crate::capture::CaptureRequest;
     use crate::engine::CaptureError;
     use crate::metrics::RecordKinds;
-    use crate::recognizer::{ConnectFailure, Detail, RecognizerError, ServerUrl, SpeechSource};
+    use crate::recognizer::{ConnectFailure, Detail, RecognizerError, SpeechSource};
     use std::time::Duration;
 
     const CONFIG: &str = r#"{
@@ -714,7 +714,7 @@ mod tests {
             FakeHost::default(),
             CaptureOutcome::Failed {
                 error: CaptureError::Recognizer(RecognizerError::Unreachable {
-                    speech: SpeechSource::thalvi_server("Office", &ServerUrl::default()),
+                    speech: SpeechSource::direct("Office", "ws://127.0.0.1:8080".to_owned()),
                     reason: ConnectFailure::Refused,
                     detail: Detail("Connection refused (os error 111)".to_owned()),
                 }),
@@ -733,7 +733,7 @@ mod tests {
         let failed = |recoverable_text: Option<&str>| CaptureOutcome::Failed {
             error: CaptureError::NotReady {
                 waited: Duration::from_secs(8),
-                speech: SpeechSource::thalvi_server("Office", &ServerUrl::default()),
+                speech: SpeechSource::direct("Office", "ws://127.0.0.1:8080".to_owned()),
             },
             recoverable_text: recoverable_text.map(str::to_owned),
         };
@@ -741,7 +741,7 @@ mod tests {
         assert_eq!(
             notice.as_deref(),
             Some(
-                "The Thalvi server \"Office\" at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix its address under Settings → Speech. Captured text is on the clipboard."
+                "The speech server \"Office\" at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Check that it is running, or fix its address under Settings → Speech. Captured text is on the clipboard."
             )
         );
         assert_eq!(seen, calls(&["capture_target", "copy:\"so far\""]));
@@ -750,7 +750,7 @@ mod tests {
         assert_eq!(
             notice.as_deref(),
             Some(
-                "The Thalvi server \"Office\" at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Start the Thalvi server, or fix its address under Settings → Speech."
+                "The speech server \"Office\" at ws://127.0.0.1:8080 was not ready after 8 seconds. Nothing was delivered. Check that it is running, or fix its address under Settings → Speech."
             )
         );
         assert_eq!(seen, calls(&["capture_target"]));

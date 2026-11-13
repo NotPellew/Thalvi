@@ -122,9 +122,4 @@ impl Host for FakeHost {
     fn open_folder(&self, path: &Path) -> Result<(), HostError> {
         self.record("open_folder", format!("open_folder:{}", path.display()))
     }
-
-    fn prepare_overlay(&self, _width: f64, _height: f64) -> Result<f64, HostError> {
-        self.record("prepare_overlay", "prepare_overlay".to_owned())
-            .map(|()| 0.0)
-    }
 }

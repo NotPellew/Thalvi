@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The overlay and the settings window listen to Thalvi's events and call its commands; settings shows the app version.",
-  "windows": ["overlay", "settings"],
+  "description": "The settings window listens to Thalvi's events and calls its commands, and shows the app version.",
+  "windows": ["settings"],
   "permissions": ["core:event:default", "core:app:allow-version", "dialog:allow-open"]
 }

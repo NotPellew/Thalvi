@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::models::CatalogSpeech;
-use crate::recognizer::{ServerUrl, SpeechSource};
+use crate::recognizer::SpeechSource;
 use crate::secondary::{SecondaryApi, SecondaryStt, SecondarySttError};
 use crate::transducer::SpeechChoice;
 
@@ -24,7 +24,7 @@ pub enum EntryError {
     #[error("Speech server \"{0}\" has no id, or one that is too long or shared with another.")]
     Id(String),
     #[error(
-        "Exactly one live speech server must be active: a realtime recognizer, a Thalvi server or this computer."
+        "Exactly one live speech server must be active: a realtime recognizer or this computer."
     )]
     ActiveLive,
     #[error("Speech server \"{name}\": {reason}")]
@@ -35,6 +35,10 @@ pub enum EntryError {
     Mixed,
     #[error("stt.model only applies when stt.engine is local.")]
     ModelWithoutLocal,
+    #[error("server must be a ws or wss URL")]
+    LegacyServerUrl,
+    #[error("server root")]
+    LegacyServerRoot,
 }
 
 fn fields(name: &str, reason: impl fmt::Display) -> EntryError {
@@ -112,8 +116,8 @@ const ADDRESS: &str =
 pub enum LiveKind {
     /// Meta's realtime ASR protocol, spoken by the desktop itself.
     Realtime(Realtime),
-    /// The Thalvi server's `/transcription` route, with the key held in the server's `.env`.
-    ThalviServer(ServerUrl),
+    /// OpenAI-compatible audio transcription, uploaded when capture ends.
+    OpenAi(SecondaryStt),
     /// The model on this computer.
     OnDevice(SpeechChoice),
 }
@@ -134,7 +138,9 @@ impl LiveEntry {
             LiveKind::Realtime(realtime) => {
                 SpeechSource::direct(&self.name, realtime.address.clone())
             }
-            LiveKind::ThalviServer(server) => SpeechSource::thalvi_server(&self.name, server),
+            LiveKind::OpenAi(settings) => {
+                SpeechSource::direct(&self.name, settings.address().to_owned())
+            }
             LiveKind::OnDevice(choice) => SpeechSource::on_device(&self.name, choice.label()),
         }
     }
@@ -157,13 +163,25 @@ impl SecondPassEntry {
 }
 
 /// The speech servers: any number of live and second-pass entries, exactly one live entry active.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Entries {
     live: Vec<LiveEntry>,
     /// Index into `live`; always in range.
     active: usize,
     second_pass: Vec<SecondPassEntry>,
+    dropped_legacy_server: bool,
+    dropped_active_legacy_server: bool,
 }
+
+impl PartialEq for Entries {
+    fn eq(&self, other: &Self) -> bool {
+        self.live == other.live
+            && self.active == other.active
+            && self.second_pass == other.second_pass
+    }
+}
+
+impl Eq for Entries {}
 
 impl Default for Entries {
     /// One On this computer entry with the catalog default model, active.
@@ -176,12 +194,12 @@ impl Default for Entries {
             }],
             active: 0,
             second_pass: Vec::new(),
+            dropped_legacy_server: false,
+            dropped_active_legacy_server: false,
         }
     }
 }
 
-const THALVI_SERVER_ID: &str = "thalvi-server";
-const THALVI_SERVER_NAME: &str = "Thalvi server";
 const ON_DEVICE_ID: &str = "on-device";
 const ON_DEVICE_NAME: &str = "On this computer";
 const SECOND_PASS_ID: &str = "second-pass";
@@ -205,6 +223,18 @@ impl Entries {
         &self.second_pass
     }
 
+    /// Whether loading this config dropped a saved Thalvi server entry.
+    #[must_use]
+    pub fn dropped_legacy_server(&self) -> bool {
+        self.dropped_legacy_server
+    }
+
+    /// Whether the dropped Thalvi server entry was active when the config was loaded.
+    #[must_use]
+    pub fn dropped_active_legacy_server(&self) -> bool {
+        self.dropped_active_legacy_server
+    }
+
     /// The ticked second-pass entries in list order.
     pub fn ticked(&self) -> impl Iterator<Item = &SecondPassEntry> {
         self.second_pass.iter().filter(|entry| entry.ticked())
@@ -218,7 +248,8 @@ impl Entries {
             .find(|entry| entry.id == id)
             .and_then(|entry| match &entry.kind {
                 LiveKind::Realtime(realtime) => Some(realtime.api_key()),
-                _ => None,
+                LiveKind::OpenAi(settings) => Some(settings.api_key()),
+                LiveKind::OnDevice(_) => None,
             })
             .or_else(|| {
                 self.second_pass
@@ -236,8 +267,15 @@ impl Entries {
         let mut active = Vec::new();
         let mut second_pass = Vec::new();
         let mut seen: Vec<(String, String)> = Vec::new();
+        let mut dropped_legacy_server = false;
+        let mut removed_active = false;
         for entry in raw {
             let built = entry.build(false)?;
+            if let Built::RemovedLegacyServer { active } = &built {
+                dropped_legacy_server = true;
+                removed_active |= *active;
+                continue;
+            }
             let (id, name) = built.identity();
             if seen
                 .iter()
@@ -255,51 +293,70 @@ impl Entries {
                     live.push(entry);
                 }
                 Built::SecondPass(entry) => second_pass.push(entry),
+                Built::RemovedLegacyServer { .. } => {}
             }
         }
-        let [active] = active
+        let active_indexes: Vec<_> = active
             .iter()
             .enumerate()
             .filter_map(|(index, on)| on.then_some(index))
-            .collect::<Vec<_>>()[..]
-        else {
-            return Err(EntryError::ActiveLive);
+            .collect();
+        let active = match active_indexes.as_slice() {
+            [active] => *active,
+            [] if removed_active => {
+                if let Some(index) = live
+                    .iter()
+                    .position(|entry| matches!(entry.kind, LiveKind::OnDevice(_)))
+                {
+                    index
+                } else {
+                    live.push(LiveEntry {
+                        id: ON_DEVICE_ID.to_owned(),
+                        name: ON_DEVICE_NAME.to_owned(),
+                        kind: LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
+                    });
+                    live.len() - 1
+                }
+            }
+            _ => return Err(EntryError::ActiveLive),
         };
         Ok(Self {
             live,
             active,
             second_pass,
+            dropped_legacy_server,
+            dropped_active_legacy_server: removed_active,
         })
     }
 
-    /// The entries a config written before the list existed meant: its recognizer, active, and
-    /// its second pass, ticked or not, with the key kept.
+    /// The entries a config written before the list existed meant: its on-device model and
+    /// second pass, ticked or not, with the key kept.
     fn migrated(
         engine: Option<EngineName>,
         model: Option<String>,
-        server: Option<ServerUrl>,
+        server: Option<String>,
         secondary: Option<SecondaryStt>,
     ) -> Result<Self, EntryError> {
-        let server_entry = |server: ServerUrl| LiveEntry {
-            id: THALVI_SERVER_ID.to_owned(),
-            name: THALVI_SERVER_NAME.to_owned(),
-            kind: LiveKind::ThalviServer(server),
-        };
+        if let Some(server) = server {
+            let parsed =
+                reqwest::Url::parse(server.trim()).map_err(|_| EntryError::LegacyServerUrl)?;
+            if !matches!(parsed.scheme(), "ws" | "wss") || parsed.host_str().is_none() {
+                return Err(EntryError::LegacyServerUrl);
+            }
+            if parsed.path() != "/" {
+                return Err(EntryError::LegacyServerRoot);
+            }
+        }
         let on_device = |choice: SpeechChoice| LiveEntry {
             id: ON_DEVICE_ID.to_owned(),
             name: ON_DEVICE_NAME.to_owned(),
             kind: LiveKind::OnDevice(choice),
         };
         let live = match (engine, model) {
-            // No recognizer was ever chosen: the default is on this computer. A saved server
-            // address or an explicit server engine keeps the server, as 0.1.x files always
-            // wrote one of those.
-            (None, None) => match server {
-                Some(server) => vec![server_entry(server)],
-                None => vec![on_device(SpeechChoice::Catalog(CatalogSpeech::ALL[0]))],
-            },
-            (Some(EngineName::Server), None) => {
-                vec![server_entry(server.unwrap_or_default())]
+            // Legacy server settings are discarded; without a usable local selection the default
+            // on-device recognizer is active.
+            (None | Some(EngineName::Server), None) => {
+                vec![on_device(SpeechChoice::Catalog(CatalogSpeech::ALL[0]))]
             }
             (None | Some(EngineName::Server), Some(_)) => {
                 return Err(EntryError::ModelWithoutLocal);
@@ -310,9 +367,7 @@ impl Entries {
                         name: ON_DEVICE_NAME.to_owned(),
                         reason,
                     })?;
-                let mut live = vec![on_device(choice)];
-                // The server address was a saved setting too; it stays as a server not in use.
-                live.extend(server.map(server_entry));
+                let live = vec![on_device(choice)];
                 live
             }
         };
@@ -327,6 +382,8 @@ impl Entries {
                 })
                 .into_iter()
                 .collect(),
+            dropped_legacy_server: false,
+            dropped_active_legacy_server: false,
         })
     }
 }
@@ -372,12 +429,26 @@ enum RawEntry {
         #[serde(default)]
         api_key: String,
     },
-    ThalviServer {
+    OpenAi {
         id: String,
         name: String,
         #[serde(default)]
         active: bool,
         address: String,
+        model: String,
+        #[serde(default)]
+        api_key: String,
+    },
+    #[serde(rename = "thalvi_server")]
+    LegacyServer {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        active: bool,
+        #[serde(default, rename = "address")]
+        _address: String,
     },
     OnDevice {
         id: String,
@@ -404,6 +475,7 @@ enum RawEntry {
 enum Built {
     Live { entry: LiveEntry, on: bool },
     SecondPass(SecondPassEntry),
+    RemovedLegacyServer { active: bool },
 }
 
 impl Built {
@@ -411,6 +483,7 @@ impl Built {
         match self {
             Self::Live { entry, .. } => (&entry.id, &entry.name),
             Self::SecondPass(entry) => (&entry.id, &entry.name),
+            Self::RemovedLegacyServer { .. } => ("", ""),
         }
     }
 }
@@ -419,9 +492,15 @@ impl RawEntry {
     /// Checks the fields. A second-pass entry that is not ticked is kept as written unless
     /// `strict`, which is how an entry is checked where it is added or edited.
     fn build(self, strict: bool) -> Result<Built, EntryError> {
+        if let Self::LegacyServer { active, .. } = &self
+            && !strict
+        {
+            return Ok(Built::RemovedLegacyServer { active: *active });
+        }
         let (id, name) = match &self {
             Self::Realtime { id, name, .. }
-            | Self::ThalviServer { id, name, .. }
+            | Self::OpenAi { id, name, .. }
+            | Self::LegacyServer { id, name, .. }
             | Self::OnDevice { id, name, .. }
             | Self::SecondPass { id, name, .. } => (id.trim().to_owned(), name.trim().to_owned()),
         };
@@ -452,14 +531,22 @@ impl RawEntry {
                 ),
                 active,
             ),
-            Self::ThalviServer {
-                active, address, ..
+            Self::OpenAi {
+                active,
+                address,
+                model,
+                api_key,
+                ..
             } => live(
-                LiveKind::ThalviServer(
-                    ServerUrl::parse(address.trim()).map_err(|e| fields(&name, e))?,
+                LiveKind::OpenAi(
+                    SecondaryStt::new(&address, &model, api_key, SecondaryApi::OpenAi, true)
+                        .map_err(|e| fields(&name, second_pass_reason(&e)))?,
                 ),
                 active,
             ),
+            Self::LegacyServer { .. } => {
+                return Err(fields(&name, "this speech server kind was removed."));
+            }
             Self::OnDevice { active, model, .. } => live(
                 LiveKind::OnDevice(speech_choice(model.as_deref()).map_err(|e| fields(&name, e))?),
                 active,
@@ -523,7 +610,7 @@ impl RawStt {
     /// The speech servers this file means; `server` is the file's old top-level address.
     pub(crate) fn entries(
         self,
-        server: Option<ServerUrl>,
+        server: Option<String>,
     ) -> Result<(Entries, crate::phrases::WordList), EntryError> {
         let phrases = self.phrases;
         let entries = match self.entries {
@@ -555,11 +642,13 @@ impl Serialize for Entries {
                 model: &'a str,
                 api_key: &'a str,
             },
-            ThalviServer {
+            OpenAi {
                 id: &'a str,
                 name: &'a str,
                 active: bool,
-                address: String,
+                address: &'a str,
+                model: &'a str,
+                api_key: &'a str,
             },
             OnDevice {
                 id: &'a str,
@@ -588,11 +677,13 @@ impl Serialize for Entries {
                     model: &realtime.model,
                     api_key: &realtime.api_key,
                 },
-                LiveKind::ThalviServer(server) => File::ThalviServer {
+                LiveKind::OpenAi(settings) => File::OpenAi {
                     id,
                     name,
                     active,
-                    address: server.to_string(),
+                    address: settings.address(),
+                    model: settings.model(),
+                    api_key: settings.api_key(),
                 },
                 LiveKind::OnDevice(choice) => File::OnDevice {
                     id,
@@ -617,7 +708,7 @@ impl Serialize for Entries {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::config::DesktopConfig;
@@ -628,12 +719,16 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
+    fn entries_of(json: &Value) -> Entries {
+        entries(&json.to_string()).unwrap()
+    }
+
     /// `(id, kind, address or model, active)` for every entry, live ones first.
     fn summary(entries: &Entries) -> Vec<(String, &'static str, String, bool)> {
         let live = entries.live().iter().map(|entry| {
             let (kind, place) = match &entry.kind {
                 LiveKind::Realtime(realtime) => ("realtime", realtime.address().to_owned()),
-                LiveKind::ThalviServer(server) => ("thalvi_server", server.to_string()),
+                LiveKind::OpenAi(settings) => ("open_ai", settings.address().to_owned()),
                 LiveKind::OnDevice(choice) => ("on_device", choice.label()),
             };
             (
@@ -667,7 +762,7 @@ mod tests {
 
     #[test]
     fn every_old_config_shape_becomes_entries_with_nothing_re_entered() {
-        let server = row("thalvi-server", "thalvi_server", "ws://h:1", true);
+        let server = row("on-device", "on_device", "nemotron_160ms", true);
         let cases = [
             (
                 "{}".to_owned(),
@@ -681,12 +776,7 @@ mod tests {
             // A 0.1.x file always wrote its engine, so it keeps its recognizer.
             (
                 r#"{"stt": {"engine": "server"}}"#.to_owned(),
-                vec![row(
-                    "thalvi-server",
-                    "thalvi_server",
-                    "ws://127.0.0.1:8080",
-                    true,
-                )],
+                vec![row("on-device", "on_device", "nemotron_160ms", true)],
             ),
             (
                 r#"{"stt": {"engine": "local"}}"#.to_owned(),
@@ -696,13 +786,9 @@ mod tests {
                 r#"{"stt": {"engine": "local", "model": "unified_160ms"}}"#.to_owned(),
                 vec![row("on-device", "on_device", "unified_160ms", true)],
             ),
-            // A server address that was saved but not in use stays as a server not in use.
             (
                 r#"{"server": "ws://h:1", "stt": {"engine": "local", "model": "/m"}}"#.to_owned(),
-                vec![
-                    row("on-device", "on_device", "/m", true),
-                    row("thalvi-server", "thalvi_server", "ws://h:1", false),
-                ],
+                vec![row("on-device", "on_device", "/m", true)],
             ),
             (
                 format!(r#"{{"stt": {{"secondary": {{"enabled": true, {SECOND}}}}}}}"#),
@@ -746,6 +832,8 @@ mod tests {
         let json = json!({"stt": {"entries": [
             {"kind": "realtime", "id": "a", "name": "Cybrex2", "active": false,
              "address": "ws://100.64.0.2:8012", "model": "nemotron", "api_key": "live-key"},
+            {"kind": "open_ai", "id": "o", "name": "OpenAI local", "active": true,
+             "address": "http://localhost:9000/v1", "model": "whisper", "api_key": "open-key"},
             {"kind": "thalvi_server", "id": "b", "name": "Office", "active": true,
              "address": "ws://127.0.0.1:8080"},
             {"kind": "on_device", "id": "c", "name": "Offline", "active": false, "model": "/m"},
@@ -757,7 +845,7 @@ mod tests {
         .to_string();
         let config = DesktopConfig::from_json_str(&json).unwrap();
         let got = &config.stt.entries;
-        assert_eq!(got.active_live().name, "Office");
+        assert_eq!(got.active_live().name, "OpenAI local");
         assert_eq!(
             got.second_pass()
                 .iter()
@@ -771,8 +859,13 @@ mod tests {
             ["Why"]
         );
         assert_eq!(
-            (got.key_of("a"), got.key_of("z"), got.key_of("y")),
-            ("live-key", "zk", "")
+            (
+                got.key_of("a"),
+                got.key_of("o"),
+                got.key_of("z"),
+                got.key_of("y")
+            ),
+            ("live-key", "open-key", "zk", "")
         );
         let written = serde_json::to_string(&config).unwrap();
         assert_eq!(
@@ -785,8 +878,8 @@ mod tests {
     #[test]
     fn a_list_that_cannot_work_is_refused_in_plain_words() {
         let live = |id: &str, name: &str, active: bool| {
-            json!({"kind": "thalvi_server", "id": id, "name": name, "active": active,
-                   "address": "ws://127.0.0.1:8080"})
+            json!({"kind": "realtime", "id": id, "name": name, "active": active,
+                   "address": "ws://127.0.0.1:8012", "model": "m"})
         };
         let with =
             |entries: Vec<serde_json::Value>| json!({"stt": {"entries": entries}}).to_string();
@@ -871,10 +964,13 @@ mod tests {
         let blank_second = json!({"kind": "second_pass", "id": "p", "name": "P", "active": false,
                                   "address": "", "model": "", "api_key": "k"});
         // Saved from an old config this way, so it still loads …
-        let loaded = entries(&json!({"stt": {"entries": [
-            {"kind": "thalvi_server", "id": "s", "name": "S", "active": true, "address": "ws://h:1"},
-            blank_second
-        ]}}).to_string())
+        let loaded = entries(
+            &json!({"stt": {"entries": [
+                {"kind": "on_device", "id": "d", "name": "Device", "active": true},
+                blank_second
+            ]}})
+            .to_string(),
+        )
         .unwrap();
         assert_eq!(loaded.key_of("p"), "k");
         // … but where an entry is added or edited, every field is checked.
@@ -889,6 +985,101 @@ mod tests {
         let bad_live = json!({"kind": "realtime", "id": "r", "name": "R", "active": false,
                               "address": "http://h", "model": "m"});
         assert!(check(&bad_live).unwrap_err().contains("ws or wss"));
+        let open_ai = json!({"kind": "open_ai", "id": "o", "name": "Local ASR", "active": false,
+                             "address": "https://host.example/v1/", "model": "whisper", "api_key": "saved"});
+        assert_eq!(check(&open_ai), Ok(()));
+        for address in [
+            "ftp://host/v1",
+            "http://user:pass@host/v1",
+            "http://host/v1?x=1",
+            "http://host/v1#x",
+        ] {
+            let mut invalid = open_ai.clone();
+            invalid["address"] = json!(address);
+            assert!(
+                check(&invalid).unwrap_err().contains("http or https URL"),
+                "{address}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_saved_thalvi_server_entry_is_dropped_and_the_config_says_whether_it_was_active() {
+        let device = |active: bool| json!({"kind": "on_device", "id": "d", "name": "Device", "active": active});
+        let server = |active: bool| {
+            json!({"kind": "thalvi_server", "id": "s", "name": "Office", "active": active,
+                   "address": "ws://127.0.0.1:8080"})
+        };
+        let cases = [
+            ("none", vec![device(true)], (false, false), "Device"),
+            (
+                "inactive",
+                vec![server(false), device(true)],
+                (true, false),
+                "Device",
+            ),
+            (
+                "active beside a device",
+                vec![server(true), device(false)],
+                (true, true),
+                "Device",
+            ),
+            (
+                "active alone",
+                vec![server(true)],
+                (true, true),
+                ON_DEVICE_NAME,
+            ),
+        ];
+        for (case, list, flags, active) in cases {
+            let got = entries(&json!({"stt": {"entries": list}}).to_string()).unwrap();
+            assert_eq!(
+                (
+                    got.dropped_legacy_server(),
+                    got.dropped_active_legacy_server()
+                ),
+                flags,
+                "{case}"
+            );
+            assert_eq!(got.active_live().name, active, "{case}");
+            assert!(got.live().iter().all(|entry| entry.id != "s"), "{case}");
+        }
+        assert!(
+            check(&server(false))
+                .unwrap_err()
+                .contains("this speech server kind was removed"),
+            "where an entry is added, the removed kind is refused"
+        );
+    }
+
+    #[test]
+    fn lists_are_equal_only_when_entries_active_one_and_second_passes_all_match() {
+        let live = |id: &str, name: &str, active: bool| json!({"kind": "on_device", "id": id, "name": name, "active": active});
+        let second = json!({"kind": "second_pass", "id": "p", "name": "P", "active": true,
+                            "address": "http://h/v1", "model": "m"});
+        let list = |entries: Vec<Value>| entries_of(&json!({"stt": {"entries": entries}}));
+        let base = list(vec![live("a", "A", true), live("b", "B", false)]);
+        assert_eq!(
+            base,
+            list(vec![live("a", "A", true), live("b", "B", false)])
+        );
+        let others = [
+            (
+                "another name",
+                list(vec![live("a", "A", true), live("b", "C", false)]),
+            ),
+            (
+                "another active entry",
+                list(vec![live("a", "A", false), live("b", "B", true)]),
+            ),
+            (
+                "a second pass",
+                list(vec![live("a", "A", true), live("b", "B", false), second]),
+            ),
+        ];
+        for (case, other) in others {
+            assert_ne!(base, other, "{case}");
+        }
     }
 
     #[test]

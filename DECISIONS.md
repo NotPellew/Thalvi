@@ -11,21 +11,21 @@ areas your change touches. Editing rules are in
   delivery; TypeScript owns browser media and UI. Why: use native wake/audio
   libraries without moving model orchestration. Rejected: a WASM UI.
 - **Two products, one repo.** Desktop voice control and the conversational
-  assistant are separate tracks, joined only by `/transcription` and
-  `/session`. Why: different platforms, thin boundary. Rejected for now:
+  assistant are separate tracks, joined only by `/session`. Why: different
+  platforms, thin boundary. Rejected for now:
   phone-to-PC dictation; separate repos until desktop needs its own releases.
 - **Desktop on Hyprland, GNOME Wayland and Windows.** GNOME gets dictation on
   the clipboard only: it exposes neither the focused window nor focus by ID.
   Why: the desktops we can qualify. Rejected: KDE, X11 and macOS until needed,
   and claiming untested platform parity.
-- **Rust desktop app with a Tauri UI.** One process runs engine, tray, a top overlay and a settings window; the overlay never takes
-  focus (Hyprland window rules via the host, a non-activating window on Windows, an XWayland window on GNOME, where the app runs on GTK's X11 backend).
-  Why: one TypeScript UI, no IPC; on GNOME's Mutter a Wayland window and `wl-copy` each take focus, an X11 window and clipboard do not (measured).
-  Rejected: layer-shell webview (blank), GTK-only overlay, egui, native Wayland GTK on GNOME.
+- **Rust desktop app; Tauri settings, CPU-drawn overlay.** One process runs engine, tray, a Tauri settings window and an overlay drawn on its own thread with tiny-skia onto each desktop's surface: a layer surface on Hyprland, an override-redirect XWayland window on GNOME (GTK's X11 backend), a layered non-activating window on Windows; it never takes focus.
+  Why: no IPC; the overlay holds no WebView or GPU device (Windows GPU memory 27–33 → 0 MiB, binary +4 MB, #384); on GNOME's Mutter a Wayland window and `wl-copy` each take focus, an X11 window and clipboard do not (measured).
+  Rejected: WebView overlay (per-desktop focus tricks; a layer-shell WebView is blank), Rune (#367: +116 MiB GPU on Windows, +28.6 MB, pre-release, takes no pull requests),
+  GTK-only overlay, egui, native Wayland GTK on GNOME.
 - **Three looks for the desktop UI.** `look` picks gunmetal (default), holo or neon for the overlay
   and settings window; the overlay hangs from the top of the usable screen area, one 460 × 200 size
-  for all looks. Why: the developer chose gunmetal, the others stay as options; resizing re-centres it
-  on Hyprland. Rejected: dropping the neon pill, y = 0 (a bar covers it), a window size per look.
+  for all looks, and neon follows the system's light or dark theme. Why: the developer chose gunmetal,
+  the others stay as options. Rejected: dropping the neon pill, y = 0 (a bar covers it), a size per look.
 - **Local recognition in the desktop app.** `stt.engine: local` runs a catalog model on `ort`, picked in Settings from a Language drop-down (filters only, not saved) and a Model drop-down: Nemotron Streaming (0.6B, 160 ms, default), Nemotron Unified (0.6B, buffered) or Parakeet TDT v3 (0.6B, offline, re-read every 640 ms). Why: offline; a model is listed for a real trade-off, not only for the fewest errors; word errors on
   LibriSpeech and the developer's takes 3.46/7.14% and 3.03/6.35%, Unified also 8.38% German, 7.09% Spanish; Parakeet about 0.15× real time against Unified's 1×, at 2.33/4.76% (Unified 2.25/4.76% on those clips), 12.44% German, 7.95% Spanish. Rejected: Moonshine (7.4%), Zipformer
   (28%), Nemotron 3.5 (15%), the 80 and 560 ms exports (no real choice; 3.62 and 3.46% on LibriSpeech).
@@ -34,8 +34,9 @@ areas your change touches. Editing rules are in
   5.8–6.6% word errors on the developer's takes (Meta-free, en/de/es), fits next to TTS on an 8 GB
   RTX 2080. Rejected: Voxtral 4B Realtime (too big), Nemotron 3.5 streaming (15%), Qwen3-ASR (2 s chunks).
 - **The desktop connects to its recognizer itself, from a list of speech servers.** `stt.entries` holds realtime
-  ASR, Thalvi server, on-device and second-pass entries; one live entry is active, ticked second passes run in list
-  order and the first that answers wins; `STT_URL` stays for web conversations. Why: switch recognizers with one click,
+  ASR, OpenAI-compatible buffered transcription, on-device and second-pass entries; one live entry is active,
+  ticked second passes run in list order and the first that answers wins; `STT_URL` stays for web conversations. Why:
+  switch recognizers with one click,
   no `.env` edit or restart. Rejected: one setting per recognizer, a silent fallback between entries, several live entries (#228).
 - **A fresh install recognizes on this computer.** With no `stt.entries` the one active entry is On this computer
   with Nemotron Streaming; the first start writes the defaults, opens Settings on Speech and downloads the model.
@@ -44,9 +45,8 @@ areas your change touches. Editing rules are in
   when speech follows seconds of digital silence (#220); fp32 takes 1.25 GB more VRAM (7.7 of 8 GB beside TTS)
   and about 2 ms more per step on the RTX 2080. Rejected: bfloat16 (Turing has none), filling silence with
   noise (rescued one stretch of two), restarting streams.
-- **The word list is a recognition hint, used locally and on the server.** Settings' list goes to the
-  server (when a Thalvi server entry is active) and to a direct realtime recognizer at each connection, to
-  recognizers that announce `phraseBoosting`, and to local dictation. Why: NeMo boosting fixed "Cybrex2" with no new errors; text replacement can't fix
+- **The word list is a recognition hint, used locally and by recognizers reached directly.** Settings' list goes to a
+  direct realtime recognizer at each connection, to recognizers that announce `phraseBoosting`, and to local dictation. Why: NeMo boosting fixed "Cybrex2" with no new errors; text replacement can't fix
   what was misheard. Rejected: a flat logit bonus (no fix, stray tokens in silence), sending it to Meta.
 - **Local boosting fuses NeMo's phrase tree into the greedy search at alpha 2.** Why: "Cybrex2", digit
   and all, in 8 of 8 dictations, no new errors on 48 takes with a two-entry list, about 1 ms more per
@@ -92,10 +92,10 @@ areas your change touches. Editing rules are in
   `reply_audio` (on or off); only `mic` opens a recognizer, only reply audio calls speech
   synthesis. Web: Voice sets both, Speak replies only reply audio. Why: typed or locally
   recognized input can get spoken replies. Rejected: one `voice` switch, a compat message.
-- **Two wake entries, endings select the capture route.** One local inference pipeline
-  runs separate trained capture and conversation wake heads; a wake capture whose whole text is
-  an `open_url`/`focus_app` phrase or `open <host>` runs as a task with no ending. Why: defer the
-  action choice until an ending, yet a ready command needs none. Rejected: one phrase for both flows.
+- **Two wake entries, endings select the capture route.** Trained capture and conversation heads;
+  the desktop runs only capture until it has conversations. A capture whose whole text is an
+  `open_url`/`focus_app` phrase or `open <host>` runs as a task with no ending. Why: a ready command
+  needs no ending; a head with no handler dropped wakes. Rejected: one phrase; hiding it in Settings.
 - **Wake context.** Both trained heads use 16 embedding frames. Why: this
   supports first-frame inference with upstream startup and reset history.
   Rejected: accepting longer contexts that need additional warm-up history.
@@ -144,15 +144,18 @@ areas your change touches. Editing rules are in
   treating an endpoint's presence as enablement.
 - **Resident controls and private request socket.** Commands reach the running app over a request/reply
   socket in the private runtime folder (a user-only pipe on Windows): one JSON line each way, size-bounded,
-  known commands only. Why: controls must not start a microphone, and an agent needs an answer.
-  Rejected: single-instance relaunch (no answer), a keyboard listener, TCP, transcript-bearing replies.
+  known commands only. An agent can feed a WAV file in place of the microphone and set the app up (models, speech servers, word list, quit). Why: controls must not start a microphone, an agent needs an answer, and testing and setup must not need computer use.
+  Rejected: single-instance relaunch (no answer), a keyboard listener, TCP, transcript-bearing replies (they stay rejected).
 - **Hold to talk.** Holding a key dictates and releasing pastes: F9 without a modifier on Hyprland (binds Thalvi adds at runtime with its own executable through `hyprctl`, removed on quit and re-added on `configreloaded`), Alt+KeyZ on Windows (a swallowing keyboard hook that waits for the
   key and Alt both up); a second key, `write_key` (F10, Alt+KeyX), releases into the writing model instead; every word of a hold is text, and only `cancel` abandons one. Each desktop supplies its default keys, and `hold_key` and `write_key` are stored only when they differ. Why: Hyprland 0.53.3 types held modifiers into the paste and drops the release when one comes up first, seen live, and drops a plain `bindr` when another key is pressed or a modifier is down during the hold, so the release is `bindrti`; `RegisterHotKey` sees no release; the key already ends a dictation, and spoken endings cut off sentences that held them; binds in the user's config go stale when the executable moves.
-  Rejected: Alt+Y with binds, Ctrl+Z/Y, spoken endings during a hold, a managed `thalvi-binds.conf` the user sources, hand-written binds.
-- **Writing is one direct chat call, words only.** "write that out" or the write key sends the
-  recognized words to an OpenAI-compatible endpoint from Settings and pastes what streams back, line breaks included; no
-  context, no Enter, 15 s at most; any failure pastes nothing and puts the words on the clipboard. Why: dictation then needs
-  no server, and text the user did not say is never sent unread. Rejected: the Thalvi server, app-aware tone, write-and-send.
+  Rejected: Alt+Y with binds, Ctrl+Z/Y, spoken endings during a hold, a managed `thalvi-binds.conf` the user sources, hand-written binds, a modifier checklist with a key drop-down (Settings records the combination the user presses).
+- **Wake words are a switch apart from listening.** `wake.enabled` (stored only when off) turns spoken activation off while listening stays on: the engine skips the wake model and the hold keys work, the switch applies as a retune with no rebuild, and keyboard-only is its own status (`keyboardOnly`, tray icon and `state` word `keyboard`). Why: pausing also refuses the hold keys, and a user who wants only the keyboard has no other way to stop wake words from starting captures. Rejected: pausing as the way to turn wake words off, unloading the wake model (re-enabling would need a rebuild).
+- **AltGr alone may be a hold key on Windows.** `AltRight` held alone dictates; AltGr with any other key is a chord that types, so the hook passes every event, ignores the Ctrl Windows adds, and starts the hold only after 0.2 s alone, keeping the audio from the press. Why: AltGr types `@`, `€` and `{` on layouts that have it, and a swallowed AltGr would break typing for them. Reversible: a hold started by AltGr and a second key stays a hold.
+  Rejected: swallowing AltGr, starting the hold at the press and cancelling on a chord (cue and overlay would flash on every `@`).
+- **Writing is one direct chat call, words only.** "write that out" or the write key sends the recognized words to an
+  OpenAI-compatible endpoint from Settings and pastes what streams back, line breaks included; no context, no Enter, 15 s at most;
+  reasoning shows as thinking, never pasted, and the request says nothing about thinking; any failure pastes nothing and puts the words
+  on the clipboard. Why: no server needed, unsaid text never sent unread, strict endpoints refuse unknown fields. Rejected: the Thalvi server, app-aware tone, write-and-send, sending `enable_thinking`.
 - **The writing prompt is a stored override of one built-in default.** `writing.prompt` is the system message; it is
   saved only when it differs from the default, and a blank one is refused where the config loads. Why: users who never
   edited it get a better default later, and Settings, the agent surface and the file share one check. Rejected:
@@ -165,16 +168,17 @@ areas your change touches. Editing rules are in
   final or after 250 ms. Why: a streaming recognizer emits a word only after audio past it; measured headless on the server
   recognizer, no last word lost in 336 releases (75% before when released on the word's end). Rejected: a fixed 500 ms tail;
   an end-of-stream message through the server (11% lost at the word's end, a protocol change).
-- **Packaged desktop with an OS-held login entry.** AppImage on Linux, per-user NSIS on Windows, released from `desktop-vX.Y.Z` tags that match the Cargo version; login startup is the OS entry (`tauri-plugin-autostart`, run with `--login`), and the config keeps the preference (`start_at_login`, written by the switch alone, never by Save) so each start restores an entry an upgrade removed. Hyprland runs no XDG autostart unless `xdg-desktop-autostart.target` is up (uwsm starts it), so otherwise the row shows an `exec-once` line to copy and no entry is written. The AppImage's app menu entry is Thalvi's own file (`show_in_menu`, same pattern); a startup failure shows a GTK or `MessageBoxW` box when stderr is no terminal (`gtk` is Tauri's own).
-  Why: both formats suit the updater (#137), the plugin is Tauri's own, the switch reads the OS back, and the NSIS uninstall hook cannot tell an upgrade from an uninstall.
-  Rejected: deb and MSI as well, a hand-written login `.desktop` and `Run` key writer, restoring over a Thalvi entry the user turned off in Windows (read from `StartupApproved` with `windows-registry`).
+- **Packaged desktop with an OS-held login entry.** AppImage on Linux, per-user NSIS on Windows, released from `desktop-vX.Y.Z` tags that match the Cargo version (development builds add `-dev.N` at build time); login startup is the OS entry (`tauri-plugin-autostart`, run with `--login`), and the config keeps the preference (`start_at_login`, written by the switch alone, never by Save) so each start restores an entry an upgrade removed. Hyprland runs no XDG autostart unless `xdg-desktop-autostart.target` is up (uwsm starts it), so otherwise the row shows an `exec-once` line to copy and no entry is written. The AppImage's app menu entry is Thalvi's own file (`show_in_menu`, same pattern); a startup failure shows a GTK or `MessageBoxW` box when stderr is no terminal (`gtk` is Tauri's own).
+  Updates (#137): `tauri-plugin-updater` follows `update_channel` (Stable or Development; signed packages only, never an older version); a download installs only when the engine thread itself finds Thalvi idle, and a one-shot `update.json` keeps the paused state across the restart and tells the next start what came of it.
+  Why: both formats suit the updater, the plugin is Tauri's own, the switch reads the OS back, and the NSIS uninstall hook cannot tell an upgrade from an uninstall.
+  Rejected: deb and MSI as well, a hand-written login `.desktop` and `Run` key writer, restoring over a Thalvi entry the user turned off in Windows (read from `StartupApproved` with `windows-registry`), idle read from a status snapshot.
 - **Pause before changing microphones.** Save device changes only while paused;
   enabling opens the selected device and status names the open stream separately.
   Why: choosing a microphone must not start recording or redirect a capture.
   Rejected: applying a device change automatically after an active capture.
 - **Errors stay in the tray and Settings, not on the overlay.** Each says what failed, why and which setting to fix; its short headline shows on the
   overlay for 5 s, and again when it refuses a hold key press. Copy (settings, tray, `copy-error`) puts a report (causes, version, system, no secrets)
-  on the clipboard through the host. Why: on Hyprland `no_focus` makes the overlay click-through, so a headline that stayed covered the screen with no way
+  on the clipboard through the host. Why: on Hyprland the overlay takes no clicks, so a headline that stayed covered the screen with no way
   to close it. Rejected: keeping errors on the overlay, a focusable overlay, a duration per error, the WebView clipboard.
 - **Scripted decisions, typed actions.** The demo matches configured phrases to
   browser and app actions; execution receives a typed action. Why: a later model
@@ -231,11 +235,11 @@ areas your change touches. Editing rules are in
   branches may be rewritten before merge. Why: the commits show the work being
   iterated, which is enough; no full audit trail. Rejected: squash merge (hides
   the iteration), a force-push block on all branches (more friction).
-- **Work lands on `development`; releases merge it into `main`.** PRs target `development`; a release PR
-  merges it into `main`, and only a tag on `main` publishes. Why: `main` stays what users run, and a
-  release is one reviewable diff. Rejected: PRs straight to `main` (every merge a release candidate),
-  changing GitHub's default branch during the hackathon freeze.
-- **No review gate.** The `main` and `development` rulesets require PRs and passing checks but
+- **Work lands on `main`; a tag releases it.** PRs target `main`, the only long-lived branch, and only a tag on `main`
+  publishes a release. An approved push to `main` publishes an `X.Y.Z-dev.N` prerelease, never Latest, for the Development
+  update choice. Why: GitHub closes issues natively, and testers get fixes as they land. Rejected: a second
+  integration branch (a workflow faked issue closing for it), a version commit per dev build.
+- **No review gate.** The `main` ruleset requires PRs and passing checks but
   no approvals. Why: Thalvi has one author, and GitHub does not let authors
   approve their own PRs. Revisit if a second contributor joins.
 - **Issues are optional.** Why: in a 9-day solo build, PRs and the commit
@@ -250,14 +254,17 @@ areas your change touches. Editing rules are in
 - **Releases wait for approval.** `publish` runs in a `release` environment only the developer can approve.
   Why: agent tokens can push tags, and a tag builds and publishes to users. Rejected: a tag ruleset (the token
   acts as the developer, so any bypass for the developer also lets agents through).
+- **The approved `publish` job signs for the updater.** It signs the downloaded packages with `tauri signer sign`
+  after an `--ignore-scripts` install, checks each signature against the committed public key, and writes `latest.json`.
+  Why: the key in the `release` environment never reaches a job that runs build scripts. Rejected: signing inside
+  `tauri build` (`createUpdaterArtifacts`), which needs the key in both package jobs and fails PR builds without it.
 - **Dependency and secret gates.** cargo-deny checks advisories, licences and sources; gitleaks scans
   history in CI and staged changes in a hook. Why: nothing else watched Rust advisories, the binaries link
   every crate, and on a public repo a pushed secret has leaked. Rejected: bans (nothing to ban), flagging
   unmaintained transitive crates (no upgrade exists), a hook that refuses when gitleaks is missing.
-- **Rust caches are saved only on `development`.** CI runs on pushes to `development` and saves the Rust
-  caches there; PRs, and mutation runs on the Linux one, only read them. Why: a PR can read only its own and its
-  base branch's caches, so per-PR copies left every new PR cold and filled the 10 GB limit. Rejected: saving on
-  every PR, saving on `main` (frozen, so its caches go stale and are evicted).
+- **Rust caches are saved only on `main`.** CI runs on pushes to `main` and saves the Rust caches there; PRs,
+  and mutation runs on the Linux one, only read them. Why: a PR can read only its own and its base branch's caches,
+  so per-PR copies left every new PR cold and filled the 10 GB limit. Rejected: saving on every PR.
 - **Mutation testing advises on the diff.** cargo-mutants reports survivors in a PR's changed Rust as
   annotations, on Linux. Why: agents write code and tests, and it found real gaps, but it can't tell those from
   equivalent mutants. Rejected: a required gate, whole-workspace runs (3,197 mutants, about 18 hours on a CI runner), Windows runs.

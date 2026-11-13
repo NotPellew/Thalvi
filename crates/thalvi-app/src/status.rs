@@ -22,6 +22,8 @@ pub const SPOTTER_DOWNLOAD_NOTICE: &str = "Downloading the ending phrase model."
 pub enum Status {
     Paused,
     Listening,
+    /// Listening with the wake word off: only the hold keys start a capture.
+    KeyboardOnly,
     /// The wake word was heard and the recognizer is connecting.
     Starting {
         target: Option<String>,
@@ -48,11 +50,21 @@ pub enum Status {
         target: Option<String>,
         text: String,
     },
+    /// The writing model is reasoning and has written no text yet.
+    Thinking {
+        target: Option<String>,
+    },
     /// A second transcription or the delivery is running.
     Working {
         target: Option<String>,
         route: CaptureRoute,
         /// The capture can still be cancelled; delivery cannot be.
+        cancellable: bool,
+    },
+    /// A buffered live recognizer is transcribing a capture after release or a voice pause.
+    Transcribing {
+        target: Option<String>,
+        route: CaptureRoute,
         cancellable: bool,
     },
     Done {
@@ -195,6 +207,8 @@ pub struct View {
     pub pauses: EndingPauses,
     /// What the speech model needs, while it loads.
     pub loading: Option<Step>,
+    /// The wake word starts captures; off, listening is for the hold keys alone.
+    pub wake_words: bool,
 }
 
 impl View {
@@ -240,7 +254,8 @@ impl View {
                 kind: failure.kind,
             },
             (Mode::Idle | Mode::Done { .. } | Mode::Failed(_), engine) => match engine {
-                EngineState::Listening => Status::Listening,
+                EngineState::Listening if self.wake_words => Status::Listening,
+                EngineState::Listening => Status::KeyboardOnly,
                 EngineState::StartingCapture => Status::Starting { target },
                 EngineState::Capturing {
                     committed,
@@ -270,10 +285,16 @@ impl View {
                     route: *route,
                     cancellable: true,
                 },
+                EngineState::TranscribingLive { route } => Status::Transcribing {
+                    target,
+                    route: *route,
+                    cancellable: true,
+                },
                 EngineState::Writing { text } => Status::Writing {
                     target,
                     text: text.clone(),
                 },
+                EngineState::Thinking => Status::Thinking { target },
             },
         }
     }
@@ -282,9 +303,7 @@ impl View {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use thalvi_desktop::recognizer::{
-        ConnectFailure, Detail, RecognizerError, ServerUrl, SpeechSource,
-    };
+    use thalvi_desktop::recognizer::{ConnectFailure, Detail, RecognizerError, SpeechSource};
 
     use super::*;
 
@@ -296,6 +315,7 @@ mod tests {
             copies: false,
             pauses: EndingPauses::default(),
             loading: None,
+            wake_words: true,
         }
     }
 
@@ -308,6 +328,51 @@ mod tests {
             route,
             text: "hello".to_owned(),
             waiting_for_quiet,
+        }
+    }
+
+    #[test]
+    fn listening_is_with_wake_words_keyboard_only_or_paused_and_nothing_else_changes() {
+        // (mode, engine, wake words on, status)
+        let cases = [
+            (Mode::Idle, EngineState::Listening, true, Status::Listening),
+            (
+                Mode::Idle,
+                EngineState::Listening,
+                false,
+                Status::KeyboardOnly,
+            ),
+            (Mode::Paused, EngineState::Listening, true, Status::Paused),
+            (Mode::Paused, EngineState::Listening, false, Status::Paused),
+            (
+                Mode::Idle,
+                EngineState::StartingCapture,
+                false,
+                Status::Starting {
+                    target: Some(kitty()),
+                },
+            ),
+            (
+                Mode::Done {
+                    route: CaptureRoute::Paste,
+                    notice: "Pasted.".to_owned(),
+                },
+                EngineState::Listening,
+                false,
+                Status::Done {
+                    target: Some(kitty()),
+                    route: CaptureRoute::Paste,
+                    notice: "Pasted.".to_owned(),
+                },
+            ),
+        ];
+        for (mode, engine, wake_words, expected) in cases {
+            let status = View {
+                wake_words,
+                ..view(mode, engine)
+            }
+            .status();
+            assert_eq!(status, expected, "wake words {wake_words}");
         }
     }
 
@@ -386,6 +451,12 @@ mod tests {
                 },
             ),
             (
+                EngineState::Thinking,
+                Status::Thinking {
+                    target: Some(kitty()),
+                },
+            ),
+            (
                 EngineState::TranscribingSecondary {
                     route: CaptureRoute::Task,
                 },
@@ -400,6 +471,25 @@ mod tests {
             let label = format!("{engine:?}");
             assert_eq!(view(Mode::Idle, engine).status(), expected, "{label}");
         }
+    }
+
+    #[test]
+    fn live_transcription_keeps_its_delivery_route_and_cancel_state() {
+        let status = view(
+            Mode::Idle,
+            EngineState::TranscribingLive {
+                route: CaptureRoute::Paste,
+            },
+        )
+        .status();
+        assert_eq!(
+            status,
+            Status::Transcribing {
+                target: Some(kitty()),
+                route: CaptureRoute::Paste,
+                cancellable: true,
+            }
+        );
     }
 
     #[test]
@@ -596,6 +686,7 @@ mod tests {
     fn the_status_is_the_json_the_ui_reads() {
         let cases = [
             (Status::Paused, json!({"state": "paused"})),
+            (Status::KeyboardOnly, json!({"state": "keyboardOnly"})),
             (
                 Status::Starting { target: None },
                 json!({"state": "starting", "target": null}),
@@ -701,7 +792,7 @@ mod tests {
     #[test]
     fn a_failure_carries_the_errors_text_headline_and_causes() {
         let error = RecognizerError::Unreachable {
-            speech: SpeechSource::thalvi_server("Thalvi server", &ServerUrl::default()),
+            speech: SpeechSource::direct("Realtime", "ws://127.0.0.1:9".to_owned()),
             reason: ConnectFailure::Refused,
             detail: Detail("connection refused (os error 111)".to_owned()),
         };

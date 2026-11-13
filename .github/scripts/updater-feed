@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Signs a desktop release's packages for the updater, checks each signature against the
+# app's public key, and writes the updater's latest.json next to them.
+# Usage: updater-feed TAURI_CONF VERSION TAG DIR, with TAURI_SIGNING_PRIVATE_KEY and
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD set and @tauri-apps/cli installed in crates/thalvi-app/ui.
+set -euo pipefail
+
+conf=$1 version=$2 tag=$3 dir=$4
+repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY names the repository the release is in}
+ui="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/crates/thalvi-app/ui"
+
+fail() {
+  echo "::error::$*" >&2
+  exit 1
+}
+
+for secret in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+  [[ -n ${!secret:-} ]] || fail "The $secret secret is missing from the release environment, so nothing was signed or published."
+done
+
+pubkey=$(jq -er '.plugins.updater.pubkey' "$conf") || fail "$conf has no plugins.updater.pubkey to check the signatures against."
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+base64 -d <<<"$pubkey" >"$scratch/key.pub"
+
+platforms='{}'
+for entry in linux-x86_64:amd64.AppImage windows-x86_64:x64-setup.exe; do
+  platform=${entry%%:*} suffix=${entry#*:}
+  file="Thalvi_${version}_${suffix}"
+  if [[ ! -f $dir/$file ]]; then
+    built=$(cd "$dir" && compgen -G "Thalvi_*_${suffix}" | paste -sd ' ') || true
+    [[ -z $built ]] || fail "The $platform package is $built, but the release is version $version."
+    fail "The $platform package $file is missing."
+  fi
+  npm exec --prefix "$ui" -- tauri signer sign --app-version "$version" "$dir/$file" >/dev/null
+  [[ -s $dir/$file.sig ]] || fail "Signing $file wrote no $file.sig."
+  base64 -d "$dir/$file.sig" >"$scratch/sig"
+  minisign -Vq -p "$scratch/key.pub" -x "$scratch/sig" -m "$dir/$file" ||
+    fail "$file.sig does not verify against the public key in $conf; TAURI_SIGNING_PRIVATE_KEY is not its key."
+  platforms=$(jq -c --arg p "$platform" --arg sig "$(<"$dir/$file.sig")" \
+    --arg url "https://github.com/$repo/releases/download/$tag/$file" \
+    '.[$p] = {signature: $sig, url: $url}' <<<"$platforms")
+done
+
+jq -n --arg version "$version" --arg notes "https://github.com/$repo/releases/tag/$tag" \
+  --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson platforms "$platforms" \
+  '{version: $version, notes: $notes, pub_date: $date, platforms: $platforms}' >"$dir/latest.json"

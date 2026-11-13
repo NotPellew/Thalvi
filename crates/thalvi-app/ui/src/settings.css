@@ -37,6 +37,7 @@ h4 { margin: 16px 0 4px; font: 600 12px system-ui; color: var(--mut); text-trans
 .num, .slider, .stack { display: inline-flex; align-items: center; gap: 8px; }
 .stack { flex-direction: column; align-items: flex-end; }
 .stack.wide { width: 100%; align-items: stretch; }
+kbd.key { font: 13px var(--mono); }
 .unit, .val { font: 12px var(--mono); color: var(--mut); }
 .slider input { width: 150px; accent-color: var(--neon); }
 input[type="checkbox"] { appearance: none; width: 36px; height: 20px; margin: 0; border-radius: 10px; background: var(--line); position: relative; cursor: pointer; transition: background 0.15s; }

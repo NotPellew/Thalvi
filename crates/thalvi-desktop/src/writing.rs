@@ -243,6 +243,11 @@ pub enum WritingError {
     NotSetUp,
     #[error("The writing model took longer than 15 seconds.")]
     Timeout,
+    /// The limit passed while the model had only reasoned.
+    #[error(
+        "The writing model was still thinking after 15 seconds. Turn off its thinking on the model server."
+    )]
+    StillThinking,
     #[error("The writing model could not be reached.")]
     Unreachable,
     #[error("The writing model failed with status {0}.")]
@@ -260,6 +265,7 @@ impl WritingError {
         match self {
             Self::NotSetUp => "not_set_up",
             Self::Timeout => "timeout",
+            Self::StillThinking => "still_thinking",
             Self::Unreachable => "unreachable",
             Self::Status(_) => "status",
             Self::BadResponse => "bad_response",
@@ -273,6 +279,7 @@ impl UserError for WritingError {
         match self {
             Self::NotSetUp => "Writing not set up — Settings",
             Self::Timeout => "Writing took too long",
+            Self::StillThinking => "Writing model still thinking",
             Self::Unreachable => "Writing model unreachable",
             Self::Status(_) => "Writing model failed",
             Self::BadResponse => "Writing reply unreadable",
@@ -281,7 +288,15 @@ impl UserError for WritingError {
     }
 }
 
-/// One streamed answer, read a piece of text at a time.
+/// What one streamed piece of an answer holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Piece {
+    /// The model reasoned before writing; what it reasoned is dropped unread.
+    Thinking,
+    Text(String),
+}
+
+/// One streamed answer, read a piece at a time.
 pub struct Reply {
     chunks: Pin<Box<dyn Stream<Item = reqwest::Result<Vec<u8>>> + Send>>,
     /// Bytes received that do not yet end a line.
@@ -291,22 +306,22 @@ pub struct Reply {
 
 /// What one line of the stream says.
 enum Line {
-    Text(String),
+    Piece(Piece),
     Done,
     Nothing,
 }
 
 impl Reply {
-    /// The next piece of text, or `None` once the answer is complete. Safe to drop and call again.
+    /// The next piece, or `None` once the answer is complete. Safe to drop and call again.
     ///
     /// # Errors
     /// [`WritingError::Unreachable`] when the connection breaks, or
     /// [`WritingError::BadResponse`] when a piece is not the chat completions format.
-    pub async fn next(&mut self) -> Result<Option<String>, WritingError> {
+    pub async fn next(&mut self) -> Result<Option<Piece>, WritingError> {
         loop {
             if let Some(line) = self.take_line() {
                 match read_line(&line)? {
-                    Line::Text(text) => return Ok(Some(text)),
+                    Line::Piece(piece) => return Ok(Some(piece)),
                     Line::Done => {
                         self.over = true;
                         return Ok(None);
@@ -352,11 +367,26 @@ fn read_line(line: &[u8]) -> Result<Line, WritingError> {
     if piece.get("error").is_some() {
         return Err(WritingError::BadResponse);
     }
-    Ok(piece
-        .pointer("/choices/0/delta/content")
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map_or(Line::Nothing, |text| Line::Text(text.to_owned())))
+    let Some(delta) = piece.pointer("/choices/0/delta") else {
+        return Ok(Line::Nothing);
+    };
+    let said = |field: &str| {
+        delta
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+    };
+    if let Some(text) = said("content") {
+        return Ok(Line::Piece(Piece::Text(text.to_owned())));
+    }
+    // llama.cpp names the field `reasoning_content`; newer vLLM and others name it `reasoning`.
+    if said("reasoning_content")
+        .or_else(|| said("reasoning"))
+        .is_some()
+    {
+        return Ok(Line::Piece(Piece::Thinking));
+    }
+    Ok(Line::Nothing)
 }
 
 #[cfg(test)]
@@ -502,7 +532,7 @@ mod tests {
         }
     }
 
-    async fn pieces(mut reply: Reply) -> (Vec<String>, Result<(), WritingError>) {
+    async fn pieces(mut reply: Reply) -> (Vec<Piece>, Result<(), WritingError>) {
         let mut out = Vec::new();
         loop {
             match reply.next().await {
@@ -527,14 +557,45 @@ mod tests {
         ]);
         assert_eq!(
             pieces(reply).await,
-            (vec!["Héllo".to_owned(), " there".to_owned()], Ok(()))
+            (vec![text("Héllo"), text(" there")], Ok(()))
         );
     }
 
     #[tokio::test]
     async fn an_answer_that_ends_without_done_or_a_final_newline_still_ends() {
         let reply = reply_of(&[b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}"]);
-        assert_eq!(pieces(reply).await, (vec!["Hi".to_owned()], Ok(())));
+        assert_eq!(pieces(reply).await, (vec![text("Hi")], Ok(())));
+    }
+
+    fn text(piece: &str) -> Piece {
+        Piece::Text(piece.to_owned())
+    }
+
+    #[tokio::test]
+    async fn reasoning_is_read_as_thinking_and_never_as_text() {
+        // (the delta, what it reads as)
+        let cases = [
+            (
+                r#"{"reasoning_content":"Anna is late"}"#,
+                Some(Piece::Thinking),
+            ),
+            (r#"{"reasoning":"Anna is late"}"#, Some(Piece::Thinking)),
+            (r#"{"reasoning_content":"","content":null}"#, None),
+            (r#"{"content":"Hi"}"#, Some(text("Hi"))),
+            (
+                r#"{"reasoning_content":"Anna is late","content":"Hi"}"#,
+                Some(text("Hi")),
+            ),
+        ];
+        for (delta, expected) in cases {
+            let line = format!("data: {{\"choices\":[{{\"delta\":{delta}}}]}}\n");
+            let (read, result) = pieces(reply_of(&[line.as_bytes()])).await;
+            assert_eq!(
+                (read, result),
+                (expected.into_iter().collect(), Ok(())),
+                "{delta}"
+            );
+        }
     }
 
     #[tokio::test]

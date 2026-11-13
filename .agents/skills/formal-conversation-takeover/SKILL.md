@@ -24,7 +24,7 @@ Four invariants, each one sentence:
 
 ## Covers
 
-Sync commit: `a5060554df34d8b99071e7f379376d4e69466f41`. [source.json](source.json)
+Sync commit: `8218dba22ec6c24255c73aa3e073071fb4d76bd4`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 
@@ -37,8 +37,9 @@ Matching hashes establish synchronization only, not correctness of the model.
 | `SessionStore::save` | `Sync` and `FinalSave` through `DoSave`: one lock; a dead attachment changes nothing, otherwise the entry is created or replaced (`entry().or_insert_with`). |
 | `SessionStore::release` | `Release`: removes the `Live` entry only if this connection still owns it, then fires `released`. One lock. |
 | `write_loop`, `DiskOp::Remove` (from `SessionStore::delete`) | `Delete`: one lock across the file removal; marks the owner and every predecessor dead. |
-| `crates/thalvi-server/src/session.rs`: `handle_session` loop top, `Persistence::sync`, `Saved::sync` | `Turn` and `Sync`: a save happens only when the history grew. |
-| Same file: `handle_session` loop exit on `persistence.detached()` or the client leaving, then `close_session` → `Persistence::finish` | `Close`, `FinalSave`, `Release`: the last sync, then release, before `ended` is sent. |
+| `crates/thalvi-server/src/session.rs`: `run_session` loop top, `Persistence::sync`, `Saved::sync` | `Turn` and `Sync`: a save happens only when the history grew. |
+| Same file: recognizer retry state in `31a2eeb` | Not a persistence step: this changes input readiness and browser status/error messages only; the `Turn`, `Sync`, `Close`, `FinalSave` and `Release` ordering remains unchanged. |
+| Same file: `run_session` loop exit on `persistence.detached()`, the client leaving, or a browser send timing out or failing, then `close_session` → `Persistence::finish` | `Close`, `FinalSave`, `Release`: the last sync, then release, before `ended` is sent. |
 
 Not covered in these files: `retire`, `rename`, `set_model_title`, `snapshot`,
 `search_history`, the private conversation path, and the order of disk writes in

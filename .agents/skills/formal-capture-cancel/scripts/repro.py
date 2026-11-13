@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run the real engine and source-extracted runner against an event-gated fake close."""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -19,7 +20,8 @@ def main():
     for name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml'):
         shutil.copyfile(ROOT / name, snapshot / name)
     tracked = subprocess.check_output(['git', 'ls-files', '-z', 'crates'], cwd=ROOT).decode().split('\0')
-    for relative in filter(None, tracked):
+    mapped = json.loads((SKILL / 'source.json').read_text())['files']
+    for relative in sorted(set(filter(None, tracked)) | set(mapped)):
         target = snapshot / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)

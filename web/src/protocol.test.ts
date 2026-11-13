@@ -12,6 +12,7 @@ describe("parseServerMessage", () => {
     ['{"type":"state","state":"thinking"}', { type: "state", state: "thinking" }],
     ['{"type":"state","state":"idle"}', { type: "state", state: "idle" }],
     ['{"type":"state","state":"starting"}', { type: "state", state: "starting" }],
+    ['{"type":"state","state":"recognizer_retrying"}', { type: "state", state: "recognizer_retrying" }],
     ['{"type":"state","state":"working"}', { type: "state", state: "working" }],
     [
       '{"type":"task","step":{"id":"call-1","label":"Searching conversations","status":"running"}}',
