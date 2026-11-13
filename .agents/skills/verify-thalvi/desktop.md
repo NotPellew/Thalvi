@@ -206,7 +206,9 @@ only loopback, so nothing leaves the machine and abstract unix sockets are the r
 A virtio GPU without 3D (bit 0 of `/sys/class/drm/renderD*/device/virtio*/features` is `0`, no
 virgl) has no hardware GL, so Mesa draws in software, and that needs dumb buffers, which a render
 node refuses. `up` detects this and binds the host's primary node (`/dev/dri/card0`) at the render
-node's path, so both compositors and `grim` work; the user must be in the `video` group.
+node's path, so both compositors and `grim` work; the user must be in the `video` group. The
+sandbox then holds a primary node, which also allows modesetting, so use it only on a VM with no
+display session of its own.
 `THALVI_RIG_RENDER=software` forces the mode and `hardware` keeps the render node.
 
 - Every pixel is drawn on the CPU: 20 back-to-back `grim` frames took 2.1 s on a 4-core VM. Judge

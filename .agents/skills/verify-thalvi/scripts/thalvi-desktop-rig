@@ -58,7 +58,12 @@ render_source() {
               [ "$(cut -c1 "$dev"/virtio*/features 2>/dev/null)" = 0 ]; } || { echo "$node"; return; } ;;
     *) die "THALVI_RIG_RENDER is software or hardware, not ${THALVI_RIG_RENDER}" ;;
   esac
-  for c in "$dev"/drm/card[0-9]*; do [ ! -e "$c" ] || { echo "/dev/dri/${c##*/}"; return; }; done
+  for c in "$dev"/drm/card[0-9]*; do
+    [ -e "$c" ] || continue
+    [ -r "/dev/dri/${c##*/}" ] && [ -w "/dev/dri/${c##*/}" ] || die "software rendering needs /dev/dri/${c##*/}: join the video group"
+    echo "/dev/dri/${c##*/}"
+    return
+  done
   die "software rendering needs a primary node next to $node"
 }
 
@@ -227,6 +232,9 @@ cmd_up() {
       *) die "up: unknown argument $1" ;;
     esac
   done
+  local node
+  node=$(render_node)
+  render_source "$node" > /dev/null  # dies here, in the main shell, on a bad THALVI_RIG_RENDER or an unusable primary node
   mkdir -p "$BASE"
   local r
   r=$(mktemp -d "$BASE/run-XXXXXX")
