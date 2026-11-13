@@ -19,6 +19,7 @@ use tower_http::services::ServeDir;
 use tracing::Instrument;
 
 use crate::api;
+use crate::briefing::Briefing;
 use crate::config::{Config, TtsApi};
 use crate::learning::LearningStore;
 use crate::learning_api;
@@ -47,6 +48,7 @@ pub struct AppState<T> {
     default_voice: String,
     store: Arc<SessionStore>,
     titler: Option<Arc<Titler<OpenAiChatModel>>>,
+    briefing: Option<Arc<Briefing>>,
     recording: RecordingConfig,
     ack_enabled: bool,
     audio_input: bool,
@@ -56,7 +58,8 @@ pub struct AppState<T> {
 ///
 /// # Errors
 ///
-/// Returns a plain message when the saved conversations cannot be opened.
+/// Returns a plain message when the saved conversations cannot be opened or the briefing
+/// client cannot be built.
 pub fn router(config: &Config) -> Result<Router, String> {
     let store = Arc::new(SessionStore::open(&config.data_dir.join("sessions"))?);
     let learnings = Arc::new(LearningStore::open(
@@ -64,7 +67,7 @@ pub fn router(config: &Config) -> Result<Router, String> {
     )?);
     let base_url = config.tts_base_url.clone();
     let voice = config.tts_voice.clone();
-    Ok(match &config.tts_api {
+    match &config.tts_api {
         TtsApi::OpenAi { model, api_key } => with_tts(
             config,
             store,
@@ -79,7 +82,7 @@ pub fn router(config: &Config) -> Result<Router, String> {
             Qwen3Tts::new(base_url, voice),
             "qwen3-tts".to_string(),
         ),
-    })
+    }
 }
 
 fn with_tts<T: Tts + Clone + 'static>(
@@ -88,7 +91,7 @@ fn with_tts<T: Tts + Clone + 'static>(
     learnings: Arc<LearningStore>,
     tts: T,
     tts_model: String,
-) -> Router {
+) -> Result<Router, String> {
     let recording = RecordingConfig {
         kinds: config.record,
         data_dir: config.data_dir.clone(),
@@ -115,6 +118,14 @@ fn with_tts<T: Tts + Clone + 'static>(
             recorder,
         );
     }
+    let briefing = config
+        .briefing
+        .as_ref()
+        .map(|briefing| {
+            let recorder = start_recording(recording.clone(), "briefing".to_string()).recorder;
+            Briefing::start(briefing, recorder)
+        })
+        .transpose()?;
     let state = AppState {
         factory: MetaRecognizerFactory::new(
             config.stt_url.clone(),
@@ -143,11 +154,12 @@ fn with_tts<T: Tts + Clone + 'static>(
                 name: bg.model.clone(),
             })
         }),
+        briefing,
         recording,
         ack_enabled: config.ack_enabled,
         audio_input: config.llm_audio_input,
     };
-    Router::new()
+    Ok(Router::new()
         .route("/session", get(session_upgrade::<T>))
         .route("/voices", get(list_voices::<T>))
         .route("/voice/preview", post(preview_voice::<T>))
@@ -155,7 +167,7 @@ fn with_tts<T: Tts + Clone + 'static>(
         .merge(api::routes().with_state(store))
         .merge(learning_api::routes().with_state(learnings))
         .fallback_service(ServeDir::new(&config.web_dir))
-        .layer(middleware::from_fn(refuse_other_sites))
+        .layer(middleware::from_fn(refuse_other_sites)))
 }
 
 /// Refuses requests a browser sends from a page on another site. Browsers apply no
@@ -191,9 +203,14 @@ async fn session_upgrade<T: Tts + Clone + 'static>(
     let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
     let private = query.get("private").is_some_and(|value| value == "1");
     let resume = query.get("resume").cloned();
-    let retention = Retention::from_request(private, resume, state.store, state.titler, || {
-        format!("{PRIVATE_ID_PREFIX}{id:x}-{:x}", crate::recorder::now_ms())
-    });
+    let retention = Retention::from_request(
+        private,
+        resume,
+        state.store,
+        state.titler,
+        state.briefing,
+        || format!("{PRIVATE_ID_PREFIX}{id:x}-{:x}", crate::recorder::now_ms()),
+    );
     upgrade.on_upgrade(move |socket| async move {
         let Some(retention) = retention else {
             refuse_private_resume(socket).await;

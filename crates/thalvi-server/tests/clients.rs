@@ -11,6 +11,7 @@ use axum::response::Response;
 use axum::routing::post;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use thalvi_server::briefing::BriefingContext;
 use thalvi_server::model::{ChatEvent, ChatMessage, ChatModel, OpenAiChatModel};
 use thalvi_server::recognizer::{
     MetaRecognizerFactory, Recognizer, RecognizerError, RecognizerEvent, RecognizerFactory,
@@ -231,6 +232,7 @@ async fn chat_model_sends_the_clip_and_surfaces_the_echo() {
             Some(&[0, 1, 2, 3]),
             &[],
             &[],
+            &BriefingContext::Off,
         )
         .await
         .unwrap();
@@ -280,7 +282,13 @@ async fn truncated_model_streams_never_produce_executable_tool_calls() {
         );
         let model = OpenAiChatModel::new(serve(app).await, "m".to_string(), String::new(), None);
         let stream = model
-            .stream_reply_with_tools(&[ChatMessage::user("search".to_string())], None, &[], &[])
+            .stream_reply_with_tools(
+                &[ChatMessage::user("search".to_string())],
+                None,
+                &[],
+                &[],
+                &BriefingContext::Off,
+            )
             .await
             .unwrap();
         let events: Vec<_> = stream.collect().await;

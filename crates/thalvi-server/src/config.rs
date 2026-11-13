@@ -46,6 +46,17 @@ pub struct Config {
     pub llm_audio_input: bool,
     /// Age in days after which sessions are retired (`THALVI_RETIRE_DAYS`); `None` is off.
     pub retire_days: Option<u64>,
+    /// Briefing source for new conversations (`BRIEFING_*`); `None` turns the feature off.
+    pub briefing: Option<BriefingConfig>,
+}
+
+/// The briefing source's endpoint (`BRIEFING_URL`, `BRIEFING_TOKEN`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BriefingConfig {
+    /// Base URL, without a trailing slash: HTTPS, or HTTP on a loopback host.
+    pub base_url: String,
+    /// Bearer token sent only in the `Authorization` header.
+    pub token: String,
 }
 
 /// The background model's Chat Completions endpoint (`BG_LLM_*`).
@@ -128,6 +139,7 @@ impl Config {
             parse_on_off("LLM_AUDIO_INPUT", lookup("LLM_AUDIO_INPUT").as_deref())?;
         let record = parse_record_kinds(lookup("THALVI_RECORD"))?;
         let retire_days = parse_retire_days(lookup("THALVI_RETIRE_DAYS").as_deref())?;
+        let briefing = parse_briefing(&lookup)?;
         let data_dir = lookup("THALVI_DATA_DIR")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
@@ -152,8 +164,49 @@ impl Config {
             ack_enabled,
             llm_audio_input,
             retire_days,
+            briefing,
         })
     }
+}
+
+/// Reads `BRIEFING_URL` and `BRIEFING_TOKEN`; errors never quote either value.
+fn parse_briefing(
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<BriefingConfig>, String> {
+    let (raw_url, token) = match (lookup("BRIEFING_URL"), lookup("BRIEFING_TOKEN")) {
+        (None, None) => return Ok(None),
+        (Some(raw_url), Some(token)) => (raw_url, token),
+        _ => return Err("BRIEFING_URL and BRIEFING_TOKEN must be set together".to_string()),
+    };
+    let url = reqwest::Url::parse(raw_url.trim())
+        .map_err(|_| "BRIEFING_URL is not a valid URL".to_string())?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if !(url.scheme() == "https" || url.scheme() == "http" && loopback) {
+        return Err(
+            "BRIEFING_URL must be an https:// URL (http:// only for localhost)".to_string(),
+        );
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("BRIEFING_URL must not contain a username or password".to_string());
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("BRIEFING_URL must not contain a query or fragment".to_string());
+    }
+    if token.is_empty()
+        || reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).is_err()
+    {
+        return Err("BRIEFING_TOKEN must be a non-empty token of visible characters".to_string());
+    }
+    Ok(Some(BriefingConfig {
+        base_url: url.as_str().trim_end_matches('/').to_string(),
+        token,
+    }))
 }
 
 fn parse_bg_llm(lookup: &impl Fn(&str) -> Option<String>) -> Result<Option<BgLlm>, String> {
@@ -286,7 +339,7 @@ fn endpoint_url(value: &str, schemes: &[&str]) -> Option<reqwest::Url> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BgLlm, Config, TtsApi};
+    use super::{BgLlm, BriefingConfig, Config, TtsApi};
     use std::collections::HashMap;
 
     fn full() -> HashMap<&'static str, String> {
@@ -460,6 +513,89 @@ mod tests {
         ]);
         let err = Config::from_lookup(|name| vars.get(name).cloned()).unwrap_err();
         assert!(err.contains("BG_LLM_BASE_URL"), "{err}");
+    }
+
+    #[test]
+    fn briefing_needs_both_variables_or_none_and_a_safe_url_and_never_echoes_them() {
+        type Case<'a> = (
+            Option<&'a str>,
+            Option<&'a str>,
+            Result<Option<BriefingConfig>, &'a str>,
+        );
+        let secret_cases = [
+            "https://user:hunter2@briefing.example",
+            "https://briefing.example/?key=hunter2",
+            "https://briefing.example/#hunter2",
+            "http://briefing.example/hunter2",
+            "hunter2",
+        ];
+        let ok = |url: &str| {
+            Ok(Some(BriefingConfig {
+                base_url: url.to_string(),
+                token: "tok".to_string(),
+            }))
+        };
+        let cases: Vec<Case> = vec![
+            (None, None, Ok(None)),
+            (
+                Some("https://briefing.example"),
+                None,
+                Err("BRIEFING_TOKEN"),
+            ),
+            (None, Some("tok"), Err("BRIEFING_URL")),
+            (
+                Some("https://briefing.example/"),
+                Some("tok"),
+                ok("https://briefing.example"),
+            ),
+            (
+                Some("http://127.0.0.1:9000"),
+                Some("tok"),
+                ok("http://127.0.0.1:9000"),
+            ),
+            (
+                Some("http://localhost:9000/api/"),
+                Some("tok"),
+                ok("http://localhost:9000/api"),
+            ),
+            (
+                Some("http://[::1]:9000"),
+                Some("tok"),
+                ok("http://[::1]:9000"),
+            ),
+            (Some(secret_cases[0]), Some("tok"), Err("username")),
+            (Some(secret_cases[1]), Some("tok"), Err("query")),
+            (Some(secret_cases[2]), Some("tok"), Err("fragment")),
+            (Some(secret_cases[3]), Some("tok"), Err("https")),
+            (Some(secret_cases[4]), Some("tok"), Err("valid URL")),
+            (Some("ftp://briefing.example"), Some("tok"), Err("https")),
+            (Some("https://briefing.example"), Some(""), Err("non-empty")),
+            (
+                Some("https://briefing.example"),
+                Some("tok\nhunter2"),
+                Err("visible"),
+            ),
+        ];
+        for (url, token, expected) in cases {
+            let mut vars = full();
+            for (name, value) in [("BRIEFING_URL", url), ("BRIEFING_TOKEN", token)] {
+                if let Some(value) = value {
+                    vars.insert(name, value.to_string());
+                }
+            }
+            let result = Config::from_lookup(|name| vars.get(name).cloned()).map(|c| c.briefing);
+            match expected {
+                Ok(briefing) => assert_eq!(result, Ok(briefing), "{url:?} {token:?}"),
+                Err(part) => {
+                    let err = result.unwrap_err();
+                    assert!(
+                        err.contains("BRIEFING_") && err.contains(part),
+                        "{url:?} {token:?}: {err}"
+                    );
+                    assert!(!err.contains("hunter2"), "the error echoed a secret: {err}");
+                }
+            }
+        }
     }
 
     #[test]

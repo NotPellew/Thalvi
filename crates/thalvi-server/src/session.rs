@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::Instrument;
 
+use crate::briefing::{Briefing, BriefingContext};
 use crate::history::{self, HistoryMatch};
 use crate::model::{ChatEvent, ChatMessage, ChatModel, Role, ToolCall, ToolDefinition, ToolResult};
 use crate::recognizer::{Recognizer, RecognizerEvent, RecognizerFactory, validate_frame};
@@ -57,6 +58,8 @@ struct ReplyContext {
     voice_name: String,
     /// Saved conversations the history tool may search; none for a private conversation.
     past: Option<Arc<SessionStore>>,
+    /// What the model is told about the briefing, fixed when the conversation opened.
+    briefing: BriefingContext,
     session_id: String,
 }
 
@@ -80,6 +83,7 @@ impl ReplySettings {
         ack_enabled: bool,
         voices: VoiceChoices,
         past: Option<Arc<SessionStore>>,
+        briefing: BriefingContext,
         session_id: String,
     ) -> Self {
         Self {
@@ -90,6 +94,7 @@ impl ReplySettings {
                 },
                 voice_name: voices.default,
                 past,
+                briefing,
                 session_id,
             },
             offered: voices.offered,
@@ -354,6 +359,9 @@ pub enum Retention<M> {
         resume: Option<String>,
         /// Writes a title after the first reply, when configured.
         titler: Option<Arc<Titler<M>>>,
+        /// Briefing headlines the conversation starts with, when configured. A private
+        /// conversation has no such field, so it cannot reach the briefing.
+        briefing: Option<Arc<Briefing>>,
     },
     /// Context held in memory only, under an id no store knows.
     Private {
@@ -392,6 +400,7 @@ impl<M> Retention<M> {
         resume: Option<String>,
         store: Arc<SessionStore>,
         titler: Option<Arc<Titler<M>>>,
+        briefing: Option<Arc<Briefing>>,
         new_private_id: impl FnOnce() -> String,
     ) -> Option<Self> {
         match (private, resume) {
@@ -402,6 +411,7 @@ impl<M> Retention<M> {
                 store,
                 resume,
                 titler,
+                briefing,
             }),
             _ => None,
         }
@@ -415,6 +425,7 @@ struct Opened<M> {
     history: Vec<ChatMessage>,
     next_turn: u64,
     past: Option<Arc<SessionStore>>,
+    briefing: BriefingContext,
 }
 
 impl<M: ChatModel + 'static> Retention<M> {
@@ -424,6 +435,7 @@ impl<M: ChatModel + 'static> Retention<M> {
                 store,
                 resume,
                 titler,
+                briefing,
             } => {
                 let mut attachment = store.attach(resume.as_deref()).await;
                 let history = std::mem::take(&mut attachment.history);
@@ -442,6 +454,7 @@ impl<M: ChatModel + 'static> Retention<M> {
                     history,
                     next_turn,
                     past,
+                    briefing: briefing.map_or(BriefingContext::Off, |briefing| briefing.open()),
                 }
             }
             Self::Private { id } => Opened {
@@ -450,6 +463,7 @@ impl<M: ChatModel + 'static> Retention<M> {
                 history: Vec::new(),
                 next_turn: 0,
                 past: None,
+                briefing: BriefingContext::Off,
             },
         }
     }
@@ -627,9 +641,9 @@ async fn run_session<F, M, T>(
         mut history,
         next_turn,
         past,
+        briefing,
     } = retention.open().await;
     let private = persistence.is_private();
-    let resumed = !history.is_empty();
     let recording_config = if private {
         recording_config.metrics_only()
     } else {
@@ -639,13 +653,13 @@ async fn run_session<F, M, T>(
     let mut turn_log = TurnLog::new(recording.recorder.clone(), next_turn, audio_input);
     turn_log
         .recorder
-        .emit("session_open", json!({"resumed": resumed}));
+        .emit("session_open", json!({"resumed": !history.is_empty()}));
     let mut browser_gone = send_session_opening(&mut sink, &session_id, &history, private)
         .await
         .err();
     tracing::info!("session opened");
 
-    let mut settings = ReplySettings::new(ack_enabled, voices, past, session_id.clone());
+    let mut settings = ReplySettings::new(ack_enabled, voices, past, briefing, session_id.clone());
     let mut choices = Choices::new();
     let mut recognizer: Option<RecognizerHandle> = None;
     let mut rec_rx: Option<mpsc::Receiver<RecognizerMessage>> = None;
@@ -1708,6 +1722,7 @@ async fn run_reply<M, T>(
             sentence_tx,
             Arc::clone(&failure_sent),
             ToolRun {
+                briefing: context.briefing.clone(),
                 past: context.past.clone(),
                 session_id: context.session_id.clone(),
                 recorder: recorder.clone(),
@@ -1769,8 +1784,9 @@ async fn send_failed(
     }
 }
 
-/// What running a tool call needs besides the call.
+/// What one reply's model calls and tool calls need besides the calls themselves.
 struct ToolRun {
+    briefing: BriefingContext,
     past: Option<Arc<SessionStore>>,
     session_id: String,
     recorder: Recorder,
@@ -1849,6 +1865,7 @@ where
     M: ChatModel,
 {
     let (clip, caption) = audio.unzip();
+    let briefing = &tools.briefing;
     let definitions = [history::tool_definition()];
     let mut results: Vec<ToolResult> = Vec::new();
     let mut splitter = SentenceSplitter::new();
@@ -1865,7 +1882,7 @@ where
         };
         let mut model_call = ModelCall::start(&tools, round);
         let mut stream = match model
-            .stream_reply_with_tools(&history, clip.as_deref(), offered, &results)
+            .stream_reply_with_tools(&history, clip.as_deref(), offered, &results, briefing)
             .await
         {
             Ok(stream) => stream,
@@ -2631,6 +2648,7 @@ mod tests {
             _audio: Option<&[u8]>,
             _tools: &[crate::model::ToolDefinition],
             results: &[crate::model::ToolResult],
+            _briefing: &crate::briefing::BriefingContext,
         ) -> impl std::future::Future<Output = Result<crate::model::EventStream, ModelError>> + Send
         {
             let events = if results.is_empty() {
@@ -2714,6 +2732,7 @@ mod tests {
             _audio: Option<&[u8]>,
             _tools: &[crate::model::ToolDefinition],
             results: &[crate::model::ToolResult],
+            _briefing: &crate::briefing::BriefingContext,
         ) -> impl std::future::Future<Output = Result<crate::model::EventStream, ModelError>> + Send
         {
             use crate::model::{ChatEvent, ToolCall};
@@ -2806,6 +2825,7 @@ mod tests {
             ack,
             voice_name: "af_heart".to_string(),
             past: Some(Arc::new(store)),
+            briefing: crate::briefing::BriefingContext::Off,
             session_id: "unit".to_string(),
         }
     }
@@ -3622,6 +3642,7 @@ mod tests {
                 sentences,
                 Arc::new(AtomicBool::new(false)),
                 super::ToolRun {
+                    briefing: crate::briefing::BriefingContext::Off,
                     past: store,
                     session_id: "unit".to_string(),
                     recorder: recording.recorder.clone(),
@@ -3683,8 +3704,7 @@ mod tests {
             assert_eq!(calls.len(), 2);
             assert_eq!(calls[0]["outcome"], "ok");
             assert_eq!(calls[1]["outcome"], outcome);
-            assert_eq!(calls[0]["total_ms"], 0);
-            assert_eq!(calls[1]["total_ms"], 0);
+            assert!(calls.iter().all(|call| call["total_ms"] == 0));
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
@@ -3715,6 +3735,7 @@ mod tests {
             store: Arc::clone(&store),
             resume: None,
             titler: None,
+            briefing: None,
         }
         .open()
         .await;
