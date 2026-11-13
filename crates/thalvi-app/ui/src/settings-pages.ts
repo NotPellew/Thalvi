@@ -12,6 +12,7 @@ import type {
   ScriptActionKind,
   LiveEntry,
   OnDeviceEntry,
+  OpenAiRequest,
   SecondaryApi,
   SecondPassEntry,
   Settings,
@@ -106,6 +107,10 @@ const SCRIPT_ACTIONS: readonly (readonly [ScriptActionKind, string])[] = [
 const APIS: readonly (readonly [SecondaryApi, string])[] = [
   ["openai", "OpenAI-style"],
   ["meta", "Meta"],
+];
+const OPEN_AI_REQUESTS: readonly (readonly [OpenAiRequest, string])[] = [
+  ["transcriptions", "Transcriptions"],
+  ["chat", "Chat with audio"],
 ];
 const SPEECH_MODEL = "nemotron_160ms";
 /** Like the config, a speech model name with a path separator is a folder of the user's own. */
@@ -805,7 +810,7 @@ function blankEntry(kind: SpeechEntry["kind"], name: string): SpeechEntry {
     case "realtime":
       return { ...base, kind, address: "", model: "" };
     case "open_ai":
-      return { ...base, kind, address: "", model: "" };
+      return { ...base, kind, address: "", model: "", request: "transcriptions", language: "" };
     case "on_device":
       return { ...base, kind };
     case "second_pass":
@@ -1370,7 +1375,17 @@ function speech(context: PageContext): HTMLElement[] {
         rows.push(address("The ws:// or wss:// address of a speech server that speaks Meta's realtime protocol, such as the self-hosted one.", "ws://127.0.0.1:8012"), modelRow(), keyRow());
         break;
       case "open_ai":
-        rows.push(address("Where each capture is sent for transcription.", "http://127.0.0.1:9000/v1"), modelRow(), keyRow());
+        rows.push(
+          address("Where each capture is sent for transcription.", "http://127.0.0.1:9000/v1"),
+          modelRow(),
+          row("Request", "Transcriptions uses /audio/transcriptions. Chat with audio sends the recording to /chat/completions, for servers that offer only that.", controls.select(OPEN_AI_REQUESTS, working.request, (value) => {
+            working.request = value;
+          })),
+          row("Language", "Two-letter code such as de. Leave empty to let the server detect it.", controls.text(working.language, (value) => {
+            working.language = value;
+          }, { placeholder: "Detect automatically" })),
+          keyRow(),
+        );
         break;
       case "on_device": {
         const built = onDeviceRows(working, context, speechModels);
