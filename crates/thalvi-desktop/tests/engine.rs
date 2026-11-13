@@ -6410,3 +6410,39 @@ async fn cancel_stops_the_feed_and_the_capture_it_started_and_a_second_file_wait
         })
         .await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_buffered_wake_capture_keeps_its_spoken_route() {
+    LocalSet::new()
+        .run_until(async {
+            let config = r#"{"ending_pause":{"paste":1.0}}"#;
+            let (mut rig, engine, frames) = Rig::new(config);
+            rig.server.buffer_audio();
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1200, Kind::Voice).await;
+            rig.feed_until(3500, Kind::Quiet).await;
+            assert!(matches!(rig.state(), EngineState::TranscribingLive { .. }));
+            rig.finals("Run tests submit").await;
+            let got = finished(task).await;
+            assert_eq!(got, accepted(CaptureRoute::Submit, "Run tests"));
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_long_buffered_hold_is_not_cut_off_as_idle() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            rig.server.buffer_audio();
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.feed_until(61_000, Kind::Voice).await;
+            rig.release(61_100).await;
+            rig.finals("a long dictation").await;
+            let got = finished(task).await;
+            assert!(matches!(got, CaptureOutcome::Accepted(_)), "{got:?}");
+        })
+        .await;
+}

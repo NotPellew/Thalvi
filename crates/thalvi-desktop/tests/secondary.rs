@@ -286,6 +286,27 @@ async fn openai_streaming_emits_cumulative_text() {
 }
 
 #[tokio::test]
+async fn openai_streaming_accepts_a_clean_empty_stream() {
+    let (url, _rx) = serve_sse("").await;
+    let recognizer = OpenAiRecognizer::new(
+        "local",
+        settings(&url, SecondaryApi::OpenAi, ""),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+    );
+    let mut session = recognizer.connect().await.expect("connected");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), session.next_event())
+            .await
+            .expect("clean stream completes")
+            .expect("empty stream is a transcript"),
+        RecognizerEvent::Final(String::new())
+    );
+}
+
+#[tokio::test]
 async fn openai_plain_json_still_works() {
     let (url, mut rx) = serve(200, r#"{"text":"plain answer"}"#).await;
     let recognizer = OpenAiRecognizer::new(
@@ -432,8 +453,8 @@ async fn a_failed_capture_reports_plainly_and_the_next_capture_can_succeed() {
     assert!(rx.try_recv().is_err());
 }
 
-#[tokio::test(start_paused = true)]
-async fn an_unreachable_or_slow_live_endpoint_says_what_failed() {
+#[tokio::test]
+async fn an_unreachable_live_endpoint_says_what_failed() {
     let unused = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -448,13 +469,16 @@ async fn an_unreachable_or_slow_live_endpoint_says_what_failed() {
     let mut session = recognizer.connect().await.expect("connected");
     session.send_frame(&ramp(0)).await.expect("buffered frame");
     session.finish_audio().await.expect("capture ended");
-    let failure = tokio::time::timeout(Duration::from_secs(5), session.next_event())
+    let failure = tokio::time::timeout(Duration::from_secs(15), session.next_event())
         .await
         .expect("the unreachable endpoint returns an error")
         .expect_err("endpoint is down");
     assert_eq!(failure.headline(), "Can't reach speech server — Settings");
     assert!(failure.to_string().contains("could not be reached"));
+}
 
+#[tokio::test(start_paused = true)]
+async fn a_slow_live_endpoint_says_what_failed() {
     let app = Router::new().fallback(std::future::pending::<()>);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

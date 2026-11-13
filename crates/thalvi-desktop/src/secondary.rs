@@ -366,11 +366,7 @@ pub async fn transcribe_events(
                 }
             }
         }
-        let text = final_text.unwrap_or(transcript);
-        if text.is_empty() {
-            return Err(SecondaryError::BadResponse);
-        }
-        Ok(text)
+        Ok(final_text.unwrap_or(transcript))
     };
     tokio::time::timeout(TIMEOUT, upload)
         .await

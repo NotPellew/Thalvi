@@ -108,6 +108,7 @@ same `CLOSE_TIMEOUT`, so `CloseReturns` now maps there. `engine.rs`, `runner.rs`
 engine's arms and the word-list sharing; no mapped await boundary, control drain or delivery admission changed, so the
 model is unchanged and only the hashes moved.
 Its later tests of a reply that isn't speech live in `recognizer.rs`'s test module; only that hash moved.
+Buffered OpenAI captures no longer expire at the idle deadline, and a wake upload's final spoken ending carries its armed route and text to delivery. Neither change alters the cancellation-first select, control drains, or delivery admission, so the model is unchanged and only the `engine.rs` hash moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision

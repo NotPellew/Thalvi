@@ -1576,7 +1576,7 @@ where
                 () = until(live.watch.as_ref().and_then(Watch::ready_at)) => Step::Disputed,
                 () = until(watchdog) => Step::Silent,
                 () = until(tail) => Step::Tail,
-                () = tokio::time::sleep_until(live.last_words + self.limits.idle()) => Step::Idle,
+                () = tokio::time::sleep_until(live.last_words + self.limits.idle()), if !live.session.buffers_audio() => Step::Idle,
                 () = tokio::time::sleep_until(live.started + self.limits.max()) => Step::TooLong,
             };
             let done = match step {
@@ -1645,7 +1645,18 @@ where
                 }
                 let done = self.on_final(live, &text);
                 done.or_else(|| {
-                    matches!(live.release, Release::Tail(_)).then(|| self.finish_hold(live, held))
+                    matches!(live.release, Release::Tail(_)).then(|| {
+                        if held.is_none()
+                            && let Some(pending) = live.text.pending()
+                        {
+                            Done::Accepted(CaptureRequest {
+                                route: pending.route,
+                                text: pending.text.clone(),
+                            })
+                        } else {
+                            self.finish_hold(live, held)
+                        }
+                    })
                 })
             }
         }
