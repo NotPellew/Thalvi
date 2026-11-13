@@ -34,7 +34,7 @@ areas your change touches. Editing rules are in
   5.8–6.6% word errors on the developer's takes (Meta-free, en/de/es), fits next to TTS on an 8 GB
   RTX 2080. Rejected: Voxtral 4B Realtime (too big), Nemotron 3.5 streaming (15%), Qwen3-ASR (2 s chunks).
 - **The desktop connects to its recognizer itself, from a list of speech servers.** `stt.entries` holds realtime
-  ASR, OpenAI-compatible buffered transcription, on-device and second-pass entries; one live entry is active,
+  ASR, OpenAI-compatible buffered transcription (request kind Transcriptions or Chat with audio, optional language), on-device and second-pass entries; one live entry is active,
   ticked second passes run in list order and the first that answers wins; `STT_URL` stays for web conversations. Why:
   switch recognizers with one click,
   no `.env` edit or restart. Rejected: one setting per recognizer, a silent fallback between entries, several live entries (#228).
