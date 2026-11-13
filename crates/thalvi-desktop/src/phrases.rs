@@ -1,4 +1,4 @@
-//! Owns the word list: the spellings recognition favours, and its limits.
+//! Owns the local word list and checks direct recognizers for phrase boosting.
 
 use std::time::{Duration, Instant};
 
@@ -7,9 +7,8 @@ use serde_json::json;
 
 use crate::entries::Realtime;
 use crate::metrics::{Event, Metrics};
-use crate::recognizer::ServerUrl;
 
-/// How long a word list request to the server may take.
+/// How long a direct recognizer check may take.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The most entries a word list may hold; the server and the self-hosted recognizer agree.
@@ -77,69 +76,6 @@ impl From<WordList> for Vec<String> {
     }
 }
 
-#[derive(Deserialize)]
-struct ServerList {
-    boosting: Option<bool>,
-}
-
-#[derive(Deserialize)]
-struct ServerError {
-    error: String,
-}
-
-fn unsupported(server: &ServerUrl) -> String {
-    format!("The server at {server} doesn't support a word list yet; it may need updating.")
-}
-
-/// Whether the server's recognizer boosts a word list; `Ok(false)` covers Meta's recognizer.
-///
-/// # Errors
-/// A plain message when the server can't be reached or can't tell.
-pub async fn server_boosts(
-    client: &reqwest::Client,
-    server: &ServerUrl,
-    metrics: &Metrics,
-) -> Result<bool, String> {
-    let started = Instant::now();
-    let result = async {
-        let response = client
-            .get(server.http("/phrases"))
-            .timeout(TIMEOUT)
-            .send()
-            .await?;
-        response.error_for_status()?.json::<ServerList>().await
-    }
-    .await;
-    let result = match result {
-        Ok(ServerList {
-            boosting: Some(boosting),
-        }) => Ok(boosting),
-        Ok(ServerList { boosting: None }) => Err(format!(
-            "The server at {server} could not reach its speech recognizer to ask about a word list."
-        )),
-        Err(error) => Err(match error.status() {
-            Some(reqwest::StatusCode::NOT_FOUND) => unsupported(server),
-            Some(status) => format!(
-                "The server at {server} answered HTTP {} when Thalvi asked about a word list.",
-                status.as_u16()
-            ),
-            None if error.is_decode() => {
-                format!("The server at {server} sent a word list response Thalvi could not read.")
-            }
-            None => {
-                format!("Thalvi could not reach the server at {server} to ask about a word list.")
-            }
-        }),
-    };
-    metrics.metric(
-        Event::WordList,
-        if result.is_ok() { "ok" } else { "error" },
-        Some(started.elapsed()),
-        json!({"call": "check"}),
-    );
-    result
-}
-
 /// Whether a recognizer reached directly announces phrase boosting in its handshake; Meta's does not.
 ///
 /// # Errors
@@ -180,53 +116,6 @@ pub async fn realtime_boosts(realtime: &Realtime, metrics: &Metrics) -> Result<b
         json!({"call": "check"}),
     );
     result
-}
-
-/// Saves `list` on the server, which gives it to its recognizer for dictation and conversations.
-///
-/// # Errors
-/// A plain message when the server can't be reached or refuses the list.
-pub async fn share(
-    client: &reqwest::Client,
-    server: &ServerUrl,
-    list: &WordList,
-    metrics: &Metrics,
-) -> Result<(), String> {
-    let started = Instant::now();
-    let result = client
-        .put(server.http("/phrases"))
-        .json(&json!({"phrases": list.phrases()}))
-        .timeout(TIMEOUT)
-        .send()
-        .await;
-    let refused = match result {
-        Ok(response) if response.status().is_success() => None,
-        Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
-            Some(unsupported(server))
-        }
-        Ok(response) => {
-            let status = response.status();
-            Some(response.json::<ServerError>().await.map_or_else(
-                |_| {
-                    format!(
-                        "The server at {server} answered HTTP {} when Thalvi tried to save the word list.",
-                        status.as_u16()
-                    )
-                },
-                |body| body.error,
-            ))
-        }
-        Err(_) => Some(format!(
-            "The word list is saved here, but Thalvi could not reach the server at {server} to use it there."
-        )),
-    };
-    metrics.metric(
-        Event::WordList,
-        if refused.is_none() { "ok" } else { "error" },
-        Some(started.elapsed()),
-        json!({"call": "share"}),
-    );
-    refused.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]

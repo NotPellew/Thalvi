@@ -11,8 +11,8 @@ areas your change touches. Editing rules are in
   delivery; TypeScript owns browser media and UI. Why: use native wake/audio
   libraries without moving model orchestration. Rejected: a WASM UI.
 - **Two products, one repo.** Desktop voice control and the conversational
-  assistant are separate tracks, joined only by `/transcription` and
-  `/session`. Why: different platforms, thin boundary. Rejected for now:
+  assistant are separate tracks, joined only by `/session`. Why: different
+  platforms, thin boundary. Rejected for now:
   phone-to-PC dictation; separate repos until desktop needs its own releases.
 - **Desktop on Hyprland, GNOME Wayland and Windows.** GNOME gets dictation on
   the clipboard only: it exposes neither the focused window nor focus by ID.
@@ -34,7 +34,7 @@ areas your change touches. Editing rules are in
   5.8–6.6% word errors on the developer's takes (Meta-free, en/de/es), fits next to TTS on an 8 GB
   RTX 2080. Rejected: Voxtral 4B Realtime (too big), Nemotron 3.5 streaming (15%), Qwen3-ASR (2 s chunks).
 - **The desktop connects to its recognizer itself, from a list of speech servers.** `stt.entries` holds realtime
-  ASR, Thalvi server, on-device and second-pass entries; one live entry is active, ticked second passes run in list
+  ASR, on-device and second-pass entries; one live entry is active, ticked second passes run in list
   order and the first that answers wins; `STT_URL` stays for web conversations. Why: switch recognizers with one click,
   no `.env` edit or restart. Rejected: one setting per recognizer, a silent fallback between entries, several live entries (#228).
 - **A fresh install recognizes on this computer.** With no `stt.entries` the one active entry is On this computer
@@ -44,9 +44,8 @@ areas your change touches. Editing rules are in
   when speech follows seconds of digital silence (#220); fp32 takes 1.25 GB more VRAM (7.7 of 8 GB beside TTS)
   and about 2 ms more per step on the RTX 2080. Rejected: bfloat16 (Turing has none), filling silence with
   noise (rescued one stretch of two), restarting streams.
-- **The word list is a recognition hint, used locally and on the server.** Settings' list goes to the
-  server (when a Thalvi server entry is active) and to a direct realtime recognizer at each connection, to
-  recognizers that announce `phraseBoosting`, and to local dictation. Why: NeMo boosting fixed "Cybrex2" with no new errors; text replacement can't fix
+- **The word list is a recognition hint, used locally and by recognizers reached directly.** Settings' list goes to a
+  direct realtime recognizer at each connection, to recognizers that announce `phraseBoosting`, and to local dictation. Why: NeMo boosting fixed "Cybrex2" with no new errors; text replacement can't fix
   what was misheard. Rejected: a flat logit bonus (no fix, stray tokens in silence), sending it to Meta.
 - **Local boosting fuses NeMo's phrase tree into the greedy search at alpha 2.** Why: "Cybrex2", digit
   and all, in 8 of 8 dictations, no new errors on 48 takes with a two-entry list, about 1 ms more per

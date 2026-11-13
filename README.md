@@ -204,12 +204,9 @@ STT_API_KEY=
 ```
 
 With it, Settings → Speech shows a **Word list**: names and terms, one per
-line, whose spelling recognition should favour (such as "Cybrex2"). Saving
-sends the list to the Thalvi server in use, which keeps it and uses it for
-dictation and conversations; a realtime speech server entry gets it at each
-connection. Meta's recognizer doesn't support it, so the field is hidden
-then. Dictation on this computer always uses the list, so the field shows
-whenever speech is recognized there.
+line, whose spelling recognition should favour (such as "Cybrex2"). The list
+is used by local recognition and sent to direct realtime speech servers at
+each connection. Web conversations continue to use `STT_URL` through `/session`.
 
 ### Voices
 
@@ -289,16 +286,15 @@ under each entry's collapsed **Details**. The kinds are:
 
 - **Realtime speech server:** a recognizer that speaks Meta's realtime ASR
   protocol, such as the self-hosted one below, which the app connects to itself
-  (address, model, API key), with no Thalvi server running.
-- **Through a Thalvi server:** streams to the server's `/transcription`
-  (by default `ws://127.0.0.1:8080`), which uses the recognizer in its `.env`.
+  (address, model, API key).
 - **On this computer:** dictates without the server or a network; the default.
   Use **Show models for** to filter the list of models (each model recognizes the
   languages on its card), then pick a model.
 
 Web conversations always use the server's own `STT_URL`. An existing config
 with `stt.engine`, `stt.model`, `stt.secondary` and `server` becomes entries
-the first time Thalvi reads it, with nothing to enter again. An API key is shown
+the first time Thalvi reads it; a saved Thalvi server speech entry is dropped,
+and if active, On this computer becomes active with a one-time notice. An API key is shown
 as saved and never again; leave it blank to keep it. A server that cannot be
 reached is named in the error, and Thalvi never falls back to another one.
 
@@ -452,12 +448,11 @@ the network, and a command never starts the app or the microphone.
 | `models` | `{"ok": true, "models": [{"kind": "speech", "name", "title", "size", "downloaded", "progress_percent", "runs_on"}, …]}`: the wake and speech catalog models, `progress_percent` only while one downloads, `runs_on` (the Speech page's hardware line) only for speech models. |
 | `model-download <wake\|speech> <name>` | Downloads the model; replies when it is ready, `{"ok": true, "downloaded": true}`, or has failed, `{"ok": false, "downloaded": false, "error": "…"}`. `models` shows the progress meanwhile. |
 | `speech-check '<json>'` | Checks one speech server entry exactly as Settings does before saving it: `{"ok": true, "ready": true}`, or `{"ok": false, "ready": false, "error": "…"}`. Saves nothing; keys are never repeated. |
-| `word-list-push` | Gives the active Thalvi server the stored word list, as Settings does: `{"ok": true, "pushed": true}`; `"pushed": false` with a message when the active speech entry is not a Thalvi server. |
 | `show [page]` | Opens Settings, at `speech`, `microphone`, `capture`, `feedback`, `tasks`, `history` or `app` when one is named: `{"ok": true, "took_effect": true}`. |
 | `quit` | Quits as the tray's Quit does: `{"ok": true, "took_effect": true}`. |
 | `settings get` | `{"ok": true, "settings": {…}}`, every setting Settings offers plus `start_at_login` and `show_in_menu`. Speech server keys appear only as `"has_key": true/false`. |
 | `settings check '<json>'` | `{"ok": true, "valid": true}`, or `{"ok": false, "valid": false, "error": "…"}` with the message Settings shows. Saves nothing. |
-| `settings set '<json>'` | `{"ok": true, "changed": true, "applies": "now"}`, or `"next_capture"` while a capture runs. A refusal is `{"ok": false, "error": "…", "changed": false}` and changes nothing. A word list the Thalvi server could not take comes back as `"warning"`. |
+| `settings set '<json>'` | `{"ok": true, "changed": true, "applies": "now"}`, or `"next_capture"` while a capture runs. A refusal is `{"ok": false, "error": "…", "changed": false}` and changes nothing. |
 | `pause`, `resume`, `toggle`, `cancel`, `hold-start`, `hold-end`, `write-start`, `write-end`, `copy-error` | `{"ok": true, "took_effect": true, "state": "…"}`, or `{"ok": false, "took_effect": false, "error": "…", "state": "…"}`, such as when Thalvi is already paused. `hold-start` starts a dictation that `hold-end` or `cancel` ends; `write-start` and `write-end` do the same with writing on release. |
 | `metrics summary` | `{"ok": true, "enabled": true, "window_hours": 24, "stages": {"connect", "partial_lag", "final", "delivery"}, "captures": {"ok": 3, …}}`; each stage has `count`, `outcomes`, `p50_ms` and `p95_ms`. `"enabled": false` and a message when metrics are off. |
 

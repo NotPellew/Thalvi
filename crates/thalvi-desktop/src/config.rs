@@ -13,7 +13,7 @@ use crate::hold::HoldKey;
 use crate::host::{App, Desktop, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
 use crate::phrases::WordList;
-use crate::recognizer::{ServerUrl, SpeechSource};
+use crate::recognizer::SpeechSource;
 use crate::wake::WakeConfig;
 use crate::writing::Writing;
 
@@ -82,7 +82,7 @@ pub struct DesktopConfig {
 struct RawDesktopConfig {
     /// The address a config written before the speech server list kept; read only to migrate it.
     #[serde(default)]
-    server: Option<ServerUrl>,
+    server: Option<String>,
     #[serde(default)]
     wake: WakeConfig,
     #[serde(default, deserialize_with = "cues")]
@@ -1057,7 +1057,7 @@ mod tests {
         for (json, kind) in [
             (
                 r#"{"stt": {"engine": "server"}}"#,
-                LiveKind::ThalviServer(ServerUrl::default()),
+                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
             ),
             (
                 r#"{"stt": {"engine": "local"}}"#,
@@ -1129,7 +1129,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             config.stt.entries.active_live().kind,
-            LiveKind::ThalviServer(ServerUrl::parse("wss://thalvi.example:9000").unwrap())
+            LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0]))
         );
         assert_eq!(
             config

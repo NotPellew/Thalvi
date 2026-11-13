@@ -72,13 +72,13 @@ function sent(stub: Awaited<ReturnType<typeof open>>): Settings {
   return call[0];
 }
 
-const SERVER = SETTINGS.stt.entries[0] as SpeechEntry;
+const SERVER: SpeechEntry = { kind: "realtime", id: "direct", name: "Realtime speech server", active: true, address: "ws://127.0.0.1:8012", model: "nemotron" };
 
 function device(model?: string, active = true): OnDeviceEntry {
   return { kind: "on_device", id: "on-device", name: "On this computer", active, ...(model ? { model } : {}) };
 }
 
-/** Settings whose live entry in use is the on-device model, beside a Thalvi server entry not in use. */
+/** Settings whose live entry in use is the on-device model, beside a realtime speech server entry not in use. */
 function local(model?: string): Settings {
   return { ...SETTINGS, stt: { entries: [device(model), { ...SERVER, active: false }] } };
 }
@@ -228,7 +228,7 @@ describe("save", () => {
   it("sends exactly the edits", async () => {
     const stub = await open();
     goTo("speech");
-    edit("Thalvi server");
+    edit("Realtime speech server");
     type(control("Address", "input"), "wss://thalvi.example");
     await saveServer();
     goTo("capture");
@@ -244,7 +244,7 @@ describe("save", () => {
     choose(control("Saved device", "select"), "USB Microphone");
     button("Save").click();
     const expected = structuredClone(SETTINGS);
-    expected.stt.entries = [{ ...SERVER, address: "wss://thalvi.example" } as SpeechEntry];
+    expected.stt.entries = [{ ...SERVER, address: "wss://thalvi.example" }];
     expected.ending_pause.paste = 1.5;
     expected.wake.capture.threshold = 0.8;
     expected.overlay.draft = false;
@@ -266,14 +266,14 @@ describe("save", () => {
   it("marks unsaved edits and clears the mark on revert", async () => {
     const stub = await open();
     goTo("speech");
-    edit("Thalvi server");
+    edit("Realtime speech server");
     type(control("Address", "input"), "ws://other");
     await saveServer();
     expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
     button("Revert").click();
     await settle();
     expect(stub.backend.getSettings).toHaveBeenCalledTimes(2);
-    expect(root.querySelector(".trow.server")?.textContent).toContain("ws://127.0.0.1:8080");
+    expect(root.querySelector(".trow.server")?.textContent).toContain("ws://127.0.0.1:8012");
     expect(root.querySelector(".msg")?.textContent).toBe("");
   });
 
@@ -291,7 +291,7 @@ describe("save", () => {
 
     it("loads the new settings and stays on the current page when nothing is unsaved", async () => {
       const stub = await openChanged();
-      expect(activeNames()).toEqual(["Thalvi server"]);
+      expect(activeNames()).toEqual(["Realtime speech server"]);
       stub.changedElsewhere();
       await settle();
       expect(activeNames()).toEqual(["Cybrex2"]);
@@ -310,7 +310,7 @@ describe("save", () => {
       goTo("speech");
       stub.changedElsewhere();
       await settle();
-      expect(activeNames()).toEqual(["Thalvi server"]);
+      expect(activeNames()).toEqual(["Realtime speech server"]);
       expect(stub.backend.getSettings).toHaveBeenCalledTimes(1);
       expect(root.querySelector(".msg")?.textContent).toBe(ELSEWHERE_TEXT);
       button(action === "revert" ? "Revert" : "Save").click();
@@ -318,7 +318,7 @@ describe("save", () => {
       if (action === "revert") {
         expect(activeNames()).toEqual(["Cybrex2"]);
       } else {
-        expect(activeNames()).toEqual(["Thalvi server"]);
+        expect(activeNames()).toEqual(["Realtime speech server"]);
         expect(sent(stub).stt.entries.find((entry) => entry.active)?.id).toBe(SERVER.id);
       }
       expect(root.querySelector(".msg")?.textContent).toBe(action === "revert" ? "" : SAVED_TEXT);
@@ -679,18 +679,10 @@ describe("a custom speech model folder", () => {
 });
 
 describe("the word list", () => {
-  async function openWith(engine: "server" | "local", support: () => Promise<boolean>, phrases?: string[]) {
-    const entries: SpeechEntry[] = [{ ...SERVER, active: engine === "server" }, device(undefined, engine === "local")];
-    const stub = stubBackend({ ...SETTINGS, stt: { entries, ...(phrases ? { phrases } : {}) } });
-    stub.backend.wordListSupport.mockImplementation(support);
-    mountSettings(root, stub.backend);
-    await settle();
+  async function openWordList(phrases?: string[]) {
+    const stub = await open({ ...SETTINGS, stt: { entries: [device()], ...(phrases ? { phrases } : {}) } });
     goTo("speech");
     return stub;
-  }
-
-  function box(): HTMLInputElement {
-    return rowOf("Word list").querySelector('input[aria-label="New word"]') as HTMLInputElement;
   }
 
   function chips(): string[] {
@@ -698,73 +690,25 @@ describe("the word list", () => {
   }
 
   function add(word: string, by: "plus" | "enter" = "plus"): void {
-    type(box(), word);
-    if (by === "enter") box().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    const box = rowOf("Word list").querySelector('input[aria-label="New word"]') as HTMLInputElement;
+    type(box, word);
+    if (by === "enter") box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     else (rowOf("Word list").querySelector('button[aria-label="Add the word"]') as HTMLButtonElement).click();
   }
 
-  function offered(): boolean {
-    const found = rowOf("Word list");
-    return !found.hidden && !found.classList.contains("off");
-  }
-
-  it.each([
-    ["the local engine", "local", () => Promise.reject(new Error("unreachable")), { shown: true, disabled: false, problem: "" }],
-    ["a recognizer without boosting", "server", () => Promise.resolve(false), { shown: false, disabled: false, problem: "" }],
-    ["a recognizer that boosts", "server", () => Promise.resolve(true), { shown: true, disabled: false, problem: "" }],
-    [
-      "a server that can't tell",
-      "server",
-      () => Promise.reject(new Error("Thalvi could not reach the server at ws://127.0.0.1:8080 to ask about a word list.")),
-      {
-        shown: true,
-        disabled: true,
-        problem: "Thalvi could not reach the server at ws://127.0.0.1:8080 to ask about a word list.",
-      },
-    ],
-  ] as const)("is offered for %s only when it can be used", async (_name, engine, support, expected) => {
-    const stub = await openWith(engine, support);
-    expect(stub.backend.wordListSupport).toHaveBeenCalledTimes(engine === "server" ? 1 : 0);
-    expect(offered()).toBe(expected.shown);
-    expect(box().disabled).toBe(expected.disabled);
-    const said = Array.from(rowOf("Word list").querySelectorAll(".note")).map((note) => note.textContent).join("");
-    expect(said).toBe(expected.problem);
-  });
-
-  it("adds a typed word by + or Enter, refuses a blank or repeated one, and shares the list once per change", async () => {
-    const stub = await openWith("server", () => Promise.resolve(true));
+  it("keeps the list available, edits terms, and saves them locally", async () => {
+    const stub = await openWordList();
+    expect(rowOf("Word list").hidden).toBe(false);
     add("  Cybrex2 ");
     add("Thalvi", "enter");
-    expect(chips()).toEqual(["Cybrex2", "Thalvi"]);
-    expect(box().value).toBe("");
-    const problem = (): string => Array.from(rowOf("Word list").querySelectorAll(".note")).map((note) => note.textContent).join("");
-    add("  ");
-    expect(problem()).toBe("Type the word to add first.");
-    add("Cybrex2");
-    expect(problem()).toBe("Cybrex2 is already in the list.");
     expect(chips()).toEqual(["Cybrex2", "Thalvi"]);
     button("Save").click();
     await settle();
     expect(sent(stub).stt.phrases).toEqual(["Cybrex2", "Thalvi"]);
-    expect(stub.backend.shareWordList).toHaveBeenCalledTimes(1);
-    button("Save").click();
-    await settle();
-    expect(stub.backend.shareWordList).toHaveBeenCalledTimes(1);
   });
 
-  it("says when the server could not take the list, and the save stands", async () => {
-    const stub = await openWith("server", () => Promise.resolve(true));
-    stub.backend.shareWordList.mockRejectedValue("The word list is saved here, but Thalvi could not reach the server.");
-    add("Cybrex2");
-    button("Save").click();
-    await settle();
-    expect(root.querySelector(".err")?.textContent).toBe("The word list is saved here, but Thalvi could not reach the server.");
-    expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
-    expect(root.querySelector(".msg")?.textContent).not.toBe("Unsaved changes");
-  });
-
-  it("shows a saved list as chips and removes a word", async () => {
-    const stub = await openWith("server", () => Promise.resolve(true), ["Cybrex2", "Thalvi"]);
+  it("shows saved terms and removes them", async () => {
+    const stub = await openWordList(["Cybrex2", "Thalvi"]);
     expect(chips()).toEqual(["Cybrex2", "Thalvi"]);
     (rowOf("Word list").querySelector('button[aria-label="Remove Cybrex2"]') as HTMLButtonElement).click();
     expect(chips()).toEqual(["Thalvi"]);
@@ -773,43 +717,13 @@ describe("the word list", () => {
     expect(sent(stub).stt.phrases).toEqual(["Thalvi"]);
   });
 
-  it("is offered without asking the server once the engine switches to this computer", async () => {
-    const stub = await openWith("server", () => Promise.reject(new Error("Thalvi could not reach the server.")));
-    use("On this computer");
+  it("offers the list to direct recognizers that announce phrase boosting", async () => {
+    const stub = stubBackend({ ...SETTINGS, stt: { entries: [{ ...SERVER, active: true }] } });
+    stub.backend.wordListSupport.mockResolvedValue(false);
+    mountSettings(root, stub.backend);
     await settle();
-    expect(stub.backend.wordListSupport).toHaveBeenCalledTimes(1);
-    expect(offered()).toBe(true);
-    expect(box().disabled).toBe(false);
-    expect(Array.from(rowOf("Word list").querySelectorAll(".note")).map((note) => note.textContent).join("")).toBe("");
-  });
-
-  it("asks again when the engine switches to the server", async () => {
-    const stub = await openWith("local", () => Promise.resolve(true));
-    use("Thalvi server");
-    await settle();
-    expect(stub.backend.wordListSupport).toHaveBeenCalledWith(expect.objectContaining({ kind: "thalvi_server", address: "ws://127.0.0.1:8080" }));
-    expect(offered()).toBe(true);
-  });
-
-  it("keeps chips, the add box and messages in one column inside the word list controls", async () => {
-    await openWith(
-      "server",
-      () => Promise.reject(new Error("Thalvi could not reach the server at ws://127.0.0.1:8080 to ask about a word list.")),
-      ["Cybrex2"],
-    );
-    const found = rowOf("Word list");
-    const ctl = found.querySelector(".ctl") as HTMLElement;
-    const stack = ctl.firstElementChild as HTMLElement;
-    expect(Array.from(ctl.children)).toEqual([stack]);
-    const chipsEl = stack.querySelector(".chips");
-    const addRow = stack.querySelector(".trow.add");
-    const notes = Array.from(stack.querySelectorAll(":scope > .note"));
-    expect(chips()).toEqual(["Cybrex2"]);
-    expect(Array.from(stack.children)).toEqual([chipsEl, addRow, ...notes]);
-    expect(notes.map((note) => note.textContent).join("")).toContain("could not reach the server");
-    expect(addRow?.classList.contains("word-add")).toBe(true);
-    goTo("capture");
-    expect(rowOf("Ending phrases").querySelector(".trow.add")?.classList.contains("word-add")).toBe(false);
+    expect(stub.backend.wordListSupport).toHaveBeenCalledWith(expect.objectContaining({ kind: "realtime" }));
+    expect(rowOf("Word list").classList.contains("off")).toBe(true);
   });
 });
 
@@ -842,7 +756,7 @@ const META: SpeechEntry = {
   api: "meta",
 };
 
-/** A Thalvi server in use, a recognizer reached directly, the on-device model, and two second-pass servers. */
+/** A realtime recognizer in use, another recognizer, the on-device model, and two second-pass servers. */
 function several(): Settings {
   return { ...SETTINGS, stt: { entries: [{ ...SERVER }, { ...CYBREX }, device(undefined, false), { ...OPENAI }, { ...META }] } };
 }
@@ -873,16 +787,17 @@ describe("the speech server list", () => {
   it("lists each server with its kind and where it is, and marks the one in use", async () => {
     await openSeveral();
     const [live, second] = lists();
-    expect(names(live as HTMLElement)).toEqual(["Thalvi server", "Cybrex2", "On this computer"]);
+    expect(Array.from(root.querySelectorAll('select[aria-label="Kind of speech server to add"] option')).map((option) => option.getAttribute("value"))).not.toContain("thalvi_server");
+    expect(names(live as HTMLElement)).toEqual(["Realtime speech server", "Cybrex2", "On this computer"]);
     expect(names(second as HTMLElement)).toEqual(["OpenAI", "Meta"]);
-    expect(badgesOf("Thalvi server")).toEqual(["In use"]);
+    expect(badgesOf("Realtime speech server")).toEqual(["In use"]);
     expect(badgesOf("Cybrex2")).toEqual(["Realtime speech server", "Key saved"]);
     expect(badgesOf("On this computer")).toEqual([]);
     expect(entryNamed("Cybrex2").querySelector("details")?.textContent).toContain("ws://100.64.0.2:8012 · nemotron");
     expect(entryNamed("On this computer").querySelector("details")?.textContent).toContain("nemotron_160ms");
     expect(entryNamed("OpenAI").querySelector("details")?.textContent).toContain("https://api.openai.com/v1 · whisper-1 · OpenAI-style");
-    expect(root.querySelector('button[aria-label="Use Thalvi server"]')).toBeNull();
-    expect((root.querySelector('button[aria-label="Remove Thalvi server"]') as HTMLButtonElement).disabled).toBe(true);
+    expect(root.querySelector('button[aria-label="Use Realtime speech server"]')).toBeNull();
+    expect((root.querySelector('button[aria-label="Remove Realtime speech server"]') as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("switches the live server with one click, saving only that and nothing else that is unsaved", async () => {
@@ -896,14 +811,14 @@ describe("the speech server list", () => {
     const savedSettings = sent(stub);
     expect(savedSettings.ending_pause.paste).toBe(SETTINGS.ending_pause.paste);
     expect(savedSettings.stt.entries.map((entry) => [entry.name, entry.active])).toEqual([
-      ["Thalvi server", false],
+      ["Realtime speech server", false],
       ["Cybrex2", true],
       ["On this computer", false],
       ["OpenAI", true],
       ["Meta", false],
     ]);
     expect(badgesOf("Cybrex2")).toContain("In use");
-    expect(badgesOf("Thalvi server")).not.toContain("In use");
+    expect(badgesOf("Realtime speech server")).not.toContain("In use");
     expect(root.querySelector('button[aria-label="Use Cybrex2"]')).toBeNull();
     expect(root.querySelector(".msg")?.textContent).toBe("Unsaved changes");
   });
@@ -914,7 +829,7 @@ describe("the speech server list", () => {
     use("Cybrex2");
     await settle();
     expect(root.querySelector(".err")?.textContent).toBe("The settings could not be saved to /config: disk full.");
-    expect(badgesOf("Thalvi server")).toContain("In use");
+    expect(badgesOf("Realtime speech server")).toContain("In use");
     expect(badgesOf("Cybrex2")).not.toContain("In use");
   });
 
@@ -922,7 +837,7 @@ describe("the speech server list", () => {
     const stub = await openSeveral();
     await addServer("realtime");
     expect(root.querySelector(".editor h4")?.textContent).toBe("Add a realtime speech server");
-    expect(control("Name", "input").value).toBe("Realtime speech server");
+    expect(control("Name", "input").value).toBe("Realtime speech server 2");
     type(control("Name", "input"), "Office GPU");
     type(control("Address", "input"), "ws://10.0.0.5:8012");
     type(control("Model", "input"), "nemotron");
@@ -951,13 +866,13 @@ describe("the speech server list", () => {
     await saveServer();
     expect(editorNote()).toBe('Speech server "Realtime speech server": the address must be a ws or wss URL.');
     expect(root.querySelector(".editor")?.hasAttribute("hidden")).toBe(false);
-    expect(names(lists()[0] as HTMLElement)).toEqual(["Thalvi server", "Cybrex2", "On this computer"]);
+    expect(names(lists()[0] as HTMLElement)).toEqual(["Realtime speech server", "Cybrex2", "On this computer"]);
     expect(root.querySelector(".msg")?.textContent).toBe("");
   });
 
   it("keeps every name distinct before asking the app", async () => {
     const stub = await openSeveral();
-    await addServer("thalvi_server");
+    await addServer("realtime");
     type(control("Name", "input"), "cybrex2");
     await saveServer();
     expect(editorNote()).toBe('Two speech servers are called "cybrex2". Give each its own name.');
@@ -971,7 +886,7 @@ describe("the speech server list", () => {
     type(control("Name", "input"), "Cybrex2 GPU");
     type(control("Address", "input"), "ws://100.64.0.3:8012");
     await saveServer();
-    expect(names(lists()[0] as HTMLElement)).toEqual(["Thalvi server", "Cybrex2 GPU", "On this computer"]);
+    expect(names(lists()[0] as HTMLElement)).toEqual(["Realtime speech server", "Cybrex2 GPU", "On this computer"]);
     expect(entryNamed("Cybrex2 GPU").querySelector("details")?.textContent).toContain("ws://100.64.0.3:8012 · nemotron");
     expect(badgesOf("Cybrex2 GPU")).toContain("Not saved");
 
@@ -981,7 +896,7 @@ describe("the speech server list", () => {
     expect(names(lists()[0] as HTMLElement)).toContain("Cybrex2 GPU");
 
     (root.querySelector('button[aria-label="Remove Cybrex2 GPU"]') as HTMLButtonElement).click();
-    expect(names(lists()[0] as HTMLElement)).toEqual(["Thalvi server", "On this computer"]);
+    expect(names(lists()[0] as HTMLElement)).toEqual(["Realtime speech server", "On this computer"]);
   });
 
   const keyActions: [string, (clear: HTMLButtonElement) => void, string | undefined, boolean][] = [
@@ -1003,13 +918,7 @@ describe("the speech server list", () => {
     expect(badgesOf("Cybrex2").includes("Key saved")).toBe(stillSaved);
   });
 
-  it("asks the app about the word list for the server it switches to", async () => {
-    const stub = await openSeveral();
-    stub.backend.wordListSupport.mockResolvedValue(true);
-    use("Cybrex2");
-    await settle();
-    expect(stub.backend.wordListSupport).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "realtime", id: "cybrex2" }));
-  });
+
 });
 
 describe("second-pass servers", () => {
@@ -1166,7 +1075,7 @@ describe("the next dictation summary and state words", () => {
     await settle();
     stub.emit(status as never);
     await settle();
-    expect(summaryText()).toBe(`Next dictation: Thalvi server — ${state}`);
+    expect(summaryText()).toBe(`Next dictation: Realtime speech server — ${state}`);
   });
 
   it("shows the on-device model title, follows Use, and keeps the saved entry while its edit is unsaved", async () => {
@@ -1257,7 +1166,7 @@ describe("the next dictation summary and state words", () => {
   });
 
   it.each([
-    ["Thalvi server", ["In use"], false],
+    ["Realtime speech server", ["In use"], false],
     ["Cybrex2", ["Realtime speech server", "Key saved"], true],
     ["On this computer", [], true],
     ["OpenAI", ["Second pass", "Key saved"], false],

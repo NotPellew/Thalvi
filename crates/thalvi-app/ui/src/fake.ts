@@ -49,7 +49,7 @@ const SETTINGS: Settings = {
     "scratch that": "scratch",
     "never mind": "cancel",
   },
-  stt: { entries: [{ kind: "thalvi_server", id: "thalvi-server", name: "Thalvi server", active: true, address: "ws://127.0.0.1:8080" }] },
+  stt: { entries: [{ kind: "on_device", id: "on-device", name: "On this computer", active: true, model: "nemotron_160ms" }] },
   apps: { slack: { classes: ["Slack"], executables: ["slack.exe"], input_keys: [] } },
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com/docs", label: "docs" }],
   overlay: { show: true, draft: true },
@@ -87,7 +87,7 @@ function script(): Status[] {
     { state: "pending", target: slack, route: "paste", text: "Remind me to call", waitingForQuiet: false, pauseMs: 700, copies: false },
     { state: "done", target: slack, route: "paste", notice: "Pasted" },
     { state: "starting", target: null },
-    { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:8080 (connection refused). Start the Thalvi server, or fix Settings → Speech → Server address.", headline: "Can't reach speech server — Settings", causes: [], kind: "other" },
+    { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:8080 (connection refused). Check that it is running, or fix its address under Settings → Speech.", headline: "Can't reach speech server — Settings", causes: [], kind: "other" },
     { state: "loading", notice: "Loading the speech model." },
     { state: "starting", target: "Firefox" },
     { state: "capturing", target: "Firefox", committed: "", partial: null, notice: null },
@@ -313,8 +313,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
         ? Promise.reject(new Error(`Speech server "${entry.name}": the address must start with ${entry.kind === "second_pass" ? "http:// or https://" : "ws:// or wss://"}.`))
         : Promise.resolve();
     },
-    wordListSupport: () => Promise.resolve(true),
-    shareWordList: () => Promise.resolve(),
+    wordListSupport: (entry) => Promise.resolve(entry.kind !== "realtime"),
     appVersion: () => Promise.resolve("0.1.0 (fake)"),
     getUpdateState: () => Promise.resolve(structuredClone(update)),
     onUpdate: (listener) => updateListeners.push(listener),

@@ -43,7 +43,7 @@ exclude_re = [
     "<impl SpeechModel for Transducer>::placement",
     # The engine thread starts, applies settings, rebuilds and spawns the load around a real engine and microphone; the load it shows and the retune it takes are tested, and the formal-capture-cancel replay runs the apply handoff.
     "Runner::(start|rebuild|apply|load_speech_model)",
-    "crates/thalvi-app/src/(app|commands).rs.*replace (start|list_speech_models|speech_device|download_speech_model) ->",
+    "crates/thalvi-app/src/(app|commands).rs.*replace (start|list_speech_models|speech_device|download_speech_model|word_list_support) ->",
     "get_hold_key_unavailable",
     # Picks the hold key check by the session in the process environment, which a test cannot set (unsafe_code is denied); Hyprland's check is tested directly.
     "replace Desktop::check_hold_keys ->",

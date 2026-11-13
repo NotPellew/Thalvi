@@ -77,12 +77,6 @@ export interface RealtimeEntry extends EntryBase {
   has_key?: boolean;
 }
 
-/** A Thalvi server's `/transcription` route; its recognizer key is held in the server's `.env`. */
-export interface ThalviServerEntry extends EntryBase {
-  kind: "thalvi_server";
-  address: string;
-}
-
 /** The speech model on this computer. */
 export interface OnDeviceEntry extends EntryBase {
   kind: "on_device";
@@ -116,7 +110,7 @@ export interface WritingSettings {
   /** Absent when there are none. */
   openings?: WritingOpening[];
 }
-export type LiveEntry = RealtimeEntry | ThalviServerEntry | OnDeviceEntry;
+export type LiveEntry = RealtimeEntry | OnDeviceEntry;
 export type SpeechEntry = LiveEntry | SecondPassEntry;
 
 export interface AppSettings {
@@ -311,10 +305,8 @@ export interface Backend {
   openSpeechModelSource(name: string): Promise<void>;
   /** Resolves when the entry's fields can be used; rejects with the plain reason they cannot. */
   checkSpeechEntry(entry: SpeechEntry): Promise<void>;
-  /** Whether the recognizer behind a live entry boosts a word list; rejects with the plain reason it can't tell. */
+  /** Whether a direct realtime recognizer boosts the word list. */
   wordListSupport(entry: LiveEntry): Promise<boolean>;
-  /** Saves the stored word list on the server; rejects with the plain reason it could not. */
-  shareWordList(): Promise<void>;
   appVersion(): Promise<string>;
   getUpdateState(): Promise<UpdateState>;
   onUpdate(listener: (state: UpdateState) => void): void;

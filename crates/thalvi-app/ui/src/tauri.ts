@@ -79,7 +79,6 @@ export function tauriBackend(): Backend {
     openSpeechModelSource: (name) => invoke<undefined>("open_speech_model_source", { name }),
     checkSpeechEntry: (entry) => invoke<undefined>("check_speech_entry", { entry }),
     wordListSupport: (entry) => invoke<boolean>("word_list_support", { entry }),
-    shareWordList: () => invoke<undefined>("share_word_list"),
     appVersion: getVersion,
     getUpdateState: () => invoke<UpdateState>("get_update_state"),
     onUpdate: (listener) => {

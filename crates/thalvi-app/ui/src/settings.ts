@@ -258,18 +258,13 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     const pending = checks.map((check) => check()).filter((check) => check !== null);
     const sent = pending.length === 0 ? backend.saveSettings(sending) : Promise.all(pending).then(() => backend.saveSettings(sending));
     const before = baseline === "" ? undefined : (JSON.parse(baseline) as Settings);
-    const listBefore = before?.stt.phrases;
     sent
       .then(() => {
         baseline = JSON.stringify(sending);
         markSaved(before, sending);
         changedElsewhere = false;
         live.saved();
-        if (JSON.stringify(listBefore ?? []) === JSON.stringify(sending.stt.phrases ?? [])) return undefined;
-        // The server keeps its own copy for dictation and conversations; a miss is said, the save stands.
-        return backend.shareWordList().catch((error: unknown) => {
-          saveFailure = errorText(error);
-        });
+        return undefined;
       })
       .catch((error: unknown) => {
         saved = false;

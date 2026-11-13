@@ -10,9 +10,7 @@ use thalvi_desktop::engine::{CaptureError, ListenError};
 use thalvi_desktop::host::HostError;
 use thalvi_desktop::metrics::RecorderError;
 use thalvi_desktop::models::{ModelError, ModelKind};
-use thalvi_desktop::recognizer::{
-    ConnectFailure, Detail, RecognizerError, ServerUrl, SpeechSource,
-};
+use thalvi_desktop::recognizer::{ConnectFailure, Detail, RecognizerError, SpeechSource};
 use thalvi_desktop::report::{MAX_HEADLINE_CHARS, UserError};
 use thalvi_desktop::tasks::NotConfigured;
 use thalvi_desktop::wake::WakeError;
@@ -32,7 +30,7 @@ fn download() -> reqwest::Error {
 }
 
 fn office() -> SpeechSource {
-    SpeechSource::thalvi_server("Office", &ServerUrl::default())
+    SpeechSource::direct("Office", "ws://127.0.0.1:8080".to_owned())
 }
 
 fn unreachable() -> RecognizerError {

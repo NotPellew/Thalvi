@@ -26,8 +26,7 @@ use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::hold::{HoldInput, HoldKind, Refusal};
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
 use thalvi_desktop::recognizer::{
-    FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, ServerUrl,
-    SpeechSource,
+    FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, SpeechSource,
 };
 use thalvi_desktop::spotter::KeywordSpotter;
 use thalvi_desktop::vad::VadDetector;
@@ -1419,7 +1418,7 @@ async fn a_failed_capture_says_what_happened_keeps_the_text_and_returns_to_liste
     let recognizer = |message: &str| CaptureError::Recognizer(RecognizerError::said(message));
     let not_ready = || CaptureError::NotReady {
         waited: Duration::from_secs(8),
-        speech: SpeechSource::thalvi_server("Thalvi server", &ServerUrl::default()),
+        speech: SpeechSource::direct("Realtime speech server", "ws://127.0.0.1:8080".to_owned()),
     };
     // Fault, the error, the text kept, when the error cue plays, and whether a stream was open.
     let cases = [
@@ -1464,7 +1463,7 @@ async fn a_failed_capture_says_what_happened_keeps_the_text_and_returns_to_liste
     LocalSet::new()
         .run_until(async {
             for (fault, error, recoverable_text, error_cue_at, had_stream) in cases {
-                let (mut rig, engine, frames) = Rig::new(r#"{"stt": {"engine": "server"}}"#);
+                let (mut rig, engine, frames) = Rig::new(&with_second_passes(&[]));
                 let task = capture_task(engine, frames);
                 inflict(&mut rig, &task, fault).await;
                 assert_eq!(
@@ -1840,13 +1839,13 @@ async fn serve(reply: Reply) -> (String, tokio::sync::mpsc::UnboundedReceiver<us
 
 fn with_secondary(url: &str, api: &str) -> String {
     format!(
-        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"engine": "server", "secondary": {{"enabled": true, "url": "{url}", "model": "m", "api": "{api}"}}}}}}"#
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"entries": [{{"kind": "realtime", "id": "live", "name": "Realtime speech server", "active": true, "address": "ws://127.0.0.1:8080", "model": "m"}}, {{"kind": "second_pass", "id": "secondary", "name": "Second pass", "active": true, "address": "{url}", "model": "m", "api": "{api}"}}]}}}}"#
     )
 }
 
 fn with_secondary_off(url: &str) -> String {
     format!(
-        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"engine": "server", "secondary": {{"enabled": false, "url": "{url}", "model": "m", "api": "openai"}}}}}}"#
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"entries": [{{"kind": "realtime", "id": "live", "name": "Realtime speech server", "active": true, "address": "ws://127.0.0.1:8080", "model": "m"}}, {{"kind": "second_pass", "id": "secondary", "name": "Second pass", "active": false, "address": "{url}", "model": "m", "api": "openai"}}]}}}}"#
     )
 }
 
@@ -1965,7 +1964,7 @@ async fn the_live_transcript_is_kept_with_a_notice_when_the_secondary_cannot_sta
         .await;
 }
 
-/// A config with the Thalvi server entry active and these second-pass entries, in order:
+/// A config with a direct speech entry active and these second-pass entries, in order:
 /// `(name, url, ticked)`.
 fn with_second_passes(entries: &[(&str, &str, bool)]) -> String {
     let second: Vec<String> = entries
@@ -1976,9 +1975,13 @@ fn with_second_passes(entries: &[(&str, &str, bool)]) -> String {
             )
         })
         .collect();
+    let second = if second.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", second.join(", "))
+    };
     format!(
-        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"entries": [{{"kind": "thalvi_server", "id": "s", "name": "Thalvi server", "active": true, "address": "ws://127.0.0.1:8080"}}, {}]}}}}"#,
-        second.join(", ")
+        r#"{{"ending_pause": {{"paste": 2.5}}, "stt": {{"entries": [{{"kind": "realtime", "id": "s", "name": "Realtime speech server", "active": true, "address": "ws://127.0.0.1:8080", "model": "m"}}{second}]}}}}"#
     )
 }
 
@@ -2704,7 +2707,7 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
                 .iter()
                 .find(|line| line["event"] == "desktop_transcription_ready")
                 .unwrap();
-            assert_eq!(ready["entry"], "Thalvi server");
+            assert_eq!(ready["entry"], "Realtime speech server");
 
             let folder = dictation_dirs(&dir).pop().unwrap();
             assert_eq!(
@@ -2731,7 +2734,7 @@ async fn the_delay_from_speech_to_the_recognizers_words_is_recorded_once_for_par
             let dir = record_dir("lags");
             let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
             let (mut rig, spot, engine, frames) = Rig::spotting(
-                r#"{"stt":{"entries":[{"kind":"thalvi_server","id":"test","name":"Metrics recognizer","active":true,"address":"ws://127.0.0.1:8080"}]}}"#,
+                r#"{"stt":{"entries":[{"kind":"realtime","id":"test","name":"Metrics recognizer","active":true,"address":"ws://127.0.0.1:8080","model":"m"}]}}"#,
                 recorder,
             );
             spot.hear(HEARD_AT_FRAME, "paste that", Ending::Paste);

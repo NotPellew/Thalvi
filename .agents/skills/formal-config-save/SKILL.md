@@ -84,7 +84,7 @@ sends two settings requests at once reaches it without the user, because
 
 ## Covers
 
-Sync commit: `5afbb4faccb0c277dacfea196958270a81140d37`. [source.json](source.json)
+Sync commit: `a03b86c0f995a8ec683157ed28765e668c183c66`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 
@@ -97,7 +97,7 @@ Matching hashes establish synchronization only, not correctness of the model.
 | Same file: `write_private` | `RmTmp` (`remove_file` of the shared name), `Create` (`create_new`; fails if the name exists), `Write` (`write_all` into the opened file). Under the save lock these steps cannot interleave with another writer's. |
 | Same file: `write_atomically` | `Rename` (moves whatever `desktop.json.tmp` names now; fails if it names nothing). On any error it removes the shared name and returns Err. |
 | `crates/thalvi-app/src/app.rs`: `AppState::apply` | `Apply`: `*current = config.clone()` under `AppState::config`'s lock (for `remember`, its own `*self.config.lock() = config`). `Send`: `Control::Apply` to the runner, which takes them in order. |
-| `crates/thalvi-app/src/settings.rs`: `Store::start` (from `AppState::start` in `app.rs`'s `setup`) | Not modeled: a first start writes the defaults through `save_switches` before `setup` registers the state, serves requests or opens Settings, so no other writer exists yet. |
+| `crates/thalvi-app/src/settings.rs`: `Store::start` (from `AppState::start` in `app.rs`'s `setup`) | Not modeled: a first start writes the defaults, and a load that drops a saved Thalvi server entry writes the normalized config, both through `Store::write` before `setup` registers the state, serves requests or opens Settings, so no other writer exists yet. |
 | `crates/thalvi-app/src/update.rs`: `Marker::write` and update-channel reads | Not a config writer: the updater's atomic write targets the separate `update.json` marker. The channel is read from `AppState::config`; changing it is covered by the Settings form writer above. |
 | `crates/thalvi-desktop/src/host/channel.rs`: `accept`; `windows/pipe.rs`: `accept`, `answer` | Why `A` and `L` run concurrently: one `thalvi-request` thread per connection, up to `MAX_CONNECTIONS`. |
 
