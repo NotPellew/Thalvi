@@ -2,7 +2,7 @@
   "sync_commit": "a03b86c0f995a8ec683157ed28765e668c183c66",
   "files": {
     "crates/thalvi-app/src/runner.rs": {
-      "sha256": "08740665357f6f1284ed6ae79ca1dee34108bbeb2dfeee90b4535a68632516fe",
+      "sha256": "2d0e1b9989af5cbf5de8ef10d036e6d6e3d6aa90b00db253c93770068112c709",
       "functions": [
         "Requests::take",
         "Requests::read_queued",
@@ -45,7 +45,7 @@
       ]
     },
     "crates/thalvi-desktop/src/openai_live.rs": {
-      "sha256": "5ef07df02f1cbdfc6df59beae0a5eb3f2245b98aac19d87c214e62b0f4521420",
+      "sha256": "976773d3d9a05644adca98d345601084c9650cd9704d656ed94d80a28d8ee1db",
       "functions": [
         "OpenAiSession::cancel",
         "OpenAiSession::close"
