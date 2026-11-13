@@ -10,3 +10,4 @@ export async function chooseBackend(): Promise<Backend> {
   }
   return tauriBackend();
 }
+// throwaway: fast-tier check
