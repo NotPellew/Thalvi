@@ -791,14 +791,16 @@ async fn send_json(harness: &mut Harness, value: &Value) {
         .unwrap();
 }
 
+/// Bounded by the wall clock: a paused tokio clock never advances while this keeps yielding.
 async fn wait_until(condition: impl Fn() -> bool) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !condition() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("condition not reached within 5s");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !condition() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "condition not reached within 5s"
+        );
+        tokio::task::yield_now().await;
+    }
 }
 
 /// Waits until `count` sessions have fully ended, final save and recording flush included.
@@ -4684,6 +4686,47 @@ async fn cancelling_aborts_the_source_call_records_interrupted_and_the_next_turn
     let lines = tool_lines(&data_dir, &session);
     assert_eq!(lines[0]["outcome"], "interrupted");
     assert!(lines[0].get("matches").is_none());
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn with_a_source_other_tool_calls_never_reach_it() {
+    let source = BriefingSource::start("Markets rally", false).await;
+    let mut harness = start_with_source(&source, RecordingConfig::disabled()).await;
+    harness.model.add_script(vec![
+        search_call("c1", r#"{"query":"tariffs"}"#),
+        briefing_call("c2", "no_such_tool", "{}"),
+    ]);
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Done.".to_string())]);
+    send_json(&mut harness, &json!({"type": "text", "text": "news?"})).await;
+    let received = finish_reply(&mut harness).await;
+
+    let steps: Vec<(Value, Value, Value)> = tasks(&received)
+        .into_iter()
+        .map(|step| {
+            (
+                step["id"].clone(),
+                step["label"].clone(),
+                step["status"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            (
+                json!("c1"),
+                json!("Searching conversations"),
+                json!("running")
+            ),
+            (json!("c1"), json!("Searching conversations"), json!("done")),
+            (json!("c2"), json!("Running a tool"), json!("running")),
+            (json!("c2"), json!("Running a tool"), json!("failed")),
+        ]
+    );
+    assert_eq!(source.tool_requests(), Vec::<String>::new());
     harness.server.abort();
 }
 
