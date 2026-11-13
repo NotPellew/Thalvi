@@ -103,7 +103,7 @@ can't break and doesn't slow down the next change.
 CI runs these as required checks on `main`. `.github/scripts/gates <component>`
 runs a component's checks exactly as CI does and stops at the first failure.
 Components: `server`, `desktop-windows`, `web`, `desktop-ui`, `speech`,
-`issue-sync`, `release`; `all` runs every gate this OS can run and says which it skipped.
+`issue-sync`, `release`, `formal`; `all` runs every gate this OS can run and says which it skipped.
 CI jobs call the script after their toolchain setup, so a new check goes in the
 script, and a new component adds its pinned toolchain here, its case in the
 script and its CI job; one that ships on Windows also runs its gate on
@@ -123,6 +123,7 @@ Prerequisites the script does not install:
 - Issue sync: `pipx`.
 - Release (the updater signing and feed scripts): Node pinned in `.node-version`,
   `minisign`, and `pipx`.
+- Formal source hashes: Python pinned in `.python-version` (standard library only).
 
 Two required checks are not in the script:
 
