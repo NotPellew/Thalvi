@@ -18,7 +18,7 @@ the CLI below) and no Windows, and no microphone unless it is a GNOME run or `up
 H=.agents/skills/verify-thalvi/scripts/thalvi-desktop-rig
 ```
 
-Needs `bwrap`, `kwin_wayland`, `Hyprland`, `hyprctl`, `grim`, `wtype`, python3
+Needs `bwrap`, `kwin_wayland`, `Hyprland`, `hyprctl`, `wayland-info`, `grim`, `wtype`, python3
 with Pillow (for image checks), and a non-NVIDIA render node (`/dev/dri`). Run
 `$H help` for the commands. A GNOME run (below) instead needs `gnome-shell`,
 `pipewire`, `wireplumber`, `ffmpeg`, `xdpyinfo`, python3 with `gi` and GTK 3, and
