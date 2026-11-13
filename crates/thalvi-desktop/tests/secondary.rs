@@ -296,7 +296,11 @@ async fn openai_plain_json_still_works() {
     let mut session = recognizer.connect().await.expect("connected");
     session.send_frame(&ramp(0)).await.expect("buffered frame");
     session.finish_audio().await.expect("capture ended");
-    let events = [session.next_event().await.expect("final transcription")];
+    let event = tokio::time::timeout(Duration::from_secs(10), session.next_event())
+        .await
+        .expect("transcription completes")
+        .expect("final transcription");
+    let events = [event];
     assert_eq!(events, [RecognizerEvent::Final("plain answer".to_owned())]);
     assert_eq!(
         rx.recv().await.expect("one upload").path,
