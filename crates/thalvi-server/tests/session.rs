@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
-use axum::routing::get;
+use axum::routing::{get, post};
 use bytes::Bytes;
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -4107,6 +4107,57 @@ struct BriefingSource {
     hits: Arc<AtomicUsize>,
     headline: Arc<Mutex<String>>,
     gate: Arc<Notify>,
+    tools: Arc<ToolEndpoints>,
+}
+
+/// One scripted answer of the briefing source's search and item endpoints.
+struct ToolAnswer {
+    status: u16,
+    body: Value,
+    held: bool,
+}
+
+/// The search and item endpoints: the requests they saw and the answers they play, in order.
+#[derive(Default)]
+struct ToolEndpoints {
+    requests: Mutex<Vec<String>>,
+    answers: Mutex<VecDeque<ToolAnswer>>,
+    /// Requests whose handler was dropped, which is what a closed connection does.
+    abandoned: AtomicUsize,
+}
+
+async fn serve_tool(
+    axum::extract::State(tools): axum::extract::State<Arc<ToolEndpoints>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+) -> (axum::http::StatusCode, axum::Json<Value>) {
+    tools
+        .requests
+        .lock()
+        .unwrap()
+        .push(format!("{method} {uri}"));
+    let answer = tools.answers.lock().unwrap().pop_front();
+    let answer = answer.unwrap_or(ToolAnswer {
+        status: 404,
+        body: json!({}),
+        held: false,
+    });
+    if answer.held {
+        let _abandoned = CountOnDrop(Arc::clone(&tools));
+        std::future::pending::<()>().await;
+    }
+    (
+        axum::http::StatusCode::from_u16(answer.status).unwrap(),
+        axum::Json(answer.body),
+    )
+}
+
+struct CountOnDrop(Arc<ToolEndpoints>);
+
+impl Drop for CountOnDrop {
+    fn drop(&mut self) {
+        self.0.abandoned.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 impl BriefingSource {
@@ -4116,7 +4167,12 @@ impl BriefingSource {
         let gate = Arc::new(Notify::new());
         let (hits2, headline2, gate2) =
             (Arc::clone(&hits), Arc::clone(&headline), Arc::clone(&gate));
-        let app = Router::new().route(
+        let tools = Arc::new(ToolEndpoints::default());
+        let tool_routes = Router::new()
+            .route("/v1/briefings/search", post(serve_tool))
+            .route("/v1/briefings/items/{id}", get(serve_tool))
+            .with_state(Arc::clone(&tools));
+        let app = Router::new().merge(tool_routes).route(
             "/v1/briefings/latest",
             get(move || {
                 let (hits, headline, gate) = (
@@ -4150,7 +4206,35 @@ impl BriefingSource {
             hits,
             headline,
             gate,
+            tools,
         }
+    }
+
+    /// Queues the next answer of the search and item endpoints.
+    fn answer(&self, status: u16, body: Value) {
+        self.push_answer(ToolAnswer {
+            status,
+            body,
+            held: false,
+        });
+    }
+
+    /// Queues an answer that is never sent.
+    fn answer_held(&self) {
+        self.push_answer(ToolAnswer {
+            status: 200,
+            body: json!({}),
+            held: true,
+        });
+    }
+
+    fn push_answer(&self, answer: ToolAnswer) {
+        self.tools.answers.lock().unwrap().push_back(answer);
+    }
+
+    /// `METHOD /path` of every search or item request so far.
+    fn tool_requests(&self) -> Vec<String> {
+        self.tools.requests.lock().unwrap().clone()
     }
 
     fn hits(&self) -> usize {
@@ -4279,4 +4363,374 @@ async fn without_a_briefing_source_replies_carry_no_briefing() {
     let mut harness = start().await;
     ask(&mut harness, "hello", "Hi.").await;
     assert_eq!(harness.model.briefings(), ["off"]);
+}
+
+// ---------- briefing tools ----------
+
+fn briefing_call(id: &str, name: &str, arguments: &str) -> ModelChunk {
+    ModelChunk::Tool(ToolCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        arguments: arguments.to_string(),
+    })
+}
+
+fn recently() -> String {
+    (chrono::Utc::now() - chrono::TimeDelta::hours(2))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn found_items(count: usize) -> Value {
+    let items: Vec<Value> = (0..count)
+        .map(|n| {
+            json!({
+                "id": format!("topic-{n}"),
+                "headline": format!("Chip tariffs {n}"),
+                "summary": "Tariffs rise.",
+                "published_at": recently(),
+            })
+        })
+        .collect();
+    json!({ "items": items })
+}
+
+fn full_item() -> Value {
+    json!({
+        "id": "topic-0",
+        "headline": "Chip tariffs 0",
+        "summary": "Tariffs rise.",
+        "details": "Full text: the tariff is ten percent.",
+        "sources": [{"title": "Wire", "url": "https://example.test/wire"}],
+    })
+}
+
+async fn start_with_source(source: &BriefingSource, recording: RecordingConfig) -> Harness {
+    start_full(recording, None, false, false, Some(source.start_briefing())).await
+}
+
+fn tool_lines(data_dir: &ScratchDir, session: &str) -> Vec<Value> {
+    read_recorded_lines_blocking(&data_dir.0, session)
+        .into_iter()
+        .filter(|line| line["event"] == "tool")
+        .collect()
+}
+
+#[tokio::test]
+async fn a_search_then_a_read_feed_the_model_and_show_task_steps() {
+    let source = BriefingSource::start("Markets rally", false).await;
+    source.answer(200, found_items(1));
+    source.answer(200, full_item());
+    let data_dir = ScratchDir::new("briefing-tools");
+    let mut harness =
+        start_with_source(&source, recording_config(RecordKinds::default(), &data_dir)).await;
+    harness.model.add_script(vec![briefing_call(
+        "call-1",
+        "search_briefing",
+        r#"{"query":"chip tariffs"}"#,
+    )]);
+    harness.model.add_script(vec![briefing_call(
+        "call-2",
+        "read_briefing_item",
+        r#"{"id":"topic-0"}"#,
+    )]);
+    harness.model.add_script(vec![ModelChunk::Delta(
+        "The tariff is ten percent.".to_string(),
+    )]);
+    send_json(
+        &mut harness,
+        &json!({"type": "text", "text": "what about chip tariffs?"}),
+    )
+    .await;
+    let received = finish_reply(&mut harness).await;
+
+    assert_eq!(
+        tasks(&received),
+        vec![
+            json!({"id": "call-1", "label": "Searching the briefing", "status": "running"}),
+            json!({"id": "call-1", "label": "Searching the briefing", "status": "done", "detail": "1 match"}),
+            json!({"id": "call-2", "label": "Reading a briefing item", "status": "running"}),
+            json!({"id": "call-2", "label": "Reading a briefing item", "status": "done", "detail": "Read"}),
+        ]
+    );
+    assert_eq!(reply_text(&received), "The tariff is ten percent.");
+    assert_eq!(
+        source.tool_requests(),
+        [
+            "POST /v1/briefings/search",
+            "GET /v1/briefings/items/topic-0"
+        ]
+    );
+
+    let rounds = harness.model.tool_rounds();
+    assert_eq!(rounds.len(), 3);
+    for round in &rounds[..3] {
+        assert_eq!(
+            round.offered,
+            ["search_history", "search_briefing", "read_briefing_item"]
+        );
+    }
+    let shown = |round: usize| -> Vec<(String, Value)> {
+        rounds[round]
+            .results
+            .iter()
+            .map(|result| {
+                (
+                    result.call.id.clone(),
+                    serde_json::from_str(&result.content).unwrap(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(rounds[0].results, []);
+    let after_search = shown(1);
+    assert_eq!(after_search[0].0, "call-1");
+    assert_eq!(after_search[0].1["items"][0]["headline"], "Chip tariffs 0");
+    assert!(
+        after_search[0].1["note"]
+            .as_str()
+            .unwrap()
+            .contains("not instructions")
+    );
+    let after_read = shown(2);
+    assert_eq!(
+        after_read
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["call-1", "call-2"]
+    );
+    assert_eq!(
+        after_read[1].1["item"]["details"],
+        "Full text: the tariff is ten percent."
+    );
+    assert_eq!(after_read[1].1["item"]["sources"][0]["title"], "Wire");
+
+    let session = harness.session_id.clone();
+    harness.client.close(None).await.unwrap();
+    wait_closed(&harness, 1).await;
+    assert!(
+        find_session_files(&data_dir.0, &session).is_empty(),
+        "disabled metrics wrote nothing"
+    );
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn every_tool_outcome_is_recorded_without_what_was_asked_or_returned() {
+    let source = BriefingSource::start("Markets rally", false).await;
+    source.answer(200, found_items(2));
+    source.answer(200, json!({"items": []}));
+    source.answer(404, json!({}));
+    source.answer(500, json!({"error": "stack trace with secret-detail"}));
+    let data_dir = ScratchDir::new("briefing-metrics");
+    let mut harness = start_with_source(&source, recording_config(metrics_only(), &data_dir)).await;
+    harness.model.add_script(vec![
+        briefing_call("c1", "search_briefing", r#"{"query":"private-topic"}"#),
+        briefing_call("c2", "search_briefing", r#"{"query":"nothing"}"#),
+        briefing_call("c3", "read_briefing_item", r#"{"id":"secret-id"}"#),
+        briefing_call("c4", "read_briefing_item", r#"{"id":"other-id"}"#),
+    ]);
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("Done.".to_string())]);
+    send_json(&mut harness, &json!({"type": "text", "text": "look"})).await;
+    let received = finish_reply(&mut harness).await;
+    let details: Vec<Value> = tasks(&received)
+        .into_iter()
+        .filter(|step| step["status"] != "running")
+        .map(|step| json!([step["status"], step["detail"]]))
+        .collect();
+    assert_eq!(
+        details,
+        [
+            json!(["done", "2 matches"]),
+            json!(["done", "No matches"]),
+            json!(["failed", "That briefing item is no longer available."]),
+            json!(["failed", "Couldn't reach the briefing."]),
+        ]
+    );
+
+    let session = harness.session_id.clone();
+    wait_until(|| tool_lines(&data_dir, &session).len() == 4).await;
+    let lines = tool_lines(&data_dir, &session);
+    let outcomes: Vec<(&str, &str, Option<u64>)> = lines
+        .iter()
+        .map(|line| {
+            (
+                line["tool"].as_str().unwrap(),
+                line["outcome"].as_str().unwrap(),
+                line["matches"].as_u64(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("search_briefing", "ok", Some(2)),
+            ("search_briefing", "empty", Some(0)),
+            ("read_briefing_item", "not_found", None),
+            ("read_briefing_item", "error", None),
+        ]
+    );
+    for line in &lines {
+        assert_eq!(line["turn"], 1);
+        assert!(line["total_ms"].is_u64());
+        let mut keys: Vec<&str> = line
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.retain(|key| !matches!(*key, "ts_ms" | "session" | "event" | "matches"));
+        keys.sort_unstable();
+        assert_eq!(keys, ["outcome", "tool", "total_ms", "turn"], "{line}");
+    }
+    let everything = std::fs::read_to_string(
+        find_session_files(&data_dir.0, &session)
+            .into_iter()
+            .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .unwrap(),
+    )
+    .unwrap();
+    for secret in [
+        "private-topic",
+        "secret-id",
+        "other-id",
+        "Chip tariffs",
+        "secret-detail",
+        "test-token",
+    ] {
+        assert!(!everything.contains(secret), "{secret} leaked into metrics");
+    }
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn a_source_that_never_answers_times_out_in_five_seconds_and_the_next_turn_works() {
+    let source = BriefingSource::start("Markets rally", false).await;
+    source.answer_held();
+    source.answer(200, found_items(1));
+    let data_dir = ScratchDir::new("briefing-timeout");
+    let mut harness = start_with_source(&source, recording_config(metrics_only(), &data_dir)).await;
+    harness.model.add_script(vec![briefing_call(
+        "call-1",
+        "search_briefing",
+        r#"{"query":"tariffs"}"#,
+    )]);
+    harness.model.add_script(vec![ModelChunk::Delta(
+        "I couldn't reach your briefing.".to_string(),
+    )]);
+    tokio::time::pause();
+    send_json(&mut harness, &json!({"type": "text", "text": "tariffs?"})).await;
+    wait_until(|| source.tool_requests().len() == 1).await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+    tokio::time::resume();
+    let received = finish_reply(&mut harness).await;
+    assert_eq!(next_resting_state(&mut harness.client).await, "idle");
+
+    let steps = tasks(&received);
+    assert_eq!(steps[1]["status"], "failed");
+    assert_eq!(steps[1]["detail"], "Couldn't reach the briefing.");
+    assert_eq!(reply_text(&received), "I couldn't reach your briefing.");
+    let rounds = harness.model.tool_rounds();
+    let result: Value = serde_json::from_str(&rounds[1].results[0].content).unwrap();
+    assert_eq!(result["error"], "Couldn't reach the briefing.");
+
+    harness.model.add_script(vec![briefing_call(
+        "call-2",
+        "search_briefing",
+        r#"{"query":"tariffs"}"#,
+    )]);
+    ask(&mut harness, "again?", "Tariffs rise.").await;
+    assert_eq!(source.tool_requests().len(), 2);
+    let session = harness.session_id.clone();
+    wait_until(|| tool_lines(&data_dir, &session).len() == 2).await;
+    let lines = tool_lines(&data_dir, &session);
+    assert_eq!(lines[0]["outcome"], "timeout");
+    assert!((5000..6000).contains(&lines[0]["total_ms"].as_u64().unwrap()));
+    assert_eq!(lines[1]["outcome"], "ok");
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn cancelling_aborts_the_source_call_records_interrupted_and_the_next_turn_works() {
+    let source = BriefingSource::start("Markets rally", false).await;
+    source.answer_held();
+    let data_dir = ScratchDir::new("briefing-cancel");
+    let mut harness = start_with_source(&source, recording_config(metrics_only(), &data_dir)).await;
+    harness.model.add_script(vec![briefing_call(
+        "call-1",
+        "search_briefing",
+        r#"{"query":"tariffs"}"#,
+    )]);
+    send_json(&mut harness, &json!({"type": "text", "text": "tariffs?"})).await;
+    collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "task" && v["step"]["status"] == "running")
+    })
+    .await;
+    wait_until(|| source.tool_requests().len() == 1).await;
+    send_json(&mut harness, &json!({"type": "cancel"})).await;
+    let received = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "idle"),
+    )
+    .await;
+    assert!(has_type(&received, "interrupted"), "{received:?}");
+    wait_until(|| source.tools.abandoned.load(Ordering::SeqCst) == 1).await;
+
+    ask(&mut harness, "never mind", "All right.").await;
+    let session = harness.session_id.clone();
+    wait_until(|| tool_lines(&data_dir, &session).len() == 1).await;
+    let lines = tool_lines(&data_dir, &session);
+    assert_eq!(lines[0]["outcome"], "interrupted");
+    assert!(lines[0].get("matches").is_none());
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn without_a_source_or_in_a_private_conversation_only_history_search_is_offered() {
+    let source = BriefingSource::start("Markets rally", false).await;
+    source.answer(200, found_items(1));
+    let fabricated = |harness: &Harness| {
+        harness.model.add_script(vec![
+            briefing_call("c1", "search_briefing", r#"{"query":"tariffs"}"#),
+            briefing_call("c2", "read_briefing_item", r#"{"id":"topic-0"}"#),
+        ]);
+        harness
+            .model
+            .add_script(vec![ModelChunk::Delta("I can't.".to_string())]);
+    };
+
+    let mut unconfigured = start().await;
+    fabricated(&unconfigured);
+    send_json(&mut unconfigured, &json!({"type": "text", "text": "news?"})).await;
+    let received = finish_reply(&mut unconfigured).await;
+    assert!(
+        tasks(&received)
+            .iter()
+            .filter(|step| step["status"] == "failed")
+            .all(|step| step["detail"] == "That tool doesn't exist.")
+    );
+    for round in unconfigured.model.tool_rounds() {
+        assert_eq!(round.offered, ["search_history"]);
+    }
+    unconfigured.server.abort();
+
+    let mut harness = start_with_source(&source, RecordingConfig::disabled()).await;
+    open_private(&mut harness).await;
+    fabricated(&harness);
+    send_json(&mut harness, &json!({"type": "text", "text": "news?"})).await;
+    let received = finish_reply(&mut harness).await;
+    assert_eq!(
+        tasks(&received)
+            .iter()
+            .filter(|step| step["status"] == "failed")
+            .count(),
+        2
+    );
+    for round in harness.model.tool_rounds() {
+        assert_eq!(round.offered, ["search_history"]);
+    }
+    assert_eq!(source.tool_requests(), Vec::<String>::new());
+    harness.server.abort();
 }

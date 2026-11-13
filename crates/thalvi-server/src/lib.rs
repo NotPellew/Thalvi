@@ -2,6 +2,9 @@
 
 pub mod api;
 pub mod briefing;
+#[cfg(test)]
+mod briefing_fake;
+pub mod briefing_tools;
 pub mod config;
 pub mod heard;
 pub mod history;
