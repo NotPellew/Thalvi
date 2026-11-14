@@ -2301,7 +2301,7 @@ mod tests {
         assert_eq!(
             unknown,
             json!({"ok": false, "took_effect": false,
-                "error": "That is not a settings page. The pages are speech, microphone, capture, feedback, tasks, history, app."})
+                "error": "That is not a settings page. The pages are listening, recognition, commands, chat, overlay, history, app."})
         );
         assert_eq!(
             rig.fake.shown.load(Ordering::SeqCst),
