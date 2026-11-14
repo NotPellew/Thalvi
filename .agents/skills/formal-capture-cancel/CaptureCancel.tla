@@ -5,11 +5,11 @@ CONSTANTS MaxControls, Scenario, DropCompletionGuard, ForgetEarlierStop, LeakExt
 Commands == {"cancel", "pause", "resume", "toggle", "apply", "restart", "quit"}
 VARIABLES phase, queue, sent, off, quit, preEnds, ended, intentOff,
           stopRequested, cancelPending, cueDone, cueAccepted, closeDone,
-          secondary, writing, result, delivered, extras, extra, merged
+          secondary, writing, result, delivered, extras, extra, merged, starting
 vars == <<phase, queue, sent, off, quit, preEnds, ended, intentOff,
           stopRequested, cancelPending, cueDone, cueAccepted, closeDone,
-          secondary, writing, result, delivered, extras, extra, merged>>
-extraVars == <<extras, extra, merged>>
+          secondary, writing, result, delivered, extras, extra, merged, starting>>
+extraVars == <<extras, extra, merged, starting>>
 
 NextOff(c, old) == CASE c = "pause" -> TRUE
                        [] c = "resume" -> FALSE
@@ -30,6 +30,9 @@ Init == /\ phase = "pre"
         \* `extras`: streaming extras are on. Without `secondary` they exist but the merge does not run
         \* (a scratched capture, or one with no words of its own).
         /\ extras \in BOOLEAN /\ extra = "none" /\ merged = FALSE
+        \* `starting`: the recognizer loads a model on this computer, so Engine::start waits for the
+        \* load with no time limit (a remote recognizer is abandoned after READY_TIMEOUT: a failure).
+        /\ starting \in BOOLEAN
 
 \* A producer can enqueue between any two receives, including drain iterations.
 Send(c) == /\ phase # "done" /\ sent < MaxControls
@@ -60,7 +63,7 @@ PreEmpty == /\ phase = "pre" /\ queue = <<>>
             /\ extra' = IF ~preEnds /\ extras THEN "open" ELSE extra
             /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                            stopRequested, cancelPending, cueDone, cueAccepted,
-                           closeDone, secondary, writing, result, delivered, extras, merged>>
+                           closeDone, secondary, writing, result, delivered, extras, merged, starting>>
 
 \* The engine is Pending here: capture, ending join, second pass or writing.
 Receive == /\ phase \in {"active", "ending", "secondary", "writing"}
@@ -76,20 +79,35 @@ Receive == /\ phase \in {"active", "ending", "secondary", "writing"}
                           cueDone, cueAccepted, closeDone, secondary, writing, result, delivered,
                           extraVars>>
 
+\* Engine::start with a model still loading: the select polls cancellation first and has no time
+\* limit, so this wait may last any number of steps. It ends when the model is ready, when the load
+\* fails or reaches a download (a failed capture that delivers nothing, ending in conclude, which
+\* cancels the extras), or by a cancel observed first (ActiveCancelled).
+Loaded == /\ phase = "active" /\ starting /\ ~cancelPending /\ starting' = FALSE
+          /\ UNCHANGED <<phase, queue, sent, off, quit, preEnds, ended, intentOff,
+                         stopRequested, cancelPending, cueDone, cueAccepted,
+                         closeDone, secondary, writing, result, delivered, extras, extra, merged>>
+LoadFailed == /\ phase = "active" /\ starting /\ ~cancelPending
+              /\ phase' = "finish" /\ result' = "failed" /\ starting' = FALSE
+              /\ extra' = Released(extra)
+              /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
+                             stopRequested, cancelPending, cueDone, cueAccepted,
+                             closeDone, secondary, writing, delivered, extras, merged>>
+
 \* Abstract the pre-accept capture awaits: observed cancellation cannot accept. Engine::conclude
 \* sends Finish to the extras when the merge will run, and cancels them when it will not.
-Accept == /\ phase = "active" /\ ~cancelPending /\ phase' = "ending"
+Accept == /\ phase = "active" /\ ~starting /\ ~cancelPending /\ phase' = "ending"
           /\ extra' = IF extras /\ ~secondary THEN Released(extra) ELSE extra
           /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                          stopRequested, cancelPending, cueDone, cueAccepted,
-                         closeDone, secondary, writing, result, delivered, extras, merged>>
+                         closeDone, secondary, writing, result, delivered, extras, merged, starting>>
 \* Every end without an accept (cancel, failure, "never mind") cancels the extras in conclude.
 ActiveCancelled == /\ phase = "active" /\ cancelPending
                    /\ phase' = "finish" /\ result' = "cancelled"
                    /\ extra' = Released(extra)
                    /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                   stopRequested, cancelPending, cueDone, cueAccepted,
-                                  closeDone, secondary, writing, delivered, extras, merged>>
+                                  closeDone, secondary, writing, delivered, extras, merged, starting>>
 
 AfterEnding == IF secondary THEN "secondary" ELSE IF writing THEN "writing" ELSE "finish"
 
@@ -104,7 +122,7 @@ CueReturns == /\ phase = "ending" /\ ~cueDone
               /\ extra' = IF phase' = "finish" /\ result' = "cancelled" THEN Released(extra) ELSE extra
               /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                              stopRequested, cancelPending, closeDone, secondary, writing, delivered,
-                             extras, merged>>
+                             extras, merged, starting>>
 
 \* end_with's join retains the cue's earlier bool while close is Pending.
 CloseReturns == /\ phase = "ending" /\ ~closeDone
@@ -116,7 +134,7 @@ CloseReturns == /\ phase = "ending" /\ ~closeDone
                 /\ extra' = IF phase' = "finish" /\ result' = "cancelled" THEN Released(extra) ELSE extra
                 /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                stopRequested, cancelPending, cueDone, cueAccepted,
-                               secondary, writing, delivered, extras, merged>>
+                               secondary, writing, delivered, extras, merged, starting>>
 
 \* Second-pass completion and writing completion are distinct cancellation-first awaits. A cancel
 \* here cancels the extras still running (Streams::cancel); a merge that ran leaves the ones it did
@@ -130,7 +148,7 @@ SecondaryReturns == /\ phase = "secondary"
                     /\ merged' = (~cancelPending /\ extras)
                     /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                    stopRequested, cancelPending, cueDone, cueAccepted,
-                                   closeDone, secondary, writing, delivered, extras>>
+                                   closeDone, secondary, writing, delivered, extras, starting>>
 
 WritingReturns == /\ phase = "writing" /\ phase' = "finish"
                   /\ result' = IF cancelPending THEN "cancelled" ELSE "accepted"
@@ -148,7 +166,7 @@ FinishEmpty == /\ phase = "finish" /\ queue = <<>> /\ phase' = "done"
                               closeDone, secondary, writing, result, extraVars>>
 
 Next == (\E c \in Commands : Send(c)) \/ DrainOne \/ PreEmpty \/ Receive
-        \/ Accept \/ ActiveCancelled \/ CueReturns \/ CloseReturns
+        \/ Loaded \/ LoadFailed \/ Accept \/ ActiveCancelled \/ CueReturns \/ CloseReturns
         \/ SecondaryReturns \/ WritingReturns \/ FinishEmpty
 Spec == Init /\ [][Next]_vars
 NoDeliveryAfterStop == delivered => ~stopRequested
@@ -157,6 +175,8 @@ ExtrasNeverLeftOpen == phase = "done" => extra # "open"
 \* A capture that ended cancelled before its merge finished leaves no extra session running.
 ReleasedWhenCancelled == (phase = "done" /\ result = "cancelled" /\ ~merged)
                          => extra \in {"none", "released"}
+\* Nothing is accepted while the model is still loading.
+AcceptedOnlyAfterLoad == phase \in {"ending", "secondary", "writing"} => ~starting
 \* Only a merge that ran leaves extras behind, and what it left feeds nothing.
 LateOnlyAfterMerge == extra = "late" => merged
 =============================================================================

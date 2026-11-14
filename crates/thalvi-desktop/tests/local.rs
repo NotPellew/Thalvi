@@ -21,6 +21,7 @@ use thalvi_desktop::phrases::WordList;
 use thalvi_desktop::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
 use thalvi_desktop::report::UserError;
 use thalvi_desktop::transducer::{SpeechChoice, TransducerSource};
+use tokio::sync::Notify;
 
 const WAIT: Duration = Duration::from_secs(5);
 const FRAME: Frame = [0; FRAME_SAMPLES];
@@ -41,6 +42,9 @@ struct Fake {
 struct Source {
     failures: AtomicUsize,
     fakes: Mutex<VecDeque<Fake>>,
+    /// The first load to start reports this step and waits to be released.
+    held: Mutex<Option<(Step, Arc<Notify>)>>,
+    started: AtomicUsize,
 }
 
 impl ModelSource for Source {
@@ -50,24 +54,36 @@ impl ModelSource for Source {
         &self,
         step: impl Fn(Step) + Send + Sync,
     ) -> impl Future<Output = Result<Fake, RecognizerError>> + Send {
+        self.started.fetch_add(1, Ordering::SeqCst);
         step(Step::Reading);
-        let failing = self
-            .failures
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
-                left.checked_sub(1)
-            })
-            .is_ok();
-        std::future::ready(if failing {
-            Err(RecognizerError::said(
-                "Could not download the speech model.",
-            ))
-        } else {
-            self.fakes
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .pop_front()
-                .ok_or_else(|| RecognizerError::said("The fake source has no model left."))
-        })
+        let held = self
+            .held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        async move {
+            if let Some((held, release)) = held {
+                step(held);
+                release.notified().await;
+            }
+            let failing = self
+                .failures
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
+            if failing {
+                Err(RecognizerError::said(
+                    "Could not download the speech model.",
+                ))
+            } else {
+                self.fakes
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .pop_front()
+                    .ok_or_else(|| RecognizerError::said("The fake source has no model left."))
+            }
+        }
     }
 }
 
@@ -177,6 +193,8 @@ fn rig_on(
             Source {
                 failures: AtomicUsize::new(failures),
                 fakes: Mutex::new(VecDeque::from([fake])),
+                held: Mutex::new(None),
+                started: AtomicUsize::new(0),
             },
             "fake-model",
             recorder.metrics(),
@@ -654,4 +672,67 @@ async fn the_load_reports_how_many_nodes_of_each_network_the_gpu_took() {
     ] {
         assert_eq!(load[key], value, "{key}");
     }
+}
+
+#[tokio::test]
+async fn a_load_goes_on_after_the_dictation_that_began_it_gives_up_and_a_failed_one_is_not_left_downloading()
+ {
+    let downloading = Step::Downloading(Export::Cpu, 40);
+    for failures in [0, 1] {
+        let rig = rig(&format!("detached-{failures}"), dictation, None, failures);
+        let release = Arc::new(Notify::new());
+        *rig.recognizer
+            .source()
+            .held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some((downloading, Arc::clone(&release)));
+        let mut steps = rig.recognizer.steps();
+        tokio::select! {
+            _ = rig.recognizer.connect() => panic!("the download has not finished"),
+            seen = steps.wait_for(|step| *step == downloading) => seen.map(|_| ()).expect("steps"),
+        }
+        // The dictation stopped waiting, which dropped its connect.
+        release.notify_one();
+        if failures == 0 {
+            let session = tokio::time::timeout(WAIT, rig.recognizer.connect())
+                .await
+                .expect("in time")
+                .expect("the model the first load fetched");
+            session.cancel().await;
+            assert_eq!(rig.recognizer.source().started.load(Ordering::SeqCst), 1);
+            assert!(rig.recognizer.device().is_some());
+        } else {
+            tokio::time::timeout(WAIT, steps.wait_for(|step| *step == Step::Reading))
+                .await
+                .expect("in time")
+                .expect("steps");
+            assert!(rig.recognizer.device().is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn everyone_waiting_for_a_load_gets_its_outcome_instead_of_starting_another() {
+    let rig = rig("shared-load", dictation, None, 1);
+    let release = Arc::new(Notify::new());
+    *rig.recognizer
+        .source()
+        .held
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some((Step::Reading, Arc::clone(&release)));
+    let (preload, dictation, ()) = tokio::join!(
+        rig.recognizer.load(),
+        async { rig.recognizer.connect().await.err() },
+        async {
+            tokio::task::yield_now().await;
+            release.notify_one();
+        }
+    );
+    let failed = "Could not download the speech model.";
+    assert_eq!(preload.expect_err("the load fails").to_string(), failed);
+    assert_eq!(
+        dictation.expect("the dictation fails too").to_string(),
+        failed
+    );
+    assert_eq!(rig.recognizer.source().started.load(Ordering::SeqCst), 1);
 }

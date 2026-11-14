@@ -27,6 +27,9 @@ pub enum Status {
     /// The wake word was heard and the recognizer is connecting.
     Starting {
         target: Option<String>,
+        /// The speech model is being read from disk; what the user says is kept until it is ready.
+        #[serde(skip)]
+        loading: bool,
     },
     Capturing {
         target: Option<String>,
@@ -261,7 +264,14 @@ impl View {
             (Mode::Idle | Mode::Done { .. } | Mode::Failed(_), engine) => match engine {
                 EngineState::Listening if self.wake_words => Status::Listening,
                 EngineState::Listening => Status::KeyboardOnly,
-                EngineState::StartingCapture => Status::Starting { target },
+                EngineState::StartingCapture => Status::Starting {
+                    target,
+                    loading: false,
+                },
+                EngineState::LoadingModel => Status::Starting {
+                    target,
+                    loading: true,
+                },
                 EngineState::Capturing {
                     committed,
                     partial,
@@ -354,6 +364,7 @@ mod tests {
                 false,
                 Status::Starting {
                     target: Some(kitty()),
+                    loading: false,
                 },
             ),
             (
@@ -388,6 +399,7 @@ mod tests {
                 EngineState::StartingCapture,
                 Status::Starting {
                     target: Some(kitty()),
+                    loading: false,
                 },
             ),
             (
@@ -552,10 +564,19 @@ mod tests {
                 },
             ),
             (
-                done,
+                done.clone(),
                 EngineState::StartingCapture,
                 Status::Starting {
                     target: Some(kitty()),
+                    loading: false,
+                },
+            ),
+            (
+                done,
+                EngineState::LoadingModel,
+                Status::Starting {
+                    target: Some(kitty()),
+                    loading: true,
                 },
             ),
             (
@@ -672,7 +693,8 @@ mod tests {
         assert_eq!(
             loading(Mode::Idle, EngineState::StartingCapture),
             Status::Starting {
-                target: Some(kitty())
+                target: Some(kitty()),
+                loading: false
             }
         );
     }
@@ -691,7 +713,10 @@ mod tests {
             (Status::Paused, json!({"state": "paused"})),
             (Status::KeyboardOnly, json!({"state": "keyboardOnly"})),
             (
-                Status::Starting { target: None },
+                Status::Starting {
+                    target: None,
+                    loading: false,
+                },
                 json!({"state": "starting", "target": null}),
             ),
             (

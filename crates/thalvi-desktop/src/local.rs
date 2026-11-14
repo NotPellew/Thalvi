@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tokio::sync::{mpsc as events, watch};
+use tokio::task::JoinSet;
 
 use crate::device::{Device, Placement, Step};
 use crate::frame::Frame;
@@ -56,13 +57,22 @@ pub trait ModelSource: Send + Sync + 'static {
 /// The model a recognizer has loaded, if it still has one.
 type Loaded<M> = Arc<Mutex<Option<Arc<M>>>>;
 
+/// How the load in progress ended, once it has.
+type Outcome<M> = Option<Result<Arc<M>, RecognizerError>>;
+
 /// Recognizes speech on this machine, one recognition at a time.
 pub struct LocalRecognizer<S: ModelSource> {
+    shared: Arc<Shared<S>>,
+    /// The loads under way, which go on when the dictation that asked for one is gone and stop with the recognizer.
+    loads: Mutex<JoinSet<()>>,
+}
+
+struct Shared<S: ModelSource> {
     source: S,
     /// Emptied when a recognition on the model fails, so the next one plans and loads again.
     model: Loaded<S::Model>,
-    /// Held while a load runs, so concurrent callers share it.
-    loading: tokio::sync::Mutex<()>,
+    /// The load in progress, which every caller that needs the model waits for, so all of them get its outcome.
+    running: Mutex<Option<watch::Receiver<Outcome<S::Model>>>>,
     steps: watch::Sender<Step>,
     name: String,
     metrics: Metrics,
@@ -73,43 +83,39 @@ impl<S: ModelSource> LocalRecognizer<S> {
     #[must_use]
     pub fn new(source: S, name: impl Into<String>, metrics: Metrics) -> Self {
         Self {
-            source,
-            model: Arc::default(),
-            loading: tokio::sync::Mutex::new(()),
-            steps: watch::channel(Step::Reading).0,
-            name: name.into(),
-            metrics,
+            shared: Arc::new(Shared {
+                source,
+                model: Arc::default(),
+                running: Mutex::new(None),
+                steps: watch::channel(Step::Reading).0,
+                name: name.into(),
+                metrics,
+            }),
+            loads: Mutex::new(JoinSet::new()),
         }
     }
 
     #[must_use]
     pub fn source(&self) -> &S {
-        &self.source
+        &self.shared.source
     }
 
     /// The name that labels the model in metrics.
     #[must_use]
     pub fn name(&self) -> &str {
-        &self.name
+        &self.shared.name
     }
 
-    /// What the load in progress is doing; it changes only while [`load`](Self::load) or a dictation loads.
+    /// What the load in progress is doing; [`Step::Reading`] while none runs.
     #[must_use]
     pub fn steps(&self) -> watch::Receiver<Step> {
-        self.steps.subscribe()
+        self.shared.steps.subscribe()
     }
 
     /// Where the model runs now, or `None` when it is not loaded: not yet, failed to load, or lost to an error.
     #[must_use]
     pub fn device(&self) -> Option<Device> {
-        self.loaded().map(|model| model.device())
-    }
-
-    fn loaded(&self) -> Option<Arc<S::Model>> {
-        self.model
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.shared.loaded().map(|model| model.device())
     }
 
     /// Fetches and loads the model now instead of at the first dictation; later calls are free.
@@ -120,21 +126,70 @@ impl<S: ModelSource> LocalRecognizer<S> {
         self.model().await.map(|_| ())
     }
 
+    /// The model, loaded by a task of its own: a caller that stops waiting leaves the load running.
     async fn model(&self) -> Result<Arc<S::Model>, RecognizerError> {
-        if let Some(model) = self.loaded() {
+        if let Some(model) = self.shared.loaded() {
             return Ok(model);
         }
-        let _loading = self.loading.lock().await;
+        let mut outcome = {
+            let mut running = self
+                .shared
+                .running
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            running
+                .get_or_insert_with(|| {
+                    let (done, outcome) = watch::channel(None);
+                    let shared = Arc::clone(&self.shared);
+                    self.loads
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .spawn(async move {
+                            let loaded = shared.load().await;
+                            shared
+                                .running
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .take();
+                            done.send_replace(Some(loaded));
+                        });
+                    outcome
+                })
+                .clone()
+        };
+        let ended = outcome
+            .wait_for(Option::is_some)
+            .await
+            .ok()
+            .and_then(|ended| ended.clone());
+        ended.unwrap_or_else(|| {
+            Err(RecognizerError::said(
+                "Loading the speech model stopped unexpectedly.",
+            ))
+        })
+    }
+}
+
+impl<S: ModelSource> Shared<S> {
+    fn loaded(&self) -> Option<Arc<S::Model>> {
+        self.model
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn tell(&self, step: Step) {
+        self.steps
+            .send_if_modified(|current| std::mem::replace(current, step) != step);
+    }
+
+    async fn load(&self) -> Result<Arc<S::Model>, RecognizerError> {
         if let Some(model) = self.loaded() {
             return Ok(model);
         }
         let started = Instant::now();
-        let tell = |step| {
-            self.steps
-                .send_if_modified(|current| std::mem::replace(current, step) != step);
-        };
-        tell(Step::Reading);
-        let loaded = self.source.load(tell).await;
+        self.tell(Step::Reading);
+        let loaded = self.source.load(|step| self.tell(step)).await;
         let fields = json!({"model": self.name});
         self.metrics.metric(
             Event::SpeechLoad,
@@ -150,6 +205,9 @@ impl<S: ModelSource> LocalRecognizer<S> {
                 Err(_) => fields,
             },
         );
+        if loaded.is_err() {
+            self.tell(Step::Reading);
+        }
         let model = Arc::new(loaded?);
         *self.model.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&model));
         Ok(model)
@@ -164,15 +222,15 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
         let (frames_tx, frames_rx) = mpsc::channel();
         let (events_tx, events_rx) = events::unbounded_channel();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let cache = Arc::clone(&self.model);
+        let cache = Arc::clone(&self.shared.model);
         let work = Work {
             stream: model.stream(),
             device: model.device(),
             frames: frames_rx,
             events: events_tx,
             cancelled: Arc::clone(&cancelled),
-            name: self.name.clone(),
-            metrics: self.metrics.clone(),
+            name: self.shared.name.clone(),
+            metrics: self.shared.metrics.clone(),
             forget: Box::new(move || {
                 *cache.lock().unwrap_or_else(PoisonError::into_inner) = None;
             }),
@@ -186,6 +244,10 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
             events: events_rx,
             cancelled,
         })
+    }
+
+    fn loading(&self) -> Option<watch::Receiver<Step>> {
+        Some(self.steps())
     }
 }
 

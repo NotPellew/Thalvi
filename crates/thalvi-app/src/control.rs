@@ -43,7 +43,11 @@ fn describe(icon: Icon) -> (&'static str, &'static str) {
 /// The state word for a bar: the engine's latest published state, never what was heard.
 /// An engine that stopped has no state to confirm, so that reads as an error.
 pub fn word(status: &watch::Receiver<Status>) -> &'static str {
-    if matches!(*status.borrow(), Status::Loading { .. }) && status.has_changed().is_ok() {
+    if matches!(
+        *status.borrow(),
+        Status::Loading { .. } | Status::Starting { loading: true, .. }
+    ) && status.has_changed().is_ok()
+    {
         return "loading";
     }
     let icon = if status.has_changed().is_err() {
@@ -157,6 +161,11 @@ mod tests {
         sender.send_replace(Status::Loading {
             notice: "private path".to_owned(),
             downloading: false,
+        });
+        assert_eq!(state(), "loading");
+        sender.send_replace(Status::Starting {
+            target: None,
+            loading: true,
         });
         assert_eq!(state(), "loading");
         sender.send_replace(Status::Listening);

@@ -326,7 +326,11 @@ fn cancel_mark(canvas: &mut Canvas, text: &mut Text, colors: &Palette, (x, middl
 fn pill_words(view: &View) -> (Tone, String, Option<&str>) {
     let words = |text: &str| text.to_owned();
     match &view.status {
-        Status::Starting { target } | Status::Capturing { target, .. } => {
+        Status::Starting {
+            target,
+            loading: true,
+        } => (Tone::Working, words("LOADING"), target.as_deref()),
+        Status::Starting { target, .. } | Status::Capturing { target, .. } => {
             (Tone::Live, words("LISTENING"), target.as_deref())
         }
         Status::Pending {

@@ -503,6 +503,7 @@ mod tests {
             (
                 Status::Starting {
                     target: target.clone(),
+                    loading: false,
                 },
                 Visibility::Show,
             ),

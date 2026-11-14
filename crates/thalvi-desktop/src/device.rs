@@ -194,6 +194,18 @@ pub enum Step {
     Downloading(Export, u8),
 }
 
+impl Step {
+    /// How far the download is, in whole percent, while the load is downloading.
+    #[must_use]
+    pub fn download_percent(self) -> Option<u8> {
+        match self {
+            Self::Reading => None,
+            Self::Fetching(_) => Some(0),
+            Self::Downloading(_, percent) => Some(percent),
+        }
+    }
+}
+
 /// How an attempt to load on the GPU failed.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Attempt<E> {
