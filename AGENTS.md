@@ -146,6 +146,7 @@ Locally, run checks in three stages; none replaces a required CI result.
     `.github/scripts/gates desktop-ui`.
   - Units `web`, `speech`: `.github/scripts/gates web`, `.github/scripts/gates speech`. Unit `issues`:
     `.github/scripts/gates issue-sync`.
+  - `none` (only Markdown outside `crates/`, `web/` and `speech/`): run no gate.
   - `all` (an empty, unreadable or shallow diff, or any path outside the mapped ones, such as
     `crates/thalvi-app/tauri.conf.json`, its icons and build files): `.github/scripts/gates all`, unnarrowed.
     That is the only case that builds the AppImage or NSIS package locally.

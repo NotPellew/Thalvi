@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Prints the units the changes from BASE to HEAD affect, space-separated, or
+# Prints the units the changes from BASE to HEAD affect, space-separated,
+# `none` when only Markdown outside crates/, web/ and speech/ changed, or
 # `all` when any change can affect everything or the diff can't be read.
 # Units: server desktop app desktop-ui web speech issues.
 set -euo pipefail
@@ -25,12 +26,23 @@ while IFS= read -r file; do
     web/*) units+=(web) ;;
     speech/* | compose.yaml) units+=(speech) ;;
     .github/scripts/issue-refs*) units+=(issues) ;;
+    *.md)
+      if [[ $file == crates/* || $file == web/* || $file == speech/* ]]; then
+        echo all
+        exit 0
+      fi
+      ;;
     *)
       echo all
       exit 0
       ;;
   esac
 done <<< "$files"
+
+if (( ${#units[@]} == 0 )); then
+  echo none
+  exit 0
+fi
 
 for unit in server desktop app desktop-ui web speech issues; do
   if [[ " ${units[*]} " == *" $unit "* ]]; then echo "$unit"; fi

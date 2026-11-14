@@ -274,7 +274,7 @@ areas your change touches. Editing rules are in
   and mutation runs on the Linux one, only read them. Why: a PR can read only its own and its base branch's caches,
   so per-PR copies left every new PR cold and filled the 10 GB limit. Rejected: saving on every PR.
 - **PRs run what changed; `main` runs everything.** A PR runs the steps its paths affect, and anything unmapped
-  runs all; `heavy.yml` runs every gate plus mutants on `main`, nightly and on request. Why: PRs get a fast answer,
+  runs all, except Markdown outside `crates/`, `web/` and `speech/`, which runs no unit; `heavy.yml` runs every gate plus mutants on `main`, nightly and on request. Why: PRs get a fast answer,
   and a slip past detection is caught on `main` with the commits since `verified`. Rejected: mutants on every PR.
 - **Local checks run in three stages.** Editing runs the closest check; before pushing, each component `changed origin/main HEAD` names runs `gates` once, with `TESTS` and `BUNDLE=false`, and only `all` (an unmapped diff) builds a package locally; PR CI and `main` are unchanged (13 Nov 2026).
   Why: in 54 PR server jobs the AppImage took a median 135 s of a 261 s gate (53%), and a branch ran the full gate 2.3 times on average.
