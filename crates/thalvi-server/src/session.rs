@@ -8,7 +8,8 @@ use axum::extract::ws::{Message, WebSocket};
 use bytes::Bytes;
 use futures_util::{SinkExt, Stream, StreamExt};
 use serde_json::json;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -26,6 +27,8 @@ use crate::tts::Tts;
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
+/// How long the recognizer may take to accept one audio frame before it counts as lost.
+const RECOGNIZER_SEND_WAIT: Duration = Duration::from_secs(10);
 const ACK_DELAY: Duration = Duration::from_millis(500);
 /// The web client clears this notice when the recognizer is ready again, so both sides must match.
 const RECOGNIZER_RETRY_NOTICE: &str = "Can't reach speech recognition. Trying again…";
@@ -245,6 +248,7 @@ impl TurnLog {
             next_turn,
             last_reply_turn: 0,
             last_reply_audio_bytes: 0,
+            frame_refusal_sent: false,
         }
     }
 
@@ -283,6 +287,8 @@ struct TurnLog {
     next_turn: u64,
     last_reply_turn: u64,
     last_reply_audio_bytes: usize,
+    /// Whether the client was already told once that a mic frame is malformed.
+    frame_refusal_sent: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -294,6 +300,8 @@ enum RecognizerState {
 
 struct RecognizerHandle {
     audio_tx: mpsc::Sender<Vec<u8>>,
+    /// Tells the recognizer task its audio channel is full, so it drops the connection now.
+    behind: Arc<Notify>,
     task: JoinHandle<()>,
     state: RecognizerState,
 }
@@ -705,7 +713,7 @@ async fn run_session<F, M, T>(
             client_message = stream.next() => {
                 match client_message {
                     Some(Ok(Message::Binary(audio))) => {
-                        forward_mic(&audio, recognizer.as_ref(), &mut turn_log);
+                        browser_gone = forward_mic(&audio, &mut sink, recognizer.as_mut(), &mut turn_log).await.err();
                     }
                     Some(Ok(Message::Text(text))) => {
                         browser_gone = handle_client_text(&text, &mut sink, &mut recognizer, &mut rec_rx, &factory, &mut choices, &mut history, &mut reply, &mut reply_rx, &mut client_audio, &model, &tts, &mut turn_log, &mut settings).await.err();
@@ -1000,23 +1008,42 @@ async fn recognizer_disconnected(
     }
 }
 
-/// Passes one mic frame to a ready recognizer, keeping it for turn clips.
-fn forward_mic(audio: &[u8], recognizer: Option<&RecognizerHandle>, turn_log: &mut TurnLog) {
+/// Passes one mic frame to a ready recognizer, keeping it for turn clips. The first malformed
+/// frame is answered with its plain reason; a full audio channel means the recognizer stopped
+/// reading, so the task is told to drop it and reconnect.
+async fn forward_mic(
+    audio: &[u8],
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    recognizer: Option<&mut RecognizerHandle>,
+    turn_log: &mut TurnLog,
+) -> Result<(), BrowserGone> {
     if let Err(reason) = validate_frame(audio) {
         tracing::debug!(bytes = audio.len(), reason, "mic frame refused");
-        return;
+        if !std::mem::replace(&mut turn_log.frame_refusal_sent, true) {
+            send_json(sink, &json!({"type": "error", "message": reason})).await?;
+        }
+        return Ok(());
     }
-    let forwarded = recognizer.is_some_and(|handle| {
-        handle.state == RecognizerState::Ready && handle.audio_tx.try_send(audio.to_vec()).is_ok()
-    });
-    if !forwarded {
+    let Some(handle) = recognizer.filter(|handle| handle.state == RecognizerState::Ready) else {
         tracing::debug!("mic frame dropped");
-        return;
+        return Ok(());
+    };
+    match handle.audio_tx.try_send(audio.to_vec()) {
+        Ok(()) => {
+            turn_log.forward_clock.push(audio.len(), Instant::now());
+            if turn_log.buffers_audio() {
+                turn_log.audio.push(audio);
+            }
+        }
+        Err(TrySendError::Full(_)) => {
+            tracing::warn!("recognizer stopped reading audio");
+            // Not ready until the task reports the loss, so only one signal is sent per connection.
+            handle.state = RecognizerState::Retrying;
+            handle.behind.notify_one();
+        }
+        Err(TrySendError::Closed(_)) => tracing::debug!("mic frame dropped"),
     }
-    turn_log.forward_clock.push(audio.len(), Instant::now());
-    if turn_log.buffers_audio() {
-        turn_log.audio.push(audio);
-    }
+    Ok(())
 }
 
 fn record_voice_turn(
@@ -1111,12 +1138,21 @@ where
 {
     let (audio_tx, audio_rx) = mpsc::channel::<Vec<u8>>(32);
     let (rec_tx, rec_rx) = mpsc::channel::<RecognizerMessage>(32);
+    let behind = Arc::new(Notify::new());
     let task = tokio::spawn(
-        run_recognizer(Arc::clone(factory), audio_rx, rec_tx, recorder).in_current_span(),
+        run_recognizer(
+            Arc::clone(factory),
+            audio_rx,
+            Arc::clone(&behind),
+            rec_tx,
+            recorder,
+        )
+        .in_current_span(),
     );
     (
         RecognizerHandle {
             audio_tx,
+            behind,
             task,
             state: RecognizerState::Connecting,
         },
@@ -2449,22 +2485,50 @@ async fn synthesize_sentence<T: Tts>(
     true
 }
 
-/// The metrics fields for a lost recognizer: a fixed category and whether reconnecting is
-/// allowed, never the provider's message, which may echo request or transcript details.
-fn stt_disconnect_fields(fatal: bool) -> serde_json::Value {
-    json!({"category": "recognizer_disconnect", "fatal": fatal})
+/// Why the session itself, not the recognizer, ended a connection.
+#[derive(Clone, Copy)]
+enum Lost {
+    /// A send did not complete within `RECOGNIZER_SEND_WAIT`.
+    Stalled,
+    /// The audio channel was full: the recognizer was 32 frames behind.
+    Behind,
 }
 
+impl Lost {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stalled => "stalled",
+            Self::Behind => "behind",
+        }
+    }
+}
+
+/// The metrics fields for a lost recognizer: a fixed category, whether reconnecting is
+/// allowed and, when the session ended the connection, why; never the provider's message,
+/// which may echo request or transcript details.
+fn stt_disconnect_fields(fatal: bool, lost: Option<Lost>) -> serde_json::Value {
+    let mut fields = json!({"category": "recognizer_disconnect", "fatal": fatal});
+    if let Some(lost) = lost {
+        fields["cause"] = json!(lost.as_str());
+    }
+    fields
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "recognizer state is passed explicitly rather than bundled into a context type"
+)]
 async fn note_disconnect(
     events: &mpsc::Sender<RecognizerMessage>,
     message: String,
     is_fatal: bool,
+    lost: Option<Lost>,
     backoff: &mut Duration,
     reconnect_at: &mut Option<Instant>,
     fatal: &mut bool,
     recorder: &Recorder,
 ) {
-    recorder.emit("stt_disconnect", stt_disconnect_fields(is_fatal));
+    recorder.emit("stt_disconnect", stt_disconnect_fields(is_fatal, lost));
     let _ = events
         .send(RecognizerMessage::Disconnected {
             message,
@@ -2517,7 +2581,7 @@ async fn attempt_reconnect<F>(
             );
             if error.is_fatal() {
                 *fatal = true;
-                recorder.emit("stt_disconnect", stt_disconnect_fields(true));
+                recorder.emit("stt_disconnect", stt_disconnect_fields(true, None));
                 let _ = events
                     .send(RecognizerMessage::Disconnected {
                         message: error.to_string(),
@@ -2580,6 +2644,7 @@ where
                 events,
                 error.to_string(),
                 is_fatal,
+                None,
                 backoff,
                 reconnect_at,
                 fatal,
@@ -2591,9 +2656,27 @@ where
     }
 }
 
+/// Sends one frame; `Some` is the loss to report: the send failed, took longer than
+/// `RECOGNIZER_SEND_WAIT`, or the session said the audio channel is full.
+async fn send_or_lose<R: Recognizer>(
+    rec: &mut R,
+    audio: &[u8],
+    behind: &Notify,
+) -> Option<(String, bool, Option<Lost>)> {
+    tokio::select! {
+        sent = tokio::time::timeout(RECOGNIZER_SEND_WAIT, rec.send_audio(audio)) => match sent {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some((error.to_string(), error.is_fatal(), None)),
+            Err(_) => Some(("recognizer stopped reading audio".to_string(), false, Some(Lost::Stalled))),
+        },
+        () = behind.notified() => Some(("recognizer fell behind".to_string(), false, Some(Lost::Behind))),
+    }
+}
+
 async fn run_recognizer<F>(
     factory: Arc<F>,
     mut audio_rx: mpsc::Receiver<Vec<u8>>,
+    behind: Arc<Notify>,
     events: mpsc::Sender<RecognizerMessage>,
     recorder: Recorder,
 ) where
@@ -2640,17 +2723,18 @@ async fn run_recognizer<F>(
                     }
                     return;
                 };
-                let send_result = match &mut recognizer {
-                    Some(rec) => Some(rec.send_audio(&audio).await),
+                let lost = match &mut recognizer {
+                    Some(rec) => send_or_lose(rec, &audio, &behind).await,
                     None => None,
                 };
-                if let Some(Err(error)) = send_result {
+                if let Some((message, is_fatal, cause)) = lost {
+                    // Dropped, not closed: a close would wait on the same stalled socket.
                     recognizer = None;
-                    let is_fatal = error.is_fatal();
                     note_disconnect(
                         &events,
-                        error.to_string(),
+                        message,
                         is_fatal,
+                        cause,
                         &mut backoff,
                         &mut reconnect_at,
                         &mut fatal,
@@ -2679,6 +2763,7 @@ async fn run_recognizer<F>(
                             &events,
                             message,
                             is_fatal,
+                            None,
                             &mut backoff,
                             &mut reconnect_at,
                             &mut fatal,
@@ -3139,6 +3224,7 @@ mod tests {
                     marker,
                 }),
                 audio_rx,
+                Arc::new(Notify::new()),
                 events_tx,
                 recording.recorder.clone(),
             ));
