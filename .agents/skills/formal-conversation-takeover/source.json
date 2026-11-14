@@ -13,7 +13,7 @@
       ]
     },
     "crates/thalvi-server/src/session.rs": {
-      "sha256": "b7ed14e5d1f53042391d6a039bfbe8229762aaa610c3dbaaf2447682e8307d39",
+      "sha256": "1126a68a6303ef826a0f7993a463396df19d42cc25faec8a46fa560bd480475f",
       "functions": [
         "Retention::open",
         "Persistence::finish",
