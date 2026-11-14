@@ -231,6 +231,10 @@ areas your change touches. Editing rules are in
   old transcripts with summaries and keeps durable facts in a separate editable
   store. Why: bound retention without losing useful context. Rejected:
   automatic deletion by default or hiding learnings inside summaries.
+- **Model and speech requests fail on a stall, not on total time.** A request fails when no byte
+  arrives for 30 s (model) or 10 s (speech), headers and every chunk gap included; the user gets a
+  plain notice and metrics record `timeout`. Why: replies stream for as long as they need. Rejected: a
+  total deadline (cuts long replies and tool rounds).
 - **Per-device voices on the configured engine.** `TTS_VOICES` offers names;
   browsers preview and save their own choice. Why: simple personalization
   without shared-device surprises. Rejected: runtime engine switching and a

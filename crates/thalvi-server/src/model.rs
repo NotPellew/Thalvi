@@ -1,8 +1,8 @@
 //! Owns the chat model trait and the streamed Chat Completions client.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::fmt::Display;
 use std::pin::Pin;
+use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -55,13 +55,24 @@ impl ChatMessage {
     }
 }
 
+/// How long the model endpoint may go without sending a byte before the call fails.
+const STALL_DEADLINE: Duration = Duration::from_secs(30);
+
 /// A model call failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelError(pub String);
+pub enum ModelError {
+    /// No byte arrived within the stall deadline.
+    Stalled,
+    /// The call failed for the reason given, in words fit for the user.
+    Failed(String),
+}
 
 impl std::fmt::Display for ModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::Stalled => f.write_str("the language model stopped responding"),
+            Self::Failed(reason) => f.write_str(reason),
+        }
     }
 }
 
@@ -230,7 +241,7 @@ impl<E> SseState<E> {
                 self.done = true;
             }
             SseLine::Failed(reason) => {
-                self.pending.push_back(Err(ModelError(reason)));
+                self.pending.push_back(Err(ModelError::Failed(reason)));
                 self.done = true;
             }
             SseLine::Done => {
@@ -283,7 +294,7 @@ impl ToolAccumulator {
         let mut finished = Vec::new();
         for call in std::mem::take(&mut self.calls).into_values() {
             if call.id.is_empty() || call.name.is_empty() {
-                return Err(ModelError(
+                return Err(ModelError::Failed(
                     "the language model sent an incomplete tool call".to_string(),
                 ));
             }
@@ -330,13 +341,19 @@ impl OpenAiChatModel {
         reasoning_effort: Option<String>,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: stall_client(STALL_DEADLINE),
             base_url,
             model,
             api_key,
             reasoning_effort,
             system_prompt: SYSTEM_PROMPT.to_string(),
         }
+    }
+
+    #[cfg(test)]
+    fn with_stall_deadline(mut self, deadline: Duration) -> Self {
+        self.client = stall_client(deadline);
+        self
     }
 
     /// Replaces the voice-assistant system prompt, for calls that are not replies.
@@ -423,7 +440,10 @@ impl OpenAiChatModel {
             request = request.bearer_auth(&self.api_key);
         }
         let response = request.send().await.map_err(|error| {
-            ModelError(format!(
+            if error.is_timeout() {
+                return ModelError::Stalled;
+            }
+            ModelError::Failed(format!(
                 "the language model could not be reached: {}",
                 error.without_url()
             ))
@@ -431,14 +451,30 @@ impl OpenAiChatModel {
         if !response.status().is_success() {
             let status = response.status();
             let _ = response.text().await;
-            return Err(ModelError(format!(
+            return Err(ModelError::Failed(format!(
                 "the language model returned an error ({status})"
             )));
         }
-        Ok(decode_events(
-            response.bytes_stream().map_err(reqwest::Error::without_url),
-        ))
+        Ok(decode_events(response.bytes_stream().map_err(|error| {
+            if error.is_timeout() {
+                return ModelError::Stalled;
+            }
+            ModelError::Failed(format!(
+                "the language model stream failed: {}",
+                error.without_url()
+            ))
+        })))
     }
+}
+
+/// A client that fails a request when no byte arrives for `deadline`, however long the
+/// reply runs in total.
+pub(crate) fn stall_client(deadline: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(deadline)
+        .read_timeout(deadline)
+        .build()
+        .unwrap_or_default()
 }
 
 /// A message body holding only the audio, as one `OpenAI` `input_audio` part.
@@ -450,12 +486,9 @@ fn audio_content(pcm: &[u8]) -> Value {
 }
 
 /// Decodes an SSE byte stream into text deltas and completed tool calls.
-fn decode_events<E>(
-    bytes: impl Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
-) -> EventStream
-where
-    E: Display + Send + 'static,
-{
+fn decode_events(
+    bytes: impl Stream<Item = Result<bytes::Bytes, ModelError>> + Send + 'static,
+) -> EventStream {
     let state = SseState {
         bytes: Box::pin(bytes),
         buffer: Vec::new(),
@@ -488,18 +521,13 @@ where
                     }
                     Some(Err(error)) => {
                         state.done = true;
-                        return Some((
-                            Err(ModelError(format!(
-                                "the language model stream failed: {error}"
-                            ))),
-                            state,
-                        ));
+                        return Some((Err(error), state));
                     }
                     None => {
                         let tail = std::mem::take(&mut state.buffer);
                         state.accept_line(String::from_utf8_lossy(&tail).trim());
                         if !state.done {
-                            state.pending.push_back(Err(ModelError(
+                            state.pending.push_back(Err(ModelError::Failed(
                                 "the language model stream ended before the reply finished"
                                     .to_string(),
                             )));
@@ -673,6 +701,12 @@ mod tests {
         BriefingContext, ChatEvent, ChatMessage, ModelError, OpenAiChatModel, SseLine, ToolCall,
         ToolDefinition, ToolResult, decode_events, parse_sse_line,
     };
+    use std::time::Duration;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::post;
     use bytes::Bytes;
     use futures_util::StreamExt;
     use serde_json::json;
@@ -714,11 +748,13 @@ mod tests {
     async fn decode(
         chunks: Vec<Result<&'static str, &'static str>>,
     ) -> Vec<Result<ChatEvent, ModelError>> {
-        let bytes = futures_util::stream::iter(
-            chunks
-                .into_iter()
-                .map(|chunk| chunk.map(|text| Bytes::from_static(text.as_bytes()))),
-        );
+        let bytes = futures_util::stream::iter(chunks.into_iter().map(|chunk| {
+            chunk
+                .map(|text| Bytes::from_static(text.as_bytes()))
+                .map_err(|error| {
+                    ModelError::Failed(format!("the language model stream failed: {error}"))
+                })
+        }));
         decode_events(bytes).collect().await
     }
 
@@ -977,7 +1013,7 @@ mod tests {
                 vec![
                     "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"h\",\"content\":\"a\"},\"finish_reason\":\"length\"}]}\n",
                 ],
-                vec![Err(ModelError(
+                vec![Err(ModelError::Failed(
                     "the language model did not finish its reply (length)".into(),
                 ))],
             ),
@@ -1047,7 +1083,7 @@ mod tests {
         .await;
         assert_eq!(
             missing_id,
-            vec![Err(ModelError(
+            vec![Err(ModelError::Failed(
                 "the language model sent an incomplete tool call".to_string()
             ))]
         );
@@ -1062,7 +1098,7 @@ mod tests {
         .await;
         assert_eq!(
             events,
-            vec![Err(ModelError(
+            vec![Err(ModelError::Failed(
                 "the language model stream failed: connection reset".to_string()
             ))]
         );
@@ -1083,5 +1119,117 @@ mod tests {
                 Ok(ChatEvent::Text("lo".to_string())),
             ]
         );
+    }
+    #[derive(Clone, Copy)]
+    enum Endpoint {
+        Silent,
+        HeadersThenSilent,
+        ChunksThenSilent,
+        SlowButSteady,
+    }
+
+    const DEADLINE: Duration = Duration::from_millis(250);
+    const GAP: Duration = Duration::from_millis(80);
+
+    fn sse(text: &str) -> Result<Bytes, std::convert::Infallible> {
+        Ok(Bytes::from(format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{text}\"}}}}]}}\n\n"
+        )))
+    }
+
+    const SSE_END: &[u8] = b"data: {\"choices\":[{\"delta\":{\"content\":\".\"},\"finish_reason\":\"stop\"}]}\ndata: [DONE]\n";
+
+    async fn respond(endpoint: Endpoint) -> Response {
+        match endpoint {
+            Endpoint::Silent => std::future::pending().await,
+            Endpoint::HeadersThenSilent => Body::from_stream(futures_util::stream::pending::<
+                Result<Bytes, std::convert::Infallible>,
+            >())
+            .into_response(),
+            Endpoint::ChunksThenSilent => Body::from_stream(
+                futures_util::stream::iter([sse("a"), sse("b")])
+                    .chain(futures_util::stream::pending()),
+            )
+            .into_response(),
+            Endpoint::SlowButSteady => {
+                Body::from_stream(futures_util::stream::unfold(0, |sent| async move {
+                    tokio::time::sleep(GAP).await;
+                    match sent {
+                        0..8 => Some((sse("x"), sent + 1)),
+                        8 => Some((Ok(Bytes::from_static(SSE_END)), sent + 1)),
+                        _ => None,
+                    }
+                }))
+                .into_response()
+            }
+        }
+    }
+
+    /// Whether the headers arrived, the text delivered, and how the stream ended.
+    async fn ask_endpoint(endpoint: Endpoint) -> (bool, Vec<String>, Option<ModelError>) {
+        let app = Router::new().route("/v1/chat/completions", post(move || respond(endpoint)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}/v1", listener.local_addr().expect("addr"));
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let model = OpenAiChatModel::new(url, "m".to_string(), String::new(), None)
+            .with_stall_deadline(DEADLINE);
+        let asked = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut stream = match model.post_stream(&model.request_body(&[], None)).await {
+                Ok(stream) => stream,
+                Err(error) => return (false, Vec::new(), Some(error)),
+            };
+            let mut texts = Vec::new();
+            while let Some(event) = stream.next().await {
+                match event {
+                    Ok(ChatEvent::Text(text)) => texts.push(text),
+                    Ok(other) => panic!("unexpected {other:?}"),
+                    Err(error) => return (true, texts, Some(error)),
+                }
+            }
+            (true, texts, None)
+        })
+        .await;
+        asked.expect("the call must end under the stall deadline, not hang")
+    }
+
+    #[tokio::test]
+    async fn a_quiet_model_endpoint_stalls_the_call_but_a_steady_stream_never_does() {
+        let steady: Vec<String> = ["x"; 8]
+            .iter()
+            .chain(&["."])
+            .map(ToString::to_string)
+            .collect();
+        let cases = [
+            ("never answers", Endpoint::Silent, false, vec![], true),
+            (
+                "headers, then silence",
+                Endpoint::HeadersThenSilent,
+                true,
+                vec![],
+                true,
+            ),
+            (
+                "chunks, then silence",
+                Endpoint::ChunksThenSilent,
+                true,
+                vec!["a".to_string(), "b".to_string()],
+                true,
+            ),
+            (
+                "slow but steady",
+                Endpoint::SlowButSteady,
+                true,
+                steady,
+                false,
+            ),
+        ];
+        for (name, endpoint, headers, texts, stalls) in cases {
+            let (got_headers, got_texts, error) = ask_endpoint(endpoint).await;
+            assert_eq!(got_headers, headers, "{name}");
+            assert_eq!(got_texts, texts, "{name}");
+            assert_eq!(error, stalls.then_some(ModelError::Stalled), "{name}");
+        }
     }
 }
