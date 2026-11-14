@@ -353,13 +353,21 @@ under OpenMDW-1.1, exported to ONNX by Thalvi. Parakeet is NVIDIA's
 [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), in sherpa-onnx's int8 export.
 
-**Extra recognizers** (Settings → Speech → Extra recognizers, none switched on by
-default) are OpenAI-style or Meta transcription APIs that hear each accepted capture
-besides the recognizer you chose. That one stays live: it shows the words, hears
+**Extra recognizers** (none switched on by default) hear each accepted capture
+besides the recognizer you chose. Any recognizer can be one: a realtime speech
+server, an OpenAI-compatible endpoint or the model on this computer, switched on with
+"Also transcribe with" on its row (any entry but the one in use), or an OpenAI-style
+or Meta transcription API listed under Extra recognizers. The recognizer you chose
+stays live: it shows the words, hears
 the ending phrases and decides what happens to the text (paste, submit, task,
-write). Each extra has a switch labelled "Also transcribe with" its name and says where
+write). A live-kind extra hears the same audio from the start of the capture, so its
+text is ready about when the capture ends; its partials are never shown and its text
+decides nothing. A second on-device model stays loaded and adds its memory and
+processing. If an extra cannot connect, load or keep up, only it is left out of that
+capture's merge, with a notice; the live capture is never slowed or stopped.
+Each extra has a switch and says where
 its audio goes ("Audio goes to" the address's host), and the group says "Off. Dictation
-pastes the live text." until one is on, then which are on. Every extra transcribes the same capture, and the chat model of **Writing**
+pastes the live text." until one is on, then which are on. Every extra hears the same capture, and the chat model of **Writing**
 (same `url`, `model` and key, its own fixed prompt) merges the live text and the
 extras' texts into one, choosing between what the recognizers heard; the overlay says
 "Merging…" meanwhile, and cancel works as ever. The merged text is pasted only if
@@ -372,8 +380,9 @@ out" and the write key write out the merged text, with a second chat call.
 Extras can be switched on only while Writing has an endpoint, and the endpoint
 cannot be removed while one is on; without one, the group says so and **Go to the
 endpoint setting** moves to it. Switching one off keeps its address and key.
-An extra is stored as an entry of kind `extra`; an old `second_pass` entry loads as
-one, and is written as `extra` the next time the settings are saved.
+An upload extra is stored as an entry of kind `extra`; an old `second_pass` entry loads as
+one, and is written as `extra` the next time the settings are saved. A live-kind
+entry is an extra with `"extra": true`, which the active entry can't be.
 
 ### Microphone
 
