@@ -62,7 +62,7 @@ impl ChatModel for FakeModel {
     ) -> Result<DeltaStream, ModelError> {
         self.log.lock().unwrap().push((self.name, history.to_vec()));
         if self.cannot_start {
-            return Err(ModelError("offline".to_string()));
+            return Err(ModelError::Failed("offline".to_string()));
         }
         let steps = self.script.clone().into_iter();
         Ok(Box::pin(futures_util::stream::unfold(
@@ -75,7 +75,7 @@ impl ChatModel for FakeModel {
                     }
                     Step::Fail(ms) => {
                         sleep(Duration::from_millis(ms)).await;
-                        Some((Err(ModelError("stream cut".to_string())), steps))
+                        Some((Err(ModelError::Failed("stream cut".to_string())), steps))
                     }
                     Step::Hang => std::future::pending().await,
                 }
@@ -103,7 +103,7 @@ impl FakeTts {
 impl Tts for FakeTts {
     async fn synthesize(&self, _text: &str) -> Result<AudioStream, TtsError> {
         if self.cannot_start {
-            return Err(TtsError("no voice".to_string()));
+            return Err(TtsError::Failed("no voice".to_string()));
         }
         Ok(Box::pin(futures_util::stream::unfold(
             self.chunks.clone().into_iter(),

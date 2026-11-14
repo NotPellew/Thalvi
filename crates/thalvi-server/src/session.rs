@@ -17,13 +17,15 @@ use tracing::Instrument;
 use crate::briefing::{Briefing, BriefingContext};
 use crate::briefing_tools;
 use crate::history::{self, HistoryMatch};
-use crate::model::{ChatEvent, ChatMessage, ChatModel, Role, ToolCall, ToolDefinition, ToolResult};
+use crate::model::{
+    ChatEvent, ChatMessage, ChatModel, ModelError, Role, ToolCall, ToolDefinition, ToolResult,
+};
 use crate::recognizer::{Recognizer, RecognizerEvent, RecognizerFactory, validate_frame};
 use crate::recorder::{AudioBuffer, Recorder, RecordingConfig, start_recording};
 use crate::sentence::SentenceSplitter;
 use crate::store::{Attachment, Detach, SessionStore};
 use crate::title::{Titler, spawn_title};
-use crate::tts::Tts;
+use crate::tts::{Tts, TtsError};
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
@@ -1880,17 +1882,21 @@ impl<'a> ModelCall<'a> {
 
     async fn fail(
         &mut self,
-        error: &crate::model::ModelError,
+        error: &ModelError,
         events: &mpsc::Sender<ReplyEvent>,
         failure_sent: &AtomicBool,
     ) -> bool {
-        self.finish("failed", Some(&error.to_string()));
-        send_failed(
-            events,
-            failure_sent,
-            format!("The language model could not reply: {error}"),
-        )
-        .await;
+        let message = match error {
+            ModelError::Stalled => {
+                self.finish("timeout", None);
+                "The language model stopped responding. Try again.".to_string()
+            }
+            ModelError::Failed(_) => {
+                self.finish("failed", Some(&error.to_string()));
+                format!("The language model could not reply: {error}")
+            }
+        };
+        send_failed(events, failure_sent, message).await;
         false
     }
 }
@@ -2346,7 +2352,7 @@ async fn synthesize_ack<T: Tts>(
             tracing::warn!(%error, "acknowledgement synthesis failed");
             recorder.emit(
                 "ack",
-                json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "outcome": "failed", "voice": voice_name}),
+                json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "outcome": tts_outcome(&error), "voice": voice_name}),
             );
             return true;
         }
@@ -2365,7 +2371,7 @@ async fn synthesize_ack<T: Tts>(
                 tracing::warn!(%error, "acknowledgement synthesis failed");
                 recorder.emit(
                     "ack",
-                    json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "outcome": "failed", "voice": voice_name}),
+                    json!({"turn": turn, "cached": false, "total_ms": total_ms(started), "outcome": tts_outcome(&error), "voice": voice_name}),
                 );
                 return true;
             }
@@ -2437,6 +2443,7 @@ async fn synthesize_sentence<T: Tts>(
     let mut audio = match tts.synthesize_with_voice(sentence, voice_name).await {
         Ok(audio) => audio,
         Err(error) => {
+            emit_sentence_failure(recorder, turn, voice_name, tts_started, &error);
             send_failed(
                 events,
                 failure_sent,
@@ -2458,6 +2465,7 @@ async fn synthesize_sentence<T: Tts>(
                 }
             }
             Err(error) => {
+                emit_sentence_failure(recorder, turn, voice_name, tts_started, &error);
                 send_failed(
                     events,
                     failure_sent,
@@ -2476,6 +2484,7 @@ async fn synthesize_sentence<T: Tts>(
         json!({
             "turn": turn,
             "voice": voice_name,
+            "outcome": "ok",
             "chars": sentence.chars().count(),
             "first_byte_ms": ms_since(first_byte_at),
             "total_ms": u64::try_from(tts_started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -2483,6 +2492,31 @@ async fn synthesize_sentence<T: Tts>(
         }),
     );
     true
+}
+
+fn tts_outcome(error: &TtsError) -> &'static str {
+    match error {
+        TtsError::Stalled => "timeout",
+        TtsError::Failed(_) => "failed",
+    }
+}
+
+fn emit_sentence_failure(
+    recorder: &Recorder,
+    turn: u64,
+    voice_name: &str,
+    started: Instant,
+    error: &TtsError,
+) {
+    recorder.emit(
+        "tts_sentence",
+        json!({
+            "turn": turn,
+            "voice": voice_name,
+            "outcome": tts_outcome(error),
+            "total_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        }),
+    );
 }
 
 /// Why the session itself, not the recognizer, ended a connection.
@@ -2931,7 +2965,7 @@ mod tests {
             if !results.is_empty() {
                 self.next_started.notify_one();
                 let result: Result<crate::model::EventStream, ModelError> = match self.outcome {
-                    "failed" => Err(ModelError("model failed".to_string())),
+                    "failed" => Err(ModelError::Failed("model failed".to_string())),
                     "interrupted" => Ok(Box::pin(futures_util::stream::pending())),
                     _ => Ok(Box::pin(futures_util::stream::iter([Ok(ChatEvent::Text(
                         "Answer.".to_string(),
@@ -2988,7 +3022,7 @@ mod tests {
                 .push(text.to_string());
             self.entered.notify_one();
             let result = if ACK_LINES.contains(&text) {
-                Err(TtsError("ack failed".to_string()))
+                Err(TtsError::Failed("ack failed".to_string()))
             } else {
                 Ok(
                     Box::pin(futures_util::stream::iter(vec![Ok(Bytes::from_static(
@@ -3627,7 +3661,9 @@ mod tests {
             &self,
             _text: &str,
         ) -> impl std::future::Future<Output = Result<AudioStream, TtsError>> + Send {
-            std::future::ready(Err(TtsError("the reply must pick its voice".to_string())))
+            std::future::ready(Err(TtsError::Failed(
+                "the reply must pick its voice".to_string(),
+            )))
         }
 
         fn synthesize_with_voice(

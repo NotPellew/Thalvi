@@ -24,7 +24,7 @@ Four invariants, each one sentence:
 
 ## Covers
 
-Sync commit: `8218dba22ec6c24255c73aa3e073071fb4d76bd4`. [source.json](source.json)
+Sync commit: `fe051c6b01af06533e4baddaff7ed25bf43355ac`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 
@@ -39,6 +39,7 @@ Matching hashes establish synchronization only, not correctness of the model.
 | `write_loop`, `DiskOp::Remove` (from `SessionStore::delete`) | `Delete`: one lock across the file removal; marks the owner and every predecessor dead. |
 | `crates/thalvi-server/src/session.rs`: `run_session` loop top, `Persistence::sync`, `Saved::sync` | `Turn` and `Sync`: a save happens only when the history grew. |
 | Same file: recognizer retry state in `31a2eeb` | Not a persistence step: this changes input readiness and browser status/error messages only; the `Turn`, `Sync`, `Close`, `FinalSave` and `Release` ordering remains unchanged. |
+| Same file: model and speech stall handling in `fe051c6` | Not a persistence step: `ModelCall::fail` and the speech failure metrics only change the notice text and the recorded outcome; the `Turn`, `Sync`, `Close`, `FinalSave` and `Release` ordering remains unchanged. |
 | Same file: `run_session` loop exit on `persistence.detached()`, the client leaving, or a browser send timing out or failing, then `close_session` → `Persistence::finish` | `Close`, `FinalSave`, `Release`: the last sync, then release, before `ended` is sent. |
 
 Not covered in these files: `retire`, `rename`, `set_model_title`, `snapshot`,
