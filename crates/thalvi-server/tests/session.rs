@@ -7,7 +7,7 @@
 )]
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -51,9 +51,15 @@ struct FakeFactoryInner {
     audio: Arc<Mutex<Vec<Vec<u8>>>>,
     connect_gate: Mutex<Option<Arc<Notify>>>,
     connect_errors: Mutex<VecDeque<RecognizerError>>,
+    stall_next: AtomicBool,
 }
 
 impl FakeFactory {
+    /// The next connection takes every frame it is sent and then never finishes reading it.
+    fn stall_next_connection(&self) {
+        self.inner.stall_next.store(true, Ordering::SeqCst);
+    }
+
     fn attempts(&self) -> usize {
         self.inner.attempts.load(Ordering::SeqCst)
     }
@@ -102,6 +108,7 @@ impl FakeFactory {
 struct FakeRecognizer {
     receiver: tokio::sync::mpsc::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>,
     audio: Arc<Mutex<Vec<Vec<u8>>>>,
+    stalled: bool,
 }
 
 impl RecognizerFactory for FakeFactory {
@@ -121,6 +128,7 @@ impl RecognizerFactory for FakeFactory {
         Ok(FakeRecognizer {
             receiver,
             audio: Arc::clone(&self.inner.audio),
+            stalled: self.inner.stall_next.swap(false, Ordering::SeqCst),
         })
     }
 }
@@ -128,6 +136,9 @@ impl RecognizerFactory for FakeFactory {
 impl Recognizer for FakeRecognizer {
     async fn send_audio(&mut self, audio: &[u8]) -> Result<(), RecognizerError> {
         self.audio.lock().unwrap().push(audio.to_vec());
+        if self.stalled {
+            std::future::pending::<()>().await;
+        }
         Ok(())
     }
 
@@ -245,9 +256,10 @@ fn assert_retrying_follows_reply_end(received: &[Received]) {
     );
 }
 
+const RETRY_NOTICE: &str = "Can't reach speech recognition. Trying again…";
+
 #[tokio::test]
 async fn recognizer_outages_report_one_plain_notice_and_retry_until_ready() {
-    const RETRY_NOTICE: &str = "Can't reach speech recognition. Trying again…";
     const RAW_ERROR: &str =
         "recognizer connect failed: IO error: ws://127.0.0.1:9 Connection refused (os error 111)";
 
@@ -348,6 +360,148 @@ async fn recognizer_outages_report_one_plain_notice_and_retry_until_ready() {
         }
         expect_quiet_until_marker(&mut harness).await;
         harness.server.abort();
+    }
+}
+
+/// One way a recognizer stops reading, and what the session must record about it.
+struct StopsReading {
+    name: &'static str,
+    stalls: bool,
+    frames: usize,
+    wait: Duration,
+    cause: Option<&'static str>,
+}
+
+/// Follows a lost recognizer from the notice to a reconnect that hears speech again.
+async fn follow_recovery(harness: &mut Harness, name: &str) {
+    let received = collect_with_paused_clock(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "recognizer_retrying")
+    })
+    .await;
+    let notices: Vec<&str> = received
+        .iter()
+        .filter_map(|item| match item {
+            Received::Json(v) if v["type"] == "error" => v["message"].as_str(),
+            Received::Json(_) | Received::Audio(_) => None,
+        })
+        .collect();
+    assert_eq!(notices, vec![RETRY_NOTICE], "{name}: {received:?}");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while harness.factory.attempts() < 2 {
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{name}: reconnect timed out"
+        );
+    }
+    tokio::time::resume();
+    let _ = collect_until(&mut harness.client, |item| {
+        matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+    })
+    .await;
+    harness
+        .client
+        .send(ClientMessage::Binary(vec![9_u8; 3840].into()))
+        .await
+        .unwrap();
+    wait_until(|| harness.factory.audio_received().last() == Some(&vec![9_u8; 3840])).await;
+}
+
+/// The `cause` of each `stt_disconnect` recorded for a session that has ended.
+async fn recorded_disconnect_causes(data_dir: &ScratchDir, session: &str) -> Vec<Option<String>> {
+    wait_until(|| {
+        read_recorded_lines_blocking(&data_dir.0, session)
+            .iter()
+            .any(|line| line["event"] == "session_close")
+    })
+    .await;
+    read_recorded_lines_blocking(&data_dir.0, session)
+        .iter()
+        .filter(|line| line["event"] == "stt_disconnect")
+        .map(|line| line["cause"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_recognizer_that_stops_reading_is_lost_and_voice_recovers() {
+    // With a stalled recognizer the first frame is in its hands, 32 more fill the channel, the next cannot fit.
+    for scenario in [
+        StopsReading {
+            name: "a send that never completes",
+            stalls: true,
+            frames: 1,
+            wait: Duration::from_secs(10),
+            cause: Some("stalled"),
+        },
+        StopsReading {
+            name: "a full audio channel",
+            stalls: true,
+            frames: 34,
+            wait: Duration::ZERO,
+            cause: Some("behind"),
+        },
+        StopsReading {
+            name: "a recognizer that keeps up",
+            stalls: false,
+            frames: 40,
+            wait: Duration::from_secs(10),
+            cause: None,
+        },
+    ] {
+        let name = scenario.name;
+        let data_dir = ScratchDir::new("recognizer-lost");
+        let mut harness = start_with_recording(recording_config(metrics_only(), &data_dir)).await;
+        tokio::time::pause();
+        if scenario.stalls {
+            harness.factory.stall_next_connection();
+        }
+        voice_on_with_paused_clock(&mut harness).await;
+        send_json(&mut harness, &json!({"type": "text", "text": ""})).await;
+        let _ = collect_with_paused_clock(
+            &mut harness.client,
+            |item| matches!(item, Received::Json(v) if v["type"] == "error"),
+        )
+        .await;
+        for _ in 0..scenario.frames {
+            harness
+                .client
+                .send(ClientMessage::Binary(vec![3_u8; 3840].into()))
+                .await
+                .unwrap();
+        }
+        let taken = if scenario.stalls { 1 } else { scenario.frames };
+        wait_until(|| harness.factory.audio_received().len() >= taken).await;
+
+        if let Some(rest) = scenario.wait.checked_sub(Duration::from_secs(1)) {
+            tokio::time::advance(rest).await;
+            for _ in 0..50 {
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                harness.client.next().now_or_never().is_none(),
+                "{name}: nothing is reported before the deadline"
+            );
+            tokio::time::advance(Duration::from_secs(1) + Duration::from_millis(5)).await;
+        }
+        if scenario.cause.is_some() {
+            follow_recovery(&mut harness, name).await;
+        } else {
+            tokio::time::resume();
+        }
+        expect_quiet_until_marker(&mut harness).await;
+
+        harness.client.close(None).await.unwrap();
+        wait_closed(&harness, 1).await;
+        harness.server.abort();
+        let causes = recorded_disconnect_causes(&data_dir, &harness.session_id).await;
+        let expected: Vec<Option<String>> = scenario
+            .cause
+            .map(|cause| Some(cause.to_owned()))
+            .into_iter()
+            .collect();
+        assert_eq!(causes, expected, "{name}");
     }
 }
 
@@ -1356,7 +1510,7 @@ async fn audio_before_recognizer_ready_is_discarded_and_state_goes_starting_then
 }
 
 #[tokio::test]
-async fn mic_frames_that_are_not_bounded_pcm_never_reach_the_recognizer() {
+async fn mic_frames_that_are_not_bounded_pcm_never_reach_the_recognizer_and_are_reported_once() {
     let mut harness = start().await;
     voice_on(&mut harness).await;
     for frame in [vec![], vec![1_u8; 3], vec![1_u8; 48_002], vec![2_u8; 3840]] {
@@ -1368,6 +1522,17 @@ async fn mic_frames_that_are_not_bounded_pcm_never_reach_the_recognizer() {
     }
     wait_until(|| !harness.factory.audio_received().is_empty()).await;
     assert_eq!(harness.factory.audio_received(), vec![vec![2_u8; 3840]]);
+    let received = collect_until(
+        &mut harness.client,
+        |item| matches!(item, Received::Json(v) if v["type"] == "error"),
+    )
+    .await;
+    assert!(
+        matches!(received.last(), Some(Received::Json(v))
+            if v["message"] == "Send at most one second of 24 kHz mono s16le audio at a time."),
+        "{received:?}"
+    );
+    expect_quiet_until_marker(&mut harness).await;
     harness.server.abort();
 }
 
