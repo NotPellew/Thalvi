@@ -25,11 +25,6 @@ describe("the settings window's look", () => {
   }
 
   const radio = (look: Look) => pick(root, `[data-choice="${look}"] input`) as HTMLInputElement;
-  const button = (name: string) => {
-    const found = Array.from(root.querySelectorAll("button")).find((candidate) => candidate.textContent === name);
-    if (!found) throw new Error(`no button ${name}`);
-    return found;
-  };
 
   it("wears the saved look and offers the three looks on the Overlay & sounds page", async () => {
     await open("gunmetal");
@@ -38,20 +33,21 @@ describe("the settings window's look", () => {
     expect(radio("gunmetal").checked).toBe(true);
   });
 
-  it("switches at once when picked, saves with the other settings, and goes back on revert", async () => {
+  it("switches at once when picked, applies it, and goes back when the app refuses it", async () => {
     const stub = await open();
     radio("holo").click();
     expect(root.dataset["look"]).toBe("holo");
-    expect(pick(root, ".msg").textContent).toBe("Unsaved changes");
-
-    button("Save").click();
+    await settle();
     expect(stub.backend.saveSettings).toHaveBeenCalledWith({ ...SETTINGS, look: "holo" });
-    await settle();
+    expect(pick(root, "section[data-page=overlay] .row[data-label=look] .applied").textContent).toBe("Applied.");
 
+    stub.backend.saveSettings.mockRejectedValueOnce("Thalvi could not apply it.");
     radio("gunmetal").click();
-    button("Revert").click();
+    expect(root.dataset["look"]).toBe("gunmetal");
     await settle();
-    expect(root.dataset["look"]).toBe("neon");
+    expect(root.dataset["look"]).toBe("holo");
+    expect(radio("holo").checked).toBe(true);
+    expect(pick(root, "section[data-page=overlay] .row[data-label=look] .note:not([hidden])").textContent).toBe("Thalvi could not apply it.");
   });
 
   it("puts each heading and the rows after it in one group the looks can frame", async () => {
@@ -61,7 +57,7 @@ describe("the settings window's look", () => {
     expect(headings("overlay")).toEqual(["Overlay", "Look", "Sounds"]);
     expect(headings("listening")).toEqual([
       "Right now",
-      "Saved with Save",
+      "Device",
       "Wake words",
       "Dictation wake word",
       "Hold keys",

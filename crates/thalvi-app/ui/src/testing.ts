@@ -105,6 +105,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     selected: settings.microphone,
     active: initial.state === "paused" ? null : (settings.microphone ?? "Built-in"),
     paused: initial.state === "paused",
+    problem: null,
   };
   const emitAudio = (next: AudioStatus): void => {
     audioState = next;
@@ -172,6 +173,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
           selected: audioState.selected,
           active: paused ? null : (audioState.selected ?? "Built-in"),
           paused,
+          problem: null,
         });
       }
     },

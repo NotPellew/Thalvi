@@ -46,6 +46,8 @@ export interface AudioStatus {
   selected: string | null;
   active: string | null;
   paused: boolean;
+  /** Why the selected device could not be opened while `active` stays open; null otherwise. */
+  problem: string | null;
 }
 
 export type Ending = "paste" | "write" | "submit" | "task" | "scratch" | "cancel";

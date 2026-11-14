@@ -208,6 +208,8 @@ lands in one step, so a half-written file is not modeled; validation in `load`
 never fails; the runner applies `Control::Apply` messages in send order;
 `rename` replaces the target atomically.
 
+Removing the "pause before changing the microphone" rule (#340) only drops a check that ran inside the lock after `Snap` and before `Create`, and the `paused` argument it needed; it adds no writer or file-system step and a refused save still ends before `Create`, so the model is unchanged and the `settings.rs`, `app.rs` and `agent.rs` hashes moved.
+
 Preserving an OpenAI-compatible API key in an unchanged Settings entry (#385 review fix) only changes form normalization before the existing serialized save; it adds no writer or file-system step, so the model is unchanged and the `settings.rs` hash moved.
 
 The Settings page rename (#341) changes only a message naming a page in `settings.rs` and the page ids `agent.rs`'s `show` accepts; no writer, lock or file-system step changed, so the model is unchanged and only those hashes moved.

@@ -140,7 +140,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
     for (const listener of speechListeners) listener(progress);
   };
   const microphones = ["Built-in Audio Analog Stereo", "USB Microphone"];
-  let audioState: AudioStatus = { selected: null, active: "Built-in Audio Analog Stereo", paused: false };
+  let audioState: AudioStatus = { selected: null, active: "Built-in Audio Analog Stereo", paused: false, problem: null };
   const emitAudio = (next: AudioStatus): void => {
     audioState = next;
     for (const listener of audioListeners) listener(next);
@@ -220,15 +220,12 @@ export function fakeBackend(params: URLSearchParams): Backend {
           ),
         );
       }
-      if (next.microphone !== saved.microphone && !audioState.paused) {
-        return Promise.reject(new Error("Pause listening before changing the microphone. Turn listening off, then save again."));
-      }
       saved = structuredClone(next);
-      emitAudio({ selected: next.microphone, active: audioState.paused ? null : activeFor(next.microphone), paused: audioState.paused });
+      emitAudio({ selected: next.microphone, active: audioState.paused ? null : activeFor(next.microphone), paused: audioState.paused, problem: null });
       return Promise.resolve();
     },
     setListening: (on) => {
-      emitAudio({ selected: audioState.selected, active: on ? activeFor(audioState.selected) : null, paused: !on });
+      emitAudio({ selected: audioState.selected, active: on ? activeFor(audioState.selected) : null, paused: !on, problem: null });
       emit(on ? { state: "listening" } : { state: "paused" });
       return Promise.resolve();
     },
