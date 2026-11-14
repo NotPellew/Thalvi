@@ -1558,7 +1558,7 @@ function speech(context: PageContext): SpeechRows {
   const addExtra = button("Add an extra recognizer", () => {
     openEditor(null, "extra");
   });
-  const liveBlock = el("div", { class: "stack wide" }, liveList, liveApplied, problem, el("div", { class: "trow add" }, kindLabel, kindPicker.node, addLive), el("small", { class: "kind-help" }, KIND_HELP));
+  const liveBlock = el("div", { class: "stack wide" }, liveList, liveApplied, problem, el("div", { class: "trow add kind-add" }, kindLabel, kindPicker.node, addLive), el("small", { class: "kind-help" }, KIND_HELP));
   const extraBlock = el("div", { class: "stack wide" }, extraState, needsEndpoint, extraList, extraApplied, addExtra);
 
   const writing = settings.writing;
