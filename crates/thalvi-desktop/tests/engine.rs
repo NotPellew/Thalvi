@@ -19,7 +19,7 @@ use thalvi_desktop::engine::fakes::{
 };
 use thalvi_desktop::engine::{
     CaptureError, CaptureOutcome, Engine, EngineHandle, EngineState, FrameSource, ListenError,
-    Parts, WakeTrigger,
+    Parts, StreamingExtra, WakeTrigger,
 };
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
@@ -124,6 +124,8 @@ struct Rig {
     wake: WakeControl,
     cues: CueControl,
     server: FakeControl,
+    /// The recognizers of the config's streaming extras, in order.
+    extras: Vec<FakeControl>,
     handle: EngineHandle,
     gate: InputGate,
     notices: Rc<RefCell<Vec<String>>>,
@@ -166,6 +168,21 @@ impl Rig {
         let notices = Rc::new(RefCell::new(Vec::new()));
         let sink = Rc::clone(&notices);
         let (key, hold) = HoldInput::new();
+        let (extras, extra_servers): (Vec<_>, Vec<_>) = config
+            .stt
+            .entries
+            .streaming_extras()
+            .map(|entry| {
+                let (recognizer, control) = FakeRecognizer::new();
+                (
+                    StreamingExtra {
+                        entry: entry.clone(),
+                        recognizer: Arc::new(recognizer),
+                    },
+                    control,
+                )
+            })
+            .unzip();
         let (engine, handle) = Engine::new(
             Parts {
                 recognizer,
@@ -177,6 +194,7 @@ impl Rig {
                 notice: Box::new(move |notice| sink.borrow_mut().push(notice.to_owned())),
                 spotter: spotter.map(|spotter| Box::new(spotter) as Box<dyn KeywordSpotter>),
                 spotter_off: spotter_off.map(str::to_owned),
+                extras,
             },
             &config,
             recorder,
@@ -187,6 +205,7 @@ impl Rig {
                 wake,
                 cues,
                 server,
+                extras: extra_servers,
                 handle,
                 gate,
                 notices,
@@ -250,14 +269,12 @@ impl Rig {
     }
 
     fn sent(&self) -> Vec<Frame> {
-        self.server
-            .calls()
-            .into_iter()
-            .filter_map(|call| match call {
-                FakeCall::Frame(frame) => Some(*frame),
-                _ => None,
-            })
-            .collect()
+        frames_of(self.server.calls())
+    }
+
+    /// The frames the streaming extra `at` was sent.
+    fn extra_sent(&self, at: usize) -> Vec<Frame> {
+        frames_of(self.extras[at].calls())
     }
 
     fn cue_log(&self) -> Vec<(u64, CueLog)> {
@@ -284,6 +301,16 @@ impl Rig {
     fn notices(&self) -> Vec<String> {
         self.notices.borrow().clone()
     }
+}
+
+fn frames_of(calls: Vec<FakeCall>) -> Vec<Frame> {
+    calls
+        .into_iter()
+        .filter_map(|call| match call {
+            FakeCall::Frame(frame) => Some(*frame),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Runs a wake then a capture on the engine, as a caller would.
@@ -1928,6 +1955,11 @@ fn with_extras(chat_url: &str, extras: &[(&str, &str, bool)]) -> String {
 /// A capture that says "live words paste that" at 1000 and is delivered at 3500.
 async fn live_words(rig: &mut Rig) {
     rig.open().await;
+    live_words_after_open(rig).await;
+}
+
+/// The rest of [`live_words`], for a capture the test opened itself.
+async fn live_words_after_open(rig: &mut Rig) {
     rig.feed_until(1000, Kind::Quiet).await;
     rig.finals("live words paste that").await;
     rig.feed_until(3499, Kind::Quiet).await;
@@ -6289,6 +6321,473 @@ async fn a_long_buffered_hold_is_not_cut_off_as_idle() {
             rig.finals("a long dictation").await;
             let got = finished(task).await;
             assert!(matches!(got, CaptureOutcome::Accepted(_)), "{got:?}");
+        })
+        .await;
+}
+
+/// A config with a realtime server live, a chat endpoint at `chat_url` and these realtime
+/// entries switched on as extras.
+fn with_streaming(chat_url: &str, extras: &[&str]) -> String {
+    let extras: Vec<String> = extras
+        .iter()
+        .enumerate()
+        .map(|(at, name)| {
+            format!(
+                r#", {{"kind": "realtime", "id": "{name}", "name": "{name}", "extra": true, "address": "ws://127.0.0.1:{}", "model": "m"}}"#,
+                8081 + at
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"ending_pause": {{"paste": 2.5}}, "writing": {{"url": "{chat_url}", "model": "chat"}}, "stt": {{"entries": [{{"kind": "realtime", "id": "s", "name": "Realtime speech server", "active": true, "address": "ws://127.0.0.1:8080", "model": "m"}}{}]}}}}"#,
+        extras.concat()
+    )
+}
+
+/// The streaming extra metrics, each as `(entry, outcome, used)`, ordered by entry.
+fn streaming_metrics(dir: &std::path::Path) -> Vec<(String, String, bool)> {
+    let mut got = extra_metrics(dir);
+    got.sort();
+    got
+}
+
+fn extra_duration(dir: &std::path::Path, entry: &str) -> f64 {
+    read_lines(&dir.join("metrics.jsonl"))
+        .iter()
+        .find(|line| line["event"] == "desktop_extra_stt" && line["entry"] == entry)
+        .unwrap()["duration_ms"]
+        .as_f64()
+        .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_streaming_extra_is_sent_every_frame_the_live_recognizer_is_sent_however_late_it_connects()
+ {
+    LocalSet::new()
+        .run_until(async {
+            for hold in [false, true] {
+                let (chat_url, _asked, _feed) = chat(Chat::Stall).await;
+                let (mut rig, engine, frames) = Rig::new(&with_streaming(&chat_url, &["X"]));
+                let task = if hold {
+                    hold_task(engine, frames)
+                } else {
+                    capture_task(engine, frames)
+                };
+                if hold {
+                    rig.hold().await;
+                } else {
+                    rig.open().await;
+                }
+                rig.feed_until(500, Kind::Voice).await;
+                assert!(rig.sent().len() > 3, "hold {hold}");
+                assert!(
+                    rig.extra_sent(0).is_empty(),
+                    "hold {hold}: still connecting"
+                );
+                rig.extras[0].ready();
+                settle().await;
+                assert_eq!(
+                    rig.extra_sent(0),
+                    rig.sent(),
+                    "hold {hold}: what was sent while it connected comes first, in order"
+                );
+                if hold {
+                    rig.say(1000, Say::Partial("hello")).await;
+                    rig.release(1200).await;
+                    let sent = rig.extra_sent(0);
+                    assert_eq!(
+                        tags(&sent[sent.len() - 10..]),
+                        vec![0; 10],
+                        "the release's silence reaches the extra"
+                    );
+                } else {
+                    rig.feed_until(1000, Kind::Voice).await;
+                }
+                assert_eq!(rig.extra_sent(0), rig.sent(), "hold {hold}");
+                task.abort();
+                let _ = task.await;
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_streaming_extra_decides_nothing_and_only_its_final_text_reaches_the_merge() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("streaming-merged");
+            let (chat_url, mut asked, _feed) = chat(Chat::Stream(says!("live other words"))).await;
+            let recorder = Recorder::in_dir(ALL, &dir).unwrap();
+            let (mut rig, engine, frames) =
+                Rig::recording(&with_streaming(&chat_url, &["X"]), recorder);
+            let task = capture_and_listen(&rig, engine, frames, 0);
+            rig.open().await;
+            rig.extras[0].ready();
+            rig.feed_until(500, Kind::Quiet).await;
+            let capturing = EngineState::Capturing {
+                committed: String::new(),
+                partial: None,
+                notice: None,
+            };
+            for event in [
+                RecognizerEvent::Partial("other words paste that".to_owned()),
+                RecognizerEvent::Final("other words paste that".to_owned()),
+            ] {
+                rig.extras[0].emit(Ok(event));
+                settle().await;
+                assert_eq!(rig.state(), capturing, "the extra's words are not shown");
+            }
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("live words paste that").await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3500).await;
+            let pasted = finished(task).await;
+
+            assert_eq!(
+                pasted.outcome,
+                accepted(CaptureRoute::Paste, "live other words")
+            );
+            assert_eq!(
+                rig.started(Cue::Provisional),
+                [1000],
+                "only the live ending counts"
+            );
+            assert_eq!(rig.started(Cue::Accepted), [3500]);
+            assert_eq!(
+                pasted.at, MERGE_STARTS,
+                "its text was ready when the capture ended"
+            );
+            assert_eq!(
+                request(&mut asked).await.body["messages"][1]["content"],
+                r#"["live words","other words"]"#
+            );
+            let calls = rig.extras[0].calls();
+            assert_eq!(calls.last(), Some(&FakeCall::Close));
+            assert!(!calls.contains(&FakeCall::FinishAudio));
+            extras_were(&extra_metrics(&dir), &[("X", "ok", true)]);
+            let folder = dictation_dirs(&dir).pop().unwrap();
+            assert!(
+                std::fs::read_to_string(folder.join("text.txt"))
+                    .unwrap()
+                    .contains("extra (X): other words paste that\n")
+            );
+        })
+        .await;
+}
+
+#[derive(Clone, Copy)]
+enum Trouble {
+    NoConnect,
+    StalledConnect,
+    Drops,
+    Silent,
+    Late,
+    OtherEnding,
+}
+
+struct Trial {
+    name: &'static str,
+    trouble: Trouble,
+    notice: &'static str,
+    /// `X`'s metric: `(outcome, used)`.
+    metric: (&'static str, bool),
+    /// Milliseconds from the capture's end to the text, or to the failure.
+    took: f64,
+    /// When the live text is delivered, in milliseconds after the wake word.
+    pasted: u64,
+}
+
+const TRIALS: &[Trial] = &[
+    Trial {
+        name: "it cannot connect",
+        trouble: Trouble::NoConnect,
+        notice: "Merged without some texts: \"X\" failed.",
+        metric: ("error", false),
+        took: 0.0,
+        pasted: MERGE_STARTS,
+    },
+    Trial {
+        name: "it is still connecting when the connection time runs out",
+        trouble: Trouble::StalledConnect,
+        notice: "Merged without some texts: \"X\" failed.",
+        metric: ("timeout", false),
+        took: 4500.0,
+        pasted: 8000,
+    },
+    Trial {
+        name: "it fails during the capture",
+        trouble: Trouble::Drops,
+        notice: "Merged without some texts: \"X\" failed.",
+        metric: ("error", false),
+        took: 0.0,
+        pasted: MERGE_STARTS,
+    },
+    Trial {
+        name: "it never answers",
+        trouble: Trouble::Silent,
+        notice: "Merged without some texts: \"X\" was too slow.",
+        metric: ("timeout", false),
+        took: 8000.0,
+        pasted: MERGE_STARTS + 5000,
+    },
+    Trial {
+        name: "it answers after the extras' time is up",
+        trouble: Trouble::Late,
+        notice: "Merged without some texts: \"X\" was too slow.",
+        metric: ("ok", false),
+        took: 6100.0,
+        pasted: MERGE_STARTS + 5000,
+    },
+    Trial {
+        name: "it hears another ending",
+        trouble: Trouble::OtherEnding,
+        notice: "Merged without some texts: \"X\" heard another ending.",
+        metric: ("error", false),
+        took: 0.0,
+        pasted: MERGE_STARTS,
+    },
+];
+
+#[tokio::test(start_paused = true)]
+async fn a_streaming_extra_that_fails_or_misses_the_merge_is_left_out_and_nothing_else_changes() {
+    LocalSet::new()
+        .run_until(async {
+            for trial in TRIALS {
+                let name = trial.name;
+                let dir = record_dir("streaming-left-out");
+                let (chat_url, mut asked, _feed) = chat(Chat::Stream(says!("live Y words"))).await;
+                let recorder = Recorder::in_dir(ALL, &dir).unwrap();
+                let (mut rig, engine, frames) =
+                    Rig::recording(&with_streaming(&chat_url, &["X", "Y"]), recorder);
+                let task = capture_and_listen(&rig, engine, frames, 0);
+                if matches!(trial.trouble, Trouble::NoConnect) {
+                    rig.extras[0].fail("down");
+                }
+                rig.open().await;
+                assert!(
+                    matches!(rig.state(), EngineState::Capturing { .. }),
+                    "{name}: the live recognizer is ready whatever the extra does"
+                );
+                if !matches!(trial.trouble, Trouble::NoConnect | Trouble::StalledConnect) {
+                    rig.extras[0].ready();
+                }
+                rig.extras[1].ready();
+                rig.feed_until(600, Kind::Quiet).await;
+                let first = match trial.trouble {
+                    Trouble::Drops => {
+                        Some(Err(RecognizerError::said("The extra's server hung up.")))
+                    }
+                    Trouble::OtherEnding => {
+                        Some(Ok(RecognizerEvent::Final("X words submit".to_owned())))
+                    }
+                    _ => None,
+                };
+                if let Some(first) = first {
+                    rig.extras[0].emit(first);
+                }
+                rig.feed_until(700, Kind::Quiet).await;
+                rig.extras[1].emit(Ok(RecognizerEvent::Final("Y words paste that".to_owned())));
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals("live words paste that").await;
+                rig.feed_until(3499, Kind::Quiet).await;
+                rig.at(3500).await;
+                if matches!(trial.trouble, Trouble::Late) {
+                    rig.at(MERGE_STARTS).await;
+                    rig.at(MERGE_STARTS + 5000).await;
+                    rig.at(9600).await;
+                    rig.extras[0].emit(Ok(RecognizerEvent::Final("X words paste that".to_owned())));
+                    settle().await;
+                }
+                let pasted = finished(task).await;
+
+                assert_eq!(
+                    pasted.outcome,
+                    accepted(CaptureRoute::Paste, "live Y words"),
+                    "{name}"
+                );
+                assert_eq!(pasted.at, trial.pasted, "{name}");
+                assert_eq!(
+                    rig.started(Cue::Accepted),
+                    [3500],
+                    "{name}: the live capture ends as it would"
+                );
+                assert_eq!(pasted.notices, [trial.notice], "{name}");
+                assert_eq!(
+                    request(&mut asked).await.body["messages"][1]["content"],
+                    r#"["live words","Y words"]"#,
+                    "{name}"
+                );
+                extras_were(
+                    &streaming_metrics(&dir),
+                    &[("X", trial.metric.0, trial.metric.1), ("Y", "ok", true)],
+                );
+                assert_eq!(extra_duration(&dir, "X").round(), trial.took, "{name}");
+            }
+        })
+        .await;
+}
+
+#[derive(Clone, Copy)]
+enum Ends {
+    CancelledOutside,
+    LiveFails,
+    NeverMind,
+    CancelledWhileMerging,
+    NoWords,
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capture_that_ends_without_a_merge_cancels_every_extra_and_delivers_nothing_from_them() {
+    LocalSet::new()
+        .run_until(async {
+            for (name, ends) in [
+                ("cancelled from outside", Ends::CancelledOutside),
+                ("the live recognizer fails", Ends::LiveFails),
+                ("never mind", Ends::NeverMind),
+                ("cancelled while merging", Ends::CancelledWhileMerging),
+                ("no words of its own", Ends::NoWords),
+            ] {
+                let dir = record_dir("streaming-cancelled");
+                let (chat_url, mut asked, _feed) = chat(Chat::Stall).await;
+                let recorder = Recorder::in_dir(ALL, &dir).unwrap();
+                let (mut rig, engine, frames) =
+                    Rig::recording(&with_streaming(&chat_url, &["X", "Y"]), recorder);
+                let task = capture_and_listen(&rig, engine, frames, 0);
+                rig.open().await;
+                rig.extras[0].ready();
+                rig.extras[1].ready();
+                rig.feed_until(1000, Kind::Quiet).await;
+                match ends {
+                    Ends::CancelledOutside => {
+                        rig.finals("live words").await;
+                        rig.handle.cancel();
+                    }
+                    Ends::LiveFails => rig
+                        .server
+                        .emit(Err(RecognizerError::said("The server hung up."))),
+                    Ends::NeverMind => rig.finals("live words never mind").await,
+                    Ends::CancelledWhileMerging => {
+                        rig.finals("live words paste that").await;
+                        rig.feed_until(3499, Kind::Quiet).await;
+                        rig.at(3500).await;
+                        rig.at(MERGE_STARTS).await;
+                        rig.at(MERGE_STARTS + 1000).await;
+                        assert!(matches!(rig.state(), EngineState::Merging { .. }), "{name}");
+                        rig.handle.cancel();
+                    }
+                    Ends::NoWords => {
+                        rig.finals("paste that").await;
+                        rig.feed_until(3499, Kind::Quiet).await;
+                        rig.at(3600).await;
+                    }
+                }
+                let pasted = finished(task).await;
+
+                match (ends, &pasted.outcome) {
+                    (Ends::LiveFails, CaptureOutcome::Failed { .. })
+                    | (
+                        Ends::CancelledOutside | Ends::NeverMind | Ends::CancelledWhileMerging,
+                        CaptureOutcome::Cancelled { .. },
+                    ) => {}
+                    (Ends::NoWords, outcome) => {
+                        assert_eq!(*outcome, accepted(CaptureRoute::Paste, ""), "{name}");
+                    }
+                    (_, outcome) => panic!("{name}: {outcome:?}"),
+                }
+                assert!(asked.try_recv().is_err(), "{name}: nothing was merged");
+                for at in 0..2 {
+                    let calls = rig.extras[at].calls();
+                    assert_eq!(calls.last(), Some(&FakeCall::Cancel), "{name}: {at}");
+                    assert!(!calls.contains(&FakeCall::Close), "{name}: {at}");
+                }
+                extras_were(
+                    &streaming_metrics(&dir),
+                    &[("X", "cancelled", false), ("Y", "cancelled", false)],
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_buffering_streaming_extra_is_told_the_audio_is_complete_and_merges_its_single_final() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("streaming-buffered");
+            let (chat_url, mut asked, _feed) = chat(Chat::Stream(says!("live X words"))).await;
+            let recorder = Recorder::in_dir(ALL, &dir).unwrap();
+            let (mut rig, engine, frames) =
+                Rig::recording(&with_streaming(&chat_url, &["X"]), recorder);
+            rig.extras[0].buffer_audio();
+            let task = capture_and_listen(&rig, engine, frames, 0);
+            rig.open().await;
+            rig.extras[0].ready();
+            live_words_after_open(&mut rig).await;
+            assert_eq!(rig.extras[0].calls().last(), Some(&FakeCall::FinishAudio));
+            rig.extras[0].emit(Ok(RecognizerEvent::Partial("junk words".to_owned())));
+            rig.at(MERGE_STARTS + 300).await;
+            rig.extras[0].emit(Ok(RecognizerEvent::Final("X words paste that".to_owned())));
+            settle().await;
+            let pasted = finished(task).await;
+
+            assert_eq!(
+                pasted.outcome,
+                accepted(CaptureRoute::Paste, "live X words")
+            );
+            assert_eq!(pasted.at, MERGE_STARTS + 300);
+            assert_eq!(
+                request(&mut asked).await.body["messages"][1]["content"],
+                r#"["live words","X words"]"#
+            );
+            extras_were(&extra_metrics(&dir), &[("X", "ok", true)]);
+            assert_eq!(extra_duration(&dir, "X").round(), 400.0);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_streaming_extra_is_waited_for_until_every_word_it_heard_is_final() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("streaming-unfinished");
+            let (chat_url, mut asked, _feed) = chat(Chat::Stream(says!("live X words"))).await;
+            let recorder = Recorder::in_dir(ALL, &dir).unwrap();
+            let (mut rig, engine, frames) =
+                Rig::recording(&with_streaming(&chat_url, &["X"]), recorder);
+            let task = capture_and_listen(&rig, engine, frames, 0);
+            rig.open().await;
+            rig.extras[0].ready();
+            rig.feed_until(600, Kind::Quiet).await;
+            rig.extras[0].emit(Ok(RecognizerEvent::Final("X words".to_owned())));
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("live words paste that").await;
+            rig.feed_until(3400, Kind::Quiet).await;
+            rig.extras[0].emit(Ok(RecognizerEvent::Partial("paste".to_owned())));
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3500).await;
+            rig.at(MERGE_STARTS).await;
+            rig.at(4200).await;
+            rig.extras[0].emit(Ok(RecognizerEvent::Final("paste that".to_owned())));
+            settle().await;
+            let pasted = finished(task).await;
+
+            assert_eq!(
+                pasted.outcome,
+                accepted(CaptureRoute::Paste, "live X words")
+            );
+            assert_eq!(pasted.at, 4200);
+            assert_eq!(
+                request(&mut asked).await.body["messages"][1]["content"],
+                r#"["live words","X words"]"#
+            );
+            // Counted from the capture's end, which is when the live recognizer was done.
+            assert_eq!(extra_duration(&dir, "X").round(), 700.0);
+            let metric = read_lines(&dir.join("metrics.jsonl"))
+                .into_iter()
+                .find(|line| line["event"] == "desktop_extra_stt")
+                .unwrap();
+            assert_eq!(metric["api"], "realtime");
+            assert_eq!(metric["model"], "m");
         })
         .await;
 }
