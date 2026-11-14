@@ -502,7 +502,7 @@ impl Session {
             (microphone, frames)
         })
         .await
-        .map_err(audio_thread_crashed)?;
+        .map_err(|error| audio_thread_crashed(&error))?;
         self.microphone = Some(microphone);
         self.frames = Some(
             self.feeder
@@ -529,7 +529,7 @@ impl Session {
             (microphone, frames)
         })
         .await
-        .map_err(audio_thread_crashed)?;
+        .map_err(|error| audio_thread_crashed(&error))?;
         self.microphone = Some(microphone);
         let frames = frames.map_err(|error| Failure::of(&error))?;
         let presses = self.engine.stop_listening();
@@ -545,7 +545,7 @@ impl Session {
     }
 }
 
-fn audio_thread_crashed(error: tokio::task::JoinError) -> Failure {
+fn audio_thread_crashed(error: &tokio::task::JoinError) -> Failure {
     Failure {
         kind: FailureKind::Other,
         notice: "The microphone's audio thread crashed. Restart Thalvi.".to_owned(),
