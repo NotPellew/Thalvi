@@ -1429,7 +1429,7 @@ describe("the next dictation summary and state words", () => {
       expect(stub.backend.downloadSpeechModel).not.toHaveBeenCalled();
     });
 
-    it("retries through the model download and clears the failure, or says why it failed again", async () => {
+    it("retries through the model download alone, or says why it failed again", async () => {
       const stub = await open(local());
       goTo("recognition");
       stub.emit(FAILED);
@@ -1437,13 +1437,13 @@ describe("the next dictation summary and state words", () => {
       button("Retry").click();
       await settle();
       expect(stub.backend.downloadSpeechModel).toHaveBeenCalledExactlyOnceWith("nemotron_160ms");
-      expect(stub.backend.setListening).toHaveBeenCalledExactlyOnceWith(true);
+      expect(stub.backend.setListening).not.toHaveBeenCalled();
 
       stub.backend.downloadSpeechModel.mockRejectedValueOnce(new Error("The download of Nemotron Streaming failed: offline."));
       button("Retry").click();
       await settle();
       expect(root.querySelector(".next-dictation + div .note")?.textContent).toBe("The download of Nemotron Streaming failed: offline.");
-      expect(stub.backend.setListening).toHaveBeenCalledTimes(1);
+      expect(stub.backend.setListening).not.toHaveBeenCalled();
       expect(stub.backend.saveSettings).not.toHaveBeenCalled();
     });
   });

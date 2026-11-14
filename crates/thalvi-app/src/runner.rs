@@ -21,17 +21,18 @@ use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, StreamingExtra,
     WakeTrigger,
 };
+use thalvi_desktop::entries::LiveKind;
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{Desktop, Host};
 use thalvi_desktop::local::{LocalRecognizer, ModelSource};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
-use thalvi_desktop::models::{self, ModelStore};
+use thalvi_desktop::models::{self, CatalogSpeech, ModelStore};
 use thalvi_desktop::report::{UserError, causes};
 use thalvi_desktop::speech_device::SpeechDevices;
 use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
-use thalvi_desktop::transducer::TransducerSource;
+use thalvi_desktop::transducer::{SpeechChoice, TransducerSource};
 use thalvi_desktop::wake::{WakeConfig, WakeEngine};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, LocalSet};
@@ -62,6 +63,8 @@ pub enum Control {
     HoldKeyFailed(String),
     /// Stops for an update, but only if nothing is going on.
     RestartIfIdle(Restart),
+    /// A download of this catalog model finished; load it if the active entry uses it and it is not loaded.
+    ReloadSpeechModel(CatalogSpeech),
     /// Cancels any capture, closes the microphone and the recognizer, and stops.
     Quit,
 }
@@ -342,6 +345,8 @@ async fn load_spotter(
 struct Publisher {
     view: RefCell<View>,
     out: watch::Sender<Status>,
+    /// The failure the last speech model load showed, so a reload clears that and no other.
+    load_failure: RefCell<Option<Failure>>,
 }
 
 impl Publisher {
@@ -358,6 +363,7 @@ impl Publisher {
                 wake_words: true,
             }),
             out,
+            load_failure: RefCell::new(None),
         })
     }
 
@@ -380,6 +386,18 @@ impl Publisher {
 
     fn mode(&self, mode: Mode) {
         self.update(|view| view.mode = mode);
+    }
+
+    /// Takes the speech model load failure off the status, if it still shows it, so the next load shows its progress.
+    fn load_retried(&self) {
+        let Some(failure) = self.load_failure.take() else {
+            return;
+        };
+        self.update(|view| {
+            if view.mode == Mode::Failed(failure) {
+                view.mode = Mode::Idle;
+            }
+        });
     }
 
     /// A capture started at the wake: in `window` when one was bound, on a desktop that `copies`
@@ -450,14 +468,24 @@ async fn load_showing<S: ModelSource>(local: &LocalRecognizer<S>, publisher: &Pu
         if let Err(error) = loaded
             && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
         {
-            view.mode = Mode::Failed(Failure {
+            let failure = Failure {
                 kind: FailureKind::Other,
                 notice: format!("{error} Dictation will try again when you start it."),
                 headline: error.headline(),
                 causes: causes(&error),
-            });
+            };
+            *publisher.load_failure.borrow_mut() = Some(failure.clone());
+            view.mode = Mode::Failed(failure);
         }
     });
+}
+
+/// Whether a finished download calls for loading the model again: it is the one in use and not loaded.
+fn reload_wanted<S: ModelSource>(
+    uses_downloaded: bool,
+    local: Option<&LocalRecognizer<S>>,
+) -> bool {
+    uses_downloaded && local.is_some_and(|local| local.device().is_none())
 }
 
 /// Everything one engine needs; replaced when settings change.
@@ -713,6 +741,22 @@ impl Runner {
         }));
     }
 
+    /// Loads the model again after its download finished, unless the active entry does not use it or it is loaded.
+    fn reload_speech_model(&mut self, downloaded: CatalogSpeech) {
+        let uses_downloaded = matches!(
+            &self.config.stt.entries.active_live().kind,
+            LiveKind::OnDevice(SpeechChoice::Catalog(active)) if *active == downloaded
+        );
+        let local = self
+            .session
+            .as_ref()
+            .and_then(|session| session.local.as_deref());
+        if reload_wanted(uses_downloaded, local) {
+            self.publisher.load_retried();
+            self.load_speech_model();
+        }
+    }
+
     fn fail(&mut self, failure: Failure) {
         println!("{}", failure.notice);
         self.publisher.mode(Mode::Failed(failure));
@@ -845,6 +889,9 @@ impl Runner {
         self.paused = requests.listening_off;
         self.stopping |= requests.quit;
         self.hold_problem = requests.hold_problem.or(self.hold_problem.take());
+        if let Some(model) = requests.reload {
+            self.reload_speech_model(model);
+        }
         if let Some(config) = requests.pending
             && config != self.config
         {
@@ -998,6 +1045,7 @@ impl Runner {
             },
             Control::Apply(config) => self.apply(*config).await,
             Control::HoldKeyFailed(notice) => self.hold_problem = Some(notice),
+            Control::ReloadSpeechModel(model) => self.reload_speech_model(model),
             Control::RestartIfIdle(restart) => {
                 let held = self.key_state.borrow().down;
                 return answer_restart(restart, self.paused, held, *self.feeding.borrow());
@@ -1229,6 +1277,9 @@ impl Runner {
         if requests.quit {
             // Nothing is delivered after a quit; what was dictated is already kept.
             return Flow::Quit;
+        }
+        if let Some(model) = requests.reload {
+            self.reload_speech_model(model);
         }
         self.publisher
             .mode(told(noted(delivered(finished, route), note), &ignored));
@@ -1502,6 +1553,8 @@ struct Requests {
     pending: Option<DesktopConfig>,
     /// A refused hold key, to show once the capture is over.
     hold_problem: Option<String>,
+    /// A model whose download finished, to load once the capture is over.
+    reload: Option<CatalogSpeech>,
 }
 
 impl Requests {
@@ -1538,6 +1591,10 @@ impl Requests {
             }
             Some(Control::HoldKeyFailed(notice)) => {
                 self.hold_problem = Some(notice);
+                false
+            }
+            Some(Control::ReloadSpeechModel(model)) => {
+                self.reload = Some(model);
                 false
             }
             Some(Control::Feed(feed)) => {
@@ -1866,6 +1923,116 @@ mod tests {
             assert_eq!(publisher.view.borrow().loading, None, "{case}: loading ends");
             assert_eq!(publisher.view.borrow().mode, shown, "{case}");
         }
+    }
+
+    /// Fails its first load and loads after that.
+    struct FailsOnce(std::sync::atomic::AtomicBool);
+
+    impl ModelSource for FailsOnce {
+        type Model = NoModel;
+
+        fn load(
+            &self,
+            _step: impl Fn(Step) + Send + Sync,
+        ) -> impl Future<Output = Result<NoModel, thalvi_desktop::recognizer::RecognizerError>>
+        {
+            std::future::ready(if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                Err(thalvi_desktop::recognizer::RecognizerError::said(
+                    "Could not download the speech model.",
+                ))
+            } else {
+                Ok(NoModel)
+            })
+        }
+    }
+
+    fn other_failure() -> Mode {
+        Mode::Failed(Failure {
+            kind: FailureKind::Other,
+            notice: "No microphone.".to_owned(),
+            headline: "No microphone",
+            causes: Vec::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_download_after_a_failed_load_takes_the_failure_off_and_the_reload_shows_loading_then_idle()
+     {
+        let local = LocalRecognizer::new(
+            FailsOnce(std::sync::atomic::AtomicBool::new(true)),
+            "test",
+            Recorder::disabled().metrics(),
+        );
+        let (out, status) = watch::channel(Status::Paused);
+        let publisher = Publisher::new(out, EndingPauses::default());
+        publisher.mode(Mode::Idle);
+        load_showing(&local, &publisher).await;
+        assert!(
+            matches!(*status.borrow(), Status::Failed { .. }),
+            "the load failed"
+        );
+        assert!(reload_wanted(true, Some(&local)), "the model is not loaded");
+
+        publisher.load_retried();
+        publisher.loading(Some(Step::Reading));
+        assert!(
+            matches!(*status.borrow(), Status::Loading { .. }),
+            "the failure gives way to loading"
+        );
+        load_showing(&local, &publisher).await;
+        assert_eq!(*status.borrow(), Status::Listening);
+        assert!(!reload_wanted(true, Some(&local)), "a loaded model is kept");
+    }
+
+    #[tokio::test]
+    async fn a_reload_takes_off_only_the_failure_a_model_load_showed() {
+        for (case, then, shown) in [
+            ("another failure", other_failure(), other_failure()),
+            ("paused", Mode::Paused, Mode::Paused),
+        ] {
+            let local = LocalRecognizer::new(
+                FailsOnce(std::sync::atomic::AtomicBool::new(true)),
+                "test",
+                Recorder::disabled().metrics(),
+            );
+            let (out, _status) = watch::channel(Status::Paused);
+            let publisher = Publisher::new(out, EndingPauses::default());
+            publisher.mode(Mode::Idle);
+            load_showing(&local, &publisher).await;
+            publisher.mode(then);
+            publisher.load_retried();
+            assert_eq!(publisher.view.borrow().mode, shown, "{case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_finished_download_reloads_only_the_active_model_when_it_is_not_loaded() {
+        let loaded = LocalRecognizer::new(
+            FailsOnce(std::sync::atomic::AtomicBool::new(false)),
+            "test",
+            Recorder::disabled().metrics(),
+        );
+        loaded.load().await.unwrap();
+        let unloaded = LocalRecognizer::new(
+            FailsOnce(std::sync::atomic::AtomicBool::new(false)),
+            "test",
+            Recorder::disabled().metrics(),
+        );
+        for (case, uses_downloaded, local, expected) in [
+            ("active and not loaded", true, Some(&unloaded), true),
+            ("not the active model", false, Some(&unloaded), false),
+            ("active and loaded", true, Some(&loaded), false),
+            ("no on-device recognizer", true, None, false),
+        ] {
+            assert_eq!(reload_wanted(uses_downloaded, local), expected, "{case}");
+        }
+    }
+
+    #[test]
+    fn a_download_that_finishes_during_a_capture_is_kept_for_after_it() {
+        let mut requests = Requests::default();
+        assert!(!requests.take(Some(Control::ReloadSpeechModel(CatalogSpeech::ALL[0]))));
+        assert_eq!(requests.reload, Some(CatalogSpeech::ALL[0]));
     }
 
     const WAIT: Duration = Duration::from_secs(5);
