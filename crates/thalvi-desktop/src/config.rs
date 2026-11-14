@@ -1063,7 +1063,7 @@ mod tests {
                 r#""stt": {{"entries": [{{"kind": "on_device", "id": "d", "name": "D", "active": true}}, {{"kind": "{kind}", "id": "x", "name": "X", "active": {on}, "address": "http://x/v1", "model": "m"}}]}}"#
             )
         };
-        let refused = "Extra recognizers need a writing model. Set one up under Settings → Speech → Writing first, or switch the extras off.";
+        let refused = "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off.";
         for (name, json, error) in [
             (
                 "on without writing",

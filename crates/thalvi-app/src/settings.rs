@@ -805,7 +805,7 @@ mod tests {
                 Store::check(with(&base, upload, true, None), &store_defaults()).unwrap_err();
             assert_eq!(
                 on_without,
-                "Extra recognizers need a writing model. Set one up under Settings → Speech → Writing first, or switch the extras off."
+                "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."
             );
             let on = store
                 .save(

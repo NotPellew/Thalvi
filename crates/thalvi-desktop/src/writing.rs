@@ -265,7 +265,7 @@ impl TryFrom<RawWriting> for Writing {
 /// that nothing was pasted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum WritingError {
-    #[error("No writing model is set up. Add one under Settings → Speech → Writing.")]
+    #[error("No writing model is set up. Add one under Settings → Chat model → Writing.")]
     NotSetUp,
     #[error("The writing model took longer than 15 seconds.")]
     Timeout,

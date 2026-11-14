@@ -1165,7 +1165,7 @@ describe("the fake backend's rule for extra recognizers", () => {
   const settings = (endpoint: Settings["writing"], on: boolean): Settings => ({ ...SETTINGS, writing: endpoint, stt: { entries: [{ ...SERVER }, { ...OPENAI, active: on }] } });
 
   it.each([
-    ["no writing model was set", null, "Extra recognizers need a writing model. Set one up under Settings → Speech → Writing first, or switch the extras off."],
+    ["no writing model was set", null, "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."],
     ["the writing model is removed", writing, "Switch off the extra recognizers before removing the writing model."],
   ] as const)("refuses a switched-on extra when %s", async (_case, before, message) => {
     const backend = fakeBackend(new URLSearchParams());
@@ -1175,7 +1175,7 @@ describe("the fake backend's rule for extra recognizers", () => {
   });
 
   it.each([
-    ["a live extra needs a writing model", null, { ...SERVER }, { ...CYBREX, extra: true }, "Extra recognizers need a writing model. Set one up under Settings → Speech → Writing first, or switch the extras off."],
+    ["a live extra needs a writing model", null, { ...SERVER }, { ...CYBREX, extra: true }, "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."],
     ["the entry in use cannot be an extra", writing, { ...SERVER, extra: true }, { ...CYBREX }, 'Speech server "Realtime speech server" is the one in use, so it cannot also be an extra recognizer. Switch it off as an extra first.'],
   ] as const)("refuses a live entry's extra: %s", async (_case, endpoint, first, second, message) => {
     const backend = fakeBackend(new URLSearchParams());
@@ -2225,7 +2225,7 @@ describe("live controls", () => {
     expect(menu.textContent).toContain("Added by the installer; uninstalling removes it.");
   });
 
-  it("pauses, changes the device, saves and resumes from the Microphone page only", async () => {
+  it("pauses, changes the device, saves and resumes from the Listening page only", async () => {
     const stub = await open();
     const pageOf = (label: string): string | null => rowOf(label).closest("section")?.getAttribute("data-page") ?? null;
     expect(pageOf("Listening")).toBe("listening");

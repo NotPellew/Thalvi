@@ -85,10 +85,10 @@ impl SpeechSource {
     pub(crate) fn fix(&self) -> &'static str {
         match self.place {
             Place::Direct(_) => {
-                "Check that it is running, or fix its address under Settings → Speech."
+                "Check that it is running, or fix its address under Settings → Recognition."
             }
             Place::OnDevice(_) => {
-                "Wait for it to finish loading, or pick another under Settings → Speech."
+                "Wait for it to finish loading, or pick another under Settings → Recognition."
             }
         }
     }
@@ -181,7 +181,7 @@ pub enum RecognizerError {
     )]
     Dropped { speech: SpeechSource },
     #[error(
-        "{} sent something Thalvi did not understand. Check that its address under Settings → Speech is {}.",
+        "{} sent something Thalvi did not understand. Check that its address under Settings → Recognition is {}.",
         speech.subject(),
         speech.expected()
     )]
@@ -607,7 +607,7 @@ mod tests {
             assert_eq!(
                 failure.to_string(),
                 format!(
-                    "Thalvi could not reach the speech server \"Office\" at ws://127.0.0.1:9 ({words}). Check that it is running, or fix its address under Settings → Speech."
+                    "Thalvi could not reach the speech server \"Office\" at ws://127.0.0.1:9 ({words}). Check that it is running, or fix its address under Settings → Recognition."
                 )
             );
             assert_eq!(
@@ -622,11 +622,11 @@ mod tests {
         let cases = [
             (
                 SpeechSource::direct("Office", "ws://127.0.0.1:9".to_owned()),
-                "Check that its address under Settings → Speech is a realtime speech recognizer.",
+                "Check that its address under Settings → Recognition is a realtime speech recognizer.",
             ),
             (
                 SpeechSource::on_device("Offline", "nemotron_160ms".to_owned()),
-                "Check that its address under Settings → Speech is a speech model.",
+                "Check that its address under Settings → Recognition is a speech model.",
             ),
         ];
         for (speech, expected) in cases {

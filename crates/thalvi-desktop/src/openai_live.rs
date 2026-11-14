@@ -39,25 +39,25 @@ fn failure(speech: &SpeechSource, error: &SecondaryError) -> RecognizerError {
         SecondaryError::Timeout => (
             TranscriptionFailure::Timeout,
             format!(
-                "{subject} took too long to transcribe this capture. Nothing was delivered. Check the address and API key under Settings → Speech."
+                "{subject} took too long to transcribe this capture. Nothing was delivered. Check the address and API key under Settings → Recognition."
             ),
         ),
         SecondaryError::Unreachable => (
             TranscriptionFailure::Unreachable,
             format!(
-                "{subject} could not be reached. Nothing was delivered. Check the address and API key under Settings → Speech."
+                "{subject} could not be reached. Nothing was delivered. Check the address and API key under Settings → Recognition."
             ),
         ),
         SecondaryError::Status(code) => (
             TranscriptionFailure::HttpStatus,
             format!(
-                "{subject} returned HTTP {code}. Nothing was delivered. Check the address and API key under Settings → Speech."
+                "{subject} returned HTTP {code}. Nothing was delivered. Check the address and API key under Settings → Recognition."
             ),
         ),
         SecondaryError::BadResponse => (
             TranscriptionFailure::BadReply,
             format!(
-                "{subject} returned an unreadable transcription. Nothing was delivered. Check the address and API key under Settings → Speech."
+                "{subject} returned an unreadable transcription. Nothing was delivered. Check the address and API key under Settings → Recognition."
             ),
         ),
     };
