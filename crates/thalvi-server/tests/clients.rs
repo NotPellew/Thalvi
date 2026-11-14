@@ -217,7 +217,7 @@ async fn chat_model_sends_the_clip_and_surfaces_the_echo() {
                 Response::builder()
                     .header("content-type", "text/event-stream")
                     .body(Body::from(concat!(
-                        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hm\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"The user said: hm\"}}]}\n\n",
                         "data: {\"choices\":[{\"delta\":{\"content\":\"Four.\"}}]}\n\n",
                         "data: [DONE]\n\n",
                     )))
@@ -243,7 +243,7 @@ async fn chat_model_sends_the_clip_and_surfaces_the_echo() {
     assert_eq!(
         deltas,
         vec![
-            ChatEvent::Heard("hm".to_string()),
+            ChatEvent::Heard("The user said: hm".to_string()),
             ChatEvent::Text("Four.".to_string())
         ]
     );
