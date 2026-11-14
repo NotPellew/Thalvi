@@ -117,6 +117,15 @@ them (recording, a notice) is synchronous and never delivers, so it is the model
 a cancel returns `Cancelled` before any text can leave it, a failed or unfaithful merge returns the live text as
 `Accepted` like any other post-accept result, and `write` after it is unchanged. The model is unchanged and only the
 `engine.rs` hash moved.
+Streaming extras (#339) add sessions beside the live one: `Streams::start` (called in `Engine::capture` before
+`start`) spawns one task per extra, `feed` forwards every frame the live session is sent, `conclude` sends them
+`Finish` when the merge will run and cancels them (`drop_streams`, `Streams::cancel`) on every other end, and
+`merge` collects their answers under the same cancellation-first `select!` as the uploads. The model gains
+`extras` (streaming extras are on; without `secondary` the merge does not run, as for a scratched capture),
+`extra` (`none`, `open`, `released`, `late`) and `merged`, and three invariants: a finished capture never leaves an
+extra `open`; one cancelled before its merge finished leaves none running; `late` (left to finish on its own,
+bounded by `merge::LIMIT`) happens only after a merge that ran. The extras' answers feed only the merge, so
+`NoDeliveryAfterStop` still holds through them. A third negative control, `LeakExtraOnCancel`, skips the release.
 The merge's note (`Engine::take_merge_note`, `noted` in `runner.rs`) is read right after `capture` returns, beside
 `take_ignored`, and only appends text to the final status; it adds no await, control drain or delivery admission, so
 the model is unchanged and only the `engine.rs` and `runner.rs` hashes moved.
@@ -139,6 +148,7 @@ Matching hashes establish synchronization only, not correctness of the model.
 | `crates/thalvi-desktop/src/engine.rs`: `EngineHandle::cancel`, `Engine::capture` | `cancelPending` represents the watch version change; capture entry consumes the old version. `Accept` and `ActiveCancelled` abstract capture work before the ending. |
 | Same file: `Engine::conclude`, `Engine::end_cue`, `Engine::end_with` | `CueReturns`, `CloseReturns`; the cue's cancellation-biased select and recognizer release are separate futures joined together. A completed cue retains its bool while close is still Pending. Neither completion is a transaction encompassing the other. |
 | Same file: `Engine::merge`, `Engine::write`, `bounded` | `secondary` (the merge of the extras' texts), `writing`, `SecondaryReturns`, `WritingReturns`; disabled stages are skipped, each enabled stage polls cancellation first before handing the result to the next stage. |
+| `crates/thalvi-desktop/src/engine/streaming.rs`: `Streams::start`, `Streams::finish`, `Streams::cancel`, `hear`, `park`, `run`; `engine.rs`: `Engine::drop_streams` | `extras`, `extra`, `merged`: `PreEmpty` opens the extra sessions, `Accept` (merge will not run), `ActiveCancelled`, `CueReturns`/`CloseReturns` (ending cancelled) and `SecondaryReturns` (cancel) release them, an uncancelled `SecondaryReturns` leaves them `late`. A task ends by `RecognizerSession::cancel` on a cancel, a closed channel, a failure or `merge::LIMIT`, and by `close` on its text. |
 | `crates/thalvi-desktop/src/recognizer.rs`: `RecognizerSession`; `crates/thalvi-desktop/src/realtime.rs`: `RealtimeSession::close`; `crates/thalvi-desktop/src/openai_live.rs`: `OpenAiSession::cancel`, `OpenAiSession::close` | `CloseReturns` may occur before or after the cue. Network close is awaited under a timeout, so it can remain Pending; `OpenAiSession::close` aborts its upload task and returns at once. |
 | `crates/thalvi-desktop/src/delivery.rs`: `Delivery::finish`, `paste_in`, `call` | `delivered` abstracts admission to a valid configured host action. Actual host execution is outside the proof; once admitted it can run via `spawn_blocking`. Other changes to this file are not covered by the model. |
 
@@ -163,8 +173,8 @@ Temurin JRE `21.0.9+10` in the same user cache, verifying archive SHA-256
 Other platforms need a user-installed Java on PATH. No system package install
 is performed. Downloads require network access only on the first run.
 
-A faithful run here explores 22,275 distinct states (63,808 generated) with no
-error; the passing focused control explores 19,720.
+A faithful run here explores 44,768 distinct states (128,019 generated) with no
+error; the passing focused control explores 39,440.
 Each TLC invocation has a 120 s limit and 512 MB heap limit. State counts are
 receipts for this model, not acceptance criteria for a changed model.
 
@@ -186,7 +196,9 @@ control after the ending cue returns (the shutdown ordering of the fixed bug).
 It passes, then both mutations must fail the **same** `NoDeliveryAfterStop`
 invariant: removing the `ended` guard from admission, and replacing OR
 accumulation with the last message's decision. Both mutations also fail under
-`Scenario = "all"`. `SELF-TEST PASS` verifies detection only; it
+`Scenario = "all"`. A third control, `LeakExtraOnCancel = TRUE` under
+`Scenario = "all"`, never releases an extra session on a cancel and must fail
+`ExtrasNeverLeftOpen`. `SELF-TEST PASS` verifies detection only; it
 is not a pass of the full model. The production configuration remains
 `Scenario = "all"`, both mutation constants FALSE, `MaxControls = 3`.
 
@@ -280,14 +292,16 @@ proof, and rerun the full check to restore its recorded result.
 One capture, initially listening, one logical FIFO producer (representing
 channel send order), and zero to three controls from Cancel, pause, resume,
 toggle, Apply, an update's restart request (never ending a capture: the engine answers busy) and Quit. Every combination of enabled and disabled/skipped
-second-pass transcription and writing is explored. Each queue send, each receive, and each awaited
+second-pass transcription and writing, with or without streaming extras, is explored. Each queue send, each receive, and each awaited
 completion is a separate transition; synchronous runner-local updates are
 combined where no other actor reads them. The final empty receive is the
 admission fence. Sends after that fence belong to the next flow and are not
 covered; native delivery need not already have occurred at the fence.
 
 The pre-accept capture pipeline is abstracted as an accepted result or an
-observed cancellation. Recognition and silence correctness, watch wraparound,
+observed cancellation; a failure and "never mind" are the same non-accepted end. Each extra session's
+own connect, frames, events and text are not modeled, only whether the session is still owned.
+The replay has no streaming extra. Recognition and silence correctness, watch wraparound,
 channel disconnection, thread/process failure, repeated captures, more than
 three controls, liveness/fair scheduling, config application, history writes,
 real sockets/audio/cue devices, OS focus, clipboard, key injection and native

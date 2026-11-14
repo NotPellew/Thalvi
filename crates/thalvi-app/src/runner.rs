@@ -18,7 +18,8 @@ use thalvi_desktop::delivery::{Bound, Delivery, Finished};
 use thalvi_desktop::device::Step;
 use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
-    CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, WakeTrigger,
+    CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, StreamingExtra,
+    WakeTrigger,
 };
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::history::{Capture, Store as History};
@@ -461,6 +462,8 @@ struct Session {
     engine: Engine<Chosen, WakeEngine, CpalCuePlayer>,
     /// The local recognizer, whose model loads ahead of the first dictation.
     local: Option<Arc<LocalRecognizer<TransducerSource>>>,
+    /// The on-device recognizers of the streaming extras, loaded ahead the same way.
+    extra_locals: Vec<Arc<LocalRecognizer<TransducerSource>>>,
     handle: EngineHandle,
     gate: InputGate,
     device: Option<String>,
@@ -641,16 +644,35 @@ impl Runner {
             .session
             .as_ref()
             .and_then(|session| session.local.clone());
-        let Some(local) = local else {
-            self.publisher.loading(None);
+        let extras = self
+            .session
+            .as_ref()
+            .map(|session| session.extra_locals.clone())
+            .unwrap_or_default();
+        let first = local.as_ref().map(|local| *local.steps().borrow());
+        if let Some(first) = first {
+            println!("{}", load_notice(first));
+        }
+        self.publisher.loading(first);
+        if local.is_none() && extras.is_empty() {
             return;
-        };
-        let first = *local.steps().borrow();
-        println!("{}", load_notice(first));
-        self.publisher.loading(Some(first));
+        }
         let publisher = Rc::clone(&self.publisher);
         self.loading = Some(tokio::task::spawn_local(async move {
-            load_showing(&local, &publisher).await;
+            // An extra whose model cannot load fails per capture, with its own notice.
+            let preload = async {
+                for extra in &extras {
+                    if let Err(error) = extra.load().await {
+                        println!("{error}");
+                    }
+                }
+            };
+            match local {
+                Some(local) => {
+                    tokio::join!(load_showing(&local, &publisher), preload);
+                }
+                None => preload.await,
+            }
         }));
     }
 
@@ -686,14 +708,30 @@ impl Runner {
         let wake = wake.map_err(|error| Failure::of(&error))?;
         let gate = InputGate::default();
         let metrics = recorder.metrics();
-        let recognizer = Chosen::new(
-            config.stt.entries.active_live(),
-            store,
-            self.http.clone(),
-            metrics.clone(),
-            &config.stt.phrases,
-            self.devices.adapters(),
-        );
+        let chosen = |entry, store| {
+            Chosen::new(
+                entry,
+                store,
+                self.http.clone(),
+                metrics.clone(),
+                &config.stt.phrases,
+                self.devices.adapters(),
+            )
+        };
+        let extras: Vec<_> = config
+            .stt
+            .entries
+            .streaming_extras()
+            .map(|entry| StreamingExtra {
+                entry: entry.clone(),
+                recognizer: Arc::new(chosen(entry, store.clone())),
+            })
+            .collect();
+        let extra_locals = extras
+            .iter()
+            .filter_map(|extra| extra.recognizer.local())
+            .collect();
+        let recognizer = chosen(config.stt.entries.active_live(), store);
         let local = recognizer.local();
         self.devices.use_recognizer(local.clone());
         let (engine, handle) = Engine::new(
@@ -707,6 +745,7 @@ impl Runner {
                 notice: self.publisher.notice_sink(),
                 spotter,
                 spotter_off,
+                extras,
             },
             config,
             recorder,
@@ -723,6 +762,7 @@ impl Runner {
         Ok(Session {
             engine,
             local,
+            extra_locals,
             handle,
             gate,
             device: config.microphone.clone(),
@@ -1992,6 +2032,7 @@ mod tests {
                 notice: publisher.notice_sink(),
                 spotter: None,
                 spotter_off: None,
+                extras: Vec::new(),
             }, &DesktopConfig::from_json_str("{}").unwrap(), Recorder::disabled());
             let listening = tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -2304,6 +2345,7 @@ mod tests {
                         notice: publisher.notice_sink(),
                         spotter: None,
                         spotter_off: None,
+                        extras: Vec::new(),
                     },
                     &DesktopConfig::from_json_str("{}").unwrap(),
                     Recorder::disabled(),

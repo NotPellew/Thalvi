@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -71,7 +72,7 @@ def source_check():
     print('Source matches recorded hashes; sync commit ' + inventory['sync_commit'], flush=True)
 
 
-def run(java, jar, evidence, label, scenario='all', drop=False, forget=False):
+def run(java, jar, evidence, label, scenario='all', drop=False, forget=False, leak=False):
     run_dir = evidence / label
     run_dir.mkdir()
     shutil.copyfile(SKILL / 'CaptureCancel.tla', run_dir / 'CaptureCancel.tla')
@@ -81,6 +82,8 @@ def run(java, jar, evidence, label, scenario='all', drop=False, forget=False):
         config = config.replace('DropCompletionGuard = FALSE', 'DropCompletionGuard = TRUE')
     if forget:
         config = config.replace('ForgetEarlierStop = FALSE', 'ForgetEarlierStop = TRUE')
+    if leak:
+        config = config.replace('LeakExtraOnCancel = FALSE', 'LeakExtraOnCancel = TRUE')
     (run_dir / 'CaptureCancel.cfg').write_text(config)
     command = [java, '-Xmx512m', '-XX:+UseParallelGC', '-cp', str(jar),
                'tlc2.TLC', '-workers', '1', '-seed', '1', '-cleanup',
@@ -89,7 +92,7 @@ def run(java, jar, evidence, label, scenario='all', drop=False, forget=False):
         done = subprocess.run(command, cwd=run_dir, stdout=log, stderr=subprocess.STDOUT,
                               timeout=120, check=False)
     output = (run_dir / 'tlc.txt').read_text()
-    violation = 'Invariant NoDeliveryAfterStop is violated.' in output
+    violation = re.search(r'Invariant \w+ is violated\.', output) is not None
     passed = done.returncode == 0 and 'Model checking completed. No error has been found.' in output
     if not violation and not passed:
         raise RuntimeError(f'TLC did not produce a verdict; read {run_dir / "tlc.txt"}')
@@ -117,7 +120,9 @@ def main():
                 raise RuntimeError('removed completion guard escaped the invariant')
             if not run(java, jar, evidence, 'forgot-earlier-stop', scenario='fence', forget=True):
                 raise RuntimeError('overwritten drain stop escaped the invariant')
-            print('SELF-TEST PASS: faithful fence control passed; both mutations failed. '
+            if not run(java, jar, evidence, 'leaked-extra-session', leak=True):
+                raise RuntimeError('an extra session left running by a cancel escaped the invariants')
+            print('SELF-TEST PASS: faithful fence control passed; all three mutations failed. '
                   'Run without --self-test for the full model verdict.')
             return 0
         violation = run(java, jar, evidence, 'faithful')

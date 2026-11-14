@@ -176,6 +176,7 @@ async fn chosen_realtime_entry_streams_audio_and_forwards_endings() {
             kind: LiveKind::Realtime(
                 Realtime::new(&address, "nemotron", KEY.to_owned()).expect("entry"),
             ),
+            extra: false,
         };
         let chosen = Chosen::new(
             &entry,

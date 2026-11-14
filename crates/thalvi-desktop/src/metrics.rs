@@ -58,7 +58,9 @@ pub enum Event {
     PartialLag,
     /// From the last speech heard before a final result to that result.
     FinalLag,
-    /// One extra recognizer's transcription of a capture: its latency and outcome.
+    /// One extra recognizer's transcription of a capture: its latency and outcome. An upload
+    /// extra's latency is its request's; a streaming extra's is from the capture's end to its
+    /// final text, and its `api` names the kind (`realtime`, `open_ai_live`, `on_device`).
     ExtraStt,
     /// Merging the texts of a capture: the latency it adds after the ending, the chat call's own latency, and how it ended.
     Merge,

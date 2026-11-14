@@ -388,6 +388,7 @@ async fn chosen_live_openai_entry_buffers_and_forwards_the_whole_capture() {
         id: "live".to_owned(),
         name: "Local speech".to_owned(),
         kind: LiveKind::OpenAi(live(&url, "")),
+        extra: false,
     };
     let chosen = Chosen::new(
         &entry,
@@ -444,6 +445,7 @@ fn only_an_on_device_entry_has_a_preloadable_recognizer() {
         id: "local".to_owned(),
         name: "On this computer".to_owned(),
         kind: LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
+        extra: false,
     };
     let chosen = Chosen::new(
         &entry,
@@ -935,6 +937,7 @@ async fn chat_entry_sends_the_wav_as_input_audio_and_delivers_the_reply() {
             id: "live".to_owned(),
             name: "Chat speech".to_owned(),
             kind: LiveKind::OpenAi(chat(&url, key, language)),
+            extra: false,
         };
         let chosen = Chosen::new(
             &entry,

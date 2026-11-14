@@ -786,6 +786,11 @@ function isLive(entry: SpeechEntry): entry is LiveEntry {
   return entry.kind !== "extra";
 }
 
+/** Whether the entry also transcribes as an extra recognizer: an upload extra when active, a live one when flagged. */
+function isExtraOn(entry: SpeechEntry): boolean {
+  return isLive(entry) ? entry.extra === true : entry.active;
+}
+
 function hasKey(entry: SpeechEntry): boolean {
   if (entry.kind !== "realtime" && entry.kind !== "open_ai" && entry.kind !== "extra") return false;
   return entry.api_key === undefined ? entry.has_key === true : entry.api_key !== "";
@@ -1144,14 +1149,21 @@ function speech(context: PageContext): HTMLElement[] {
 
   function useLive(id: string): void {
     flag(id, (list) => {
-      for (const entry of list) if (isLive(entry)) entry.active = entry.id === id;
+      for (const entry of list) {
+        if (!isLive(entry)) continue;
+        entry.active = entry.id === id;
+        if (entry.active) delete entry.extra;
+      }
     }, checkWordList);
   }
 
   function tick(id: string, on: boolean): void {
     flag(id, (list) => {
       const entry = list.find((known) => known.id === id);
-      if (entry) entry.active = on;
+      if (!entry) return;
+      if (!isLive(entry)) entry.active = on;
+      else if (on) entry.extra = true;
+      else delete entry.extra;
     });
   }
 
@@ -1169,6 +1181,14 @@ function speech(context: PageContext): HTMLElement[] {
     if (hasKey(entry)) found.push(el("span", { class: "badge" }, "Key saved"));
     if (!isSaved(entry)) found.push(el("span", { class: "badge", "data-saved": "false" }, "Not saved"));
     return found;
+  }
+
+  function extraSwitch(entry: SpeechEntry): HTMLElement {
+    const ticked = controls.toggle(isExtraOn(entry), (on) => {
+      tick(entry.id, on);
+    });
+    (ticked.field as HTMLInputElement).setAttribute("aria-label", `Also transcribe with ${entry.name}`);
+    return ticked.node;
   }
 
   function liveRow(entry: LiveEntry): HTMLElement {
@@ -1190,6 +1210,7 @@ function speech(context: PageContext): HTMLElement[] {
     return el(
       "div",
       { class: "trow server", "data-id": entry.id },
+      ...(entry.active ? [] : [extraSwitch(entry)]),
       el("span", { class: "phrase" }, entry.name),
       ...badges(entry),
       el("small", { class: "unit" }, entryDescription(entry)),
@@ -1237,21 +1258,17 @@ function speech(context: PageContext): HTMLElement[] {
 
   /** What the group says follows the draft: the endpoint, and which extras are on. */
   function syncExtras(): void {
-    for (const input of extraList.querySelectorAll<HTMLInputElement>(".trow.server input[type=checkbox]")) lockTick(input);
-    const on = entries().filter((entry) => entry.kind === "extra" && entry.active).map((entry) => entry.name);
-    extraState.textContent =
-      on.length === 0
-        ? "Off. Dictation pastes the live text."
-        : `On: ${on.join(", ")}. The chat model merges ${on.length === 1 ? "its text" : "their texts"} with the live one.`;
+    for (const list of [liveList, extraList]) {
+      for (const input of list.querySelectorAll<HTMLInputElement>(".trow.server input[type=checkbox]")) lockTick(input);
+    }
+    const on = entries().filter(isExtraOn);
+    const merged = `The chat model merges ${on.length === 1 ? "its text" : "their texts"} with the live one.`;
+    const loads = on.some((entry) => entry.kind === "on_device") ? " Each on-device extra loads its own model, which adds memory and processing." : "";
+    extraState.textContent = on.length === 0 ? "Off. Dictation pastes the live text." : `On: ${on.map((entry) => entry.name).join(", ")}. ${merged}${loads}`;
     needsEndpoint.hidden = draft.writing !== null;
   }
 
   function extraRow(entry: ExtraEntry): HTMLElement {
-    const ticked = controls.toggle(entry.active, (on) => {
-      tick(entry.id, on);
-    });
-    const tickInput = ticked.field as HTMLInputElement;
-    tickInput.setAttribute("aria-label", `Also transcribe with ${entry.name}`);
     const edit = button("Edit", () => {
       openEditor(entry);
     }, "quiet");
@@ -1264,7 +1281,7 @@ function speech(context: PageContext): HTMLElement[] {
     return el(
       "div",
       { class: "trow server", "data-id": entry.id },
-      ticked.node,
+      extraSwitch(entry),
       el("span", { class: "phrase" }, entry.name),
       ...badges(entry),
       el("small", { class: "unit" }, entryDescription(entry)),

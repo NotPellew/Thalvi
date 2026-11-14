@@ -70,8 +70,13 @@ interface EntryBase {
   active: boolean;
 }
 
+interface LiveBase extends EntryBase {
+  /** Also transcribes each capture as an extra recognizer while not the active entry; absent means off, and the active entry never has it. */
+  extra?: boolean;
+}
+
 /** A recognizer the desktop connects to itself, speaking Meta's realtime ASR protocol. */
-export interface RealtimeEntry extends EntryBase {
+export interface RealtimeEntry extends LiveBase {
   kind: "realtime";
   address: string;
   model: string;
@@ -82,14 +87,14 @@ export interface RealtimeEntry extends EntryBase {
 }
 
 /** The speech model on this computer. */
-export interface OnDeviceEntry extends EntryBase {
+export interface OnDeviceEntry extends LiveBase {
   kind: "on_device";
   /** A catalog name or a model folder; its default when absent. */
   model?: string;
 }
 
 /** A buffered OpenAI-compatible transcription endpoint used for live dictation. */
-export interface OpenAiEntry extends EntryBase {
+export interface OpenAiEntry extends LiveBase {
   kind: "open_ai";
   address: string;
   model: string;

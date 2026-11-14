@@ -166,8 +166,12 @@ fn check_keys(
 fn check_endpoint_kept(settings: &mut Value, current: &DesktopConfig) -> Result<(), String> {
     let removed = current.writing.is_some() && settings.get("writing").is_none_or(Value::is_null);
     let extra_on = entries_of(settings).any(|entry| {
-        entry.get("kind").and_then(Value::as_str) == Some("extra")
-            && entry.get("active") == Some(&Value::Bool(true))
+        let flag = if entry.get("kind").and_then(Value::as_str) == Some("extra") {
+            "active"
+        } else {
+            "extra"
+        };
+        entry.get(flag) == Some(&Value::Bool(true))
     });
     if removed && extra_on {
         return Err(
@@ -768,17 +772,22 @@ mod tests {
     }
 
     #[test]
-    fn an_extra_cannot_be_switched_on_without_the_writing_model_nor_the_model_removed_under_it() {
+    fn an_extra_of_either_kind_cannot_be_switched_on_without_the_writing_model_nor_the_model_removed_under_it()
+     {
         let (store, dir) = store("extras");
-        let extra = |on: bool| {
-            json!({"kind": "extra", "id": "x", "name": "X", "active": on,
-                "address": "http://127.0.0.1:9/v1", "model": "m"})
+        let extra = |upload: bool, on: bool| {
+            if upload {
+                json!({"kind": "extra", "id": "x", "name": "X", "active": on,
+                    "address": "http://127.0.0.1:9/v1", "model": "m"})
+            } else {
+                json!({"kind": "on_device", "id": "x", "name": "X", "extra": on})
+            }
         };
-        let with = |settings: &Value, on: bool, writing: Option<&Value>| {
+        let with = |settings: &Value, upload: bool, on: bool, writing: Option<&Value>| {
             let mut settings = settings.clone();
             settings["stt"] = json!({"entries": [
                 {"kind": "on_device", "id": "d", "name": "D", "active": true},
-                extra(on),
+                extra(upload, on),
             ]});
             match writing {
                 Some(writing) => settings["writing"] = writing.clone(),
@@ -788,24 +797,30 @@ mod tests {
             }
             settings
         };
-        let endpoint = json!({"url": "http://127.0.0.1:8000/v1", "model": "m"});
-        let base = settings_json(&store_defaults()).unwrap();
+        for upload in [true, false] {
+            let endpoint = json!({"url": "http://127.0.0.1:8000/v1", "model": "m"});
+            let base = settings_json(&store_defaults()).unwrap();
 
-        let on_without = Store::check(with(&base, true, None), &store_defaults()).unwrap_err();
-        assert_eq!(
-            on_without,
-            "Extra recognizers need a writing model. Set one up under Settings → Speech → Writing first, or switch the extras off."
-        );
-        let on = store
-            .save(with(&base, true, Some(&endpoint)), &store_defaults())
-            .unwrap();
-        let removed = Store::check(with(&base, true, None), &on).unwrap_err();
-        assert_eq!(
-            removed,
-            "Switch off the extra recognizers before removing the writing model."
-        );
-        // Switching them off and removing the model together is allowed.
-        Store::check(with(&base, false, None), &on).unwrap();
+            let on_without =
+                Store::check(with(&base, upload, true, None), &store_defaults()).unwrap_err();
+            assert_eq!(
+                on_without,
+                "Extra recognizers need a writing model. Set one up under Settings → Speech → Writing first, or switch the extras off."
+            );
+            let on = store
+                .save(
+                    with(&base, upload, true, Some(&endpoint)),
+                    &store_defaults(),
+                )
+                .unwrap();
+            let removed = Store::check(with(&base, upload, true, None), &on).unwrap_err();
+            assert_eq!(
+                removed,
+                "Switch off the extra recognizers before removing the writing model."
+            );
+            // Switching them off and removing the model together is allowed.
+            Store::check(with(&base, upload, false, None), &on).unwrap();
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
