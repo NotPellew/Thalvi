@@ -89,7 +89,7 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
 | Need | Command |
 | --- | --- |
 | Tray actions | `$H ctl $R pause`, `resume`, `toggle`, `cancel`, `status` (the relaunch path the tray and key binds use) |
-| Open Settings | `$H ctl $R` with no argument, or `$H ctl $R show capture` for one page |
+| Open Settings | `$H ctl $R` with no argument, or `$H ctl $R show commands` for one page |
 | What Thalvi and its overlay show | `$H ctl $R state` (state, `overlay`, `recognizer`; never what was said) |
 | Set up from a fresh config | `$H ctl $R models`, `$H ctl $R model-download speech nemotron_160ms` (replies when ready), `$H ctl $R speech-check '<entry json>'`, `$H ctl $R settings set '<json>'` |
 | Quit the app like the tray | `$H ctl $R quit`; the log ends with `Stopped.` |
