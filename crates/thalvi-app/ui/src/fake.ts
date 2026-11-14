@@ -2,6 +2,7 @@
 
 import type { AudioStatus, Backend, Draft, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 import { LOOKS } from "./look.ts";
+import { applyPatch } from "./patch.ts";
 
 const UNIFIED_LANGUAGES = [
   "Bulgarian",
@@ -203,7 +204,9 @@ export function fakeBackend(params: URLSearchParams): Backend {
     onAudio: (listener) => audioListeners.push(listener),
     onSettingsChangedElsewhere: () => undefined,
     getSettings: () => Promise.resolve(structuredClone(saved)),
-    saveSettings: (next) => {
+    saveSettings: (patch) => {
+      // A setting the patch removed is back at its default.
+      const next: Settings = Object.assign({ writing: null, microphone: null }, applyPatch(saved, patch));
       if (next.stt.entries.filter((entry) => entry.kind !== "extra" && entry.active).length !== 1) {
         return Promise.reject(new Error("The desktop config is not valid: exactly one live speech server must be active."));
       }

@@ -1078,9 +1078,14 @@ impl Runner {
     async fn switch_microphone(&mut self) {
         self.microphone_problem = None;
         if let Some(session) = self.session.as_mut()
-            && let Err(failure) = session.switch_microphone(self.config.microphone.clone()).await
+            && let Err(failure) = session
+                .switch_microphone(self.config.microphone.clone())
+                .await
         {
-            tracing::warn!(notice = failure.notice, "the selected microphone could not be opened");
+            tracing::warn!(
+                notice = failure.notice,
+                "the selected microphone could not be opened"
+            );
             self.microphone_problem = Some(failure.notice);
         }
         self.publish_audio();

@@ -38,7 +38,7 @@ describe("the settings window's look", () => {
     radio("holo").click();
     expect(root.dataset["look"]).toBe("holo");
     await settle();
-    expect(stub.backend.saveSettings).toHaveBeenCalledWith({ ...SETTINGS, look: "holo" });
+    expect(stub.backend.saveSettings).toHaveBeenCalledWith({ look: "holo" });
     expect(pick(root, "section[data-page=overlay] .row[data-label=look] .applied").textContent).toBe("Applied.");
 
     stub.backend.saveSettings.mockRejectedValueOnce("Thalvi could not apply it.");

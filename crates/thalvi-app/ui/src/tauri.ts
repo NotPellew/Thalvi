@@ -31,7 +31,7 @@ export function tauriBackend(): Backend {
       });
     },
     getSettings: () => invoke<Settings>("get_settings"),
-    saveSettings: (settings) => invoke<undefined>("save_settings", { settings }),
+    saveSettings: (patch) => invoke<undefined>("save_settings", { patch }),
     setListening: (on) => invoke<undefined>("set_listening", { on }),
     dismissError: () => invoke<undefined>("dismiss_error"),
     copyReport: (message, causes) => invoke<undefined>("copy_report", { message, causes }),

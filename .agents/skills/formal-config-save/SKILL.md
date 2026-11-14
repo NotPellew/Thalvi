@@ -96,7 +96,7 @@ hashes moved.
 
 | Code | Model action and boundary |
 | --- | --- |
-| `crates/thalvi-app/src/commands.rs`: `save` (from `save_settings`, the Settings window) | Writer `S` on the main thread, one at a time with other main-thread writers. Via `AppState::save_form` into `SyncedConfig::save_form`: `Lock` before `Snap`, `Unlock` after `Send`. `Snap`: the config read for `Store::check`'s `current`, under the lock; the Settings save sets its field (the look). This abstracts any one Settings form field, including `update_channel`; that setting has no separate writer. `Store::write` runs through `AppState::take_effect`'s `write`, after any changed hold keys are watched; a desktop that refuses them ends the save before `Create`, like any refused save. |
+| `crates/thalvi-app/src/commands.rs`: `save` (from `save_settings`, the Settings window), `settings_patch` | Writer `S` on the main thread, one at a time with other main-thread writers. Via `AppState::save_form` into `SyncedConfig::save_form`: `Lock` before `Snap`, `Unlock` after `Send`. `Snap`: `settings_patch` merges the window's patch (only what the user changed) over the config read under the lock, with `settings::merged`, which `plan_over` uses too; the Settings save sets its field (the look) and carries the others over. This abstracts any one Settings form field, including `update_channel`; that setting has no separate writer. `Store::write` runs through `AppState::take_effect`'s `write`, after any changed hold keys are watched; a desktop that refuses them ends the save before `Create`, like any refused save. |
 | `crates/thalvi-app/src/agent.rs`: `settings_set`, `plan_over`, via `Live::save` in `app.rs` | Writer `A` on a request thread; the same `commands::save` path. `Snap` is `plan_over` on the config `SyncedConfig::save_form` read under the lock: the patch merged over the whole form, so it sets its own field (the microphone) and carries the others over. `settings check` (`plan`) writes nothing and is not modeled. |
 | `crates/thalvi-app/src/app.rs`: `SyncedConfig::remember` (from `AppState::remember`, reached by `remember_login`, `remember_menu_entry` and `Live::set_switch`) | Writer `L` on a request thread. `Lock` before `Snap`: reads the whole config and sets the switch under the lock; `Store::save_switches` writes it; the running config is set before `Unlock`. |
 | `crates/thalvi-app/src/settings.rs`: `Store::check` (form saves), `Store::save` (switches), `prepare` | The content each writer validates: a form save keeps `current`'s switches; a switch keeps the form it read. |
@@ -143,13 +143,14 @@ After changing the verification, check that the invariants can pass and fail:
 It first runs `Serialized = TRUE`, one lock held from before `Snap` until
 after `Send`, which must pass every invariant (131 distinct states). This shows
 the finding comes from the missing serialization, not from the model. Then
-four mutations of that design each must break their own invariant:
+five mutations of that design each must break their own invariant:
 
 | Mutation constant | What it breaks in the serialized design | Must break |
 | --- | --- | --- |
 | `SnapshotOutsideLock` | the config is read before taking the lock | `EachFieldKeepsItsLastSave` |
 | `ApplyOutsideLock` | the lock is released before `AppState::apply` | `RunningMatchesFile` |
 | `AgentMergeOutsideLock` | the agent reads and merges its patch before taking the lock, as `plan` did before the repair | `EachFieldKeepsItsLastSave` |
+| `SettingsMergeOutsideLock` | the Settings save builds its form before taking the lock, as the window did when it sent the whole form it had last read | `EachFieldKeepsItsLastSave` |
 | `RenameBeforeWrite` | the temporary file is renamed before it is written | `FileAlwaysWhole` |
 
 `SELF-TEST PASS` verifies detection only; it is not a pass of the code as it is.
@@ -199,14 +200,14 @@ Three writers that each save once: a Settings save on the main thread, and an
 agent settings change and a switch flip on request threads. Every interleaving
 of their file-system calls and locks. Content is abstract: a form of two fields, the look
 that the Settings save sets and the microphone that the agent sets, each save
-carrying the other field over from the config it read, and one switch. The
-Settings window's own view of the fields it did not change is taken to be
-current (its stale state is out of scope).
+carrying the other field over from the config it read, and one switch.
 
 Assumed: each file-system call is atomic, and `write_all` of a config this size
 lands in one step, so a half-written file is not modeled; validation in `load`
 never fails; the runner applies `Control::Apply` messages in send order;
 `rename` replaces the target atomically.
+
+The Settings window now sends a JSON merge patch of only what the user changed (#340), and `save_settings` merges it with `settings::merged` over the config read under the lock, in the closure `SyncedConfig::save_form` runs, as the agent's `settings set` does. The model already had the Settings save carry the other field over from the config it read under the lock; what changed is the code: it no longer carries the window's own last-read view over, which the earlier version of this scope called out of scope. `SettingsMergeOutsideLock` is the mutation that models the old behaviour (a form built before the lock), and the model's comments name `settings_patch`. The `settings.rs`, `commands.rs` and `agent.rs` hashes moved. The new Rust test is `a_settings_patch_is_merged_over_the_config_read_under_the_lock`.
 
 Removing the "pause before changing the microphone" rule (#340) only drops a check that ran inside the lock after `Snap` and before `Create`, and the `paused` argument it needed; it adds no writer or file-system step and a refused save still ends before `Create`, so the model is unchanged and the `settings.rs`, `app.rs` and `agent.rs` hashes moved.
 
@@ -218,6 +219,6 @@ Not verified: two writers on the main thread at once (they cannot overlap); a
 tray switch on the main thread racing an agent save (the same steps as `L`,
 with `MainThread = {"S", "L"}`); more than three writers; partial writes, disk
 full and crashes beyond the empty-file state; the Settings form's own stale
-state (`settings.ts`, the "changed elsewhere" banner); the OS login entry that
+state beyond the patch it sends (`settings.ts`); a list such as `stt.entries` is replaced whole by a patch that changes it; the OS login entry that
 `startup::set` changes before `remember`; Windows file-sharing errors on
 `rename`.

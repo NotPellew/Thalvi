@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 use crate::control;
 use crate::runner::{AudioStatus, Control};
-use crate::settings::{judge, merge_patch, settings_json};
+use crate::settings::{judge, merged, settings_json};
 use crate::status::{Failure, FailureKind, Status};
 
 /// How long a control is given to show in the engine's state before it is said to have had no effect.
@@ -781,8 +781,7 @@ fn plan_over(current: DesktopConfig, change: &Value) -> Result<Plan, String> {
             switches.push((switch, on));
         }
     }
-    let mut merged = settings_json(&current)?;
-    merge_patch(&mut merged, &Value::Object(fields));
+    let merged = merged(&current, &Value::Object(fields))?;
     let config = judge(merged.clone(), &current)?;
     Ok(Plan {
         merged,

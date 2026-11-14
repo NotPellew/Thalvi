@@ -194,6 +194,21 @@ fn load(settings: &Value) -> Result<DesktopConfig, String> {
     })
 }
 
+/// `patch` merged over the form of `current`: how every change to the settings is built, so that
+/// a change sends only what it changes and cannot undo one saved since its sender last looked.
+/// Called under the save lock, on the config in use.
+///
+/// # Errors
+/// That `patch` is not a JSON object, or why `current` has no form.
+pub fn merged(current: &DesktopConfig, patch: &Value) -> Result<Value, String> {
+    if !patch.is_object() {
+        return Err("The settings change must be a JSON object.".to_owned());
+    }
+    let mut form = settings_json(current)?;
+    merge_patch(&mut form, patch);
+    Ok(form)
+}
+
 /// Applies a JSON merge patch (RFC 7386) to `target`: objects merge, `null` removes a key, and
 /// anything else, an array included, replaces.
 pub fn merge_patch(target: &mut Value, patch: &Value) {
@@ -1006,9 +1021,7 @@ mod tests {
 
     /// The form of the default config with `change` merged in, as the commands build it.
     fn judged(current: &DesktopConfig, change: &Value) -> Result<DesktopConfig, String> {
-        let mut form = settings_json(current).unwrap();
-        merge_patch(&mut form, change);
-        judge(form, current)
+        judge(merged(current, change).unwrap(), current)
     }
 
     #[test]

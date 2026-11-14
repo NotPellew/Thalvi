@@ -3,6 +3,7 @@ import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry, Status,
 import settingsCss from "./settings.css?raw";
 import settingsLooksCss from "./settings-looks.css?raw";
 import { fakeBackend } from "./fake.ts";
+import { settingsPatch } from "./patch.ts";
 import { APPLIED_LATER_TEXT, APPLIED_TEXT, mountSettings } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO } from "./testing.ts";
 
@@ -76,9 +77,9 @@ function goTo(page: string): void {
 
 /** The settings of the latest call to `saveSettings`: every change is applied on top of the ones before. */
 function sent(stub: Awaited<ReturnType<typeof open>>): Settings {
-  const call = stub.backend.saveSettings.mock.calls.at(-1);
-  if (!call) throw new Error("nothing was applied");
-  return call[0];
+  const latest = stub.applied().at(-1);
+  if (!latest) throw new Error("nothing was applied");
+  return latest;
 }
 
 const SERVER: SpeechEntry = { kind: "realtime", id: "direct", name: "Realtime speech server", active: true, address: "ws://127.0.0.1:8012", model: "nemotron" };
@@ -240,6 +241,42 @@ describe("applying a change", () => {
     expect(read(sent(stub))).toEqual(expected);
   });
 
+  // (page, what the user does, the whole of what is sent)
+  const patches: [string, () => void, unknown][] = [
+    ["overlay", () => { flip(control("Show the draft", "input")); }, { overlay: { draft: false } }],
+    ["commands", () => { type(control("Quiet before paste", "input"), "1.5"); }, { ending_pause: { paste: 1.5 } }],
+    ["commands", () => { (root.querySelector('button[aria-label="Remove “never mind”"]') as HTMLButtonElement).click(); }, { endings: { "never mind": null } }],
+    ["listening", () => { choose(control("Microphone", "select"), "USB Microphone"); }, { microphone: "USB Microphone" }],
+    ["app", () => { choose(control("Update channel", "select"), "development"); }, { update_channel: "development" }],
+  ];
+
+  it.each(patches)("sends only the changed setting (%s)", async (page, change, patch) => {
+    const stub = await open();
+    goTo(page);
+    change();
+    await settle();
+    expect(stub.backend.saveSettings.mock.calls.map(([sentPatch]) => sentPatch)).toEqual([patch]);
+  });
+
+  it("does not send a change back that another program made since the window looked", async () => {
+    const stub = await open();
+    const changed = structuredClone(SETTINGS);
+    changed.overlay.draft = false;
+    stub.backend.getSettings.mockResolvedValue(changed);
+    goTo("overlay");
+    flip(control("Wake sound", "input"));
+    await settle();
+    expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch)).toEqual([{ cues: { wake: false } }]);
+  });
+
+  it("sends nothing when the value is the one already applied", async () => {
+    const stub = await open();
+    goTo("listening");
+    choose(control("Microphone", "select"), "");
+    await settle();
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+  });
+
   it("has no Save or Revert on any page", async () => {
     await open();
     const labels = Array.from(root.querySelectorAll("button")).map((candidate) => candidate.textContent);
@@ -254,7 +291,7 @@ describe("applying a change", () => {
     flip(control("Show the draft", "input"));
     flip(control("Wake sound", "input"));
     await settle();
-    const [first, second] = stub.backend.saveSettings.mock.calls.map(([settings]) => [settings.overlay.draft, settings.cues.wake]);
+    const [first, second] = stub.applied().map((settings) => [settings.overlay.draft, settings.cues.wake]);
     expect([first, second]).toEqual([[false, true], [false, false]]);
   });
 
@@ -376,8 +413,8 @@ describe("applying a change", () => {
       expect(stub.backend.saveSettings).not.toHaveBeenCalled();
       control("Quiet before paste", "input").blur();
       await settle();
-      expect(sent(stub).ending_pause.paste).toBe(1.5);
-      expect(sent(stub).ending_pause.submit).toBe(4);
+      // Only the field the user changed is sent, so the change from elsewhere is not sent back stale.
+      expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch)).toEqual([{ ending_pause: { paste: 1.5 } }]);
       goTo("overlay");
       expect(control("Show the draft", "input").checked).toBe(false);
     });
@@ -521,7 +558,7 @@ describe("the wake word picker", () => {
     await settle();
 
     expect(input.checked).toBe(after);
-    expect(stub.backend.saveSettings.mock.calls.map(([settings]) => settings.wake.enabled)).toEqual(sent === null ? [] : [sent]);
+    expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch)).toEqual(sent === null ? [] : [{ wake: { enabled: sent } }]);
     expect(rowOf("Wake words").querySelector("small.unit[role=status]")?.textContent).toBe(text);
     expect(rowOf("Wake words").querySelector(".note:not([hidden])")?.textContent ?? "").toBe(notice);
   });
@@ -943,8 +980,8 @@ describe("the speech server list", () => {
     await saveServer();
     expect(stub.backend.checkSpeechEntry.mock.calls.at(-1)?.[0]).toMatchObject({ model: "whisper-v3" });
     expect(stub.backend.checkSpeechEntry.mock.calls.at(-1)?.[0]).not.toHaveProperty("api_key");
-    expect(stub.backend.saveSettings.mock.calls.at(-1)?.[0].stt.entries.find((entry) => entry.name === "Local Whisper")).toMatchObject({ has_key: true });
-    expect(stub.backend.saveSettings.mock.calls.at(-1)?.[0].stt.entries.find((entry) => entry.name === "Local Whisper")).not.toHaveProperty("api_key");
+    expect(stub.applied().at(-1)?.stt.entries.find((entry) => entry.name === "Local Whisper")).toMatchObject({ has_key: true });
+    expect(stub.applied().at(-1)?.stt.entries.find((entry) => entry.name === "Local Whisper")).not.toHaveProperty("api_key");
 
     use("On this computer");
     await settle();
@@ -1009,7 +1046,9 @@ describe("the speech server list", () => {
     expect(control("API key", "input").placeholder).toBe("Saved — leave blank to keep it");
     act(within(rowOf("API key"), "Clear saved key"));
     await saveServer();
-    const entry = sent(stub).stt.entries.find((known) => known.id === "cybrex2");
+    // An entry left as it was changes nothing, so nothing is sent.
+    expect(stub.applied()).toHaveLength(sentKey === undefined ? 0 : 1);
+    const entry = stub.applied().at(-1)?.stt.entries.find((known) => known.id === "cybrex2");
     expect(entry && "api_key" in entry ? entry.api_key : undefined).toBe(sentKey);
     expect(badgesOf("Cybrex2").includes("Key saved")).toBe(stillSaved);
   });
@@ -1036,7 +1075,7 @@ describe("extra recognizers", () => {
     ]);
     flip(tickOf("OpenAI"));
     await settle();
-    const unticked = stub.backend.saveSettings.mock.calls[1]?.[0].stt.entries.find((entry) => entry.id === "openai");
+    const unticked = stub.applied()[1]?.stt.entries.find((entry) => entry.id === "openai");
     expect(unticked).toMatchObject({ active: false, address: "https://api.openai.com/v1", model: "whisper-1", has_key: true });
   });
 
@@ -1141,7 +1180,7 @@ describe("extra recognizers", () => {
       stt: { entries: several().stt.entries.map((entry) => (extras.includes(entry.name) ? { ...entry, extra: true } : entry)) },
     });
     const savedEntry = (stub: Awaited<ReturnType<typeof openSeveral>>, name: string): SpeechEntry | undefined =>
-      stub.backend.saveSettings.mock.calls.at(-1)?.[0].stt.entries.find((entry) => entry.name === name);
+      stub.applied().at(-1)?.stt.entries.find((entry) => entry.name === name);
 
     it("has no switch while it is the one in use", async () => {
       await openSeveral();
@@ -1208,6 +1247,10 @@ describe("extra recognizers", () => {
 
 describe("the fake backend's rule for extra recognizers", () => {
   const writing = { url: "http://127.0.0.1:8000/v1", model: "glimmer" };
+  /** Sends the patch from what the backend holds to `next`, as a window would. */
+  const put = async (backend: ReturnType<typeof fakeBackend>, next: Settings): Promise<void> => {
+    await backend.saveSettings(settingsPatch(await backend.getSettings(), next));
+  };
   const settings = (endpoint: Settings["writing"], on: boolean): Settings => ({ ...SETTINGS, writing: endpoint, stt: { entries: [{ ...SERVER }, { ...OPENAI, active: on }] } });
 
   it.each([
@@ -1215,9 +1258,9 @@ describe("the fake backend's rule for extra recognizers", () => {
     ["the writing model is removed", writing, "Switch off the extra recognizers before removing the writing model."],
   ] as const)("refuses a switched-on extra when %s", async (_case, before, message) => {
     const backend = fakeBackend(new URLSearchParams());
-    await backend.saveSettings(settings(before, before !== null));
-    await expect(backend.saveSettings(settings(null, true))).rejects.toThrow(message);
-    await expect(backend.saveSettings(settings(null, false))).resolves.toBeUndefined();
+    await put(backend, settings(before, before !== null));
+    await expect(put(backend, settings(null, true))).rejects.toThrow(message);
+    await expect(put(backend, settings(null, false))).resolves.toBeUndefined();
   });
 
   it.each([
@@ -1225,8 +1268,8 @@ describe("the fake backend's rule for extra recognizers", () => {
     ["the entry in use cannot be an extra", writing, { ...SERVER, extra: true }, { ...CYBREX }, 'Speech server "Realtime speech server" is the one in use, so it cannot also be an extra recognizer. Switch it off as an extra first.'],
   ] as const)("refuses a live entry's extra: %s", async (_case, endpoint, first, second, message) => {
     const backend = fakeBackend(new URLSearchParams());
-    await expect(backend.saveSettings({ ...SETTINGS, writing: endpoint, stt: { entries: [first, second] } })).rejects.toThrow(message);
-    await expect(backend.saveSettings({ ...SETTINGS, writing, stt: { entries: [{ ...SERVER }, { ...CYBREX, extra: true }] } })).resolves.toBeUndefined();
+    await expect(put(backend, { ...SETTINGS, writing: endpoint, stt: { entries: [first, second] } })).rejects.toThrow(message);
+    await expect(put(backend, { ...SETTINGS, writing, stt: { entries: [{ ...SERVER }, { ...CYBREX, extra: true }] } })).resolves.toBeUndefined();
   });
 });
 
@@ -1537,9 +1580,7 @@ describe("the speech model catalog", () => {
     choose(languages(), "");
     expect(picker().value).toBe("unified_160ms");
     await saveServer();
-    await settle();
-    await settle();
-    expect(deviceOf(sent(stub)).model).toBe("unified_160ms");
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
   });
 
   it("leaves the own folder selected when the language changes", async () => {
@@ -1840,7 +1881,7 @@ describe("writing", () => {
     expect(sent(stub).writing).toEqual({ ...writing, model: "updated" });
     button("Clear saved writing key").click();
     await settle();
-    expect(stub.backend.saveSettings.mock.calls[1]?.[0].writing).toEqual({ ...writing, model: "updated", api_key: "" });
+    expect(stub.applied()[1]?.writing).toEqual({ ...writing, model: "updated", api_key: "" });
   });
 
   describe("prompt", () => {
@@ -1867,7 +1908,7 @@ describe("writing", () => {
       await settle();
       expect(area().value).toBe(fallback);
       expect(restore().disabled).toBe(true);
-      expect(stub.backend.saveSettings.mock.calls[1]?.[0].writing).toEqual(saved);
+      expect(stub.applied()[1]?.writing).toEqual(saved);
     });
 
     it("shows a saved prompt when Settings is reopened and keeps it through other edits", async () => {
@@ -1949,7 +1990,7 @@ describe("writing", () => {
       expect(sent(stub).writing).toEqual({ ...saved, openings: [openings[1]] });
       (rows().querySelector('button[aria-label="Remove “write a message”"]') as HTMLElement).click();
       await settle();
-      expect(stub.backend.saveSettings.mock.calls[1]?.[0].writing).toEqual(saved);
+      expect(stub.applied()[1]?.writing).toEqual(saved);
     });
 
     it("refuses a phrase that is already there, ignoring case and punctuation, and an empty one", async () => {
@@ -2131,7 +2172,7 @@ describe("live controls", () => {
     const SAME = "The write key must differ from the dictate key.";
     const BOUND = "F8 is already bound in Hyprland. Pick another key or remove that bind. The keys that were set before still work.";
     const KEPT = "The keys that were set before still work.";
-    const MODIFIER = `Hyprland can bind only F1 to F12 without a modifier for the hold keys, not Alt+KeyZ. ${KEPT}`;
+    const MODIFIER = `Hyprland can bind only F1 to F12 without a modifier for the hold keys, not Alt+KeyQ. ${KEPT}`;
     const NEEDS = 'The key "KeyY" needs a modifier, or typing it would start a capture.';
     const UNKNOWN = 'The key "Tab" is not a key name such as Alt+KeyZ: modifiers Ctrl, Shift, Alt or Win, then a key such as KeyZ, Digit1, F9 or Space, joined by +.';
 
@@ -2146,7 +2187,7 @@ describe("live controls", () => {
       ["Dictate key", [["Escape"], ["KeyY", "ctrl"]], null, null, "Alt+Z", true, "", false],
       ["Dictate key", [["F8"]], BOUND, "F8", "Alt+Z", true, BOUND, false],
       ["Write key", [["KeyZ", "alt"]], SAME, "Alt+KeyZ", "Alt+X", true, SAME, false],
-      ["Dictate key", [["KeyZ", "alt"]], MODIFIER, "Alt+KeyZ", "Alt+Z", true, MODIFIER.replace("Alt+KeyZ", "Alt+Z"), false],
+      ["Dictate key", [["KeyQ", "alt"]], MODIFIER, "Alt+KeyQ", "Alt+Z", true, MODIFIER.replace("Alt+KeyQ", "Alt+Q"), false],
       ["Dictate key", [["KeyY"]], NEEDS, "KeyY", "Alt+Z", true, NEEDS.replace("KeyY", "Y"), false],
       ["Write key", [["Tab"]], UNKNOWN, "Tab", "Alt+X", true, TAB, false],
       ["Write key", [["Tab"]], UNKNOWN, "Tab", "Alt+X", true, TAB, true],
@@ -2155,7 +2196,7 @@ describe("live controls", () => {
       ["Dictate key", [["ControlLeft", "ctrl"], ["AltRight", "ctrl", "alt"]], null, "AltRight", "AltGr", false, "", false],
       ["Write key", [["AltRight", "alt"]], null, "AltRight", "AltGr", false, "", false],
       ["Write key", [["ControlLeft", "ctrl"], ["Escape"], ["AltRight", "ctrl", "alt"]], null, null, "Alt+X", true, "", false],
-      ["Dictate key", [["AltRight", "alt"]], MODIFIER.replace("Alt+KeyZ", "AltRight"), "AltRight", "Alt+Z", true, MODIFIER.replace("Alt+KeyZ", "AltGr"), false],
+      ["Dictate key", [["AltRight", "alt"]], MODIFIER.replace("Alt+KeyQ", "AltRight"), "AltRight", "Alt+Z", true, MODIFIER.replace("Alt+KeyQ", "AltGr"), false],
     ];
 
     it.each(cases)("%s: keys %j, desktop says %j: sends %j, shows %j", async (label, keys, backendSays, sent, shown, restoreDisabled, notice, otherRefused) => {
@@ -2181,7 +2222,7 @@ describe("live controls", () => {
       }
 
       const field = label === "Dictate key" ? "hold_key" : "write_key";
-      expect(stub.backend.saveSettings.mock.calls.map(([settings]) => settings[field]).slice(otherRefused ? 1 : 0)).toEqual(sent === null ? [] : [sent]);
+      expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch).slice(otherRefused ? 1 : 0)).toEqual(sent === null ? [] : [{ [field]: sent }]);
       expect(row.querySelector("kbd")?.textContent).toBe(shown);
       expect(within(row, "Restore default").disabled).toBe(restoreDisabled);
       expect(within(row, "Change…").disabled).toBe(false);
@@ -2198,7 +2239,7 @@ describe("live controls", () => {
       within(row, "Restore default").click();
       await settle();
 
-      expect(stub.backend.saveSettings.mock.calls.map(([settings]) => settings.hold_key)).toEqual(["Alt+KeyZ"]);
+      expect(stub.applied().map((settings) => settings.hold_key)).toEqual(["Alt+KeyZ"]);
       expect(row.querySelector("kbd")?.textContent).toBe("Alt+Z");
       expect(within(row, "Restore default").disabled).toBe(true);
     });

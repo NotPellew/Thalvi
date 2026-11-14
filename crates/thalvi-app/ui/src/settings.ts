@@ -5,6 +5,7 @@ import { errorText } from "./contract.ts";
 import { createControls } from "./controls.ts";
 import { el } from "./dom.ts";
 import { applyLook } from "./look.ts";
+import { settingsPatch } from "./patch.ts";
 import {
   APPLIED_LATER_TEXT,
   APPLIED_TEXT,
@@ -205,8 +206,10 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       if (settings === null) throw new Error("The settings are not loaded.");
       const next = structuredClone(settings);
       change(next);
+      const patch = settingsPatch(settings, next);
+      if (Object.keys(patch).length === 0) return;
       try {
-        await backend.saveSettings(next);
+        await backend.saveSettings(patch);
       } catch (error) {
         const reason = errorText(error);
         throw new Error(options.explain ? options.explain(reason) : reason);

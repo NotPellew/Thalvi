@@ -836,11 +836,8 @@ mod tests {
 
     #[test]
     fn a_device_that_is_not_connected_is_refused_when_replacing_and_stays_selected() {
-        let mut microphone = Microphone::new(
-            InputGate::default(),
-            None,
-            Recorder::disabled().metrics(),
-        );
+        let mut microphone =
+            Microphone::new(InputGate::default(), None, Recorder::disabled().metrics());
         microphone.select(Some("No such microphone".to_owned()));
         assert_eq!(
             microphone.replace().err(),
@@ -854,11 +851,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a microphone"]
     async fn replacing_the_microphone_keeps_the_open_one_unless_the_new_one_opens() {
-        let mut microphone = Microphone::new(
-            InputGate::default(),
-            None,
-            Recorder::disabled().metrics(),
-        );
+        let mut microphone =
+            Microphone::new(InputGate::default(), None, Recorder::disabled().metrics());
         let mut first = microphone.open().expect("a default microphone");
         let name = microphone.active_name().map(str::to_owned);
         microphone.select(Some("No such microphone".to_owned()));
