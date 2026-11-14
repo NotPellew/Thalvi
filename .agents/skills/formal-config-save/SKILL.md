@@ -210,6 +210,8 @@ never fails; the runner applies `Control::Apply` messages in send order;
 
 Preserving an OpenAI-compatible API key in an unchanged Settings entry (#385 review fix) only changes form normalization before the existing serialized save; it adds no writer or file-system step, so the model is unchanged and the `settings.rs` hash moved.
 
+The Settings page rename (#341) changes only a message naming a page in `settings.rs` and the page ids `agent.rs`'s `show` accepts; no writer, lock or file-system step changed, so the model is unchanged and only those hashes moved.
+
 Not verified: two writers on the main thread at once (they cannot overlap); a
 tray switch on the main thread racing an agent save (the same steps as `L`,
 with `MainThread = {"S", "L"}`); more than three writers; partial writes, disk
