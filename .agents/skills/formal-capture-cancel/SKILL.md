@@ -131,6 +131,9 @@ bounded by `merge::LIMIT`) happens only after a merge that ran. The extras' answ
 The merge's note (`Engine::take_merge_note`, `noted` in `runner.rs`) is read right after `capture` returns, beside
 `take_ignored`, and only appends text to the final status; it adds no await, control drain or delivery admission, so
 the model is unchanged and only the `engine.rs` and `runner.rs` hashes moved.
+A finished speech model download (#374) adds `Control::ReloadSpeechModel`, which `Requests::ends` answers by keeping the
+model for after the capture and ending nothing, like `Apply`; `Runner::capture` then starts the load synchronously after the
+quit check, adding no await, control drain or delivery admission, so the model is unchanged and only the `runner.rs` hash moved.
 The faithful check **passes**. It used to fail: cancellation was lost while the
 recognizer closed after the accepted cue finished, because the runner kept only
 the last drain's decision. `Requests::ended` now keeps every ending decision
