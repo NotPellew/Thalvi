@@ -3,7 +3,8 @@
 /// Largest word-level edit distance, as a share of the caption's words, still counted as the same speech.
 pub const MAX_HEARD_MISMATCH: f64 = 0.5;
 
-const ECHO_PREFIX: &str = "the user said:";
+/// The words the audio endpoint opens its echo line with, in any case.
+pub const ECHO_PREFIX: &str = "the user said:";
 
 fn words(text: &str) -> Vec<String> {
     let lowered = text.trim().to_lowercase();

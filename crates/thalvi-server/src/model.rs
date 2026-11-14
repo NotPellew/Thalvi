@@ -107,7 +107,7 @@ pub struct ToolResult {
 pub enum ChatEvent {
     /// A text delta.
     Text(String),
-    /// An audio-model echo of the user input.
+    /// The audio model's whole echo line, never its other reasoning.
     Heard(String),
     /// A tool call whose arguments are complete.
     ToolCall(ToolCall),
@@ -151,7 +151,14 @@ struct SseState<E> {
     buffer: Vec<u8>,
     pending: VecDeque<Result<ChatEvent, ModelError>>,
     tools: ToolAccumulator,
+    reasoning: Reasoning,
     done: bool,
+}
+
+/// The reasoning seen so far, until it is known whether its first line is the audio echo.
+enum Reasoning {
+    Opening(String),
+    Closed,
 }
 
 impl<E> SseState<E> {
@@ -159,10 +166,44 @@ impl<E> SseState<E> {
         self.accept_parsed(parse_sse_line(line));
     }
 
+    fn accept_reasoning(&mut self, fragment: &str) {
+        let Reasoning::Opening(text) = &mut self.reasoning else {
+            return;
+        };
+        text.push_str(fragment);
+        let start = text.trim_start().as_bytes();
+        let prefix = crate::heard::ECHO_PREFIX.as_bytes();
+        let compared = start.len().min(prefix.len());
+        if !start[..compared].eq_ignore_ascii_case(&prefix[..compared]) {
+            self.reasoning = Reasoning::Closed;
+        } else if start.contains(&b'\n') {
+            self.close_reasoning();
+        }
+    }
+
+    /// Ends the reasoning's first line, delivering it when it is a whole echo.
+    fn close_reasoning(&mut self) {
+        let Reasoning::Opening(text) = std::mem::replace(&mut self.reasoning, Reasoning::Closed)
+        else {
+            return;
+        };
+        let line = text.trim().lines().next().unwrap_or_default();
+        if line.len() >= crate::heard::ECHO_PREFIX.len() {
+            self.pending
+                .push_back(Ok(ChatEvent::Heard(line.to_string())));
+        }
+    }
+
     fn accept_parsed(&mut self, line: SseLine) {
+        if !matches!(
+            line,
+            SseLine::Reasoning { .. } | SseLine::Failed(_) | SseLine::Ignore
+        ) {
+            self.close_reasoning();
+        }
         match line {
-            SseLine::Heard { heard, line } => {
-                self.pending.push_back(Ok(ChatEvent::Heard(heard)));
+            SseLine::Reasoning { text, line } => {
+                self.accept_reasoning(&text);
                 self.accept_parsed(*line);
             }
             SseLine::Delta(text) => self.pending.push_back(Ok(ChatEvent::Text(text))),
@@ -420,6 +461,7 @@ where
         buffer: Vec::new(),
         pending: VecDeque::new(),
         tools: ToolAccumulator::default(),
+        reasoning: Reasoning::Opening(String::new()),
         done: false,
     };
     Box::pin(futures_util::stream::unfold(
@@ -521,10 +563,10 @@ pub struct ToolFragment {
 /// What one SSE line from the model stream means.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SseLine {
-    /// An echo and the remaining fields from the same chunk.
-    Heard {
-        /// Audio-model echo.
-        heard: String,
+    /// Reasoning and the remaining fields from the same chunk.
+    Reasoning {
+        /// The reasoning fragment.
+        text: String,
         /// Remaining fields in this chunk.
         line: Box<SseLine>,
     },
@@ -584,7 +626,7 @@ pub fn parse_sse_line(line: &str) -> SseLine {
             .filter(|content| !content.is_empty())
             .map(str::to_string)
     };
-    let heard = field("reasoning_content");
+    let reasoning = field("reasoning_content");
     let text = field("content");
     let fragments: Vec<ToolFragment> = delta
         .and_then(|delta| delta.get("tool_calls"))
@@ -605,9 +647,9 @@ pub fn parse_sse_line(line: &str) -> SseLine {
             },
         }
     };
-    match heard {
-        Some(heard) => SseLine::Heard {
-            heard,
+    match reasoning {
+        Some(text) => SseLine::Reasoning {
+            text,
             line: Box::new(parsed),
         },
         None => parsed,
@@ -863,44 +905,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn heard_and_sibling_fields_are_delivered_in_order() {
-        let events = decode(vec![
-            Ok("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"heard \"}}]}\n"),
-            Ok("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"more\",\"content\":\"answer\",\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"function\":{\"name\":\"t\",\"arguments\":\"{\"}}]}}]}\n"),
-            Ok("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"last\",\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n"),
-        ]).await;
-        assert_eq!(
-            events,
-            vec![
-                Ok(ChatEvent::Heard("heard ".into())),
-                Ok(ChatEvent::Heard("more".into())),
-                Ok(ChatEvent::Text("answer".into())),
-                Ok(ChatEvent::Heard("last".into())),
-                Ok(call("c", "t", "{}")),
-            ]
-        );
-        let complete = decode(vec![Ok("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"h\",\"content\":\"a\"},\"finish_reason\":\"stop\"}]}\n")]).await;
-        assert_eq!(
-            complete,
-            vec![
-                Ok(ChatEvent::Heard("h".into())),
-                Ok(ChatEvent::Text("a".into()))
-            ]
-        );
-        let failed = decode(vec![Ok("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"h\",\"content\":\"a\"},\"finish_reason\":\"length\"}]}\n")]).await;
-        assert_eq!(
-            failed,
-            vec![Err(ModelError(
-                "the language model did not finish its reply (length)".into()
-            ))]
-        );
+    async fn only_the_echo_line_is_heard_and_other_reasoning_stays_private() {
+        type Events = Vec<Result<ChatEvent, ModelError>>;
+        let text = |t: &str| Ok(ChatEvent::Text(t.into()));
+        let heard = |t: &str| Ok(ChatEvent::Heard(t.into()));
+        let cases: Vec<(&str, Vec<&'static str>, Events)> = vec![
+            (
+                "echo split across fragments and cased freely",
+                vec![
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"The us\"}}]}\n",
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"er SAID: \\\"yes\\\"\"}}]}\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Done.\"},\"finish_reason\":\"stop\"}]}\n",
+                ],
+                vec![heard("The user SAID: \"yes\""), text("Done.")],
+            ),
+            (
+                "reasoning after the echo line stays private",
+                vec![
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"The user said: \\\"yes\\\"\\nI should reply\"}}]}\n",
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\" briefly\"}}]}\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Done.\"},\"finish_reason\":\"stop\"}]}\n",
+                ],
+                vec![heard("The user said: \"yes\""), text("Done.")],
+            ),
+            (
+                "unrelated reasoning before the answer",
+                vec![
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"I should infer what the user meant\"}}]}\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Answer.\"},\"finish_reason\":\"stop\"}]}\n",
+                ],
+                vec![text("Answer.")],
+            ),
+            (
+                "reasoning that only starts like the echo",
+                vec![
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"The user is asking\"}}]}\n",
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\" for a joke\",\"content\":\"Joke.\"},\"finish_reason\":\"stop\"}]}\n",
+                ],
+                vec![text("Joke.")],
+            ),
+            (
+                "reasoning cut off inside the prefix",
+                vec![
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"The user\",\"content\":\"Hi.\"},\"finish_reason\":\"stop\"}]}\n",
+                ],
+                vec![text("Hi.")],
+            ),
+            (
+                "reasoning interleaved with text and tool calls keeps their order",
+                vec![
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hm \"}}]}\n",
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"more\",\"content\":\"answer\",\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"function\":{\"name\":\"t\",\"arguments\":\"{\"}}]}}]}\n",
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"last\",\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n",
+                ],
+                vec![text("answer"), Ok(call("c", "t", "{}"))],
+            ),
+            (
+                "echo before text and tool calls keeps their order",
+                vec![
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"The user said: no\",\"content\":\"answer\",\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"function\":{\"name\":\"t\",\"arguments\":\"{\"}}]}}]}\n",
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n",
+                ],
+                vec![
+                    heard("The user said: no"),
+                    text("answer"),
+                    Ok(call("c", "t", "{}")),
+                ],
+            ),
+            (
+                "an unfinished reply fails without delivering reasoning",
+                vec![
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"h\",\"content\":\"a\"},\"finish_reason\":\"length\"}]}\n",
+                ],
+                vec![Err(ModelError(
+                    "the language model did not finish its reply (length)".into(),
+                ))],
+            ),
+        ];
+        for (name, chunks, expected) in cases {
+            let events = decode(chunks.into_iter().map(Ok).collect()).await;
+            assert_eq!(events, expected, "{name}");
+        }
         let incomplete = decode(vec![Ok(
             "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"h\"}}]}\n",
         )])
         .await;
-        assert_eq!(incomplete.len(), 2);
-        assert_eq!(incomplete[0], Ok(ChatEvent::Heard("h".into())));
-        assert!(incomplete[1].is_err());
+        assert_eq!(incomplete.len(), 1);
+        assert!(incomplete[0].is_err());
     }
 
     #[tokio::test]
