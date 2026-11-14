@@ -359,6 +359,7 @@ enum ModelChunk {
     Tool(ToolCall),
     Wait(Arc<Notify>),
     Fail,
+    Stall,
 }
 
 struct DropGuard(Arc<AtomicUsize>);
@@ -439,9 +440,10 @@ impl FakeModel {
                         Some((Ok(ChatEvent::Text(String::new())), (chunks, guard)))
                     }
                     Some(ModelChunk::Fail) => Some((
-                        Err(ModelError("model blew up".to_string())),
+                        Err(ModelError::Failed("model blew up".to_string())),
                         (chunks, guard),
                     )),
+                    Some(ModelChunk::Stall) => Some((Err(ModelError::Stalled), (chunks, guard))),
                     None => None,
                 }
             },
@@ -491,6 +493,7 @@ impl ChatModel for FakeModel {
 enum TtsScript {
     Audio,
     Fail,
+    Stall,
     Hang,
     /// Audio that only arrives once the gate opens.
     Gated(Arc<Notify>),
@@ -544,7 +547,8 @@ impl Tts for FakeTts {
                     async move { Ok(bytes) },
                 )))
             }
-            TtsScript::Fail => Err(TtsError("tts blew up".to_string())),
+            TtsScript::Fail => Err(TtsError::Failed("tts blew up".to_string())),
+            TtsScript::Stall => Err(TtsError::Stalled),
             TtsScript::Gated(gate) => {
                 let guard = DropGuard(Arc::clone(&self.dropped));
                 let bytes = Bytes::from(format!("AUDIO:{text}"));
@@ -1039,6 +1043,71 @@ async fn model_and_tts_failures_report_an_error_and_the_next_turn_works() {
             audios(&received),
             vec![Bytes::from("AUDIO:Recovered nicely.")]
         );
+        harness.server.abort();
+    }
+}
+
+#[tokio::test]
+async fn a_stalled_model_or_speech_engine_gets_one_plain_notice_a_timeout_metric_and_a_working_next_turn()
+ {
+    for (name, stalled_event, notice) in [
+        (
+            "model",
+            "model_call",
+            "The language model stopped responding. Try again.",
+        ),
+        (
+            "speech",
+            "tts_sentence",
+            "Speech synthesis could not speak: the speech engine stopped responding",
+        ),
+    ] {
+        let data_dir = ScratchDir::new("stall");
+        let mut harness = start_with_recording(recording_config(metrics_only(), &data_dir)).await;
+        voice_on(&mut harness).await;
+        if name == "model" {
+            harness.model.add_script(vec![ModelChunk::Stall]);
+        } else {
+            harness
+                .model
+                .add_script(vec![ModelChunk::Delta("Hello there.".to_string())]);
+            harness.tts.add_script(TtsScript::Stall);
+        }
+        harness.factory.complete_turn(0, "first");
+        let received = collect_until(&mut harness.client, |item| {
+            matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+        })
+        .await;
+        let notices: Vec<&Value> = received
+            .iter()
+            .filter_map(|item| match item {
+                Received::Json(v) if v["type"] == "error" => Some(&v["message"]),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices, [notice], "{name}: {received:?}");
+        if name == "speech" {
+            assert_eq!(reply_text(&received), "Hello there.");
+        }
+
+        harness
+            .model
+            .add_script(vec![ModelChunk::Delta("Recovered nicely.".to_string())]);
+        harness.factory.complete_turn(0, "second");
+        let received = collect_until(&mut harness.client, |item| {
+            matches!(item, Received::Json(v) if v["type"] == "state" && v["state"] == "listening")
+        })
+        .await;
+        assert_eq!(reply_text(&received), "Recovered nicely.", "{name}");
+        assert!(!has_type(&received, "error"), "{name}: {received:?}");
+
+        let session = harness.session_id.clone();
+        wait_until(|| {
+            read_recorded_lines_blocking(&data_dir.0, &session)
+                .iter()
+                .any(|line| line["event"] == stalled_event && line["outcome"] == "timeout")
+        })
+        .await;
         harness.server.abort();
     }
 }

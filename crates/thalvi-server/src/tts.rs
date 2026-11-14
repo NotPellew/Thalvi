@@ -1,18 +1,32 @@
 //! Owns the text-to-speech trait and the streamed `OpenAI` and Qwen3-TTS speech clients.
 
 use std::pin::Pin;
+use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use serde_json::{Value, json};
 
+use crate::model::stall_client;
+
+/// How long the speech endpoint may go without sending a byte before the call fails.
+const STALL_DEADLINE: Duration = Duration::from_secs(10);
+
 /// A speech synthesis failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TtsError(pub String);
+pub enum TtsError {
+    /// No byte arrived within the stall deadline.
+    Stalled,
+    /// The call failed for the reason given, in words fit for the user.
+    Failed(String),
+}
 
 impl std::fmt::Display for TtsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::Stalled => f.write_str("the speech engine stopped responding"),
+            Self::Failed(reason) => f.write_str(reason),
+        }
     }
 }
 
@@ -56,12 +70,18 @@ impl OpenAiTts {
     #[must_use]
     pub fn new(base_url: String, model: String, voice: String, api_key: String) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: stall_client(STALL_DEADLINE),
             base_url,
             model,
             voice,
             api_key,
         }
+    }
+
+    #[cfg(test)]
+    fn with_stall_deadline(mut self, deadline: Duration) -> Self {
+        self.client = stall_client(deadline);
+        self
     }
 
     /// Builds the JSON request body for one sentence in the configured voice.
@@ -101,14 +121,7 @@ impl Tts for OpenAiTts {
         if !self.api_key.is_empty() {
             request = request.bearer_auth(&self.api_key);
         }
-        let stream = send(request).await?.bytes_stream().map(|item| {
-            item.map_err(|error| {
-                TtsError(format!(
-                    "speech synthesis stream failed: {}",
-                    error.without_url()
-                ))
-            })
-        });
+        let stream = send(request).await?.bytes_stream().map_err(stream_error);
         Ok(Box::pin(stream))
     }
 }
@@ -129,10 +142,16 @@ impl Qwen3Tts {
     #[must_use]
     pub fn new(base_url: String, voice: String) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: stall_client(STALL_DEADLINE),
             base_url,
             voice,
         }
+    }
+
+    #[cfg(test)]
+    fn with_stall_deadline(mut self, deadline: Duration) -> Self {
+        self.client = stall_client(deadline);
+        self
     }
 }
 
@@ -151,12 +170,7 @@ impl Tts for Qwen3Tts {
             .client
             .post(&url)
             .json(&json!({"input": text, "voice": voice}));
-        let body = Box::pin(
-            send(request)
-                .await?
-                .bytes_stream()
-                .map_err(reqwest::Error::without_url),
-        );
+        let body = Box::pin(send(request).await?.bytes_stream().map_err(stream_error));
         let frames =
             futures_util::stream::unfold(Some((body, BytesMut::new())), |state| async move {
                 let (mut body, mut buffer) = state?;
@@ -177,12 +191,12 @@ impl Tts for Qwen3Tts {
                             buffer.extend_from_slice(&chunk);
                             continue;
                         }
-                        Some(Err(error)) => format!("speech synthesis stream failed: {error}"),
-                        None => {
-                            "speech synthesis stopped before the sentence was finished".to_string()
-                        }
+                        Some(Err(error)) => error,
+                        None => TtsError::Failed(
+                            "speech synthesis stopped before the sentence was finished".to_string(),
+                        ),
                     };
-                    return Some((Err(TtsError(error)), None));
+                    return Some((Err(error), None));
                 }
             });
         Ok(Box::pin(frames))
@@ -191,7 +205,10 @@ impl Tts for Qwen3Tts {
 
 async fn send(request: reqwest::RequestBuilder) -> Result<reqwest::Response, TtsError> {
     let response = request.send().await.map_err(|error| {
-        TtsError(format!(
+        if error.is_timeout() {
+            return TtsError::Stalled;
+        }
+        TtsError::Failed(format!(
             "speech synthesis could not be reached: {}",
             error.without_url()
         ))
@@ -199,25 +216,39 @@ async fn send(request: reqwest::RequestBuilder) -> Result<reqwest::Response, Tts
     if !response.status().is_success() {
         let status = response.status();
         let _ = response.text().await;
-        return Err(TtsError(format!(
+        return Err(TtsError::Failed(format!(
             "speech synthesis returned an error ({status})"
         )));
     }
     Ok(response)
 }
 
+fn stream_error(error: reqwest::Error) -> TtsError {
+    if error.is_timeout() {
+        return TtsError::Stalled;
+    }
+    TtsError::Failed(format!(
+        "speech synthesis stream failed: {}",
+        error.without_url()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use axum::Router;
     use axum::body::Body;
     use axum::extract::State;
+    use axum::response::{IntoResponse, Response};
     use axum::routing::post;
+    use bytes::Bytes;
     use futures_util::StreamExt;
     use serde_json::Value;
 
-    use super::{OpenAiTts, Qwen3Tts, Tts};
+    use super::{OpenAiTts, Qwen3Tts, Tts, TtsError};
 
     #[test]
     fn request_body_matches_contract() {
@@ -309,6 +340,139 @@ mod tests {
                 .map(|body| body["voice"].clone())
                 .collect();
             assert_eq!(voices, ["sohee", "af_heart"]);
+        }
+    }
+    #[derive(Clone, Copy)]
+    enum Endpoint {
+        Silent,
+        HeadersThenSilent,
+        AudioThenSilent,
+        SlowButSteady,
+    }
+
+    const DEADLINE: Duration = Duration::from_millis(250);
+    const GAP: Duration = Duration::from_millis(80);
+
+    /// The bytes one chunk of audio takes on the wire: raw, or in a Qwen3-TTS frame.
+    fn wire(framed: bool, pcm: &[u8]) -> Bytes {
+        let mut bytes = Vec::new();
+        if framed {
+            bytes.extend_from_slice(&u32::try_from(pcm.len()).expect("small").to_be_bytes());
+        }
+        bytes.extend_from_slice(pcm);
+        Bytes::from(bytes)
+    }
+
+    async fn respond(endpoint: Endpoint, framed: bool) -> Response {
+        match endpoint {
+            Endpoint::Silent => std::future::pending().await,
+            Endpoint::HeadersThenSilent => {
+                Body::from_stream(futures_util::stream::pending::<Result<Bytes, Infallible>>())
+                    .into_response()
+            }
+            Endpoint::AudioThenSilent => Body::from_stream(
+                futures_util::stream::iter(
+                    [wire(framed, &[1, 2]), wire(framed, &[3, 4])].map(Ok::<_, Infallible>),
+                )
+                .chain(futures_util::stream::pending()),
+            )
+            .into_response(),
+            Endpoint::SlowButSteady => {
+                Body::from_stream(futures_util::stream::unfold(0, move |sent| async move {
+                    tokio::time::sleep(GAP).await;
+                    match sent {
+                        0..8 => Some((Ok::<_, Infallible>(wire(framed, &[5, 6])), sent + 1)),
+                        8 if framed => Some((Ok(wire(true, &[])), sent + 1)),
+                        _ => None,
+                    }
+                }))
+                .into_response()
+            }
+        }
+    }
+
+    /// Whether the headers arrived, the audio delivered, and how the stream ended.
+    async fn synthesize_from<T: Tts>(tts: &T) -> (bool, Vec<u8>, Option<TtsError>) {
+        let asked = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut stream = match tts.synthesize("Hello.").await {
+                Ok(stream) => stream,
+                Err(error) => return (false, Vec::new(), Some(error)),
+            };
+            let mut audio = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(chunk) => audio.extend_from_slice(&chunk),
+                    Err(error) => return (true, audio, Some(error)),
+                }
+            }
+            (true, audio, None)
+        })
+        .await;
+        asked.expect("the call must end under the stall deadline, not hang")
+    }
+
+    async fn serve_endpoint(path: &'static str, endpoint: Endpoint, framed: bool) -> String {
+        let app = Router::new().route(path, post(move || respond(endpoint, framed)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_quiet_speech_endpoint_stalls_the_call_but_a_steady_stream_never_does() {
+        let steady = [5, 6].repeat(8);
+        let cases = [
+            ("never answers", Endpoint::Silent, false, vec![], true),
+            (
+                "headers, then silence",
+                Endpoint::HeadersThenSilent,
+                true,
+                vec![],
+                true,
+            ),
+            (
+                "audio, then silence",
+                Endpoint::AudioThenSilent,
+                true,
+                vec![1, 2, 3, 4],
+                true,
+            ),
+            (
+                "slow but steady",
+                Endpoint::SlowButSteady,
+                true,
+                steady,
+                false,
+            ),
+        ];
+        for (name, endpoint, headers, audio, stalls) in cases {
+            let openai = OpenAiTts::new(
+                serve_endpoint("/audio/speech", endpoint, false).await,
+                "kokoro".to_string(),
+                "af_heart".to_string(),
+                String::new(),
+            )
+            .with_stall_deadline(DEADLINE);
+            let qwen = Qwen3Tts::new(
+                serve_endpoint("/audio/speech/pcm-stream", endpoint, true).await,
+                "af_heart".to_string(),
+            )
+            .with_stall_deadline(DEADLINE);
+            for (engine, (got_headers, got_audio, error)) in [
+                ("openai", synthesize_from(&openai).await),
+                ("qwen3", synthesize_from(&qwen).await),
+            ] {
+                assert_eq!(got_headers, headers, "{engine} {name}");
+                assert_eq!(got_audio, audio, "{engine} {name}");
+                assert_eq!(
+                    error,
+                    stalls.then_some(TtsError::Stalled),
+                    "{engine} {name}"
+                );
+            }
         }
     }
 }
