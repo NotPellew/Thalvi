@@ -89,7 +89,7 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
 | Need | Command |
 | --- | --- |
 | Tray actions | `$H ctl $R pause`, `resume`, `toggle`, `cancel`, `status` (the relaunch path the tray and key binds use) |
-| Open Settings | `$H ctl $R` with no argument, or `$H ctl $R show capture` for one page |
+| Open Settings | `$H ctl $R` with no argument, or `$H ctl $R show commands` for one page |
 | What Thalvi and its overlay show | `$H ctl $R state` (state, `overlay`, `recognizer`; never what was said) |
 | Set up from a fresh config | `$H ctl $R models`, `$H ctl $R model-download speech nemotron_160ms` (replies when ready), `$H ctl $R speech-check '<entry json>'`, `$H ctl $R settings set '<json>'` |
 | Quit the app like the tray | `$H ctl $R quit`; the log ends with `Stopped.` |
@@ -109,8 +109,8 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
 - A screenshot right after a key can show the previous frame. Wait for the change
   to appear before keeping it as evidence.
 - There is no pointer, so Settings is keyboard-driven. The first `Tab` focuses the
-  search box, then the sidebar pages in order (Speech, Microphone, Capture,
-  Feedback and appearance, Apps & tasks, History, App); `Return` opens the page.
+  search box, then the sidebar pages in order (Listening, Recognition,
+  Commands, Chat model, Overlay & sounds, History & recordings, App); `Return` opens the page.
   The page's fields follow, and `Shift+Tab` from the search box wraps to the
   footer. Take a screenshot after each step to see where the focus ring is
   rather than counting: the footer's order is Copy, ×, Revert, Save, and a long

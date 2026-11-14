@@ -214,7 +214,7 @@ STT_MODEL=nemotron-labs-unified-asr-0.6b
 STT_API_KEY=
 ```
 
-With it, Settings → Speech shows a **Word list**: names and terms, one per
+With it, Settings → Recognition shows a **Word list**: names and terms, one per
 line, whose spelling recognition should favour (such as "Cybrex2"). The list
 is used by local recognition and sent to direct realtime speech servers at
 each connection. Web conversations continue to use `STT_URL` through `/session`.
@@ -279,14 +279,14 @@ is needed.
   [Updates](#updates)); settings and models stay.
 
 Start it once and it stays in the tray; starting it again opens Settings. The
-first start writes the default config, opens Settings on Speech, and downloads
+first start writes the default config, opens Settings on Recognition, and downloads
 the wake models and, once, the speech model, so the first "Hey
 Thalvi" works with no setup. If Thalvi cannot start, for example because its
 config is broken, a message box names the problem and the file.
 
 ### Speech recognition
 
-Settings → Speech keeps a list of speech servers. A fresh install has one,
+Settings → Recognition keeps a list of speech servers. A fresh install has one,
 **On this computer**, with Nemotron Streaming, so it recognizes without a
 server; add a server to use one. **Live dictation** uses exactly one of them, and **Use** switches to another at once; it applies from the next
 capture, and a capture already running keeps its recognizer. At the top of
@@ -386,7 +386,7 @@ entry is an extra with `"extra": true`, which the active entry can't be.
 
 ### Microphone
 
-Settings → Microphone has **Listening**, which pauses and resumes right away,
+Settings → Listening has **Listening**, which pauses and resumes right away,
 and the saved device. To change the device, pause first, then choose and Save;
 listening stays paused until you resume it. **Active microphone** names the
 device actually open. If the saved device is missing, Thalvi reports it
@@ -437,7 +437,7 @@ build until a newer stable release exists.
 
 ### Recordings
 
-Settings → App has a switch each for metrics, text and audio recordings, all
+Settings → History & recordings → Recordings has a switch each for metrics, text and audio recordings, all
 off by default; Save applies them between captures. They stay on this computer.
 **Open folder** opens `recordings/` in the data folder (`~/.local/share/thalvi`
 on Linux, `%LOCALAPPDATA%\thalvi` on Windows):
@@ -483,12 +483,12 @@ the network, and a command never starts the app or the microphone.
 
 | Command | Answer |
 | --- | --- |
-| `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false, "feeding": false, "overlay": {"state": "hidden"}, "recognizer": {"name": "On this computer", "kind": "on_device", "model": "nemotron_160ms", "status": "ready"}}`. `state` is `paused`, `loading`, `listening`, `keyboard` (listening with wake words off), `capturing`, `pending`, `transcribing`, `merging`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}` (`reason` is left out for a delivery failure, whose notice can hold the dictated text), and `awaiting_confirmation: true` marks a submit that waits for you. `overlay.state` is what the overlay shows: `hidden` (also when the overlay is off), `listening`, `quiet`, `countdown`, `writing`, `merging`, `working`, `delivered`, `error` (with the `headline` shown) or `loading`. `recognizer` is the speech entry that handles the next dictation (`model` only for a catalog model) and whether it is `ready`, `loading`, `failed` or `paused`, as the Speech page says. Nothing that was said is in it. |
+| `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false, "feeding": false, "overlay": {"state": "hidden"}, "recognizer": {"name": "On this computer", "kind": "on_device", "model": "nemotron_160ms", "status": "ready"}}`. `state` is `paused`, `loading`, `listening`, `keyboard` (listening with wake words off), `capturing`, `pending`, `transcribing`, `merging`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}` (`reason` is left out for a delivery failure, whose notice can hold the dictated text), and `awaiting_confirmation: true` marks a submit that waits for you. `overlay.state` is what the overlay shows: `hidden` (also when the overlay is off), `listening`, `quiet`, `countdown`, `writing`, `merging`, `working`, `delivered`, `error` (with the `headline` shown) or `loading`. `recognizer` is the speech entry that handles the next dictation (`model` only for a catalog model) and whether it is `ready`, `loading`, `failed` or `paused`, as the Recognition page says. Nothing that was said is in it. |
 | `feed <wav-file>` | Plays the file's audio in place of the microphone, at the pace of speech, through the same wake word, recognition, endings and delivery as spoken audio; the microphone is ignored while it plays. Replies when the file has been fed: `{"ok": true, "took_effect": true, "state": "…"}`, with the state then; a capture it started carries on. Refused with `"Thalvi is paused."`, `"A capture is running."`, or the reason for a file that is missing, unreadable, not a mono or stereo 16-bit PCM WAV, or longer than the capture limit. Needs an absolute path (the command makes it absolute). `cancel` stops the feed and any capture it started. Capture metrics record `"source": "file"`. |
-| `models` | `{"ok": true, "models": [{"kind": "speech", "name", "title", "size", "downloaded", "progress_percent", "runs_on"}, …]}`: the wake and speech catalog models, `progress_percent` only while one downloads, `runs_on` (the Speech page's hardware line) only for speech models. |
+| `models` | `{"ok": true, "models": [{"kind": "speech", "name", "title", "size", "downloaded", "progress_percent", "runs_on"}, …]}`: the wake and speech catalog models, `progress_percent` only while one downloads, `runs_on` (the Recognition page's hardware line) only for speech models. |
 | `model-download <wake\|speech> <name>` | Downloads the model; replies when it is ready, `{"ok": true, "downloaded": true}`, or has failed, `{"ok": false, "downloaded": false, "error": "…"}`. `models` shows the progress meanwhile. |
 | `speech-check '<json>'` | Checks one speech server entry exactly as Settings does before saving it: `{"ok": true, "ready": true}`, or `{"ok": false, "ready": false, "error": "…"}`. Saves nothing; keys are never repeated. |
-| `show [page]` | Opens Settings, at `speech`, `microphone`, `capture`, `feedback`, `tasks`, `history` or `app` when one is named: `{"ok": true, "took_effect": true}`. |
+| `show [page]` | Opens Settings, at `listening`, `recognition`, `commands`, `chat`, `overlay`, `history` or `app` when one is named: `{"ok": true, "took_effect": true}`. |
 | `quit` | Quits as the tray's Quit does: `{"ok": true, "took_effect": true}`. |
 | `settings get` | `{"ok": true, "settings": {…}}`, every setting Settings offers plus `start_at_login` and `show_in_menu`. Speech server keys appear only as `"has_key": true/false`. |
 | `settings check '<json>'` | `{"ok": true, "valid": true}`, or `{"ok": false, "valid": false, "error": "…"}` with the message Settings shows. Saves nothing. |
@@ -511,7 +511,7 @@ and exits 1, and one that is not a command exits 2.
 
 ### Wake words off
 
-Settings → Capture → **Wake words** is a switch, on by default. Off, Thalvi keeps
+Settings → Listening → **Wake words** is a switch, on by default. Off, Thalvi keeps
 listening for the hold keys and the microphone stays open, but no wake word starts
 anything, plays a cue or delivers, and the wake model scores nothing. It applies at
 once, without Save or a restart, survives restarts and pause and resume, and is
@@ -529,7 +529,7 @@ phrase ends or cancels a hold: words such as "never mind" are dictated as text.
 To abandon a hold, use the `cancel` command: the tray's **Cancel**, or a key
 bound to `thalvi-desktop cancel` (the Hyprland examples bind SUPER+Escape).
 
-Choose the keys under **Settings → Capture → Hold keys**: **Change…** records the
+Choose the keys under **Settings → Listening → Hold keys**: **Change…** records the
 next combination you press in the Settings window (Escape cancels), and **Restore
 default** goes back to the desktop's own key. A key applies at once, with no Save.
 Thalvi refuses a key that is not a key it can use, the same key for both actions,
@@ -569,7 +569,7 @@ is pasted. Without "write that out" or the write key, the words are pasted as
 recognized. There is no write-and-send: press Enter yourself after reading it.
 
 The model is any OpenAI-compatible chat completions endpoint (Glimmer, Baseten, a
-llama.cpp server, Meta), set under **Settings → Speech → Writing** as `writing`
+llama.cpp server, Meta), set under **Settings → Chat model → Writing** as `writing`
 in the config: `url`, `model` and `api_key`. The model gets the **Writing prompt**
 (`prompt`) as its instructions and the recognized words as the message: no window,
 app or other context. The default prompt follows what you ask for (an email, a tone,

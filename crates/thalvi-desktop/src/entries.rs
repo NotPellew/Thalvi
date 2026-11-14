@@ -1,4 +1,4 @@
-//! Owns the list of speech servers in Settings → Speech: their kinds, validation, the one active live entry, the switched-on extra recognizers, and the migration from the single-recognizer settings.
+//! Owns the list of speech servers in Settings → Recognition: their kinds, validation, the one active live entry, the switched-on extra recognizers, and the migration from the single-recognizer settings.
 
 use std::{fmt, path::PathBuf};
 
@@ -40,7 +40,7 @@ pub enum EntryError {
     )]
     Mixed,
     #[error(
-        "Extra recognizers need a writing model. Set one up under Settings → Speech → Writing first, or switch the extras off."
+        "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."
     )]
     ExtrasNeedWriting,
     #[error("stt.model only applies when stt.engine is local.")]

@@ -199,9 +199,9 @@ mod tests {
         for (args, expected) in [
             (&["show"][..], ask(Request::Show { page: None })),
             (
-                &["show", "speech"][..],
+                &["show", "recognition"][..],
                 ask(Request::Show {
-                    page: Some("speech".to_owned()),
+                    page: Some("recognition".to_owned()),
                 }),
             ),
             (&["quit"][..], ask(Request::Quit)),

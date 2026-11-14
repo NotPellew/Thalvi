@@ -110,6 +110,7 @@ model is unchanged and only the hashes moved.
 Its later tests of a reply that isn't speech live in `recognizer.rs`'s test module; only that hash moved.
 Buffered OpenAI captures no longer expire at the idle deadline, and a wake upload's final spoken ending carries its armed route and text to delivery. Neither change alters the cancellation-first select, control drains, or delivery admission, so the model is unchanged and only the `engine.rs` hash moved.
 The Chat request kind and language (#419) change only what `OpenAiSession`'s upload task sends and records; `OpenAiSession::cancel` and `close` still abort it, so the model is unchanged and only the `openai_live.rs` hash moved.
+The Settings page rename (#341) changes only message text that names a page in `engine.rs`, `recognizer.rs`, `delivery.rs` and `openai_live.rs`; no mapped function's logic changed, so only those hashes moved.
 Merging every recognizer's text (#228) replaces `Engine::reconcile` with `Engine::merge`: the same post-accept
 stage, now waiting for every switched-on extra (up to a cutoff) and then asking the chat endpoint to merge. Its two
 awaits, the collection loop's `select!` and the merge call's `bounded`, both poll cancellation first, and what follows

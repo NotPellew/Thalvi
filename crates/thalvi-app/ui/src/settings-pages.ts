@@ -51,6 +51,8 @@ export interface PageContext {
   menuEntry: SwitchRead;
   /** The settings window, so a look picked here shows at once. */
   root: HTMLElement;
+  /** Shows the page with this id. */
+  open: (id: string) => void;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
   live: {
     level: (level: number) => void;
@@ -629,7 +631,7 @@ function holdKeys(context: PageContext): HTMLElement[] {
   ];
 }
 
-function capture(context: PageContext): HTMLElement[] {
+function commands(context: PageContext): HTMLElement[] {
   const { draft, controls } = context;
   const pause = (key: "paste" | "submit" | "task", label: string): HTMLElement =>
     row(
@@ -640,16 +642,13 @@ function capture(context: PageContext): HTMLElement[] {
       }),
     );
   return [
-    ...wakeSwitch(context),
-    ...wakeHeads(context),
-    ...holdKeys(context),
     group("Endings"),
     row("Ending phrases", "Say one to finish a capture. Every action needs at least one phrase.", endingsTable(context)),
     group("Quiet before acting"),
     pause("paste", "Quiet before paste"),
     pause("submit", "Quiet before paste and Enter"),
     pause("task", "Quiet before running a task"),
-    ...limits(context),
+    ...tasks(context),
   ];
 }
 
@@ -983,7 +982,13 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
   };
 }
 
-function speech(context: PageContext): HTMLElement[] {
+/** The rows of the Recognition and Chat model pages, built together because the extras need the writing endpoint. */
+interface SpeechRows {
+  recognition: HTMLElement[];
+  chat: HTMLElement[];
+}
+
+function speech(context: PageContext): SpeechRows {
   const { draft, controls, backend } = context;
   const entries = (): SpeechEntry[] => draft.stt.entries;
   const activeLive = (): LiveEntry | undefined => entries().filter(isLive).find((entry) => entry.active);
@@ -1244,6 +1249,7 @@ function speech(context: PageContext): HTMLElement[] {
     { class: "note why", id: uid("n") },
     "Extra recognizers can't be switched on until a chat model endpoint is set, because the chat model merges their texts. ",
     button("Go to the endpoint setting", () => {
+      context.open("chat");
       (writingUrl.field as HTMLInputElement).focus();
     }, "quiet"),
   );
@@ -1635,41 +1641,45 @@ function speech(context: PageContext): HTMLElement[] {
   render();
   checkWordList();
 
-  return [
-    group("Live dictation"),
-    nextDictation,
-    summaryActions,
-    row(
-      "Speech servers",
-      "The one marked Live shows your words and hears the ending phrases. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Web conversations use the server's own recognizer.",
-      liveBlock,
-    ),
-    wordRow,
-    group("Extra recognizers"),
-    row(
-      "Extra recognizers",
-      "Each recognizer switched on here also transcribes your dictation. The chat model merges their texts with the live one, and the merged text is pasted. If the merge fails or takes too long, the live text is pasted. Switching one on or off applies at once.",
-      extraBlock,
-    ),
-    group("Writing"),
-    row(
-      "Writing endpoint address",
-      "A chat completions endpoint that writes a dictation out as proper text when you say “write that out” or hold the write key. Only the words you said are sent. Saving never calls it.",
-      writingUrl,
-    ),
-    row("Writing model", "The model the endpoint should use.", writingModel),
-    row("Writing API key", "Stored in the desktop config file; unchanged keeps the saved key.", writingKeyField),
-    row(
-      "Writing prompt",
-      "The instructions the writing model gets with every dictation; the words you said go in as the message itself. Blank is not allowed. Saving never calls the model.",
-      writingPromptField,
-    ),
-    row(
-      "Opening phrases",
-      "When a dictation you write out begins with one of these phrases, its prompt is used instead of the Writing prompt; the longest matching phrase wins. A new rule starts as a copy of the Writing prompt. Case and punctuation are ignored. Saving never calls the model.",
-      openingsField,
-    ),
-  ];
+  return {
+    recognition: [
+      group("Live dictation"),
+      nextDictation,
+      summaryActions,
+      row(
+        "Speech servers",
+        "The one marked Live shows your words and hears the ending phrases. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Web conversations use the server's own recognizer.",
+        liveBlock,
+      ),
+      wordRow,
+      group("Extra recognizers"),
+      row(
+        "Extra recognizers",
+        "Each recognizer switched on here also transcribes your dictation. The chat model merges their texts with the live one, and the merged text is pasted. If the merge fails or takes too long, the live text is pasted. Switching one on or off applies at once.",
+        extraBlock,
+      ),
+    ],
+    chat: [
+      group("Writing"),
+      row(
+        "Writing endpoint address",
+        "A chat completions endpoint that writes a dictation out as proper text when you say “write that out” or hold the write key. Only the words you said are sent. Saving never calls it.",
+        writingUrl,
+      ),
+      row("Writing model", "The model the endpoint should use.", writingModel),
+      row("Writing API key", "Stored in the desktop config file; unchanged keeps the saved key.", writingKeyField),
+      row(
+        "Writing prompt",
+        "The instructions the writing model gets with every dictation; the words you said go in as the message itself. Blank is not allowed. Saving never calls the model.",
+        writingPromptField,
+      ),
+      row(
+        "Opening phrases",
+        "When a dictation you write out begins with one of these phrases, its prompt is used instead of the Writing prompt; the longest matching phrase wins. A new rule starts as a copy of the Writing prompt. Case and punctuation are ignored. Saving never calls the model.",
+        openingsField,
+      ),
+    ],
+  };
 }
 
 function microphone({ draft, backend, controls, microphones, live, audio }: PageContext): HTMLElement[] {
@@ -1772,7 +1782,7 @@ function sounds({ draft, controls }: PageContext): HTMLElement[] {
   )];
 }
 
-function feedback(context: PageContext): HTMLElement[] {
+function overlayAndSounds(context: PageContext): HTMLElement[] {
   return [...overlay(context), ...look(context), ...sounds(context)];
 }
 
@@ -1988,7 +1998,7 @@ function recordings({ draft, backend, controls }: PageContext): HTMLElement[] {
           draft.recordings[kind] = value;
         })),
     ),
-    group("Right now"),
+    group("Folder"),
     row("Recordings folder", "Everything is stored on this computer. Opening it is not part of Save.", {
       node: el("span", { class: "stack" }, open, problem),
       field: open,
@@ -2184,6 +2194,7 @@ function history(context: PageContext): HTMLElement[] {
       confirmed("Clear history", "Delete every entry? This cannot be undone.", "Yes, clear history", "Keep history", () => {
         change(backend.clearHistory());
       })),
+    ...recordings(context),
   ];
 }
 
@@ -2305,16 +2316,20 @@ function updates({ draft, backend, controls, live }: PageContext): HTMLElement[]
 }
 
 function app(context: PageContext): HTMLElement[] {
-  return [...startup(context), ...updates(context), ...recordings(context), ...about(context)];
+  return [...startup(context), ...updates(context), ...about(context)];
 }
 
-const PAGES: readonly (readonly [string, string, (context: PageContext) => HTMLElement[]])[] = [
-  ["speech", "Speech", speech],
-  ["microphone", "Microphone", microphone],
-  ["capture", "Capture", capture],
-  ["feedback", "Feedback and appearance", feedback],
-  ["tasks", "Apps & tasks", tasks],
-  ["history", "History", history],
+function listening(context: PageContext): HTMLElement[] {
+  return [...microphone(context), ...wakeSwitch(context), ...wakeHeads(context), ...holdKeys(context), ...limits(context)];
+}
+
+const PAGES: readonly (readonly [string, string, (context: PageContext, speech: SpeechRows) => HTMLElement[]])[] = [
+  ["listening", "Listening", listening],
+  ["recognition", "Recognition", (_, { recognition }) => recognition],
+  ["commands", "Commands", commands],
+  ["chat", "Chat model", (_, { chat }) => chat],
+  ["overlay", "Overlay & sounds", overlayAndSounds],
+  ["history", "History & recordings", history],
   ["app", "App", app],
 ];
 
@@ -2338,8 +2353,9 @@ function grouped(nodes: HTMLElement[]): HTMLElement[] {
 }
 
 export function buildPages(context: PageContext): Page[] {
+  const rows = speech(context);
   return PAGES.map(([id, title, build]) => {
-    const node = el("section", { "data-page": id, "aria-labelledby": `page-${id}` }, el("h3", { id: `page-${id}` }, title), ...grouped(build(context)));
+    const node = el("section", { "data-page": id, "aria-labelledby": `page-${id}` }, el("h3", { id: `page-${id}` }, title), ...grouped(build(context, rows)));
     return { id, title, node };
   });
 }
