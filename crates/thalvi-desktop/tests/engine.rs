@@ -2375,26 +2375,31 @@ async fn nothing_is_uploaded_merged_or_shown_while_no_extra_is_switched_on() {
 async fn cancelling_while_merging_delivers_nothing_and_records_the_unfinished_calls_as_cancelled() {
     LocalSet::new()
         .run_until(async {
-            for (name, extra, chat_reply, cancel_at, extra_outcome) in [
+            for (name, replies, chat_reply, outcomes) in [
                 (
                     "while waiting for the extras",
-                    Reply::Stall,
+                    [Reply::Stall, Reply::Stall],
                     Chat::Stall,
-                    1000,
-                    "cancelled",
+                    [("A", "cancelled"), ("B", "cancelled")],
+                ),
+                (
+                    "while one extra has answered and another has not",
+                    [Reply::Stall, Reply::After(100, B)],
+                    Chat::Stall,
+                    [("A", "cancelled"), ("B", "ok")],
                 ),
                 (
                     "while the chat model works",
-                    Reply::After(100, A),
+                    [Reply::After(100, A), Reply::After(100, B)],
                     Chat::Stall,
-                    1000,
-                    "ok",
+                    [("A", "ok"), ("B", "ok")],
                 ),
             ] {
                 let dir = record_dir("cancel");
-                let (a, mut uploads) = serve(extra).await;
+                let (a, mut a_uploads) = serve(replies[0]).await;
+                let (b, mut b_uploads) = serve(replies[1]).await;
                 let (chat_url, _asked, _feed) = chat(chat_reply).await;
-                let config = with_extras(&chat_url, &[("A", &a, true)]);
+                let config = with_extras(&chat_url, &[("A", &a, true), ("B", &b, true)]);
                 let recorder = Recorder::in_dir(ALL, &dir).unwrap();
                 let (mut rig, engine, frames) = Rig::recording(&config, recorder);
                 let task = capture_task(engine, frames);
@@ -2402,14 +2407,18 @@ async fn cancelling_while_merging_delivers_nothing_and_records_the_unfinished_ca
                     .await
                     .expect("capture reaches the merge");
                 rig.at(MERGE_STARTS).await;
-                assert!(
-                    tokio::time::timeout(Duration::from_secs(10), uploads.recv())
-                        .await
-                        .expect("the upload starts")
-                        .is_some(),
-                    "{name}"
-                );
-                rig.at(MERGE_STARTS + cancel_at).await;
+                for uploads in [&mut a_uploads, &mut b_uploads] {
+                    assert!(
+                        tokio::time::timeout(Duration::from_secs(10), uploads.recv())
+                            .await
+                            .expect("the upload starts")
+                            .is_some(),
+                        "{name}"
+                    );
+                }
+                // Idle, so the clock reaches each answer's own time before the cancel.
+                tokio::time::sleep(ms(500)).await;
+                rig.at(MERGE_STARTS + 1000).await;
                 assert_eq!(
                     rig.state(),
                     EngineState::Merging {
@@ -2429,7 +2438,18 @@ async fn cancelling_while_merging_delivers_nothing_and_records_the_unfinished_ca
                 assert!(rig.gate.is_enabled(), "{name}");
                 assert_eq!(rig.notices().len(), 0, "{name}");
                 assert_eq!(merge_event(&dir)["outcome"], "cancelled", "{name}");
-                extras_were(&extra_metrics(&dir), &[("A", extra_outcome, false)]);
+                let expected = outcomes.map(|(entry, outcome)| (entry, outcome, false));
+                extras_were(&extra_metrics(&dir), &expected);
+                for line in read_lines(&dir.join("metrics.jsonl"))
+                    .iter()
+                    .filter(|line| line["event"] == "desktop_extra_stt" && line["outcome"] == "ok")
+                {
+                    assert_eq!(
+                        line["duration_ms"].as_f64().unwrap().round(),
+                        100.0,
+                        "{name}"
+                    );
+                }
             }
         })
         .await;
