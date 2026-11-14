@@ -8,9 +8,10 @@ use std::{
     },
 };
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite;
 
+use crate::device::Step;
 use crate::frame::{FRAME_SAMPLES, Frame};
 use crate::models::ModelError;
 use crate::report::UserError;
@@ -278,6 +279,13 @@ pub trait Recognizer: Send + Sync {
 
     /// Resolves once the recognizer is ready for audio.
     fn connect(&self) -> impl Future<Output = Result<Self::Session, RecognizerError>> + Send;
+
+    /// The steps of the model load a [`connect`](Self::connect) waits for, for a recognizer that
+    /// loads a model on this computer; a dictation then waits as long as the load reads from disk.
+    /// None for a server, whose connection is abandoned after a fixed time.
+    fn loading(&self) -> Option<watch::Receiver<Step>> {
+        None
+    }
 }
 
 /// Taps of the 16 to 24 kHz interpolation filter, at the 48 kHz rate between up by 3 and down by 2.
@@ -376,6 +384,7 @@ pub struct FakeRecognizer {
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
+    load: Option<watch::Receiver<Step>>,
 }
 
 /// Test-side handle of a [`FakeRecognizer`].
@@ -386,6 +395,7 @@ pub struct FakeControl {
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
+    load: Option<watch::Sender<Step>>,
 }
 
 /// The stream a [`FakeRecognizer`] hands out once ready.
@@ -400,6 +410,20 @@ impl FakeRecognizer {
     /// `connect` stays pending until [`FakeControl::ready`] or [`FakeControl::fail`] is called.
     #[must_use]
     pub fn new() -> (Self, FakeControl) {
+        Self::with_load(None)
+    }
+
+    /// Like [`new`](Self::new), but loading a model on this computer: `connect` waits for the load,
+    /// which starts at [`Step::Reading`] and moves with [`FakeControl::step`].
+    #[must_use]
+    pub fn on_device() -> (Self, FakeControl) {
+        Self::with_load(Some(watch::channel(Step::Reading)))
+    }
+
+    fn with_load(
+        load: Option<(watch::Sender<Step>, watch::Receiver<Step>)>,
+    ) -> (Self, FakeControl) {
+        let (load_tx, load_rx) = load.unzip();
         let (ready_tx, ready_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -414,6 +438,7 @@ impl FakeRecognizer {
                 calls: Arc::clone(&calls),
                 stalled: Arc::clone(&stalled),
                 buffers: Arc::clone(&buffers),
+                load: load_rx,
             },
             FakeControl {
                 ready: Some(ready_tx),
@@ -422,6 +447,7 @@ impl FakeRecognizer {
                 calls,
                 stalled,
                 buffers,
+                load: load_tx,
             },
         )
     }
@@ -450,9 +476,20 @@ impl Recognizer for FakeRecognizer {
             buffers: Arc::clone(&self.buffers),
         })
     }
+
+    fn loading(&self) -> Option<watch::Receiver<Step>> {
+        self.load.clone()
+    }
 }
 
 impl FakeControl {
+    /// Moves the load of an [`on_device`](FakeRecognizer::on_device) recognizer to `step`.
+    pub fn step(&self, step: Step) {
+        if let Some(load) = &self.load {
+            load.send_replace(step);
+        }
+    }
+
     /// Lets the recognizer connect once more, to a fresh session this control then drives; the
     /// calls log carries over.
     pub fn connect_again(&mut self) {

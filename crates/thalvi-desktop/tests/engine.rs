@@ -13,6 +13,7 @@ use thalvi_desktop::audio::{AudioError, InputGate};
 use thalvi_desktop::capture::{CaptureRequest, CaptureRoute, Ending};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::cues::{Cue, CueTiming};
+use thalvi_desktop::device::{Export, Step};
 use thalvi_desktop::engine::fakes::{
     CueControl, CueLog, FakeCuePlayer, FakeFrames, FakeSpotter, FakeWake, FrameFeed,
     SpotterControl, WakeControl,
@@ -143,6 +144,11 @@ impl Rig {
         (rig, engine, frames)
     }
 
+    /// A rig whose recognizer loads a model on this computer, which the test steps through.
+    fn loading(config: &str, recorder: Recorder) -> (Self, TestEngine, FakeFrames) {
+        Self::assemble(config, recorder, (None, None), FakeRecognizer::on_device())
+    }
+
     /// A rig whose engine also has an ending spotter that hears what the test scripts.
     fn spotting(
         config: &str,
@@ -159,12 +165,25 @@ impl Rig {
         spotter: Option<FakeSpotter>,
         spotter_off: Option<&str>,
     ) -> (Self, TestEngine, FakeFrames) {
+        Self::assemble(
+            config,
+            recorder,
+            (spotter, spotter_off),
+            FakeRecognizer::new(),
+        )
+    }
+
+    fn assemble(
+        config: &str,
+        recorder: Recorder,
+        (spotter, spotter_off): (Option<FakeSpotter>, Option<&str>),
+        (recognizer, server): (FakeRecognizer, FakeControl),
+    ) -> (Self, TestEngine, FakeFrames) {
         let config = DesktopConfig::from_json_str(config).unwrap();
         let gate = InputGate::default();
         let (frames, feed) = FakeFrames::new(&gate);
         let (wake_detector, wake) = FakeWake::new();
         let (cue_player, cues) = FakeCuePlayer::new();
-        let (recognizer, server) = FakeRecognizer::new();
         let notices = Rc::new(RefCell::new(Vec::new()));
         let sink = Rc::clone(&notices);
         let (key, hold) = HoldInput::new();
@@ -330,6 +349,13 @@ async fn finished<T>(task: JoinHandle<T>) -> T {
         .await
         .expect("the task never ended")
         .unwrap()
+}
+
+fn failed(error: CaptureError) -> CaptureOutcome {
+    CaptureOutcome::Failed {
+        error,
+        recoverable_text: None,
+    }
 }
 
 fn accepted(route: CaptureRoute, text: &str) -> CaptureOutcome {
@@ -548,6 +574,166 @@ async fn the_wake_cue_and_the_connection_overlap_and_only_audio_after_both_is_se
             );
             assert!(rig.gate.is_enabled());
             assert_eq!(rig.state(), EngineState::Listening);
+        })
+        .await;
+}
+
+const LOAD_FAILED: &str = "Could not load the speech model.";
+
+#[tokio::test(start_paused = true)]
+async fn a_dictation_waits_for_a_model_read_from_disk_and_sends_what_was_said_meanwhile() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::loading("{}", Recorder::disabled());
+            let task = capture_task(engine, frames);
+            rig.wake_word().await;
+            rig.at(230).await;
+            assert_eq!(rig.state(), EngineState::LoadingModel);
+            rig.feed_until(20_000, Kind::Quiet).await;
+            assert!(
+                !task.is_finished(),
+                "no fixed limit while the model is read"
+            );
+            assert_eq!(rig.state(), EngineState::LoadingModel);
+            assert_eq!(rig.sent().len(), 0);
+
+            rig.server.ready();
+            settle().await;
+            let said: Vec<Frame> = (3..=250).map(quiet).collect();
+            assert_eq!(tags(&rig.sent()), tags(&said));
+            assert_eq!(
+                rig.state(),
+                EngineState::Capturing {
+                    committed: String::new(),
+                    partial: None,
+                    notice: None,
+                }
+            );
+            rig.finals("Hello paste that").await;
+            rig.feed_until(21_500, Kind::Quiet).await;
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "Hello"));
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dictation_that_cannot_wait_for_the_model_ends_when_it_does_and_says_why() {
+    #[derive(Clone, Copy)]
+    enum Happens {
+        /// The load is already at this step when the wake word comes.
+        DownloadingAtWake(Step),
+        /// The load reads from disk for 12 s, then this happens.
+        Download(Step),
+        LoadFails,
+        Cancel,
+    }
+    let downloading = |percent| CaptureError::ModelDownloading {
+        speech: SpeechSource::on_device("On this computer", "nemotron_160ms".to_owned()),
+        percent,
+    };
+    // What happens, how the dictation ends, and when the error cue plays.
+    let cases = [
+        (
+            Happens::DownloadingAtWake(Step::Fetching(Export::Gpu)),
+            failed(downloading(0)),
+            Some(0),
+        ),
+        (
+            Happens::DownloadingAtWake(Step::Downloading(Export::Cpu, 45)),
+            failed(downloading(45)),
+            Some(0),
+        ),
+        (
+            Happens::Download(Step::Downloading(Export::Gpu, 7)),
+            failed(downloading(7)),
+            Some(12_000),
+        ),
+        (
+            Happens::LoadFails,
+            failed(CaptureError::Recognizer(RecognizerError::said(LOAD_FAILED))),
+            Some(12_000),
+        ),
+        (
+            Happens::Cancel,
+            CaptureOutcome::Cancelled { dictated: None },
+            None,
+        ),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for (case, (happens, expected, error_cue)) in cases.into_iter().enumerate() {
+                let label = format!("case {case}");
+                let dir = record_dir(&format!("loading-{case}"));
+                let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+                let (mut rig, engine, frames) = Rig::loading("{}", recorder);
+                let task = capture_task(engine, frames);
+                if let Happens::DownloadingAtWake(step) = happens {
+                    rig.server.step(step);
+                }
+                rig.wake_word().await;
+                if !matches!(happens, Happens::DownloadingAtWake(_)) {
+                    rig.at(11_999).await;
+                    assert!(!task.is_finished(), "{label}: still waiting");
+                    rig.at(12_000).await;
+                }
+                match happens {
+                    Happens::DownloadingAtWake(_) => {}
+                    Happens::Download(step) => rig.server.step(step),
+                    Happens::LoadFails => rig.server.fail(LOAD_FAILED),
+                    Happens::Cancel => rig.handle.cancel(),
+                }
+                settle().await;
+                assert_eq!(finished(task).await, expected, "{label}");
+                assert_eq!(
+                    rig.started(Cue::Error).first().copied(),
+                    error_cue,
+                    "{label}"
+                );
+                assert!(rig.gate.is_enabled(), "{label}");
+                assert_eq!(rig.state(), EngineState::Listening, "{label}");
+                let lines = read_lines(&dir.join("metrics.jsonl"));
+                let ready = lines
+                    .iter()
+                    .find(|line| line["event"] == "desktop_transcription_ready")
+                    .unwrap();
+                let (outcome, waited) = match happens {
+                    Happens::DownloadingAtWake(_) => ("downloading", 0.0),
+                    Happens::Download(_) => ("downloading", 12_000.0),
+                    Happens::LoadFails => ("error", 12_000.0),
+                    Happens::Cancel => ("cancelled", 12_000.0),
+                };
+                assert_eq!(ready["outcome"], outcome, "{label}");
+                assert!(
+                    (ready["duration_ms"].as_f64().unwrap() - waited).abs() < 0.5,
+                    "{label}: the wait is what the user waited"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_released_while_the_model_is_read_is_dictated_once_it_is_ready() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::loading("{}", Recorder::disabled());
+            let task = hold_task(engine, frames);
+            rig.press().await;
+            rig.feed_until(3000, Kind::Voice).await;
+            rig.release(3000).await;
+            rig.at(20_000).await;
+            assert!(
+                !task.is_finished(),
+                "released, and still waiting for the model"
+            );
+            rig.server.ready();
+            settle().await;
+            rig.partial("hello world").await;
+            rig.at(20_250).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "hello world")
+            );
         })
         .await;
 }

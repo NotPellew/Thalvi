@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::device::Adapters;
+use tokio::sync::watch;
+
+use crate::device::{Adapters, Step};
 use crate::entries::{LiveEntry, LiveKind};
 use crate::frame::Frame;
 use crate::local::{LocalRecognizer, LocalSession};
@@ -106,6 +108,10 @@ impl Recognizer for Chosen {
                 .map(|session| ChosenSession::Local(session, speech.clone()))
                 .map_err(|error| named(speech, error)),
         }
+    }
+
+    fn loading(&self) -> Option<watch::Receiver<Step>> {
+        self.local().map(|local| local.steps())
     }
 }
 

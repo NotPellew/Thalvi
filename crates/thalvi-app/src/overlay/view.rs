@@ -4,8 +4,9 @@
 use std::time::Duration;
 
 use thalvi_desktop::capture::CaptureRoute;
+use thalvi_desktop::device::Step;
 
-use crate::status::{FailureKind, Status};
+use crate::status::{FailureKind, Status, load_notice};
 
 /// The overlay surface, in points; every look draws inside it.
 pub const WIDTH: f32 = 460.0;
@@ -194,6 +195,9 @@ impl View {
         self.line = self.line_of(next);
         match next {
             Status::Paused | Status::Listening | Status::KeyboardOnly => self.tone = Tone::Live,
+            Status::Starting { loading: true, .. } | Status::Loading { .. } => {
+                self.working("LOADING");
+            }
             Status::Starting { .. } | Status::Capturing { .. } => {
                 self.tone = Tone::Live;
                 wave = true;
@@ -229,7 +233,6 @@ impl View {
             Status::Transcribing { .. } => self.working("TRANSCRIBING…"),
             Status::Merging { .. } => self.working("MERGING…"),
             Status::Working { .. } => self.working("WORKING"),
-            Status::Loading { .. } => self.working("LOADING"),
             Status::Done { .. } => self.tone = Tone::Done,
             Status::Failed { kind, .. } => {
                 self.tone = Tone::Failed;
@@ -282,6 +285,7 @@ impl View {
                 ..
             }
             | Status::Loading { notice, .. } => Line::Notice(notice.clone()),
+            Status::Starting { loading: true, .. } => Line::Notice(load_notice(Step::Reading)),
             Status::Capturing {
                 committed, partial, ..
             } => words(committed, partial.as_deref().unwrap_or_default(), true),
@@ -780,7 +784,13 @@ mod tests {
             notice: String::new(),
         };
         for (status, animating) in [
-            (Status::Starting { target: None }, true),
+            (
+                Status::Starting {
+                    target: None,
+                    loading: false,
+                },
+                true,
+            ),
             (pending, true),
             (working, true),
             (done, false),
@@ -790,6 +800,25 @@ mod tests {
             view.set_status(status.clone(), 0.0);
             assert_eq!(view.animating(), animating, "{status:?}");
         }
+    }
+
+    #[test]
+    fn a_dictation_waiting_for_the_speech_model_says_so_and_can_still_be_cancelled() {
+        let mut view = View::new(true);
+        view.set_status(
+            Status::Starting {
+                target: None,
+                loading: true,
+            },
+            0.0,
+        );
+        assert_eq!(view.label.as_deref(), Some("LOADING"));
+        assert_eq!(
+            view.line,
+            Line::Notice("Loading the speech model.".to_owned())
+        );
+        assert!(view.animating());
+        assert!(view.cancellable());
     }
 
     #[test]

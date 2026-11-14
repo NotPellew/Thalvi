@@ -88,6 +88,8 @@ Sync commit: `a03b86c0f995a8ec683157ed28765e668c183c66`. [source.json](source.js
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 
+A dictation waiting for the speech model (#378) adds a `loading` flag to `Status::Starting`, which `agent.rs` reads in `phase` and `overlay_word` only; `plan`, `plan_over` and `settings_set` are unchanged, so only the `agent.rs` hash moved.
+
 A finished speech model download (#374) sends `Control::ReloadSpeechModel` from `download_speech`, which writes no settings; `save_settings` and `save` are unchanged, so only the `commands.rs` hash moved.
 
 Extra recognizers (#228) add `check_endpoint_kept` to `Store::check` and `judge`, a pure refusal on the settings value and

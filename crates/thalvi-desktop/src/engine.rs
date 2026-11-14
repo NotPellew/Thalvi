@@ -47,7 +47,7 @@ use crate::writing::{self, Piece, Writing, WritingError};
 pub use streaming::StreamingExtra;
 use streaming::Streams;
 
-/// How long the recognizer and the wake cue have to be ready before the capture is abandoned.
+/// How long the wake cue and a recognizer that is not loading a model have to be ready before the capture is abandoned.
 const READY_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// How long a pending ending may go without microphone audio before the capture fails.
@@ -199,6 +199,9 @@ pub enum EngineState {
     Listening,
     /// The wake cue plays while the recognizer connects.
     StartingCapture,
+    /// The wake cue has played and the dictation waits for the speech model to be read from disk;
+    /// what the user says is kept.
+    LoadingModel,
     Capturing {
         committed: String,
         partial: Option<String>,
@@ -243,6 +246,11 @@ pub enum CaptureError {
         waited: Duration,
         speech: SpeechSource,
     },
+    #[error(
+        "{} is still downloading ({percent}%). Nothing was delivered. Dictate again once it has finished.",
+        speech.subject()
+    )]
+    ModelDownloading { speech: SpeechSource, percent: u8 },
     #[error(transparent)]
     Audio(#[from] AudioError),
     #[error("Microphone audio stopped. Nothing was delivered.")]
@@ -271,6 +279,7 @@ impl UserError for CaptureError {
                 "Speech model not ready — Settings"
             }
             Self::NotReady { .. } => "Speech server not ready — Settings",
+            Self::ModelDownloading { .. } => "Speech model still downloading",
             Self::Audio(error) => error.headline(),
             Self::Writing(error) => error.headline(),
             Self::MicStopped => "Microphone stopped mid-capture",
@@ -301,6 +310,7 @@ impl CaptureError {
         match self {
             Self::Recognizer(_) => "recognizer",
             Self::NotReady { .. } => "not_ready",
+            Self::ModelDownloading { .. } => "model_downloading",
             Self::Audio(_) => "audio",
             Self::MicStopped => "mic_stopped",
             Self::Writing(_) => "writing",
@@ -956,6 +966,20 @@ async fn until(at: Option<Instant>) {
     }
 }
 
+/// Resolves with how far the download is once the model load downloads; never while it only reads
+/// from disk, or when there is no load.
+async fn download_started(load: &mut Option<watch::Receiver<crate::device::Step>>) -> u8 {
+    if let Some(load) = load
+        && let Ok(step) = load
+            .wait_for(|step| step.download_percent().is_some())
+            .await
+        && let Some(percent) = step.download_percent()
+    {
+        return percent;
+    }
+    pending().await
+}
+
 fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
@@ -1352,6 +1376,13 @@ where
         }
     }
 
+    fn model_downloading(&self, percent: u8) -> CaptureError {
+        CaptureError::ModelDownloading {
+            speech: self.speech.clone(),
+            percent,
+        }
+    }
+
     /// Records how the recognizer's connection ended and how long the wait for it took.
     fn ready_metric(&self, connection: (&str, Option<Duration>), started: Instant) {
         self.recorder.metric(
@@ -1563,7 +1594,13 @@ where
 
     /// Plays the wake cue while the recognizer connects, then returns the open recognition, the
     /// frames that arrived after the cue while it was still connecting, and when the hold's key
-    /// came up in the meantime, if speech was already waiting.
+    /// came up in the meantime, if speech was already waiting. A recognizer that loads a model on
+    /// this computer is waited for as long as the load reads from disk, and refused as soon as it
+    /// downloads.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one select over every way the start can end"
+    )]
     async fn start(
         &mut self,
         frames: &mut impl FrameSource,
@@ -1572,6 +1609,8 @@ where
     ) -> Result<(Live<R::Session>, Vec<Queued>, Option<Instant>), (Done, Instant)> {
         let started = Instant::now();
         let deadline = started + READY_TIMEOUT;
+        let mut load = self.recognizer.loading();
+        let loads_model = load.is_some();
         let recognizer = &self.recognizer;
         let mut connect = pin!(async move {
             let at = Instant::now();
@@ -1594,7 +1633,7 @@ where
                     self.cue_metric(Event::ReadyCue, &end);
                     self.cue_failed(&end, "The capture continues.");
                 }
-                () = tokio::time::sleep_until(deadline) => break Some(Done::Failed(self.not_ready())),
+                () = until((session.is_some() || !loads_model).then_some(deadline)) => break Some(Done::Failed(self.not_ready())),
                 frame = frames.next(), if cue_ended && released.is_none() => match frame {
                     Ok(queued) if !held.is_some_and(|held| held.release.precedes(queued.order)) => backlog.push(queued),
                     Ok(_) => {}
@@ -1625,12 +1664,19 @@ where
                         break Some(Done::Failed(error.into()));
                     }
                 },
+                percent = download_started(&mut load), if session.is_none() => {
+                    connection = ("downloading", None);
+                    break Some(Done::Failed(self.model_downloading(percent)));
+                }
             }
             // A release not yet dealt with comes first, whichever branch the select saw first.
             let release_pending =
                 released.is_none() && held.is_some_and(|held| self.key.is_over(held.press));
             if cue_ended && session.is_some() && !release_pending {
                 break None;
+            }
+            if cue_ended && session.is_none() && loads_model {
+                self.set_state(EngineState::LoadingModel);
             }
         };
         let decided = Instant::now();

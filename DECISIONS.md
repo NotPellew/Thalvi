@@ -117,6 +117,10 @@ areas your change touches. Editing rules are in
   only later speech, buffered while the recognizer connects; confirmations wait for ready,
   then the cue. Why: wake audio leaked the phrase into 1 in 5 live transcripts even with
   stripping. Rejected: pre-wake audio, cutting it at the wake, and stripping the phrase.
+- **A dictation waits for a model that is loading, not for one that is downloading.** On this computer the
+  capture waits with no limit while the model is read from disk, and fails at once with the percent once it
+  downloads; servers keep the 8 s limit. Why: a read takes seconds and ends, a 1.3 GB download takes minutes.
+  Rejected: one longer fixed limit for both.
 - **Silence commits capture.** Paste waits 0.7 s of speech silence, submit and tasks 2.5 s by
   default, each settable from 0 to 5 s; recognized speech cancels the pending ending, local speech
   pauses the countdown, submit confirms its target, and a whole-text command waits the task pause.

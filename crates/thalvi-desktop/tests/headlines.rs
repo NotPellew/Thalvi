@@ -43,6 +43,7 @@ fn unreachable() -> RecognizerError {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "one row per error")]
 fn recognition() -> Cases {
     let server = office;
     let local = || SpeechSource::on_device("On this computer", "nemotron".to_owned());
@@ -117,6 +118,13 @@ fn recognition() -> Cases {
                 speech: local(),
             }),
             "Speech model not ready — Settings",
+        ),
+        (
+            Box::new(CaptureError::ModelDownloading {
+                speech: local(),
+                percent: 45,
+            }),
+            "Speech model still downloading",
         ),
         (
             Box::new(CaptureError::Audio(AudioError::Busy)),

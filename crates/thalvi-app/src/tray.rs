@@ -383,6 +383,7 @@ mod tests {
             (
                 Status::Starting {
                     target: Some(kitty()),
+                    loading: false,
                 },
                 Icon::Capturing,
                 "Thalvi: capturing",
@@ -579,6 +580,7 @@ mod tests {
             (
                 Status::Starting {
                     target: Some(kitty()),
+                    loading: false,
                 },
                 true,
             ),

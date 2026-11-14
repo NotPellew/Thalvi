@@ -380,6 +380,7 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
         Status::Paused => "paused",
         Status::Listening | Status::Done { .. } => "listening",
         Status::KeyboardOnly => "keyboard",
+        Status::Starting { loading: true, .. } | Status::Loading { .. } => "loading",
         Status::Starting { .. } | Status::Capturing { .. } => "capturing",
         Status::Pending { .. } => "pending",
         Status::Working {
@@ -389,7 +390,6 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
         Status::Merging { .. } => "merging",
         Status::Working { .. } => "delivering",
         Status::Writing { .. } | Status::Thinking { .. } => "writing",
-        Status::Loading { .. } => "loading",
         Status::Failed { .. } => "failed",
     }
 }
@@ -406,6 +406,7 @@ fn overlay_word(status: &Status, on: bool) -> &'static str {
         | Status::Loading {
             downloading: false, ..
         } => "hidden",
+        Status::Starting { loading: true, .. } | Status::Loading { .. } => "loading",
         Status::Starting { .. } | Status::Capturing { .. } => "listening",
         Status::Pending {
             waiting_for_quiet: true,
@@ -419,7 +420,6 @@ fn overlay_word(status: &Status, on: bool) -> &'static str {
         Status::Merging { .. } => "merging",
         Status::Done { .. } => "delivered",
         Status::Failed { .. } => "error",
-        Status::Loading { .. } => "loading",
     }
 }
 
@@ -1607,6 +1607,7 @@ mod tests {
     }
 
     /// Each status with what `state` says of it: its word, the overlay's and the recognizer's.
+    #[expect(clippy::too_many_lines, reason = "one row per status")]
     fn state_words() -> Vec<(Status, &'static str, &'static str, &'static str)> {
         vec![
             (
@@ -1685,6 +1686,15 @@ mod tests {
                 "listening",
                 "delivered",
                 "ready",
+            ),
+            (
+                Status::Starting {
+                    target: Some("kitty".to_owned()),
+                    loading: true,
+                },
+                "loading",
+                "loading",
+                "loading",
             ),
             (
                 Status::Loading {
