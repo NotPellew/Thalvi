@@ -111,10 +111,9 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
 - There is no pointer, so Settings is keyboard-driven. The first `Tab` focuses the
   search box, then the sidebar pages in order (Listening, Recognition,
   Commands, Chat model, Overlay & sounds, History & recordings, App); `Return` opens the page.
-  The page's fields follow, and `Shift+Tab` from the search box wraps to the
-  footer. Take a screenshot after each step to see where the focus ring is
-  rather than counting: the footer's order is Copy, ×, Revert, Save, and a long
-  page needs about ten `Shift+Tab` presses from the sidebar to reach Save.
+  The page's fields follow. A typed field applies when it loses focus, so `Tab` out of
+  it (or press `Return`) before looking for the confirmation beside it. Take a
+  screenshot after each step to see where the focus ring is rather than counting.
 - A long page scrolls inside its own pane: focus a field in the page and press
   `Next` (Page Down) to scroll it, `Home` to return.
 - The overlay hangs at the top centre of the screen, above windows. Move the
