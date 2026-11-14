@@ -83,7 +83,7 @@ impl Report {
                 .clone()
                 .unwrap_or_else(|| "system default".to_owned()),
         ));
-        let second = config.stt.entries.ticked().next().is_some();
+        let second = config.stt.entries.any_extra();
         settings.push((
             "Extra recognizers",
             if second { "on" } else { "off" }.to_owned(),

@@ -265,7 +265,7 @@ fn build(
         .stt
         .entries(raw.server)
         .map_err(|error: EntryError| error.to_string())?;
-    if entries.ticked().next().is_some() && raw.writing.is_none() {
+    if entries.any_extra() && raw.writing.is_none() {
         return Err(EntryError::ExtrasNeedWriting.to_string());
     }
     Ok(DesktopConfig {

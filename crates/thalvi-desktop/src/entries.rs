@@ -29,6 +29,10 @@ pub enum EntryError {
         "Exactly one live speech server must be active: a realtime recognizer or this computer."
     )]
     ActiveLive,
+    #[error(
+        "Speech server \"{0}\" is the one in use, so it cannot also be an extra recognizer. Switch it off as an extra first."
+    )]
+    ActiveExtra(String),
     #[error("Speech server \"{name}\": {reason}")]
     Fields { name: String, reason: String },
     #[error(
@@ -134,6 +138,8 @@ pub struct LiveEntry {
     pub id: String,
     pub name: String,
     pub kind: LiveKind,
+    /// Whether the entry also hears each capture as an extra recognizer; never true for the active entry.
+    pub extra: bool,
 }
 
 impl LiveEntry {
@@ -195,6 +201,7 @@ impl Default for Entries {
                 id: ON_DEVICE_ID.to_owned(),
                 name: ON_DEVICE_NAME.to_owned(),
                 kind: LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
+                extra: false,
             }],
             active: 0,
             extras: Vec::new(),
@@ -242,6 +249,21 @@ impl Entries {
     /// The extra entries that are switched on.
     pub fn ticked(&self) -> impl Iterator<Item = &ExtraEntry> {
         self.extras.iter().filter(|entry| entry.ticked())
+    }
+
+    /// The live entries other than the active one that are switched on as extras.
+    pub fn streaming_extras(&self) -> impl Iterator<Item = &LiveEntry> {
+        self.live
+            .iter()
+            .enumerate()
+            .filter(|(index, entry)| entry.extra && *index != self.active)
+            .map(|(_, entry)| entry)
+    }
+
+    /// Whether any extra recognizer, of either kind, is switched on.
+    #[must_use]
+    pub fn any_extra(&self) -> bool {
+        self.ticked().next().is_some() || self.streaming_extras().next().is_some()
     }
 
     /// The API key saved for the entry with `id`; empty when it has none or there is no such entry.
@@ -318,6 +340,7 @@ impl Entries {
                         id: ON_DEVICE_ID.to_owned(),
                         name: ON_DEVICE_NAME.to_owned(),
                         kind: LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
+                        extra: false,
                     });
                     live.len() - 1
                 }
@@ -355,6 +378,7 @@ impl Entries {
             id: ON_DEVICE_ID.to_owned(),
             name: ON_DEVICE_NAME.to_owned(),
             kind: LiveKind::OnDevice(choice),
+            extra: false,
         };
         let live = match (engine, model) {
             // Legacy server settings are discarded; without a usable local selection the default
@@ -428,6 +452,8 @@ enum RawEntry {
         name: String,
         #[serde(default)]
         active: bool,
+        #[serde(default)]
+        extra: bool,
         address: String,
         model: String,
         #[serde(default)]
@@ -438,6 +464,8 @@ enum RawEntry {
         name: String,
         #[serde(default)]
         active: bool,
+        #[serde(default)]
+        extra: bool,
         address: String,
         model: String,
         #[serde(default)]
@@ -463,6 +491,8 @@ enum RawEntry {
         name: String,
         #[serde(default)]
         active: bool,
+        #[serde(default)]
+        extra: bool,
         #[serde(default)]
         model: Option<String>,
     },
@@ -519,17 +549,24 @@ impl RawEntry {
         if id.is_empty() || id.chars().count() > MAX_ID_CHARS {
             return Err(EntryError::Id(name));
         }
-        let live = |kind, on| Built::Live {
-            entry: LiveEntry {
-                id: id.clone(),
-                name: name.clone(),
-                kind,
-            },
-            on,
+        let live = |kind, on, extra| {
+            if on && extra {
+                return Err(EntryError::ActiveExtra(name.clone()));
+            }
+            Ok(Built::Live {
+                entry: LiveEntry {
+                    id: id.clone(),
+                    name: name.clone(),
+                    kind,
+                    extra,
+                },
+                on,
+            })
         };
         Ok(match self {
             Self::Realtime {
                 active,
+                extra,
                 address,
                 model,
                 api_key,
@@ -539,9 +576,11 @@ impl RawEntry {
                     Realtime::new(&address, &model, api_key).map_err(|e| fields(&name, e))?,
                 ),
                 active,
-            ),
+                extra,
+            )?,
             Self::OpenAi {
                 active,
+                extra,
                 address,
                 model,
                 api_key,
@@ -562,14 +601,21 @@ impl RawEntry {
                     language: Language::parse(&language).map_err(|e| fields(&name, e))?,
                 }),
                 active,
-            ),
+                extra,
+            )?,
             Self::LegacyServer { .. } => {
                 return Err(fields(&name, "this speech server kind was removed."));
             }
-            Self::OnDevice { active, model, .. } => live(
+            Self::OnDevice {
+                active,
+                extra,
+                model,
+                ..
+            } => live(
                 LiveKind::OnDevice(speech_choice(model.as_deref()).map_err(|e| fields(&name, e))?),
                 active,
-            ),
+                extra,
+            )?,
             Self::Extra {
                 active,
                 address,
@@ -657,6 +703,8 @@ impl Serialize for Entries {
                 id: &'a str,
                 name: &'a str,
                 active: bool,
+                #[serde(skip_serializing_if = "std::ops::Not::not")]
+                extra: bool,
                 address: &'a str,
                 model: &'a str,
                 api_key: &'a str,
@@ -665,6 +713,8 @@ impl Serialize for Entries {
                 id: &'a str,
                 name: &'a str,
                 active: bool,
+                #[serde(skip_serializing_if = "std::ops::Not::not")]
+                extra: bool,
                 address: &'a str,
                 model: &'a str,
                 api_key: &'a str,
@@ -675,6 +725,8 @@ impl Serialize for Entries {
                 id: &'a str,
                 name: &'a str,
                 active: bool,
+                #[serde(skip_serializing_if = "std::ops::Not::not")]
+                extra: bool,
                 model: String,
             },
             Extra {
@@ -688,12 +740,18 @@ impl Serialize for Entries {
             },
         }
         let live = self.live.iter().enumerate().map(|(index, entry)| {
-            let (id, name, active) = (entry.id.as_str(), entry.name.as_str(), index == self.active);
+            let (id, name, active, extra) = (
+                entry.id.as_str(),
+                entry.name.as_str(),
+                index == self.active,
+                entry.extra,
+            );
             match &entry.kind {
                 LiveKind::Realtime(realtime) => File::Realtime {
                     id,
                     name,
                     active,
+                    extra,
                     address: &realtime.address,
                     model: &realtime.model,
                     api_key: &realtime.api_key,
@@ -702,6 +760,7 @@ impl Serialize for Entries {
                     id,
                     name,
                     active,
+                    extra,
                     address: live.settings.address(),
                     model: live.settings.model(),
                     api_key: live.settings.api_key(),
@@ -712,6 +771,7 @@ impl Serialize for Entries {
                     id,
                     name,
                     active,
+                    extra,
                     model: choice.label(),
                 },
             }
@@ -1131,6 +1191,49 @@ mod tests {
                 .unwrap_err()
                 .contains("this speech server kind was removed"),
             "where an entry is added, the removed kind is refused"
+        );
+    }
+
+    #[test]
+    fn a_live_entry_can_be_an_extra_unless_it_is_the_active_one() {
+        let list = |active_extra: bool, writing: bool| {
+            let mut config = json!({"stt": {"entries": [
+                {"kind": "on_device", "id": "a", "name": "A", "active": true, "extra": active_extra},
+                {"kind": "realtime", "id": "b", "name": "B", "address": "ws://h:1", "model": "m",
+                 "extra": true},
+                {"kind": "on_device", "id": "c", "name": "C", "model": "/m"}
+            ]}});
+            if writing {
+                config["writing"] = json!({"url": "http://c/v1", "model": "c"});
+            }
+            config
+        };
+        let got = entries_of(&list(false, true));
+        assert_eq!(
+            got.streaming_extras()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            ["B"]
+        );
+        assert!(got.any_extra());
+        let saved = serde_json::to_value(&got).unwrap();
+        assert_eq!(saved[1]["extra"], true);
+        assert!(saved[0].get("extra").is_none(), "off is not written");
+        assert_eq!(
+            entries_of(
+                &json!({"stt": {"entries": saved}, "writing": {"url": "http://c/v1", "model": "c"}})
+            ),
+            got
+        );
+        assert!(
+            entries(&list(true, true).to_string())
+                .unwrap_err()
+                .contains("cannot also be an extra"),
+        );
+        assert!(
+            entries(&list(false, false).to_string())
+                .unwrap_err()
+                .contains(&EntryError::ExtrasNeedWriting.to_string()),
         );
     }
 
