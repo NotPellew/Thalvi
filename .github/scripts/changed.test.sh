@@ -40,6 +40,8 @@ check none README.md DECISIONS.md .agents/skills/verify-thalvi/SKILL.md .github/
 check web README.md web/README.md
 check server crates/thalvi-server/README.md
 check speech speech/README.md
+check server README.md crates/thalvi-server/src/a.rs
+check all crates/thalvi-app/README.md
 for file in Cargo.toml Cargo.lock rust-toolchain.toml .cargo/mutants.toml .node-version deny.toml \
   .github/workflows/ci.yml .github/scripts/changed crates/thalvi-app/tauri.conf.json crates/thalvi-asr/src/lib.rs \
   crates/thalvi-asr/README.md unknown.bin; do

@@ -27,7 +27,7 @@ while IFS= read -r file; do
     speech/* | compose.yaml) units+=(speech) ;;
     .github/scripts/issue-refs*) units+=(issues) ;;
     *.md)
-      if [[ $file == crates/* || $file == web/* || $file == speech/* ]]; then
+      if [[ $file == crates/* ]]; then
         echo all
         exit 0
       fi
