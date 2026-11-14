@@ -1697,6 +1697,7 @@ where
         if let (Some(at), Some(held)) = (released, held) {
             self.held_for = Some(at.duration_since(held.at));
             if live.session.buffers_audio() {
+                self.streams.send(&RELEASE_SILENCE);
                 if let Err(error) = live.session.finish_audio().await {
                     return (Done::Failed(error.into()), Instant::now());
                 }
@@ -1864,6 +1865,7 @@ where
             }
         }
         if live.session.buffers_audio() {
+            self.streams.send(&RELEASE_SILENCE);
             if let Err(error) = live.session.finish_audio().await {
                 return Some(Done::Failed(error.into()));
             }

@@ -6361,6 +6361,30 @@ fn extra_duration(dir: &std::path::Path, entry: &str) -> f64 {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_buffered_live_hold_still_ends_a_streaming_extra_with_silence() {
+    LocalSet::new()
+        .run_until(async {
+            let (chat_url, _asked, _feed) = chat(Chat::Stall).await;
+            let (mut rig, engine, frames) = Rig::new(&with_streaming(&chat_url, &["X"]));
+            rig.server.buffer_audio();
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.extras[0].ready();
+            rig.feed_until(500, Kind::Voice).await;
+            rig.release(700).await;
+            let sent = rig.extra_sent(0);
+            assert_eq!(
+                tags(&sent[sent.len() - 10..]),
+                vec![0; 10],
+                "a stream finalizes on silence, which the buffered live capture never sends"
+            );
+            task.abort();
+            let _ = task.await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_streaming_extra_is_sent_every_frame_the_live_recognizer_is_sent_however_late_it_connects()
  {
     LocalSet::new()
