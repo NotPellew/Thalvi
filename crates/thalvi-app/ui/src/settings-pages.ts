@@ -820,16 +820,18 @@ function modelOption(info: SpeechModelInfo): HTMLOptionElement {
 }
 
 const KIND_NAMES: Record<SpeechEntry["kind"], string> = {
-  realtime: "Realtime speech server",
-  open_ai: "OpenAI-compatible",
+  realtime: "Live as you speak — Meta realtime ASR",
+  open_ai: "After you stop — OpenAI transcriptions",
   on_device: "On this computer",
   extra: "Extra recognizer",
 };
 const LIVE_KINDS: readonly (readonly [LiveEntry["kind"], string])[] = [
-  ["realtime", "Realtime speech server"],
-  ["open_ai", "OpenAI-compatible"],
-  ["on_device", "On this computer"],
+  ["realtime", KIND_NAMES.realtime],
+  ["open_ai", KIND_NAMES.open_ai],
+  ["on_device", KIND_NAMES.on_device],
 ];
+const KIND_HELP =
+  "Live as you speak needs a server that streams audio in (Meta’s realtime ASR protocol, such as Thalvi’s own self-hosted recognizer). After you stop works with any OpenAI-compatible /v1/audio/transcriptions address; the text streams back once the recording is sent.";
 
 function isLive(entry: SpeechEntry): entry is LiveEntry {
   return entry.kind !== "extra";
@@ -1143,9 +1145,9 @@ function speech(context: PageContext): SpeechRows {
   function entryDescription(entry: SpeechEntry): string {
     switch (entry.kind) {
       case "realtime":
-        return "Dictation through a realtime speech server.";
+        return "Shows your words as you speak, through a Meta realtime ASR server.";
       case "open_ai":
-        return "Transcribes each capture with an OpenAI-compatible speech server.";
+        return "Transcribes each capture after you stop, through an OpenAI-compatible transcriptions endpoint.";
       case "on_device":
         return `Recognition with ${modelTitleFor(entry)}.`;
       case "extra":
@@ -1532,7 +1534,7 @@ function speech(context: PageContext): SpeechRows {
       { id: headingId },
       existing
         ? `Editing “${existing.name}” · ${existing.kind === "extra" ? "extra recognizer" : "live dictation"}`
-        : `Add ${working.kind === "open_ai" ? "an" : "a"} ${KIND_NAMES[working.kind].toLowerCase()}`,
+        : `Add a speech server: ${KIND_NAMES[working.kind]}`,
     );
     editor.setAttribute("aria-labelledby", headingId);
     editor.replaceChildren(
@@ -1546,7 +1548,8 @@ function speech(context: PageContext): SpeechRows {
     editor.querySelector<HTMLElement>("input, select, textarea")?.focus();
   }
 
-  const kindPicker = controls.draftSelect(LIVE_KINDS, "realtime", () => undefined, "Kind of speech server to add");
+  const kindPicker = controls.draftSelect(LIVE_KINDS, "realtime", () => undefined);
+  const kindLabel = el("label", { for: (kindPicker.field as HTMLSelectElement).id }, "Add a speech server:");
   function addSelected(): void {
     openEditor(null, (kindPicker.field as HTMLSelectElement).value as LiveEntry["kind"]);
   }
@@ -1555,7 +1558,7 @@ function speech(context: PageContext): SpeechRows {
   const addExtra = button("Add an extra recognizer", () => {
     openEditor(null, "extra");
   });
-  const liveBlock = el("div", { class: "stack wide" }, liveList, liveApplied, problem, el("div", { class: "trow add" }, kindPicker.node, addLive));
+  const liveBlock = el("div", { class: "stack wide" }, liveList, liveApplied, problem, el("div", { class: "trow add" }, kindLabel, kindPicker.node, addLive), el("small", { class: "kind-help" }, KIND_HELP));
   const extraBlock = el("div", { class: "stack wide" }, extraState, needsEndpoint, extraList, extraApplied, addExtra);
 
   const writing = settings.writing;

@@ -434,7 +434,7 @@ describe("applying a change", () => {
       stub.backend.getSettings.mockImplementation(() => Promise.resolve(structuredClone(changed)));
       goTo("recognition");
       const activeNames = (): (string | null)[] =>
-        Array.from(root.querySelectorAll(".trow.server")).filter((row) => row.textContent.includes("Live")).map((row) => row.querySelector(".phrase")?.textContent ?? null);
+        Array.from(root.querySelectorAll(".trow.server")).filter((row) => row.querySelector('.badge[data-on="true"]') !== null).map((row) => row.querySelector(".phrase")?.textContent ?? null);
       expect(activeNames()).toEqual(["Realtime speech server"]);
       stub.changedElsewhere();
       await settle();
@@ -871,8 +871,18 @@ const badgesOf = (name: string): (string | null)[] => Array.from(entryNamed(name
 const names = (list: HTMLElement): (string | null)[] => Array.from(list.querySelectorAll(".trow.server .phrase")).map((phrase) => phrase.textContent);
 const lists = (): HTMLElement[] => Array.from(root.querySelectorAll<HTMLElement>("section[data-page=recognition] .table"));
 
+const REALTIME = "Live as you speak — Meta realtime ASR";
+const OPEN_AI = "After you stop — OpenAI transcriptions";
+
+function kindPicker(): HTMLSelectElement {
+  const label = Array.from(root.querySelectorAll("label")).find((candidate) => candidate.textContent === "Add a speech server:");
+  const picker = label ? document.getElementById(label.htmlFor) : null;
+  if (!(picker instanceof HTMLSelectElement)) throw new Error("no speech server kind picker");
+  return picker;
+}
+
 async function addServer(kind: string): Promise<void> {
-  choose(root.querySelector('select[aria-label="Kind of speech server to add"]') as HTMLSelectElement, kind);
+  choose(kindPicker(), kind);
   (root.querySelector('button[aria-label="Add a speech server"]') as HTMLButtonElement).click();
   await settle();
 }
@@ -887,17 +897,36 @@ describe("the speech server list", () => {
   it("lists each server with its kind and where it is, and marks the one in use", async () => {
     await openSeveral();
     const [live, extra] = lists();
-    expect(Array.from(root.querySelectorAll('select[aria-label="Kind of speech server to add"] option')).map((option) => option.getAttribute("value"))).not.toContain("thalvi_server");
+    expect(Array.from(kindPicker().options).map((option) => [option.value, option.textContent])).toEqual([
+      ["realtime", REALTIME],
+      ["open_ai", OPEN_AI],
+      ["on_device", "On this computer"],
+    ]);
+    expect(root.querySelector(".kind-help")?.textContent).toContain("Live as you speak needs a server that streams audio in");
     expect(names(live as HTMLElement)).toEqual(["Realtime speech server", "Cybrex2", "On this computer"]);
     expect(names(extra as HTMLElement)).toEqual(["OpenAI", "Meta"]);
-    expect(badgesOf("Realtime speech server")).toEqual(["Live"]);
-    expect(badgesOf("Cybrex2")).toEqual(["Realtime speech server", "Key saved"]);
+    expect(badgesOf("Realtime speech server")).toEqual([REALTIME, "Live"]);
+    expect(badgesOf("Cybrex2")).toEqual([REALTIME, "Key saved"]);
     expect(badgesOf("On this computer")).toEqual([]);
     expect(entryNamed("Cybrex2").querySelector("details")?.textContent).toContain("ws://100.64.0.2:8012 · nemotron");
     expect(entryNamed("On this computer").querySelector("details")?.textContent).toContain("nemotron_160ms");
     expect(entryNamed("OpenAI").querySelector("details")?.textContent).toContain("https://api.openai.com/v1 · whisper-1 · OpenAI-style");
     expect(root.querySelector('button[aria-label="Use Realtime speech server"]')).toBeNull();
     expect((root.querySelector('button[aria-label="Remove Realtime speech server"]') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("describes each kind by what the user notices, and leaves a user-given name alone", async () => {
+    const entries: SpeechEntry[] = [
+      { ...SERVER, name: "Realtime speech server" },
+      { kind: "open_ai", id: "after", name: "OpenAI-compatible", active: false, address: "http://127.0.0.1:9000/v1", model: "whisper-large", request: "transcriptions", language: "" },
+      device(undefined, false),
+    ];
+    await open({ ...SETTINGS, stt: { entries } });
+    goTo("recognition");
+    const shown = (name: string): unknown[] => [entryNamed(name).querySelector(".unit")?.textContent, ...badgesOf(name).filter((badge) => badge !== "Live")];
+    expect(shown("Realtime speech server")).toEqual(["Shows your words as you speak, through a Meta realtime ASR server.", REALTIME]);
+    expect(shown("OpenAI-compatible")).toEqual(["Transcribes each capture after you stop, through an OpenAI-compatible transcriptions endpoint.", OPEN_AI]);
+    expect(shown("On this computer")[1]).toBeUndefined();
   });
 
   it("switches the live server with one click, applying only that", async () => {
@@ -933,8 +962,8 @@ describe("the speech server list", () => {
   it("adds a server once its fields are accepted, and applies it as a whole", async () => {
     const stub = await openSeveral();
     await addServer("realtime");
-    expect(root.querySelector(".editor h4")?.textContent).toBe("Add a realtime speech server");
-    expect(control("Name", "input").value).toBe("Realtime speech server 2");
+    expect(root.querySelector(".editor h4")?.textContent).toBe(`Add a speech server: ${REALTIME}`);
+    expect(control("Name", "input").value).toBe(REALTIME);
     type(control("Name", "input"), "Office GPU");
     type(control("Address", "input"), "ws://10.0.0.5:8012");
     type(control("Model", "input"), "nemotron");
@@ -947,13 +976,13 @@ describe("the speech server list", () => {
     expect(root.querySelector(".editor")?.hasAttribute("hidden")).toBe(true);
     expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
     expect(sent(stub).stt.entries.find((entry) => entry.name === "Office GPU")).toMatchObject({ active: false, api_key: "sk-new" });
-    expect(badgesOf("Office GPU")).toEqual(["Realtime speech server", "Key saved"]);
+    expect(badgesOf("Office GPU")).toEqual([REALTIME, "Key saved"]);
   });
 
   it("adds, uses, masks, edits and removes an OpenAI-compatible live entry", async () => {
     const stub = await openSeveral();
     await addServer("open_ai");
-    expect(root.querySelector(".editor h4")?.textContent).toBe("Add an openai-compatible");
+    expect(root.querySelector(".editor h4")?.textContent).toBe(`Add a speech server: ${OPEN_AI}`);
     type(control("Name", "input"), "Local Whisper");
     type(control("Address", "input"), "http://127.0.0.1:9000/v1");
     type(control("Model", "input"), "whisper-large");
@@ -1419,12 +1448,10 @@ describe("the next dictation summary and state words", () => {
       goTo("recognition");
       stub.emit(LOADING);
       await settle();
-      const picker = root.querySelector<HTMLSelectElement>('select[aria-label="Kind of speech server to add"]');
-      if (!picker) throw new Error("no speech entry kind picker");
-      choose(picker, "on_device");
+      choose(kindPicker(), "on_device");
       button("Use a speech server instead").click();
       expect((root.querySelector(".editor") as HTMLElement).hidden).toBe(false);
-      expect(root.querySelector(".editor h4")?.textContent).toBe("Add a realtime speech server");
+      expect(root.querySelector(".editor h4")?.textContent).toBe(`Add a speech server: ${REALTIME}`);
       expect(stub.backend.saveSettings).not.toHaveBeenCalled();
       expect(stub.backend.downloadSpeechModel).not.toHaveBeenCalled();
     });
@@ -1458,8 +1485,8 @@ describe("the next dictation summary and state words", () => {
   });
 
   it.each([
-    ["Realtime speech server", ["Live"], false],
-    ["Cybrex2", ["Realtime speech server", "Key saved"], true],
+    ["Realtime speech server", [REALTIME, "Live"], false],
+    ["Cybrex2", [REALTIME, "Key saved"], true],
     ["On this computer", [], true],
     ["OpenAI", ["Extra recognizer", "Key saved"], false],
   ] as const)("shows badges and Use for %s", async (name, badges, hasUse) => {

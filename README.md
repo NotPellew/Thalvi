@@ -296,11 +296,13 @@ in use is the live recognizer, marked **Live**: it shows your words and hears th
 ending phrases, and it has no **Use** button. IDs and addresses are
 under each entry's collapsed **Details**. The kinds are:
 
-- **Realtime speech server:** a recognizer that speaks Meta's realtime ASR
-  protocol, such as the self-hosted one below, which the app connects to itself
-  (address, model, API key).
-- **OpenAI-compatible:** sends each capture to an OpenAI-compatible
-  `/v1/audio/transcriptions` endpoint when you release the dictation key. A
+- **Live as you speak — Meta realtime ASR:** shows your words as you speak,
+  through a recognizer that speaks Meta's realtime ASR protocol, such as the
+  self-hosted one below, which the app connects to itself (address, model, API
+  key).
+- **After you stop — OpenAI transcriptions:** sends each capture to an
+  OpenAI-compatible `/v1/audio/transcriptions` endpoint when you release the
+  dictation key, and the text streams back once the recording is sent. A
   wake-word capture ends after a pause in speech (address, model, API key). Set
   **Request** to Chat with audio for a server that takes the recording only on
   `/v1/chat/completions` (no streaming); set **Language** to a two-letter code

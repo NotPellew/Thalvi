@@ -89,6 +89,7 @@ textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .note { margin: 6px 0 0; color: var(--warn); font-size: 12px; }
 .note.ok { color: var(--mut); }
 .applied { color: var(--mut); font-size: 12px; }
+.kind-help { color: var(--mut); font-size: 11px; }
 .applied:empty { display: none; }
 input[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: var(--warn); }
 .stack.wide > button { align-self: flex-start; }
