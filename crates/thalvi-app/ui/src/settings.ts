@@ -34,7 +34,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   let pages: Page[] = [];
   let checks: PageContext["checks"] = [];
   let navButtons: HTMLButtonElement[] = [];
-  let current = "speech";
+  let current = "recognition";
   let draft: Settings | null = null;
   let baseline = "";
   let runtimeFailure = "";
@@ -159,7 +159,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     applyLook(root, draft.look);
     checks = [];
     pages = buildPages({
-      draft, backend, root, controls: createControls(feedback), microphones, audio, holdKeyUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, checks,
+      draft, backend, root, open, controls: createControls(feedback), microphones, audio, holdKeyUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, checks,
       saved: () => (baseline === "" ? null : (JSON.parse(baseline) as Settings)),
       applyNow,
     });

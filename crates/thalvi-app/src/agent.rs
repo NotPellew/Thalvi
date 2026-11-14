@@ -50,11 +50,11 @@ const COMMANDS: [&str; 21] = [
 
 /// The settings pages `show` opens: the ids the Settings window defines.
 const PAGES: [&str; 7] = [
-    "speech",
-    "microphone",
-    "capture",
-    "feedback",
-    "tasks",
+    "listening",
+    "recognition",
+    "commands",
+    "chat",
+    "overlay",
     "history",
     "app",
 ];
@@ -240,7 +240,7 @@ pub struct ModelRow {
     /// How far a download has got, only while one runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     progress_percent: Option<u8>,
-    /// What the Speech page says about the hardware the model runs on; speech models only.
+    /// What the Recognition page says about the hardware the model runs on; speech models only.
     #[serde(skip_serializing_if = "Option::is_none")]
     runs_on: Option<String>,
 }
@@ -259,7 +259,7 @@ impl ModelRow {
         }
     }
 
-    /// `runs_on` is the Speech page's hardware line; `progress` the download running now, if any.
+    /// `runs_on` is the Recognition page's hardware line; `progress` the download running now, if any.
     #[must_use]
     pub fn speech(
         info: &SpeechModelInfo,
@@ -423,7 +423,7 @@ fn overlay_word(status: &Status, on: bool) -> &'static str {
     }
 }
 
-/// The recognizer that handles the next dictation, and whether it can, as the Speech page says.
+/// The recognizer that handles the next dictation, and whether it can, as the Recognition page says.
 fn recognizer(config: &DesktopConfig, phase: &str) -> Value {
     let entry = config.stt.entries.active_live();
     let (kind, model) = match &entry.kind {
@@ -848,7 +848,7 @@ async fn metrics_summary(running: &impl Running) -> String {
     if !running.config().recordings.metrics {
         return done(json!({
             "enabled": false,
-            "message": "Metrics are off. Turn them on in Settings → App, or send settings set with {\"recordings\": {\"metrics\": true}}.",
+            "message": "Metrics are off. Turn them on in Settings → History & recordings, or send settings set with {\"recordings\": {\"metrics\": true}}.",
         }));
     }
     let dir = match running.recordings() {
@@ -2292,11 +2292,11 @@ mod tests {
             })
         };
         assert_eq!(
-            show(Some("speech")),
+            show(Some("recognition")),
             json!({"ok": true, "took_effect": true})
         );
         assert_eq!(show(None), json!({"ok": true, "took_effect": true}));
-        assert_eq!(*lock(&rig.fake.pages), ["speech"]);
+        assert_eq!(*lock(&rig.fake.pages), ["recognition"]);
         let unknown = show(Some("wake"));
         assert_eq!(
             unknown,
