@@ -1826,12 +1826,12 @@ function overlay({ settings, controls, apply }: PageContext): HTMLElement[] {
       controls.toggle(settings.overlay.show, (value) =>
         apply((next) => {
           next.overlay.show = value;
-        }))),
+        }), true)),
     row("Show the draft", "The text so far, under the pill.",
       controls.toggle(settings.overlay.draft, (value) =>
         apply((next) => {
           next.overlay.draft = value;
-        }))),
+        }), true)),
   ];
 }
 
@@ -1846,7 +1846,7 @@ function look({ settings, controls, root, apply }: PageContext): HTMLElement[] {
       draft.look = next;
     }).then(
       () => {
-        applied.textContent = controls.confirmation();
+        applied.textContent = controls.confirmation(true);
       },
       (error: unknown) => {
         say(problem, errorText(error));
@@ -1857,7 +1857,7 @@ function look({ settings, controls, root, apply }: PageContext): HTMLElement[] {
   });
   return [
     group("Look"),
-    row("Look", "How the overlay and this window look. The overlay changes after the current capture.",
+    row("Look", "How the overlay and this window look.",
       el("div", { class: "stack wide" }, picker, applied, problem)),
   ];
 }

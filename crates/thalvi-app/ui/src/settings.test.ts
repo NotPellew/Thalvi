@@ -344,21 +344,29 @@ describe("applying a change", () => {
     expect(field.getAttribute("aria-invalid")).toBe("false");
   });
 
-  // (the status when the change is made, what the control says)
-  const confirmations: [string, Status, string][] = [
-    ["while listening", { state: "listening" }, APPLIED_TEXT],
-    ["while paused", { state: "paused" }, APPLIED_TEXT],
-    ["while a capture runs", { state: "capturing", target: null, committed: "", partial: null, notice: null }, APPLIED_LATER_TEXT],
-    ["while a dictation is being delivered", { state: "working", target: null, route: "paste", cancellable: false }, APPLIED_LATER_TEXT],
+  const CAPTURING: Status = { state: "capturing", target: null, committed: "", partial: null, notice: null };
+  const DELIVERING: Status = { state: "working", target: null, route: "paste", cancellable: false };
+  const flipSwitch = (label: string) => (): void => { flip(control(label, "input")); };
+  const pickLook = (): void => { (root.querySelector('[data-choice="holo"] input') as HTMLInputElement).click(); };
+
+  // (when the change is made, the status then, the setting and how it is changed, what its row says)
+  const confirmations: [string, Status, string, () => void, string][] = [
+    ["an ordinary setting while listening", { state: "listening" }, "Wake sound", flipSwitch("Wake sound"), APPLIED_TEXT],
+    ["an ordinary setting while paused", { state: "paused" }, "Wake sound", flipSwitch("Wake sound"), APPLIED_TEXT],
+    ["an ordinary setting while a capture runs", CAPTURING, "Wake sound", flipSwitch("Wake sound"), APPLIED_LATER_TEXT],
+    ["an ordinary setting while a dictation is being delivered", DELIVERING, "Wake sound", flipSwitch("Wake sound"), APPLIED_LATER_TEXT],
+    ["Show the overlay while a capture runs", CAPTURING, "Show the overlay", flipSwitch("Show the overlay"), APPLIED_TEXT],
+    ["Show the draft while a capture runs", CAPTURING, "Show the draft", flipSwitch("Show the draft"), APPLIED_TEXT],
+    ["the look while a capture runs", CAPTURING, "Look", pickLook, APPLIED_TEXT],
   ];
 
-  it.each(confirmations)("says next to the control how it applies %s", async (_when, status, text) => {
+  it.each(confirmations)("says next to the control how it applies: %s", async (_when, status, label, change, text) => {
     const stub = await open();
     goTo("overlay");
     stub.emit(status);
-    flip(control("Show the draft", "input"));
+    change();
     await settle();
-    expect(rowText("Show the draft")).toBe(text);
+    expect(rowText(label)).toBe(text);
   });
 
   it("applies a form of several fields only as a whole", async () => {

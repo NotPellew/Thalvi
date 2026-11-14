@@ -66,7 +66,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     refresh: () => undefined,
     update: () => undefined,
   };
-  const controls = createControls(() => (DURING_CAPTURE.includes(status.state) ? APPLIED_LATER_TEXT : APPLIED_TEXT));
+  const controls = createControls((atOnce = false) => (!atOnce && DURING_CAPTURE.includes(status.state) ? APPLIED_LATER_TEXT : APPLIED_TEXT));
 
   function applyView(): void {
     const query = search.value.trim().toLowerCase();

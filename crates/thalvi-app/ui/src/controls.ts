@@ -42,15 +42,15 @@ function around(control: HTMLElement, { applied, problem }: Verdict): HTMLElemen
   return el("span", { class: "stack" }, control, applied, problem);
 }
 
-/** `confirmation` is the text a control shows once its value is applied. */
-export function createControls(confirmation: () => string) {
+/** `confirmation` is the text a control shows once its value is applied; `atOnce` is for a setting the running capture takes up too. */
+export function createControls(confirmation: (atOnce?: boolean) => string) {
   /** Runs one attempt to apply; on a refusal shows the reason and calls `revert`. */
-  async function attempt({ applied, problem }: Verdict, apply: Promise<void>, revert: () => void): Promise<void> {
+  async function attempt({ applied, problem }: Verdict, apply: Promise<void>, revert: () => void, atOnce = false): Promise<void> {
     applied.textContent = "";
     problem.hidden = true;
     try {
       await apply;
-      applied.textContent = confirmation();
+      applied.textContent = confirmation(atOnce);
     } catch (error) {
       problem.textContent = errorText(error);
       problem.hidden = false;
@@ -156,7 +156,7 @@ export function createControls(confirmation: () => string) {
   }
 
   /** A switch: applied as it is flipped, and flipped back when refused. */
-  function toggle(value: boolean, commit: Commit<boolean>): Field {
+  function toggle(value: boolean, commit: Commit<boolean>, atOnce = false): Field {
     const input = el("input", { id: uid("f"), type: "checkbox", role: "switch" });
     input.checked = value;
     const shown = verdict();
@@ -164,7 +164,7 @@ export function createControls(confirmation: () => string) {
       const wanted = input.checked;
       void attempt(shown, commit(wanted), () => {
         input.checked = !wanted;
-      });
+      }, atOnce);
     });
     return { node: around(input, shown), field: input };
   }
