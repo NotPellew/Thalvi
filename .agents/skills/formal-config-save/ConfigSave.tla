@@ -7,15 +7,16 @@
 EXTENDS Naturals, Sequences
 
 CONSTANTS FormSaves, SwitchFlips, MainThread,
-          Serialized, SnapshotOutsideLock, AgentMergeOutsideLock, ApplyOutsideLock,
+          Serialized, SnapshotOutsideLock, AgentMergeOutsideLock, SettingsMergeOutsideLock, ApplyOutsideLock,
           RenameBeforeWrite
 
 Ops == FormSaves \cup SwitchFlips
 MaxInode == 1 + 3          \* the file at start, then at most one temporary per writer
 \* The form has one field per form writer; a form save sets its own field and carries the
-\* others over from the config it read (settings.rs `settings_json`, agent.rs `plan_over`).
+\* others over from the config it read (settings.rs `merged`, used by commands.rs `settings_patch`
+\* and agent.rs `plan_over`).
 Fields == {"look", "mic"}
-FieldOf(o) == IF o = "A" THEN "mic" ELSE "look"   \* the Settings save sets the look, the agent the microphone
+FieldOf(o) == IF o = "A" THEN "mic" ELSE "look"   \* the Settings save patches the look, the agent the microphone
 Initial == [form |-> [f \in Fields |-> "f0"], switch |-> FALSE]
 Empty == [form |-> [f \in Fields |-> "empty"], switch |-> FALSE]   \* created, nothing written yet
 Unused == [form |-> [f \in Fields |-> "none"], switch |-> FALSE]
@@ -38,9 +39,11 @@ VARIABLES
 vars == <<pc, failed, mem, engine, path, tmp, inodes, nextInode, fd, content,
           lock, lastField, lastSwitch>>
 
-\* The agent's `settings_set` plans inside `SyncedConfig::save_form`'s lock; the mutation plans
-\* first, as it did before the repair.
-ReadsBeforeLock(o) == SnapshotOutsideLock \/ (AgentMergeOutsideLock /\ o = "A")
+\* The agent's `settings_set` and the Settings window's `settings_patch` merge their patch inside
+\* `SyncedConfig::save_form`'s lock; the mutations build the form first, as the agent did before
+\* its repair and as the window did when it sent the whole form it had last read.
+ReadsBeforeLock(o) ==
+    SnapshotOutsideLock \/ (AgentMergeOutsideLock /\ o = "A") \/ (SettingsMergeOutsideLock /\ o = "S")
 
 Flow(o) ==
     (IF Serialized /\ ~ReadsBeforeLock(o) THEN <<"lock">> ELSE <<>>)
@@ -101,8 +104,9 @@ Unlock(o) ==
                    lastField, lastSwitch>>
 
 \* SyncedConfig::save_form reads the config in use and builds the form from it: the agent
-\* merges its patch over it (`plan_over`), the Settings save sets its field; AppState::remember
-\* reads the whole config and changes its switch.
+\* merges its patch over it (`plan_over`), the Settings save merges its patch over it the same way
+\* (`settings_patch`, through `settings::merged`); AppState::remember reads the whole config and
+\* changes its switch.
 Snap(o) ==
     /\ MayRun(o)
     /\ Step(o) = "snap"

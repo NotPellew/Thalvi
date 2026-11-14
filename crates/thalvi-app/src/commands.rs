@@ -30,7 +30,7 @@ use crate::app::AppState;
 use crate::menu_entry;
 use crate::overlay;
 use crate::runner::{AudioStatus, Control};
-use crate::settings::settings_json;
+use crate::settings::{merged, settings_json};
 use crate::startup;
 use crate::status::Status;
 use crate::switch::{SwitchState, Unavailable};
@@ -51,9 +51,18 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
     settings_json(&state.config())
 }
 
+/// Saves what Settings changed: `patch` holds only the changed settings, as a JSON merge patch.
 #[tauri::command]
-pub fn save_settings(settings: Value, state: State<'_, AppState>) -> Result<(), String> {
-    save(&state, |_| Ok(((), Some(settings)))).map(drop)
+pub fn save_settings(patch: Value, state: State<'_, AppState>) -> Result<(), String> {
+    save(&state, settings_patch(&patch)).map(drop)
+}
+
+/// The form of a Settings save: the patch merged over the config read under the save lock, as an
+/// agent's `settings set` is, so it cannot undo a change saved since the window last looked.
+pub(crate) fn settings_patch(
+    patch: &Value,
+) -> impl FnOnce(&DesktopConfig) -> Result<((), Option<Value>), String> + '_ {
+    move |current| Ok(((), Some(merged(current, patch)?)))
 }
 
 /// Saves and applies what Settings sends, and what an outside program sends in its place.

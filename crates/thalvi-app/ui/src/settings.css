@@ -88,6 +88,9 @@ textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .mini input, .mini select { font-size: 13px; color: var(--fg); }
 .note { margin: 6px 0 0; color: var(--warn); font-size: 12px; }
 .note.ok { color: var(--mut); }
+.applied { color: var(--mut); font-size: 12px; }
+.applied:empty { display: none; }
+input[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: var(--warn); }
 .stack.wide > button { align-self: flex-start; }
 code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surf); font-family: ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; user-select: all; }
 .note.why { margin: 4px 0 0; color: var(--amber); }
@@ -95,6 +98,7 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
 
 .bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; padding: 10px 22px; border-top: 1px solid var(--line); background: var(--surf); }
 .msg { flex: 1; color: var(--mut); font-size: 12px; }
+.bar[hidden] { display: none; }
 .msg:empty { display: none; }
 .err { flex: 1; color: var(--warn); font-size: 12px; text-align: right; }
 .err:empty { display: none; }

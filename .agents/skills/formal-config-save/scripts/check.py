@@ -32,6 +32,7 @@ FIXED = ['Serialized']
 MUTATIONS = [
     ('SnapshotOutsideLock', 'EachFieldKeepsItsLastSave'),
     ('AgentMergeOutsideLock', 'EachFieldKeepsItsLastSave'),
+    ('SettingsMergeOutsideLock', 'EachFieldKeepsItsLastSave'),
     ('ApplyOutsideLock', 'RunningMatchesFile'),
     ('RenameBeforeWrite', 'FileAlwaysWhole'),
 ]

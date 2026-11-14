@@ -100,6 +100,8 @@ pub struct AudioStatus {
     /// The name of the device the opened stream uses; `None` when no stream is open.
     pub active: Option<String>,
     pub paused: bool,
+    /// Why the selected device could not be opened while `active` stays open; `None` otherwise.
+    pub problem: Option<String>,
 }
 
 /// The app's side of the engine thread.
@@ -137,6 +139,7 @@ impl EngineLink {
             selected: config.microphone.clone(),
             active: None,
             paused,
+            problem: None,
         });
         let (feeding_tx, feeding) = watch::channel(false);
         let (key, key_state) = HoldInput::new();
@@ -499,12 +502,7 @@ impl Session {
             (microphone, frames)
         })
         .await
-        .map_err(|error| Failure {
-            kind: FailureKind::Other,
-            notice: "The microphone's audio thread crashed. Restart Thalvi.".to_owned(),
-            headline: "Microphone crashed — restart Thalvi",
-            causes: vec![error.to_string()],
-        })?;
+        .map_err(|error| audio_thread_crashed(&error))?;
         self.microphone = Some(microphone);
         self.frames = Some(
             self.feeder
@@ -513,10 +511,46 @@ impl Session {
         Ok(())
     }
 
+    /// Selects `device` for every later open and, while the microphone is open, opens it beside the
+    /// open one and swaps them once it works. A device that cannot be opened leaves the open one
+    /// running.
+    async fn switch_microphone(&mut self, device: Option<String>) -> Result<(), Failure> {
+        self.device.clone_from(&device);
+        let Some(mut microphone) = self.microphone.take() else {
+            return Ok(());
+        };
+        microphone.select(device);
+        if self.frames.is_none() {
+            self.microphone = Some(microphone);
+            return Ok(());
+        }
+        let (microphone, frames) = tokio::task::spawn_blocking(move || {
+            let frames = microphone.replace();
+            (microphone, frames)
+        })
+        .await
+        .map_err(|error| audio_thread_crashed(&error))?;
+        self.microphone = Some(microphone);
+        let frames = frames.map_err(|error| Failure::of(&error))?;
+        let presses = self.engine.stop_listening();
+        self.frames = Some(self.feeder.wrap(frames));
+        self.engine.resume_listening(presses);
+        Ok(())
+    }
+
     /// Flushes the recordings and closes the microphone.
     async fn close(mut self) {
         self.close_microphone();
         self.engine.finish().await;
+    }
+}
+
+fn audio_thread_crashed(error: &tokio::task::JoinError) -> Failure {
+    Failure {
+        kind: FailureKind::Other,
+        notice: "The microphone's audio thread crashed. Restart Thalvi.".to_owned(),
+        headline: "Microphone crashed — restart Thalvi",
+        causes: vec![error.to_string()],
     }
 }
 
@@ -551,6 +585,8 @@ struct Runner {
     stopping: bool,
     /// Set while listening wants a microphone it does not have: how many reopen attempts failed.
     reopen_failures: Option<u32>,
+    /// Why the selected microphone could not be opened while another stays open.
+    microphone_problem: Option<String>,
     /// Settings that arrived during a capture.
     pending: Option<DesktopConfig>,
     /// A refused hold key not yet shown.
@@ -588,6 +624,7 @@ impl Runner {
             paused: shared.paused,
             stopping: false,
             reopen_failures: None,
+            microphone_problem: None,
             pending: None,
             hold_problem: None,
             control,
@@ -778,6 +815,7 @@ impl Runner {
             selected: self.config.microphone.clone(),
             active: self.session.as_ref().and_then(Session::active_device),
             paused: self.paused,
+            problem: self.microphone_problem.clone(),
         };
         self.audio.send_if_modified(|current| {
             if *current == next {
@@ -792,6 +830,7 @@ impl Runner {
         if let Some(session) = self.session.as_mut() {
             session.close_microphone();
         }
+        self.microphone_problem = None;
         self.level.send_replace(0.0);
         self.publish_audio();
     }
@@ -1019,6 +1058,40 @@ impl Runner {
         if config == self.config {
             return;
         }
+        // The engine is rebuilt with the microphone it has; a changed one is opened beside it afterwards.
+        let wanted = config.microphone.clone();
+        let rest = DesktopConfig {
+            microphone: self.config.microphone.clone(),
+            ..config
+        };
+        if rest != self.config {
+            self.apply_engine(rest).await;
+        }
+        if wanted != self.config.microphone {
+            self.config.microphone = wanted;
+            self.switch_microphone().await;
+        }
+    }
+
+    /// Opens the selected microphone beside the one open, or says why it could not and leaves the
+    /// open one running.
+    async fn switch_microphone(&mut self) {
+        self.microphone_problem = None;
+        if let Some(session) = self.session.as_mut()
+            && let Err(failure) = session
+                .switch_microphone(self.config.microphone.clone())
+                .await
+        {
+            tracing::warn!(
+                notice = failure.notice,
+                "the selected microphone could not be opened"
+            );
+            self.microphone_problem = Some(failure.notice);
+        }
+        self.publish_audio();
+    }
+
+    async fn apply_engine(&mut self, config: DesktopConfig) {
         if retunes_only(&self.config, &config) {
             if let Some(session) = self.session.as_mut() {
                 session.engine.set_recordings(config.recordings);
@@ -3098,6 +3171,7 @@ mod tests {
             selected: None,
             active: Some("USB Mic".to_owned()),
             paused: false,
+            problem: None,
         });
         let following = tokio::task::spawn_local(follow(
             state,
@@ -3123,6 +3197,7 @@ mod tests {
             selected: None,
             active: None,
             paused: true,
+            problem: None,
         });
         engine_level_tx.send_replace(0.9);
         tokio::time::timeout(Duration::from_secs(5), level.changed())
@@ -3139,6 +3214,7 @@ mod tests {
             selected: None,
             active: None,
             paused: false,
+            problem: None,
         });
         engine_level_tx.send_replace(0.7);
         tokio::time::timeout(Duration::from_secs(5), level.changed())
@@ -3155,6 +3231,7 @@ mod tests {
             selected: None,
             active: Some("USB Mic".to_owned()),
             paused: false,
+            problem: None,
         });
         engine_level_tx.send_replace(0.6);
         tokio::time::timeout(Duration::from_secs(5), level.changed())

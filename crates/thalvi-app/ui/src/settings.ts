@@ -1,20 +1,33 @@
-// The settings window: sidebar, search, pages, and save or revert of the whole draft.
+// The settings window: sidebar, search, pages, and the one way a change is applied.
 
 import type { AudioStatus, Backend, Settings, Status } from "./contract.ts";
 import { errorText } from "./contract.ts";
 import { createControls } from "./controls.ts";
 import { el } from "./dom.ts";
 import { applyLook } from "./look.ts";
-import { type ApplyOptions, buildPages, type Page, type PageContext, type SwitchRead } from "./settings-pages.ts";
+import { settingsPatch } from "./patch.ts";
+import {
+  APPLIED_LATER_TEXT,
+  APPLIED_TEXT,
+  type ApplyOptions,
+  buildPages,
+  DURING_CAPTURE,
+  type Page,
+  type PageContext,
+  type SwitchRead,
+} from "./settings-pages.ts";
 
-export const ELSEWHERE_TEXT = "Changed outside this window — Revert loads the saved settings";
+export { APPLIED_LATER_TEXT, APPLIED_TEXT };
 
-export const SAVED_TEXT = "Saved — applies after the current capture";
-
-/** What the footer says after a setting that takes effect at once, such as a hold key, was saved. */
-export const SAVED_AT_ONCE_TEXT = "Saved — applies at once";
-
-export const SAVED_MICROPHONE_TEXT = `${SAVED_TEXT}; the saved microphone is not active until it opens`;
+/** Where the user was typing, so a refresh from outside leaves the text and the caret alone. */
+interface Typing {
+  page: string;
+  row: string;
+  index: number;
+  value: string;
+  start: number | null;
+  end: number | null;
+}
 
 export function mountSettings(root: HTMLElement, backend: Backend): void {
   const search = el("input", { type: "search", "aria-label": "Search settings", placeholder: "Search settings", class: "search" });
@@ -26,29 +39,23 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   const failure = el("span", { class: "err", role: "alert" });
   const copy = el("button", { type: "button", class: "quiet" }, "Copy");
   const dismiss = el("button", { type: "button", class: "quiet", "aria-label": "Dismiss error" }, "×");
-  const revert = el("button", { type: "button", class: "quiet" }, "Revert");
-  const save = el("button", { type: "button", class: "primary" }, "Save");
-  const main = el("main", {}, pagesNode, empty, el("footer", { class: "bar" }, message, failure, copy, dismiss, revert, save));
+  const bar = el("footer", { class: "bar", hidden: true }, message, failure, copy, dismiss);
+  const main = el("main", {}, pagesNode, empty, bar);
   root.append(el("div", { class: "app" }, nav, main));
 
   let pages: Page[] = [];
-  let checks: PageContext["checks"] = [];
   let navButtons: HTMLButtonElement[] = [];
   let current = "recognition";
-  let draft: Settings | null = null;
-  let baseline = "";
+  // What the desktop holds; pages read it and change it only through `apply`.
+  let settings: Settings | null = null;
   let runtimeFailure = "";
   let runtimeCauses: string[] = [];
+  let loadFailure = "";
   let copyNote = "";
-  let saveFailure = "";
-  let saving = false;
-  let saved = false;
-  // Whether the last save was of settings that apply at once, so it need not wait for a capture to end.
-  let savedAtOnce = false;
-  // The microphone the last save chose (null is the system default); unset when that save left it alone.
-  let savedMicrophone: { name: string | null } | null = null;
-  let changedElsewhere = false;
-  let audio: AudioStatus = { selected: null, active: null, paused: false };
+  let audio: AudioStatus = { selected: null, active: null, paused: false, problem: null };
+  let status: Status = { state: "listening" };
+  // Applies run one after another, each on top of the one before.
+  let queue: Promise<unknown> = Promise.resolve();
   const live: PageContext["live"] = {
     level: () => undefined,
     listening: () => undefined,
@@ -57,9 +64,9 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     status: () => undefined,
     opened: () => undefined,
     refresh: () => undefined,
-    saved: () => undefined,
     update: () => undefined,
   };
+  const controls = createControls((atOnce = false) => (!atOnce && DURING_CAPTURE.includes(status.state) ? APPLIED_LATER_TEXT : APPLIED_TEXT));
 
   function applyView(): void {
     const query = search.value.trim().toLowerCase();
@@ -85,7 +92,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   }
 
   function feedback(): void {
-    const shownFailure = saveFailure || runtimeFailure;
+    const shownFailure = loadFailure || runtimeFailure;
     if (failure.textContent !== shownFailure) {
       copy.textContent = "Copy";
       copyNote = "";
@@ -93,33 +100,20 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     failure.textContent = shownFailure;
     copy.hidden = shownFailure === "";
     dismiss.hidden = shownFailure === "";
-    const dirty = draft !== null && JSON.stringify(draft) !== baseline;
-    message.textContent = saving ? "Saving…" : changedElsewhere ? ELSEWHERE_TEXT : dirty ? "Unsaved changes"
-      : copyNote !== "" ? copyNote
-      : saved && failure.textContent === "" ? savedText() : "";
-  }
-
-  function savedText(): string {
-    if (savedAtOnce) return SAVED_AT_ONCE_TEXT;
-    const open = savedMicrophone !== null && audio.active !== null && audio.selected === savedMicrophone.name;
-    return savedMicrophone === null || open ? SAVED_TEXT : SAVED_MICROPHONE_TEXT;
-  }
-
-  function markSaved(before: Settings | undefined, after: Settings, atOnce = false): void {
-    saved = true;
-    savedAtOnce = atOnce;
-    savedMicrophone = before === undefined || before.microphone === after.microphone ? null : { name: after.microphone };
+    message.textContent = copyNote;
+    bar.hidden = shownFailure === "" && copyNote === "";
   }
 
   let lastState: Status["state"] | null = null;
 
-  function showStatus(status: Status): void {
+  function showStatus(next: Status): void {
     // A download or retry finishes behind this long-lived window, so what lives on disk is read again when the app's state changes.
-    if (lastState !== null && status.state !== lastState) live.refresh();
-    lastState = status.state;
-    runtimeFailure = status.state === "failed" ? status.notice : "";
-    runtimeCauses = status.state === "failed" ? status.causes : [];
-    live.status(status);
+    if (lastState !== null && next.state !== lastState) live.refresh();
+    lastState = next.state;
+    status = next;
+    runtimeFailure = next.state === "failed" ? next.notice : "";
+    runtimeCauses = next.state === "failed" ? next.causes : [];
+    live.status(next);
     feedback();
   }
 
@@ -131,16 +125,47 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     feedback();
   }
 
-  async function load(): Promise<void> {
-    saveFailure = "";
-    saved = false;
-    changedElsewhere = false;
+  function typingNow(): Typing | null {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) || !pagesNode.contains(active)) return null;
+    const row = active.closest<HTMLElement>(".row");
+    const page = active.closest<HTMLElement>("section[data-page]");
+    if (!row || !page) return null;
+    const inputs = Array.from(row.querySelectorAll("input, textarea"));
+    return {
+      page: page.dataset["page"] ?? "",
+      row: row.dataset["label"] ?? "",
+      index: inputs.indexOf(active),
+      value: active.value,
+      start: active.selectionStart,
+      end: active.selectionEnd,
+    };
+  }
+
+  function typeAgain(typing: Typing): void {
+    const page = pages.find((known) => known.id === typing.page);
+    const row = Array.from(page?.node.querySelectorAll<HTMLElement>(".row") ?? []).find((known) => known.dataset["label"] === typing.row);
+    const field = row?.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")[typing.index];
+    if (!field) return;
+    field.value = typing.value;
+    field.focus();
+    // A number field has no caret.
+    if (typing.start !== null && typing.end !== null) field.setSelectionRange(typing.start, typing.end);
+    // Setting a value from code is not an edit, so leaving the field would not apply it unless it is told.
+    field.addEventListener("blur", () => {
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    }, { once: true });
+  }
+
+  async function load(typing: Typing | null = null): Promise<void> {
+    loadFailure = "";
     feedback();
     let loaded: Settings;
     try {
+      await queue;
       loaded = await backend.getSettings();
     } catch (error) {
-      saveFailure = errorText(error);
+      loadFailure = errorText(error);
       feedback();
       return;
     }
@@ -153,15 +178,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       selected: loaded.microphone,
       active: null,
       paused: false,
+      problem: null,
     }));
-    draft = structuredClone(loaded);
-    baseline = JSON.stringify(draft);
-    applyLook(root, draft.look);
-    checks = [];
+    settings = loaded;
+    applyLook(root, loaded.look);
     pages = buildPages({
-      draft, backend, root, open, controls: createControls(feedback), microphones, audio, holdKeyUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, checks,
-      saved: () => (baseline === "" ? null : (JSON.parse(baseline) as Settings)),
-      applyNow,
+      settings: loaded, backend, root, open, controls, microphones, audio, holdKeyUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, apply,
     });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {
@@ -175,36 +197,29 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     showAudio(audio);
     feedback();
     applyView();
+    if (typing) typeAgain(typing);
   }
 
-  /** Saves the saved settings with `change` applied; unsaved edits stay in the draft and unsaved. */
-  async function applyNow(change: (settings: Settings) => void, options: ApplyOptions = {}): Promise<void> {
-    if (baseline === "") return;
-    if (saving) {
-      saveFailure = "Wait for the save in progress to finish.";
-      feedback();
-      throw new Error(saveFailure);
-    }
-    const before = JSON.parse(baseline) as Settings;
-    const next = structuredClone(before);
-    change(next);
-    saveFailure = "";
-    saving = true;
-    feedback();
-    try {
-      await backend.saveSettings(next);
-      baseline = JSON.stringify(next);
-      if (draft !== null) change(draft);
-      markSaved(before, next, options.atOnce === true);
-      changedElsewhere = false;
-    } catch (error) {
-      const explained = options.explain ? options.explain(errorText(error)) : errorText(error);
-      saveFailure = explained;
-      throw options.explain ? new Error(explained) : error;
-    } finally {
-      saving = false;
-      feedback();
-    }
+  /** Applies one change on top of what the desktop holds; rejects with the plain reason it was refused, and then nothing changed. */
+  function apply(change: (settings: Settings) => void, options: ApplyOptions = {}): Promise<void> {
+    const run = async (): Promise<void> => {
+      if (settings === null) throw new Error("The settings are not loaded.");
+      const next = structuredClone(settings);
+      change(next);
+      const patch = settingsPatch(settings, next);
+      if (Object.keys(patch).length === 0) return;
+      try {
+        await backend.saveSettings(patch);
+      } catch (error) {
+        const reason = errorText(error);
+        throw new Error(options.explain ? options.explain(reason) : reason);
+      }
+      for (const key of Object.keys(settings)) Reflect.deleteProperty(settings, key);
+      Object.assign(settings, next);
+    };
+    const result = queue.then(run);
+    queue = result.catch(() => undefined);
+    return result;
   }
 
   function open(id: string): void {
@@ -218,7 +233,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   search.addEventListener("input", applyView);
 
   copy.addEventListener("click", () => {
-    const causes = saveFailure === "" ? runtimeCauses : [];
+    const causes = loadFailure === "" ? runtimeCauses : [];
     backend.copyReport(failure.textContent, causes).then(
       () => {
         copyNote = "";
@@ -232,50 +247,16 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     );
   });
   dismiss.addEventListener("click", () => {
-    if (saveFailure !== "") {
-      saveFailure = "";
+    if (loadFailure !== "") {
+      loadFailure = "";
     } else {
       runtimeFailure = "";
       backend.dismissError().catch((error: unknown) => {
-        saveFailure = errorText(error);
+        loadFailure = errorText(error);
         feedback();
       });
     }
     feedback();
-  });
-
-  revert.addEventListener("click", () => {
-    void load();
-  });
-  save.addEventListener("click", () => {
-    if (draft === null) return;
-    const sending = structuredClone(draft);
-    saveFailure = "";
-    saving = true;
-    feedback();
-    save.disabled = true;
-    revert.disabled = true;
-    const pending = checks.map((check) => check()).filter((check) => check !== null);
-    const sent = pending.length === 0 ? backend.saveSettings(sending) : Promise.all(pending).then(() => backend.saveSettings(sending));
-    const before = baseline === "" ? undefined : (JSON.parse(baseline) as Settings);
-    sent
-      .then(() => {
-        baseline = JSON.stringify(sending);
-        markSaved(before, sending);
-        changedElsewhere = false;
-        live.saved();
-        return undefined;
-      })
-      .catch((error: unknown) => {
-        saved = false;
-        saveFailure = errorText(error);
-      })
-      .finally(() => {
-        saving = false;
-        save.disabled = false;
-        revert.disabled = false;
-        feedback();
-      });
   });
 
   backend.onLevel((level) => {
@@ -291,9 +272,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     live.update(state);
   });
   backend.onSettingsChangedElsewhere(() => {
-    if (!saving && draft !== null && JSON.stringify(draft) === baseline) void load();
-    else changedElsewhere = true;
-    feedback();
+    void load(typingNow());
   });
   backend.onStatus(showStatus);
   backend.getStatus().then(showStatus).catch((error: unknown) => {

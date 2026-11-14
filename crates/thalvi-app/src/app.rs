@@ -35,7 +35,7 @@ use crate::overlay::{Overlay, Visibility};
 use crate::runner::{AudioStatus, Control, EngineLink, Restart};
 use serde_json::Value;
 
-use crate::settings::{Store, ensure_microphone_change_allowed};
+use crate::settings::Store;
 use crate::startup::{self, APP_NAME, LOGIN_ARG, Registration};
 use crate::status::{Failure, FailureKind, LastError, Status};
 use crate::tray::{self, CopyItem, Tray};
@@ -93,7 +93,6 @@ impl SyncedConfig {
     pub(crate) fn save_form<T>(
         &self,
         form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
-        paused: bool,
         take_effect: impl FnOnce(
             &DesktopConfig,
             &DesktopConfig,
@@ -106,7 +105,6 @@ impl SyncedConfig {
         let Some(settings) = settings else {
             return Ok((value, false));
         };
-        ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
         let config = Store::check(settings, &current)?;
         take_effect(&current, &config, &|| self.store.write(&config))?;
         Ok((value, true))
@@ -243,10 +241,9 @@ impl AppState {
         &self,
         form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
     ) -> Result<(T, bool), String> {
-        self.saves
-            .save_form(form, self.link.audio().paused, |current, config, write| {
-                self.take_effect(current, config, write)
-            })
+        self.saves.save_form(form, |current, config, write| {
+            self.take_effect(current, config, write)
+        })
     }
 
     /// Writes `config` and takes it into effect. Changed hold keys are watched before the file is
@@ -1133,7 +1130,6 @@ mod tests {
                     saves
                         .save_form(
                             |_| Ok(((), Some(settings))),
-                            true,
                             move |_, config, write| {
                                 write()?;
                                 synced.set(config);
@@ -1164,7 +1160,7 @@ mod tests {
                     let mut settings = crate::settings::settings_json(&saves.config()).unwrap();
                     settings["ending_pause"] = serde_json::json!({"paste": 9});
                     let error = saves
-                        .save_form(|_| Ok(((), Some(settings))), true, |_, _, write| write())
+                        .save_form(|_| Ok(((), Some(settings))), |_, _, write| write())
                         .unwrap_err();
                     assert_eq!(
                         error,
@@ -1200,6 +1196,103 @@ mod tests {
         assert_eq!(leftovers, ["desktop.json"], "no temporary file is left");
     }
 
+    /// Saves like `Live::save` does, for a form built under the lock.
+    fn save_over(
+        saves: &SyncedConfig,
+        form: impl FnOnce(&DesktopConfig) -> Result<((), Option<serde_json::Value>), String>,
+    ) -> Result<(), String> {
+        saves
+            .save_form(form, |_, config, write| {
+                write()?;
+                saves.set(config);
+                Ok(())
+            })
+            .map(|(value, _)| value)
+    }
+
+    #[test]
+    fn a_settings_patch_is_merged_over_the_config_read_under_the_lock() {
+        use serde_json::json;
+        type Holds = fn(&DesktopConfig) -> bool;
+        // (what an agent saved first, what Settings then sends, built before that save, and what both leave)
+        let cases: [(&str, serde_json::Value, serde_json::Value, Holds); 3] = [
+            (
+                "a different setting",
+                json!({"microphone": "USB Mic"}),
+                json!({"look": "holo"}),
+                |config| {
+                    config.microphone.as_deref() == Some("USB Mic")
+                        && config.look == thalvi_desktop::config::Look::Holo
+                },
+            ),
+            (
+                "another field of the same group",
+                json!({"overlay": {"show": false}}),
+                json!({"overlay": {"draft": false}}),
+                |config| !config.overlay.show && !config.overlay.draft,
+            ),
+            (
+                "a setting the agent removed",
+                json!({"microphone": null}),
+                json!({"look": "neon"}),
+                |config| {
+                    config.microphone.is_none() && config.look == thalvi_desktop::config::Look::Neon
+                },
+            ),
+        ];
+        for (at, (name, agent, patch, holds)) in cases.into_iter().enumerate() {
+            let dir =
+                std::env::temp_dir().join(format!("thalvi-app-patch-{}-{at}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("desktop.json");
+            let start = DesktopConfig::from_json_str(r#"{"microphone": "Old Mic"}"#).unwrap();
+            let saves = SyncedConfig::new(Store::new(Some(path.clone())).unwrap(), start);
+
+            save_over(&saves, |current| {
+                Ok(((), Some(crate::settings::merged(current, &agent)?)))
+            })
+            .unwrap();
+            save_over(&saves, crate::commands::settings_patch(&patch)).unwrap();
+
+            let file = DesktopConfig::load(&path).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(
+                holds(&saves.config()),
+                "{name}: the running config keeps both"
+            );
+            assert_eq!(file, saves.config(), "{name}: the file holds what runs");
+        }
+    }
+
+    #[test]
+    fn a_settings_patch_that_makes_the_config_invalid_is_refused_and_changes_nothing() {
+        use serde_json::json;
+        for (patch, error) in [
+            (
+                json!({"capture_limits": {"idle": 9}}),
+                "idle limit must be a whole number of seconds from 10 to 600",
+            ),
+            (json!([1, 2]), "The settings change must be a JSON object."),
+        ] {
+            let dir =
+                std::env::temp_dir().join(format!("thalvi-app-bad-patch-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("desktop.json");
+            let start = DesktopConfig::from_json_str("{}").unwrap();
+            let saves = SyncedConfig::new(Store::new(Some(path.clone())).unwrap(), start.clone());
+
+            let refused = save_over(&saves, crate::commands::settings_patch(&patch)).unwrap_err();
+            let written = path.exists();
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert!(refused.contains(error), "{refused}");
+            assert!(!written, "nothing is written");
+            assert_eq!(saves.config(), start, "the running config is unchanged");
+        }
+    }
+
     #[test]
     fn a_save_the_file_system_refuses_is_reported_and_changes_nothing() {
         let dir = std::env::temp_dir().join(format!("thalvi-app-refused-{}", std::process::id()));
@@ -1216,7 +1309,6 @@ mod tests {
         let form = saves
             .save_form(
                 |_| Ok(((), Some(settings))),
-                true,
                 |_, _, write| {
                     write()?;
                     applied = true;
@@ -1258,7 +1350,6 @@ mod tests {
         let error = saves
             .save_form(
                 |_| Ok(((), Some(settings))),
-                true,
                 |_, _, _| Err("F7 is already bound in Hyprland.".to_owned()),
             )
             .unwrap_err();

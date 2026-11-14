@@ -1,6 +1,7 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
+import { applyPatch, type SettingsPatch } from "./patch.ts";
 import type { AudioStatus, Backend, Draft, HistoryEntry, HoldKeyDefaults, LiveEntry, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 
 export const SETTINGS: Settings = {
@@ -105,11 +106,15 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     selected: settings.microphone,
     active: initial.state === "paused" ? null : (settings.microphone ?? "Built-in"),
     paused: initial.state === "paused",
+    problem: null,
   };
   const emitAudio = (next: AudioStatus): void => {
     audioState = next;
     for (const listener of audioListeners) listener(next);
   };
+  // What the desktop holds after each patch it accepted.
+  let held = structuredClone(settings);
+  const applied: Settings[] = [];
   const backend = {
     getStatus: vi.fn(() => Promise.resolve(initial)),
     onStatus: vi.fn((listener: (status: Status) => void) => statusListeners.push(listener)),
@@ -118,7 +123,11 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     onAudio: vi.fn((listener: (audio: AudioStatus) => void) => audioListeners.push(listener)),
     onSettingsChangedElsewhere: vi.fn((listener: () => void) => elsewhereListeners.push(listener)),
     getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
-    saveSettings: vi.fn<(settings: Settings) => Promise<void>>(() => Promise.resolve()),
+    saveSettings: vi.fn<(patch: SettingsPatch) => Promise<void>>((patch) => {
+      held = Object.assign({ writing: null, microphone: null }, applyPatch(held, patch));
+      applied.push(structuredClone(held));
+      return Promise.resolve();
+    }),
     setListening: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
     dismissError: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     copyReport: vi.fn<(message: string, causes: string[]) => Promise<void>>(() => Promise.resolve()),
@@ -164,6 +173,8 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
   } satisfies Backend;
   return {
     backend,
+    /** The settings after each change the desktop accepted, in order. */
+    applied: () => applied,
     emit: (status: Status) => {
       for (const listener of statusListeners) listener(status);
       const paused = status.state === "paused";
@@ -172,6 +183,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
           selected: audioState.selected,
           active: paused ? null : (audioState.selected ?? "Built-in"),
           paused,
+          problem: null,
         });
       }
     },

@@ -1,5 +1,7 @@
 // The Rust app <-> UI contract; mirrors crates/thalvi-app/src/status.rs and the desktop config.
 
+import type { SettingsPatch } from "./patch.ts";
+
 export type Route = "paste" | "write" | "submit" | "task";
 
 /** What a failure stopped: only `delivery` means a capture's text did not reach its destination. */
@@ -46,6 +48,8 @@ export interface AudioStatus {
   selected: string | null;
   active: string | null;
   paused: boolean;
+  /** Why the selected device could not be opened while `active` stays open; null otherwise. */
+  problem: string | null;
 }
 
 export type Ending = "paste" | "write" | "submit" | "task" | "scratch" | "cancel";
@@ -271,7 +275,8 @@ export interface Backend {
   /** An agent changed the saved settings or a switch the window reads from the OS; the window's own saves never fire this. */
   onSettingsChangedElsewhere(listener: () => void): void;
   getSettings(): Promise<Settings>;
-  saveSettings(settings: Settings): Promise<void>;
+  /** Applies a merge patch of the settings that changed: it is merged into the config the desktop holds when it runs, so it can't undo a change saved since. Rejects with the plain reason it was refused. */
+  saveSettings(patch: SettingsPatch): Promise<void>;
   setListening(on: boolean): Promise<void>;
   /** The user dismissed the latest error; the overlay stops showing it. */
   dismissError(): Promise<void>;

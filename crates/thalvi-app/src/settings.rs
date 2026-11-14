@@ -194,26 +194,19 @@ fn load(settings: &Value) -> Result<DesktopConfig, String> {
     })
 }
 
-/// Refuses a microphone change while listening is not paused, before anything is written.
+/// `patch` merged over the form of `current`: how every change to the settings is built, so that
+/// a change sends only what it changes and cannot undo one saved since its sender last looked.
+/// Called under the save lock, on the config in use.
 ///
 /// # Errors
-/// The plain refusal when the saved device would change while the microphone may be open.
-pub fn ensure_microphone_change_allowed(
-    settings: &Value,
-    current: Option<&str>,
-    paused: bool,
-) -> Result<(), String> {
-    let incoming = match settings.get("microphone") {
-        Some(Value::String(name)) => Some(name.trim().to_owned()),
-        _ => None,
-    };
-    if incoming.as_deref() != current && !paused {
-        return Err(
-            "Pause listening before changing the microphone. Turn listening off, then save again."
-                .to_owned(),
-        );
+/// That `patch` is not a JSON object, or why `current` has no form.
+pub fn merged(current: &DesktopConfig, patch: &Value) -> Result<Value, String> {
+    if !patch.is_object() {
+        return Err("The settings change must be a JSON object.".to_owned());
     }
-    Ok(())
+    let mut form = settings_json(current)?;
+    merge_patch(&mut form, patch);
+    Ok(form)
 }
 
 /// Applies a JSON merge patch (RFC 7386) to `target`: objects merge, `null` removes a key, and
@@ -237,18 +230,13 @@ pub fn merge_patch(target: &mut Value, patch: &Value) {
     }
 }
 
-/// Everything Settings checks before a save, without writing: the microphone rule, the loader's
+/// Everything Settings checks before a save, without writing: the loader's
 /// validation, and for what differs from `current` the checks Settings runs as an entry, a model
 /// folder or a wake model is chosen.
 ///
 /// # Errors
 /// The plain message Settings would show.
-pub fn judge(
-    mut settings: Value,
-    current: &DesktopConfig,
-    paused: bool,
-) -> Result<DesktopConfig, String> {
-    ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
+pub fn judge(mut settings: Value, current: &DesktopConfig) -> Result<DesktopConfig, String> {
     prepare(&mut settings, current);
     check_keys(&settings, current, Desktop::check_hold_keys)?;
     check_endpoint_kept(&mut settings, current)?;
@@ -1000,42 +988,6 @@ mod tests {
     }
 
     #[test]
-    fn a_microphone_change_needs_a_pause_but_other_saves_do_not() {
-        let refusal =
-            "Pause listening before changing the microphone. Turn listening off, then save again.";
-        for (settings, current, paused, expected) in [
-            (json!({"microphone": "USB Mic"}), None, false, Err(refusal)),
-            (
-                json!({"microphone": null}),
-                Some("USB Mic"),
-                false,
-                Err(refusal),
-            ),
-            (json!({"microphone": "USB Mic"}), None, true, Ok(())),
-            (json!({"microphone": null}), Some("USB Mic"), true, Ok(())),
-            (
-                json!({"microphone": "USB Mic"}),
-                Some("USB Mic"),
-                false,
-                Ok(()),
-            ),
-            (json!({"microphone": null}), None, false, Ok(())),
-            (
-                json!({"microphone": " USB Mic "}),
-                Some("USB Mic"),
-                false,
-                Ok(()),
-            ),
-        ] {
-            assert_eq!(
-                ensure_microphone_change_allowed(&settings, current, paused),
-                expected.map_err(str::to_owned),
-                "{settings} current={current:?} paused={paused}"
-            );
-        }
-    }
-
-    #[test]
     fn a_merge_patch_merges_objects_removes_nulls_and_replaces_lists() {
         for (target, patch, expected) in [
             (
@@ -1068,14 +1020,8 @@ mod tests {
     }
 
     /// The form of the default config with `change` merged in, as the commands build it.
-    fn judged(
-        current: &DesktopConfig,
-        change: &Value,
-        paused: bool,
-    ) -> Result<DesktopConfig, String> {
-        let mut form = settings_json(current).unwrap();
-        merge_patch(&mut form, change);
-        judge(form, current, paused)
+    fn judged(current: &DesktopConfig, change: &Value) -> Result<DesktopConfig, String> {
+        judge(merged(current, change).unwrap(), current)
     }
 
     #[test]
@@ -1084,7 +1030,6 @@ mod tests {
         let current = judged(
             &store_defaults(),
             &json!({"stt": {"entries": [missing("/models/gone")]}}),
-            true,
         )
         .unwrap_err();
         assert!(
@@ -1100,12 +1045,12 @@ mod tests {
             .unwrap()
             .remove("writing_default_prompt");
         config = DesktopConfig::from_json_str(&form.to_string()).unwrap();
-        assert!(judged(&config, &json!({"look": "neon"}), true).is_ok());
+        assert!(judged(&config, &json!({"look": "neon"})).is_ok());
 
         let mut saved_conversation = settings_json(&store_defaults()).unwrap();
         saved_conversation["wake"]["conversation"]["model"] = json!("hey_jarvis");
         saved_conversation["look"] = json!("neon");
-        let config = judge(saved_conversation, &store_defaults(), true).unwrap();
+        let config = judge(saved_conversation, &store_defaults()).unwrap();
         assert_eq!(
             config.wake.conversation().model,
             thalvi_desktop::wake::HeadModel::Catalog(
@@ -1119,7 +1064,6 @@ mod tests {
             &store_defaults(),
             &json!({"stt": {"entries": [
             store_entries_default(), loose]}}),
-            true,
         );
         assert!(
             strict.is_err(),

@@ -326,7 +326,7 @@ a capture already running keeps the model it started with. Settings shows each
 model's description, languages and size, whether it is **Selected** and
 **Downloaded** or **Not downloaded**, and can download it; its ID, source and
 license are under the card's collapsed **Details**. Or you can point to your
-own model folder and check it before saving.
+own model folder and check it before it is used.
 Word errors below are on LibriSpeech (120 clips) and on 48 of the developer's
 own takes, int8 on the CPU, language detected automatically. The unified model
 also made 8.38% on German and 7.09% on Spanish (80 Multilingual LibriSpeech clips
@@ -387,10 +387,13 @@ entry is an extra with `"extra": true`, which the active entry can't be.
 ### Microphone
 
 Settings → Listening has **Listening**, which pauses and resumes right away,
-and the saved device. To change the device, pause first, then choose and Save;
-listening stays paused until you resume it. **Active microphone** names the
-device actually open. If the saved device is missing, Thalvi reports it
-instead of using another one.
+and the **Microphone** to use. Choosing a device applies it like every other
+setting: while Thalvi is listening it opens the new device first and closes the
+old one once that works, or after the capture that is running; while paused, the
+device is used when listening resumes. **Active microphone** names the device
+actually open. If the chosen device can't be opened, the reason shows under the
+choice, with the device that stays open instead; Thalvi never opens another one
+by itself.
 
 ### Start at login and app menu
 
@@ -408,7 +411,7 @@ Settings → App → Startup, both off by default and applied right away:
 ### Updates
 
 Thalvi keeps itself on one update channel, chosen in Settings → App → Updates
-(saved with Save): **Stable** (the default) follows released versions;
+(applied as you choose it): **Stable** (the default) follows released versions;
 **Development** also follows the builds the developer approves for testing.
 Stable never installs a development build, and neither channel ever installs an
 older version, so switching from Development to Stable keeps the development
@@ -438,7 +441,7 @@ build until a newer stable release exists.
 ### Recordings
 
 Settings → History & recordings → Recordings has a switch each for metrics, text and audio recordings, all
-off by default; Save applies them between captures. They stay on this computer.
+off by default; a switch applies between captures. They stay on this computer.
 **Open folder** opens `recordings/` in the data folder (`~/.local/share/thalvi`
 on Linux, `%LOCALAPPDATA%\thalvi` on Windows):
 
@@ -501,8 +504,8 @@ over what `settings get` returns: objects merge, `null` removes a key, and a
 list such as `stt.entries` or `stt.phrases` is replaced whole, so read it first
 and send it back with your change. Give `-` instead of the JSON to read it from
 standard input. A speech server entry takes `api_key` to set a key, `""` to
-clear it, and keeps the saved key when `api_key` is absent. The microphone
-changes only while Thalvi is paused.
+clear it, and keeps the saved key when `api_key` is absent. A changed
+microphone opens beside the open one, as in Settings.
 
 A confirmation stays with you: no command answers one, and a submit that waits
 for it shows as `awaiting_confirmation` in `state`. Any other failure of a
@@ -514,7 +517,7 @@ and exits 1, and one that is not a command exits 2.
 Settings → Listening → **Wake words** is a switch, on by default. Off, Thalvi keeps
 listening for the hold keys and the microphone stays open, but no wake word starts
 anything, plays a cue or delivers, and the wake model scores nothing. It applies at
-once, without Save or a restart, survives restarts and pause and resume, and is
+once, without a restart, survives restarts and pause and resume, and is
 stored as `"wake": {"enabled": false}` only when it is off. The tray, `state` and
 Settings tell the three states apart: listening with wake words, listening for the
 hold keys only (the tray tooltip says "hold keys only"), and paused. Pausing still
@@ -531,7 +534,7 @@ bound to `thalvi-desktop cancel` (the Hyprland examples bind SUPER+Escape).
 
 Choose the keys under **Settings → Listening → Hold keys**: **Change…** records the
 next combination you press in the Settings window (Escape cancels), and **Restore
-default** goes back to the desktop's own key. A key applies at once, with no Save.
+default** goes back to the desktop's own key. A key applies at once.
 Thalvi refuses a key that is not a key it can use, the same key for both actions,
 and one the desktop will not bind, says why under the row, and keeps the keys that
 worked. A key other than the default is stored as `hold_key` in the config. GNOME
@@ -575,7 +578,7 @@ in the config: `url`, `model` and `api_key`. The model gets the **Writing prompt
 app or other context. The default prompt follows what you ask for (an email, a tone,
 a wording), invents nothing and keeps line breaks to where the text needs them, such as an
 email; edit it in Settings or restore the default there.
-How closely a model follows it depends on the model. Saving never calls the model.
+How closely a model follows it depends on the model. Applying never calls the model.
 If it is not set up, fails, answers with nothing, or takes longer than 15 seconds, nothing is pasted,
 Thalvi says what happened, and your own words go on the clipboard to paste with
 Ctrl+V.
