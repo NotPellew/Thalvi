@@ -3263,16 +3263,18 @@ mod tests {
                 recording.recorder.clone(),
             ));
             for expected in &expected_fatal {
-                loop {
-                    let event = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    if let RecognizerMessage::Disconnected { message, fatal } = event {
-                        assert_eq!((message.as_str(), fatal), (marker, *expected));
-                        break;
+                // One deadline over the wait: a recognizer that reconnects forever without reporting would otherwise keep renewing a per-message one.
+                let (message, fatal) = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let event = events_rx.recv().await.unwrap();
+                        if let RecognizerMessage::Disconnected { message, fatal } = event {
+                            return (message, fatal);
+                        }
                     }
-                }
+                })
+                .await
+                .unwrap();
+                assert_eq!((message.as_str(), fatal), (marker, *expected));
             }
             drop(audio_tx);
             tokio::time::timeout(Duration::from_secs(5), task)
