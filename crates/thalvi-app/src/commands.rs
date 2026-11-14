@@ -374,7 +374,9 @@ pub async fn download_speech(app: &AppHandle, state: &AppState, name: &str) -> R
         .run(|progress| {
             let _ = app.emit("thalvi://speech-model-progress", progress);
         })
-        .await
+        .await?;
+    state.link.send(Control::ReloadSpeechModel(model));
+    Ok(())
 }
 
 /// One download of a catalog speech model's files, with what reports it.

@@ -1129,10 +1129,9 @@ function speech(context: PageContext): SpeechRows {
     if (entry?.kind !== "on_device") return;
     say(retryProblem, "");
     retry.disabled = true;
-    // The model card's downloader checks every file again and fetches what is missing or corrupt.
+    // The model card's downloader checks every file again and fetches what is missing or corrupt; the engine loads the model once it is there.
     backend
       .downloadSpeechModel(entry.model ?? SPEECH_MODEL)
-      .then(() => backend.setListening(true))
       .catch((error: unknown) => {
         say(retryProblem, errorText(error));
       })
