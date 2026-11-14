@@ -1083,6 +1083,74 @@ describe("extra recognizers", () => {
     await settle();
     expect(sent(stub).stt.entries.at(-1)).toMatchObject({ name: "Extra recognizer", active: true, api: "meta", api_key: "k" });
   });
+
+  describe("a live entry not in use", () => {
+    const settings = (writing: Settings["writing"], extras: readonly string[] = []): Settings => ({
+      ...several(),
+      writing,
+      stt: { entries: several().stt.entries.map((entry) => (extras.includes(entry.name) ? { ...entry, extra: true } : entry)) },
+    });
+    const savedEntry = (stub: Awaited<ReturnType<typeof openSeveral>>, name: string): SpeechEntry | undefined =>
+      stub.backend.saveSettings.mock.calls.at(-1)?.[0].stt.entries.find((entry) => entry.name === name);
+
+    it("has no switch while it is the one in use", async () => {
+      await openSeveral();
+      expect(entryNamed("Realtime speech server").querySelector("input[type=checkbox]")).toBeNull();
+      expect(tickOf("Cybrex2").getAttribute("aria-label")).toBe("Also transcribe with Cybrex2");
+    });
+
+    it.each(["Cybrex2", "On this computer"])("switches %s on and off at once, saving extra only while on", async (name) => {
+      const stub = await open(settings(WRITING));
+      goTo("speech");
+      expect(tickOf(name).checked).toBe(false);
+      flip(tickOf(name));
+      await settle();
+      expect(savedEntry(stub, name)).toMatchObject({ active: false, extra: true });
+      expect(tickOf(name).checked).toBe(true);
+      flip(tickOf(name));
+      await settle();
+      expect(savedEntry(stub, name)).not.toHaveProperty("extra");
+      expect(tickOf(name).checked).toBe(false);
+    });
+
+    it("shows the switch as on when the saved entry is an extra", async () => {
+      await open(settings(WRITING, ["Cybrex2"]));
+      goTo("speech");
+      expect(tickOf("Cybrex2").checked).toBe(true);
+    });
+
+    it("is not an extra any more once it becomes the one in use, and the one replaced gets a switch", async () => {
+      const stub = await open(settings(WRITING, ["Cybrex2"]));
+      goTo("speech");
+      use("Cybrex2");
+      await settle();
+      expect(savedEntry(stub, "Cybrex2")).toMatchObject({ active: true });
+      expect(savedEntry(stub, "Cybrex2")).not.toHaveProperty("extra");
+      expect(entryNamed("Cybrex2").querySelector("input[type=checkbox]")).toBeNull();
+      expect(tickOf("Realtime speech server").checked).toBe(false);
+      expect(stateText()).toBe("On: OpenAI. The chat model merges its text with the live one.");
+    });
+
+    it("can be switched on only with a chat endpoint, and always off", async () => {
+      await open(settings(null, ["On this computer"]));
+      goTo("speech");
+      expect([tickOf("Cybrex2").disabled, tickOf("Cybrex2").getAttribute("aria-describedby")]).toEqual([true, endpointNote().id]);
+      expect([tickOf("On this computer").disabled, tickOf("On this computer").hasAttribute("aria-describedby")]).toEqual([false, false]);
+      type(control("Writing endpoint address", "input"), "http://127.0.0.1:8000/v1");
+      expect(tickOf("Cybrex2").disabled).toBe(false);
+    });
+
+    it("is named in the group line with the upload extras, and an on-device one adds a note about its model", async () => {
+      await open(settings(WRITING, ["Cybrex2", "On this computer"]));
+      goTo("speech");
+      expect(stateText()).toBe(
+        "On: Cybrex2, On this computer, OpenAI. The chat model merges their texts with the live one. Each on-device extra loads its own model, which adds memory and processing.",
+      );
+      flip(tickOf("On this computer"));
+      await settle();
+      expect(stateText()).toBe("On: Cybrex2, OpenAI. The chat model merges their texts with the live one.");
+    });
+  });
 });
 
 
@@ -1098,6 +1166,15 @@ describe("the fake backend's rule for extra recognizers", () => {
     await backend.saveSettings(settings(before, before !== null));
     await expect(backend.saveSettings(settings(null, true))).rejects.toThrow(message);
     await expect(backend.saveSettings(settings(null, false))).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ["a live extra needs a writing model", null, { ...SERVER }, { ...CYBREX, extra: true }, "Extra recognizers need a writing model. Set one up under Settings → Speech → Writing first, or switch the extras off."],
+    ["the entry in use cannot be an extra", writing, { ...SERVER, extra: true }, { ...CYBREX }, 'Speech server "Realtime speech server" is the one in use, so it cannot also be an extra recognizer. Switch it off as an extra first.'],
+  ] as const)("refuses a live entry's extra: %s", async (_case, endpoint, first, second, message) => {
+    const backend = fakeBackend(new URLSearchParams());
+    await expect(backend.saveSettings({ ...SETTINGS, writing: endpoint, stt: { entries: [first, second] } })).rejects.toThrow(message);
+    await expect(backend.saveSettings({ ...SETTINGS, writing, stt: { entries: [{ ...SERVER }, { ...CYBREX, extra: true }] } })).resolves.toBeUndefined();
   });
 });
 
