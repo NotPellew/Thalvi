@@ -763,12 +763,11 @@ struct Plan {
 
 /// Merges `change` over the settings now in use and validates the result as Settings does.
 fn plan(running: &impl Running, change: &Value) -> Result<Plan, String> {
-    let paused = running.audio().borrow().paused;
-    plan_over(running.config(), paused, change)
+    plan_over(running.config(), change)
 }
 
 /// Merges `change` over `current` and validates the result as Settings does.
-fn plan_over(current: DesktopConfig, paused: bool, change: &Value) -> Result<Plan, String> {
+fn plan_over(current: DesktopConfig, change: &Value) -> Result<Plan, String> {
     let Value::Object(fields) = change else {
         return Err("The settings change must be a JSON object.".to_owned());
     };
@@ -784,7 +783,7 @@ fn plan_over(current: DesktopConfig, paused: bool, change: &Value) -> Result<Pla
     }
     let mut merged = settings_json(&current)?;
     merge_patch(&mut merged, &Value::Object(fields));
-    let config = judge(merged.clone(), &current, paused)?;
+    let config = judge(merged.clone(), &current)?;
     Ok(Plan {
         merged,
         config,
@@ -806,8 +805,7 @@ fn settings_check(running: &impl Running, change: &Value) -> String {
 fn settings_set(running: &impl Running, change: &Value) -> String {
     let secrets = secrets(&running.config(), Some(change));
     let plan = running.save(|current| {
-        let paused = running.audio().borrow().paused;
-        let plan = plan_over(current.clone(), paused, change)?;
+        let plan = plan_over(current.clone(), change)?;
         let form = (plan.config != plan.current).then(|| plan.merged.clone());
         Ok((plan, form))
     });
@@ -940,6 +938,7 @@ mod tests {
                     selected: None,
                     active: None,
                     paused: false,
+                    problem: None,
                 })
                 .0,
                 saves: SyncedConfig::new(
@@ -1079,12 +1078,10 @@ mod tests {
             &self,
             form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
         ) -> Result<T, String> {
-            let paused = self.audio.borrow().paused;
             let settings_save = lock(&self.settings_save_first).take();
             if let Some(settings) = settings_save {
                 self.saves.save_form(
                     |_| Ok(((), Some(settings))),
-                    paused,
                     |_, config, write| {
                         write()?;
                         self.saves.set(config);
@@ -1093,7 +1090,7 @@ mod tests {
                 )?;
             }
             self.saves
-                .save_form(form, paused, |_, config, write| {
+                .save_form(form, |_, config, write| {
                     write()?;
                     self.saves.set(config);
                     Ok(())
@@ -1445,18 +1442,12 @@ mod tests {
     }
 
     #[test]
-    fn the_microphone_changes_only_while_paused_and_a_change_waits_for_a_capture_to_end() {
+    fn the_microphone_changes_while_listening_and_a_change_waits_for_a_capture_to_end() {
         let rig = Rig::new("microphone", "{}");
-        let refusal =
-            "Pause listening before changing the microphone. Turn listening off, then save again.";
-        let mic = json!({"microphone": "USB Mic"});
-        let refused = rig.set(mic.clone());
-        assert_eq!(refused["error"], refusal);
-        assert_eq!(rig.ask(&Request::Pause)["ok"], true);
-        assert_eq!(rig.set(mic)["ok"], true);
+        let set = rig.set(json!({"microphone": "USB Mic"}));
+        assert_eq!(set["ok"], true, "{set}");
         assert_eq!(rig.fake.config().microphone.as_deref(), Some("USB Mic"));
 
-        rig.fake.pause_audio(false);
         rig.fake.set_status(capturing_status());
         let during = rig.set(json!({"look": "neon"}));
         assert_eq!(

@@ -35,7 +35,7 @@ use crate::overlay::{Overlay, Visibility};
 use crate::runner::{AudioStatus, Control, EngineLink, Restart};
 use serde_json::Value;
 
-use crate::settings::{Store, ensure_microphone_change_allowed};
+use crate::settings::Store;
 use crate::startup::{self, APP_NAME, LOGIN_ARG, Registration};
 use crate::status::{Failure, FailureKind, LastError, Status};
 use crate::tray::{self, CopyItem, Tray};
@@ -93,7 +93,6 @@ impl SyncedConfig {
     pub(crate) fn save_form<T>(
         &self,
         form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
-        paused: bool,
         take_effect: impl FnOnce(
             &DesktopConfig,
             &DesktopConfig,
@@ -106,7 +105,6 @@ impl SyncedConfig {
         let Some(settings) = settings else {
             return Ok((value, false));
         };
-        ensure_microphone_change_allowed(&settings, current.microphone.as_deref(), paused)?;
         let config = Store::check(settings, &current)?;
         take_effect(&current, &config, &|| self.store.write(&config))?;
         Ok((value, true))
@@ -244,7 +242,7 @@ impl AppState {
         form: impl FnOnce(&DesktopConfig) -> Result<(T, Option<Value>), String>,
     ) -> Result<(T, bool), String> {
         self.saves
-            .save_form(form, self.link.audio().paused, |current, config, write| {
+            .save_form(form, |current, config, write| {
                 self.take_effect(current, config, write)
             })
     }
@@ -1133,7 +1131,6 @@ mod tests {
                     saves
                         .save_form(
                             |_| Ok(((), Some(settings))),
-                            true,
                             move |_, config, write| {
                                 write()?;
                                 synced.set(config);
@@ -1164,7 +1161,7 @@ mod tests {
                     let mut settings = crate::settings::settings_json(&saves.config()).unwrap();
                     settings["ending_pause"] = serde_json::json!({"paste": 9});
                     let error = saves
-                        .save_form(|_| Ok(((), Some(settings))), true, |_, _, write| write())
+                        .save_form(|_| Ok(((), Some(settings))), |_, _, write| write())
                         .unwrap_err();
                     assert_eq!(
                         error,
@@ -1216,7 +1213,6 @@ mod tests {
         let form = saves
             .save_form(
                 |_| Ok(((), Some(settings))),
-                true,
                 |_, _, write| {
                     write()?;
                     applied = true;
@@ -1258,7 +1254,6 @@ mod tests {
         let error = saves
             .save_form(
                 |_| Ok(((), Some(settings))),
-                true,
                 |_, _, _| Err("F7 is already bound in Hyprland.".to_owned()),
             )
             .unwrap_err();

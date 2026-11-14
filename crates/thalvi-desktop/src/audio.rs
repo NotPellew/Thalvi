@@ -272,6 +272,14 @@ fn named<T>(items: impl IntoIterator<Item = (String, T)>, name: &str) -> Result<
         .ok_or_else(|| AudioError::DeviceMissing(name.to_owned()))
 }
 
+/// A stream that opened and is playing, not yet held by a [`Microphone`].
+struct Started {
+    stream: Stream,
+    shared: Arc<Shared>,
+    active: String,
+    consumer: Consumer<Tagged>,
+}
+
 /// Opens and closes a microphone.
 ///
 /// Closing the stream is what turns the operating system's microphone indicator off.
@@ -323,6 +331,46 @@ impl Microphone {
     /// device is not connected, in which case no other device is opened.
     pub fn open(&mut self) -> Result<Frames, AudioError> {
         self.pause();
+        let started = self.start()?;
+        Ok(self.install(started))
+    }
+
+    /// Chooses the device the next [`open`](Self::open) or [`replace`](Self::replace) uses; a stream
+    /// already open is left alone.
+    pub fn select(&mut self, device: Option<String>) {
+        self.device = device;
+    }
+
+    /// Opens the selected device and only then closes the stream open now, so a device that cannot
+    /// be opened leaves the stream already open running.
+    ///
+    /// # Errors
+    ///
+    /// Why the selected device could not be opened; the stream open before is unchanged.
+    pub fn replace(&mut self) -> Result<Frames, AudioError> {
+        let started = self.start()?;
+        self.pause();
+        Ok(self.install(started))
+    }
+
+    fn install(&mut self, started: Started) -> Frames {
+        let Started {
+            stream,
+            shared,
+            active,
+            consumer,
+        } = started;
+        self.active = Some(active);
+        self.open = Some((stream, Arc::clone(&shared)));
+        Frames {
+            consumer,
+            shared,
+            gate: self.gate.clone(),
+            failure: None,
+        }
+    }
+
+    fn start(&self) -> Result<Started, AudioError> {
         let host = cpal::default_host();
         let device = match &self.device {
             Some(name) => named(
@@ -357,13 +405,11 @@ impl Microphone {
         };
         let stream = build_stream(&device, &chosen, sink).map_err(AudioError::from_open)?;
         stream.play().map_err(AudioError::from_open)?;
-        self.active = Some(active);
-        self.open = Some((stream, Arc::clone(&shared)));
-        Ok(Frames {
-            consumer,
+        Ok(Started {
+            stream,
             shared,
-            gate: self.gate.clone(),
-            failure: None,
+            active,
+            consumer,
         })
     }
 
@@ -786,6 +832,49 @@ mod tests {
         for (ranges, expected) in cases {
             assert_eq!(pick(ranges), expected);
         }
+    }
+
+    #[test]
+    fn a_device_that_is_not_connected_is_refused_when_replacing_and_stays_selected() {
+        let mut microphone = Microphone::new(
+            InputGate::default(),
+            None,
+            Recorder::disabled().metrics(),
+        );
+        microphone.select(Some("No such microphone".to_owned()));
+        assert_eq!(
+            microphone.replace().err(),
+            Some(AudioError::DeviceMissing("No such microphone".to_owned()))
+        );
+        assert!(!microphone.is_open());
+    }
+
+    /// Replaces the open default microphone by one that is not there, which must leave the first
+    /// one delivering, and then by the default again, which must end the first one's frames.
+    #[tokio::test]
+    #[ignore = "needs a microphone"]
+    async fn replacing_the_microphone_keeps_the_open_one_unless_the_new_one_opens() {
+        let mut microphone = Microphone::new(
+            InputGate::default(),
+            None,
+            Recorder::disabled().metrics(),
+        );
+        let mut first = microphone.open().expect("a default microphone");
+        let name = microphone.active_name().map(str::to_owned);
+        microphone.select(Some("No such microphone".to_owned()));
+        assert_eq!(
+            microphone.replace().err(),
+            Some(AudioError::DeviceMissing("No such microphone".to_owned()))
+        );
+        assert_eq!(microphone.active_name().map(str::to_owned), name);
+        next(&mut first)
+            .await
+            .expect("the microphone that was open keeps delivering");
+
+        microphone.select(None);
+        let mut second = microphone.replace().expect("the default opens again");
+        assert_eq!(next(&mut first).await, Err(AudioError::Closed));
+        next(&mut second).await.expect("the new stream delivers");
     }
 
     /// Opens the default microphone for 4 s and checks 16 kHz frames arrive at the real rate,
