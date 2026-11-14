@@ -285,3 +285,4 @@ areas your change touches. Editing rules are in
   Rejected: a required gate, whole-workspace runs (3,197 mutants, about 18 hours on a CI runner), Windows runs, local runs by default.
 - **Property tests only where event order is the rule.** Today only the hold hook. Why: it found what tables
   missed there; on streaming and capture code it found nothing tables wouldn't. Rejected: properties everywhere.
+
