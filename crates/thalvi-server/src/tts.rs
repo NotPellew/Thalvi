@@ -354,13 +354,13 @@ mod tests {
     const GAP: Duration = Duration::from_millis(80);
 
     /// The bytes one chunk of audio takes on the wire: raw, or in a Qwen3-TTS frame.
-    fn wire(framed: bool, pcm: &[u8]) -> Result<Bytes, Infallible> {
+    fn wire(framed: bool, pcm: &[u8]) -> Bytes {
         let mut bytes = Vec::new();
         if framed {
             bytes.extend_from_slice(&u32::try_from(pcm.len()).expect("small").to_be_bytes());
         }
         bytes.extend_from_slice(pcm);
-        Ok(Bytes::from(bytes))
+        Bytes::from(bytes)
     }
 
     async fn respond(endpoint: Endpoint, framed: bool) -> Response {
@@ -371,16 +371,18 @@ mod tests {
                     .into_response()
             }
             Endpoint::AudioThenSilent => Body::from_stream(
-                futures_util::stream::iter([wire(framed, &[1, 2]), wire(framed, &[3, 4])])
-                    .chain(futures_util::stream::pending()),
+                futures_util::stream::iter(
+                    [wire(framed, &[1, 2]), wire(framed, &[3, 4])].map(Ok::<_, Infallible>),
+                )
+                .chain(futures_util::stream::pending()),
             )
             .into_response(),
             Endpoint::SlowButSteady => {
                 Body::from_stream(futures_util::stream::unfold(0, move |sent| async move {
                     tokio::time::sleep(GAP).await;
                     match sent {
-                        0..8 => Some((wire(framed, &[5, 6]), sent + 1)),
-                        8 if framed => Some((wire(true, &[]), sent + 1)),
+                        0..8 => Some((Ok::<_, Infallible>(wire(framed, &[5, 6])), sent + 1)),
+                        8 if framed => Some((Ok(wire(true, &[])), sent + 1)),
                         _ => None,
                     }
                 }))

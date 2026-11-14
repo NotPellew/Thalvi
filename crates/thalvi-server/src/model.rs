@@ -1131,10 +1131,10 @@ mod tests {
     const DEADLINE: Duration = Duration::from_millis(250);
     const GAP: Duration = Duration::from_millis(80);
 
-    fn sse(text: &str) -> Result<Bytes, std::convert::Infallible> {
-        Ok(Bytes::from(format!(
+    fn sse(text: &str) -> Bytes {
+        Bytes::from(format!(
             "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{text}\"}}}}]}}\n\n"
-        )))
+        ))
     }
 
     const SSE_END: &[u8] = b"data: {\"choices\":[{\"delta\":{\"content\":\".\"},\"finish_reason\":\"stop\"}]}\ndata: [DONE]\n";
@@ -1147,15 +1147,18 @@ mod tests {
             >())
             .into_response(),
             Endpoint::ChunksThenSilent => Body::from_stream(
-                futures_util::stream::iter([sse("a"), sse("b")])
-                    .chain(futures_util::stream::pending()),
+                futures_util::stream::iter([
+                    Ok::<_, std::convert::Infallible>(sse("a")),
+                    Ok(sse("b")),
+                ])
+                .chain(futures_util::stream::pending()),
             )
             .into_response(),
             Endpoint::SlowButSteady => {
                 Body::from_stream(futures_util::stream::unfold(0, |sent| async move {
                     tokio::time::sleep(GAP).await;
                     match sent {
-                        0..8 => Some((sse("x"), sent + 1)),
+                        0..8 => Some((Ok::<_, std::convert::Infallible>(sse("x")), sent + 1)),
                         8 => Some((Ok(Bytes::from_static(SSE_END)), sent + 1)),
                         _ => None,
                     }
