@@ -16,5 +16,6 @@ mod switch;
 mod tray;
 mod update;
 mod updater;
+mod watch;
 
 pub use app::run;
