@@ -100,4 +100,5 @@ Steps:
   spoken acknowledgement is also off. Neither is covered by this recipe.
 - The transient Starting state, recognizer retry/fatal-disconnect recovery,
   and ending a conversation during microphone acquisition need controlled
-  faults or delayed acquisition; this normal-flow recipe does not prove them.
+  faults or delayed acquisition; use [synthetic audio](../synthetic-audio.md)
+  for those checks. This normal-flow recipe does not prove them.

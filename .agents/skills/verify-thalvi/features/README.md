@@ -2,6 +2,10 @@
 
 This indexes Thalvi's web recipes and the separate desktop guide. Read the
 index before driving the app, then use the matching feature file as the recipe.
+For controlled microphone/endpoint failures, private audio recording and digital
+playback measurements, use [synthetic audio](../synthetic-audio.md). Physical
+audio is not routine; agents may ask before merge when a specific issue or PR
+needs it for acceptance, as that guide describes.
 
 ## Baseline preconditions
 
@@ -99,7 +103,14 @@ confirmation, disk readback and a restart; a screenshot alone is not that proof.
 Desktop dictation can use `ctl feed` with a PCM WAV or a private microphone
 from `up --mic` or `up --gnome`; see the guide's input sections. Recognition
 and delivery additionally require the specified model assets or endpoint,
-and `--hosted` plus a victim window for pasting. An empty-cache Settings run
+and `--hosted` plus a victim window for Hyprland pasting. GNOME uses a
+clipboard and focus check, including a spoken wake/ending path; its CLI hold
+controls do not establish physical shortcuts. An empty-cache Settings run
 does not establish dictation, writing, extra-recognizer merging or physical
 audio. Windows, real tray clicks, GNOME and each input route need their own
 recorded use; the web recipes establish none of them.
+
+[Native Windows](../windows.md) covers an interactive test account, separate
+config, Settings save/restart and an independently responsive paste
+destination. Record the installed binary identity when testing a release;
+do not attribute its result to the current source checkout.
