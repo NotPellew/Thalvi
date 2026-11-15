@@ -200,6 +200,10 @@ checkout is unchanged.
 
 ## Scope
 
+The working-tree lint cleanup removes two redundant clones in `settings.rs` tests only;
+no writer, lock or file-system step changes. The model is unchanged and the source
+hash describes the working tree; `sync_commit` remains at the previous sync.
+
 Three writers that each save once: a Settings save on the main thread, and an
 agent settings change and a switch flip on request threads. Every interleaving
 of their file-system calls and locks. Content is abstract: a form of two fields, the look

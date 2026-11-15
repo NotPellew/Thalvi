@@ -58,6 +58,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::redundant_clone,
+        reason = "tests that a clone shares the original switch"
+    )]
     fn clones_share_one_switch() {
         let gate = InputGate::default();
         gate.clone().set_enabled(false);

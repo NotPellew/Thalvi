@@ -671,7 +671,7 @@ mod tests {
         store.save_switches(&on).unwrap();
         let after_switches = switches(&store.load().unwrap());
         // A form opened before the switches were flipped saves them as they were then.
-        let mut stale = form.clone();
+        let mut stale = form;
         stale["start_at_login"] = json!(false);
         stale["show_in_menu"] = json!(false);
         let after_stale_save = switches(&store.save(stale, &on).unwrap());
@@ -818,7 +818,7 @@ mod tests {
         let endpoint = json!({"url": "http://127.0.0.1:8000/v1", "model": "m", "api_key": "k"});
         let mut settings = settings_json(&store_defaults()).unwrap();
         assert_eq!(settings["writing_default_prompt"], DEFAULT_PROMPT);
-        settings["writing"] = endpoint.clone();
+        settings["writing"] = endpoint;
         let mut current = store.save(settings, &store_defaults()).unwrap();
         let file = || std::fs::read_to_string(&store.path).unwrap();
         assert!(!file().contains("prompt"), "the default is not stored");

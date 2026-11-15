@@ -1,6 +1,12 @@
 [alias]
 lint = "clippy --workspace --all-targets --locked -- --deny warnings"
 docs = "doc --no-deps --workspace"
+deps-audit = "machete"
+
+[env]
+PROPTEST_CASES = "256"
+PROPTEST_RNG_ALGORITHM = "cc"
+PROPTEST_RNG_SEED = "20261115"
 
 # ONNX Runtime's WebGPU build needs libwebgpu_dawn.so beside the executable; ort's copy-dylibs links it into target/.
 [target.'cfg(target_os = "linux")']

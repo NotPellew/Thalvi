@@ -59,6 +59,9 @@ directing you.
   far-fetched ones. A bug fix adds a test that fails without it. Never sleep
   for a fixed time: drive time with a paused or fake clock, or wait for an
   observable event under a bounded timeout.
+- Rust lint exceptions use a narrow `#[expect(..., reason = "...")]` for a
+  specific invariant or platform requirement, never to make a gate pass. Do not
+  add `#[allow(...)]` shims; review an exception when its surrounding code changes.
 - Comments: default to none. Write one only for what the code can't say: a
   constraint, a platform quirk, an invariant (`// SAFETY:` on every `unsafe`
   block). Keep it to one line where possible. Never restate the code or
@@ -134,6 +137,17 @@ Two required checks are not in the script:
   pre-commit hook scans what is staged.
 
 Locally, run checks in three stages; none replaces a required CI result.
+
+`cargo lint` needs the desktop frontend built first (`npm ci --prefix
+crates/thalvi-app/ui` then `npm run build --prefix crates/thalvi-app/ui`); the Rust
+component gates do this. Property tests default to 256 cases with the seed and
+algorithm in `.cargo/config.toml`. An exploratory run may override
+`PROPTEST_RNG_SEED`; record that seed and preserve a minimized regression for a
+failure. Do not lower the case count to pass a check.
+
+`cargo deps-audit` (cargo-machete 0.9.2) is advisory: inspect each result against
+source, including build scripts and platform modules, before removing a dependency.
+It does not replace the required cargo-deny check.
 
 - **Editing:** the closest check that sees the edit: `cargo test -p <crate> <filter>`,
   or the web or desktop UI test and `npm run typecheck` for the files touched. No

@@ -55,7 +55,7 @@ impl Chosen {
                 &entry.name,
                 live.clone(),
                 http,
-                metrics.clone(),
+                metrics,
             )),
             LiveKind::OnDevice(choice) => Self::Local {
                 recognizer: Arc::new(LocalRecognizer::new(

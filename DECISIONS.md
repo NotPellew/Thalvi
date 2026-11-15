@@ -258,10 +258,10 @@ areas your change touches. Editing rules are in
   approve their own PRs. Revisit if a second contributor joins.
 - **Issues are optional.** Why: in a 9-day solo build, PRs and the commit
   history are record enough. Rejected: an issue for every change.
-- **`unsafe` only for Win32.** The workspace denies `unsafe`; only the Windows
-  host module opts out, each block with `// SAFETY:`. Why: key presses, the clipboard and window
-  checks need raw Win32 calls. Rejected: `forbid` with wrapper crates (none
-  covers the checks), clipboard-only Windows, `unsafe` allowed everywhere.
+- **`unsafe` only at native FFI boundaries.** The workspace denies `unsafe`; Windows host modules and
+  Linux WebGPU/ONNX integration opt out narrowly, each block with `// SAFETY:`.
+  Why: desktop control and GPU discovery/placement need raw native calls.
+  Rejected: workspace `forbid` (prevents these integrations), `unsafe` allowed everywhere.
 - **Commit checks run on `pull_request`.** They need only read access, and
   changes to them take effect in the PR that makes them. Rejected:
   `pull_request_target`, which runs the base branch's workflow definition.
@@ -292,3 +292,10 @@ areas your change touches. Editing rules are in
   Rejected: a required gate, whole-workspace runs (3,197 mutants, about 18 hours on a CI runner), Windows runs, local runs by default.
 - **Property tests only where event order is the rule.** Today only the hold hook. Why: it found what tables
   missed there; on streaming and capture code it found nothing tables wouldn't. Rejected: properties everywhere.
+- **Repeatable property cases, separate exploration.** Cargo defaults to 256 ChaCha cases with a fixed seed;
+  exploratory runs override and record the seed, and failures become minimized regressions.
+  Why: required checks need replayable inputs while exploration needs new ones. Rejected: fixed seeds alone.
+- **Selective lint enforcement.** Production unwrap, expect, panic and todo are denied; redundant clones join
+  the existing pedantic gate, with narrow reasoned expectations for invariants and platform requirements.
+  Why: catch mistakes without forcing artificial error paths or fragmented functions.
+  Rejected: all nursery lints, a blanket indexing ban, lower hard complexity caps, suppression to pass a gate.

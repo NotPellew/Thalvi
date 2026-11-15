@@ -154,6 +154,7 @@ impl Recognizer for FakeRecognizer {
     async fn close(&mut self) {}
 }
 
+#[expect(clippy::panic, reason = "unexpected socket messages fail the test")]
 async fn recv_with_paused_clock(client: &mut ClientSocket) -> Received {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -766,6 +767,7 @@ async fn read_session_opening(client: &mut ClientSocket) -> (String, Value) {
 }
 
 /// The `session` message that opens a connection; the idle state that follows is consumed.
+#[expect(clippy::panic, reason = "an unexpected opening message fails the test")]
 async fn read_opening_message(client: &mut ClientSocket) -> Value {
     let first = recv(client).await;
     let Received::Json(session) = &first else {
@@ -972,6 +974,7 @@ enum Received {
     Audio(Bytes),
 }
 
+#[expect(clippy::panic, reason = "unexpected socket messages fail the test")]
 async fn recv(client: &mut ClientSocket) -> Received {
     let message = tokio::time::timeout(Duration::from_secs(5), client.next())
         .await
