@@ -1,6 +1,6 @@
 ---
 name: verify-thalvi
-description: Launch and drive Thalvi's web client (typed and spoken conversation, conversation list, private conversations, history search, voice picker) against local fake endpoints, or a self-hosted model and speech engine, or the real desktop app in a sandboxed nested Hyprland (overlay, Settings window, downloads), and capture evidence. Use to confirm a server, web or desktop change works the way a user would see it, beyond the unit tests.
+description: Launch and drive Thalvi's web client against fake or self-hosted endpoints, or its real desktop app in isolated Hyprland/GNOME and a Windows test account, and capture evidence. Covers conversation, history, voice, native Settings, recognition and delivery. Use to confirm user-visible server, web or desktop behavior beyond unit tests.
 ---
 
 # Verify Thalvi
@@ -8,12 +8,17 @@ description: Launch and drive Thalvi's web client (typed and spoken conversation
 Thalvi's main surface is the web client the Rust server serves at `/`. A user
 types or talks in it, hears spoken replies, and manages saved conversations.
 The desktop app (`crates/thalvi-app`) is driven by [desktop.md](desktop.md): the
-real app in a sandboxed nested Hyprland, for its overlay, Settings window,
+real app in a sandboxed nested Hyprland or GNOME, for its overlay, Settings window,
 downloads and tray commands. It still needs the affected gates before pushing
 (AGENTS.md, Gates: `TESTS` and `BUNDLE=false` narrow them) plus
 real use on each claimed desktop, as AGENTS.md requires, and the web recipes
 below establish no native desktop behavior. The `measure` binary has CLI tests in
 `crates/thalvi-server/tests/measure_bin.rs`; it is not driven here.
+
+[windows.md](windows.md) covers native Windows session prerequisites,
+Settings persistence and file-driven recognition/paste, with build identity
+and cleanup requirements. Physical audio remains a separate supervised check;
+the desktop guide describes which parts can be automated.
 
 A run has one of two modes. Neither reaches a paid service or needs a key.
 
@@ -21,7 +26,7 @@ A run has one of two modes. Neither reaches a paid service or needs a key.
 | --- | --- | --- |
 | Chat model | Scripted fake | Your self-hosted Chat Completions server (Ollama by default) |
 | Speech | Fake tone | Your self-hosted speech engine (the repo's Kokoro by default) |
-| Recognizer | Scripted fake | Scripted fake. Thalvi only speaks Meta's realtime ASR protocol, and no self-hosted server speaks it. |
+| Recognizer | Scripted fake | Scripted fake; this helper does not select a real recognizer. |
 
 - Use fake mode for UI, session logic and error paths. It is deterministic, and
   its scripted replies drive failures, long replies and tool calls on demand.
@@ -32,6 +37,13 @@ The server starts with an empty environment from a working directory outside
 the repository, so no `.env` file or shell variable can leak in. In `--local` mode,
 every endpoint must resolve to loopback, a private LAN or a tailnet, and no API
 key is sent.
+
+The repository's `speech/asr/thalvi_asr.py` implements the realtime ASR
+protocol for a self-hosted recognizer. The desktop guide exercises it through
+a `realtime` speech entry. That does not change the web helper's fake ASR:
+`--local` alone establishes no real recognition. Existing desktop settings and
+the resident server's `.env` are separate from this helper's `.env.verify`;
+inspect only the necessary endpoint/model fields, masking credentials.
 
 All commands run from the repository root. `V` is the helper and `R` is the run
 directory that `up` prints:

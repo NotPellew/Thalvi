@@ -233,6 +233,11 @@ only loopback, so nothing leaves the machine and abstract unix sockets are the r
 - Pad each dictation clip with trailing silence (`ffmpeg ... -af apad=pad_dur=1s`). A hold
   released at the very last sample lost the last word (`on Tuesday` became `onto`); with
   300 ms or 1 s of silence the whole sentence arrived in 4 of 4 holds.
+- Pair every `hold-start` with `hold-end`, including after `cancel` or a
+  refused start. The end command releases the simulated key even when it
+  reports `No capture is being taken.` An unreleased key makes another start
+  look like a repeated key-down and no capture starts. Do the same for
+  `write-start` and `write-end`.
 - For a spoken ending use `Finish dictation.`: from the Ryan voice it ended and pasted 3 of 3
   wake captures, while `Paste that.` was heard as `Taste that` and the capture stayed open.
   `ctl cancel` closes a capture that never ends.
@@ -297,6 +302,86 @@ work as above; `hypr` and `burst` do not exist.
   run's private bus. The orange dot in the panel comes with the virtual keyboard
   session.
 - Playback goes to a speaker that discards, in real time.
+
+### GNOME recognition and clipboard check
+
+GNOME delivers to the clipboard and shows **Copied — press Ctrl+V to paste**.
+It does not automatically paste into a window, and physical hold shortcuts are
+unavailable on GNOME Wayland. The CLI hold controls below exercise the engine;
+they do not establish a working keyboard shortcut.
+
+After Launch and Doctor, keep the victim alive in a separate managed command:
+
+```sh
+$H gnome "$R" victim /tmp/out/victim-focus.log
+```
+
+Use the existing `say` recipe with a padded PCM16, mono, 16 kHz sentence. Check
+`gnome focus` names `victim` before starting, record the count of
+`desktop_transcription_ready`, issue `ctl hold-start`, and wait boundedly for
+a new ready event before queuing speech. Wait for that queue item's `played`
+line, then issue `ctl hold-end`. Wait for the new successful
+`desktop_capture_flow` and `desktop_host_call` with `call: deliver`, and read
+`gnome clip` to assert the expected sentence. Capture the delivery notice with
+`shot`. The victim's focus log must contain no `focus-out` during the capture
+or clipboard read; an empty victim text field is expected until the user pastes.
+
+Repeat with `ctl cancel` after speech has played, then release with
+`ctl hold-end`. Require a cancelled capture metric, unchanged clipboard, and
+the same focused window. Cancellation may hide its notice before a screenshot;
+the metric and unchanged destination establish its effect.
+
+For the actual spoken entry point, queue a separate **Hey Thalvi** clip with
+`say`. Wait for the new ready event, then queue a different sentence ending
+with **Finish dictation**. Require the accepted ending metric and clipboard
+text containing the new sentence without the ending phrase. Do not replace
+this with CLI hold controls when claiming wake behavior.
+
+### A self-hosted recognizer
+
+Use `ctl speech-check` with a `realtime` entry before applying it to the
+isolated app. The entry has `kind: realtime`, a unique `id` and `name`,
+`active: true`, its `ws://` or `wss://` `address`, a nonempty `model`, and
+`api_key` (empty for the repository's self-hosted ASR). `thalvi_server` is a
+removed legacy kind; it is not the current realtime entry.
+
+Apply it through `ctl settings set` as `stt.entries`, then wait for `ctl state`
+to name that entry with status `ready` before starting a capture. Run the
+GNOME recipe above and retain its new readiness, transcription and delivery
+evidence. A successful connection check alone proves no recognition.
+
+The same synthetic clip can come from a real TTS server. Qwen's
+`/v1/audio/speech/pcm-stream` accepts `input` and `voice`; decode each
+big-endian four-byte length followed by that many PCM bytes, require the
+zero-length terminal frame, and save the PCM as mono PCM16 at 24 kHz before
+resampling to 16 kHz. Keep request timing, the terminal-frame assertion and
+the recognized sentence. This proves synthesis and recognition through the
+app, not audible playback or a physical microphone.
+
+## Physical audio and repeatable coverage
+
+The private microphone above makes wake, recognition, endings, cancellation
+and destination assertions repeatable without a person speaking. Keep a fixed
+synthetic corpus and its hashes, expected normalized transcripts, model and
+build identity, and metrics for each case. `source: microphone` in a capture
+metric also describes the private PipeWire microphone; it is not evidence of
+physical hardware. `ctl feed` is a separate file-input route.
+
+A physical run needs the developer ready, the intended microphone and output
+device selected, and an owned scratch destination focused before input. Check
+dictation, cancel, interruption and what the developer actually hears. Stop
+input if focus leaves that destination. Keep recordings only with permission
+and outside the repository.
+
+For future unattended hardware coverage, use a fixed acoustic fixture: a
+separate speaker plays the corpus into the actual microphone, and a reference
+microphone records the actual output transducer. Fix placement and levels;
+retain the device identifiers and measure transcript errors, missing output,
+clipping, latency and cancellation tail. A headset needs a repeatable coupler
+or fixture for its earpiece and boom microphone. This is a proposed hardware
+setup, not a tested recipe. A digital loopback can automate routing checks but
+bypasses the transducers, room noise and acoustic echo. Human listening remains
+the acceptance check for comfort and perceived voice quality.
 
 ## Isolation, and its limits
 
