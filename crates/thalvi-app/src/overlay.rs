@@ -339,26 +339,32 @@ impl Surface for OverlaySurface {
     }
 }
 
+/// Where the surface is between waits.
+enum Shown {
+    /// Nothing is on screen.
+    Hidden,
+    /// A show committed a surface the compositor has not placed.
+    Placing,
+    /// The surface shows. `stale` means the view changed since the last draw.
+    Showing { stale: bool },
+}
+
 /// What the overlay's thread keeps between waits.
 struct Overlaying {
     view: View,
     started: Instant,
-    /// Whether the surface shows.
-    visible: bool,
     /// Whether the surface should show.
     wanted: bool,
+    /// Where the surface is.
+    shown: Shown,
     /// When a shown-for-a-while overlay hides.
     hide_at: Option<Instant>,
     /// When the next frame is due while something moves.
     frame_at: Option<Instant>,
-    /// Whether the view changed since it was last drawn.
-    stale: bool,
     /// The last failure to show, reported once.
     failure: Option<String>,
     /// The next time a failed show or present may be tried.
     retry_at: Option<Instant>,
-    /// A show has committed a surface the compositor has not placed.
-    placing: bool,
     /// The look, and whether the system's theme is dark.
     style: (Look, bool),
 }
@@ -380,15 +386,19 @@ impl Overlaying {
         Self {
             view: View::new(takes_clicks),
             started: now,
-            visible: false,
             wanted: false,
+            shown: Shown::Hidden,
             hide_at: None,
             frame_at: None,
-            stale: false,
             failure: None,
             retry_at: None,
-            placing: false,
             style: (Look::default(), true),
+        }
+    }
+
+    fn mark_stale(&mut self) {
+        if let Shown::Showing { stale } = &mut self.shown {
+            *stale = true;
         }
     }
 
@@ -400,21 +410,21 @@ impl Overlaying {
         match message {
             Message::Status(status, visibility) => {
                 self.view.set_status(*status, self.clock(now));
-                self.stale = true;
+                self.mark_stale();
                 self.want(visibility, now);
             }
             Message::Visibility(visibility) => self.want(visibility, now),
             Message::Draft(show) => {
                 self.view.set_draft(show);
-                self.stale = true;
+                self.mark_stale();
             }
             Message::Look(look) => {
                 self.style.0 = look;
-                self.stale = true;
+                self.mark_stale();
             }
             Message::Theme(dark) => {
                 self.style.1 = dark;
-                self.stale = true;
+                self.mark_stale();
             }
         }
     }
@@ -429,7 +439,7 @@ impl Overlaying {
         self.hide_at = hide_at;
         // A status that asks to show again also asks to draw, so a vanished surface is made again.
         if wanted {
-            self.stale = true;
+            self.mark_stale();
         }
     }
 
@@ -439,20 +449,18 @@ impl Overlaying {
             self.wanted = false;
             self.hide_at = None;
         } else if self.frame_at.is_some_and(|at| now >= at) {
-            self.stale = true;
+            self.mark_stale();
         }
     }
 
     /// Whether a press at `(x, y)` points cancels: only on a shown overlay's cancel button.
     fn cancels(&self, painter: &Painter, x: f32, y: f32) -> bool {
-        self.visible && painter.cancels(&self.view, x, y)
+        matches!(self.shown, Shown::Showing { .. }) && painter.cancels(&self.view, x, y)
     }
 
     /// The surface vanished or its connection ended: the next show makes it again.
     fn lost(&mut self) {
-        self.visible = false;
-        self.placing = false;
-        self.stale = true;
+        self.shown = Shown::Hidden;
         self.retry_at = None;
     }
 
@@ -472,10 +480,9 @@ impl Overlaying {
         now: Instant,
     ) -> Draw {
         if !self.wanted {
-            if self.visible || self.placing {
+            if !matches!(self.shown, Shown::Hidden) {
                 surface.hide();
-                self.visible = false;
-                self.placing = false;
+                self.shown = Shown::Hidden;
             }
             self.frame_at = None;
             self.retry_at = None;
@@ -484,7 +491,7 @@ impl Overlaying {
         if self.retry_at.is_some_and(|at| now < at) {
             return Draw::Idle;
         }
-        if self.visible && !self.stale {
+        if matches!(self.shown, Shown::Showing { stale: false }) {
             return Draw::Idle;
         }
         let clock = self.clock(now);
@@ -494,30 +501,26 @@ impl Overlaying {
             (view, look) => view.or(look),
         };
         let frame = painter.draw(&self.view, clock);
-        let drawn = if self.visible {
+        let drawn = if matches!(self.shown, Shown::Showing { .. }) {
             surface.present(frame)
         } else {
             surface.show(frame)
         };
         let outcome = match drawn {
             Ok(()) => {
-                self.visible = true;
-                self.placing = false;
-                self.stale = false;
+                self.shown = Shown::Showing { stale: false };
                 self.failure = None;
                 self.retry_at = None;
                 Draw::Shown
             }
             Err(HostError::Unsupported(message)) if message.contains("not placed yet") => {
-                self.visible = false;
-                self.placing = true;
+                self.shown = Shown::Placing;
                 self.retry_at = Some(now + PLACE_AFTER);
                 Draw::Waiting
             }
             Err(error) => {
                 let message = error.to_string();
-                self.visible = false;
-                self.placing = false;
+                self.shown = Shown::Hidden;
                 // A vanished surface is shown again as soon as the next status asks. A refusal waits.
                 self.retry_at = (!message.contains("closed")).then_some(now + RETRY_AFTER);
                 let fresh = self.failure.as_ref() != Some(&message);
@@ -846,7 +849,7 @@ mod tests {
         );
         overlay.settle(&mut surface, &mut painter, 0.0, start);
         surface.vanish = true;
-        overlay.stale = true;
+        overlay.shown = Shown::Showing { stale: true };
         overlay.settle(&mut surface, &mut painter, 0.0, start + view::FRAME);
         overlay.take(
             Message::Status(Box::new(capturing()), Visibility::Show),
@@ -892,7 +895,7 @@ mod tests {
         assert_eq!(surface.calls, ["show"]);
         surface.refuse = true;
         surface.calls.clear();
-        overlay.stale = true;
+        overlay.shown = Shown::Showing { stale: true };
         overlay.settle(&mut surface, &mut painter, 0.0, start + 3 * RETRY_AFTER);
         overlay.take(
             Message::Status(Box::new(capturing()), Visibility::Show),
@@ -931,7 +934,7 @@ mod tests {
             hide_at.saturating_duration_since(start) < Duration::from_millis(100),
             "hide ran without the configure wait"
         );
-        assert!(!overlay.visible);
+        assert!(matches!(overlay.shown, Shown::Hidden));
         assert!(
             !overlay.cancels(&painter, 386.0, 17.0),
             "a press on an unplaced overlay cancels nothing"

@@ -756,7 +756,10 @@ fn start_overlay(app: &AppHandle, state: &AppState) {
     };
     let handle = app.clone();
     state.overlay.report_to(FailureSink::new(move |failure| {
-        let state = handle.state::<AppState>();
+        // The overlay's thread can fail while setup still has the state, before `manage`.
+        let Some(state) = handle.try_state::<AppState>() else {
+            return;
+        };
         if let Some(failure) = failure {
             state.last_error.note(failure.clone());
             state.link.send(Control::Overlay(Some(failure)));
