@@ -554,7 +554,7 @@ mod tests {
         })
     }
 
-    fn metrics(recent: Vec<Value>) -> Value {
+    fn metrics(recent: &[Value]) -> Value {
         json!({"ok": true, "enabled": true, "recent": recent, "stages": stages()})
     }
 
@@ -598,7 +598,7 @@ mod tests {
         let cases = [
             (
                 listening,
-                metrics(vec![capture("paste", "delivered")]),
+                metrics(&[capture("paste", "delivered")]),
                 "\
 Thalvi: Listening
 Overlay: hidden
@@ -643,7 +643,7 @@ Metrics: off",
         let first = state("listening");
         let same = first.clone();
         let next = state("capturing");
-        let summary = metrics(vec![capture("paste", "delivered")]);
+        let summary = metrics(&[capture("paste", "delivered")]);
         for (json, terminal) in [(true, false), (false, false), (false, true)] {
             let (text, asked) = play(
                 terminal,
@@ -686,7 +686,7 @@ Metrics: off",
     #[test]
     fn an_app_that_is_absent_or_quits_is_waited_for_and_picked_up_again() {
         let up = state("listening");
-        let summary = metrics(vec![capture("paste", "delivered")]);
+        let summary = metrics(&[capture("paste", "delivered")]);
         let (text, _) = play(
             false,
             false,
