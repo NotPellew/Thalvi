@@ -27,10 +27,13 @@ with Pillow (for image checks), and a non-NVIDIA render node (`/dev/dri`); a VM 
 
 ## Build the commit
 
-Build in the change's own worktree, never in a checkout someone else uses, and
-keep that worktree's `target/` between runs: the second build of the same commit
-compiles nothing. Follow the machine's own build rules (a build runner, lean
-build settings) when the run's brief carries them.
+Build in the change's own worktree, never in a checkout someone else uses. On
+a machine with `dev-job`, reuse its managed `CARGO_TARGET_DIR` across build
+steps, copy the executable and library into retained artifacts before finishing
+the job, and run compositors in a separate `--no-slot` managed command that
+stays alive through teardown. Do not wrap `up` alone: it backgrounds processes
+that the runner stops when the command exits. Keep the rig's runtime directory
+short (the default `/var/tmp/thalvi-rig` works); Wayland sockets have a path limit.
 
 ```sh
 cd <worktree>   # at the commit to verify
@@ -84,6 +87,39 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
 - App output is `$R/out/app-<tag>.log`, every line stamped with its arrival time.
   The app's own state: `$H ctl $R status`.
 
+## Doctor
+
+Before driving, and after a failed step, run:
+
+```sh
+$H proof "$R"
+kill -0 "$(cat "$R/compositor.pid")"
+$H ctl "$R" status
+$H ctl "$R" state
+$H hypr "$R" clients
+$H shot "$R" doctor
+```
+
+Confirm the binary path recorded in `$R/app.bin` is the copy from this task's
+build; retain that build's HEAD, diff and binary SHA256 with the evidence.
+Use `gnome windows` instead of `hypr clients` for a GNOME run. Drive only the
+run this task launched. Inspect the isolation proof before sending input.
+
+The app must answer its private request socket. Open Settings and wait under
+a bounded deadline for its **content**, not only a mapped window: the sidebar
+pages and selected page's controls must be visible in a screenshot. On a cold
+start, the shell and search box render before the settings arrive; a startup
+error can also select Recognition. Once ready, issue `ctl show overlay`
+(or the required page) again and inspect the requested heading before sending
+keys. A successful `show`
+reply alone does not prove that page was rendered.
+
+An empty-cache run with the refused proxy in Launch can verify Settings and
+the visible download failure. It cannot verify dictation: `state` reports a
+failed recognizer and names the missing model. A capture recipe requires its
+models or endpoint to be ready first. Report this prerequisite failure rather
+than treating a responsive Settings window as a ready speech engine.
+
 ## Drive
 
 | Need | Command |
@@ -126,6 +162,22 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
 - `Hyprland` only renders a window that is mapped; open Settings before taking
   screenshots of it.
 
+## Settings save and effect notices
+
+A small end-to-end Settings check needs no working speech model. After Doctor,
+open `ctl show overlay` and inspect the Overlay & sounds heading. Use `wtype`
+Tab keys until a named sound switch has the visible focus ring; do not rely on
+an unverified tab count. Press Space to toggle it. Wait for its changed switch
+and save/effect notice, then capture a screenshot. Read back that one setting
+with `ctl settings get` and from the run's own
+`$R/home/.config/thalvi/desktop.json`; never dump the developer's config.
+
+Quit with `ctl quit`, stop the app, and restart the same binary **without
+`--config`**, which would overwrite the saved value. Reopen the page after
+Doctor and confirm the switch and stored value survived. A change that applies
+on the next capture needs a ready capture flow to prove that timing; saving
+and reopening alone proves persistence, not its effect during a capture.
+
 ## Feed a file instead of speaking
 
 `$H ctl $R feed /var/tmp/thalvi-rig/wake.wav` plays a WAV file into the app in place of its
@@ -163,12 +215,12 @@ only loopback, so nothing leaves the machine and abstract unix sockets are the r
 - Say the wake phrase (or `ctl hold-start`), then wait until the capture is ready before
   saying the dictation. `ctl status` reads `capturing` from the moment the wake cue starts,
   and the app records nothing until the cue (250 to 370 ms) has ended and the recognizer is
-  connected; a clip started on that word lost its first 250 ms in 1 of 16 trials. With
+  connected; a clip started on that word lost its first 250 ms in a historical 16-trial run. With
   `metrics` on, a new `desktop_transcription_ready` line in
   `$R/home/.local/share/thalvi/recordings/metrics.jsonl` marks the moment (0.25 to 0.55 s after
-  `hold-start`); `say` right after it kept the whole clip in 16 of 16 trials. Without
-  metrics, wait about two seconds after `capturing`. Sound played into the microphone before
-  that is lost.
+  `hold-start` in that run); `say` right after it kept the whole clip in those
+  16 trials. Enable metrics for this recipe and wait for the new event under
+  a timeout; do not substitute a fixed delay. Sound played before readiness is lost.
 - Synthesize speech with Piper's `en_US-ryan-high` voice; espeak-ng and flite voices
   score near 0 on `hey_thalvi` and don't wake it. Voice:
   `https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/high/en_US-ryan-high.onnx`
@@ -272,10 +324,12 @@ $H app-stop $R     # the app only
 $H down $R         # app and compositors; $R/out stays
 ```
 
-Both stop by recorded PID (the holder shell of each sandbox). The one name
+Before teardown, save the nonempty `app.pid` and `compositor.pid` values in
+your evidence; the helper clears these files when it stops them. Afterwards,
+check `kill -0` fails for each saved PID and confirm screenshots and logs still
+exist. Both stop by recorded PID (the holder shell of each sandbox). The one name
 match is a `--hosted` app, which `app-stop` ends with `pkill -x app-bin` inside
-the run's own compositor PID namespace. Check with `ps -eo pid,etime,cmd | grep -E 'bwrap|/tmp/thalvi'`
-that nothing of this run is left. Stop proxies you started by their recorded
+the run's own compositor PID namespace. Stop proxies you started by their recorded
 PID. Never run `thalvi-desktop` outside the sandbox: even `--help` starts the
 app against the real session.
 

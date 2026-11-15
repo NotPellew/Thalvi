@@ -29,6 +29,10 @@ Preconditions:
 
 Steps:
 
+- **Observe microphone lifetime.** After starting the recording, before Voice
+  on, run `$V ab $R eval 'const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices); window.__tracks = []; navigator.mediaDevices.getUserMedia = async (...args) => { const stream = await gum(...args); window.__tracks.push(...stream.getTracks()); return stream; }; 1'`.
+  This records the real fake-device tracks without changing acquisition.
+
 - **Voice on.** Queue a turn, then tap the reticle.
   - Run `$V say $R "What should I cook with leftover rice"`,
     `$V ab $R click 'button[aria-label="Start talking"]'` and
@@ -66,6 +70,10 @@ Steps:
   - Run `$V ab $R click 'button.o-voice'` and `$V state $R idle`.
   - `aria-pressed="false"`. The recognizer closes asynchronously; wait for
     it with `timeout 10 sh -c 'until grep -q asr_close "$0"; do sleep 0.2; done' $R/fakes.jsonl`.
+  - Run `$V ab $R wait --fn 'window.__tracks.length > 0 && window.__tracks.every(t => t.readyState === "ended")'`.
+- **Other entry points.** Click `button.o-voice`, wait for `listening`, then
+  click `button[aria-label="End voice"]`, wait for `idle`, and repeat the
+  track-ended assertion. This separately drives the header start and reticle end.
 - **Proof.** Record the whole recipe. Start it in place of `open`, before
   voice is on: `$V ab $R record start $R/evidence/voice.webm "$(. $R/run.env; echo $URL)"`
   and `$V state $R idle`. Finish with `$V ab $R record stop`. Keep a
@@ -90,3 +98,6 @@ Steps:
 - Audio-model turns and the heard guard in `crates/thalvi-server/src/session.rs`
   are unreachable with this launcher: it sets `LLM_AUDIO_INPUT=off`. Optional
   spoken acknowledgement is also off. Neither is covered by this recipe.
+- The transient Starting state, recognizer retry/fatal-disconnect recovery,
+  and ending a conversation during microphone acquisition need controlled
+  faults or delayed acquisition; this normal-flow recipe does not prove them.
