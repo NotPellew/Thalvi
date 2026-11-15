@@ -18,7 +18,7 @@ NextOff(c, old) == CASE c = "pause" -> TRUE
 Ends(c, old) == c \in {"cancel", "pause", "quit"}
                 \/ (c = "toggle" /\ ~old)
 Accumulate(old, ending) == IF ForgetEarlierStop THEN ending ELSE old \/ ending
-\* Streams::cancel: a streaming extra's session is cancelled (its task runs RecognizerSession::cancel).
+\* Streams::cancel issues Notify and transfers task ownership; it does not await session cleanup.
 Released(x) == IF x = "open" /\ ~LeakExtraOnCancel THEN "released" ELSE x
 
 Init == /\ phase = "pre"
@@ -49,7 +49,7 @@ DrainOne == /\ phase \in {"pre", "finish"} /\ Len(queue) > 0
             /\ LET c == Head(queue) IN
                /\ off' = NextOff(c, off) /\ quit' = (quit \/ (c = "quit"))
                /\ preEnds' = IF phase = "pre"
-                              THEN Accumulate(preEnds, Ends(c, off)) ELSE preEnds
+                              THEN preEnds \/ Ends(c, off) ELSE preEnds
                /\ ended' = Accumulate(ended, Ends(c, off))
             /\ queue' = Tail(queue)
             /\ UNCHANGED <<phase, sent, intentOff, stopRequested, cancelPending,
@@ -138,7 +138,7 @@ CloseReturns == /\ phase = "ending" /\ ~closeDone
 
 \* Second-pass completion and writing completion are distinct cancellation-first awaits. A cancel
 \* here cancels the extras still running (Streams::cancel); a merge that ran leaves the ones it did
-\* not wait for to finish on their own, bounded by merge::LIMIT, and they feed no outcome.
+\* not wait for to finish on their own; they feed no capture outcome. Cleanup is not modeled.
 SecondaryReturns == /\ phase = "secondary"
                     /\ phase' = IF ~cancelPending /\ writing THEN "writing" ELSE "finish"
                     /\ result' = IF cancelPending THEN "cancelled"
@@ -170,13 +170,13 @@ Next == (\E c \in Commands : Send(c)) \/ DrainOne \/ PreEmpty \/ Receive
         \/ SecondaryReturns \/ WritingReturns \/ FinishEmpty
 Spec == Init /\ [][Next]_vars
 NoDeliveryAfterStop == delivered => ~stopRequested
-\* No extra session stays owned by a finished capture: it was cancelled or handed on, bounded.
+\* No extra remains owned by the finished capture: cancellation was requested or ownership handed on.
 ExtrasNeverLeftOpen == phase = "done" => extra # "open"
-\* A capture that ended cancelled before its merge finished leaves no extra session running.
+\* A capture cancelled before merge handoff has requested cancellation of each extra.
 ReleasedWhenCancelled == (phase = "done" /\ result = "cancelled" /\ ~merged)
                          => extra \in {"none", "released"}
 \* Nothing is accepted while the model is still loading.
 AcceptedOnlyAfterLoad == phase \in {"ending", "secondary", "writing"} => ~starting
-\* Only a merge that ran leaves extras behind, and what it left feeds nothing.
+\* Only a completed merge stage (including skipped text merging) hands extras off without cancellation.
 LateOnlyAfterMerge == extra = "late" => merged
 =============================================================================

@@ -24,9 +24,15 @@ Four invariants, each one sentence:
 
 ## Covers
 
-Sync commit: `fe051c6b01af06533e4baddaff7ed25bf43355ac`. [source.json](source.json)
+Sync commit: `f87174d14c2651d7ad1a88e44334ca8ed38ae391`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
+
+Since `fe051c6b`, `c3f9fbff` adds recognizer backpressure/timeout handling and a
+bounded error send for malformed mic audio; `26f5cdd2` merges that with stall
+reporting; `9b09b141` changes only a test deadline. None changes store locks or
+the order of sync, final save and release. Extra browser-send failure exits
+are already represented by `Close`. The model and bounds are unchanged.
 
 | Code | Model action and boundary |
 | --- | --- |
@@ -47,6 +53,9 @@ Not covered in these files: `retire`, `rename`, `set_model_title`, `snapshot`,
 `write_loop` (one writer thread serializes them).
 
 ## Run
+
+TLA+ with TLC explores all interleavings in the stated finite model; it fits
+this ordering property but does not execute the production implementation.
 
 From the repository root, with Python 3.12+:
 
@@ -110,7 +119,7 @@ The `RevokeOnlyPrevious` counterexample, which is the takeover chain that
 1. `c1`'s `attach` claims and reads the conversation; a turn is added but not yet synced (`Claim`, `Read`, `Turn`).
 2. `c2` opens the same conversation: its `attach` takes the `Live` entry and waits for `c1` (`Claim`).
 3. `c3` opens it too, carrying `c1` and `c2` as predecessors, and waits for `c2` (`Claim`).
-4. `c3`'s `HANDOFF_WAIT` passes first, since timers can fire in either order (`WaitTimeout`).
+4. `c3`'s `HANDOFF_WAIT` passes first, though the earlier deadline has also passed in this model (`WaitTimeout`).
 5. `c3` marks only `c2` dead, reads the history and returns (`Revoke`, `Read`).
 6. `c1`'s `handle_session` loop syncs, and `SessionStore::save` stores its turn after `c3` returned (`Sync`): an old device has written over the conversation the newest one holds.
 
@@ -148,9 +157,9 @@ worktree, and confirm the original checkout is unchanged and still passes.
 One saved conversation; three connections that each open it once, in any
 order; at most one new turn each; any number of deletes. Each connection's
 saves can happen at any point while it is open, which over-approximates the
-`handle_session` loop. `HANDOFF_WAIT` can pass at any moment of a wait, and
-every takeover waits the same length, so deadlines pass in the order the waits
-began.
+`handle_session` loop. `HANDOFF_WAIT` can pass at any moment of a wait, under the assumption that deadlines are established in claim order; this model
+does not cover an OS preemption between releasing the claim lock and creating
+the timeout. Timer callbacks may run in either order once deadlines have passed.
 
 Assumed: `Mutex<State>` excludes other lock holders; oneshot and watch channels
 deliver; the store's `Arc<AtomicBool>` stores are `SeqCst` and made under the

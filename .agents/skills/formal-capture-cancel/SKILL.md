@@ -1,6 +1,6 @@
 ---
 name: formal-capture-cancel
-description: Check that desktop cancellation, pause, and quit prevent a capture from entering delivery. Use on any change to crates/thalvi-app/src/runner.rs or crates/thalvi-desktop/src/engine.rs, recognizer.rs, or delivery.rs; update the source-mapped TLA+ model before rerunning when code changes.
+description: Check that desktop cancellation, pause, and quit prevent a capture from entering delivery. Use on any change to crates/thalvi-app/src/runner.rs or crates/thalvi-desktop/src/engine.rs, recognizer.rs, delivery.rs, realtime.rs, openai_live.rs, engine/streaming.rs, or local.rs (connect, loading); update the source-mapped TLA+ model before rerunning when code changes.
 ---
 
 # Formal capture cancellation
@@ -9,144 +9,42 @@ description: Check that desktop cancellation, pause, and quit prevent a capture 
 
 An ending control queued before the capture's final control drain empties must
 prevent that capture's accepted result from entering delivery, even if a later
-control resumes listening. The result's text is still kept once, as cancelled.
+control resumes listening. The CPU replay separately checks that the result's text is kept once, as cancelled.
 Breaking this promise can type text, press Enter, or execute a configured task
 after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `a03b86c0f995a8ec683157ed28765e668c183c66`. The recorded file hashes
-match the covered files at that commit. Since the model was last updated, holds
-stopped honouring spoken endings (a hold's secondary transcript is agreed as
-plain text, and cancellation is still polled first), the quiet wake floor was
-added in `engine.rs`, the upsampling filter and word list changed in
-`recognizer.rs`, and `runner.rs` hands the word list to the local recognizer and
-notifies followers of every refused press, and `load_wake` publishes a wake model
-download while `Runner::build` loads the wake engine. A released hold sends silence through
-the same cancel-first send before it waits for the final. `Runner::apply` now
-accounts for presses during a rebuild and refuses them afterwards; its former
-body is `Runner::rebuild`. A dropped listener keeps its hold cursor until it
-resumes. Closing the microphone ends that interval and hands pending presses to
-Apply, which returns the accounted cursor to the live engine so a newer press
-cannot be skipped. Speech servers became a list of entries: `Engine::reconcile`
-runs every ticked second-pass entry (none runs when none is ticked, as before
-when the switch was off), still polling cancellation first, and the recognizer
-errors name their entry. `drive` times the recognizer's first words and each final
-result against the speech heard (`Heard`) for the metrics. None of these touch the mapped functions' cancellation
-behaviour, so the model is unchanged and only the hashes moved.
-The OpenAI-compatible recognizer buffers audio until release or the wake VAD pause; cancellation aborts its upload before delivery, with the existing cancel-first control path unchanged.
-Classifying its endpoint errors (#385 review fix) changes only the reported message and headline; cancellation and delivery admission are unchanged, so the model is unchanged and its `recognizer.rs` and `openai_live.rs` hashes moved.
-The GNOME host (#267) changed `delivery.rs` and `runner.rs` without changing that:
-`Delivery::paste_in` (formerly `type_in`) returns `Delivered::InWindow` or `Delivered::OnClipboard` from the
-same `Delivery::finish` admission, so a clipboard-only desktop is another admitted host
-action and a cancelled capture still never reaches it. `Runner::capture` now calls
-`Publisher::woke` before `drive`, which only sets the view's `copies` and `target`.
-A wake capture whose whole text is a task now arms the task ending itself; it
-reaches `Engine::conclude` through the same `Done::Accepted`, so that is unchanged too.
-The offline-model fix (#272) added a `RecognizerError::Model` variant, raised while the
-local model's files are fetched and so before any `RecognizerSession` exists.
-Writing a dictation out ("write that out", the write key) adds one stage after
-`reconcile`: `Engine::write` streams a chat reply and returns Accepted (a paste of
-the written text), Failed (the user's words are kept for the clipboard) or
-Cancelled. It polls cancellation first, through `bounded`, at every await, so it
-is another case of the model's `secondary` stage: a post-accept step that sees a
-pending cancel before it can return Accepted. Its Failed result is not an
-accepted result, and an ended capture skips `Delivery::finish`, so the clipboard
-copy of the user's words is gated by `ended` like every other host effect. The
-model now keeps second-pass completion and writing completion as separate
-cancellation-first awaits; neither admits a result into delivery. `delivery.rs`
-adds a `Write` arm that pastes.
-Delivery by pasting (#308) renames `type_in` to `paste_in` and drops its post-delivery `copy`, since the host
-now leaves the text on the clipboard; admission through `Delivery::finish`, the `Write` arm and every await
-boundary are unchanged, and `engine.rs` and `runner.rs` changed only in message text and a test.
-The ending spotter adds synchronous bookkeeping in `conclude` before the cue and
-recognizer release, and a `drive` branch that only plays a cue and shows a notice.
-`Runner::build` joins the spotter load with the wake load; capture notices are set
-synchronously. These changes preserve the mapped await boundaries, control drains
-and delivery admission, so the cancellation model is unchanged.
-The spotter loader now accepts its load future, like the wake loader, so tests
-exercise download status and both load outcomes. The future is still awaited at
-the same pre-capture boundary; the mapped cancellation functions are unchanged.
-`SpotStats::record` now owns the same synchronous capture-summary metric calculation,
-so exact durations and the zero-frame case can be tested. `close_spotting` still
-records it before the ending cue; this metric extraction preserves the control drains and await boundaries.
-An idle failure now picks `NoEnding` or `NoWords` from the kept text; it only chooses the error and leaves every await, control drain and delivery admission as mapped.
-The default recognizer became On this computer (#141); a `runner.rs` test now names its server engine
-explicitly. No mapped function changed, so only the hash moved.
-The on-device model's load now reports the steps it takes and a download's percent (`load_speech_model` runs the
-load through `load_showing`, a select over the load and the recognizer's step channel, and `Publisher`
-shows each step as the loading notice). No mapped function changed, so only the `runner.rs` hash moved.
-`Engine::reconcile` now returns after the earliest agreeing ticked entry, keeping later requests as recorded-only tasks. Its cancellation-first select still fences acceptance; these later tasks do not feed the capture outcome. The recognizer change only extends its test fake; the mapped session and close remain unchanged.
-The Hyprland runtime binds (#337) add `EngineLink::hold_problems`, another sender of the existing
-`Control::HoldKeyFailed`, which `Requests::take` already treats as no ending. A reasoning writing model (#348) adds
-a `Piece::Thinking` arm to `Engine::write` that only sets the Thinking state and records a time, and relabels a
-timeout after reasoning as `WritingError::StillThinking`, still a Failed result; every await is the same `bounded`
-cancel-first call, so the model is unchanged and only the hashes moved.
-Listening for the dictation wake alone (#342) removes the conversation and ambiguous wake branches from `listen`,
-`scan` and `refuse_quiet`, and the runner's conversation arm in `Runner::step`; no mapped function changed, so only
-the hashes moved.
-A file fed in place of the microphone (#350) adds `Control::Feed`, which `Requests::ends` answers
-by refusing the file and ending nothing, so like `Apply` it has no cancellation effect; `Runner::capture` hands
-`drive` a cancel callback that also stops the feed, and `Engine::capture` notes whether its frames come from a file
-for the capture metric. No mapped await boundary, control drain or delivery admission changed, so the model is
-unchanged and only the hashes moved.
-AltGr alone as a hold key (#387) keeps the frames heard since the press: `Engine::scan` stores `Queued`
-frames in `wake_clip`, `begin_hold` copies those since the press into `Held::heard`, and `Engine::start`
-seeds its backlog with them before any await. `capture`, `conclude`, `end_cue`, `end_with`, `reconcile`,
-`write`, `bounded` and `cancel` are unchanged, and the seed adds no await, control drain or delivery
-admission, so the model is unchanged and only the `engine.rs` hash moved.
-The Wake words switch (#377) skips `Engine::scan`'s wake scoring when off (`wake_words`, set through
-`Engine::set_wake_words`) and makes `Runner::apply`'s retune branch take the switch without a rebuild; the
-view's `wake_words` only picks the status word. `Requests`, `drive`, `Runner::capture`, `Settling::settle`
-and every mapped engine function are unchanged, and no await, control drain or delivery admission was added,
-so the model is unchanged and only the `runner.rs` and `engine.rs` hashes moved.
-The CPU-drawn overlay (#384) drops `prepare_overlay` from the host interface, which removes it from `runner.rs`'s
-test host only; no mapped function changed, so only the hash moved.
-Removing dictation through the Thalvi server (#386) deletes `ServerSession` and its `/transcription` client from
-`recognizer.rs`; the remaining network session, `RealtimeSession::close` in `realtime.rs`, awaits its close under the
-same `CLOSE_TIMEOUT`, so `CloseReturns` now maps there. `engine.rs`, `runner.rs` and `delivery.rs` lose the server
-engine's arms and the word-list sharing; no mapped await boundary, control drain or delivery admission changed, so the
-model is unchanged and only the hashes moved.
-Its later tests of a reply that isn't speech live in `recognizer.rs`'s test module; only that hash moved.
-Buffered OpenAI captures no longer expire at the idle deadline, and a wake upload's final spoken ending carries its armed route and text to delivery. Neither change alters the cancellation-first select, control drains, or delivery admission, so the model is unchanged and only the `engine.rs` hash moved.
-The Chat request kind and language (#419) change only what `OpenAiSession`'s upload task sends and records; `OpenAiSession::cancel` and `close` still abort it, so the model is unchanged and only the `openai_live.rs` hash moved.
-The Settings page rename (#341) changes only message text that names a page in `engine.rs`, `recognizer.rs`, `delivery.rs` and `openai_live.rs`; no mapped function's logic changed, so only those hashes moved.
-Switching the microphone while listening (#340) adds `Session::switch_microphone` and splits `Runner::apply` so the engine is rebuilt with the open microphone before the new one opens beside it. Settings during a capture still wait in `pending`, and no mapped function changed, so only the `runner.rs` hash moved.
-Merging every recognizer's text (#228) replaces `Engine::reconcile` with `Engine::merge`: the same post-accept
-stage, now waiting for every switched-on extra (up to a cutoff) and then asking the chat endpoint to merge. Its two
-awaits, the collection loop's `select!` and the merge call's `bounded`, both poll cancellation first, and what follows
-them (recording, a notice) is synchronous and never delivers, so it is the model's `secondary` stage under a new name:
-a cancel returns `Cancelled` before any text can leave it, a failed or unfaithful merge returns the live text as
-`Accepted` like any other post-accept result, and `write` after it is unchanged. The model is unchanged and only the
-`engine.rs` hash moved.
-Streaming extras (#339) add sessions beside the live one: `Streams::start` (called in `Engine::capture` before
-`start`) spawns one task per extra, `feed` forwards every frame the live session is sent, `conclude` sends them
-`Finish` when the merge will run and cancels them (`drop_streams`, `Streams::cancel`) on every other end, and
-`merge` collects their answers under the same cancellation-first `select!` as the uploads. The model gains
-`extras` (streaming extras are on; without `secondary` the merge does not run, as for a scratched capture),
-`extra` (`none`, `open`, `released`, `late`) and `merged`, and three invariants: a finished capture never leaves an
-extra `open`; one cancelled before its merge finished leaves none running; `late` (left to finish on its own,
-bounded by `merge::LIMIT`) happens only after a merge that ran. The extras' answers feed only the merge, so
-`NoDeliveryAfterStop` still holds through them. A third negative control, `LeakExtraOnCancel`, skips the release.
-The merge's note (`Engine::take_merge_note`, `noted` in `runner.rs`) is read right after `capture` returns, beside
-`take_ignored`, and only appends text to the final status; it adds no await, control drain or delivery admission, so
-the model is unchanged and only the `engine.rs` and `runner.rs` hashes moved.
-A finished speech model download (#374) adds `Control::ReloadSpeechModel`, which `Requests::ends` answers by keeping the
-model for after the capture and ending nothing, like `Apply`; `Runner::capture` then starts the load synchronously after the
-quit check, adding no await, control drain or delivery admission, so the model is unchanged and only the `runner.rs` hash moved.
-A dictation waits for an on-device model that is being read from disk (#378): `Engine::start` has no time limit while
-`Recognizer::loading` reports a load, and ends at once when that load downloads or fails. Its select still polls
-cancellation first, but the pre-accept stage can now stay pending for any time, so the model gains `starting`
-(the recognizer loads a model on this computer), `Loaded` and `LoadFailed`, and the invariant `AcceptedOnlyAfterLoad`
-(`Accept` needs the load done; a failed load is a non-delivering end that cancels the extras). A third check was made by
-hand: removing `~starting` from `Accept` fails the model. The model's other actions are unchanged, and the `engine.rs`
-and `recognizer.rs` hashes moved.
-The faithful check **passes**. It used to fail: cancellation was lost while the
-recognizer closed after the accepted cue finished, because the runner kept only
-the last drain's decision. `Requests::ended` now keeps every ending decision
-through the whole `drive` call, and `Settling::settle` delivers nothing once it
-is set. The full model's counterexample, the shortest trace and the first
-replay failure are kept in "Read a result" as the history of the fix.
+Sync commit: `f87174d14c2651d7ad1a88e44334ca8ed38ae391`. The source hashes describe this commit.
+The previous sync was `a03b86c0f995a8ec683157ed28765e668c183c66`.
+The covered changes through this commit include buffered live recognition,
+extra recognizer merging and streaming, deferred reload after download, and
+waiting for an on-device load. Their mapped actions remain below. Microphone
+switching happens after capture; notices, metrics and endpoint payload changes
+add no delivery path. No product promise or bound changed in this maintenance.
+
+The five checked invariants have these exact meanings:
+
+- `NoDeliveryAfterStop`: a control ending this capture before the final empty
+  receive prevents admission to delivery.
+- `ExtrasNeverLeftOpen`: at capture completion, extra tasks are no longer owned
+  by this capture: cancellation was requested or they were handed to recording.
+- `ReleasedWhenCancelled`: an engine-cancelled capture before merge handoff has
+  requested cancellation of its extras.
+- `LateOnlyAfterMerge`: handing extras to recording without a cancellation
+  request happens only after the merge stage completes, including a skipped merge.
+- `AcceptedOnlyAfterLoad`: a capture cannot enter its accepted ending, merge or
+  writing stage while its recognizer is still loading.
+
+`extra = "released"` means **cancellation requested**, not that a task or socket
+has finished closing: `Streams::cancel` notifies tasks and returns their JoinSet,
+and `Engine::drop_streams` moves it to `recorded_only`. `extra = "late"` means
+that ownership was handed over without that request. `merged` records that
+handoff, not successful text merging. Earlier prose claiming no task remained
+running or cleanup was bounded by `merge::LIMIT` was unsupported by this model;
+the logical invariants are unchanged. Task cleanup and its duration remain
+unverified. A runner-only cancel after merge handoff still prevents delivery,
+but does not retroactively cancel recorded-only tasks.
 
 All paths below are repository-relative. [source.json](source.json) records
 whole-file hashes so a changed implementation cannot silently reuse this model.
@@ -159,13 +57,16 @@ Matching hashes establish synchronization only, not correctness of the model.
 | Same file: `Runner::capture`, `Settling::settle` | `FinishEmpty` admits an Accepted result only if `ended` is clear. This is delivery admission at the last empty receive, not an atomic physical host effect. An ended capture skips `Delivery::finish` and is kept as cancelled. |
 | `crates/thalvi-desktop/src/engine.rs`: `EngineHandle::cancel`, `Engine::capture` | `cancelPending` represents the watch version change; capture entry consumes the old version. `Accept` and `ActiveCancelled` abstract capture work before the ending. |
 | Same file: `Engine::conclude`, `Engine::end_cue`, `Engine::end_with` | `CueReturns`, `CloseReturns`; the cue's cancellation-biased select and recognizer release are separate futures joined together. A completed cue retains its bool while close is still Pending. Neither completion is a transaction encompassing the other. |
-| Same file: `Engine::start`, `download_started`; `recognizer.rs`: `Recognizer::loading` | `starting`, `Loaded`, `LoadFailed`; the wait for an on-device model is unbounded and polls cancellation first. `Accept` is enabled only after `Loaded`. A download or load failure is `LoadFailed`, a failed capture that delivers nothing. |
-| Same file: `Engine::merge`, `Engine::write`, `bounded` | `secondary` (the merge of the extras' texts), `writing`, `SecondaryReturns`, `WritingReturns`; disabled stages are skipped, each enabled stage polls cancellation first before handing the result to the next stage. |
-| `crates/thalvi-desktop/src/engine/streaming.rs`: `Streams::start`, `Streams::finish`, `Streams::cancel`, `hear`, `park`, `run`; `engine.rs`: `Engine::drop_streams` | `extras`, `extra`, `merged`: `PreEmpty` opens the extra sessions, `Accept` (merge will not run), `ActiveCancelled`, `CueReturns`/`CloseReturns` (ending cancelled) and `SecondaryReturns` (cancel) release them, an uncancelled `SecondaryReturns` leaves them `late`. A task ends by `RecognizerSession::cancel` on a cancel, a closed channel, a failure or `merge::LIMIT`, and by `close` on its text. |
+| Same file: `Engine::start`, `download_started`; `recognizer.rs`: `Recognizer::loading`; `local.rs`: `LocalRecognizer::connect`, `loading` | `starting`, `Loaded`, `LoadFailed`; the wait for an on-device model is unbounded and polls cancellation first. `Accept` is enabled only after `Loaded`. A download or load failure is `LoadFailed`, a failed capture that delivers nothing. |
+| Same file: `Engine::merge`, `Engine::ask_merge`, `Engine::write`, `bounded` | `secondary` (the merge of the extras' texts), `writing`, `SecondaryReturns`, `WritingReturns`; disabled stages are skipped, awaiting stages poll cancellation first; repeated waits stutter in this abstraction. A synchronous skipped merge returns without another poll; the runner's final drain still guards delivery. |
+| `crates/thalvi-desktop/src/engine/streaming.rs`: `Streams::start`, `Streams::finish`, `Streams::cancel`, `send_frame`, `hear`, `park`, `run`; `engine.rs`: `Engine::drop_streams` | `extras`, `extra`, `merged`: `PreEmpty` opens the extra sessions, `Accept` (merge will not run), `ActiveCancelled`, `CueReturns`/`CloseReturns` (ending cancelled) and `SecondaryReturns` (cancel) request their cancellation, an uncancelled `SecondaryReturns` leaves them `late`. The model tracks ownership and notification only; the task awaits `RecognizerSession::cancel` or `close` separately. |
 | `crates/thalvi-desktop/src/recognizer.rs`: `RecognizerSession`; `crates/thalvi-desktop/src/realtime.rs`: `RealtimeSession::close`; `crates/thalvi-desktop/src/openai_live.rs`: `OpenAiSession::cancel`, `OpenAiSession::close` | `CloseReturns` may occur before or after the cue. Network close is awaited under a timeout, so it can remain Pending; `OpenAiSession::close` aborts its upload task and returns at once. |
 | `crates/thalvi-desktop/src/delivery.rs`: `Delivery::finish`, `paste_in`, `call` | `delivered` abstracts admission to a valid configured host action. Actual host execution is outside the proof; once admitted it can run via `spawn_blocking`. Other changes to this file are not covered by the model. |
 
 ## Run
+
+TLA+ with TLC explores all interleavings in the stated finite model; it fits
+this ordering property but does not execute the production implementation.
 
 From the repository root, with Python 3.12+:
 
@@ -186,8 +87,8 @@ Temurin JRE `21.0.9+10` in the same user cache, verifying archive SHA-256
 Other platforms need a user-installed Java on PATH. No system package install
 is performed. Downloads require network access only on the first run.
 
-A faithful run here explores 44,768 distinct states (128,019 generated) with no
-error; the passing focused control explores 39,440.
+A faithful run here explores 62,800 distinct states (174,187 generated) with no
+error; a warm full check takes about 1 s, and the self-test about 5 s.
 Each TLC invocation has a 120 s limit and 512 MB heap limit. State counts are
 receipts for this model, not acceptance criteria for a changed model.
 
@@ -204,16 +105,22 @@ Check the negative controls after changing the verification:
 .agents/skills/formal-capture-cancel/scripts/check.py --self-test
 ```
 
-This runs a focused `Scenario = "fence"` control that disallows consuming a
-control after the ending cue returns (the shutdown ordering of the fixed bug).
-It passes, then both mutations must fail the **same** `NoDeliveryAfterStop`
-invariant: removing the `ended` guard from admission, and replacing OR
-accumulation with the last message's decision. Both mutations also fail under
-`Scenario = "all"`. A third control, `LeakExtraOnCancel = TRUE` under
-`Scenario = "all"`, never releases an extra session on a cancel and must fail
-`ExtrasNeverLeftOpen`. `SELF-TEST PASS` verifies detection only; it
-is not a pass of the full model. The production configuration remains
-`Scenario = "all"`, both mutation constants FALSE, `MaxControls = 3`.
+This runs the full faithful model, then each control with its named invariant
+alone, so another violation cannot hide a missing detector:
+
+| Control | Broken code behavior represented | Must fail |
+| --- | --- | --- |
+| `DropCompletionGuard` | `Settling::settle` admits an ended capture | `NoDeliveryAfterStop` |
+| `ForgetEarlierStop` | `Requests::take` overwrites `self.ended` instead of OR-ing | `NoDeliveryAfterStop` |
+| `LeakExtraOnCancel` | cancellation paths hand off extras without notifying them | `ExtrasNeverLeftOpen` and, separately, `ReleasedWhenCancelled` |
+| `late-without-merge` | `drop_streams` hands extras off as recording-only without cancellation | `LateOnlyAfterMerge` |
+| `accept-before-load` | `Engine::start` permits an accepted ending before connect completes | `AcceptedOnlyAfterLoad` |
+
+The last two controls edit a copy of the model and require an exact match;
+no working-tree source is changed. `SELF-TEST PASS` means the faithful model
+passed and all six controls broke exactly their named invariant. It is not
+physical desktop verification. The production config remains `Scenario = "all"`,
+all mutation constants FALSE, `MaxControls = 3`.
 
 For a deterministic CPU replay against the real engine and delivery, plus
 byte-for-byte extracted `Control`, `Requests`, and `drive` from the current
@@ -239,12 +146,12 @@ output and `delivered=true`. Now it observes Accepted output with `ended=true`,
 no host call, and one cancelled history entry and draft carrying the text.
 The second replay gates the same shutdown without Cancel, presses and releases
 the hold key while close is pending, and checks one refusal and successful delivery.
-The settings replay extracts `Runner::apply` and `refuse_unheard` byte for byte,
+The settings replay extracts `Runner::apply_engine` and `refuse_unheard` byte for byte,
 gates a fake rebuild, and checks one refusal for a tap or held press just before
 Apply or during the rebuild, through both
 success and failure. It also replays identical and retune-only Apply handoffs with the real engine,
-accepting a held press or reporting a completed tap. It checks the Apply wiring,
-not model loading or native input.
+accepting a held press or reporting a completed tap. It checks engine retune/rebuild handoffs, not the outer `Runner::apply` microphone
+switch, model loading or native input. A warm replay takes about 5 s.
 The replay respects an existing `TMPDIR` and `CARGO_TARGET_DIR` for managed jobs.
 
 ## Read a result
@@ -261,7 +168,7 @@ Shortest trace of the fixed bug (secondary disabled), kept to read the model:
 3. `engine.rs::conclude` reaches Accepted and starts `end_with` (`Accept`).
 4. `engine.rs::end_cue` finishes successfully while recognizer close remains Pending (`CueReturns`).
 5. `runner.rs::drive` receives Cancel, `Requests::take` returns true, and `EngineHandle::cancel` changes the watch version (`Receive`).
-6. `recognizer.rs::ServerSession::close` completes or times out; `engine.rs::end_with` returns the cue's earlier true, and disabled `merge` returns Accepted (`CloseReturns`).
+6. `realtime.rs::RealtimeSession::close` completes or times out; `engine.rs::end_with` returns the cue's earlier true, and disabled `merge` returns Accepted (`CloseReturns`).
 7. `runner.rs::drive` finds an empty completion queue because it consumed Cancel already; `Runner::capture` admits Accepted to `Delivery::finish` (`FinishEmpty`).
 
 Cancel enqueued after step 4 reached the same bug; the CPU replay uses that
@@ -289,31 +196,30 @@ order. Step 7 now finds `ended` set by step 5 and admits nothing.
    preserve a real failure. The known failure may be resolved only with code
    evidence and a faithful full-model pass, plus the real-code replay.
 
-When proving this recipe, make a temporary product mutation in a throwaway
-worktree: change `Requests::read_queued` from `ends |= self.take(...)` to
-`ends = self.take(...)`. The unchanged recipe must first report `SOURCE DRIFT`.
-Read that diff, set `ForgetEarlierStop = TRUE` in the scratch model's config,
-and refresh its source hash. For a diagnostic comparison, use the already
-specified `Scenario = "fence"` to isolate this new break from the known bug;
-TLC must report a counterexample where Cancel followed by Resume revives the
-capture. Restore the full configuration and remove only the scratch worktree.
-Confirm the original checkout's product files and status are unchanged by the
-proof, and rerun the full check to restore its recorded result.
+To prove the recipe in a throwaway worktree, change `Requests::take` in
+`crates/thalvi-app/src/runner.rs` from `self.ended |= ends;` to
+`self.ended = ends;`. The check must first report `SOURCE DRIFT`. Read that
+diff, set `ForgetEarlierStop = TRUE` in the scratch config and refresh the
+source hash; the full check must report `COUNTEREXAMPLE NoDeliveryAfterStop`.
+The local `read_queued` accumulator still ORs its decisions; mutating only that
+local accumulator no longer reproduces the fixed delivery bug. Remove the
+scratch worktree and rerun the faithful check. Product files in the working
+checkout must be unchanged.
 
 ## Scope
 
 One capture, initially listening, one logical FIFO producer (representing
 channel send order), and zero to three controls from Cancel, pause, resume,
 toggle, Apply, an update's restart request (never ending a capture: the engine answers busy) and Quit. Every combination of enabled and disabled/skipped
-second-pass transcription and writing, with or without streaming extras, is explored. Each queue send, each receive, and each awaited
-completion is a separate transition; synchronous runner-local updates are
+second-pass transcription and writing, with or without streaming extras, is explored. Each queue send, each receive, and each modeled awaited
+completion is a separate transition; repeated capture and merge awaits are abstracted as stuttering; synchronous runner-local updates are
 combined where no other actor reads them. The final empty receive is the
 admission fence. Sends after that fence belong to the next flow and are not
 covered; native delivery need not already have occurred at the fence.
 
 The pre-accept capture pipeline is abstracted as an accepted result or an
 observed cancellation; a failure and "never mind" are the same non-accepted end. Each extra session's
-own connect, frames, events and text are not modeled, only whether the session is still owned.
+own connect, frames, events and text are not modeled, only whether the capture owns their tasks or has handed them off with or without a cancellation request.
 The replay has no streaming extra. Recognition and silence correctness, watch wraparound,
 channel disconnection, thread/process failure, repeated captures, more than
 three controls, liveness/fair scheduling, config application, history writes,
