@@ -587,7 +587,6 @@ mod tests {
         }
     }
 
-    #[expect(clippy::panic, reason = "an unexpected delivery error fails the test")]
     fn nothing_typed_text(error: HostError) -> String {
         match error {
             HostError::NothingTyped(notice) => notice,
