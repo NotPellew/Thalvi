@@ -19,9 +19,11 @@ below establish no native desktop behavior. The `measure` binary has CLI tests i
 Settings persistence and file-driven recognition/paste, with build identity
 and cleanup requirements. [synthetic-audio.md](synthetic-audio.md) defines the
 automated audio scope and additional fault/playback checks. Use synthetic input
-and silent output. Physical audio is excluded from verification plans until the
-developer explicitly says a suitable setup exists; do not schedule it, request
-a supervised headset session, or treat it as a pending completion requirement.
+and silent output by default. Do not routinely schedule physical audio or make
+it a completion requirement. When a specific issue or PR needs physical audio
+to verify its acceptance, an agent may always ask the developer before merge:
+explain the gap synthetic checks cannot cover and the short check needed.
+Arrange the check only after the developer confirms a suitable setup and agrees.
 
 A run has one of two modes. Neither reaches a paid service or needs a key.
 

@@ -4,7 +4,8 @@ This indexes Thalvi's web recipes and the separate desktop guide. Read the
 index before driving the app, then use the matching feature file as the recipe.
 For controlled microphone/endpoint failures, private audio recording and digital
 playback measurements, use [synthetic audio](../synthetic-audio.md). Physical
-audio is excluded until the developer explicitly confirms a suitable setup.
+audio is not routine; agents may ask before merge when a specific issue or PR
+needs it for acceptance, as that guide describes.
 
 ## Baseline preconditions
 

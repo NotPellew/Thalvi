@@ -367,10 +367,11 @@ build identity, and metrics for each case. `source: microphone` in a capture
 metric also describes the private PipeWire microphone; it is not evidence of
 physical hardware. `ctl feed` is a separate file-input route.
 
-Physical audio is out of scope until the developer explicitly confirms a
-suitable setup exists. Do not put hardware fixtures or supervised headset
-sessions in the plan or leave them as a completion requirement. Use only the
-private microphone/file input and null output described here. Synthetic audio
+Use the private microphone/file input and null output described here by default.
+Do not routinely plan hardware fixtures or supervised headset sessions. If an
+issue or PR needs physical audio for acceptance, ask the developer before merge
+under the exception in [synthetic-audio.md](synthetic-audio.md); do not assume
+the setup or participation is available. Synthetic audio
 can exercise real recognizers and digital playback; it does not establish
 physical transducers, room acoustics, comfort or perceived voice quality.
 See [synthetic-audio.md](synthetic-audio.md) for browser fault and playback checks.

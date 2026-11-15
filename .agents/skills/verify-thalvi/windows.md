@@ -93,8 +93,9 @@ the destination received text.
 
 This exercises the real recognizer and Windows paste path using file input.
 It proves neither the physical microphone nor the physical hold shortcut:
-the Windows hook deliberately ignores injected key events. Report that boundary;
-do not add physical audio or a supervised headset session to the plan. Synthetic
+the Windows hook deliberately ignores injected key events. Report that boundary.
+If physical audio is needed for a specific issue or PR, agents may ask the
+developer before merge under [synthetic-audio.md](synthetic-audio.md). Synthetic
 key-state tests and CLI hold controls are separate evidence from hardware keys.
 
 ## Cleanup

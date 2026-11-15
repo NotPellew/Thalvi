@@ -1,10 +1,16 @@
 # Synthetic audio verification
 
 Use synthetic input and silent output for unattended verification. Physical
-audio is excluded until the developer explicitly confirms a suitable setup
-exists. Do not schedule a headset session, propose buying a fixture as a task
-dependency, or make human listening a completion requirement. Describe hardware
-and subjective quality as outside the scope, not as unfinished synthetic tests.
+audio is not a routine plan item or completion requirement. Do not assume a
+headset session or make buying a fixture a dependency.
+
+For a specific issue or PR whose acceptance still needs physical audio, agents
+may always ask the developer before merge. Finish the independent synthetic
+checks first, explain exactly what they cannot establish, and propose a short
+check. Arrange it only after the developer confirms a suitable setup and agrees.
+Keep the acceptance gap explicit until the check is performed or the developer
+resolves the requirement; synthetic evidence must not be relabelled as hardware
+proof. Otherwise, describe hardware and subjective quality as outside scope.
 
 ## Coverage and evidence
 
