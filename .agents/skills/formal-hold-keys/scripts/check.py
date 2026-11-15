@@ -76,14 +76,19 @@ def run(evidence, label, mutation=None):
     command = ['cargo', 'test', '--offline', '--locked', '-p', 'thalvi-desktop',
                '--test', 'formal_hold_keys', '--', '--nocapture']
     with (root / 'harness.txt').open('w') as log:
-        subprocess.run(command, cwd=root, env=environment, stdout=log, stderr=subprocess.STDOUT,
-                       timeout=600, check=False)
+        done = subprocess.run(command, cwd=root, env=environment, stdout=log, stderr=subprocess.STDOUT,
+                              timeout=600, check=False)
     output = (root / 'harness.txt').read_text()
     broken = re.findall(r'^COUNTEREXAMPLE (\w+)$', output, re.M)
     holds = re.findall(r'^HOLDS (\w+)$', output, re.M)
     if sorted(broken + holds) != sorted(PROPERTIES):
         raise RuntimeError(f'the harness did not report every property; read {root / "harness.txt"}')
-    scenarios = re.search(r'^SCENARIOS (\d+)$', output, re.M).group(1)
+    if done.returncode != (101 if broken else 0):
+        raise RuntimeError(f'harness exit {done.returncode} contradicts its properties; read {root / "harness.txt"}')
+    count = re.search(r'^SCENARIOS (\d+)$', output, re.M)
+    if count is None or int(count.group(1)) == 0:
+        raise RuntimeError(f'the harness did not run any scenarios; read {root / "harness.txt"}')
+    scenarios = count.group(1)
     print(f'{label}: {scenarios} scenarios; '
           + ('COUNTEREXAMPLE ' + ' '.join(broken) if broken else 'PASS')
           + f' ({root / "harness.txt"})', flush=True)

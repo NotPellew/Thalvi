@@ -36,7 +36,7 @@ def main():
     ]
     template = (SKILL / 'scripts/repro.rs').read_text()
     test = template.replace('// INSERT_RUNNER_SOURCE', '\n'.join(pieces))
-    reload = runner[runner.index('    async fn apply('):runner.index('    /// Closes the microphone and replaces')]
+    reload = runner[runner.index('    async fn apply_engine('):runner.index('    /// Closes the microphone and replaces')]
     refusal = runner[runner.index('    fn refuse_unheard('):runner.index('    /// Says that `count` presses of')]
     test = test.replace('// INSERT_RELOAD_SOURCE', reload + refusal)
     (snapshot / 'crates/thalvi-desktop/tests/formal_cancel_repro.rs').write_text(test)

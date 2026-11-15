@@ -56,11 +56,13 @@ own, so either order could (not tried on a live session).
 
 ## Covers
 
-Sync commit: `6baf0f0e1046590b29f2b562c71aca84f4de0858` (#387). [source.json](source.json)
-records the whole-file hash of `crates/thalvi-desktop/src/hold.rs`. Matching
-hashes establish synchronization only, not that the event model still fits. The
-recorded hash also covers the #326 fix, whose own commit cannot name itself, so
-`sync_commit` stays at the last commit the check ran against before it.
+Sync commit: `f87174d14c2651d7ad1a88e44334ca8ed38ae391`. [source.json](source.json) records the
+whole-file hash of `hold.rs`. Matching hashes establish synchronization only,
+not that the event model fits. Changes since `6baf0f0e` alter hook routing and
+its tests (`251fd063`, `27430c3b`); `HoldInput`, `Presses`, their bounds and the
+AltGr event harness remain unchanged. The merged history also contains the
+already represented AltGr addition `51c26f40` and key-validation/message changes
+`0baa95a4`, `c056fa4c`. Hook routing itself remains outside this proof.
 
 | Code | In the harness |
 | --- | --- |
@@ -80,6 +82,10 @@ frames, and `Refusal`'s wording.
 
 ## Run
 
+This is bounded exhaustive enumeration against real Rust code, not a theorem
+about all inputs or a native key-hook proof. It avoids a second implementation
+of `HoldInput`; the harness models only legal events and observations.
+
 From the repository root, with Python 3.12+ and the workspace's Rust toolchain:
 
 ```sh
@@ -91,7 +97,8 @@ It copies the tracked `crates/` and the workspace manifests into a new
 `crates/thalvi-desktop/tests/formal_hold_keys.rs`, and runs
 `cargo test --offline --locked -p thalvi-desktop --test formal_hold_keys`.
 The pinned toolchain (`rust-toolchain.toml`) and `Cargo.lock` pin every version.
-Build output goes to `${XDG_CACHE_HOME:-~/.cache}/thalvi-formal/hold-keys-target`,
+Build output uses an existing `CARGO_TARGET_DIR`, otherwise
+`${XDG_CACHE_HOME:-~/.cache}/thalvi-formal/hold-keys-target`,
 never into the checkout. It needs the Cargo dependencies already fetched and the
 Linux build prerequisites from AGENTS.md. Nothing is installed.
 
@@ -99,8 +106,11 @@ It runs 351,684 scenarios (85,770 of two plain keys, 265,914 of AltGr alone besi
 compiling; each run has a 600 s limit. It prints `EVIDENCE=...`; `harness.txt` there
 holds the full output. Exit 0 prints `PASS`; exit 1 prints each broken
 property's shortest counterexample as numbered steps, then `FAIL`; exit 2 prints
-`BLOCKED` for source drift, a build failure or a timeout. The current result is
-exit 0 with `PASS`. Never turn a failure into a pass.
+`BLOCKED` for source drift, a build failure or a timeout. A PASS also requires Cargo exit 0 and a positive scenario count; contradictory
+output or a failed process is BLOCKED. The current result is exit 0 with `PASS`. Never turn a failure into a pass.
+
+The checker's failure handling has a standard-library regression check:
+`python3 .agents/skills/formal-hold-keys/scripts/test_check.py`.
 
 After changing the harness, check that each property can still fail:
 
@@ -121,9 +131,8 @@ break its property:
 | `StaleWaitConfirms` | the wait of an earlier press starts the hold of a later one | `ChordNeverHolds` |
 | `ReleaseCreditsWaiting` | the release of a press that never became a hold leaves an early-release credit, as a release of a key that is up does | `FreeKeyStartsHold` |
 
-A fix for the finding must turn `FreeKeyStartsHold` to `HOLDS` without breaking
-the other two, and `ForgetIgnoredKey` is that fix's reversal, so the self-test
-keeps showing the property can fail. A mutation whose text no longer matches
+`ForgetIgnoredKey` reverses the fixed bug, so the self-test keeps showing
+that `FreeKeyStartsHold` can fail. A mutation whose text no longer matches
 `hold.rs` stops the self-test with `BLOCKED`; update it from the code.
 
 ## Read a result
@@ -142,7 +151,7 @@ to make a run pass.
 1. Read the `hold.rs` diff and commit messages since the sync commit. Check
    whether the change alters what the harness assumes: the two keys and their
    `set`/`set_write` entry points, a look being `is_over` then `take` then
-   `take_lost`, the 1 s overtake window, and which arrivals Hyprland or the
+   `take_lost`, the 1 s overtake window (real wall time, not a fake clock), and which arrivals Hyprland or the
    hook can produce. Read the engine's and runner's callers in
    `crates/thalvi-desktop/src/engine.rs` (`scan`, `on_key`, `capture`) and
    `crates/thalvi-app/src/runner.rs` if the way presses are looked at changed.
@@ -157,7 +166,7 @@ to make a run pass.
    commit; for an uncommitted change, keep the previous commit and say the
    hash describes the working tree.
 5. Run the check and `--self-test`. A fix for the finding must turn
-   `FreeKeyStartsHold` to `HOLDS` without breaking the other two; update the
+   `FreeKeyStartsHold` to `HOLDS` without breaking the other three; update the
    finding text here and add its mutation.
 
 To prove this recipe, in a throwaway worktree make a release while the key is

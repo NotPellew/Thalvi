@@ -72,18 +72,25 @@ def source_check():
     print('Source matches recorded hashes; sync commit ' + inventory['sync_commit'], flush=True)
 
 
-def run(java, jar, evidence, label, scenario='all', drop=False, forget=False, leak=False):
+def run(java, jar, evidence, label, scenario='all', flags=(), invariant=None, mutation=None):
     run_dir = evidence / label
     run_dir.mkdir()
-    shutil.copyfile(SKILL / 'CaptureCancel.tla', run_dir / 'CaptureCancel.tla')
+    model = (SKILL / 'CaptureCancel.tla').read_text()
+    if mutation:
+        old, new = mutation
+        if model.count(old) != 1:
+            raise RuntimeError(f'{label}: model mutation no longer matches; update it from the code')
+        model = model.replace(old, new)
+    (run_dir / 'CaptureCancel.tla').write_text(model)
     config = (SKILL / 'CaptureCancel.cfg').read_text()
     config = config.replace('Scenario = "all"', f'Scenario = "{scenario}"')
-    if drop:
-        config = config.replace('DropCompletionGuard = FALSE', 'DropCompletionGuard = TRUE')
-    if forget:
-        config = config.replace('ForgetEarlierStop = FALSE', 'ForgetEarlierStop = TRUE')
-    if leak:
-        config = config.replace('LeakExtraOnCancel = FALSE', 'LeakExtraOnCancel = TRUE')
+    for flag in flags:
+        old = f'{flag} = FALSE'
+        if config.count(old) != 1:
+            raise RuntimeError(f'{label}: {flag} no longer matches the faithful config')
+        config = config.replace(old, f'{flag} = TRUE')
+    if invariant:
+        config = re.sub(r'INVARIANT .*', f'INVARIANT {invariant}', config)
     (run_dir / 'CaptureCancel.cfg').write_text(config)
     command = [java, '-Xmx512m', '-XX:+UseParallelGC', '-cp', str(jar),
                'tlc2.TLC', '-workers', '1', '-seed', '1', '-cleanup',
@@ -92,15 +99,15 @@ def run(java, jar, evidence, label, scenario='all', drop=False, forget=False, le
         done = subprocess.run(command, cwd=run_dir, stdout=log, stderr=subprocess.STDOUT,
                               timeout=120, check=False)
     output = (run_dir / 'tlc.txt').read_text()
-    violation = re.search(r'Invariant \w+ is violated\.', output) is not None
+    violation = re.search(r'Invariant (\w+) is violated\.', output)
     passed = done.returncode == 0 and 'Model checking completed. No error has been found.' in output
     if not violation and not passed:
         raise RuntimeError(f'TLC did not produce a verdict; read {run_dir / "tlc.txt"}')
-    print(f'{label}: {"COUNTEREXAMPLE (" + str(run_dir / "tlc.txt") + ")" if violation else "PASS"}', flush=True)
+    print(f'{label}: {"COUNTEREXAMPLE " + violation.group(1) + " (" + str(run_dir / "tlc.txt") + ")" if violation else "PASS"}', flush=True)
     for line in output.splitlines():
         if 'states generated' in line or line.startswith('Finished in'):
             print(line, flush=True)
-    return violation
+    return violation.group(1) if violation else None
 
 
 def main():
@@ -114,21 +121,30 @@ def main():
     keep = True
     try:
         if args.self_test:
-            if run(java, jar, evidence, 'faithful-fence', scenario='fence'):
-                raise RuntimeError('faithful fence control unexpectedly fails')
-            if not run(java, jar, evidence, 'removed-completion-guard', scenario='fence', drop=True):
-                raise RuntimeError('removed completion guard escaped the invariant')
-            if not run(java, jar, evidence, 'forgot-earlier-stop', scenario='fence', forget=True):
-                raise RuntimeError('overwritten drain stop escaped the invariant')
-            if not run(java, jar, evidence, 'leaked-extra-session', leak=True):
-                raise RuntimeError('an extra session left running by a cancel escaped the invariants')
-            print('SELF-TEST PASS: faithful fence control passed; all three mutations failed. '
-                  'Run without --self-test for the full model verdict.')
+            if run(java, jar, evidence, 'faithful'):
+                raise RuntimeError('faithful model unexpectedly fails')
+            controls = [
+                ('removed-completion-guard', 'NoDeliveryAfterStop', ('DropCompletionGuard',), None),
+                ('forgot-earlier-stop', 'NoDeliveryAfterStop', ('ForgetEarlierStop',), None),
+                ('leaked-extra-session', 'ExtrasNeverLeftOpen', ('LeakExtraOnCancel',), None),
+                ('cancel-keeps-extra', 'ReleasedWhenCancelled', ('LeakExtraOnCancel',), None),
+                ('late-without-merge', 'LateOnlyAfterMerge', (),
+                 ('THEN "released" ELSE x', 'THEN "late" ELSE x')),
+                ('accept-before-load', 'AcceptedOnlyAfterLoad', (),
+                 ('phase = "active" /\\ ~starting /\\ ~cancelPending',
+                  'phase = "active" /\\ ~cancelPending')),
+            ]
+            for label, invariant, flags, mutation in controls:
+                caught = run(java, jar, evidence, label, flags=flags,
+                             invariant=invariant, mutation=mutation)
+                if caught != invariant:
+                    raise RuntimeError(f'{label} should break {invariant}, got {caught or "a pass"}')
+            print('SELF-TEST PASS: faithful model passed; all six controls broke their named invariant.')
             return 0
         violation = run(java, jar, evidence, 'faithful')
         keep = violation
-        print('FAIL: cancellation can reach delivery; replay the trace using SKILL.md.' if violation
-              else 'PASS: no delivery after a stop in this bounded model; see SKILL.md for scope.')
+        print(f'FAIL: {violation} is broken; replay the trace using SKILL.md.' if violation
+              else 'PASS: all five invariants hold in this bounded model; see SKILL.md for scope.')
         return 1 if violation else 0
     finally:
         if keep:

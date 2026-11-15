@@ -1,5 +1,5 @@
 {
-  "sync_commit": "a03b86c0f995a8ec683157ed28765e668c183c66",
+  "sync_commit": "f87174d14c2651d7ad1a88e44334ca8ed38ae391",
   "files": {
     "crates/thalvi-app/src/settings.rs": {
       "sha256": "4fc8c6edcbb513e4c73def42104c4e89b6cda59b1a279c64c5c534df8a38cd66",
@@ -11,14 +11,16 @@
         "Store::save_switches",
         "prepare",
         "write_atomically",
-        "write_private"
+        "write_private",
+        "merged"
       ]
     },
     "crates/thalvi-app/src/commands.rs": {
       "sha256": "fa479d4d770f9010f87b6d456a09e9273ac7d758169ba08d7f4f02f71f085661",
       "functions": [
         "save_settings",
-        "save"
+        "save",
+        "settings_patch"
       ]
     },
     "crates/thalvi-app/src/app.rs": {
@@ -36,7 +38,8 @@
         "AppState::apply",
         "serve_requests",
         "Live::save",
-        "Live::set_switch"
+        "Live::set_switch",
+        "SyncedConfig::set"
       ]
     },
     "crates/thalvi-app/src/agent.rs": {

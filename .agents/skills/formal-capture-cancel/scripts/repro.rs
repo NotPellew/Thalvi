@@ -13,6 +13,7 @@ use thalvi_desktop::draft::Draft;
 use thalvi_desktop::draft::Drafts;
 use thalvi_desktop::engine::fakes::{FakeFrames, FakeWake};
 use thalvi_desktop::engine::{CaptureOutcome, CuePlayer, Engine, Parts};
+use thalvi_desktop::models::CatalogSpeech;
 use thalvi_desktop::feed::Feed;
 use thalvi_desktop::frame::Frame;
 use thalvi_desktop::history::{Capture, Outcome, Store as History};
@@ -166,7 +167,7 @@ async fn settings_apply_reports_presses_during_successful_and_failed_rebuilds() 
                 }
             }
             tokio::time::timeout(Duration::from_secs(5), async {
-                tokio::join!(runner.apply(next.clone()), async {
+                tokio::join!(runner.apply_engine(next.clone()), async {
                     started.await.unwrap();
                     if !before_apply {
                         input.set(true);
@@ -466,7 +467,7 @@ async fn no_rebuild_apply_handoff_keeps_holds_and_reports_taps() {
                 input.set(false);
             }
             if let Control::Apply(config) = apply {
-                runner.apply(*config).await;
+                runner.apply_engine(*config).await;
             }
             assert!(runner.refused.borrow().is_empty());
             let result =

@@ -48,9 +48,14 @@ replaces it.
 
 ## Covers
 
-Sync commit: `41228a49fafc85002521e45f02634a6fb6c544d7`. [source.json](source.json)
+Sync commit: `f87174d14c2651d7ad1a88e44334ca8ed38ae391`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
+
+Since `41228a49`, `31a2eeb2` changes the recognizer retry notice and its display
+state only (`session.ts`, `view.ts`); the text-input voice-off branch, ended
+handling, button guard, microphone acquisition and release are unchanged.
+The model, browser assumptions and bounds are unchanged.
 
 JavaScript runs one task at a time, so each action is the code between two
 awaits, or one event:
@@ -71,6 +76,9 @@ Browser behaviour enters as two constants, measured by the probe:
 `ClosedAddModuleRejects = FALSE` and `ClosedNodeThrows = TRUE` (HeadlessChrome 153).
 
 ## Run
+
+TLA+ with TLC explores all interleavings in the stated finite model; it fits
+this ordering property but does not execute the production implementation.
 
 From the repository root, with Python 3.12+:
 
@@ -156,7 +164,7 @@ bug: report the steps in the code's words, with the harm.
 5. Run the check and `--self-test`. When a fix lands, the faithful run must pass;
    update the finding above, and add a mutation that reverts the fix.
 
-To prove this recipe, in a throwaway worktree delete `this.micInput.mic.stop();` from
+To prove this recipe, in a throwaway worktree remove the entire `if (!voice && this.micInput)` block from
 `releaseUnused` in `web/src/device-audio.ts`. The unchanged recipe must first report
 `SOURCE DRIFT`. Reading the diff, `releaseUnused` now keeps the stream running,
 which is `ReleaseKeepsMic = TRUE` in the scratch `.cfg`; refresh the hash. The

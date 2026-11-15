@@ -84,19 +84,15 @@ sends two settings requests at once reaches it without the user, because
 
 ## Covers
 
-Sync commit: `a03b86c0f995a8ec683157ed28765e668c183c66`. [source.json](source.json)
+Sync commit: `f87174d14c2651d7ad1a88e44334ca8ed38ae391`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 
-A dictation waiting for the speech model (#378) adds a `loading` flag to `Status::Starting`, which `agent.rs` reads in `phase` and `overlay_word` only; `plan`, `plan_over` and `settings_set` are unchanged, so only the `agent.rs` hash moved.
-
-A finished speech model download (#374) sends `Control::ReloadSpeechModel` from `download_speech`, which writes no settings; `save_settings` and `save` are unchanged, so only the `commands.rs` hash moved.
-
-Extra recognizers (#228) add `check_endpoint_kept` to `Store::check` and `judge`, a pure refusal on the settings value and
-`current` that runs before `load`; the loader also refuses a switched-on extra without a writing endpoint. Both only
-decide whether a save is refused, as any invalid form already is, and `agent.rs` gained status words. No lock, read
-of the running config, write or send changed, so the model is unchanged and only the `settings.rs` and `agent.rs`
-hashes moved.
+Changes since the previous sync `a03b86c0` were read: `f2cfcac8` moves the
+Settings patch merge under the existing lock (already represented by `Snap`);
+`ad4f4d4a` removes the pre-save microphone pause refusal; endpoint validation,
+page text, metrics, loading status and test-only lint changes add no writer or
+lock boundary. The model and its three invariants are unchanged.
 
 | Code | Model action and boundary |
 | --- | --- |
@@ -106,12 +102,15 @@ hashes moved.
 | `crates/thalvi-app/src/settings.rs`: `Store::check` (form saves), `Store::save` (switches), `prepare` | The content each writer validates: a form save keeps `current`'s switches; a switch keeps the form it read. |
 | Same file: `write_private` | `RmTmp` (`remove_file` of the shared name), `Create` (`create_new`; fails if the name exists), `Write` (`write_all` into the opened file). Under the save lock these steps cannot interleave with another writer's. |
 | Same file: `write_atomically` | `Rename` (moves whatever `desktop.json.tmp` names now; fails if it names nothing). On any error it removes the shared name and returns Err. |
-| `crates/thalvi-app/src/app.rs`: `AppState::apply` | `Apply`: `*current = config.clone()` under `AppState::config`'s lock (for `remember`, its own `*self.config.lock() = config`). `Send`: `Control::Apply` to the runner, which takes them in order. |
+| `crates/thalvi-app/src/app.rs`: `AppState::apply` | `Apply`: `SyncedConfig::set` updates `current` under its mutex while the separate save lock remains held. `Send`: `Control::Apply` to the runner, which takes them in order. |
 | `crates/thalvi-app/src/settings.rs`: `Store::start` (from `AppState::start` in `app.rs`'s `setup`) | Not modeled: a first start writes the defaults, and a load that drops a saved Thalvi server entry writes the normalized config, both through `Store::write` before `setup` registers the state, serves requests or opens Settings, so no other writer exists yet. |
 | `crates/thalvi-app/src/update.rs`: `Marker::write` and update-channel reads | Not a config writer: the updater's atomic write targets the separate `update.json` marker. The channel is read from `AppState::config`; changing it is covered by the Settings form writer above. |
 | `crates/thalvi-desktop/src/host/channel.rs`: `accept`; `windows/pipe.rs`: `accept`, `answer` | Why `A` and `L` run concurrently: one `thalvi-request` thread per connection, up to `MAX_CONNECTIONS`. |
 
 ## Run
+
+TLA+ with TLC explores all interleavings in the stated finite model; it fits
+this ordering property but does not execute the production implementation.
 
 From the repository root, with Python 3.12+:
 
@@ -135,8 +134,7 @@ and keeps TLC's output there, outside the checkout. Each counterexample prints
 as numbered steps naming the writer (Settings save, agent settings change, login
 switch) and the action from the table. Exit 0 prints `PASS`; exit 1 prints
 `COUNTEREXAMPLE <invariant>` for each broken one, then `FAIL`; exit 2 prints
-`BLOCKED` for source drift, a tool error or a timeout. The current result is exit 0
-(the finding above). Never turn a failure into a pass.
+`BLOCKED` for source drift, a tool error or a timeout. The current result is exit 0; the traces above are historical fixed bugs. Never turn a failure into a pass.
 
 After changing the verification, check that the invariants can pass and fail:
 
@@ -145,8 +143,7 @@ After changing the verification, check that the invariants can pass and fail:
 ```
 
 It first runs `Serialized = TRUE`, one lock held from before `Snap` until
-after `Send`, which must pass every invariant (131 distinct states). This shows
-the finding comes from the missing serialization, not from the model. Then
+after `Send`, which must pass every invariant (131 distinct states). This is the current implementation, not a proposed fix. Then
 five mutations of that design each must break their own invariant:
 
 | Mutation constant | What it breaks in the serialized design | Must break |
@@ -165,8 +162,7 @@ A pass holds only for the bounds and assumptions under Scope. For a failure,
 replay each numbered step against the function the table maps its action to.
 A step the code cannot take is a modeling error: fix the model from the code
 and say what was wrong. If every step is possible, it is a bug: report the
-steps in the code's words, with the harm. The traces above are this check's
-current output.
+steps in the code's words, with the harm. The traces above describe the fixed bugs, not the faithful current output.
 
 ## When the covered code changes
 
@@ -189,20 +185,16 @@ current output.
 5. Run the check and `--self-test`. When a fix lands, the faithful run must pass;
    update the finding above and keep a mutation that reverts the fix.
 
-To prove this recipe, in a throwaway worktree make `write_private` stop
-removing an existing temporary file: delete its `let _ = std::fs::remove_file(path);`.
-The unchanged recipe must first report `SOURCE DRIFT`. Reading the diff, `RmTmp`
-no longer exists, so remove `"rmtmp", ` from both step lists in the scratch
-copy's `Flow` and refresh the hash. The check must still report
-`COUNTEREXAMPLE RunningMatchesFile`, because a Settings save and an agent change
-still collide on `create_new`. Remove the worktree and confirm that the
-checkout is unchanged.
+To prove the recipe in a throwaway worktree, in `SyncedConfig::remember`
+(`crates/thalvi-app/src/app.rs`) move `let mut config = self.config();` before
+acquiring `self.lock`. The unchanged check must first report `SOURCE DRIFT`.
+Read the diff: only writer `L` now snapshots before locking, so add
+`\/ (o = "L")` to `ReadsBeforeLock(o)` in the scratch `ConfigSave.tla` and
+refresh the source hash. The check must fail `EachFieldKeepsItsLastSave`.
+Restore the scratch files and confirm the faithful check passes. Removing the
+temporary-file cleanup alone is not a failing recipe with serialized writers.
 
 ## Scope
-
-The working-tree lint cleanup removes two redundant clones in `settings.rs` tests only;
-no writer, lock or file-system step changes. The model is unchanged and the source
-hash describes the working tree; `sync_commit` remains at the previous sync.
 
 Three writers that each save once: a Settings save on the main thread, and an
 agent settings change and a switch flip on request threads. Every interleaving
@@ -215,13 +207,14 @@ lands in one step, so a half-written file is not modeled; validation in `load`
 never fails; the runner applies `Control::Apply` messages in send order;
 `rename` replaces the target atomically.
 
-The Settings window now sends a JSON merge patch of only what the user changed (#340), and `save_settings` merges it with `settings::merged` over the config read under the lock, in the closure `SyncedConfig::save_form` runs, as the agent's `settings set` does. The model already had the Settings save carry the other field over from the config it read under the lock; what changed is the code: it no longer carries the window's own last-read view over, which the earlier version of this scope called out of scope. `SettingsMergeOutsideLock` is the mutation that models the old behaviour (a form built before the lock), and the model's comments name `settings_patch`. The `settings.rs`, `commands.rs` and `agent.rs` hashes moved. The new Rust test is `a_settings_patch_is_merged_over_the_config_read_under_the_lock`.
-
-Removing the "pause before changing the microphone" rule (#340) only drops a check that ran inside the lock after `Snap` and before `Create`, and the `paused` argument it needed; it adds no writer or file-system step and a refused save still ends before `Create`, so the model is unchanged and the `settings.rs`, `app.rs` and `agent.rs` hashes moved.
-
-Preserving an OpenAI-compatible API key in an unchanged Settings entry (#385 review fix) only changes form normalization before the existing serialized save; it adds no writer or file-system step, so the model is unchanged and the `settings.rs` hash moved.
-
-The Settings page rename (#341) changes only a message naming a page in `settings.rs` and the page ids `agent.rs`'s `show` accepts; no writer, lock or file-system step changed, so the model is unchanged and only those hashes moved.
+The Settings window and agent send patches merged over `current` under the
+save lock. The model checks two distinct scalar fields and one switch; arrays
+such as `stt.entries` are replaced whole, and patch construction in the UI is
+outside the proof. `engine` is the last configuration **enqueued** by
+`Control::Apply`, not an observation that the engine has already rebuilt or
+switched microphones. `d6385653` explicitly distinguishes changes that apply
+now from those deferred until the next capture. The in-memory configuration
+is `SyncedConfig::current`; device adoption is not this invariant's claim.
 
 Not verified: two writers on the main thread at once (they cannot overlap); a
 tray switch on the main thread racing an agent save (the same steps as `L`,
