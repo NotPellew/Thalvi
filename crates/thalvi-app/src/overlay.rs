@@ -357,6 +357,8 @@ struct Overlaying {
     failure: Option<String>,
     /// The next time a failed show or present may be tried.
     retry_at: Option<Instant>,
+    /// A show has committed a surface the compositor has not placed.
+    placing: bool,
     /// The look, and whether the system's theme is dark.
     style: (Look, bool),
 }
@@ -385,6 +387,7 @@ impl Overlaying {
             stale: false,
             failure: None,
             retry_at: None,
+            placing: false,
             style: (Look::default(), true),
         }
     }
@@ -448,6 +451,7 @@ impl Overlaying {
     /// The surface vanished or its connection ended: the next show makes it again.
     fn lost(&mut self) {
         self.visible = false;
+        self.placing = false;
         self.stale = true;
         self.retry_at = None;
     }
@@ -468,9 +472,10 @@ impl Overlaying {
         now: Instant,
     ) -> Draw {
         if !self.wanted {
-            if self.visible {
+            if self.visible || self.placing {
                 surface.hide();
                 self.visible = false;
+                self.placing = false;
             }
             self.frame_at = None;
             self.retry_at = None;
@@ -497,6 +502,7 @@ impl Overlaying {
         let outcome = match drawn {
             Ok(()) => {
                 self.visible = true;
+                self.placing = false;
                 self.stale = false;
                 self.failure = None;
                 self.retry_at = None;
@@ -504,12 +510,14 @@ impl Overlaying {
             }
             Err(HostError::Unsupported(message)) if message.contains("not placed yet") => {
                 self.visible = false;
+                self.placing = true;
                 self.retry_at = Some(now + PLACE_AFTER);
                 Draw::Waiting
             }
             Err(error) => {
                 let message = error.to_string();
                 self.visible = false;
+                self.placing = false;
                 // A vanished surface is shown again as soon as the next status asks. A refusal waits.
                 self.retry_at = (!message.contains("closed")).then_some(now + RETRY_AFTER);
                 let fresh = self.failure.as_ref() != Some(&message);
@@ -918,6 +926,7 @@ mod tests {
         let hide_at = start + Duration::from_millis(20);
         overlay.take(Message::Visibility(Visibility::Hide), hide_at);
         overlay.settle(&mut surface, &mut painter, 0.0, hide_at);
+        assert_eq!(surface.calls, ["show", "hide"]);
         assert!(
             hide_at.saturating_duration_since(start) < Duration::from_millis(100),
             "hide ran without the configure wait"
