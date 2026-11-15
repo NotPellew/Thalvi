@@ -373,7 +373,9 @@ impl OverlayPlan {
     ) -> Result<OverlaySurface, HostError> {
         let (sender, events) = mpsc::channel();
         let backing = match self {
-            Self::Layer => Backing::Layer(Box::new(layer::Layer::open(width, height)?)),
+            Self::Layer => {
+                Backing::Layer(Box::new(layer::Layer::open(width, height, sender.clone())?))
+            }
             Self::Xwayland { top } => Backing::Xwayland(xwayland::Window::open(
                 (width, height),
                 top,

@@ -31,7 +31,7 @@ use crate::client;
 use crate::commands;
 use crate::launch::{Launch, relaunch_shows_settings};
 use crate::menu_entry::{self, MenuEntry};
-use crate::overlay::{Overlay, Visibility};
+use crate::overlay::{FailureSink, Overlay, Visibility};
 use crate::runner::{AudioStatus, Control, EngineLink, Restart};
 use serde_json::Value;
 
@@ -766,6 +766,20 @@ fn start_overlay(app: &AppHandle, state: &AppState) {
             return;
         }
     };
+    let handle = app.clone();
+    state.overlay.report_to(FailureSink::new(move |failure| {
+        // The overlay's thread can fail while setup still has the state, before `manage`.
+        let Some(state) = handle.try_state::<AppState>() else {
+            return;
+        };
+        if let Some(failure) = failure {
+            state.last_error.note(failure.clone());
+            state.link.send(Control::Overlay(Some(failure)));
+        } else {
+            state.last_error.clear_overlay();
+            state.link.send(Control::Overlay(None));
+        }
+    }));
     let config = state.config();
     state.overlay.show_draft(config.overlay.draft);
     state.overlay.set_look(config.look);
@@ -822,6 +836,10 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
         &state.updates.snapshot(),
     )?;
     let _ = state.tray.set(tray);
+    if let Some(failure) = state.overlay.failure() {
+        state.last_error.note(failure.clone());
+        state.link.send(Control::Overlay(Some(failure)));
+    }
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let current = status.borrow_and_update().clone();
@@ -874,6 +892,11 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
 
 fn show(app: &AppHandle, status: &Status) {
     let state = app.state::<AppState>();
+    if let Some(failure) = state.overlay.failure() {
+        state.last_error.note(failure);
+    } else {
+        state.last_error.clear_overlay();
+    }
     state.last_error.record(status);
     if matches!(
         status,

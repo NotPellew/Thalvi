@@ -1,7 +1,9 @@
 //! Hyprland's overlay surface: a layer-shell surface on the overlay layer, drawn from shared memory.
 
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::Duration;
+
+use crate::host::OverlayEvent;
 
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState, Region};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
@@ -30,9 +32,22 @@ fn failed(cause: impl std::fmt::Display) -> HostError {
 }
 
 /// What the compositor said about the layer surface last made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Configure {
     Ready,
     Closed,
+}
+
+/// The latest configure still in force: a later one replaces an earlier one, so a `Ready` queued
+/// ahead of a `Closed` cannot hide the closure.
+fn coalesce(queued: impl IntoIterator<Item = Configure>) -> Option<Configure> {
+    queued.into_iter().last()
+}
+
+/// A layer surface committed and not yet placed, and when that wait started.
+struct Pending {
+    layer: LayerSurface,
+    since: std::time::Instant,
 }
 
 /// The overlay's layer surface, made and drawn on the overlay's thread; its events are read on a
@@ -48,19 +63,27 @@ pub struct Layer {
     /// In points.
     size: (u32, u32),
     surface: Option<LayerSurface>,
-    configures: mpsc::Receiver<Configure>,
+    configures: Arc<Mutex<mpsc::Receiver<Configure>>>,
+    /// A show waiting on the compositor; `None` once it is placed, closed or given up.
+    pending: Option<Pending>,
+    /// The overlay thread hears when the event thread's connection ends, or a show is still placing.
+    events: mpsc::Sender<OverlayEvent>,
 }
 
 impl Layer {
-    pub fn open(width: f32, height: f32) -> Result<Self, HostError> {
+    pub fn open(
+        width: f32,
+        height: f32,
+        events: mpsc::Sender<OverlayEvent>,
+    ) -> Result<Self, HostError> {
         let conn = Connection::connect_to_env().map_err(failed)?;
-        let (globals, mut events_queue) = registry_queue_init::<Events>(&conn).map_err(failed)?;
-        let queue = events_queue.handle();
+        let (globals, mut queue_events) = registry_queue_init::<Events>(&conn).map_err(failed)?;
+        let queue = queue_events.handle();
         let compositor = CompositorState::bind(&globals, &queue).map_err(failed)?;
         let shell = LayerShell::bind(&globals, &queue).map_err(failed)?;
         let shm = Shm::bind(&globals, &queue).map_err(failed)?;
         let (sender, configures) = mpsc::channel();
-        let mut events = Events {
+        let mut state = Events {
             registry: RegistryState::new(&globals),
             output: OutputState::new(&globals, &queue),
             shm,
@@ -68,12 +91,12 @@ impl Layer {
         };
         // The second round trip brings each output's scale.
         for _ in 0..2 {
-            events_queue.roundtrip(&mut events).map_err(failed)?;
+            queue_events.roundtrip(&mut state).map_err(failed)?;
         }
-        let scale = events
+        let scale = state
             .output
             .outputs()
-            .filter_map(|output| events.output.info(&output))
+            .filter_map(|output| state.output.info(&output))
             .map(|info| info.scale_factor)
             .max()
             .unwrap_or(1)
@@ -87,10 +110,16 @@ impl Layer {
         #[expect(clippy::cast_sign_loss, reason = "a scale of at least 1")]
         let bytes = (size.0 * size.1 * 4) as usize * (scale * scale) as usize;
         // Two frames' room: one the compositor holds while the next is drawn.
-        let pool = SlotPool::new(2 * bytes, &events.shm).map_err(failed)?;
+        let pool = SlotPool::new(2 * bytes, &state.shm).map_err(failed)?;
+        let report = events.clone();
         std::thread::Builder::new()
             .name("overlay-wayland".to_owned())
-            .spawn(move || while events_queue.blocking_dispatch(&mut events).is_ok() {})
+            .spawn(move || {
+                while queue_events.blocking_dispatch(&mut state).is_ok() {}
+                let _ = report.send(OverlayEvent::Lost(
+                    "The status overlay lost its Wayland connection.".to_owned(),
+                ));
+            })
             .map_err(failed)?;
         Ok(Self {
             conn,
@@ -101,7 +130,9 @@ impl Layer {
             scale,
             size,
             surface: None,
-            configures,
+            configures: Arc::new(Mutex::new(configures)),
+            pending: None,
+            events,
         })
     }
 
@@ -111,7 +142,12 @@ impl Layer {
     }
 
     pub fn show(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
-        while self.configures.try_recv().is_ok() {}
+        self.drain();
+        // A surface that is still being placed, or one already showing, is drawn onto. Making
+        // another here leaks a layer every time the caller asks again.
+        if self.pending.is_some() || self.surface.is_some() {
+            return self.placed(frame);
+        }
         let surface = self.compositor.create_surface(&self.queue);
         surface.set_buffer_scale(self.scale);
         // An empty input region: clicks reach the windows below, as the overlay takes none here.
@@ -129,21 +165,55 @@ impl Layer {
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.commit();
         self.conn.flush().map_err(failed)?;
-        match self.configures.recv_timeout(CONFIGURE_WITHIN) {
-            Ok(Configure::Ready) => {}
-            Ok(Configure::Closed) | Err(_) => return Err(failed("Hyprland did not place it")),
+        // Placed by the event thread. The overlay thread keeps handling Hide and Press.
+        self.pending = Some(Pending {
+            layer,
+            since: std::time::Instant::now(),
+        });
+        match self.placed(frame) {
+            Err(_) if self.pending.is_some() => {
+                let _ = self.events.send(OverlayEvent::Pending);
+                Err(failed("the layer surface is not placed yet"))
+            }
+            other => other,
         }
-        self.surface = Some(layer);
-        self.present(frame)
     }
 
     pub fn present(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
-        // A closed surface (its output went away) is made again at the next show.
-        if matches!(self.configures.try_recv(), Ok(Configure::Closed)) {
+        self.placed(frame)
+    }
+
+    /// Attaches `frame` once the compositor has placed the surface. A configure still outstanding
+    /// leaves the surface unplaced, so the caller retries later instead of waiting here.
+    fn placed(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
+        let configure = self.drain();
+        if configure == Some(Configure::Closed) {
             self.surface = None;
+            self.pending = None;
+            return Err(failed("the layer surface closed"));
+        }
+        if self.surface.is_none()
+            && configure == Some(Configure::Ready)
+            && let Some(pending) = self.pending.take()
+        {
+            self.surface = Some(pending.layer);
+        }
+        if self.surface.is_none()
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.since.elapsed() >= CONFIGURE_WITHIN)
+        {
+            // Keep the surface. Dropping it and showing again leaves a layer behind on a
+            // compositor that never configured it, and the next status would make another.
+            let Some(pending) = self.pending.take() else {
+                return Err(failed("Hyprland did not place it"));
+            };
+            self.surface = Some(pending.layer);
+            return Err(failed("Hyprland did not place it"));
         }
         let Some(layer) = &self.surface else {
-            return Ok(());
+            return Err(failed("Hyprland did not place it"));
         };
         let (width, height) = (
             i32::try_from(frame.width).map_err(failed)?,
@@ -163,7 +233,17 @@ impl Layer {
 
     pub fn hide(&mut self) {
         self.surface = None;
+        self.pending = None;
         let _ = self.conn.flush();
+    }
+
+    /// Every queued configure, coalesced so the latest one is the one in force.
+    fn drain(&mut self) -> Option<Configure> {
+        let guard = self
+            .configures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        coalesce(guard.try_iter())
     }
 }
 
@@ -255,6 +335,24 @@ impl ProvidesRegistryState for Events {
         &mut self.registry
     }
     registry_handlers![OutputState];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Configure, coalesce};
+
+    #[test]
+    fn a_later_configure_replaces_an_earlier_one() {
+        assert_eq!(
+            coalesce([Configure::Ready, Configure::Closed]),
+            Some(Configure::Closed)
+        );
+        assert_eq!(
+            coalesce([Configure::Closed, Configure::Ready]),
+            Some(Configure::Ready)
+        );
+        assert_eq!(coalesce([]), None);
+    }
 }
 
 delegate_registry!(Events);

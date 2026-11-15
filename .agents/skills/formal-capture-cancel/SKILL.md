@@ -15,13 +15,13 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `f87174d14c2651d7ad1a88e44334ca8ed38ae391`. The source hashes describe this commit.
-The previous sync was `a03b86c0f995a8ec683157ed28765e668c183c66`.
+Sync commit: `8df760f8587cdcf268e878eea4a551a856057019`. The source hashes describe this commit.
+The previous sync was `f87174d14c2651d7ad1a88e44334ca8ed38ae391`.
 The covered changes through this commit include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
 waiting for an on-device load. Their mapped actions remain below. Microphone
 switching happens after capture; notices, metrics and endpoint payload changes
-add no delivery path. No product promise or bound changed in this maintenance.
+add no delivery path. `Control::Overlay` (8df760f) returns false from `Requests::ends`, so it never sets `ended` and neither admits nor blocks delivery, the same as `Apply` for this property; it is not one of the modeled controls. No product promise or bound changed in this maintenance.
 
 `Engine::capture` now also records the delivery route on a delivered capture's
 metrics line, after `set_state(Listening)` and after the outcome has already

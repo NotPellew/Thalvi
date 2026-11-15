@@ -160,6 +160,30 @@ impl LastError {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+
+    /// Keeps an overlay failure the status did not already show, so the tray and Settings can.
+    /// The same notice again changes nothing.
+    pub fn note(&self, failure: Failure) {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if held
+            .as_ref()
+            .is_some_and(|kept| kept.notice == failure.notice)
+        {
+            return;
+        }
+        *held = Some(failure);
+    }
+
+    /// Drops the overlay failure once the surface is showing again.
+    pub fn clear_overlay(&self) {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if held
+            .as_ref()
+            .is_some_and(|failure| failure.headline == "Status overlay unavailable")
+        {
+            *held = None;
+        }
+    }
 }
 
 /// What the notice says while the speech model loads: from disk, or which download it is waiting for and how far it is.

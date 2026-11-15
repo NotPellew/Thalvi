@@ -84,15 +84,15 @@ sends two settings requests at once reaches it without the user, because
 
 ## Covers
 
-Sync commit: `f87174d14c2651d7ad1a88e44334ca8ed38ae391`. [source.json](source.json)
+Sync commit: `8df760f8587cdcf268e878eea4a551a856057019`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 
-Changes since the previous sync `a03b86c0` were read: `f2cfcac8` moves the
-Settings patch merge under the existing lock (already represented by `Snap`);
-`ad4f4d4a` removes the pre-save microphone pause refusal; endpoint validation,
-page text, metrics, loading status and test-only lint changes add no writer or
-lock boundary. The model and its three invariants are unchanged.
+Changes since the previous sync `f87174d1` were read: `8df760f` adds the
+overlay's failure sink and a replay of a failure that arrived before the tray,
+both inside `setup` and `follow_engine`. Neither writes `desktop.json` nor
+`AppState::config`, and neither takes the save lock. The model and its three
+invariants are unchanged.
 
 `app.rs`'s `run` now returns from `Launch::Watch` before setup, so a terminal
 view never opens the app, writes `desktop.json`, or takes the save lock.
