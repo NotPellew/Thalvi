@@ -91,6 +91,46 @@ run that `up` created in this task. Never drive the developer's own server on
 
 Teardown is `$V down $R` (see Cleanup).
 
+### Managed jobs and retained evidence
+
+When this machine requires `dev-job`, keep the managed command alive through
+cleanup. Running only `up` inside a job lets the service kill the servers when
+that command returns. This complete smoke run builds, drives Send, and cleans up:
+
+```sh
+job=$(dev-job new thalvi-web-verify)
+dev-job run --job "$job" -- bash -s <<'SH'
+set -euo pipefail
+V=.agents/skills/verify-thalvi/scripts/thalvi-verify
+R=
+cleanup() {
+  R=$(sed -n 's/^RUN_DIR=//p' "$DEV_JOB_ARTIFACTS/up.log" | head -1)
+  if [ -n "$R" ] && [ -f "$R/run.env" ]; then "$V" down "$R"; fi
+}
+trap cleanup EXIT
+TMPDIR="$DEV_JOB_ARTIFACTS" "$V" up | tee "$DEV_JOB_ARTIFACTS/up.log"
+R=$(sed -n 's/^RUN_DIR=//p' "$DEV_JOB_ARTIFACTS/up.log" | head -1)
+"$V" doctor "$R"
+"$V" ab "$R" open "$(. "$R/run.env"; echo "$URL")"
+"$V" state "$R" idle
+"$V" ab "$R" fill '#o-message' 'Managed verification smoke'
+"$V" ab "$R" click 'button[aria-label="Send"]'
+"$V" reply "$R" --after 'Managed verification smoke'
+"$V" ab "$R" screenshot "$R/evidence/smoke.png"
+"$V" ab "$R" snapshot -c > "$R/evidence/smoke.aria.txt"
+SH
+dev-job finish "$job"
+```
+
+Have the repository's pinned Node and all Helpers on `PATH` before starting
+the job. Set `TMPDIR` to the artifact directory **only for `up`**. Chromium
+needs the runner's short temporary path for its Unix sockets; exporting a
+long artifact path for the whole run causes `Socket path too long`. The run
+and evidence above survive `finish`, while the build target is disposable.
+Keep desktop compositors in a separate `--no-slot` service after building,
+and stop them before that service exits. Never wrap a backgrounding helper
+as a finished one-shot command.
+
 ### Self-hosted endpoints for `--local`
 
 Each setting comes from the environment, else `.env.verify` at the repository

@@ -1,9 +1,9 @@
 # Private conversation
 
-The user starts a conversation that leaves nothing behind: it is never saved,
-listed or searchable from other conversations, a Private badge stays visible
-while it is open, and it ends for good when the connection drops instead of
-reconnecting into a saved conversation.
+The user starts a conversation that Thalvi never saves or lists, and whose
+turns cannot be searched from other conversations. A Private badge stays
+visible while it is open. It ends for good when the connection drops instead
+of reconnecting into a saved conversation.
 
 ## Sub-features
 
@@ -29,9 +29,11 @@ reconnecting into a saved conversation.
 Preconditions:
 
 - Baseline from `features/README.md`, page at `idle`.
-- At least one ordinary saved conversation, so the sheet has rows to compare
-  against. Send `A saved turn first` and run
-  `$V reply $R --after "A saved turn first"`.
+- Start a new ordinary conversation with Conversations, `.o-lib-new`, then
+  wait for `idle`. This makes its title unique in the sheet. Send
+  `Saved garden marker` and run
+  `$V reply $R --after "Saved garden marker"`. Save the session filenames and
+  the ids and titles from `curl <URL>sessions` before Start.
 
 Steps:
 
@@ -46,25 +48,30 @@ Steps:
     your requests.`
   - `window.__ws.at(-1).url` ends in `/session?private=1`, and
     `JSON.stringify(Object.entries(sessionStorage))` is `[]`.
-- **Talk.** Send `Keep this secret about the garden` and run
-  `$V reply $R --after "Keep this secret about the garden"`.
+- **Talk.** Send `Private garden marker` and run
+  `$V reply $R --after "Private garden marker"`.
 - **Search inside.** Send `search for garden` and run
   `$V reply $R --after "search for garden"`.
   - The last `llm_request` in `R/fakes.jsonl` has `tool_results` whose matches
-    carry a `private-…` `session_id` and the title `Current conversation`.
+    are nonempty, all carry a `private-…` `session_id` and the title
+    `Current conversation`, include `Private garden marker`, and exclude
+    `Saved garden marker`. Both conversations match the query, so this
+    distinguishes private-only search from searching saved history.
 - **Nothing saved.** Check the server side.
   - `ls R/data/sessions/` and the ids and titles from `curl <URL>sessions`
     are unchanged from before **Start**. Only `age_s` moves.
-  - `grep -rl garden R/data` prints nothing.
+  - `grep -rlF 'Private garden marker' "$R/data"` prints nothing. The ordinary
+    saved garden marker remains on disk.
   - `R/data/recordings/<date>/private-*.jsonl` exists and holds metrics only.
   - Open `Conversations`, wait for a `Delete …` button, and confirm
-    `.o-library` has no `garden` text. Close the sheet.
+    `.o-library` has the saved marker and no `Private garden marker`. Close the sheet.
 - **Drop.** Lose the connection.
-  - Run `$V ab $R eval 'window.__ws.at(-1).close(); 1'` and
+  - Run `$V ab $R eval 'window.__count = window.__ws.length; window.__ws.at(-1).close(); 1'` and
     `$V state $R ended`.
   - `.o-notice-text` reads `This private conversation ended when the
     connection dropped, and can't be resumed. Start a new conversation.`, and
-    `window.__ws.length` is still the count from before the drop.
+    `window.__ws.length === window.__count` at this observation. This is a
+    bounded live check, not proof that a socket can never open later.
 - **Reload.** Run `$V ab $R reload` and `$V state $R idle`.
   - `.o-private` is hidden and `.o-turns` is empty: an ordinary new
     conversation, not the private one.
@@ -83,6 +90,10 @@ Steps:
 - Reloading a private conversation does not show the ended notice. The
   reload never asks for a private session, so it opens an ordinary one.
 - Private sessions record metrics whatever `THALVI_RECORD` says. The fake run
-  does not set text or audio recording, so that override is not exercised.
+  sets `metrics,text`, so this checks suppression of text recording; audio
+  recording is off and its suppression is unverified.
+- Providers still process requests. The fake deliberately retains test text
+  in `R/fakes.jsonl`; the no-transcript assertion applies to Thalvi's `R/data`,
+  not to provider logs or this run's private evidence.
 - Learnings retirement and background titling are off in the fake run, so
   their exclusion of private turns is not exercised.

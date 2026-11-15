@@ -35,6 +35,10 @@ facts the user can read and correct.
 Preconditions:
 
 - Baseline from `features/README.md`, page at `idle`.
+- Use a fresh run for this recipe so the seed and renamed title are unique.
+  If reusing a run, capture its exact ID from `sessionStorage["thalvi.session"]`
+  after seeding and use `button[data-id="<id>"]`, `button[data-rename="<id>"]`
+  and `button[data-delete="<id>"]` instead of title selectors.
 - Start a new conversation: `$V ab $R click 'button[aria-label="Conversations"]'`,
   `$V ab $R click 'button.o-lib-new'` and `$V state $R idle`, then send `What should I cook with leftover rice`.
   Run `$V reply $R --after "What should I cook with leftover rice"`.
@@ -79,9 +83,6 @@ Steps:
     `$V state $R idle` alone can pass before the page switches over.
   - The sheet closes and `.o-turns` starts with `What should I cook with
     leftover rice`.
-  - A second browser that has the conversation open shows `This conversation
-    continued on another device.` and stays stopped. Drive it with
-    `agent-browser --session <name>`; previewing from it never stops the first.
 - **Delete, keep.** Open the sheet, wait for
   `button[aria-label="Delete Rice ideas"]`, and choose it.
   - `.o-lib-ask` reads `Delete “Rice ideas”? This can't be undone.`
@@ -111,6 +112,32 @@ Steps:
 - **Proof.** Screenshot and ARIA-snapshot the sheet after the rename and after
   the delete. Keep `curl <URL>sessions` output and the `R/data/` files.
 
+### Two-client preview, takeover and deletion
+
+Use two tabs in this run's browser session; each has its own connection and
+session storage. `down` closes both, including on failure. These test two
+clients, not two physical devices.
+
+1. `$V ab $R tab new --label owner "$(. $R/run.env; echo $URL)"`, wait for
+   `idle`, and send `Takeover audit seed`. Read its ID with
+   `$V ab $R eval 'sessionStorage.getItem("thalvi.session")'`; retain that ID
+   as `ID` below (without JSON quotes).
+2. `$V ab $R tab new --label reader "$(. $R/run.env; echo $URL)"`, wait for
+   `idle`, open Conversations, wait for `button[data-id="$ID"]`, and click
+   it. `.o-lib-warn` says it is open on another device. Capture the preview.
+3. `$V ab $R tab owner`: it remains `idle`. Send
+   `Still answering after preview` and wait with `reply --after`. This proves
+   preview did not take it over.
+4. `$V ab $R tab reader`, click `.o-lib-continue`, and wait for `.o-turns` to
+   contain `Still answering after preview`. Switch to `owner`: it reaches
+   `ended` and `.o-notice-text` reads `This conversation continued on another
+   device.` Capture that state.
+5. From `owner`, open Conversations and delete `button[data-delete="$ID"]`
+   through `.o-lib-danger`, without reopening the conversation. Wait for the
+   question and row to disappear. Switch to `reader`: it reaches `ended`
+   with the deletion notice. Confirm `$R/data/sessions/$ID.json` is absent.
+6. Close both with `$V ab $R tab close owner` and `$V ab $R tab close reader`.
+
 ## Gotchas
 
 - Fallback titles use the first nonblank line of the first user turn,
@@ -120,12 +147,10 @@ Steps:
 - Reopening the same saved session in another tab takes it over: the old tab
   ends before deletion. For a deletion-notice check, leave the first tab
   attached and delete via a second client's list without reopening that session.
-  This cross-client path is not exercised by the single-tab recipe.
+  The two-client recipe above exercises this distinction.
 - Row labels include the age (`just now`, `1 min ago`). Match the
   `aria-label` of `Rename …` and `Delete …`, which carry only the title.
-  Earlier recipes leave rows with the same rice title; a selector picks the
-  first row, the most recently updated one, which is this recipe's seed as
-  long as nothing else touched an older rice conversation since.
+  Duplicate titles need the captured ID, never an assumption about row order.
 - Use `button.o-lib-new` for the ordinary path. The sheet also has
   `New private conversation`, so a name-based `find` is ambiguous.
 - While the delete question shows, the row's `Delete …` button is gone, so
@@ -139,3 +164,7 @@ Steps:
 - A blank learning shows a validation message. Normal UI typing is capped at
   1000 characters by the textarea; overlength API rejection is a separate
   boundary check, not a normal UI journey.
+- A conversation becoming active elsewhere after preview requires another
+  informed Continue choice (`web/src/library.ts`). The two-client recipe
+  starts with an already-live preview; it does not exercise that stale-preview
+  race or leaving the preview while the join check is pending.

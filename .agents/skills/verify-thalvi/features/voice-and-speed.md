@@ -64,6 +64,13 @@ Steps:
     `localStorage["thalvi.speed"]` is `1.5`.
   - After `$V ab $R reload` and `$V state $R idle`, the chip still reads
     `1.5×`.
+- **Voice survives reload; typed input can speak.** Open `button.o-voice-chip`
+  again. Wait until `.o-vp-select` has the selected option
+  `fake_bella (in use)`. Click `button.o-speak` and wait for its
+  `aria-checked="true"` while `.o-voice` remains `aria-pressed="false"`.
+  Send `Which voice survives reload?`, then
+  `$V reply $R --after 'Which voice survives reload?'`.
+  Its `tts_request` uses `fake_bella`. Turn Speak replies off afterwards.
 - **Proof.** Keep the screenshot and `snapshot -c` captured immediately after
   Apply, the `voice_preview` metric, and the `tts_request` lines for the
   preview and the reply.
@@ -82,3 +89,5 @@ Steps:
 - This recipe proves speed selection and persistence, not audible stretching
   quality. Speed changes the playback rate on the client only. The server and
   `tts_request` lines do not change.
+- Preview cancellation, switching the candidate during playback, and fallback
+  when a saved voice is no longer offered are not exercised here.

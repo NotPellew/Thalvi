@@ -28,6 +28,9 @@ private conversation the search covers only that conversation's own turns.
 Preconditions:
 
 - Baseline from `features/README.md`, page at `idle`.
+- Start a new ordinary conversation before creating the seed below:
+  `$V ab $R click 'button[aria-label="Conversations"]'`,
+  `$V ab $R click 'button.o-lib-new'`, then `$V state $R idle`.
 - One saved conversation that contains `leftover rice`. Create it by sending
   `What should I cook with leftover rice` and running
   `$V reply $R --after "What should I cook with leftover rice"`. Then choose

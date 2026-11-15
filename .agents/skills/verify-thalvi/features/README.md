@@ -1,6 +1,6 @@
 # Thalvi verification map
 
-This is the source for verifying Thalvi's user-facing web behavior. Read the
+This indexes Thalvi's web recipes and the separate desktop guide. Read the
 index before driving the app, then use the matching feature file as the recipe.
 
 ## Baseline preconditions
@@ -86,9 +86,20 @@ user-visible behavior. It then has exactly four H2 sections, in this order:
 - [Briefing search](./briefing-search.md) covers the `search_briefing` and
   `read_briefing_item` tools: steps, timeout, cancel and private.
 
-Desktop features are outside this web map. The overlay, Settings window and
+## Desktop coverage
+
+The overlay, Settings window and
 looks (`crates/thalvi-app/ui/src/look.ts`), model download notices and tray
 commands are driven in a sandboxed nested Hyprland by
-[desktop.md](../desktop.md). Dictation by voice
-(`crates/thalvi-desktop/src/local.rs`) needs a microphone, which that sandbox
-does not have; neither recipe verifies it.
+[desktop.md](../desktop.md). Its Doctor distinguishes a usable Settings window
+from a ready recognizer. Settings auto-save and effect notices
+(`crates/thalvi-app/ui/src/settings.ts`) need a changed value, its visible
+confirmation, disk readback and a restart; a screenshot alone is not that proof.
+
+Desktop dictation can use `ctl feed` with a PCM WAV or a private microphone
+from `up --mic` or `up --gnome`; see the guide's input sections. Recognition
+and delivery additionally require the specified model assets or endpoint,
+and `--hosted` plus a victim window for pasting. An empty-cache Settings run
+does not establish dictation, writing, extra-recognizer merging or physical
+audio. Windows, real tray clicks, GNOME and each input route need their own
+recorded use; the web recipes establish none of them.

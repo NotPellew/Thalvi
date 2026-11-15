@@ -23,7 +23,10 @@ model fails, after which the session keeps working.
 
 Preconditions:
 
-- Baseline from `features/README.md`, page at `idle`, voice off.
+- Baseline from `features/README.md`, page at `idle`, Voice and Speak replies
+  both off (`.o-voice` `aria-pressed=false`, `.o-speak` `aria-checked=false`).
+- Start `typed.webm` before the first turn as described in `SKILL.md`, Evidence;
+  stop the recording after Recovery.
 
 Steps:
 
@@ -39,8 +42,11 @@ Steps:
   - The `.o-turns > .o-user` turn before it reads `How do I proof bread
     dough?`. It appears only once the server echoes it.
   - `R/fakes.jsonl` has an `llm_request` with that `user` text and
-    `"tools": ["search_history"]`.
-  - With voice off there is no `tts_request`.
+    `"tools": ["search_history", "search_briefing", "read_briefing_item"]`.
+  - With Speak replies off there is no `tts_request`.
+- **Enter.** Run `$V ab $R fill '#o-message' 'Enter submission check'`,
+  `$V ab $R press Enter`, then `$V reply $R --after 'Enter submission check'`.
+  The composer clears and that turn gets its own reply.
 - **Stop.** Send `Tell me a long story` and stop it while it streams.
   - Run the same `fill` and `click`, then wait for visible streamed text:
     `$V ab $R wait --fn 'document.querySelector(".orb-app").dataset.state === "thinking" && document.querySelector(".o-turns > .o-assistant:last-child")?.textContent.includes("This is a long fake answer")'`.
@@ -82,3 +88,6 @@ Steps:
 - The notice clears on the next turn. Capture it before sending again.
 - Headless Chromium denies clipboard reads, so `Copied` proves the write
   resolved, not what landed on the clipboard.
+- The HTTP 500 case does not exercise the model's 30-second stall timeout
+  (`crates/thalvi-server/src/model.rs`). The fake has no stalled-model control.
+  Shift+Enter and IME composition are also outside this recipe's live coverage.
