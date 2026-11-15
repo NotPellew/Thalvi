@@ -1201,7 +1201,7 @@ mod tests {
         // `None` content is a directory, which can't be read as a file on any platform.
         let cases: [(&str, Files, _); 7] = [
             ("all absent", vec![], none.clone()),
-            ("readable and empty", vec![(0, Some(b""))], none.clone()),
+            ("readable and empty", vec![(0, Some(b""))], none),
             (
                 "malformed lines skipped",
                 vec![(0, Some(damaged.as_bytes()))],

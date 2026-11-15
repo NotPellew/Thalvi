@@ -809,7 +809,7 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][0]["content"], super::SYSTEM_PROMPT);
-        let titled = model.clone().with_system_prompt("Write titles.");
+        let titled = model.with_system_prompt("Write titles.");
         assert_eq!(
             titled.request_body(&[], None)["messages"][0]["content"],
             "Write titles."

@@ -979,7 +979,7 @@ mod tests {
                 "hyprctl",
                 Err(CommandError::TimedOut("hyprctl".to_owned())),
                 false,
-                partial.clone(),
+                partial,
             ),
             (
                 "shortcut refused",
