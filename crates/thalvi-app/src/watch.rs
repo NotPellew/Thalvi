@@ -143,6 +143,8 @@ enum Style {
 struct Shown {
     state: Value,
     metrics: Value,
+    /// What was printed, so a reply that changes nothing on screen prints nothing.
+    rendered: String,
     lines: usize,
 }
 
@@ -203,6 +205,7 @@ impl Watch {
         self.shown = Some(Shown {
             state: Value::Null,
             metrics: json!({}),
+            rendered: WAITING.to_owned(),
             lines: 1,
         });
         self.since_metrics = METRICS_EVERY;
@@ -210,24 +213,30 @@ impl Watch {
     }
 
     fn show<O: Out>(&mut self, state: Value, metrics: Value, out: &mut O) -> io::Result<()> {
-        let same = self
-            .shown
-            .as_ref()
-            .is_some_and(|shown| shown.state == state && shown.metrics == metrics);
-        if same {
-            return Ok(());
-        }
         let picture = picture(&state, &metrics);
         let lines = picture.lines().count();
+        // JSON follows the reply. The other views follow what they draw, so a field they leave
+        // out (such as whether a file is still being fed) does not print a copy of the last line.
+        let rendered = match self.style {
+            Style::Json => json_line(&state, &metrics).to_string(),
+            Style::Line | Style::Terminal => picture.replace('\n', " | "),
+        };
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|shown| shown.rendered == rendered)
+        {
+            return Ok(());
+        }
         let text = match self.style {
-            Style::Json => format!("{}\n", json_line(&state, &metrics)),
-            Style::Line => format!("{}\n", picture.replace('\n', " | ")),
+            Style::Json | Style::Line => format!("{rendered}\n"),
             Style::Terminal => frame(&picture, self.shown.as_ref().map_or(0, |shown| shown.lines)),
         };
         out.write(&text)?;
         self.shown = Some(Shown {
             state,
             metrics,
+            rendered,
             lines,
         });
         Ok(())
@@ -340,13 +349,22 @@ fn capture_lines(metrics: &Value) -> Vec<String> {
 }
 
 fn capture_line(capture: &Value) -> String {
-    let route = capture["route"].as_str().unwrap_or("dictation");
+    // A delivered capture names its route. One that was cancelled or failed names where the
+    // audio came from, which is all the log recorded for it.
+    let how = capture["route"]
+        .as_str()
+        .or_else(|| match capture["source"].as_str() {
+            Some("file") => Some("file"),
+            Some("microphone") => Some("microphone"),
+            _ => None,
+        })
+        .unwrap_or("dictation");
     let outcome = match capture["outcome"].as_str() {
         Some("ok") => "delivered",
         Some(other) => other,
         None => "unknown",
     };
-    format!("Last capture: {route} — {outcome}")
+    format!("Last capture: {how} — {outcome}")
 }
 
 /// The median of each stage the window measured, in the order a dictation runs.
@@ -513,6 +531,18 @@ mod tests {
 
     fn capture(route: &str, outcome: &str) -> Value {
         json!({"route": route, "outcome": outcome, "source": "file"})
+    }
+
+    #[test]
+    fn a_capture_without_a_route_names_where_its_audio_came_from() {
+        assert_eq!(
+            capture_line(&json!({"outcome": "cancelled", "source": "file"})),
+            "Last capture: file — cancelled"
+        );
+        assert_eq!(
+            capture_line(&json!({"route": "paste", "outcome": "ok", "source": "microphone"})),
+            "Last capture: paste — delivered"
+        );
     }
 
     fn stages() -> Value {
