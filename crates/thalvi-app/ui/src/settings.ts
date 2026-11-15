@@ -110,6 +110,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     // A download or retry finishes behind this long-lived window, so what lives on disk is read again when the app's state changes.
     if (lastState !== null && next.state !== lastState) live.refresh();
     lastState = next.state;
+    // A change made during a capture is in effect once the capture is over.
+    if (DURING_CAPTURE.includes(status.state) && !DURING_CAPTURE.includes(next.state)) {
+      for (const applied of pagesNode.querySelectorAll(".applied")) {
+        if (applied.textContent === APPLIED_LATER_TEXT) applied.textContent = APPLIED_TEXT;
+      }
+    }
     status = next;
     runtimeFailure = next.state === "failed" ? next.notice : "";
     runtimeCauses = next.state === "failed" ? next.causes : [];

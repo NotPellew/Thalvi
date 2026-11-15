@@ -813,9 +813,13 @@ fn settings_set(running: &impl Running, change: &Value) -> String {
         Err(error) => return refused(&scrub(&error, &secrets), json!({"changed": false})),
     };
     let settings_changed = plan.config != plan.current;
-    // What is under way keeps the settings it started with.
-    let applies = if capturing(&running.status().borrow())
-        || matches!(&*running.status().borrow(), Status::Working { .. })
+    // What is under way keeps the settings it started with, except the overlay's, which apply at once.
+    let mut overlay_only = plan.current.clone();
+    overlay_only.overlay = plan.config.overlay;
+    overlay_only.look = plan.config.look;
+    let applies = if (capturing(&running.status().borrow())
+        || matches!(&*running.status().borrow(), Status::Working { .. }))
+        && overlay_only != plan.config
     {
         "next_capture"
     } else {
@@ -1448,11 +1452,24 @@ mod tests {
         assert_eq!(rig.fake.config().microphone.as_deref(), Some("USB Mic"));
 
         rig.fake.set_status(capturing_status());
-        let during = rig.set(json!({"look": "neon"}));
-        assert_eq!(
-            during,
-            json!({"ok": true, "changed": true, "applies": "next_capture"})
-        );
+        for (change, applies) in [
+            (json!({"look": "holo"}), "now"),
+            (json!({"overlay": {"show": false}}), "now"),
+            (json!({"overlay": {"draft": false}}), "now"),
+            (json!({"overlay": {"show": true}, "look": "neon"}), "now"),
+            (
+                json!({"look": "neon", "microphone": "Desk Mic"}),
+                "next_capture",
+            ),
+            (json!({"ending_pause": {"submit": 0.5}}), "next_capture"),
+        ] {
+            let during = rig.set(change.clone());
+            assert_eq!(
+                during,
+                json!({"ok": true, "changed": true, "applies": applies}),
+                "{change}"
+            );
+        }
     }
 
     #[test]

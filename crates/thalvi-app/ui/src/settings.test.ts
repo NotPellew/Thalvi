@@ -369,6 +369,17 @@ describe("applying a change", () => {
     expect(rowText(label)).toBe(text);
   });
 
+  it("says a change made during a capture is in effect once the capture is over", async () => {
+    const stub = await open();
+    goTo("overlay");
+    stub.emit(CAPTURING);
+    flipSwitch("Wake sound")();
+    await settle();
+    expect(rowText("Wake sound")).toBe(APPLIED_LATER_TEXT);
+    stub.emit({ state: "listening" });
+    expect(rowText("Wake sound")).toBe(APPLIED_TEXT);
+  });
+
   it("applies a form of several fields only as a whole", async () => {
     const stub = await open();
     goTo("commands");
