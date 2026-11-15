@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `8df760f8587cdcf268e878eea4a551a856057019`. The source hashes describe this commit.
+Sync commit: `0342449a6d2b2a6c32435e46f8fb45d83aa3d2e8`. The source hashes describe this commit.
 The previous sync was `f87174d14c2651d7ad1a88e44334ca8ed38ae391`.
 The covered changes through this commit include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
@@ -27,6 +27,12 @@ add no delivery path. `Control::Overlay` (8df760f) returns false from `Requests:
 metrics line, after `set_state(Listening)` and after the outcome has already
 been decided. That write is not a delivery path and adds no cancellation or
 queue step, so the mapped actions are unchanged.
+
+The certificate diagnostics change only failure classification in
+`recognizer.rs`, `realtime.rs` and `openai_live.rs`. The inspected close, cancel
+and loading methods are unchanged: failed connections still deliver nothing,
+with no new await or queue step. Model actions remain unchanged; source hashes
+include these diagnostics at the sync commit above.
 
 The five checked invariants have these exact meanings:
 

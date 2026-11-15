@@ -43,6 +43,11 @@ pub struct RealtimeSession {
 
 fn failure(speech: &SpeechSource, error: Error) -> RecognizerError {
     let speech = speech.clone();
+    if let Error::Connect(cause) = &error
+        && let Some(problem) = crate::report::CertificateProblem::from_error(cause)
+    {
+        return RecognizerError::Certificate { speech, problem };
+    }
     match error {
         Error::Connect(error) => RecognizerError::Unreachable {
             speech,

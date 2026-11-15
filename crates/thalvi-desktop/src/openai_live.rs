@@ -36,6 +36,12 @@ impl OpenAiRecognizer {
 fn failure(speech: &SpeechSource, error: &SecondaryError) -> RecognizerError {
     let subject = speech.subject();
     let (failure, message) = match error {
+        SecondaryError::Certificate(problem) => {
+            return RecognizerError::Certificate {
+                speech: speech.clone(),
+                problem: *problem,
+            };
+        }
         SecondaryError::Timeout => (
             TranscriptionFailure::Timeout,
             format!(

@@ -169,6 +169,11 @@ pub enum TranscriptionFailure {
 /// what to do, naming the entry.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RecognizerError {
+    #[error("Thalvi could not securely connect to {speech}. {problem} Nothing was delivered.")]
+    Certificate {
+        speech: SpeechSource,
+        problem: crate::report::CertificateProblem,
+    },
     #[error("Thalvi could not reach {speech} ({reason}). {}", speech.fix())]
     Unreachable {
         speech: SpeechSource,
@@ -213,6 +218,7 @@ pub enum RecognizerError {
 impl UserError for RecognizerError {
     fn headline(&self) -> &'static str {
         match self {
+            Self::Certificate { .. } => "Server certificate problem",
             Self::Unreachable { .. } => "Can't reach speech server — Settings",
             Self::Dropped { .. } => "Speech server hung up — Settings",
             Self::NotUnderstood { .. } => "Bad speech server reply — Settings",

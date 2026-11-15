@@ -183,7 +183,8 @@ impl Writing {
     /// read piece by piece through [`Reply::next`].
     ///
     /// # Errors
-    /// [`WritingError::Unreachable`] or [`WritingError::Status`] when no answer starts.
+    /// [`WritingError::Certificate`], [`WritingError::Unreachable`] or [`WritingError::Status`]
+    /// when no answer starts.
     pub async fn start(
         &self,
         client: &reqwest::Client,
@@ -227,10 +228,10 @@ impl Writing {
         if !self.api_key.is_empty() {
             request = request.bearer_auth(&self.api_key);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|_| WritingError::Unreachable)?;
+        let response = request.send().await.map_err(|error| {
+            crate::report::CertificateProblem::from_error(&error)
+                .map_or(WritingError::Unreachable, WritingError::Certificate)
+        })?;
         let status = response.status();
         if !status.is_success() {
             return Err(WritingError::Status(status.as_u16()));
@@ -265,6 +266,8 @@ impl TryFrom<RawWriting> for Writing {
 /// that nothing was pasted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum WritingError {
+    #[error("The writing model's secure connection failed. {0}")]
+    Certificate(crate::report::CertificateProblem),
     #[error("No writing model is set up. Add one under Settings → Chat model → Writing.")]
     NotSetUp,
     #[error("The writing model took longer than 15 seconds.")]
@@ -293,6 +296,7 @@ impl WritingError {
             Self::Timeout => "timeout",
             Self::StillThinking => "still_thinking",
             Self::Unreachable => "unreachable",
+            Self::Certificate(_) => "certificate",
             Self::Status(_) => "status",
             Self::BadResponse => "bad_response",
             Self::Empty => "empty",
@@ -307,6 +311,7 @@ impl UserError for WritingError {
             Self::Timeout => "Writing took too long",
             Self::StillThinking => "Writing model still thinking",
             Self::Unreachable => "Writing model unreachable",
+            Self::Certificate(_) => "Server certificate problem",
             Self::Status(_) => "Writing model failed",
             Self::BadResponse => "Writing reply unreadable",
             Self::Empty => "Writing returned no text",
