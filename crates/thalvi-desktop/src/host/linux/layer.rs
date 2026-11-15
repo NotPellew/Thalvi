@@ -143,6 +143,11 @@ impl Layer {
 
     pub fn show(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
         self.drain();
+        // A surface that is still being placed, or one already showing, is drawn onto. Making
+        // another here leaks a layer every time the caller asks again.
+        if self.pending.is_some() || self.surface.is_some() {
+            return self.placed(frame);
+        }
         let surface = self.compositor.create_surface(&self.queue);
         surface.set_buffer_scale(self.scale);
         // An empty input region: clicks reach the windows below, as the overlay takes none here.
@@ -199,7 +204,12 @@ impl Layer {
                 .as_ref()
                 .is_some_and(|pending| pending.since.elapsed() >= CONFIGURE_WITHIN)
         {
-            self.pending = None;
+            // Keep the surface. Dropping it and showing again leaves a layer behind on a
+            // compositor that never configured it, and the next status would make another.
+            let Some(pending) = self.pending.take() else {
+                return Err(failed("Hyprland did not place it"));
+            };
+            self.surface = Some(pending.layer);
             return Err(failed("Hyprland did not place it"));
         }
         let Some(layer) = &self.surface else {
