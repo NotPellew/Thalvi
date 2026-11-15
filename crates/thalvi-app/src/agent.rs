@@ -867,6 +867,7 @@ async fn metrics_summary(running: &impl Running) -> String {
         "window_hours": SUMMARY_WINDOW.as_secs() / 3600,
         "stages": summary.stages,
         "captures": summary.captures,
+        "recent": summary.recent,
     }))
 }
 
@@ -1966,6 +1967,13 @@ mod tests {
         assert_eq!(reply["stages"]["delivery"]["count"], 0);
         assert_eq!(reply["stages"]["delivery"]["p50_ms"], Value::Null);
         assert_eq!(reply["captures"], json!({"cancelled": 1, "ok": 1}));
+        assert_eq!(
+            reply["recent"],
+            json!([
+                {"outcome": "ok"},
+                {"outcome": "cancelled"},
+            ])
+        );
 
         #[cfg(unix)]
         {

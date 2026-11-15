@@ -23,6 +23,11 @@ waiting for an on-device load. Their mapped actions remain below. Microphone
 switching happens after capture; notices, metrics and endpoint payload changes
 add no delivery path. No product promise or bound changed in this maintenance.
 
+`Engine::capture` now also records the delivery route on a delivered capture's
+metrics line, after `set_state(Listening)` and after the outcome has already
+been decided. That write is not a delivery path and adds no cancellation or
+queue step, so the mapped actions are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty

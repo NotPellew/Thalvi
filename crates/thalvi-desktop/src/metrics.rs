@@ -607,12 +607,31 @@ pub struct Stages {
     pub delivery: StageSummary,
 }
 
+/// One recent dictation, as far as its capture-flow line says. It names the route and the source,
+/// never the words.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct RecentCapture {
+    /// How the dictation was delivered, when the log says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+    /// How the capture ended: `ok`, `cancelled` or `failed`.
+    pub outcome: String,
+    /// Where the audio came from: `microphone` or `file`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// How many recent dictations [`Summary::recent`] keeps.
+const RECENT_CAPTURES: usize = 3;
+
 /// What `metrics.jsonl` says about the dictations of a recent window.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Summary {
     pub stages: Stages,
     /// How the captures ended.
     pub captures: BTreeMap<String, usize>,
+    /// The last few dictations in the window, oldest first.
+    pub recent: Vec<RecentCapture>,
 }
 
 /// A metrics log exists but could not be read.
@@ -650,7 +669,15 @@ pub fn summarize(dir: &Path, window: Duration) -> Result<Summary, UnreadableLog>
             let outcome = line["outcome"].as_str().unwrap_or("unknown").to_owned();
             let stage = match line["event"].as_str() {
                 Some("desktop_capture_flow") => {
-                    *summary.captures.entry(outcome).or_default() += 1;
+                    *summary.captures.entry(outcome.clone()).or_default() += 1;
+                    summary.recent.push(RecentCapture {
+                        route: line["route"].as_str().map(str::to_owned),
+                        outcome,
+                        source: line["source"].as_str().map(str::to_owned),
+                    });
+                    summary
+                        .recent
+                        .drain(..summary.recent.len().saturating_sub(RECENT_CAPTURES));
                     continue;
                 }
                 Some("desktop_transcription_ready") => (&mut summary.stages.connect, 0),
@@ -1188,6 +1215,49 @@ mod tests {
             summary.captures,
             BTreeMap::from([("cancelled".to_owned(), 1), ("ok".to_owned(), 2)])
         );
+        assert_eq!(summary.recent.len(), 3);
+        assert_eq!(
+            summary.recent.last().map(|last| last.outcome.as_str()),
+            Some("cancelled")
+        );
+    }
+
+    #[test]
+    fn the_summary_keeps_the_last_few_captures_and_never_their_words() {
+        let dir = TempDir::new("recent");
+        std::fs::create_dir_all(dir.root()).unwrap();
+        let now = now_ms();
+        let flow = |n: u64, outcome: &str, route: Option<&str>| {
+            let mut line = json!({
+                "ts_ms": now + n,
+                "event": "desktop_capture_flow",
+                "outcome": outcome,
+                "source": "file",
+                "text": "the words that were said",
+            });
+            if let Some(route) = route {
+                line["route"] = json!(route);
+            }
+            line.to_string()
+        };
+        let lines = [
+            flow(1, "ok", Some("paste")),
+            flow(2, "cancelled", None),
+            flow(3, "ok", Some("submit")),
+            flow(4, "failed", Some("paste")),
+        ];
+        std::fs::write(dir.root().join("metrics.jsonl"), lines.join("\n")).unwrap();
+        let summary = summarize(&dir.root(), SUMMARY_WINDOW).unwrap();
+        let recent = serde_json::to_value(&summary.recent).unwrap();
+        assert_eq!(
+            recent,
+            json!([
+                {"outcome": "cancelled", "source": "file"},
+                {"route": "submit", "outcome": "ok", "source": "file"},
+                {"route": "paste", "outcome": "failed", "source": "file"},
+            ])
+        );
+        assert!(!recent.to_string().contains("words"));
     }
 
     #[test]

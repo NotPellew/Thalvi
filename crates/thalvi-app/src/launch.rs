@@ -8,13 +8,18 @@ use serde_json::Value;
 use crate::agent::{Catalog, Request};
 use crate::startup::LOGIN_ARG;
 
-const USAGE: &str = "Usage: thalvi-desktop [toggle | pause | resume | cancel | hold-start | hold-end | write-start | write-end | copy-error | state | status | show [page] | quit | feed <wav-file> | models | model-download <wake|speech> <name> | speech-check <json> | settings get | settings check <json> | settings set <json> | metrics summary | config-file]";
+const USAGE: &str = "Usage: thalvi-desktop [toggle | pause | resume | cancel | hold-start | hold-end | write-start | write-end | copy-error | state | status | watch [--json] | show [page] | quit | feed <wav-file> | models | model-download <wake|speech> <name> | speech-check <json> | settings get | settings check <json> | settings set <json> | metrics summary | config-file]";
 
 /// The command line after the program name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Launch {
     /// Ask the running app and print its reply; never starts the app, the microphone or a window.
     Ask(Request),
+    /// Follow the running app, printing again only when what it shows changes.
+    Watch {
+        /// One JSON line per change, instead of the terminal view.
+        json: bool,
+    },
     /// Open the app, or its settings window when it already runs.
     Open {
         /// What the login entry asks for: start in the tray, and leave a running app as it is.
@@ -39,6 +44,8 @@ impl Launch {
             [] => open(false, None),
             ["status"] => Ok(Self::Ask(Request::Status)),
             ["state"] => Ok(Self::Ask(Request::State)),
+            ["watch"] => Ok(Self::Watch { json: false }),
+            ["watch", "--json"] => Ok(Self::Watch { json: true }),
             ["toggle"] => Ok(Self::Ask(Request::Toggle)),
             ["pause"] => Ok(Self::Ask(Request::Pause)),
             ["resume"] => Ok(Self::Ask(Request::Resume)),
@@ -87,7 +94,7 @@ impl Launch {
             [path]
                 if !matches!(
                     *path,
-                    "settings" | "metrics" | "feed" | "model-download" | "speech-check"
+                    "settings" | "metrics" | "feed" | "model-download" | "speech-check" | "watch"
                 ) =>
             {
                 open(false, Some(PathBuf::from(path)))
@@ -114,7 +121,7 @@ fn change_of(argument: &str, stdin: impl FnOnce() -> io::Result<String>) -> Resu
 pub fn relaunch_shows_settings(args: &[String]) -> bool {
     !matches!(
         Launch::parse(args.get(1..).unwrap_or_default(), || Ok(String::new())),
-        Ok(Launch::Open { login: true, .. } | Launch::Ask(_))
+        Ok(Launch::Open { login: true, .. } | Launch::Ask(_) | Launch::Watch { .. })
     )
 }
 
@@ -155,6 +162,8 @@ mod tests {
             (&["copy-error"][..], ask(Request::CopyError)),
             (&["status"][..], ask(Request::Status)),
             (&["state"][..], ask(Request::State)),
+            (&["watch"][..], Ok(Launch::Watch { json: false })),
+            (&["watch", "--json"][..], Ok(Launch::Watch { json: true })),
             (&["settings", "get"][..], ask(Request::SettingsGet)),
             (&["metrics", "summary"][..], ask(Request::MetricsSummary)),
             (
@@ -184,6 +193,8 @@ mod tests {
             (&["settings"][..], Err(USAGE.to_owned())),
             (&["settings", "get", "x"][..], Err(USAGE.to_owned())),
             (&["metrics"][..], Err(USAGE.to_owned())),
+            (&["watch", "json"][..], Err(USAGE.to_owned())),
+            (&["watch", "--json", "more"][..], Err(USAGE.to_owned())),
         ] {
             assert_eq!(parse(args), expected, "{args:?}");
         }
@@ -260,6 +271,7 @@ mod tests {
             (&["thalvi-desktop", "desktop.json"][..], true),
             (&["thalvi-desktop", "--login"][..], false),
             (&["thalvi-desktop", "toggle"][..], false),
+            (&["thalvi-desktop", "watch"][..], false),
             (&["thalvi-desktop", "a", "b"][..], true),
             (&[][..], true),
         ] {

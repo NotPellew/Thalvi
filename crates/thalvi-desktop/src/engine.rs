@@ -1463,13 +1463,20 @@ where
         self.gate.set_enabled(true);
         self.level.send_replace(0.0);
         self.set_state(EngineState::Listening);
-        let (flow, fields) = match &outcome {
+        let route = match &outcome {
+            CaptureOutcome::Accepted(request) => Some(request.route.name()),
+            _ => None,
+        };
+        let (flow, mut fields) = match &outcome {
             CaptureOutcome::Accepted(_) => ("ok", json!({"source": source})),
             CaptureOutcome::Cancelled { .. } => ("cancelled", json!({"source": source})),
             CaptureOutcome::Failed { error, .. } => {
                 ("failed", json!({"reason": error.kind(), "source": source}))
             }
         };
+        if let Some(route) = route {
+            fields["route"] = json!(route);
+        }
         self.recorder
             .metric(Event::CaptureFlow, flow, Some(started.elapsed()), fields);
         if let Some(held) = held {

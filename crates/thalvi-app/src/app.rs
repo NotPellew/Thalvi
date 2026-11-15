@@ -457,6 +457,18 @@ pub fn run() -> ExitCode {
     });
     let (login, config) = match launch {
         Ok(Launch::Ask(request)) => return client::run(&request),
+        Ok(Launch::Watch { json }) => {
+            return match crate::watch::run(json) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    println!(
+                        "{}",
+                        refusal(&format!("The view could not be shown: {error}."))
+                    );
+                    ExitCode::FAILURE
+                }
+            };
+        }
         Ok(Launch::Open { login, config }) => (login, config),
         Err(message) => {
             println!("{}", refusal(&message));
