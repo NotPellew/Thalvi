@@ -686,10 +686,15 @@ async fn a_load_goes_on_after_the_dictation_that_began_it_gives_up_and_a_failed_
             .held
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some((downloading, Arc::clone(&release)));
-        let mut steps = rig.recognizer.steps();
+        let mut steps = rig
+            .recognizer
+            .loading()
+            .expect("a local recognizer shows its load");
         tokio::select! {
             _ = rig.recognizer.connect() => panic!("the download has not finished"),
-            seen = steps.wait_for(|step| *step == downloading) => seen.map(|_| ()).expect("steps"),
+            seen = tokio::time::timeout(WAIT, steps.wait_for(|step| *step == downloading)) => {
+                seen.expect("the download is shown in time").map(|_| ()).expect("steps");
+            }
         }
         // The dictation stopped waiting, which dropped its connect.
         release.notify_one();
