@@ -228,6 +228,8 @@ pub struct OpenAiLive {
 /// Why the secondary transcription produced no text.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SecondaryError {
+    #[error("The transcription server's secure connection failed. {0}")]
+    Certificate(crate::report::CertificateProblem),
     #[error("The second transcription took too long.")]
     Timeout,
     #[error("The second transcription could not be reached.")]
@@ -236,6 +238,13 @@ pub enum SecondaryError {
     Status(u16),
     #[error("The second transcription returned an unexpected answer.")]
     BadResponse,
+}
+
+impl SecondaryError {
+    fn connection(error: &reqwest::Error) -> Self {
+        crate::report::CertificateProblem::from_error(error)
+            .map_or(Self::Unreachable, Self::Certificate)
+    }
 }
 
 /// 24 kHz mono 16-bit WAV of the captured frames, upsampled exactly as the live stream was.
@@ -315,7 +324,7 @@ pub async fn transcribe(
         let response = request
             .send()
             .await
-            .map_err(|_| SecondaryError::Unreachable)?;
+            .map_err(|error| SecondaryError::connection(&error))?;
         let status = response.status();
         if !status.is_success() {
             return Err(SecondaryError::Status(status.as_u16()));
@@ -381,7 +390,7 @@ async fn transcribe_stream(
         let response = request
             .send()
             .await
-            .map_err(|_| SecondaryError::Unreachable)?;
+            .map_err(|error| SecondaryError::connection(&error))?;
         if !response.status().is_success() {
             return Err(SecondaryError::Status(response.status().as_u16()));
         }
@@ -407,7 +416,7 @@ async fn transcribe_stream(
         let mut transcript = String::new();
         let mut final_text = None;
         while let Some(chunk) = stream.next().await {
-            pending.extend_from_slice(&chunk.map_err(|_| SecondaryError::Unreachable)?);
+            pending.extend_from_slice(&chunk.map_err(|error| SecondaryError::connection(&error))?);
             while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<_> = pending.drain(..=newline).collect();
                 let line = String::from_utf8_lossy(&line);
@@ -485,7 +494,7 @@ async fn transcribe_chat(
         let response = request
             .send()
             .await
-            .map_err(|_| SecondaryError::Unreachable)?;
+            .map_err(|error| SecondaryError::connection(&error))?;
         let status = response.status();
         if !status.is_success() {
             return Err(SecondaryError::Status(status.as_u16()));

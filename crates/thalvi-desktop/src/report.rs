@@ -7,6 +7,62 @@ use chrono::{DateTime, Utc};
 
 use crate::config::DesktopConfig;
 
+/// A certificate rejection, with advice that never asks the user to bypass verification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CertificateProblem {
+    #[error(
+        "The server's certificate issuer is not trusted. Ask your IT team or server administrator to check the certificate chain and install the approved company CA in this computer's certificate store, then restart Thalvi."
+    )]
+    UntrustedIssuer,
+    #[error(
+        "The server's certificate has expired. Check this computer's date and time, or ask the server administrator to renew the certificate."
+    )]
+    Expired,
+    #[error(
+        "The server's certificate is not valid yet. Check this computer's date and time, or contact the server administrator."
+    )]
+    NotValidYet,
+    #[error(
+        "The server's certificate does not match its address. Check the configured server address, or ask the server administrator to correct the certificate."
+    )]
+    WrongHost,
+    #[error(
+        "The server's certificate could not be verified. Contact your IT team or server administrator to check the certificate."
+    )]
+    Invalid,
+}
+
+impl CertificateProblem {
+    /// Finds a typed TLS certificate rejection through HTTP, WebSocket and I/O wrappers.
+    #[must_use]
+    pub fn from_error(error: &(dyn Error + 'static)) -> Option<Self> {
+        std::iter::successors(Some(error), |cause| {
+            if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+                io.get_ref().map(|inner| inner as &(dyn Error + 'static))
+            } else {
+                (*cause).source()
+            }
+        })
+        .find_map(|cause| {
+            let rustls::Error::InvalidCertificate(certificate) =
+                cause.downcast_ref::<rustls::Error>()?
+            else {
+                return None;
+            };
+            Some(match certificate {
+                rustls::CertificateError::UnknownIssuer => Self::UntrustedIssuer,
+                rustls::CertificateError::Expired
+                | rustls::CertificateError::ExpiredContext { .. } => Self::Expired,
+                rustls::CertificateError::NotValidYet
+                | rustls::CertificateError::NotValidYetContext { .. } => Self::NotValidYet,
+                rustls::CertificateError::NotValidForName
+                | rustls::CertificateError::NotValidForNameContext { .. } => Self::WrongHost,
+                _ => Self::Invalid,
+            })
+        })
+    }
+}
+
 /// The messages of every error behind `error`, outermost first, without `error` itself.
 #[must_use]
 pub fn causes(error: &(dyn Error + 'static)) -> Vec<String> {
@@ -134,6 +190,37 @@ mod tests {
 
     use super::*;
     use crate::recognizer::{ConnectFailure, Detail, RecognizerError, SpeechSource};
+
+    #[test]
+    fn certificate_causes_are_classified_through_io_without_matching_error_text() {
+        for (certificate, expected) in [
+            (
+                rustls::CertificateError::UnknownIssuer,
+                CertificateProblem::UntrustedIssuer,
+            ),
+            (
+                rustls::CertificateError::Expired,
+                CertificateProblem::Expired,
+            ),
+            (
+                rustls::CertificateError::NotValidYet,
+                CertificateProblem::NotValidYet,
+            ),
+            (
+                rustls::CertificateError::NotValidForName,
+                CertificateProblem::WrongHost,
+            ),
+            (
+                rustls::CertificateError::Revoked,
+                CertificateProblem::Invalid,
+            ),
+        ] {
+            let error = std::io::Error::other(rustls::Error::InvalidCertificate(certificate));
+            assert_eq!(CertificateProblem::from_error(&error), Some(expected));
+        }
+        let error = std::io::Error::other("invalid certificate: UnknownIssuer");
+        assert_eq!(CertificateProblem::from_error(&error), None);
+    }
 
     fn config(json: &str) -> DesktopConfig {
         DesktopConfig::from_json_str(json).unwrap()

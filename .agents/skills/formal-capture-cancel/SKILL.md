@@ -28,6 +28,12 @@ metrics line, after `set_state(Listening)` and after the outcome has already
 been decided. That write is not a delivery path and adds no cancellation or
 queue step, so the mapped actions are unchanged.
 
+The working-tree certificate diagnostics change only failure classification in
+`recognizer.rs`, `realtime.rs` and `openai_live.rs`. The inspected close, cancel
+and loading methods are unchanged: failed connections still deliver nothing,
+with no new await or queue step. Model actions remain unchanged; source hashes
+include these uncommitted diagnostics while the sync commit stays as above.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
