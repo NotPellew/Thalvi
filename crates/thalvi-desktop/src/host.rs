@@ -46,7 +46,7 @@ pub struct OverlayFrame {
 }
 
 /// What ended a wait on the overlay surface.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum OverlayEvent {
     /// Its [`OverlayWaker`] was called.
     Woken,
@@ -54,6 +54,10 @@ pub enum OverlayEvent {
     Press { x: f32, y: f32 },
     /// The wait reached its deadline.
     Due,
+    /// The surface's connection or protocol failed; the overlay is no longer on screen.
+    Lost(String),
+    /// A show is still waiting for the compositor to place the surface.
+    Pending,
 }
 
 /// Where `deliver` left the text.
@@ -91,6 +95,15 @@ impl UserError for HostError {
             Self::MaybePartial(_) => "Some text may have been pasted",
         }
     }
+}
+
+/// The notice and headline an overlay failure shows in the tray and Settings.
+#[must_use]
+pub fn overlay_failure(reason: &str) -> (&'static str, String) {
+    (
+        "Status overlay unavailable",
+        format!("{reason} The status overlay stays off until it recovers."),
+    )
 }
 
 /// Text to paste: line breaks (as `\n`) and tabs, but no other control character, so pasting it

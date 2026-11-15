@@ -61,6 +61,8 @@ pub enum Control {
     Apply(Box<DesktopConfig>),
     /// The desktop refused to report the hold key; the notice says so in plain words.
     HoldKeyFailed(String),
+    /// The status overlay failed, or recovered (`None`). Shown while nothing else has failed.
+    Overlay(Option<Failure>),
     /// Stops for an update, but only if nothing is going on.
     RestartIfIdle(Restart),
     /// A download of this catalog model finished; load it if the active entry uses it and it is not loaded.
@@ -382,6 +384,11 @@ impl Publisher {
 
     fn failed(&self) -> bool {
         matches!(self.view.borrow().mode, Mode::Failed(_))
+    }
+
+    /// Whether the status shows an overlay failure, which recovery may clear.
+    fn overlay_failed(&self) -> bool {
+        matches!(&self.view.borrow().mode, Mode::Failed(failure) if failure.headline == "Status overlay unavailable")
     }
 
     fn mode(&self, mode: Mode) {
@@ -1045,6 +1052,7 @@ impl Runner {
             },
             Control::Apply(config) => self.apply(*config).await,
             Control::HoldKeyFailed(notice) => self.hold_problem = Some(notice),
+            Control::Overlay(failure) => self.overlay(failure),
             Control::ReloadSpeechModel(model) => self.reload_speech_model(model),
             Control::RestartIfIdle(restart) => {
                 let held = self.key_state.borrow().down;
@@ -1057,6 +1065,15 @@ impl Runner {
 
     /// Shows a refused hold key once nothing else is on the status: the failure stays until the
     /// next capture or resumed listening, like any other.
+    /// Shows an overlay failure while the engine itself is fine, and clears it on recovery.
+    fn overlay(&mut self, failure: Option<Failure>) {
+        match failure {
+            Some(failure) if !self.publisher.failed() => self.fail(failure),
+            None if self.publisher.overlay_failed() => self.publisher.mode(Mode::Idle),
+            _ => {}
+        }
+    }
+
     fn show_hold_problem(&mut self) {
         if self.paused || self.publisher.failed() {
             return;
@@ -1593,6 +1610,7 @@ impl Requests {
                 self.hold_problem = Some(notice);
                 false
             }
+            Some(Control::Overlay(_)) => false,
             Some(Control::ReloadSpeechModel(model)) => {
                 self.reload = Some(model);
                 false

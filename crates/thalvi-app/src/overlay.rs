@@ -14,9 +14,10 @@ use std::time::{Duration, Instant};
 use thalvi_desktop::config::Look;
 use thalvi_desktop::host::{
     HostError, OverlayEvent, OverlayFrame, OverlayPlan, OverlaySurface, OverlayWaker,
+    overlay_failure,
 };
 
-use crate::status::Status;
+use crate::status::{Failure, FailureKind, LastError, Status};
 use painter::Painter;
 use view::View;
 
@@ -25,6 +26,12 @@ const DONE_FOR: Duration = Duration::from_secs(1);
 
 /// How long a failure's headline stays on screen; the tray and Settings keep the failure.
 const FAILED_FOR: Duration = Duration::from_secs(5);
+
+/// How soon a failed show or present may be tried again.
+const RETRY_AFTER: Duration = Duration::from_secs(1);
+
+/// How soon a show still waiting on the compositor is looked at again.
+const PLACE_AFTER: Duration = Duration::from_millis(50);
 
 /// What the overlay window does when the status changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +84,25 @@ enum Message {
     Theme(bool),
 }
 
+/// Where an overlay failure is shown, off the overlay's own thread.
+pub struct FailureSink {
+    /// Records the failure the tray and Settings copy.
+    note: Arc<dyn Fn(Option<Failure>) + Send + Sync>,
+}
+
+impl FailureSink {
+    /// `show` receives the failure, or `None` once the surface has recovered.
+    pub fn new(show: impl Fn(Option<Failure>) + Send + Sync + 'static) -> Self {
+        Self {
+            note: Arc::new(show),
+        }
+    }
+
+    fn show(&self, failure: Option<Failure>) {
+        (self.note)(failure);
+    }
+}
+
 /// Feeds the overlay's thread from any thread. What it is told before the thread starts waits.
 pub struct Overlay {
     messages: mpsc::Sender<Message>,
@@ -84,6 +110,9 @@ pub struct Overlay {
     waker: Arc<Mutex<Option<OverlayWaker>>>,
     /// The mic level as `f32` bits; read at each frame rather than sent.
     level: Arc<AtomicU32>,
+    /// Overlay failures the tray and Settings show, beside the engine's own status.
+    failures: LastError,
+    sink: Mutex<Option<FailureSink>>,
 }
 
 impl Default for Overlay {
@@ -94,11 +123,18 @@ impl Default for Overlay {
             waiting: Mutex::new(Some(waiting)),
             waker: Arc::default(),
             level: Arc::default(),
+            failures: LastError::default(),
+            sink: Mutex::default(),
         }
     }
 }
 
 impl Overlay {
+    /// Where overlay failures are shown. Set before [`Self::start`].
+    pub fn report_to(&self, sink: FailureSink) {
+        *self.sink.lock().unwrap_or_else(PoisonError::into_inner) = Some(sink);
+    }
+
     /// Starts the overlay's thread, which opens `plan`'s surface; `cancel` runs when its cancel
     /// button is pressed. A second call does nothing.
     pub fn start(&self, plan: OverlayPlan, takes_clicks: bool, cancel: impl Fn() + Send + 'static) {
@@ -110,13 +146,51 @@ impl Overlay {
         else {
             return;
         };
-        let (waker, level) = (Arc::clone(&self.waker), Arc::clone(&self.level));
+        let (waker, level, failures, sink) = (
+            Arc::clone(&self.waker),
+            Arc::clone(&self.level),
+            self.failures.clone(),
+            self.sink
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
         let started = std::thread::Builder::new()
             .name("overlay".to_owned())
-            .spawn(move || run(plan, takes_clicks, &messages, &waker, &level, &cancel));
+            .spawn(move || {
+                run(
+                    Thread {
+                        plan,
+                        takes_clicks,
+                        messages,
+                        waker,
+                        level,
+                        failures,
+                        sink,
+                    },
+                    &cancel,
+                );
+            });
         if let Err(error) = started {
-            println!("The status overlay could not start: {error}. It stays off.");
+            self.report(&format!("The status overlay could not start: {error}."));
         }
+    }
+
+    /// The latest overlay failure, for the tray and Settings.
+    #[must_use]
+    pub fn failure(&self) -> Option<Failure> {
+        self.failures.get()
+    }
+
+    fn report(&self, reason: &str) {
+        publish(
+            &self.failures,
+            self.sink
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref(),
+            reason,
+        );
     }
 
     /// Shows `status`, and shows or hides the overlay as `visibility` says.
@@ -156,25 +230,41 @@ impl Overlay {
 }
 
 /// The overlay's thread: opens the surface, then shows, animates and hides it as told.
-fn run(
+struct Thread {
     plan: OverlayPlan,
     takes_clicks: bool,
-    messages: &mpsc::Receiver<Message>,
-    waker: &Mutex<Option<OverlayWaker>>,
-    level: &AtomicU32,
-    cancel: &dyn Fn(),
-) {
+    messages: mpsc::Receiver<Message>,
+    waker: Arc<Mutex<Option<OverlayWaker>>>,
+    level: Arc<AtomicU32>,
+    failures: LastError,
+    sink: Option<FailureSink>,
+}
+
+fn run(thread: Thread, cancel: &dyn Fn()) {
+    let Thread {
+        plan,
+        takes_clicks,
+        messages,
+        waker,
+        level,
+        failures,
+        sink,
+    } = thread;
     let mut surface = match plan.open(view::WIDTH, view::HEIGHT, takes_clicks) {
         Ok(surface) => surface,
         Err(error) => {
-            println!("{error} The status overlay stays off.");
+            publish(&failures, sink.as_ref(), &error.to_string());
             return;
         }
     };
     *waker.lock().unwrap_or_else(PoisonError::into_inner) = Some(surface.waker());
     // Fonts load here, before the first show, so no show waits for them.
     let Some(mut painter) = Painter::new(surface.scale(), Look::default(), true) else {
-        println!("The status overlay could not be drawn at this scale. It stays off.");
+        publish(
+            &failures,
+            sink.as_ref(),
+            "The status overlay could not be drawn at this scale.",
+        );
         return;
     };
     let mut overlay = Overlaying::new(takes_clicks, Instant::now());
@@ -183,16 +273,48 @@ fn run(
             overlay.take(message, Instant::now());
         }
         let level = f32::from_bits(level.load(Ordering::Relaxed));
-        overlay.settle(&mut surface, &mut painter, level, Instant::now());
+        let outcome = overlay.settle(&mut surface, &mut painter, level, Instant::now());
+        match outcome {
+            Draw::Shown => {
+                failures.clear_overlay();
+                if let Some(sink) = sink.as_ref() {
+                    sink.show(None);
+                }
+            }
+            Draw::Failed(reason) => publish(&failures, sink.as_ref(), &reason),
+            Draw::Waiting | Draw::Idle => {}
+        }
         match surface.wait(overlay.deadline()) {
-            OverlayEvent::Woken => {}
+            OverlayEvent::Woken | OverlayEvent::Pending => {}
             OverlayEvent::Press { x, y } => {
                 if overlay.cancels(&painter, x, y) {
                     cancel();
                 }
             }
             OverlayEvent::Due => overlay.due(Instant::now()),
+            OverlayEvent::Lost(reason) => {
+                overlay.lost();
+                publish(&failures, sink.as_ref(), &reason);
+            }
         }
+    }
+}
+
+/// Keeps `reason` where the tray and Settings read it, once per distinct reason, and shows it.
+fn publish(failures: &LastError, sink: Option<&FailureSink>, reason: &str) {
+    let (headline, notice) = overlay_failure(reason);
+    if failures.get().is_some_and(|held| held.notice == notice) {
+        return;
+    }
+    let failure = Failure {
+        notice,
+        headline,
+        causes: vec![reason.to_owned()],
+        kind: FailureKind::Other,
+    };
+    failures.note(failure.clone());
+    if let Some(sink) = sink {
+        sink.show(Some(failure));
     }
 }
 
@@ -233,8 +355,22 @@ struct Overlaying {
     stale: bool,
     /// The last failure to show, reported once.
     failure: Option<String>,
+    /// The next time a failed show or present may be tried.
+    retry_at: Option<Instant>,
     /// The look, and whether the system's theme is dark.
     style: (Look, bool),
+}
+
+/// What one settle did with the surface.
+enum Draw {
+    /// Nothing was asked of the surface.
+    Idle,
+    /// A show is waiting for the compositor.
+    Waiting,
+    /// The surface is showing.
+    Shown,
+    /// The surface could not be shown; the reason is new.
+    Failed(String),
 }
 
 impl Overlaying {
@@ -248,6 +384,7 @@ impl Overlaying {
             frame_at: None,
             stale: false,
             failure: None,
+            retry_at: None,
             style: (Look::default(), true),
         }
     }
@@ -287,6 +424,10 @@ impl Overlaying {
         };
         self.wanted = wanted;
         self.hide_at = hide_at;
+        // A status that asks to show again also asks to draw, so a vanished surface is made again.
+        if wanted {
+            self.stale = true;
+        }
     }
 
     /// A deadline passed: hide once shown long enough, or draw the next frame.
@@ -304,11 +445,18 @@ impl Overlaying {
         self.visible && painter.cancels(&self.view, x, y)
     }
 
+    /// The surface vanished or its connection ended: the next show makes it again.
+    fn lost(&mut self) {
+        self.visible = false;
+        self.stale = true;
+        self.retry_at = None;
+    }
+
     fn deadline(&self) -> Option<Instant> {
-        match (self.hide_at, self.frame_at) {
-            (Some(hide), Some(frame)) => Some(hide.min(frame)),
-            (hide, frame) => hide.or(frame),
-        }
+        [self.hide_at, self.frame_at, self.retry_at]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Brings the surface in line with what is wanted, drawing a frame when the view moved.
@@ -318,17 +466,21 @@ impl Overlaying {
         painter: &mut Painter,
         level: f32,
         now: Instant,
-    ) {
+    ) -> Draw {
         if !self.wanted {
             if self.visible {
                 surface.hide();
                 self.visible = false;
             }
             self.frame_at = None;
-            return;
+            self.retry_at = None;
+            return Draw::Idle;
+        }
+        if self.retry_at.is_some_and(|at| now < at) {
+            return Draw::Idle;
         }
         if self.visible && !self.stale {
-            return;
+            return Draw::Idle;
         }
         let clock = self.clock(now);
         painter.restyle(self.style.0, self.style.1);
@@ -342,21 +494,35 @@ impl Overlaying {
         } else {
             surface.show(frame)
         };
-        match drawn {
+        let outcome = match drawn {
             Ok(()) => {
                 self.visible = true;
+                self.stale = false;
                 self.failure = None;
+                self.retry_at = None;
+                Draw::Shown
+            }
+            Err(HostError::Unsupported(message)) if message.contains("not placed yet") => {
+                self.visible = false;
+                self.retry_at = Some(now + PLACE_AFTER);
+                Draw::Waiting
             }
             Err(error) => {
                 let message = error.to_string();
-                if self.failure.as_ref() != Some(&message) {
-                    println!("{message} The status overlay stays hidden.");
+                self.visible = false;
+                // A vanished surface is shown again as soon as the next status asks. A refusal waits.
+                self.retry_at = (!message.contains("closed")).then_some(now + RETRY_AFTER);
+                let fresh = self.failure.as_ref() != Some(&message);
+                self.failure = Some(message.clone());
+                if fresh {
+                    Draw::Failed(message)
+                } else {
+                    Draw::Idle
                 }
-                self.failure = Some(message);
             }
-        }
-        self.stale = false;
+        };
         self.frame_at = next.map(|wait| now + wait);
+        outcome
     }
 }
 
@@ -370,16 +536,26 @@ mod tests {
 
     use super::*;
 
-    /// Records what the overlay's thread asked of it; refuses to show while `refuse` is set.
+    /// Records what the overlay's thread asked of it.
     #[derive(Default)]
     struct Fake {
         calls: Vec<&'static str>,
+        /// Refuses show and present while set.
         refuse: bool,
+        /// The next present reports the surface gone.
+        vanish: bool,
+        /// Show answers that the compositor has not placed the surface yet.
+        pending: bool,
     }
 
     impl Surface for Fake {
         fn show(&mut self, _: &OverlayFrame) -> Result<(), HostError> {
             self.calls.push("show");
+            if self.pending {
+                return Err(HostError::Unsupported(
+                    "the layer surface is not placed yet".to_owned(),
+                ));
+            }
             if self.refuse {
                 return Err(HostError::Unsupported("The desktop said no.".to_owned()));
             }
@@ -388,6 +564,15 @@ mod tests {
 
         fn present(&mut self, _: &OverlayFrame) -> Result<(), HostError> {
             self.calls.push("present");
+            if self.vanish {
+                self.vanish = false;
+                return Err(HostError::Unsupported(
+                    "the layer surface closed".to_owned(),
+                ));
+            }
+            if self.refuse {
+                return Err(HostError::Unsupported("The desktop said no.".to_owned()));
+            }
             Ok(())
         }
 
@@ -418,7 +603,7 @@ mod tests {
             if due {
                 overlay.due(now);
             }
-            overlay.settle(&mut surface, &mut painter, 0.5, now);
+            let _ = overlay.settle(&mut surface, &mut painter, 0.5, now);
             overlay.deadline()
         };
         let first = step(
@@ -483,9 +668,9 @@ mod tests {
         surface.refuse = false;
         overlay.take(
             Message::Status(Box::new(capturing()), Visibility::Show),
-            start,
+            start + RETRY_AFTER,
         );
-        overlay.settle(&mut surface, &mut painter, 0.0, start);
+        overlay.settle(&mut surface, &mut painter, 0.0, start + RETRY_AFTER);
         assert_eq!(surface.calls, ["show", "show"]);
         assert!(
             overlay.cancels(&painter, 386.0, 17.0),
@@ -639,5 +824,134 @@ mod tests {
         overlay.due(at(11_000));
         overlay.settle(&mut surface, &mut painter, 0.0, at(11_000));
         assert_eq!(overlay.view.label.as_deref(), Some("PASTE IN 2 s"));
+    }
+
+    #[test]
+    fn a_vanished_surface_is_shown_again_on_the_next_status() {
+        let start = Instant::now();
+        let mut painter = Painter::new(1.0, Look::Gunmetal, true).unwrap();
+        let mut surface = Fake::default();
+        let mut overlay = Overlaying::new(false, start);
+        overlay.take(
+            Message::Status(Box::new(capturing()), Visibility::Show),
+            start,
+        );
+        overlay.settle(&mut surface, &mut painter, 0.0, start);
+        surface.vanish = true;
+        overlay.stale = true;
+        overlay.settle(&mut surface, &mut painter, 0.0, start + view::FRAME);
+        overlay.take(
+            Message::Status(Box::new(capturing()), Visibility::Show),
+            start + view::FRAME,
+        );
+        overlay.settle(&mut surface, &mut painter, 0.0, start + view::FRAME);
+        assert_eq!(surface.calls, ["show", "present", "show"]);
+    }
+
+    #[test]
+    fn a_failed_show_or_present_retries_at_most_once_a_second() {
+        let start = Instant::now();
+        let mut painter = Painter::new(1.0, Look::Gunmetal, true).unwrap();
+        let mut surface = Fake {
+            refuse: true,
+            ..Fake::default()
+        };
+        let mut overlay = Overlaying::new(false, start);
+        let mut again = |overlay: &mut Overlaying, surface: &mut Fake, now: Instant| {
+            overlay.take(
+                Message::Status(Box::new(capturing()), Visibility::Show),
+                now,
+            );
+            overlay.settle(surface, &mut painter, 0.0, now);
+        };
+        again(&mut overlay, &mut surface, start);
+        again(
+            &mut overlay,
+            &mut surface,
+            start + Duration::from_millis(40),
+        );
+        again(
+            &mut overlay,
+            &mut surface,
+            start + Duration::from_millis(999),
+        );
+        assert_eq!(surface.calls, ["show"]);
+        again(&mut overlay, &mut surface, start + RETRY_AFTER);
+        assert_eq!(surface.calls, ["show", "show"]);
+        surface.refuse = false;
+        surface.calls.clear();
+        again(&mut overlay, &mut surface, start + 2 * RETRY_AFTER);
+        assert_eq!(surface.calls, ["show"]);
+        surface.refuse = true;
+        surface.calls.clear();
+        overlay.stale = true;
+        overlay.settle(&mut surface, &mut painter, 0.0, start + 3 * RETRY_AFTER);
+        overlay.take(
+            Message::Status(Box::new(capturing()), Visibility::Show),
+            start + 3 * RETRY_AFTER + Duration::from_millis(40),
+        );
+        overlay.settle(
+            &mut surface,
+            &mut painter,
+            0.0,
+            start + 3 * RETRY_AFTER + Duration::from_millis(40),
+        );
+        assert_eq!(surface.calls, ["present"]);
+        overlay.settle(&mut surface, &mut painter, 0.0, start + 4 * RETRY_AFTER);
+        assert_eq!(surface.calls, ["present", "show"]);
+    }
+
+    #[test]
+    fn a_pending_configure_does_not_hold_hide_or_press() {
+        let start = Instant::now();
+        let mut painter = Painter::new(1.0, Look::Gunmetal, true).unwrap();
+        let mut surface = Fake {
+            pending: true,
+            ..Fake::default()
+        };
+        let mut overlay = Overlaying::new(true, start);
+        overlay.take(
+            Message::Status(Box::new(capturing()), Visibility::Show),
+            start,
+        );
+        overlay.settle(&mut surface, &mut painter, 0.0, start);
+        let hide_at = start + Duration::from_millis(20);
+        overlay.take(Message::Visibility(Visibility::Hide), hide_at);
+        overlay.settle(&mut surface, &mut painter, 0.0, hide_at);
+        assert!(
+            hide_at.saturating_duration_since(start) < Duration::from_millis(100),
+            "hide ran without the configure wait"
+        );
+        assert!(!overlay.visible);
+        assert!(
+            !overlay.cancels(&painter, 386.0, 17.0),
+            "a press on an unplaced overlay cancels nothing"
+        );
+    }
+
+    #[test]
+    fn an_overlay_failure_reaches_the_tray_once_and_clears_when_it_recovers() {
+        let shown = Arc::new(Mutex::new(Vec::new()));
+        let overlay = Overlay::default();
+        let record = Arc::clone(&shown);
+        overlay.report_to(FailureSink::new(move |failure| {
+            record
+                .lock()
+                .unwrap()
+                .push(failure.map(|failure| failure.notice));
+        }));
+        overlay.report("The desktop said no.");
+        overlay.report("The desktop said no.");
+        let held = overlay.failure().expect("a failure");
+        assert_eq!(held.headline, "Status overlay unavailable");
+        assert!(held.notice.contains("The desktop said no."));
+        overlay.report("The status overlay lost its Wayland connection.");
+        assert_eq!(
+            shown.lock().unwrap().len(),
+            2,
+            "the same failure is shown once"
+        );
+        overlay.failures.clear_overlay();
+        assert!(overlay.failure().is_none());
     }
 }

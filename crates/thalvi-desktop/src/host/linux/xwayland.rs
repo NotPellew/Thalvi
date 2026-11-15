@@ -204,18 +204,27 @@ fn forward_presses(
         .name("overlay-x11".to_owned())
         .spawn(move || {
             while let Ok(event) = conn.wait_for_event() {
-                if let Event::ButtonPress(press) = event
-                    && press.detail == 1
-                {
-                    let at = OverlayEvent::Press {
-                        x: f32::from(press.event_x) / scale,
-                        y: f32::from(press.event_y) / scale,
-                    };
-                    if events.send(at).is_err() {
-                        break;
+                let forwarded = match event {
+                    Event::ButtonPress(press) if press.detail == 1 => {
+                        events.send(OverlayEvent::Press {
+                            x: f32::from(press.event_x) / scale,
+                            y: f32::from(press.event_y) / scale,
+                        })
                     }
+                    Event::Error(error) => events.send(OverlayEvent::Lost(format!(
+                        "The status overlay's X connection failed: {} (error {}).",
+                        error.request_name.unwrap_or("a request"),
+                        error.error_code
+                    ))),
+                    _ => continue,
+                };
+                if forwarded.is_err() {
+                    break;
                 }
             }
+            let _ = events.send(OverlayEvent::Lost(
+                "The status overlay lost its X connection.".to_owned(),
+            ));
         })
         .map(|_| ())
         .map_err(failed)
