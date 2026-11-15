@@ -17,8 +17,11 @@ below establish no native desktop behavior. The `measure` binary has CLI tests i
 
 [windows.md](windows.md) covers native Windows session prerequisites,
 Settings persistence and file-driven recognition/paste, with build identity
-and cleanup requirements. Physical audio remains a separate supervised check;
-the desktop guide describes which parts can be automated.
+and cleanup requirements. [synthetic-audio.md](synthetic-audio.md) defines the
+automated audio scope and additional fault/playback checks. Use synthetic input
+and silent output. Physical audio is excluded from verification plans until the
+developer explicitly says a suitable setup exists; do not schedule it, request
+a supervised headset session, or treat it as a pending completion requirement.
 
 A run has one of two modes. Neither reaches a paid service or needs a key.
 

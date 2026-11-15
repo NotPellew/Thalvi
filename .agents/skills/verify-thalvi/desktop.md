@@ -358,7 +358,7 @@ resampling to 16 kHz. Keep request timing, the terminal-frame assertion and
 the recognized sentence. This proves synthesis and recognition through the
 app, not audible playback or a physical microphone.
 
-## Physical audio and repeatable coverage
+## Synthetic audio scope
 
 The private microphone above makes wake, recognition, endings, cancellation
 and destination assertions repeatable without a person speaking. Keep a fixed
@@ -367,21 +367,13 @@ build identity, and metrics for each case. `source: microphone` in a capture
 metric also describes the private PipeWire microphone; it is not evidence of
 physical hardware. `ctl feed` is a separate file-input route.
 
-A physical run needs the developer ready, the intended microphone and output
-device selected, and an owned scratch destination focused before input. Check
-dictation, cancel, interruption and what the developer actually hears. Stop
-input if focus leaves that destination. Keep recordings only with permission
-and outside the repository.
-
-For future unattended hardware coverage, use a fixed acoustic fixture: a
-separate speaker plays the corpus into the actual microphone, and a reference
-microphone records the actual output transducer. Fix placement and levels;
-retain the device identifiers and measure transcript errors, missing output,
-clipping, latency and cancellation tail. A headset needs a repeatable coupler
-or fixture for its earpiece and boom microphone. This is a proposed hardware
-setup, not a tested recipe. A digital loopback can automate routing checks but
-bypasses the transducers, room noise and acoustic echo. Human listening remains
-the acceptance check for comfort and perceived voice quality.
+Physical audio is out of scope until the developer explicitly confirms a
+suitable setup exists. Do not put hardware fixtures or supervised headset
+sessions in the plan or leave them as a completion requirement. Use only the
+private microphone/file input and null output described here. Synthetic audio
+can exercise real recognizers and digital playback; it does not establish
+physical transducers, room acoustics, comfort or perceived voice quality.
+See [synthetic-audio.md](synthetic-audio.md) for browser fault and playback checks.
 
 ## Isolation, and its limits
 

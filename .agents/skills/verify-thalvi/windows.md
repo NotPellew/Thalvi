@@ -34,8 +34,8 @@ Get-FileHash (Join-Path $env:APPDATA 'thalvi\desktop.json') -Algorithm SHA256
 ```
 
 Use an existing cached on-device model, no writing endpoint or external
-actions, and synthetic speech. Disable audio recordings and sounds when the
-run is not a supervised physical-audio check. Retain metrics and test text.
+actions, and synthetic speech. Disable microphone audio recordings and sounds;
+physical audio is outside this verification scope. Retain metrics and test text.
 Keep the original login/menu switches unchanged. Do not print credentials
 from the original settings.
 
@@ -93,8 +93,9 @@ the destination received text.
 
 This exercises the real recognizer and Windows paste path using file input.
 It proves neither the physical microphone nor the physical hold shortcut:
-the Windows hook deliberately ignores injected key events. Those need a
-supervised physical press or a separately qualified hardware input fixture.
+the Windows hook deliberately ignores injected key events. Report that boundary;
+do not add physical audio or a supervised headset session to the plan. Synthetic
+key-state tests and CLI hold controls are separate evidence from hardware keys.
 
 ## Cleanup
 

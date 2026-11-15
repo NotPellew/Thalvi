@@ -90,4 +90,5 @@ Steps:
   quality. Speed changes the playback rate on the client only. The server and
   `tts_request` lines do not change.
 - Preview cancellation, switching the candidate during playback, and fallback
-  when a saved voice is no longer offered are not exercised here.
+  when a saved voice is no longer offered are exercised separately in
+  [synthetic audio](../synthetic-audio.md), alongside measured digital playback.
