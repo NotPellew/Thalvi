@@ -86,6 +86,11 @@ impl<R: CommandRunner, T: Toolkit> Host for Gnome<R, T> {
         true
     }
 
+    // Nothing is ever pasted here, so no line can run.
+    fn is_terminal(&self, _target: &Clipboard) -> bool {
+        false
+    }
+
     fn writing_target(&self, _target: &Clipboard) -> Result<WindowApp, AppMatchLimit> {
         Err(AppMatchLimit::Gnome)
     }

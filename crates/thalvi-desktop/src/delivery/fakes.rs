@@ -28,6 +28,7 @@ pub struct FakeHost {
     calls: Mutex<Vec<String>>,
     behavior: BTreeMap<&'static str, Behavior>,
     clipboard_only: bool,
+    terminal: bool,
 }
 
 impl FakeHost {
@@ -41,6 +42,13 @@ impl FakeHost {
     #[must_use]
     pub fn clipboard_only(mut self) -> Self {
         self.clipboard_only = true;
+        self
+    }
+
+    /// Binds a terminal.
+    #[must_use]
+    pub fn terminal(mut self) -> Self {
+        self.terminal = true;
         self
     }
 
@@ -80,6 +88,10 @@ impl Host for FakeHost {
 
     fn copies_only(&self) -> bool {
         self.clipboard_only
+    }
+
+    fn is_terminal(&self, _target: &FakeWindow) -> bool {
+        self.terminal
     }
 
     fn writing_target(&self, target: &FakeWindow) -> Result<WindowApp, AppMatchLimit> {

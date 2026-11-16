@@ -106,8 +106,8 @@ pub fn overlay_failure(reason: &str) -> (&'static str, String) {
     )
 }
 
-/// Text to paste: line breaks (as `\n`) and tabs, but no other control character, so pasting it
-/// can only insert text and never act in a terminal.
+/// Text to paste: line breaks (as `\n`) and tabs, but no other control character, so pasting a
+/// single line can only insert text and never act in a terminal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PasteText(String);
 
@@ -307,6 +307,10 @@ pub trait Host: Send + Sync {
     /// Whether this desktop can only put dictation on the clipboard, never paste it, so the
     /// target names no window and the user pastes it themselves.
     fn copies_only(&self) -> bool;
+
+    /// Whether `target` is a terminal that the paste shortcut pastes into, where a pasted line
+    /// break can run a command.
+    fn is_terminal(&self, target: &Self::Target) -> bool;
 
     /// Binds the focused window.
     ///

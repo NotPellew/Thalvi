@@ -50,6 +50,8 @@ pub trait Win32: Send + Sync {
     fn foreground(&self) -> Option<Hwnd>;
     /// The window's title, read once when it is bound. Empty when Windows will not say.
     fn title(&self, window: Hwnd) -> String;
+    /// The window's class name; empty when the window no longer exists.
+    fn class(&self, window: Hwnd) -> String;
     /// `None` when the window no longer exists or its process cannot be read.
     fn process(&self, window: Hwnd) -> Option<Process>;
     /// Visible top-level windows, most recently active first.
@@ -70,7 +72,11 @@ pub struct Target {
     identity: Identity,
     /// Read once, when the window was bound. Never part of [`Display`].
     title: String,
+    terminal: bool,
 }
+
+/// Window classes of the terminals Ctrl+V pastes into: the console host and Windows Terminal.
+const TERMINAL_CLASSES: [&str; 2] = ["ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"];
 
 impl PartialEq for Target {
     fn eq(&self, other: &Self) -> bool {
@@ -178,6 +184,15 @@ impl<A: Win32> Windows<A> {
         Ok(Self { api, own_integrity })
     }
 
+    fn bind(&self, window: Hwnd, identity: Identity) -> Target {
+        Target {
+            window,
+            identity,
+            title: self.api.title(window),
+            terminal: TERMINAL_CLASSES.contains(&self.api.class(window).as_str()),
+        }
+    }
+
     fn live_process(&self, target: &Target) -> Result<Process, HostError> {
         self.api
             .process(target.window)
@@ -242,6 +257,10 @@ impl<A: Win32> Host for Windows<A> {
         false
     }
 
+    fn is_terminal(&self, target: &Target) -> bool {
+        target.terminal
+    }
+
     fn capture_target(&self) -> Result<Target, HostError> {
         let window = self.api.foreground().ok_or_else(|| {
             nothing_typed("No window is in front, so Thalvi has nowhere to paste.")
@@ -249,11 +268,7 @@ impl<A: Win32> Host for Windows<A> {
         let process = self.api.process(window).ok_or_else(|| {
             nothing_typed("Thalvi could not tell which program the window in front belongs to.")
         })?;
-        Ok(Target {
-            window,
-            identity: process.identity,
-            title: self.api.title(window),
-        })
+        Ok(self.bind(window, process.identity))
     }
 
     fn writing_target(&self, target: &Target) -> Result<WindowApp, AppMatchLimit> {
@@ -343,11 +358,7 @@ impl<A: Win32> Host for Windows<A> {
                 "Pressing the shortcut stopped partway. Some keys may have been pressed.",
             )?;
         }
-        Ok(Target {
-            window,
-            identity: process.identity,
-            title: self.api.title(window),
-        })
+        Ok(self.bind(window, process.identity))
     }
 
     fn open_url(&self, url: &WebUrl) -> Result<(), HostError> {
@@ -504,6 +515,7 @@ mod tests {
         opened: Vec<String>,
         browser_open: bool,
         titles: HashMap<Hwnd, String>,
+        classes: HashMap<Hwnd, String>,
     }
 
     struct Fake(Mutex<State>);
@@ -539,6 +551,9 @@ mod tests {
         }
         fn title(&self, window: Hwnd) -> String {
             self.read(|state| state.titles.get(&window).cloned().unwrap_or_default())
+        }
+        fn class(&self, window: Hwnd) -> String {
+            self.read(|state| state.classes.get(&window).cloned().unwrap_or_default())
         }
         fn process(&self, window: Hwnd) -> Option<Process> {
             self.read(|state| state.processes.get(&window).cloned())
@@ -688,6 +703,23 @@ mod tests {
     }
 
     #[test]
+    fn the_console_and_windows_terminal_are_terminals() {
+        for (class, terminal) in [
+            ("ConsoleWindowClass", true),
+            ("CASCADIA_HOSTING_WINDOW_CLASS", true),
+            ("Notepad", false),
+            ("", false),
+        ] {
+            let desktop = windows(Fake::desktop());
+            desktop.api.with(|state| {
+                state.classes.insert(NOTEPAD, class.to_owned());
+            });
+            let target = desktop.capture_target().unwrap();
+            assert_eq!(desktop.is_terminal(&target), terminal, "{class:?}");
+        }
+    }
+
+    #[test]
     fn unreadable_own_permissions_make_the_desktop_unsupported() {
         struct Blind(Fake);
         impl Win32 for Blind {
@@ -696,6 +728,9 @@ mod tests {
             }
             fn title(&self, window: Hwnd) -> String {
                 self.0.title(window)
+            }
+            fn class(&self, window: Hwnd) -> String {
+                self.0.class(window)
             }
             fn process(&self, window: Hwnd) -> Option<Process> {
                 self.0.process(window)
@@ -850,6 +885,7 @@ mod tests {
                 window: NOTEPAD,
                 identity: identity(1, "notepad.exe"),
                 title: String::new(),
+                terminal: false,
             };
 
             let result = desktop.deliver(&target, &text("hi"), false);

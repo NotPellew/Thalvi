@@ -265,9 +265,13 @@ const TERMINAL_CLASSES: [&str; 14] = [
     "ptyxis",
 ];
 
+fn is_terminal(window: &Window) -> bool {
+    TERMINAL_CLASSES.contains(&window.class.to_lowercase().as_str())
+}
+
 /// The modifiers of the paste shortcut for `target`.
 fn paste_modifiers(target: &Window) -> &'static str {
-    if TERMINAL_CLASSES.contains(&target.class.to_lowercase().as_str()) {
+    if is_terminal(target) {
         "CTRL SHIFT"
     } else {
         "CTRL"
@@ -395,6 +399,10 @@ impl<R: CommandRunner> Host for Hyprland<R> {
 
     fn copies_only(&self) -> bool {
         false
+    }
+
+    fn is_terminal(&self, target: &Window) -> bool {
+        is_terminal(target)
     }
 
     fn writing_target(&self, target: &Window) -> Result<WindowApp, AppMatchLimit> {
@@ -844,6 +852,11 @@ mod tests {
             ];
             expected.extend(submit.then(|| enter.to_owned()));
             assert_eq!(commands(&host), expected, "{class} submit={submit}");
+            assert_eq!(
+                host.is_terminal(&window("0x2", 2, class)),
+                shortcut == "CTRL SHIFT",
+                "{class}"
+            );
         }
     }
 
