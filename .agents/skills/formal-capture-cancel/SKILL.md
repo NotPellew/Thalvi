@@ -54,8 +54,8 @@ changed, and `engine.rs`, `recognizer.rs` and `local.rs` are untouched, so the m
 A hold released while an on-device model is still loading keeps `Engine::start` reading microphone frames.
 Frames after the release cutoff are discarded and are not delivered. The read stays in the same
 cancellation-first select: the wait is still unbounded, `Accept` is still enabled only after `Loaded`,
-and a cancel still wins. Model actions are unchanged. The `engine.rs` hash describes the drain
-after a released hold during a load and is newer than the sync commit above.
+and a cancel still wins. Model actions are unchanged. The `engine.rs` hash describes commit
+`2e2d2a5a6bcfed0c90b73dde084ab6a96bd76f13`, after the sync commit above.
 
 The five checked invariants have these exact meanings:
 
