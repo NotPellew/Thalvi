@@ -1542,7 +1542,7 @@ mod tests {
             ),
             (
                 r#"{"ending_pause": {"submit": 5.5}}"#.to_owned(),
-                "submit pause must be a number of seconds from 0 to 5",
+                "submit pause must be a number of seconds from 0.1 to 5",
             ),
             (
                 r#"{"ending_pause": {"paste": -1}}"#.to_owned(),

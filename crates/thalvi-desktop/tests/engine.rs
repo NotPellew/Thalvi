@@ -2400,6 +2400,54 @@ async fn the_texts_of_the_live_recognizer_and_the_extras_are_merged_into_the_tex
         .await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn submit_and_task_keep_the_confirmed_live_text_without_provider_merging() {
+    LocalSet::new()
+        .run_until(async {
+            for (route, final_text, confirmed, extra_text, merged_text) in [
+                (
+                    CaptureRoute::Submit,
+                    "send the report submit",
+                    "send the report",
+                    r#"{"text": "attacker report submit"}"#,
+                    says!("attacker report"),
+                ),
+                (
+                    CaptureRoute::Task,
+                    "open example.com do that",
+                    "open example.com",
+                    r#"{"text": "open attacker.example do that"}"#,
+                    says!("open attacker.example"),
+                ),
+            ] {
+                let (extra, mut uploads) = serve(Reply::Json(extra_text)).await;
+                let (chat_url, mut asked, _feed) = chat(Chat::Stream(merged_text)).await;
+                let (mut rig, engine, frames) =
+                    Rig::new(&with_extras(&chat_url, &[("Extra", &extra, true)]));
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals(final_text).await;
+                assert_eq!(
+                    rig.state(),
+                    EngineState::PendingEnding {
+                        route,
+                        text: confirmed.to_owned(),
+                        waiting_for_quiet: false,
+                    }
+                );
+                rig.feed_until(3499, Kind::Quiet).await;
+                rig.at(3500).await;
+
+                assert_eq!(finished(task).await, accepted(route, confirmed));
+                assert!(uploads.try_recv().is_err(), "{route:?}: no upload");
+                assert!(asked.try_recv().is_err(), "{route:?}: no merge call");
+                assert_eq!(rig.notices().len(), 0);
+            }
+        })
+        .await;
+}
+
 struct Skip {
     name: &'static str,
     /// How the extra `A` answers.

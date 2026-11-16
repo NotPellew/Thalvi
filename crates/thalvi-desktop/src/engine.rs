@@ -2348,7 +2348,11 @@ where
                 let merging = self
                     .merging
                     .clone()
-                    .filter(|_| !scratched && has_words(&request.text));
+                    .filter(|_| {
+                        !scratched
+                            && has_words(&request.text)
+                            && matches!(request.route, CaptureRoute::Paste | CaptureRoute::Write)
+                    });
                 if merging.is_some() {
                     self.streams.finish(request.route, has_endings);
                 } else {

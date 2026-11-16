@@ -242,6 +242,16 @@ describe("applying a change", () => {
     expect(read(sent(stub))).toEqual(expected);
   });
 
+  it("requires a positive quiet period before submit and task actions", async () => {
+    await open();
+    goTo("commands");
+    expect(
+      ["Quiet before paste", "Quiet before paste and Enter", "Quiet before running a task"].map(
+        (label) => control(label, "input").min,
+      ),
+    ).toEqual(["0", "0.1", "0.1"]);
+  });
+
   // (page, what the user does, the whole of what is sent)
   const patches: [string, () => void, unknown][] = [
     ["overlay", () => { flip(control("Show the draft", "input")); }, { overlay: { draft: false } }],

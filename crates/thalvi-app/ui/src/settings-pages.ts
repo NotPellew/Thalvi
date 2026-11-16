@@ -684,16 +684,18 @@ function holdKeys(context: PageContext): HTMLElement[] {
 
 function commands(context: PageContext): HTMLElement[] {
   const { settings, controls, apply } = context;
-  const pause = (key: "paste" | "submit" | "task", label: string): HTMLElement =>
-    row(
+  const pause = (key: "paste" | "submit" | "task", label: string): HTMLElement => {
+    const minimum = key === "paste" ? 0 : 0.1;
+    return row(
       label,
-      "Time to keep talking or cancel, 0 to 5 s.",
-      controls.number(settings.ending_pause[key], { min: 0, max: 5, step: 0.1, unit: "s" }, (value) =>
+      `Time to keep talking or cancel, ${String(minimum)} to 5 s.`,
+      controls.number(settings.ending_pause[key], { min: minimum, max: 5, step: 0.1, unit: "s" }, (value) =>
         apply((next) => {
           next.ending_pause[key] = value;
         }),
       ),
     );
+  };
   return [
     group("Endings"),
     row("Ending phrases", "Say one to finish a capture. Every action needs at least one phrase.", endingsTable(context)),
