@@ -20,9 +20,10 @@ for variant in "${variants[@]}"; do
 done
 [[ ${#pending[@]} -eq 0 ]] && { echo "whisper-helper: ${variants[*]} already built"; exit 0; }
 
-# Beside OUT rather than in TMPDIR: Windows runners' temp path is an 8.3 short name (RUNNER~1), and
-# the Vulkan build's nested configure of vulkan-shaders-gen found no compiler there.
-work=$(dirname "$out")/.whisper-build-$COMMIT
+# Short, because MSBuild's file tracker fails (FTK1011) past 260 characters in the Vulkan build's
+# nested vulkan-shaders-gen project; tracking only serves incremental builds, which this is not.
+work=$(dirname "$out")/.wb
+export TrackFileAccess=false
 if [[ $(git -C "$work" rev-parse HEAD 2>/dev/null) != "$COMMIT" ]]; then
   rm -rf "$work"
   git init -q "$work"
@@ -47,7 +48,7 @@ for variant in "${pending[@]}"; do
     vulkan) flags=(-DGGML_VULKAN=ON) ;;
     *) echo "whisper-helper: unknown variant $variant" >&2; exit 2 ;;
   esac
-  build=$work/build-$variant
+  build=$work/b-$variant
   cmake -S "$work" -B "$build" "${common[@]}" "${flags[@]}"
   if ! cmake --build "$build" --config Release --target whisper-server -j "$(nproc 2>/dev/null || echo 4)"; then
     find "$build" -name CMakeConfigureLog.yaml -path '*vulkan-shaders-gen*' -exec tail -n 120 {} \;
