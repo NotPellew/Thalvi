@@ -25,6 +25,7 @@ use thalvi_desktop::engine::{
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::hold::{HoldInput, HoldKind, Refusal};
+use thalvi_desktop::host::WindowApp;
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
 use thalvi_desktop::recognizer::{
     FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, SpeechSource,
@@ -333,11 +334,19 @@ fn frames_of(calls: Vec<FakeCall>) -> Vec<Frame> {
 }
 
 /// Runs a wake then a capture on the engine, as a caller would.
-fn capture_task(mut engine: TestEngine, mut frames: FakeFrames) -> JoinHandle<CaptureOutcome> {
+fn capture_task(engine: TestEngine, frames: FakeFrames) -> JoinHandle<CaptureOutcome> {
+    capture_in(engine, frames, WakeTrigger::Capture, None)
+}
+
+fn capture_in(
+    mut engine: TestEngine,
+    mut frames: FakeFrames,
+    trigger: WakeTrigger,
+    window: Option<WindowApp>,
+) -> JoinHandle<CaptureOutcome> {
     tokio::task::spawn_local(async move {
-        let trigger = engine.listen(&mut frames).await.unwrap();
-        assert_eq!(trigger, WakeTrigger::Capture);
-        let outcome = engine.capture(&mut frames).await;
+        assert_eq!(engine.listen(&mut frames).await.unwrap(), trigger);
+        let outcome = engine.capture(&mut frames, window).await;
         engine.finish().await;
         outcome
     })
@@ -2177,7 +2186,7 @@ fn capture_and_listen(
     tokio::task::spawn_local(async move {
         let trigger = engine.listen(&mut frames).await.unwrap();
         assert_eq!(trigger, WakeTrigger::Capture);
-        let outcome = engine.capture(&mut frames).await;
+        let outcome = engine.capture(&mut frames, None).await;
         let pasted = Pasted {
             outcome,
             at: u64::try_from(origin.elapsed().as_millis()).unwrap(),
@@ -3881,7 +3890,7 @@ async fn the_wake_cue_wait_is_counted_from_the_wake_word_not_from_the_cue_starti
                 engine.listen(&mut frames).await.unwrap();
                 // The caller takes 70 ms to get from the wake word to the capture.
                 tokio::time::sleep(ms(70)).await;
-                let outcome = engine.capture(&mut frames).await;
+                let outcome = engine.capture(&mut frames, None).await;
                 engine.finish().await;
                 outcome
             });
@@ -4020,14 +4029,8 @@ async fn cue_timings_are_not_written_when_metrics_are_off() {
 }
 
 /// Runs a hold then its capture on the engine, as a caller would.
-fn hold_task(mut engine: TestEngine, mut frames: FakeFrames) -> JoinHandle<CaptureOutcome> {
-    tokio::task::spawn_local(async move {
-        let trigger = engine.listen(&mut frames).await.unwrap();
-        assert_eq!(trigger, WakeTrigger::Hold);
-        let outcome = engine.capture(&mut frames).await;
-        engine.finish().await;
-        outcome
-    })
+fn hold_task(engine: TestEngine, frames: FakeFrames) -> JoinHandle<CaptureOutcome> {
+    capture_in(engine, frames, WakeTrigger::Hold, None)
 }
 
 impl Rig {
@@ -4226,7 +4229,7 @@ async fn cancelling_a_hold_from_outside_ends_it_cancelled_and_the_release_does_n
             let task = tokio::task::spawn_local(async move {
                 let trigger = engine.listen(&mut frames).await.unwrap();
                 assert_eq!(trigger, WakeTrigger::Hold);
-                let outcome = engine.capture(&mut frames).await;
+                let outcome = engine.capture(&mut frames, None).await;
                 // The key is still down; listening goes on without starting anything.
                 let next =
                     tokio::time::timeout(Duration::from_secs(30), engine.listen(&mut frames)).await;
@@ -4825,7 +4828,7 @@ async fn a_hold_sends_what_was_queued_before_its_release_and_nothing_queued_afte
                     let (mut rig, mut engine, mut frames) = Rig::new("{}");
                     let task = tokio::task::spawn_local(async move {
                         assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
-                        let outcome = engine.capture(&mut frames).await;
+                        let outcome = engine.capture(&mut frames, None).await;
                         let ignored = engine.take_ignored();
                         engine.finish().await;
                         (outcome, ignored)
@@ -4908,7 +4911,7 @@ async fn a_hold_abandoned_before_its_capture_leaves_nothing_for_the_next_wake_ca
                     engine.listen(&mut frames).await.unwrap(),
                     WakeTrigger::Capture
                 );
-                let outcome = engine.capture(&mut frames).await;
+                let outcome = engine.capture(&mut frames, None).await;
                 engine.finish().await;
                 outcome
             });
@@ -4941,7 +4944,7 @@ async fn presses_that_start_nothing_are_told_counted_and_left_to_the_caller() {
             let task = tokio::task::spawn_local(async move {
                 let trigger = engine.listen(&mut frames).await.unwrap();
                 assert_eq!(trigger, WakeTrigger::Capture);
-                let outcome = engine.capture(&mut frames).await;
+                let outcome = engine.capture(&mut frames, None).await;
                 let ignored = engine.take_ignored();
                 engine.finish().await;
                 (outcome, ignored)
@@ -5079,7 +5082,7 @@ async fn a_frame_published_after_pending_poll_but_before_release_is_not_lost() {
             };
             let task = tokio::task::spawn_local(async move {
                 assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
-                let outcome = engine.capture(&mut frames).await;
+                let outcome = engine.capture(&mut frames, None).await;
                 engine.finish().await;
                 outcome
             });
@@ -5126,7 +5129,7 @@ async fn continuation_published_during_a_poll_reaches_the_recognizer_only_while_
                 };
                 let task = tokio::task::spawn_local(async move {
                     assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
-                    engine.capture(&mut frames).await
+                    engine.capture(&mut frames, None).await
                 });
                 rig.press().await;
                 rig.server.ready();
@@ -5631,6 +5634,110 @@ async fn the_opening_of_the_words_picks_the_system_message_and_the_words_stay_wh
 }
 
 #[tokio::test(start_paused = true)]
+async fn writing_uses_the_bound_app_prompt_and_records_only_the_prompt_source() {
+    LocalSet::new()
+        .run_until(async {
+            let kinds = RecordKinds {
+                metrics: true,
+                text: true,
+                audio: false,
+            };
+            for ask in [Ask::Ending, Ask::Key] {
+                for (words, window, prompt, source) in [
+                    (
+                        WORDS,
+                        Some(WindowApp::new("kitty", "secret-title")),
+                        "APP",
+                        "app",
+                    ),
+                    (
+                        "write me an email to Anna",
+                        Some(WindowApp::new("kitty", "secret-title")),
+                        "OPENING",
+                        "opening",
+                    ),
+                    (
+                        WORDS,
+                        Some(WindowApp::new("kitty", "different-title")),
+                        "FALLBACK",
+                        "default",
+                    ),
+                    (WORDS, None, "FALLBACK", "default"),
+                ] {
+                    let (url, mut asked, feed) = chat(Chat::Live).await;
+                    let config = json!({
+                        "ending_pause": {"paste": 2.5},
+                        "writing": {
+                            "url": url, "model": "m", "prompt": "FALLBACK",
+                            "openings": [{"phrase": "write me an email", "prompt": "OPENING"}],
+                            "apps": [{"app": "kitty", "title": "secret-title", "prompt": "APP"}],
+                        },
+                    })
+                    .to_string();
+                    let dir =
+                        record_dir(&format!("app-style-{ask:?}-{source}-{}", window.is_some()));
+                    let (mut rig, engine, frames) =
+                        Rig::recording(&config, Recorder::in_dir(kinds, &dir).unwrap());
+                    let trigger = match ask {
+                        Ask::Ending => WakeTrigger::Capture,
+                        Ask::Key => WakeTrigger::Hold,
+                    };
+                    let task = capture_in(engine, frames, trigger, window);
+                    ask.say(&mut rig, words).await;
+                    let body = request(&mut asked).await.body;
+                    for private in ["kitty", "secret-title"] {
+                        assert!(
+                            !body.to_string().contains(private),
+                            "window metadata must stay out of the writing request: {body}"
+                        );
+                    }
+                    assert_eq!(
+                        body,
+                        json!({
+                            "model": "m", "stream": true,
+                            "messages": [
+                                {"role": "system", "content": prompt},
+                                {"role": "user", "content": words},
+                            ],
+                        }),
+                        "{ask:?} {source}"
+                    );
+                    feed.text("Written.");
+                    feed.finish();
+                    assert_eq!(
+                        finished(task).await,
+                        accepted(CaptureRoute::Paste, "Written.")
+                    );
+                    let metrics = read_lines(&dir.join("metrics.jsonl"));
+                    let calls: Vec<_> = metrics
+                        .iter()
+                        .filter(|line| line["event"] == "desktop_writing")
+                        .collect();
+                    assert_eq!(calls.len(), 1);
+                    assert_eq!(calls[0]["prompt_source"], source, "{ask:?}");
+                    let saved = std::fs::read_to_string(dir.join("metrics.jsonl")).unwrap();
+                    assert_eq!(dictation_dirs(&dir).len(), 1);
+                    for private in ["kitty", "secret-title"] {
+                        assert!(
+                            !saved.contains(private),
+                            "window metadata must stay out of metrics"
+                        );
+                        for path in dictation_dirs(&dir) {
+                            let text = std::fs::read_to_string(path.join("text.txt")).unwrap();
+                            assert!(
+                                !text.contains(private),
+                                "window metadata must stay out of recordings"
+                            );
+                        }
+                    }
+                    std::fs::remove_dir_all(dir).unwrap();
+                }
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn nothing_is_written_unless_it_is_asked_for() {
     LocalSet::new()
         .run_until(async {
@@ -5650,11 +5757,11 @@ async fn nothing_is_written_unless_it_is_asked_for() {
                 // The dictated words begin with an opening phrase, which alone starts nothing.
                 let config = with_writing(&url).replace(
                     r#""model": "m""#,
-                    r#""model": "m", "openings": [{"phrase": "tell anna", "prompt": "P"}]"#,
+                    r#""model": "m", "openings": [{"phrase": "tell anna", "prompt": "P"}], "apps": [{"app": "kitty", "prompt": "APP"}]"#,
                 );
                 let (mut rig, engine, frames) = Rig::new(&config);
                 let task = if name == "hold key" {
-                    let task = hold_task(engine, frames);
+                    let task = capture_in(engine, frames, WakeTrigger::Hold, Some(WindowApp::new("kitty", "secret-title")));
                     rig.hold().await;
                     rig.say(1000, Say::Partial("tell Anna I'm late write that out"))
                         .await;
@@ -5663,7 +5770,7 @@ async fn nothing_is_written_unless_it_is_asked_for() {
                         .await;
                     task
                 } else {
-                    let task = capture_task(engine, frames);
+                    let task = capture_in(engine, frames, WakeTrigger::Capture, Some(WindowApp::new("kitty", "secret-title")));
                     rig.open().await;
                     rig.feed_until(1000, Kind::Quiet).await;
                     let said = if name == "paste ending" {
@@ -6328,7 +6435,7 @@ fn fed_capture_task(
     tokio::task::spawn_local(async move {
         let trigger = engine.listen(&mut frames).await.unwrap();
         assert_eq!(trigger, WakeTrigger::Capture);
-        let outcome = engine.capture(&mut frames).await;
+        let outcome = engine.capture(&mut frames, None).await;
         engine.finish().await;
         (outcome, frames)
     })

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    App, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, PasteText, RequestServer,
-    WebUrl,
+    App, AppMatchLimit, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, PasteText,
+    RequestServer, WebUrl, WindowApp,
 };
 use crate::hold::{HoldChange, HoldKey, HoldKind};
 pub use overlay::{OverlayPlan, OverlaySurface, OverlayWaker};
@@ -48,6 +48,8 @@ pub struct KeyEvent {
 /// The Win32 calls the host rules depend on. The real and the test implementation are the only two.
 pub trait Win32: Send + Sync {
     fn foreground(&self) -> Option<Hwnd>;
+    /// The window's title, read once when it is bound. Empty when Windows will not say.
+    fn title(&self, window: Hwnd) -> String;
     /// `None` when the window no longer exists or its process cannot be read.
     fn process(&self, window: Hwnd) -> Option<Process>;
     /// Visible top-level windows, most recently active first.
@@ -62,10 +64,18 @@ pub trait Win32: Send + Sync {
 }
 
 /// A window as bound at wake.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq)]
 pub struct Target {
     window: Hwnd,
     identity: Identity,
+    /// Read once, when the window was bound. Never part of [`Display`].
+    title: String,
+}
+
+impl PartialEq for Target {
+    fn eq(&self, other: &Self) -> bool {
+        self.window == other.window && self.identity == other.identity
+    }
 }
 
 impl fmt::Display for Target {
@@ -242,7 +252,23 @@ impl<A: Win32> Host for Windows<A> {
         Ok(Target {
             window,
             identity: process.identity,
+            title: self.api.title(window),
         })
+    }
+
+    fn writing_target(&self, target: &Target) -> Result<WindowApp, AppMatchLimit> {
+        Ok(WindowApp::new(
+            target.identity.executable.clone(),
+            target.title.clone(),
+        ))
+    }
+
+    fn recent_app(&self) -> Result<Option<WindowApp>, AppMatchLimit> {
+        Ok(self.api.top_level_windows().into_iter().find_map(|window| {
+            let process = self.api.process(window)?;
+            (process.identity.pid != std::process::id())
+                .then(|| WindowApp::new(process.identity.executable, self.api.title(window)))
+        }))
     }
 
     fn deliver(
@@ -320,6 +346,7 @@ impl<A: Win32> Host for Windows<A> {
         Ok(Target {
             window,
             identity: process.identity,
+            title: self.api.title(window),
         })
     }
 
@@ -476,6 +503,7 @@ mod tests {
         clipboard_open: bool,
         opened: Vec<String>,
         browser_open: bool,
+        titles: HashMap<Hwnd, String>,
     }
 
     struct Fake(Mutex<State>);
@@ -508,6 +536,9 @@ mod tests {
     impl Win32 for Fake {
         fn foreground(&self) -> Option<Hwnd> {
             self.read(|state| state.foreground)
+        }
+        fn title(&self, window: Hwnd) -> String {
+            self.read(|state| state.titles.get(&window).cloned().unwrap_or_default())
         }
         fn process(&self, window: Hwnd) -> Option<Process> {
             self.read(|state| state.processes.get(&window).cloned())
@@ -595,11 +626,53 @@ mod tests {
     }
 
     #[test]
+    fn the_recent_app_skips_this_process_and_windows_with_no_process() {
+        let desktop = windows(Fake::desktop());
+        desktop.api.with(|state| {
+            state.processes.insert(
+                NOTEPAD,
+                process(std::process::id(), "thalvi.exe", Some(MEDIUM)),
+            );
+            state.processes.remove(&OTHER);
+            state.titles.insert(EDITOR, "main.rs".to_owned());
+        });
+        assert_eq!(
+            desktop.recent_app(),
+            Ok(Some(WindowApp::new("T3 Code.exe", "main.rs")))
+        );
+        desktop.api.with(|state| {
+            state.processes.remove(&EDITOR);
+        });
+        assert_eq!(desktop.recent_app(), Ok(None));
+        desktop.api.with(|state| state.stack.clear());
+        assert_eq!(desktop.recent_app(), Ok(None));
+    }
+
+    #[test]
     fn capture_binds_the_foreground_window_or_says_why_not() {
         let desktop = windows(Fake::desktop());
+        desktop.api.with(|state| {
+            state
+                .titles
+                .insert(NOTEPAD, "notes.txt - Notepad".to_owned())
+        });
         let target = desktop.capture_target().unwrap();
         assert_eq!(target.window, NOTEPAD);
         assert_eq!(target.identity, identity(1, "notepad.exe"));
+        assert_eq!(target.to_string(), "notepad.exe");
+        assert_eq!(
+            desktop.writing_target(&target).unwrap(),
+            WindowApp::new("notepad.exe", "notes.txt - Notepad")
+        );
+
+        desktop
+            .api
+            .with(|state| state.titles.insert(NOTEPAD, "renamed.txt".to_owned()));
+        assert_eq!(desktop.capture_target().unwrap(), target);
+        assert_eq!(
+            desktop.writing_target(&target).unwrap().title(),
+            "notes.txt - Notepad"
+        );
 
         desktop.api.with(|state| state.foreground = None);
         assert_eq!(
@@ -620,6 +693,9 @@ mod tests {
         impl Win32 for Blind {
             fn foreground(&self) -> Option<Hwnd> {
                 self.0.foreground()
+            }
+            fn title(&self, window: Hwnd) -> String {
+                self.0.title(window)
             }
             fn process(&self, window: Hwnd) -> Option<Process> {
                 self.0.process(window)
@@ -773,6 +849,7 @@ mod tests {
             let target = Target {
                 window: NOTEPAD,
                 identity: identity(1, "notepad.exe"),
+                title: String::new(),
             };
 
             let result = desktop.deliver(&target, &text("hi"), false);

@@ -216,6 +216,60 @@ pub struct Shortcut {
     pub key: String,
 }
 
+/// The program a window belongs to, and its title as read once when the window was bound.
+/// `Display` is the app name only: the title stays out of notices, history, metrics and recordings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowApp {
+    app: String,
+    title: String,
+}
+
+impl WindowApp {
+    /// `app` is the Hyprland class or the Windows executable name.
+    #[must_use]
+    pub fn new(app: impl Into<String>, title: impl Into<String>) -> Self {
+        Self {
+            app: app.into(),
+            title: title.into(),
+        }
+    }
+
+    /// The app name a writing style matches.
+    #[must_use]
+    pub fn app(&self) -> &str {
+        &self.app
+    }
+
+    /// The window title a writing style may require.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+}
+
+impl fmt::Display for WindowApp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.app)
+    }
+}
+
+/// Why a desktop cannot match a writing style to the focused app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppMatchLimit {
+    /// Mutter tells no app which window is focused, so an app style has nothing to match.
+    Gnome,
+}
+
+impl AppMatchLimit {
+    /// The sentence Settings shows on the App styles section.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Gnome => "GNOME doesn't say which app you're in, so app styles don't apply here.",
+        }
+    }
+}
+
 /// A configured app and how each desktop recognises its windows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct App {
@@ -234,6 +288,18 @@ pub trait Host: Send + Sync {
     /// A window as bound at wake. Equal targets are the same live window, never a reused handle;
     /// `Display` names it in notices, without its title.
     type Target: Clone + PartialEq + fmt::Debug + fmt::Display + Send + 'static;
+
+    /// The app and title of a bound window.
+    ///
+    /// # Errors
+    /// Why this desktop cannot name the focused app.
+    fn writing_target(&self, target: &Self::Target) -> Result<WindowApp, AppMatchLimit>;
+
+    /// The most recently focused window outside this process; `None` when none can be read.
+    ///
+    /// # Errors
+    /// Why this desktop cannot name an app.
+    fn recent_app(&self) -> Result<Option<WindowApp>, AppMatchLimit>;
 
     /// Whether a click on the overlay reaches it; where it does not, the overlay shows no buttons.
     fn overlay_takes_clicks(&self) -> bool;

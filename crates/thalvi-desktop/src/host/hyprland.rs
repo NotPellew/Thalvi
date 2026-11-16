@@ -13,18 +13,26 @@ use xkbcommon::xkb::{self, Keycode, Keysym};
 
 use super::command::{CommandError, CommandRunner, SystemRunner, tool, wl_copy};
 use super::{
-    App, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, PasteText, Shortcut,
-    WebUrl,
+    App, AppMatchLimit, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, PasteText,
+    Shortcut, WebUrl, WindowApp,
 };
 use crate::hold::{HoldChange, HoldKey, HoldKind};
 use hold_binds::{Events, Installed};
 
 /// The window as Hyprland identifies it; the pid tells a reused address from the original window.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq)]
 pub struct Window {
     address: String,
     pid: u32,
     class: String,
+    /// Read once, when the window was bound. Never part of [`Display`].
+    title: String,
+}
+
+impl PartialEq for Window {
+    fn eq(&self, other: &Self) -> bool {
+        self.address == other.address && self.pid == other.pid && self.class == other.class
+    }
 }
 
 impl fmt::Display for Window {
@@ -123,6 +131,7 @@ struct Row {
     address: Option<String>,
     pid: Option<i64>,
     class: Option<String>,
+    title: Option<String>,
     #[serde(rename = "focusHistoryID")]
     focus_history: Option<i64>,
 }
@@ -136,6 +145,7 @@ impl Row {
         })?;
         let pid = u32::try_from(self.pid?).ok().filter(|pid| *pid > 0)?;
         let class = self.class.filter(|class| !class.is_empty())?;
+        let title = self.title.unwrap_or_default();
         // Windows that were never focused have no history; they rank last.
         let history = self.focus_history.filter(|id| *id >= 0).unwrap_or(i64::MAX);
         Some((
@@ -144,6 +154,7 @@ impl Row {
                 address,
                 pid,
                 class,
+                title,
             },
         ))
     }
@@ -384,6 +395,19 @@ impl<R: CommandRunner> Host for Hyprland<R> {
 
     fn copies_only(&self) -> bool {
         false
+    }
+
+    fn writing_target(&self, target: &Window) -> Result<WindowApp, AppMatchLimit> {
+        Ok(WindowApp::new(target.class.clone(), target.title.clone()))
+    }
+
+    fn recent_app(&self) -> Result<Option<WindowApp>, AppMatchLimit> {
+        Ok(self.windows().ok().and_then(|windows| {
+            windows
+                .into_iter()
+                .find(|window| window.pid != std::process::id())
+                .map(|window| WindowApp::new(window.class, window.title))
+        }))
     }
 
     fn capture_target(&self) -> Result<Window, HostError> {
@@ -641,6 +665,7 @@ mod tests {
             address: address.to_owned(),
             pid,
             class: class.to_owned(),
+            title: "TITLE".to_owned(),
         }
     }
 
@@ -682,9 +707,44 @@ mod tests {
     #[test]
     fn the_focused_window_is_bound_by_address_pid_and_class() {
         let host = desktop(vec![row("0x1f", 42, "kitty", 0)], "0x1f", "0x1f");
-        assert_eq!(host.capture_target(), Ok(window("0x1f", 42, "kitty")));
-        assert_eq!(window("0x1f", 42, "kitty").to_string(), "kitty");
+        let bound = host.capture_target().unwrap();
+        assert_eq!(bound, window("0x1f", 42, "kitty"));
+        assert_eq!(bound.to_string(), "kitty");
+        assert_eq!(
+            host.writing_target(&bound).unwrap(),
+            WindowApp::new("kitty", "TITLE")
+        );
         assert_eq!(commands(&host), ["hyprctl -j activewindow"]);
+        let mut renamed = bound.clone();
+        renamed.title = "another title".to_owned();
+        assert_eq!(
+            bound, renamed,
+            "a new title does not replace the bound window"
+        );
+        assert_eq!(host.focus(&renamed), Ok(()));
+    }
+
+    #[test]
+    fn the_recent_app_skips_this_process_and_follows_focus_history() {
+        let own = row("0x1", i64::from(std::process::id()), "thalvi", 0);
+        for (windows, expected) in [
+            (
+                vec![
+                    row("0x2", 2, "older", 5),
+                    own.clone(),
+                    row("0x3", 3, "kitty", 1),
+                ],
+                Some(WindowApp::new("kitty", "TITLE")),
+            ),
+            (vec![own], None),
+            (vec![], None),
+        ] {
+            let host = desktop(windows, "0x1", "0x1");
+            assert_eq!(host.recent_app(), Ok(expected));
+            assert_eq!(commands(&host), ["hyprctl -j clients"]);
+        }
+        let host = host(|_, _| Ok("unreadable".to_owned()));
+        assert_eq!(host.recent_app(), Ok(None));
     }
 
     #[test]

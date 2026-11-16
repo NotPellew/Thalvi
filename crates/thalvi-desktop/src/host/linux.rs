@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use super::gnome::{Clipboard, Gnome};
 use super::hyprland::{Hyprland, Window};
 use super::{
-    App, Delivered, HoldSource, Host, HostError, OverlayEvent, OverlayFrame, PasteText,
-    RequestServer, WebUrl, channel,
+    App, AppMatchLimit, Delivered, HoldSource, Host, HostError, OverlayEvent, OverlayFrame,
+    PasteText, RequestServer, WebUrl, WindowApp, channel,
 };
 use crate::hold::{HoldChange, HoldKey, HoldKind};
 
@@ -296,6 +296,21 @@ impl Host for Desktop {
         match self {
             Self::Hyprland(host) => host.copies_only(),
             Self::Gnome(host) => host.copies_only(),
+        }
+    }
+
+    fn writing_target(&self, target: &Target) -> Result<WindowApp, AppMatchLimit> {
+        match (self, target) {
+            (Self::Hyprland(host), Target::Window(window)) => host.writing_target(window),
+            (Self::Gnome(host), Target::Clipboard(clipboard)) => host.writing_target(clipboard),
+            _ => Err(AppMatchLimit::Gnome),
+        }
+    }
+
+    fn recent_app(&self) -> Result<Option<WindowApp>, AppMatchLimit> {
+        match self {
+            Self::Hyprland(host) => host.recent_app(),
+            Self::Gnome(host) => host.recent_app(),
         }
     }
 

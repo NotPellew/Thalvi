@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::capture::CaptureRoute;
 use crate::config::DesktopConfig;
 use crate::engine::{CaptureOutcome, EngineState};
-use crate::host::{Delivered, Host, HostError, PasteText};
+use crate::host::{Delivered, Host, HostError, PasteText, WindowApp};
 use crate::metrics::{Event, Recorder};
 use crate::report::{UserError, causes};
 use crate::tasks::{self, Task};
@@ -119,6 +119,12 @@ where
             self.call(recorder, "capture_target", H::capture_target)
                 .await,
         )
+    }
+
+    /// The bound app and its title, when this desktop can name them.
+    #[must_use]
+    pub fn writing_target(&self, bound: &Bound<H::Target>) -> Option<WindowApp> {
+        self.host.writing_target(bound.0.as_ref().ok()?).ok()
     }
 
     /// Acts on how a capture ended and says what came of it; `None` when the user cancelled and
@@ -924,15 +930,19 @@ mod tests {
     }
 
     #[test]
-    fn a_bound_window_is_named_by_its_display() {
-        assert_eq!(
-            Bound(Ok(FakeWindow("firefox"))).window().as_deref(),
-            Some("firefox")
-        );
-        assert_eq!(
-            Bound::<FakeWindow>(Err(HostError::Unsupported(String::new()))).window(),
-            None
-        );
+    fn a_bound_window_names_its_app_only_when_bound_and_supported() {
+        let bound = Bound(Ok(FakeWindow("firefox")));
+        assert_eq!(bound.window().as_deref(), Some("firefox"));
+        let failed = Bound::<FakeWindow>(Err(HostError::Unsupported(String::new())));
+        assert_eq!(failed.window(), None);
+        for (host, expected) in [
+            (FakeHost::default(), Some(WindowApp::new("firefox", ""))),
+            (FakeHost::default().clipboard_only(), None),
+        ] {
+            let delivery = Delivery::new(host);
+            assert_eq!(delivery.writing_target(&bound), expected);
+            assert_eq!(delivery.writing_target(&failed), None);
+        }
     }
 
     #[tokio::test]

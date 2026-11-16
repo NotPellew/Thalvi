@@ -18,7 +18,7 @@ use thalvi_desktop::feed::Feed;
 use thalvi_desktop::frame::Frame;
 use thalvi_desktop::history::{Capture, Outcome, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
-use thalvi_desktop::host::{App, Delivered, Host, HostError, PasteText, WebUrl};
+use thalvi_desktop::host::{App, AppMatchLimit, Delivered, Host, HostError, PasteText, WebUrl, WindowApp};
 use thalvi_desktop::metrics::Recorder;
 use thalvi_desktop::recognizer::{
     FakeRecognizer, FakeSession, Recognizer, RecognizerError, RecognizerEvent, RecognizerSession,
@@ -42,6 +42,12 @@ impl Host for RecordingHost {
     }
     fn copies_only(&self) -> bool {
         false
+    }
+    fn writing_target(&self, target: &String) -> Result<WindowApp, AppMatchLimit> {
+        Ok(WindowApp::new(target.clone(), ""))
+    }
+    fn recent_app(&self) -> Result<Option<WindowApp>, AppMatchLimit> {
+        Ok(None)
     }
     fn capture_target(&self) -> Result<String, HostError> {
         Ok("Editor".to_owned())
@@ -307,7 +313,7 @@ async fn closing_capture(cancel: bool) {
     let consumed = Mutex::new(Some(consumed));
     let mut requests = Requests::default();
     let driven = drive(
-        engine.capture(&mut frames),
+        engine.capture(&mut frames, None),
         &mut controls,
         || {
             handle.cancel();

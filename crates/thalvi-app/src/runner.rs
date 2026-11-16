@@ -26,7 +26,7 @@ use thalvi_desktop::entries::LiveKind;
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
-use thalvi_desktop::host::{Desktop, Host};
+use thalvi_desktop::host::{Desktop, Host, WindowApp};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::{self, ListedSpeech, ModelStore};
 use thalvi_desktop::report::{UserError, causes};
@@ -117,6 +117,7 @@ pub struct EngineLink {
     feeding: watch::Receiver<bool>,
     stopped: Mutex<std_mpsc::Receiver<()>>,
     key: HoldInput,
+    pub last_writing_window: Arc<Mutex<Option<WindowApp>>>,
 }
 
 impl EngineLink {
@@ -134,6 +135,8 @@ impl EngineLink {
         paused: bool,
         whisper_helpers: PathBuf,
     ) -> Result<Self, String> {
+        let last_writing_window = Arc::new(Mutex::new(None));
+        let writing_window = Arc::clone(&last_writing_window);
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
             notice: STARTING_NOTICE.to_owned(),
@@ -182,6 +185,7 @@ impl EngineLink {
                         feeding: Arc::new(feeding_tx),
                         paused,
                         whisper_helpers,
+                        last_writing_window: writing_window,
                     },
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
@@ -199,6 +203,7 @@ impl EngineLink {
             feeding,
             stopped: Mutex::new(stopped),
             key,
+            last_writing_window,
         })
     }
 
@@ -599,6 +604,7 @@ enum Woke {
 
 /// What the app shares with the runner besides its controls.
 struct Shared {
+    last_writing_window: Arc<Mutex<Option<WindowApp>>>,
     /// Whether the hold key is down.
     key: watch::Receiver<KeyState>,
     history: Arc<History>,
@@ -626,6 +632,9 @@ struct Runner {
     pending: Option<DesktopConfig>,
     /// A refused hold key not yet shown.
     hold_problem: Option<String>,
+    /// The app and title of the last window a capture was bound to. Settings offers it when it
+    /// cannot read the window that was focused before it opened. The title never leaves this.
+    last_writing_window: Arc<Mutex<Option<WindowApp>>>,
     control: mpsc::UnboundedReceiver<Control>,
     publisher: Rc<Publisher>,
     level: Arc<watch::Sender<f32>>,
@@ -663,6 +672,7 @@ impl Runner {
             microphone_problem: None,
             pending: None,
             hold_problem: None,
+            last_writing_window: shared.last_writing_window,
             control,
             publisher,
             level,
@@ -1220,6 +1230,13 @@ impl Runner {
             };
             self.delivery.bind(session.engine.recorder()).await
         };
+        let window = self.delivery.writing_target(&bound);
+        if let Some(window) = &window {
+            *self
+                .last_writing_window
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(window.clone());
+        }
         self.publisher
             .woke(bound.window(), self.delivery.copies_only());
         let mut requests = Requests::default();
@@ -1247,7 +1264,7 @@ impl Runner {
                 return Flow::Continue;
             };
             let outcome = Box::pin(drive(
-                engine.capture(frames),
+                engine.capture(frames, window),
                 control,
                 || {
                     handle.cancel();
@@ -2838,8 +2855,22 @@ mod tests {
             false
         }
 
+        fn writing_target(
+            &self,
+            target: &String,
+        ) -> Result<thalvi_desktop::host::WindowApp, thalvi_desktop::host::AppMatchLimit> {
+            Ok(thalvi_desktop::host::WindowApp::new(
+                target.clone(),
+                String::new(),
+            ))
+        }
+
         fn overlay_takes_clicks(&self) -> bool {
             false
+        }
+
+        fn recent_app(&self) -> Result<Option<WindowApp>, thalvi_desktop::host::AppMatchLimit> {
+            Ok(Some(WindowApp::new("Editor", "")))
         }
 
         fn capture_target(&self) -> Result<String, thalvi_desktop::host::HostError> {
