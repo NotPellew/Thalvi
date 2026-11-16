@@ -111,6 +111,13 @@ jobs:
         with:
           path: ~/.cache/thalvi/test-models
           key: spotter-models-${{ runner.os }}-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
+      # The per-package build reruns ort-sys's build script; its download from cdn.pyke.io drops on parallel shards.
+      - if: steps.diff.outputs.rust == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-binaries-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ort-binaries-${{ runner.os }}-
       - if: steps.diff.outputs.rust == 'true'
         uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
