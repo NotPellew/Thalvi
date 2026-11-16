@@ -39,11 +39,15 @@ exclude_re = [
     # Needs a model loaded on a GPU; the counts it hands to the metric are tested through a fake model.
     "<impl SpeechModel for Transducer>::placement",
     # The engine thread starts, applies settings, rebuilds and spawns the load around a real engine and microphone; the load it shows and the retune it takes are tested, and the formal-capture-cancel replay runs the apply handoff.
-    "Runner::(start|rebuild|apply|load_speech_model)",
-    "crates/thalvi-app/src/(app|commands).rs.*replace (start|list_speech_models|speech_device|download_speech_model|word_list_support) ->",
-    "get_hold_key_unavailable",
+    "Runner::(start|rebuild|apply|load_speech_model|reload_speech_model)",
+    "crates/thalvi-app/src/(app|commands).rs.*replace (start|list_speech_models|speech_models|speech_device|speech_device_line|download_speech_model|download_speech|open_speech_model_source|word_list_support) ->",
+    "get_(hold_key_unavailable|app_styles_unavailable|current_app)",
     # Picks the hold key check by the session in the process environment, which a test cannot set (unsafe_code is denied); Hyprland's check is tested directly.
     "replace Desktop::check_hold_keys ->",
+    # A Hyprland window target exists only with a running compositor; the bound window it carries is tested in hyprland.rs.
+    "delete match arm \\(Self::Hyprland\\(host\\), Target::Window\\(window\\)\\) in <impl Host for Desktop>::writing_target",
+    # Equivalent: GNOME's own answer and the fallback arm are the same Err(AppMatchLimit::Gnome).
+    "delete match arm \\(Self::Gnome\\(host\\), Target::Clipboard\\(clipboard\\)\\) in <impl Host for Desktop>::writing_target",
     # The overlay's Tauri wiring (window and theme events, the engine follower, the error dismissal) runs only inside the app; the overlay thread it feeds is tested with a fake surface.
     "crates/thalvi-app/src/(app|commands).rs.*(replace (setup|create_windows|follow_engine) ->|replace (start_overlay|show|dismiss_error) with \\(\\)|in create_windows)",
     # The overlay's own windows and their threads talk only to a running X server or compositor; the Xft scale they use is tested.
