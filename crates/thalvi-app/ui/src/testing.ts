@@ -79,6 +79,7 @@ export const NEMOTRON: SpeechModelInfo = {
   license: "NVIDIA Open Model License",
   languages: ["English"],
   cached: false,
+  word_list: true,
 };
 
 export const UNIFIED: SpeechModelInfo = {
@@ -90,6 +91,19 @@ export const UNIFIED: SpeechModelInfo = {
   license: "OpenMDW-1.1",
   languages: UNIFIED_LANGUAGES,
   cached: false,
+  word_list: true,
+};
+
+export const WHISPER: SpeechModelInfo = {
+  name: "whisper_turbo_cpu",
+  title: "Whisper Turbo · CPU (experimental)",
+  description: "Experimental. OpenAI's Whisper Turbo on the CPU.",
+  size: 574_926_293,
+  source: "https://huggingface.co/ggerganov/whisper.cpp",
+  license: "MIT",
+  languages: ["English", "German"],
+  cached: false,
+  word_list: false,
 };
 
 /** A backend whose calls are spies and whose events the test emits. */
