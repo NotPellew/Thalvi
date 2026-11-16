@@ -962,15 +962,27 @@ async fn the_whisper_entries_are_listed_with_one_shared_download_that_marks_both
         assert_eq!(model.source, "https://huggingface.co/ggerganov/whisper.cpp");
         assert!(
             model.description.contains("Experimental")
-                && model.description.contains("only after you stop speaking")
                 && model.description.contains("word list is ignored"),
             "{}",
             model.description
         );
     }
     assert!(
-        before[0].description.contains("slow") && before[1].description.contains("untested"),
+        before[0]
+            .description
+            .contains("only after you stop speaking")
+            && before[0].description.contains("slow")
+            && before[1].description.contains("while you speak")
+            && before[1].description.contains("extra GPU work")
+            && before[1].description.contains("untested"),
         "each card says its own trade-off"
+    );
+    assert_eq!(
+        before
+            .iter()
+            .map(|model| model.word_list)
+            .collect::<Vec<_>>(),
+        [false, false]
     );
 
     for asset in [WHISPER_TURBO.model, WHISPER_TURBO.vad] {
@@ -991,6 +1003,17 @@ async fn the_whisper_entries_are_listed_with_one_shared_download_that_marks_both
     assert!(
         catalog.iter().all(|model| !model.cached),
         "the catalog is untouched"
+    );
+    assert_eq!(
+        catalog
+            .iter()
+            .map(|model| (model.name, model.word_list))
+            .collect::<Vec<_>>(),
+        [
+            ("nemotron_160ms", true),
+            ("unified_160ms", true),
+            ("parakeet_tdt_v3", true),
+        ]
     );
 }
 

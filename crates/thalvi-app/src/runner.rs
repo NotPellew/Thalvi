@@ -1702,9 +1702,26 @@ mod tests {
     use std::cell::Cell;
     use std::time::Duration;
 
-    use thalvi_desktop::device::Export;
+    use thalvi_desktop::device::{Download, Export};
     use thalvi_desktop::local::{LocalRecognizer, ModelSource};
     use thalvi_desktop::models::{self, CatalogHead, CatalogSpeech};
+
+    fn cpu_files(model: CatalogSpeech) -> Download {
+        Download {
+            export: Export::Cpu,
+            size: model.assets().size(),
+        }
+    }
+
+    fn gpu_files() -> Download {
+        let Some(assets) = CatalogSpeech::Unified160ms.gpu_assets() else {
+            panic!("Nemotron Unified has GPU files");
+        };
+        Download {
+            export: Export::Gpu,
+            size: assets.size(),
+        }
+    }
 
     use super::*;
     use crate::overlay::Visibility;
@@ -1785,6 +1802,8 @@ mod tests {
     #[tokio::test]
     async fn the_overlay_stays_hidden_while_a_model_on_disk_loads_and_shows_each_download_by_name()
     {
+        let cpu = cpu_files(CatalogSpeech::Nemotron160ms);
+        let gpu = gpu_files();
         let cases = [
             (
                 "from disk",
@@ -1794,13 +1813,13 @@ mod tests {
             ),
             (
                 "the CPU files",
-                Step::Fetching(Export::Cpu),
+                Step::Fetching(cpu),
                 true,
-                "Loading the speech model. Downloading about 650 MB.",
+                "Loading the speech model. Downloading about 662 MB.",
             ),
             (
                 "the GPU files",
-                Step::Fetching(Export::Gpu),
+                Step::Fetching(gpu),
                 true,
                 "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.",
             ),
@@ -1873,10 +1892,10 @@ mod tests {
             &self,
             step: impl Fn(Step) + Send + Sync,
         ) -> Result<NoModel, thalvi_desktop::recognizer::RecognizerError> {
-            step(Step::Fetching(Export::Gpu));
+            step(Step::Fetching(gpu_files()));
             let gate = self.gate.lock().unwrap().take().unwrap();
             let _ = gate.await;
-            step(Step::Fetching(Export::Cpu));
+            step(Step::Fetching(cpu_files(CatalogSpeech::Unified160ms)));
             if self.fails {
                 Err(thalvi_desktop::recognizer::RecognizerError::said(
                     "Could not download the speech model.",
@@ -1924,7 +1943,7 @@ mod tests {
                 tokio::select! {
                     () = &mut load => panic!("{case}: finished before the GPU download was shown"),
                     () = async {
-                        while publisher.view.borrow().loading != Some(Step::Fetching(Export::Gpu)) {
+                        while publisher.view.borrow().loading != Some(Step::Fetching(gpu_files())) {
                             tokio::task::yield_now().await;
                         }
                     } => {}
@@ -2109,7 +2128,9 @@ mod tests {
         let (out, mut status) = watch::channel(Status::Paused);
         let publisher = Publisher::new(out, EndingPauses::default());
         publisher.mode(Mode::Idle);
-        publisher.loading(Some(Step::Fetching(Export::Cpu)));
+        publisher.loading(Some(Step::Fetching(cpu_files(
+            CatalogSpeech::Nemotron160ms,
+        ))));
         status.mark_unchanged();
         let (steps, received) = mpsc::unbounded_channel();
         let local = Arc::new(LocalRecognizer::new(
@@ -2127,19 +2148,20 @@ mod tests {
     #[tokio::test]
     async fn the_loading_notice_follows_a_download_once_per_percent_and_ends_with_the_model_loading()
      {
-        use Export::{Cpu, Gpu};
         LocalSet::new()
             .run_until(async {
                 let (steps, _publisher, load, mut status) = loading_download();
+                let cpu = cpu_files(CatalogSpeech::Nemotron160ms);
+                let gpu = gpu_files();
                 let mut shown = vec![loading_now(&status)];
                 for (step, changes) in [
-                    (Step::Downloading(Cpu, 0), true),
-                    (Step::Downloading(Cpu, 0), false),
-                    (Step::Downloading(Cpu, 1), true),
-                    (Step::Downloading(Cpu, 100), true),
+                    (Step::Downloading(cpu, 0), true),
+                    (Step::Downloading(cpu, 0), false),
+                    (Step::Downloading(cpu, 1), true),
+                    (Step::Downloading(cpu, 100), true),
                     (Step::Reading, true),
-                    (Step::Fetching(Gpu), true),
-                    (Step::Downloading(Gpu, 50), true),
+                    (Step::Fetching(gpu), true),
+                    (Step::Downloading(gpu, 50), true),
                     (Step::Reading, true),
                 ] {
                     steps.send(step).unwrap();
@@ -2155,10 +2177,10 @@ mod tests {
                 assert_eq!(
                     shown,
                     [
-                        download("Loading the speech model. Downloading about 650 MB."),
-                        download("Downloading the speech model, about 650 MB \u{2014} 0%"),
-                        download("Downloading the speech model, about 650 MB \u{2014} 1%"),
-                        download("Downloading the speech model, about 650 MB \u{2014} 100%"),
+                        download("Loading the speech model. Downloading about 662 MB."),
+                        download("Downloading the speech model, about 662 MB \u{2014} 0%"),
+                        download("Downloading the speech model, about 662 MB \u{2014} 1%"),
+                        download("Downloading the speech model, about 662 MB \u{2014} 100%"),
                         reading.clone(),
                         download(
                             "Loading the speech model. Downloading the model for the GPU, about 1.3 GB."
@@ -2177,16 +2199,17 @@ mod tests {
         LocalSet::new()
             .run_until(async {
                 let (steps, publisher, load, mut status) = loading_download();
-                steps.send(Step::Downloading(Export::Cpu, 40)).unwrap();
+                let cpu = cpu_files(CatalogSpeech::Nemotron160ms);
+                steps.send(Step::Downloading(cpu, 40)).unwrap();
                 assert_eq!(
                     next_loading(&mut status).await.0,
-                    "Downloading the speech model, about 650 MB \u{2014} 40%"
+                    "Downloading the speech model, about 662 MB \u{2014} 40%"
                 );
 
                 load.abort();
                 assert!(load.await.unwrap_err().is_cancelled());
                 publisher.loading(None);
-                let late = steps.send(Step::Downloading(Export::Cpu, 41));
+                let late = steps.send(Step::Downloading(cpu, 41));
 
                 assert!(late.is_err(), "the aborted load no longer listens");
                 assert_eq!(*status.borrow(), Status::Listening);

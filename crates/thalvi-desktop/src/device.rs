@@ -187,15 +187,22 @@ pub enum Export {
     Cpu,
 }
 
+/// One export's files as a download, with their pinned bytes together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Download {
+    pub export: Export,
+    pub size: u64,
+}
+
 /// What a load is doing now, for the notice shown while it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
     /// Reading the files from disk, checking them as it goes.
     Reading,
     /// Downloading an export that is not on disk, before the first percent has arrived.
-    Fetching(Export),
+    Fetching(Download),
     /// A download of an export, with the whole percent of its bytes that have arrived.
-    Downloading(Export, u8),
+    Downloading(Download, u8),
 }
 
 impl Step {
@@ -233,6 +240,9 @@ pub trait Provider: Sync {
 
     /// Whether every file of `export` is on disk, without checking its bytes.
     fn cached(&self, export: Export) -> impl Future<Output = bool> + Send;
+
+    /// The pinned bytes of `export`'s files together.
+    fn size(&self, export: Export) -> u64;
 
     /// The files of `export`, checked, and downloaded first where missing or damaged; `progress` is told how
     /// the download goes.
@@ -276,13 +286,17 @@ pub async fn load<P: Provider>(
             let cpu_files = !gpu_files && provider.cached(Export::Cpu).await;
             match Device::Gpu(gpu).given_files(gpu_files, cpu_files) {
                 Device::Gpu(gpu) => {
+                    let download = Download {
+                        export: Export::Gpu,
+                        size: provider.size(Export::Gpu),
+                    };
                     step(if gpu_files {
                         Step::Reading
                     } else {
-                        Step::Fetching(Export::Gpu)
+                        Step::Fetching(download)
                     });
                     match provider
-                        .fetch(Export::Gpu, downloading(Export::Gpu, &step))
+                        .fetch(Export::Gpu, downloading(download, &step))
                         .await
                     {
                         Ok(files) => match provider.open_gpu(gpu, files).await {
@@ -300,25 +314,29 @@ pub async fn load<P: Provider>(
             }
         }
     };
+    let download = Download {
+        export: Export::Cpu,
+        size: provider.size(Export::Cpu),
+    };
     step(if provider.cached(Export::Cpu).await {
         Step::Reading
     } else {
-        Step::Fetching(Export::Cpu)
+        Step::Fetching(download)
     });
     let files = provider
-        .fetch(Export::Cpu, downloading(Export::Cpu, &step))
+        .fetch(Export::Cpu, downloading(download, &step))
         .await?;
     provider.open_cpu(reason, files).await
 }
 
 /// Turns what a download reports into steps; a download's percent is shown only while it runs.
 pub(crate) fn downloading(
-    export: Export,
+    download: Download,
     step: &(impl Fn(Step) + Send + Sync),
 ) -> impl FnMut(SpeechProgress) + Send {
     move |progress| match progress {
         SpeechProgress::Verifying => {}
-        SpeechProgress::Downloading { percent } => step(Step::Downloading(export, percent)),
+        SpeechProgress::Downloading { percent } => step(Step::Downloading(download, percent)),
         SpeechProgress::Done => step(Step::Reading),
     }
 }
@@ -505,6 +523,9 @@ mod tests {
     }
 
     impl Fake {
+        const CPU_SIZE: u64 = 111;
+        const GPU_SIZE: u64 = 222;
+
         fn log(&self, call: &'static str) {
             self.calls
                 .lock()
@@ -523,6 +544,13 @@ mod tests {
                 Export::Gpu => self.gpu_cached,
                 Export::Cpu => self.cpu_cached,
             })
+        }
+
+        fn size(&self, export: Export) -> u64 {
+            match export {
+                Export::Cpu => Self::CPU_SIZE,
+                Export::Gpu => Self::GPU_SIZE,
+            }
         }
 
         fn fetch(
@@ -642,6 +670,16 @@ mod tests {
     const MISSING: &str = "cpu of Cpu: the GPU model isn't downloaded";
     const DRIVER: &str = "cpu of Cpu: the GPU driver failed to start";
 
+    fn download(export: Export) -> Download {
+        Download {
+            export,
+            size: match export {
+                Export::Cpu => Fake::CPU_SIZE,
+                Export::Gpu => Fake::GPU_SIZE,
+            },
+        }
+    }
+
     #[tokio::test]
     async fn a_gpu_plan_loads_on_what_is_on_disk_and_falls_back_to_the_cpu_when_the_gpu_files_or_the_gpu_fail()
      {
@@ -672,7 +710,7 @@ mod tests {
             gpu(),
             fake(),
             Ok("gpu"),
-            &[Fetching(OnGpu)],
+            &[Fetching(download(OnGpu))],
             &["fetch gpu", "open gpu"],
         )
         .await;
@@ -684,7 +722,7 @@ mod tests {
                 ..fake()
             },
             Ok(MISSING),
-            &[Fetching(OnGpu), Fetching(Cpu)],
+            &[Fetching(download(OnGpu)), Fetching(download(Cpu))],
             &["fetch gpu", "fetch cpu", "open cpu"],
         )
         .await;
@@ -697,7 +735,7 @@ mod tests {
                 ..fake()
             },
             Err("still offline"),
-            &[Fetching(OnGpu), Fetching(Cpu)],
+            &[Fetching(download(OnGpu)), Fetching(download(Cpu))],
             &["fetch gpu", "fetch cpu"],
         )
         .await;
@@ -715,7 +753,7 @@ mod tests {
             gpu(),
             fake().disk(true, false).gpu_open_fails(driver()),
             Ok(DRIVER),
-            &[Reading, Fetching(Cpu)],
+            &[Reading, Fetching(download(Cpu))],
             &["fetch gpu", "open gpu", "fetch cpu", "open cpu"],
         )
         .await;
@@ -767,7 +805,7 @@ mod tests {
                 Device::Cpu(fallback),
                 fake(),
                 Ok(&expected),
-                &[Fetching(Cpu)],
+                &[Fetching(download(Cpu))],
                 &["fetch cpu", "open cpu"],
             )
             .await;
@@ -780,7 +818,7 @@ mod tests {
                 ..fake()
             },
             Err("offline"),
-            &[Fetching(Cpu)],
+            &[Fetching(download(Cpu))],
             &["fetch cpu"],
         )
         .await;
@@ -804,10 +842,10 @@ mod tests {
             fake().reports(&reports),
             Ok("cpu of Cpu: this model runs on the CPU"),
             &[
-                Step::Fetching(Cpu),
-                Step::Downloading(Cpu, 0),
-                Step::Downloading(Cpu, 42),
-                Step::Downloading(Cpu, 100),
+                Step::Fetching(download(Cpu)),
+                Step::Downloading(download(Cpu), 0),
+                Step::Downloading(download(Cpu), 42),
+                Step::Downloading(download(Cpu), 100),
                 Step::Reading,
             ],
             &["fetch cpu", "open cpu"],
@@ -819,10 +857,10 @@ mod tests {
             fake().reports(&reports),
             Ok("gpu"),
             &[
-                Step::Fetching(OnGpu),
-                Step::Downloading(OnGpu, 0),
-                Step::Downloading(OnGpu, 42),
-                Step::Downloading(OnGpu, 100),
+                Step::Fetching(download(OnGpu)),
+                Step::Downloading(download(OnGpu), 0),
+                Step::Downloading(download(OnGpu), 42),
+                Step::Downloading(download(OnGpu), 100),
                 Step::Reading,
             ],
             &["fetch gpu", "open gpu"],

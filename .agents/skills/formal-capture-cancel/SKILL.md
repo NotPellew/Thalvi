@@ -42,7 +42,14 @@ are unchanged. Its `WhisperSession` (`crates/thalvi-desktop/src/whisper.rs`) buf
 task and kills the helper, so a late reply has no receiver. Model actions are unchanged. `Live::tail` now waits `RecognizerSession::final_wait()`
 after the release of a buffered capture (11 s by default, the helper's request timeout plus a second for
 Whisper) instead of a fixed 11 s; running out is the same non-accepted failure, polled after cancellation,
-so the model actions are unchanged.
+so the model actions are unchanged. Its Vulkan previews (#482) are `RecognizerEvent::Partial`s that
+`WhisperSession` returns only before `finish_audio`; the engine's `on_partial` publishes them for display and
+never admits one to delivery, the same path the model abstracts for streaming recognizers. The model does not
+cover preview ordering inside the session; `whisper.rs` tests do.
+
+The download-size notice (#485, stacked on `feat/speech-trials`) changes only `runner.rs`'s tests module, for
+`Step`'s new `Download` payload; `runner.rs`'s hash describes the commit that adds this paragraph. No mapped function
+changed, and `engine.rs`, `recognizer.rs` and `local.rs` are untouched, so the model actions are unchanged.
 
 The five checked invariants have these exact meanings:
 
