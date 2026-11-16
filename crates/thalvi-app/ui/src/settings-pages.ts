@@ -26,6 +26,7 @@ import type {
   UpdateState,
   WakeModelInfo,
   SwitchState,
+  WritingAppStyle,
   WritingOpening,
   WritingSettings,
 } from "./contract.ts";
@@ -56,6 +57,8 @@ export interface PageContext {
   audio: AudioStatus;
   /** Why this desktop offers no hold key, or null where it does. */
   holdKeyUnavailable: string | null;
+  /** Why this desktop cannot match app styles, or null where it can. */
+  appStylesUnavailable: string | null;
   /** The keys this desktop starts with. */
   holdKeyDefaults: HoldKeyDefaults;
   /** Whether the OS starts Thalvi at login, or why that could not be read. */
@@ -1600,8 +1603,9 @@ function speech(context: PageContext): SpeechRows {
     const model = modelInput?.value ?? "";
     const custom = promptArea.value.trim() !== defaultPrompt.trim();
     const hasOpenings = (settings.writing?.openings ?? []).length > 0;
+    const hasAppStyles = (settings.writing?.apps ?? []).length > 0;
     if (url.trim() === "" && model.trim() === "") {
-      if (custom || hasOpenings || (keyInput?.value ?? "") !== "") {
+      if (custom || hasOpenings || hasAppStyles || (keyInput?.value ?? "") !== "") {
         return Promise.reject(new Error("Set the address and the model of the writing endpoint first."));
       }
       return apply((next) => {
@@ -1676,6 +1680,101 @@ function speech(context: PageContext): SpeechRows {
     openingProblem,
   );
 
+  const appStylesList = el("div", { class: "stack wide" });
+  const appStyleProblem = note();
+  const appStylesField = el("div", { class: "stack wide" }, appStylesList, appStyleProblem);
+
+  function setAppStyles(change: (apps: WritingAppStyle[]) => WritingAppStyle[]): Promise<void> {
+    say(appStyleProblem, "");
+    return apply((next) => {
+      if (next.writing === null) throw new Error("Set the writing endpoint first: the address and the model.");
+      const apps = change(next.writing.apps ?? []);
+      if (apps.length > 0) next.writing.apps = apps;
+      else delete next.writing.apps;
+    }).then(renderAppStyles);
+  }
+
+  function renderAppStyles(): void {
+    appStylesList.replaceChildren(...(settings.writing?.apps ?? []).map((style, index) => {
+      if (context.appStylesUnavailable !== null) {
+        const prompt = el("textarea", { rows: "4", readonly: "", "aria-label": `Prompt for app “${style.app}”` });
+        prompt.value = style.prompt;
+        return el("div", { class: "stack wide" }, el("div", { class: "trow server" }, el("span", { class: "phrase" }, style.app), el("span", { class: "unit" }, `Title contains: ${style.title ?? "—"}`)), prompt);
+      }
+      const update = (change: (app: WritingAppStyle) => WritingAppStyle): Promise<void> =>
+        setAppStyles((known) => known.map((other, at) => at === index ? change(other) : other)).catch((error: unknown) => {
+          say(appStyleProblem, errorText(error));
+          throw error;
+        });
+      const app = controls.text(style.app, (value) => update((other) => ({ ...other, app: value.trim() })), { label: `App for “${style.app}”` });
+      const title = controls.text(style.title ?? "", (value) => update((other) => {
+        const next = { ...other };
+        if (value.trim() === "") delete next.title;
+        else next.title = value.trim();
+        return next;
+      }), { label: `Title contains for “${style.app}”`, placeholder: "—" });
+      const prompt = controls.text(style.prompt, (value) => update((other) => ({ ...other, prompt: value })), { rows: 4, label: `Prompt for app “${style.app}”` });
+      const remove = button("Remove", () => {
+        void setAppStyles((known) => known.filter((_, at) => at !== index)).catch((error: unknown) => {
+          say(appStyleProblem, errorText(error));
+        });
+      }, "quiet");
+      remove.setAttribute("aria-label", `Remove app style for “${style.app}”`);
+      return el("div", { class: "stack wide" }, el("div", { class: "trow kind-add" }, miniField("App", app), miniField("Title contains (optional)", title), remove), miniField("Prompt", prompt));
+    }));
+  }
+  renderAppStyles();
+
+  if (context.appStylesUnavailable !== null) {
+    appStylesField.prepend(unavailable({ kind: "unavailable", reason: context.appStylesUnavailable, line: null }));
+  } else {
+    const newApp = controls.draftText("", () => undefined, { label: "New app", placeholder: "Slack.exe or firefox" });
+    const newTitle = controls.draftText("", () => undefined, { label: "New title contains (optional)", placeholder: "Any window title" });
+    const appInput = newApp.field as HTMLInputElement;
+    const titleInput = newTitle.field as HTMLInputElement;
+    const add = button("Add", () => {
+      const app = appInput.value.trim();
+      if (app === "") {
+        say(appStyleProblem, "Type the app name to add first.");
+        return;
+      }
+      const title = titleInput.value.trim();
+      void setAppStyles((known) => [...known, { app, ...(title === "" ? {} : { title }), prompt: promptArea.value }]).then(() => {
+        appInput.value = "";
+        titleInput.value = "";
+        addRow.hidden = true;
+        byName.focus();
+      }, (error: unknown) => {
+        say(appStyleProblem, errorText(error));
+      });
+    });
+    const addRow = el("div", { class: "trow kind-add", hidden: true }, miniField("App", newApp), miniField("Title contains (optional)", newTitle), add);
+    const byName = button("Add by name", () => {
+      say(appStyleProblem, "");
+      appInput.value = "";
+      titleInput.value = "";
+      addRow.hidden = false;
+      appInput.focus();
+    }, "quiet");
+    const currentApp = button("Add the app you're in now", () => {
+      say(appStyleProblem, "");
+      void backend.getCurrentApp().then((current) => {
+        if (current === null) {
+          say(appStyleProblem, "Thalvi doesn't know which app you were in yet. Choose Add by name, or write into the app once and try again.");
+          return;
+        }
+        appInput.value = current.app;
+        titleInput.value = current.title;
+        addRow.hidden = false;
+        titleInput.focus();
+      }, (error: unknown) => {
+        say(appStyleProblem, errorText(error));
+      });
+    }, "quiet");
+    appStylesField.insertBefore(el("div", { class: "trow kind-add" }, currentApp, byName), appStyleProblem);
+    appStylesField.insertBefore(addRow, appStyleProblem);
+  }
+
   const words = wordListTable(context);
   const wordProblem = note();
   words.node.append(wordProblem);
@@ -1746,6 +1845,11 @@ function speech(context: PageContext): SpeechRows {
         "Opening phrases",
         "When a dictation you write out begins with one of these phrases, its prompt is used instead of the Writing prompt; the longest matching phrase wins. A new rule starts as a copy of the Writing prompt. Case and punctuation are ignored. Applying never calls the model.",
         openingsField,
+      ),
+      row(
+        "App styles",
+        "Use a prompt for the app you write into, optionally matching part of its window title. App names match exactly, ignoring case; the first matching style wins. A new style starts as a copy of the Writing prompt. The app name and title are only matched on this computer and are never sent to the writing model. A spoken opening phrase wins over an app style.",
+        appStylesField,
       ),
     ],
   };

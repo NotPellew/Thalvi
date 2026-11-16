@@ -125,6 +125,17 @@ export interface WritingOpening {
   prompt: string;
 }
 
+export interface WritingAppStyle {
+  app: string;
+  title?: string;
+  prompt: string;
+}
+
+export interface CurrentApp {
+  app: string;
+  title: string;
+}
+
 export interface WritingSettings {
   url: string;
   model: string;
@@ -134,6 +145,8 @@ export interface WritingSettings {
   prompt?: string;
   /** Absent when there are none. */
   openings?: WritingOpening[];
+  /** Absent when there are none. */
+  apps?: WritingAppStyle[];
 }
 export type LiveEntry = RealtimeEntry | OnDeviceEntry | OpenAiEntry;
 export type SpeechEntry = LiveEntry | ExtraEntry;
@@ -300,6 +313,10 @@ export interface Backend {
   onOpenPage(listener: (page: string) => void): void;
   /** Why this desktop offers no hold key to dictate with, or null where it does. */
   getHoldKeyUnavailable(): Promise<string | null>;
+  /** Why this desktop cannot match app styles, or null where it can. */
+  getAppStylesUnavailable(): Promise<string | null>;
+  /** The app focused before Settings, or the last bound target; null when neither is known. */
+  getCurrentApp(): Promise<CurrentApp | null>;
   /** The keys this desktop starts with, which Settings restores. */
   getHoldKeyDefaults(): Promise<HoldKeyDefaults>;
   /** Whether the OS starts Thalvi at login, read from the OS, and why Thalvi could not put its entry back on start. */
