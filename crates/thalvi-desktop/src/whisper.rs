@@ -1210,11 +1210,6 @@ mod tests {
         let Some(address) = std::env::var_os("THALVI_WHISPER_TEST_CHILD") else {
             return;
         };
-        #[cfg(target_os = "linux")]
-        assert_eq!(
-            rustix::process::parent_process_death_signal().unwrap(),
-            Some(rustix::process::Signal::KILL)
-        );
         let mut stream = std::net::TcpStream::connect(address.to_str().unwrap()).unwrap();
         stream.set_read_timeout(Some(WAIT * 4)).unwrap();
         for number in 0..KEPT_LINES + 2 {
@@ -1225,10 +1220,7 @@ mod tests {
         std::process::exit(7);
     }
 
-    async fn helper_child() -> (Child, tokio::net::TcpStream, u32) {
-        let listener = within(tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)))
-            .await
-            .unwrap();
+    fn helper_command(address: &str) -> Command {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args([
@@ -1236,15 +1228,21 @@ mod tests {
                 "whisper::tests::helper_process_fixture",
                 "--nocapture",
             ])
-            .env(
-                "THALVI_WHISPER_TEST_CHILD",
-                listener.local_addr().unwrap().to_string(),
-            )
+            .env("THALVI_WHISPER_TEST_CHILD", address)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         native::prepare(&mut command);
-        let child = command.spawn().unwrap();
+        command
+    }
+
+    async fn helper_child() -> (Child, tokio::net::TcpStream, u32) {
+        let listener = within(tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .unwrap();
+        let child = helper_command(&listener.local_addr().unwrap().to_string())
+            .spawn()
+            .unwrap();
         native::bind(&child).unwrap();
         let (mut stream, _) = within(listener.accept()).await.unwrap();
         let pid = within(stream.read_u32_le()).await.unwrap();
@@ -1336,6 +1334,34 @@ mod tests {
         );
         assert_eq!(ended, Some(Exit(Some(7))));
         assert_eq!(process.output(), ["last message"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_helper_is_killed_when_the_thread_that_started_it_ends() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let listener = within(tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let mut child = std::thread::spawn(move || helper_command(&address).spawn().unwrap())
+            .join()
+            .unwrap();
+        let ended = tokio::time::timeout(WAIT, async {
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        if ended.is_err() {
+            child.kill().unwrap();
+        }
+        let status = ended.expect("the helper ended with the thread that started it");
+        assert_eq!(status.signal(), Some(9), "SIGKILL, not {status}");
     }
 
     #[tokio::test]
