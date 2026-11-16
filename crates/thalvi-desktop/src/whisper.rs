@@ -40,6 +40,12 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(25);
 /// What a request is given besides one second per second of audio.
 const BASE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Audio a Vulkan capture must hold before its first preview: a shorter one is a click or a breath.
+const PREVIEW_MIN_AUDIO: Duration = Duration::from_secs(1);
+/// New audio that must arrive before the next preview starts: each one re-reads the whole capture on the GPU.
+const PREVIEW_STEP: Duration = Duration::from_millis(800);
+/// What a preview is given: it only shows text, so one that is slow is dropped for the next.
+const PREVIEW_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the engine waits past a request's own timeout, so that timeout's error is the one shown.
 const FINAL_MARGIN: Duration = Duration::from_secs(1);
 const SAMPLE_RATE: u32 = 16_000;
@@ -91,9 +97,14 @@ impl WhisperBackend {
                 "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts. Text appears only after you stop speaking, and the word list is ignored. On the CPU it is slow: the text can take as long as you spoke, or longer. The language is detected automatically; only English and German have been tried."
             }
             Self::Vulkan => {
-                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts on your graphics card through Vulkan. Text appears only after you stop speaking, and the word list is ignored. Its speed on your GPU is untested. If no GPU is found, it says so; pick the CPU entry then. The language is detected automatically; only English and German have been tried."
+                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts on your graphics card through Vulkan. Text appears while you speak, because the capture so far is read again on the GPU about every second, which is extra GPU work; the final text replaces it after you stop. The word list is ignored. Its speed on your GPU is untested. If no GPU is found, it says so; pick the CPU entry then. The language is detected automatically; only English and German have been tried."
             }
         }
+    }
+
+    /// Whether text is shown while the user speaks, which only a GPU keeps up with.
+    fn previews(self) -> bool {
+        self == Self::Vulkan
     }
 
     fn folder(self) -> &'static str {
@@ -465,6 +476,12 @@ fn multipart(fields: &[(&str, &str)], wav: &[u8]) -> Vec<u8> {
 /// What a request for a capture of `frames` frames is given: twenty seconds and a second per second of audio.
 fn request_timeout(frames: usize) -> Duration {
     BASE_TIMEOUT + Duration::from_secs_f64(audio_seconds(frames))
+}
+
+/// How long `frames` frames of audio last.
+fn audio_time(frames: usize) -> Duration {
+    let samples = u64::try_from(frames * crate::frame::FRAME_SAMPLES).unwrap_or(u64::MAX);
+    Duration::from_micros(samples.saturating_mul(1_000_000) / u64::from(SAMPLE_RATE))
 }
 
 #[expect(
@@ -840,6 +857,9 @@ impl<L: Launcher> Recognizer for WhisperRecognizer<L> {
             finished_frames: None,
             finished_signal: Notify::new(),
             request: Request::Buffering,
+            preview: None,
+            previewed_frames: 0,
+            shown: String::new(),
         })
     }
 
@@ -848,19 +868,39 @@ impl<L: Launcher> Recognizer for WhisperRecognizer<L> {
     }
 }
 
-enum Request {
-    Buffering,
-    Sent {
-        reply: oneshot::Receiver<Result<String, RecognizerError>>,
-        task: JoinHandle<()>,
-        at: Instant,
-    },
-    Answered {
-        ok: bool,
-    },
+/// A request to the helper that is under way.
+struct Sent {
+    reply: oneshot::Receiver<Result<String, RecognizerError>>,
+    task: JoinHandle<()>,
+    at: Instant,
 }
 
-/// One capture, buffered until it ends and then transcribed in one request.
+enum Request {
+    Buffering,
+    Sent(Sent),
+    Answered { ok: bool },
+}
+
+/// Why audio is sent to the helper.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    /// Provisional text while the user speaks.
+    Preview,
+    /// The text of the whole capture, once it has ended.
+    Final,
+}
+
+impl Reading {
+    fn timeout(self, frames: usize) -> Duration {
+        match self {
+            Self::Preview => PREVIEW_TIMEOUT,
+            Self::Final => request_timeout(frames),
+        }
+    }
+}
+
+/// One capture, buffered until it ends and then transcribed in one request; on a GPU it is also read while it
+/// lasts, for the provisional text the overlay shows.
 pub struct WhisperSession<L: Launcher = ProcessLauncher> {
     shared: Arc<Shared<L>>,
     running: Arc<Running<L::Process>>,
@@ -869,18 +909,49 @@ pub struct WhisperSession<L: Launcher = ProcessLauncher> {
     finished_frames: Option<usize>,
     finished_signal: Notify,
     request: Request,
+    /// The one preview in flight; none is started once the capture has ended.
+    preview: Option<Sent>,
+    /// The frames the last preview started with.
+    previewed_frames: usize,
+    /// The text of the last preview shown.
+    shown: String,
 }
 
 fn stopped() -> RecognizerError {
     RecognizerError::said("Speech transcription stopped unexpectedly. Nothing was delivered.")
 }
 
+impl<L: Launcher> Shared<L> {
+    fn transcription_metric(
+        &self,
+        running: &Running<L::Process>,
+        outcome: &str,
+        at: Instant,
+        reading: Reading,
+        seconds: Option<f64>,
+    ) {
+        let mut fields = json!({"engine": "whisper_helper", "model": self.name});
+        if let Some(seconds) = seconds {
+            fields["audio_seconds"] = json!(seconds);
+        }
+        if reading == Reading::Preview {
+            fields["preview"] = json!(true);
+        }
+        self.metrics.metric(
+            Event::LocalStt,
+            outcome,
+            Some(at.elapsed()),
+            running.device.tag(fields),
+        );
+    }
+}
+
 impl<L: Launcher> WhisperSession<L> {
-    fn send_request(&mut self) -> Request {
+    /// Transcribes `frames` in the background.
+    fn send(&self, frames: Vec<Frame>, reading: Reading) -> Sent {
         let (sender, reply) = oneshot::channel();
         let running = Arc::clone(&self.running);
         let shared = Arc::clone(&self.shared);
-        let frames = std::mem::take(&mut self.frames);
         let at = Instant::now();
         let task = tokio::spawn(async move {
             let seconds = audio_seconds(frames.len());
@@ -889,22 +960,71 @@ impl<L: Launcher> WhisperSession<L> {
             } else {
                 let audio = wav(frames.as_flattened());
                 let fields = [("response_format", "json"), ("language", "auto")];
-                let timeout = request_timeout(frames.len());
+                let timeout = reading.timeout(frames.len());
                 infer(&running.client, running.port, &fields, &audio, timeout).await
             };
-            shared.metrics.metric(
-                Event::LocalStt,
+            shared.transcription_metric(
+                &running,
                 if result.is_ok() { "ok" } else { "error" },
-                Some(at.elapsed()),
-                running.device.tag(json!({
-                    "engine": "whisper_helper",
-                    "model": shared.name,
-                    "audio_seconds": seconds,
-                })),
+                at,
+                reading,
+                Some(seconds),
             );
             let _ = sender.send(result.map_err(|failure| failure.error()));
         });
-        Request::Sent { reply, task, at }
+        Sent { reply, task, at }
+    }
+
+    /// Starts a preview of the whole capture so far when none is running and enough new audio has arrived.
+    fn start_preview(&mut self) {
+        if !self.shared.backend.previews()
+            || self.finished_frames.is_some()
+            || self.preview.is_some()
+            || audio_time(self.frames.len()) < PREVIEW_MIN_AUDIO
+            || audio_time(self.frames.len() - self.previewed_frames) < PREVIEW_STEP
+        {
+            return;
+        }
+        self.previewed_frames = self.frames.len();
+        self.preview = Some(self.send(self.frames.clone(), Reading::Preview));
+    }
+
+    /// Drops the preview in flight and tells whether the helper was still working on it.
+    fn stop_preview(&mut self) -> bool {
+        let Some(preview) = self.preview.take() else {
+            return false;
+        };
+        if preview.task.is_finished() {
+            return false;
+        }
+        preview.task.abort();
+        self.shared.transcription_metric(
+            &self.running,
+            "cancelled",
+            preview.at,
+            Reading::Preview,
+            Some(audio_seconds(self.previewed_frames)),
+        );
+        true
+    }
+
+    /// The text of the whole capture, requested once it has ended.
+    async fn final_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
+        if matches!(self.request, Request::Buffering) {
+            let frames = std::mem::take(&mut self.frames);
+            self.request = Request::Sent(self.send(frames, Reading::Final));
+        }
+        let Request::Sent(Sent { reply, .. }) = &mut self.request else {
+            return Err(stopped());
+        };
+        let answer = reply.await;
+        let ok = matches!(answer, Ok(Ok(_)));
+        self.request = Request::Answered { ok };
+        match answer {
+            Ok(Ok(text)) => Ok(RecognizerEvent::Final(text)),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(stopped()),
+        }
     }
 }
 
@@ -923,6 +1043,7 @@ impl<L: Launcher> RecognizerSession for WhisperSession<L> {
     )]
     async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
         self.finished_frames = Some(self.frames.len());
+        self.stop_preview();
         self.finished_signal.notify_one();
         Ok(())
     }
@@ -933,26 +1054,33 @@ impl<L: Launcher> RecognizerSession for WhisperSession<L> {
     )]
     async fn send_frame(&mut self, frame: &Frame) -> Result<(), RecognizerError> {
         self.frames.push(*frame);
+        self.start_preview();
         Ok(())
     }
 
     async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
-        if self.finished_frames.is_none() {
-            self.finished_signal.notified().await;
-        }
-        if matches!(self.request, Request::Buffering) {
-            self.request = self.send_request();
-        }
-        let Request::Sent { reply, .. } = &mut self.request else {
-            return Err(stopped());
-        };
-        let answer = reply.await;
-        let ok = matches!(answer, Ok(Ok(_)));
-        self.request = Request::Answered { ok };
-        match answer {
-            Ok(Ok(text)) => Ok(RecognizerEvent::Final(text)),
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err(stopped()),
+        loop {
+            if self.finished_frames.is_some() {
+                return self.final_event().await;
+            }
+            let Some(preview) = &mut self.preview else {
+                self.finished_signal.notified().await;
+                continue;
+            };
+            tokio::select! {
+                () = self.finished_signal.notified() => {}
+                answer = &mut preview.reply => {
+                    self.preview = None;
+                    self.start_preview();
+                    if let Ok(Ok(text)) = answer
+                        && !text.is_empty()
+                        && text != self.shown
+                    {
+                        self.shown.clone_from(&text);
+                        return Ok(RecognizerEvent::Partial(text));
+                    }
+                }
+            }
         }
     }
 
@@ -963,22 +1091,24 @@ impl<L: Launcher> RecognizerSession for WhisperSession<L> {
 
 impl<L: Launcher> Drop for WhisperSession<L> {
     fn drop(&mut self) {
+        let mut busy = self.stop_preview();
         match &self.request {
             Request::Buffering | Request::Answered { ok: true } => {}
-            Request::Answered { ok: false } => self.shared.discard(&self.running),
-            Request::Sent { task, at, .. } => {
+            Request::Answered { ok: false } => busy = true,
+            Request::Sent(Sent { task, at, .. }) => {
                 task.abort();
-                self.shared.metrics.metric(
-                    Event::LocalStt,
+                self.shared.transcription_metric(
+                    &self.running,
                     "cancelled",
-                    Some(at.elapsed()),
-                    self.running.device.tag(json!({
-                        "engine": "whisper_helper",
-                        "model": self.shared.name,
-                    })),
+                    *at,
+                    Reading::Final,
+                    None,
                 );
-                self.shared.discard(&self.running);
+                busy = true;
             }
+        }
+        if busy {
+            self.shared.discard(&self.running);
         }
     }
 }
@@ -2121,6 +2251,375 @@ mod tests {
         assert!(transcription["duration_ms"].is_number());
     }
 
+    fn vulkan(replies: Vec<Reply>) -> Plan {
+        Plan {
+            output: GPU_OUTPUT.to_vec(),
+            replies,
+            ..Plan::default()
+        }
+    }
+
+    /// `count` frames that differ from each other, so that what a request carried says which they were.
+    fn numbered(count: usize) -> Vec<Frame> {
+        (1..=count)
+            .map(|number| frame(i16::try_from(number).unwrap()))
+            .collect()
+    }
+
+    async fn send_all<L: Launcher>(session: &mut WhisperSession<L>, frames: &[Frame]) {
+        for frame in frames {
+            session.send_frame(frame).await.unwrap();
+        }
+    }
+
+    fn partial(text: &str) -> RecognizerEvent {
+        RecognizerEvent::Partial(text.to_owned())
+    }
+
+    fn the_final(text: &str) -> RecognizerEvent {
+        RecognizerEvent::Final(text.to_owned())
+    }
+
+    #[test]
+    fn only_the_vulkan_entry_says_it_shows_text_while_you_speak() {
+        for (backend, shows, says) in [
+            (
+                WhisperBackend::Cpu,
+                false,
+                "Text appears only after you stop speaking",
+            ),
+            (WhisperBackend::Vulkan, true, "Text appears while you speak"),
+        ] {
+            let description = backend.description();
+            assert_eq!(backend.previews(), shows, "{backend:?}");
+            assert!(description.contains(says), "{backend:?}: {description}");
+            assert_eq!(description.contains("extra GPU work"), shows, "{backend:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_vulkan_capture_previews_everything_said_so_far_once_a_second_and_every_800_ms_and_only_its_final_ends_it()
+     {
+        let scratch = Scratch::with_files("previews");
+        let fake = Fake::new([vulkan(vec![
+            Reply::Text("a"),
+            Reply::Text(" a "),
+            Reply::Text("a b"),
+            Reply::Text(""),
+            Reply::Text("a b c"),
+            Reply::Text("the whole capture"),
+        ])]);
+        let recognizer = recognizer(&fake, WhisperBackend::Vulkan, &scratch);
+        let frames = numbered(53);
+        let mut session = within(recognizer.connect()).await.unwrap();
+        let mut events = Vec::new();
+
+        send_all(&mut session, &frames[..13]).await;
+        send_all(&mut session, &frames[13..23]).await;
+        events.push(within(session.next_event()).await.unwrap());
+        send_all(&mut session, &frames[23..33]).await;
+        events.push(within(session.next_event()).await.unwrap());
+        send_all(&mut session, &frames[33..53]).await;
+        events.push(within(session.next_event()).await.unwrap());
+        session.finish_audio().await.unwrap();
+        events.push(within(session.next_event()).await.unwrap());
+
+        assert_eq!(
+            events,
+            [
+                partial("a"),
+                partial("a b"),
+                partial("a b c"),
+                the_final("the whole capture")
+            ],
+            "a repeated text and an empty one are not shown again"
+        );
+        let seen = fake.helper(0).seen();
+        let capture: Vec<&Seen> = seen.iter().skip(1).collect();
+        assert_eq!(
+            capture
+                .iter()
+                .map(|seen| seen.samples().len())
+                .collect::<Vec<_>>(),
+            [13, 23, 33, 43, 53, 53].map(|count| count * FRAME_SAMPLES),
+            "the first preview waits for a second of audio, then one starts per 800 ms of new audio, one at a time, and the final comes last"
+        );
+        for seen in &capture {
+            assert_eq!(
+                seen.fields,
+                [
+                    ("response_format".to_owned(), "json".to_owned()),
+                    ("language".to_owned(), "auto".to_owned())
+                ]
+            );
+            assert_eq!(
+                seen.samples(),
+                frames.as_flattened()[..seen.samples().len()],
+                "each request is the capture from its start"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cpu_capture_is_never_previewed() {
+        let scratch = Scratch::with_files("cpu-no-previews");
+        let fake = Fake::new([Plan {
+            replies: vec![Reply::Text("only the final")],
+            ..Plan::default()
+        }]);
+        let recognizer = recognizer(&fake, WhisperBackend::Cpu, &scratch);
+        let frames = numbered(60);
+        let mut abandoned = within(recognizer.connect()).await.unwrap();
+        send_all(&mut abandoned, &frames).await;
+        abandoned.cancel().await;
+        assert!(
+            !fake.helper(0).killed.load(Ordering::SeqCst),
+            "no request was in flight, so the helper is kept"
+        );
+
+        let mut session = within(recognizer.connect()).await.unwrap();
+        send_all(&mut session, &frames).await;
+        session.finish_audio().await.unwrap();
+        assert_eq!(
+            within(session.next_event()).await.unwrap(),
+            the_final("only the final")
+        );
+        let seen = fake.helper(0).seen();
+        assert_eq!(seen.len(), 1, "the final alone");
+        assert_eq!(seen[0].samples(), frames.as_flattened());
+        assert_eq!(fake.launches(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_preview_that_fails_shows_nothing_keeps_the_helper_and_the_next_preview_and_the_final_go_on()
+     {
+        for (case, failing) in [
+            ("an error status", Reply::Status(500)),
+            ("an unreadable answer", Reply::Garbage),
+        ] {
+            let scratch = Scratch::with_files("preview-fails");
+            let fake = Fake::new([vulkan(vec![
+                failing,
+                Reply::Text("recovered"),
+                Reply::Text("the final"),
+            ])]);
+            let recognizer = recognizer(&fake, WhisperBackend::Vulkan, &scratch);
+            let frames = numbered(23);
+            let mut session = within(recognizer.connect()).await.unwrap();
+            send_all(&mut session, &frames).await;
+            assert_eq!(
+                within(session.next_event()).await.unwrap(),
+                partial("recovered"),
+                "{case}"
+            );
+            session.finish_audio().await.unwrap();
+            assert_eq!(
+                within(session.next_event()).await.unwrap(),
+                the_final("the final"),
+                "{case}"
+            );
+            assert_eq!(fake.launches(), 1, "{case}: the helper was kept");
+            assert!(!fake.helper(0).killed.load(Ordering::SeqCst), "{case}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_preview_that_never_answers_is_dropped_after_five_seconds_and_the_next_one_goes_on() {
+        let scratch = Scratch::with_files("preview-timeout");
+        let fake = Fake::new([vulkan(vec![
+            Reply::Held("never"),
+            Reply::Text("recovered"),
+            Reply::Text("the final"),
+        ])]);
+        let recognizer = recognizer(&fake, WhisperBackend::Vulkan, &scratch);
+        let frames = numbered(23);
+        let mut session = recognizer.connect().await.unwrap();
+        send_all(&mut session, &frames).await;
+        let began = tokio::time::Instant::now();
+        assert_eq!(
+            within(session.next_event()).await.unwrap(),
+            partial("recovered")
+        );
+        assert!(
+            (PREVIEW_TIMEOUT..BASE_TIMEOUT).contains(&began.elapsed()),
+            "{:?}",
+            began.elapsed()
+        );
+        session.finish_audio().await.unwrap();
+        assert_eq!(
+            within(session.next_event()).await.unwrap(),
+            the_final("the final")
+        );
+        assert_eq!(fake.launches(), 1, "the helper was kept");
+    }
+
+    #[tokio::test]
+    async fn the_end_of_the_capture_aborts_a_preview_in_flight_and_nothing_it_says_or_starts_later_is_shown()
+     {
+        let scratch = Scratch::with_files("finish-aborts");
+        let fake = Fake::new([vulkan(vec![
+            Reply::Held("a late preview"),
+            Reply::Text("the final"),
+            Reply::Held("a preview that must not start"),
+        ])]);
+        let recognizer = recognizer(&fake, WhisperBackend::Vulkan, &scratch);
+        let frames = numbered(18);
+        let mut session = within(recognizer.connect()).await.unwrap();
+        send_all(&mut session, &frames[..13]).await;
+        let helper = fake.helper(0);
+        helper.seen_requests(2).await;
+        send_all(&mut session, &frames[13..]).await;
+        session.finish_audio().await.unwrap();
+        tokio::select! {
+            biased;
+            event = session.next_event() => panic!("the final answered at once: {event:?}"),
+            () = std::future::ready(()) => {}
+        }
+        send_all(&mut session, &numbered(30)).await;
+
+        assert_eq!(
+            within(session.next_event()).await.unwrap(),
+            the_final("the final")
+        );
+        helper.server.release.notify_waiters();
+        assert!(
+            session.next_event().await.is_err(),
+            "no event follows the final, and a late preview is not one"
+        );
+        let seen = helper.seen();
+        assert_eq!(
+            seen.len(),
+            3,
+            "the warm-up, the preview and the final: frames after the end start no preview"
+        );
+        assert_eq!(
+            seen[2].samples(),
+            frames.as_flattened(),
+            "the final has all the frames"
+        );
+        drop(session);
+        assert!(
+            !helper.killed.load(Ordering::SeqCst),
+            "the preview was ended with the capture, so nothing is left to replace the helper for"
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoning_a_capture_during_a_preview_replaces_the_helper_and_the_next_capture_gets_only_its_own_text()
+     {
+        for how in ["cancel", "close", "drop"] {
+            let scratch = Scratch::with_files("preview-abandoned");
+            let fake = Fake::new([
+                vulkan(vec![Reply::Held("stale preview")]),
+                vulkan(vec![Reply::Text("second text")]),
+            ]);
+            let recognizer = recognizer(&fake, WhisperBackend::Vulkan, &scratch);
+            let mut first = within(recognizer.connect()).await.unwrap();
+            send_all(&mut first, &numbered(13)).await;
+            let stuck = fake.helper(0);
+            stuck.seen_requests(2).await;
+
+            match how {
+                "cancel" => first.cancel().await,
+                "close" => first.close().await,
+                _ => drop(first),
+            }
+            assert!(
+                stuck.killed.load(Ordering::SeqCst),
+                "{how}: the busy helper is gone"
+            );
+            stuck.server.release.notify_waiters();
+
+            let event = dictate(&recognizer, &[frame(9), frame(9)]).await.unwrap();
+            assert_eq!(event, the_final("second text"), "{how}");
+            assert_eq!(fake.launches(), 2, "{how}");
+            let fresh = fake.helper(1).seen();
+            assert_eq!(
+                fresh.len(),
+                2,
+                "{how}: the warm-up and the new capture only"
+            );
+            assert_eq!(fresh[1].samples().len(), 2 * FRAME_SAMPLES, "{how}");
+        }
+    }
+
+    #[tokio::test]
+    async fn abandoning_a_capture_whose_preview_has_answered_keeps_the_helper() {
+        let scratch = Scratch::with_files("preview-answered");
+        let fake = Fake::new([vulkan(vec![Reply::Text("one")])]);
+        let recognizer = recognizer(&fake, WhisperBackend::Vulkan, &scratch);
+        let mut session = within(recognizer.connect()).await.unwrap();
+        send_all(&mut session, &numbered(13)).await;
+        assert_eq!(within(session.next_event()).await.unwrap(), partial("one"));
+        session.cancel().await;
+        assert!(!fake.helper(0).killed.load(Ordering::SeqCst));
+        assert_eq!(fake.launches(), 1);
+    }
+
+    #[tokio::test]
+    async fn each_preview_is_recorded_as_a_local_transcription_marked_as_one_and_the_final_is_not()
+    {
+        let scratch = Scratch::with_files("preview-metrics");
+        let recorder = Recorder::in_dir(
+            RecordKinds {
+                metrics: true,
+                text: false,
+                audio: false,
+            },
+            scratch.0.join("recordings"),
+        )
+        .unwrap();
+        let fake = Fake::new([vulkan(vec![
+            Reply::Text("one"),
+            Reply::Held("late"),
+            Reply::Text("done"),
+        ])]);
+        let recognizer = recognizer_with(
+            &fake,
+            WhisperBackend::Vulkan,
+            &scratch,
+            FAKE_FILES,
+            recorder.metrics(),
+        );
+        let frames = numbered(23);
+        let mut session = within(recognizer.connect()).await.unwrap();
+        send_all(&mut session, &frames).await;
+        assert_eq!(within(session.next_event()).await.unwrap(), partial("one"));
+        fake.helper(0).seen_requests(3).await;
+        session.finish_audio().await.unwrap();
+        assert_eq!(
+            within(session.next_event()).await.unwrap(),
+            the_final("done")
+        );
+        recorder.finish().await;
+
+        let written =
+            std::fs::read_to_string(scratch.0.join("recordings").join("metrics.jsonl")).unwrap();
+        let lines: Vec<Value> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|line: &Value| line["event"] == "desktop_local_stt")
+            .collect();
+        let summary = |preview: bool| -> Vec<(String, f64)> {
+            lines
+                .iter()
+                .filter(|line| line["preview"].as_bool().unwrap_or(false) == preview)
+                .map(|line| {
+                    assert!(line["duration_ms"].is_number());
+                    (
+                        line["outcome"].as_str().unwrap().to_owned(),
+                        line["audio_seconds"].as_f64().unwrap(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            summary(true),
+            [("ok".to_owned(), 1.04), ("cancelled".to_owned(), 1.84)]
+        );
+        assert_eq!(summary(false), [("ok".to_owned(), 1.84)]);
+    }
+
     /// Tests that run the packaged helper and the real model, which CI does not have: each is skipped, with
     /// its reason printed, unless `THALVI_WHISPER_HELPERS` (the folder with `cpu` and `vulkan`),
     /// `THALVI_WHISPER_MODELS` (holding `ggml-large-v3-turbo-q5_0.bin` and `ggml-silero-v6.2.0.bin`) and
@@ -2236,6 +2735,64 @@ mod tests {
                     .await
                     .unwrap(),
                 RecognizerEvent::Final(String::new())
+            );
+        }
+
+        /// A 54 s capture fed at ten times real time: the GPU's previews grow with it and the final follows.
+        #[tokio::test]
+        async fn the_real_vulkan_helper_previews_a_capture_that_is_still_being_spoken() {
+            let name = "the_real_vulkan_helper_previews_a_capture_that_is_still_being_spoken";
+            let Some(files) = Files::from_env(name) else {
+                return;
+            };
+            if std::env::var_os("THALVI_WHISPER_VULKAN").is_none() {
+                eprintln!("{name} skipped: set THALVI_WHISPER_VULKAN to run it on the GPU");
+                return;
+            }
+            let scratch = Scratch::new("real-previews");
+            let recognizer = WhisperRecognizer::new(
+                WhisperBackend::Vulkan,
+                &files.helpers,
+                files.store(&scratch),
+                Recorder::disabled().metrics(),
+            );
+            let mut session = within(recognizer.connect()).await.unwrap();
+            let mut frames = files.frames("say-long.wav").into_iter();
+            let mut pace = tokio::time::interval(Duration::from_millis(8));
+            let mut partials = Vec::new();
+            let mut ended = None;
+            let spoken = within(async {
+                loop {
+                    tokio::select! {
+                        biased;
+                        event = session.next_event() => match event.unwrap() {
+                            RecognizerEvent::Partial(text) => {
+                                eprintln!("preview {}: {text}", partials.len());
+                                partials.push(text);
+                            }
+                            RecognizerEvent::Final(text) => break text,
+                        },
+                        _ = pace.tick(), if ended.is_none() => {
+                            if let Some(frame) = frames.next() {
+                                session.send_frame(&frame).await.unwrap();
+                            } else {
+                                session.finish_audio().await.unwrap();
+                                ended = Some(Instant::now());
+                            }
+                        },
+                    }
+                }
+            })
+            .await;
+            assert!(partials.len() >= 2, "{partials:?}");
+            let (first, last) = (&partials[0], &partials[partials.len() - 1]);
+            assert!(last.len() > first.len(), "the previews grow: {partials:?}");
+            assert_ne!(spoken, "");
+            let released = ended.expect("the capture ended before its final");
+            eprintln!(
+                "{} previews; the final came {:?} after the capture ended: {spoken}",
+                partials.len(),
+                released.elapsed()
             );
         }
 

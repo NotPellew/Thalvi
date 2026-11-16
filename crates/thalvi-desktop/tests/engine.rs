@@ -6534,6 +6534,83 @@ async fn a_long_buffered_hold_is_not_cut_off_as_idle() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn previews_from_a_buffering_recognizer_are_shown_but_never_paste_end_or_cancel_a_capture() {
+    // (a hold, what the previews say, the final, the outcome)
+    type Case = (bool, [&'static str; 2], &'static str, CaptureOutcome);
+    let cases: [Case; 2] = [
+        (
+            true,
+            ["draft words send that", "draft never mind"],
+            "draft words",
+            accepted(CaptureRoute::Paste, "draft words"),
+        ),
+        (
+            false,
+            ["Run tests submit", "never mind"],
+            "Run tests submit",
+            accepted(CaptureRoute::Submit, "Run tests"),
+        ),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for (hold, previews, last, outcome) in cases {
+                let label = format!("hold {hold}");
+                let (mut rig, engine, frames) = Rig::new(r#"{"ending_pause":{"paste":1.0}}"#);
+                rig.server.buffer_audio();
+                let task = if hold {
+                    hold_task(engine, frames)
+                } else {
+                    capture_task(engine, frames)
+                };
+                if hold {
+                    rig.hold().await;
+                } else {
+                    rig.open().await;
+                }
+                rig.feed_until(1200, Kind::Voice).await;
+                for preview in previews {
+                    rig.partial(preview).await;
+                    assert_eq!(
+                        rig.state(),
+                        EngineState::Capturing {
+                            committed: String::new(),
+                            partial: Some(preview.to_owned()),
+                            notice: None
+                        },
+                        "{label}: the overlay shows the preview"
+                    );
+                }
+                assert!(!task.is_finished(), "{label}: no preview ended the capture");
+                for cue in [Cue::Provisional, Cue::Cancelled, Cue::Accepted, Cue::Error] {
+                    assert!(rig.started(cue).is_empty(), "{label}: {cue:?} played");
+                }
+                assert!(!rig.server.calls().contains(&FakeCall::FinishAudio));
+
+                if hold {
+                    rig.release(1400).await;
+                } else {
+                    rig.feed_until(3500, Kind::Quiet).await;
+                }
+                assert!(
+                    matches!(rig.state(), EngineState::TranscribingLive { .. }),
+                    "{label}: {:?}",
+                    rig.state()
+                );
+                rig.finals(last).await;
+                assert_eq!(finished(task).await, outcome, "{label}");
+                let finishes = rig
+                    .server
+                    .calls()
+                    .iter()
+                    .filter(|call| matches!(call, FakeCall::FinishAudio))
+                    .count();
+                assert_eq!(finishes, 1, "{label}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_released_buffered_hold_waits_as_long_as_its_recognizer_needs_for_the_final() {
     let too_long = CaptureError::Recognizer(RecognizerError::said(
         "The speech server took too long to transcribe this capture. Nothing was delivered.",
