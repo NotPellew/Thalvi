@@ -86,7 +86,7 @@ impl WhisperBackend {
     pub fn description(self) -> &'static str {
         match self {
             Self::Cpu => {
-                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts. Text appears only after you stop speaking, and the word list is ignored. On the CPU it is slow: expect seconds for a short dictation. The language is detected automatically; only English and German have been tried."
+                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts. Text appears only after you stop speaking, and the word list is ignored. On the CPU it is slow: the text can take as long as you spoke, or longer. The language is detected automatically; only English and German have been tried."
             }
             Self::Vulkan => {
                 "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts on your graphics card through Vulkan. Text appears only after you stop speaking, and the word list is ignored. Its speed on your GPU is untested. If no GPU is found, it says so; pick the CPU entry then. The language is detected automatically; only English and German have been tried."
