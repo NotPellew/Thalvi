@@ -29,23 +29,20 @@ check() {
 }
 
 git branch -q main
-check server crates/thalvi-server/src/lib.rs
 check 'desktop app' crates/thalvi-desktop/src/config.rs
 check app crates/thalvi-app/src/update.rs
 check desktop-ui crates/thalvi-app/ui/src/main.ts
-check 'web speech' web/src/view.ts speech/asr/app.py compose.yaml
+check speech speech/asr/app.py speech/nemotron-asr.sh
 check issues .github/scripts/issue-refs.test.sh
-check 'server desktop app' crates/thalvi-server/Cargo.toml crates/thalvi-desktop/src/a.rs crates/thalvi-app/src/b.rs
+check 'desktop app desktop-ui' crates/thalvi-desktop/src/a.rs crates/thalvi-app/src/b.rs crates/thalvi-app/ui/src/c.ts
 check none README.md DECISIONS.md .agents/skills/verify-thalvi/SKILL.md .github/pull_request_template.md
-check web README.md web/README.md
-check server crates/thalvi-server/README.md
 check speech speech/README.md
-check server README.md crates/thalvi-server/src/a.rs
+check desktop-ui README.md crates/thalvi-app/ui/src/a.ts
 check all crates/thalvi-app/README.md
 for file in Cargo.toml Cargo.lock rust-toolchain.toml .cargo/mutants.toml .node-version deny.toml \
   .github/workflows/ci.yml .github/scripts/changed crates/thalvi-app/tauri.conf.json crates/thalvi-asr/src/lib.rs \
   crates/thalvi-asr/README.md unknown.bin; do
-  check all web/src/view.ts "$file"
+  check all speech/asr/app.py "$file"
   check all README.md "$file"
 done
 check all

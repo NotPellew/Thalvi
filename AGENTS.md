@@ -1,7 +1,8 @@
 # AGENTS.md
 
-Thalvi is a voice assistant for when hands and eyes are busy. The goals are
-solid engineering, good UX, and a lean codebase. Decisions in force live in
+Thalvi is a desktop voice accessory: it hears you at your computer and delivers
+the words to the window you are using, and remembers nothing beyond its
+settings. The goals are solid engineering, good UX, and a lean codebase. Decisions in force live in
 [DECISIONS.md](DECISIONS.md); read the areas your change touches before
 writing code.
 
@@ -15,8 +16,8 @@ directing you.
 - Never rewrite `main`'s history.
 - Every commit message and PR title follows Conventional Commits:
   `type(scope): summary`, the summary not starting with a capital letter.
-  Types: `feat fix docs refactor test chore ci build perf`. Scopes: `server web
-  desktop ci deps docs`. The commit-msg hook checks this, and CI runs it on
+  Types: `feat fix docs refactor test chore ci build perf`. Scopes: `desktop ci
+  deps docs`. The commit-msg hook checks this, and CI runs it on
   every commit and the PR title. Run `git config core.hooksPath .githooks` once
   per clone.
 - Never commit secrets, model weights, datasets, audio or camera captures,
@@ -77,9 +78,9 @@ directing you.
 - Prefer a lint or a CI check over a new rule in this file.
 - Before calling work done, run the gates and use the change end to end the
   way the user would. Report what you ran and what you could not verify.
-  The `verify-thalvi` skill (`.agents/skills/verify-thalvi/`) runs the web
-  client on fake or self-hosted endpoints for this, and its `desktop.md` runs
-  the real desktop app in a sandboxed nested Hyprland. A desktop PR names each
+  The `verify-thalvi` skill (`.agents/skills/verify-thalvi/`) runs the real
+  desktop app for this, in a sandboxed nested Hyprland or GNOME or a Windows
+  test account. A desktop PR names each
   desktop it was used on; CI and fixtures are not use.
 
 ## Keep it lean (YAGNI)
@@ -105,7 +106,7 @@ can't break and doesn't slow down the next change.
 
 CI runs these as required checks on `main`. `.github/scripts/gates <component>`
 runs a component's checks exactly as CI does and stops at the first failure.
-Components: `server`, `desktop-windows`, `web`, `desktop-ui`, `speech`,
+Components: `server` (the Rust workspace on Linux), `desktop-windows`, `desktop-ui`, `speech`,
 `issue-sync`, `release`, `formal`; `all` runs every gate this OS can run and says which it skipped.
 CI jobs call the script after their toolchain setup, so a new check goes in the
 script, and a new component adds its pinned toolchain here, its case in the
@@ -114,7 +115,7 @@ script and its CI job; one that ships on Windows also runs its gate on
 
 Prerequisites the script does not install:
 
-- Server and Rust desktop (`crates/`): the Rust toolchain; on Linux
+- Rust (`crates/`): the Rust toolchain; on Linux
   `libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev`; Node
   pinned in `.node-version`. Packaging also builds the Whisper helpers
   (`.github/scripts/whisper-helper`): git, cmake, a C++ compiler and, on Linux,
@@ -123,8 +124,8 @@ Prerequisites the script does not install:
   `windows-latest` and runs from Git Bash. CI then runs
   `.github/scripts/windows-smoke.ps1` on its installer: it checks the Whisper
   helpers, installs and starts the app and opens Settings, and uploads screenshots.
-- Web and desktop UI: Node pinned in `.node-version`.
-- Speech servers: Docker with Compose, `pipx`, and `uv` (Python pinned in
+- Desktop UI: Node pinned in `.node-version`.
+- Self-hosted recognizer: `pipx` and `uv` (Python pinned in
   `speech/asr/.python-version`).
 - Issue sync: `pipx`.
 - Release (the updater signing and feed scripts): Node pinned in `.node-version`,
@@ -153,17 +154,16 @@ source, including build scripts and platform modules, before removing a dependen
 It does not replace the required cargo-deny check.
 
 - **Editing:** the closest check that sees the edit: `cargo test -p <crate> <filter>`,
-  or the web or desktop UI test and `npm run typecheck` for the files touched. No
+  or the desktop UI test and `npm run typecheck` for the files touched. No
   workspace tests, docs, mutation testing or packaging.
 - **Before pushing,** with the work committed: `.github/scripts/changed origin/main HEAD`
   prints the affected units. Run each affected component's gate once:
-  - Units `server`, `desktop`, `app`, `desktop-ui` (any of them): `TESTS="<packages>" BUNDLE=false
-    .github/scripts/gates server`, where `<packages>` is `-p thalvi-server`, `-p thalvi-desktop` and
-    `-p thalvi-app` for those of `server`, `desktop`, `app` printed, or `none`. `desktop-ui` also runs
+  - Units `desktop`, `app`, `desktop-ui` (any of them): `TESTS="<packages>" BUNDLE=false
+    .github/scripts/gates server`, where `<packages>` is `-p thalvi-desktop` and `-p thalvi-app` for
+    those of `desktop`, `app` printed, or `none`. `desktop-ui` also runs
     `.github/scripts/gates desktop-ui`.
-  - Units `web`, `speech`: `.github/scripts/gates web`, `.github/scripts/gates speech`. Unit `issues`:
-    `.github/scripts/gates issue-sync`.
-  - `none` (only Markdown outside `crates/`, `web/` and `speech/`): run no gate.
+  - Unit `speech`: `.github/scripts/gates speech`. Unit `issues`: `.github/scripts/gates issue-sync`.
+  - `none` (only Markdown outside `crates/` and `speech/`): run no gate.
   - `all` (an empty, unreadable or shallow diff, or any path outside the mapped ones, such as
     `crates/thalvi-app/tauri.conf.json`, its icons and build files): `.github/scripts/gates all`, unnarrowed.
     That is the only case that builds the AppImage or NSIS package locally.
@@ -205,7 +205,7 @@ since it runs tests against deliberately broken code.
 - Use `.github/pull_request_template.md` for every PR body, including PRs
   created through CLI tools; preserve its headings and remove instructional
   comments.
-- Label every issue `area:desktop` or `area:conversation`, plus `windows`
+- Label every issue `area:desktop`, plus `windows`
   when Windows behaviour is involved. `ready` marks an issue the dispatcher
   can take; `ci-regression` marks the one the heavy tier files.
 - When opening an issue, use the matching form in `.github/ISSUE_TEMPLATE/`.

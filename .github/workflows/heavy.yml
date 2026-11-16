@@ -13,7 +13,7 @@ on:
         description: Narrow tests and mutants to one crate or UI package; a scoped run never moves verified
         type: choice
         default: all
-        options: [all, thalvi-app, thalvi-asr, thalvi-desktop, thalvi-server, web, desktop-ui]
+        options: [all, thalvi-app, thalvi-asr, thalvi-desktop, desktop-ui]
 
 run-name: ${{ inputs.scope && inputs.scope != 'all' && format('Heavy, scoped to {0} (verified unchanged)', inputs.scope) || github.event.head_commit.message || 'Heavy' }}
 
@@ -76,7 +76,7 @@ jobs:
   mutants:
     name: mutants (${{ matrix.shard }})
     needs: start
-    if: needs.start.outputs.superseded == 'false' && (inputs.scope || 'all') != 'web' && (inputs.scope || 'all') != 'desktop-ui'
+    if: needs.start.outputs.superseded == 'false' && (inputs.scope || 'all') != 'desktop-ui'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
