@@ -1332,6 +1332,13 @@ impl Provider for TransducerSource {
         }
     }
 
+    fn size(&self, export: Export) -> u64 {
+        match &self.choice {
+            SpeechChoice::Catalog(catalog) => catalog.assets_of(export).size(),
+            SpeechChoice::Folder(_) | SpeechChoice::Whisper(_) => 0,
+        }
+    }
+
     async fn fetch(
         &self,
         export: Export,
