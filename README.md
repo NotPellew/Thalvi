@@ -11,229 +11,21 @@ can correct yourself as you go and look at something else while you talk, and
 the words still land in the window you started from. The agent workflow is
 tested with Muse Code on Hyprland.
 
-The same voice helps whenever typing isn't an option:
-
-- **Cooking:** pick a recipe together and get walked through it step by step.
-- **On the road:** a briefing on the topics you care about, then follow-up
-  questions in plain conversation.
-- **Messages on the go:** dictate a reply and confirm it out loud before
-  anything is sent.
-
-Thalvi has two parts:
-
-- **The desktop app** (Hyprland, Windows, and GNOME Wayland with dictation
-  copied to the clipboard) listens for "Hey Thalvi" and pastes what you dictate
-  into the window you are using.
-- **The server and its web client** hold the spoken conversation. Open it in a
-  browser, on your phone for example, and talk over it to interrupt.
+Thalvi is a desktop app for Hyprland, Windows, and GNOME Wayland, where
+dictation is copied to the clipboard. It listens for "Hey Thalvi" and pastes
+what you dictate into the window you are using. It keeps nothing about you
+beyond its settings, recordings you opt into and its dictation history.
 
 **Download the desktop app:** the
 [latest release](https://github.com/NotPellew/Thalvi/releases/latest) has the
 Windows installer and the Linux AppImage; see [Install](#install).
 
-It is built to self-host. By default it uses Meta's Muse Voice Transcribe for
-live speech and Muse Spark for reasoning and tool use, and speaks with a voice
-engine on your own machine. Each model is an endpoint in `.env`, so any
-compatible server can replace it, such as Ollama or vLLM. Camera input (SAM
-3.1) is not built yet.
-
-## Server and web client
-
-### Run it
-
-1. Start a speech engine (see [Speech](#speech)). On an NVIDIA GPU with 9 GB
-   of free VRAM:
-
-   ```sh
-   hf download Qwen/Qwen3-TTS-12Hz-1.7B-Base --local-dir ~/thalvi-tts/models/qwen3-base
-   docker compose --profile vllm-omni up -d --wait
-   ```
-
-   Without one: `docker compose --profile kokoro up -d --wait`.
-2. `cp .env.example .env`, then fill in the API keys and the speech lines for
-   the engine you started. `.env.example` describes every setting.
-3. `npm ci --prefix web && npm run build --prefix web`, then `cargo run --release`.
-4. `tailscale serve --bg 8080` and open the printed HTTPS address on your phone.
-
-There is no authentication: anyone who can reach the server can read and
-delete every conversation, so keep it on your tailnet.
-
-### Use it
-
-**Voice** turns the microphone on and off. **Speak replies** chooses whether
-replies are spoken; it follows Voice, and you can flip it on its own to type and
-listen, or to talk and read. Talking while Thalvi speaks interrupts it. The
-**1×** chip sets the playback speed, and the **Voice** chip picks the voice (see
-[Voices](#voices)).
-
-An error stays on screen until you dismiss it or it is fixed, and **Copy** puts
-its text on the clipboard.
-
-With `LLM_AUDIO_INPUT=on`, the language model hears each spoken turn instead of
-reading its transcript: the turn's audio, padded by 300 ms on each side, goes
-as an OpenAI `input_audio` WAV part, so the model must accept those. Captions,
-the saved conversation and earlier turns still use the transcript, and typed
-turns are always text.
-
-For a model that hears speech itself,
-[Glimmer projector v3](https://github.com/NotPellew/Thalvi/releases/tag/glimmer-projector-v3)
-is an experimental audio projector for Muse Glimmer 30B, with its training code
-on the
-[`feat/glimmer-adapter`](https://github.com/NotPellew/Thalvi/tree/feat/glimmer-adapter)
-branch. It is not part of the app.
-
-### Conversations
-
-Every conversation is saved under `$THALVI_DATA_DIR/sessions/` (default
-`data/sessions/`, one JSON file each) until you delete it from **Conversations**.
-A reload or a dropped connection rejoins the same conversation. Opening a
-conversation that is live on another device shows it read-only; **Continue
-here** moves it to this device.
-
-- **Titles** start as your first line. With `BG_LLM_BASE_URL`, `BG_LLM_MODEL`
-  and `BG_LLM_API_KEY` set (all three or none), a background model rewrites each
-  title in three to six words after the first reply. A title you typed is never
-  overwritten.
-- **History search:** Thalvi can call the read-only `search_history` tool for
-  short, timestamped matches in past conversations. The app shows **Working**
-  while it runs; **Task steps** opens the details.
-- **Briefing headlines:** with `BRIEFING_URL` and `BRIEFING_TOKEN` set (both or
-  neither), the server fetches the latest briefing from `GET /v1/briefings/latest`
-  in the background. A new saved conversation starts with the headlines fetched
-  within the last 24 hours, or is told none are available; its first reply never
-  waits for the fetch. Private conversations neither see headlines nor contact
-  the source. In a saved conversation Thalvi can also call the read-only
-  `search_briefing` (up to 10 items from the last seven days, via
-  `POST /v1/briefings/search`) and `read_briefing_item` (details and sources,
-  via `GET /v1/briefings/items/{id}`); each call gets five seconds, and a
-  failure becomes a plain "Couldn't reach the briefing." the conversation
-  carries on from.
-- **Retirement:** with `THALVI_RETIRE_DAYS=90`, conversations inactive for 90
-  days are replaced by a summary on startup and then daily. Lasting preferences
-  and facts go to `$THALVI_DATA_DIR/learnings.json`, which you can read and
-  edit under **Conversations → Learnings**. A failed model call or write leaves
-  the transcript untouched. Unset or `off` (the default) changes nothing.
-
-### Speech
-
-`compose.yaml` runs the engine in Docker on 127.0.0.1, with weights and voices
-under `$SPEECH_DIR` (default `~/thalvi-tts`). To switch engine, change the
-`TTS_*` lines in `.env` and restart Thalvi.
-
-| Engine | First audio | Cost | Needs |
-| --- | --- | --- | --- |
-| Kokoro | ~0.15 s short sentence, ~1 s long one | CPU, ~1 GB RAM | nothing |
-| Qwen3-TTS clone of `af_heart`, vLLM-Omni | ~50 ms | ~8 GB VRAM, ~8 GB RAM, ~2.5 min to start | NVIDIA GPU, Ampere or newer |
-| Qwen3-TTS clone of `af_heart`, qwentts.cpp | ~60 ms (RTX 2080), ~4.8× real time | ~4 GB VRAM, ~3 GB RAM, starts in seconds | any NVIDIA GPU, CUDA toolkit to build |
-
-**Kokoro** (`--profile kokoro`) takes any
-[Kokoro voice](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md)
-as `TTS_VOICE`.
-
-```sh
-TTS_API=openai
-TTS_BASE_URL=http://127.0.0.1:8880/v1
-TTS_MODEL=kokoro
-TTS_VOICE=af_heart
-```
-
-**Qwen3-TTS on vLLM-Omni** (`--profile vllm-omni`). The first start also runs
-Kokoro, which reads the reference line for the `af_heart` clone and then stays
-up as the CPU fallback.
-
-```sh
-TTS_API=openai
-TTS_BASE_URL=http://127.0.0.1:8091/v1
-TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-Base
-TTS_VOICE=af_heart
-```
-
-To use another voice, register a few seconds of clean speech with its
-transcript, then put the name in `TTS_VOICE`:
-
-```sh
-curl 127.0.0.1:8091/v1/audio/voices -F audio_sample=@me.wav -F consent=mine \
-  -F name=me -F "ref_text=What the clip says"
-```
-
-A misspelled voice fails with "does not support task_type='CustomVoice'".
-Qwen3's built-in presets (such as `vivian`) need
-`Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` instead of the Base checkpoint: download
-it, then change the model path and `--served-model-name` in `compose.yaml` and
-`TTS_MODEL`.
-
-**Qwen3-TTS on older GPUs** (before Ampere, such as an RTX 2080) runs
-[qwentts.cpp](https://github.com/ServeurpersoCom/qwentts.cpp) as a systemd user
-service, built without root from a pinned
-[fork](https://github.com/NotPellew/qwentts.cpp) that adds Thalvi's streaming
-route (offered upstream in
-[#45](https://github.com/ServeurpersoCom/qwentts.cpp/pull/45)).
-
-```sh
-docker compose --profile kokoro up -d --wait   # or set KOKORO_URL to a running Kokoro
-speech/qwentts.sh
-systemctl --user enable --now thalvi-qwentts
-```
-
-It needs `git`, `cmake`, a C++ compiler and `nvcc`. `CUDA_ARCH` targets
-another GPU than the detected one (`75` for an RTX 2080); `SPEECH_DIR`, `HOST`
-and `PORT` (default `8011`) set where it lives and listens. It has no
-authentication, so keep `HOST` at `127.0.0.1`. Rerun the script to resume or
-upgrade, then restart the service. It prints the `.env` lines:
-
-```sh
-TTS_API=qwen3
-TTS_BASE_URL=http://127.0.0.1:8011/v1
-TTS_VOICE=af_heart
-```
-
-**Speech recognition on your own GPU** replaces Meta's recognizer for
-dictation through the server and for conversations. It runs NVIDIA's
-[Nemotron unified ASR 0.6B](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b)
-(OpenMDW licence) live with about 0.56 s of lookahead, finds the language
-itself (English, German, Spanish and 22 more European languages) and
-punctuates. On an RTX 2080 it uses about 3 GB of VRAM next to qwentts.cpp
-and takes about 75 ms for each 0.16 s of audio. Run it from a checkout on the GPU
-machine:
-
-```sh
-speech/nemotron-asr.sh
-systemctl --user enable --now thalvi-asr
-```
-
-It needs `uv`, `curl` and an NVIDIA driver, and downloads about 2.5 GB of
-weights plus NeMo. `SPEECH_DIR`, `HOST`, `PORT` (default `8012`) and
-`ENDPOINT_MS` (silence that ends a stretch of speech, default 600) set where it
-lives, listens and how it cuts. It has no authentication, so keep `HOST` at
-`127.0.0.1` or a private address such as the machine's tailnet IP. It prints
-the `.env` lines:
-
-```sh
-STT_URL=ws://127.0.0.1:8012
-STT_MODEL=nemotron-labs-unified-asr-0.6b
-STT_API_KEY=
-```
-
-With it, Settings → Recognition shows a **Word list**: names and terms, one per
-line, whose spelling recognition should favour (such as "Cybrex2"). The list
-is used by local recognition and sent to direct realtime speech servers at
-each connection. Web conversations continue to use `STT_URL` through `/session`.
-
-### Voices
-
-`TTS_VOICES` lists the voices the app offers, comma-separated; `TTS_VOICE` is
-the default and always comes first. The names must be ones the running engine
-knows.
-
-```sh
-TTS_VOICE=af_heart
-TTS_VOICES=af_heart,af_bella,sohee
-```
-
-In the app, the **Voice** chip opens the picker. **Preview** speaks a short
-phrase on that device without interrupting a reply. **Apply** saves the choice
-in that browser only and uses it in the conversation from then on. A saved
-voice the server no longer offers falls back to `TTS_VOICE`.
+It recognizes speech on this computer by default. Any speech server that
+speaks Meta's realtime ASR protocol or OpenAI transcriptions can replace it,
+including the [self-hosted recognizer](#a-self-hosted-recognizer) in this
+repository. Spoken conversation, with a server and web client, lived here up to
+the tag
+[`conversation-final`](https://github.com/NotPellew/Thalvi/tree/conversation-final).
 
 ## Desktop app
 
@@ -307,11 +99,11 @@ under each entry's collapsed **Details**. The kinds are:
   **Request** to Chat with audio for a server that takes the recording only on
   `/v1/chat/completions` (no streaming); set **Language** to a two-letter code
   such as `de` to stop the server guessing it.
-- **On this computer:** dictates without the server or a network; the default.
+- **On this computer:** dictates without a speech server or a network; the default.
   Use **Show models for** to filter the list of models (each model recognizes the
   languages on its card), then pick a model.
 
-Web conversations always use the server's own `STT_URL`. An existing config
+An existing config
 with `stt.engine`, `stt.model`, `stt.secondary` and `server` becomes entries
 the first time Thalvi reads it; a saved Thalvi server speech entry is dropped,
 and if active, On this computer becomes active with a one-time notice. An API key is shown
@@ -387,6 +179,35 @@ endpoint setting** moves to it. Switching one off keeps its address and key.
 An upload extra is stored as an entry of kind `extra`; an old `second_pass` entry loads as
 one, and is written as `extra` the next time the settings are saved. A live-kind
 entry is an extra with `"extra": true`, which the active entry can't be.
+
+### A self-hosted recognizer
+
+`speech/nemotron-asr.sh` installs a live recognizer on your own GPU, which
+the app reaches as a Meta realtime ASR entry. It runs NVIDIA's
+[Nemotron unified ASR 0.6B](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b)
+(OpenMDW licence) live with about 0.56 s of lookahead, finds the language
+itself (English, German, Spanish and 22 more European languages) and
+punctuates. On an RTX 2080 it uses about 3 GB of VRAM and takes about 75 ms
+for each 0.16 s of audio. Run it from a checkout on the GPU machine:
+
+```sh
+speech/nemotron-asr.sh
+systemctl --user enable --now thalvi-asr
+```
+
+It needs `uv`, `curl` and an NVIDIA driver, and downloads about 2.5 GB of
+weights plus NeMo. `SPEECH_DIR`, `HOST`, `PORT` (default `8012`) and
+`ENDPOINT_MS` (silence that ends a stretch of speech, default 600) set where it
+lives, listens and how it cuts. It has no authentication, so keep `HOST` at
+`127.0.0.1` or a private address such as the machine's tailnet IP. It prints
+what to enter in Settings → Recognition: a **Live as you speak** entry with
+address `ws://127.0.0.1:8012`, model `nemotron-labs-unified-asr-0.6b` and no
+API key.
+
+With it, Settings → Recognition shows a **Word list**: names and terms, one per
+line, whose spelling recognition should favour (such as "Cybrex2"). The list
+is used by local recognition and sent to direct realtime speech servers at
+each connection.
 
 ### Microphone
 
@@ -653,33 +474,6 @@ to the next version right after a release.
 - **Lost or leaked key:** make a new pair, commit the new public key and replace
   the secrets. Installed apps cannot verify releases signed with the new key, so
   their users reinstall once from the release page.
-
-## Measure a setup
-
-`cargo run --release --bin measure -- --setup data/measure/a.env --setup data/measure/b.env`
-times and grades the same prompts on each setup and prints the numbers side by
-side. A setup is your `.env` plus an override file whose lines win over it.
-Keep override files under `data/` (git-ignored), since they may hold keys:
-
-```sh
-# data/measure/spark12.env
-LLM_MODEL=muse-spark-1.2
-LLM_REASONING_EFFORT=low
-```
-
-Setups run interleaved, so they share the same network noise, on the prompts
-in `crates/thalvi-server/measure/cases.json`. Flags: `--setup <file>` (repeat;
-none measures the plain `.env`), `--runs <n>` (default 3), `--cases <file>`,
-`--only <id>` (repeat) and `--no-judge`.
-
-Replies run through Thalvi's own chat, sentence and speech code. The table
-gives median (min-max) seconds to the first token, first sentence, first and
-last audio byte, plus failures (an error or over 120 s) and the judge's mean
-score. The wait a user feels adds endpointing (about 0.5-0.75 s). Every run is
-saved to `data/measure/run-<time>.json`. The judge scores each answer 1 to 5
-(correct, fitting length, speakable) with any OpenAI-compatible model set in
-`JUDGE_BASE_URL`, `JUDGE_MODEL` and `JUDGE_API_KEY`; without them quality is
-"not judged".
 
 ## Status
 
