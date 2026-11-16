@@ -102,7 +102,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, respects rust-toolchain.toml
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libvulkan-dev glslc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libvulkan-dev glslc spirv-headers
       - if: matrix.os == 'windows-latest'
         run: .github/scripts/vulkan-sdk.ps1
         shell: pwsh

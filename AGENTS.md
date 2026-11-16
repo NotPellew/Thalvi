@@ -116,10 +116,13 @@ Prerequisites the script does not install:
 
 - Server and Rust desktop (`crates/`): the Rust toolchain; on Linux
   `libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev`; Node
-  pinned in `.node-version`. `desktop-windows` needs the same toolchains on
+  pinned in `.node-version`. Packaging also builds the Whisper helpers
+  (`.github/scripts/whisper-helper`): git, cmake, a C++ compiler and, on Linux,
+  `libvulkan-dev glslc spirv-headers`; on Windows the Vulkan SDK that
+  `.github/scripts/vulkan-sdk.ps1` installs. `desktop-windows` needs the same toolchains on
   `windows-latest` and runs from Git Bash. CI then runs
-  `.github/scripts/windows-smoke.ps1` on its installer: it installs and starts
-  the app and opens Settings, and uploads screenshots.
+  `.github/scripts/windows-smoke.ps1` on its installer: it checks the Whisper
+  helpers, installs and starts the app and opens Settings, and uploads screenshots.
 - Web and desktop UI: Node pinned in `.node-version`.
 - Speech servers: Docker with Compose, `pipx`, and `uv` (Python pinned in
   `speech/asr/.python-version`).

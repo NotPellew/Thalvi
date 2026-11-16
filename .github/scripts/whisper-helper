@@ -2,7 +2,7 @@
 # Builds the pinned whisper.cpp server twice, CPU only and with Vulkan, into OUT/{cpu,vulkan}.
 # Usage: whisper-helper OUT [cpu|vulkan]...   (both by default). A variant whose OUT/<variant>.built
 # names this script's hash is kept. Needs git, cmake and a C++ compiler; the Vulkan build also needs
-# the Vulkan headers, loader library and glslc.
+# the Vulkan and SPIR-V headers, the loader library and glslc.
 set -euo pipefail
 
 COMMIT=d1be6fde11ac6e0407606b4e42fe72d34add8037

@@ -120,7 +120,7 @@ jobs:
           path: ~/.cache/thalvi/test-models
           key: spotter-models-${{ runner.os }}-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
       - if: needs.changes.outputs.server != 'false'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libvulkan-dev glslc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libvulkan-dev glslc spirv-headers
       - if: needs.changes.outputs.server != 'false' && needs.changes.outputs.bundle != 'false'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
