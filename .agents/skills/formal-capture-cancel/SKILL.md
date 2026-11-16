@@ -44,6 +44,10 @@ after the release of a buffered capture (11 s by default, the helper's request t
 Whisper) instead of a fixed 11 s; running out is the same non-accepted failure, polled after cancellation,
 so the model actions are unchanged.
 
+The download-size notice (#485, stacked on `feat/speech-trials`) changes only `runner.rs`'s tests module, for
+`Step`'s new `Download` payload; `runner.rs`'s hash describes the commit that adds this paragraph. No mapped function
+changed, and `engine.rs`, `recognizer.rs` and `local.rs` are untouched, so the model actions are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
