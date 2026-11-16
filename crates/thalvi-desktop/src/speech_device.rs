@@ -2,9 +2,10 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::chosen::Preload;
 use crate::device::{Adapter, Adapters, Device, Export, Fallback};
-use crate::local::{LocalRecognizer, ModelSource};
 use crate::models::{CatalogSpeech, ModelStore};
+use crate::whisper::WhisperBackend;
 
 /// The recognizer whose model the engine runs: its name, and where the model runs now.
 struct Active {
@@ -34,7 +35,7 @@ impl SpeechDevices {
     }
 
     /// Names the recognizer whose model Settings reports as the one running; `None` when the engine has none.
-    pub fn use_recognizer<S: ModelSource>(&self, local: Option<Arc<LocalRecognizer<S>>>) {
+    pub fn use_recognizer<P: Preload + ?Sized + 'static>(&self, local: Option<Arc<P>>) {
         *self.active.lock().unwrap_or_else(PoisonError::into_inner) = local.map(|local| Active {
             name: local.name().to_owned(),
             device: Box::new(move || local.device()),
@@ -67,6 +68,28 @@ impl SpeechDevices {
     }
 }
 
+impl SpeechDevices {
+    /// The Settings line for a Whisper entry: where its helper runs if the engine has it loaded, else what it will use.
+    #[must_use]
+    pub fn whisper_line(&self, backend: WhisperBackend) -> String {
+        let loaded = self
+            .active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|active| active.name == backend.name())
+            .and_then(|active| (active.device)());
+        match (loaded, backend) {
+            (Some(device), _) => device.line(true),
+            (None, WhisperBackend::Cpu) => "Will run on the CPU, in a helper Thalvi starts".to_owned(),
+            (None, WhisperBackend::Vulkan) => {
+                "Will run on a GPU through Vulkan, in a helper Thalvi starts; the device is named once it has loaded"
+                    .to_owned()
+            }
+        }
+    }
+}
+
 /// The line for a model that runs on `loaded`, or, when it is not loaded, will load as `planned` with these files
 /// on disk.
 fn describe(loaded: Option<Device>, planned: Device, gpu_files: bool, cpu_files: bool) -> String {
@@ -86,6 +109,7 @@ mod tests {
 
     use super::*;
     use crate::device::Gpu;
+    use crate::local::{LocalRecognizer, ModelSource};
 
     fn rtx() -> Gpu {
         Gpu {
@@ -316,12 +340,53 @@ mod tests {
 
         devices.use_recognizer(Some(recognizer("nemotron_160ms", Device::Gpu(rtx()))));
         assert_eq!(line().await, will_gpu, "another model is the active one");
-        devices.use_recognizer::<Source>(None);
+        devices.use_recognizer::<LocalRecognizer<Source>>(None);
         assert_eq!(line().await, will_gpu, "no engine model");
         assert_eq!(
             checks.load(Ordering::SeqCst),
             1,
             "Settings read the check a load made and made none"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_whisper_line_names_the_device_the_helper_reported_and_promises_none_before_it() {
+        let devices = devices(&Arc::new(AtomicUsize::new(0)));
+        let will_cpu = "Will run on the CPU, in a helper Thalvi starts";
+        let will_vulkan = "Will run on a GPU through Vulkan, in a helper Thalvi starts; the device is named once it has loaded";
+        let line = |backend| devices.whisper_line(backend);
+        assert_eq!(line(WhisperBackend::Cpu), will_cpu);
+        assert_eq!(line(WhisperBackend::Vulkan), will_vulkan);
+
+        let vulkan = recognizer("whisper_turbo_vulkan", Device::Gpu(rtx()));
+        devices.use_recognizer(Some(Arc::clone(&vulkan)));
+        assert_eq!(
+            line(WhisperBackend::Vulkan),
+            will_vulkan,
+            "named but not loaded yet"
+        );
+        vulkan.load().await.unwrap();
+        assert_eq!(
+            line(WhisperBackend::Vulkan),
+            "Runs on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)"
+        );
+        assert_eq!(
+            line(WhisperBackend::Cpu),
+            will_cpu,
+            "the other entry is not the loaded one"
+        );
+
+        let cpu = recognizer("whisper_turbo_cpu", Device::Cpu(Fallback::CpuChoice));
+        devices.use_recognizer(Some(Arc::clone(&cpu)));
+        cpu.load().await.unwrap();
+        assert_eq!(
+            line(WhisperBackend::Cpu),
+            "Runs on the CPU: you chose the CPU entry"
+        );
+        assert_eq!(
+            line(WhisperBackend::Vulkan),
+            will_vulkan,
+            "a replaced recognizer leaves nothing stale"
         );
     }
 }

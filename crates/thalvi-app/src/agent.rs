@@ -430,6 +430,7 @@ fn recognizer(config: &DesktopConfig, phase: &str) -> Value {
         LiveKind::Realtime(_) => ("realtime", None),
         LiveKind::OpenAi(_) => ("open_ai", None),
         LiveKind::OnDevice(SpeechChoice::Catalog(model)) => ("on_device", Some(model.name())),
+        LiveKind::OnDevice(SpeechChoice::Whisper(backend)) => ("on_device", Some(backend.name())),
         LiveKind::OnDevice(SpeechChoice::Folder(_)) => ("on_device", None),
     };
     let ready = match phase {

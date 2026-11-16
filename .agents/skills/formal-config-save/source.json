@@ -16,7 +16,7 @@
       ]
     },
     "crates/thalvi-app/src/commands.rs": {
-      "sha256": "fa479d4d770f9010f87b6d456a09e9273ac7d758169ba08d7f4f02f71f085661",
+      "sha256": "dff3b4efe0022502c77347caa450553f3821afa5c2d7e8aaa2068b32f64e70e5",
       "functions": [
         "save_settings",
         "save",
@@ -24,7 +24,7 @@
       ]
     },
     "crates/thalvi-app/src/app.rs": {
-      "sha256": "eb5c85cd7f731ad3fdf1b8b58ecc724e6c9d4ac6d4c3f5b59474f779c5e96ddd",
+      "sha256": "b05ca920e66bf1ade1da14a6d1ed90405d861af565e8450fab3cebea82f20317",
       "functions": [
         "setup",
         "AppState::config",
@@ -43,7 +43,7 @@
       ]
     },
     "crates/thalvi-app/src/agent.rs": {
-      "sha256": "f6db939ff5530a0e7d3d82e00f4d7b1b7cfee971e07aeb9fc5a6fde392d50487",
+      "sha256": "d4a85b8a2ca7c3696b6e652a9813d52b5f0ced02a241d5003a6e906c0328f152",
       "functions": [
         "plan",
         "plan_over",

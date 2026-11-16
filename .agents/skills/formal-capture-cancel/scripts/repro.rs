@@ -13,7 +13,7 @@ use thalvi_desktop::draft::Draft;
 use thalvi_desktop::draft::Drafts;
 use thalvi_desktop::engine::fakes::{FakeFrames, FakeWake};
 use thalvi_desktop::engine::{CaptureOutcome, CuePlayer, Engine, Parts};
-use thalvi_desktop::models::CatalogSpeech;
+use thalvi_desktop::models::ListedSpeech;
 use thalvi_desktop::feed::Feed;
 use thalvi_desktop::frame::Frame;
 use thalvi_desktop::history::{Capture, Outcome, Store as History};
@@ -24,6 +24,9 @@ use thalvi_desktop::recognizer::{
     FakeRecognizer, FakeSession, Recognizer, RecognizerError, RecognizerEvent, RecognizerSession,
 };
 use tokio::sync::{mpsc, oneshot, watch};
+
+/// The app crate's overlay failure, which no replayed control carries.
+type Failure = ();
 
 #[derive(Clone, Default)]
 struct RecordingHost(Arc<Mutex<Vec<&'static str>>>);

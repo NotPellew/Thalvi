@@ -170,7 +170,11 @@ struct Started {
 impl AppState {
     /// Reads the config and starts the engine. `running` is the app's version as the updater sees it,
     /// which a development build sets at build time, so not the crate's version.
-    fn start(config: Option<std::path::PathBuf>, running: &Version) -> Result<Started, String> {
+    fn start(
+        config: Option<std::path::PathBuf>,
+        running: &Version,
+        whisper_helpers: std::path::PathBuf,
+    ) -> Result<Started, String> {
         let store = Store::new(config)?;
         let (config, first_start, removed_active_entry) = store.start()?;
         let marker = Marker::take(&store.sibling(Marker::FILE));
@@ -192,6 +196,7 @@ impl AppState {
             Arc::clone(&speech_devices),
             // An update restarts the app as it was: a paused microphone stays closed.
             marker.as_ref().is_some_and(|marker| marker.paused),
+            whisper_helpers,
         )?;
         let mut held = watch_hold_keys(&config, &link, false);
         if let Some(notice) = held.refusal.take() {
@@ -589,6 +594,12 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
 
 /// Reads the config and starts the engine, the tray and the windows.
 fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), String> {
+    // The helpers are packaged beside the app; without them, choosing Whisper says so.
+    let whisper_helpers = app
+        .path()
+        .resource_dir()
+        .unwrap_or_default()
+        .join("whisper");
     // Only the first instance gets here, so a relaunch never reads the config.
     let Started {
         state,
@@ -596,7 +607,7 @@ fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), Stri
         removed_active_entry,
         inbox,
         arrival,
-    } = AppState::start(config, &app.package_info().version)?;
+    } = AppState::start(config, &app.package_info().version, whisper_helpers)?;
     state.restore_login(app);
     state.restore_menu_entry(&menu_entry::System::from_env());
     start_overlay(app, &state);

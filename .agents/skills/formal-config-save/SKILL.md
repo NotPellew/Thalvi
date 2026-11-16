@@ -99,6 +99,11 @@ view never opens the app, writes `desktop.json`, or takes the save lock.
 `agent.rs`'s `metrics_summary` reads the metrics log and writes no config.
 Neither is a writer of the file or of `AppState::config`.
 
+The experimental Whisper entry (#481, branch `feat/speech-trials`; these hashes describe its commit `98c254fb`) adds no writer:
+`commands.rs` lists the Whisper models, words their device line and downloads their files into the model
+store, `app.rs` passes the packaged helper folder into `AppState::start`, and `agent.rs` names the model in
+`recognizer`. None writes `desktop.json` or `AppState::config` or takes the save lock.
+
 | Code | Model action and boundary |
 | --- | --- |
 | `crates/thalvi-app/src/commands.rs`: `save` (from `save_settings`, the Settings window), `settings_patch` | Writer `S` on the main thread, one at a time with other main-thread writers. Via `AppState::save_form` into `SyncedConfig::save_form`: `Lock` before `Snap`, `Unlock` after `Send`. `Snap`: `settings_patch` merges the window's patch (only what the user changed) over the config read under the lock, with `settings::merged`, which `plan_over` uses too; the Settings save sets its field (the look) and carries the others over. This abstracts any one Settings form field, including `update_channel`; that setting has no separate writer. `Store::write` runs through `AppState::take_effect`'s `write`, after any changed hold keys are watched; a desktop that refuses them ends the save before `Create`, like any refused save. |

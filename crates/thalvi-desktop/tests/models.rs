@@ -17,9 +17,11 @@ use axum::routing::get;
 use sha2::{Digest, Sha256};
 use thalvi_desktop::device::{Device, Fallback, Gpu};
 use thalvi_desktop::models::{
-    Asset, CatalogSpeech, ModelError, ModelKind, ModelStore, SPOTTER, SpeechAssets,
-    SpeechDownloads, SpeechProgress,
+    Asset, CatalogSpeech, ListedSpeech, ModelError, ModelKind, ModelStore, SPOTTER, SpeechAssets,
+    SpeechDownloads, SpeechProgress, WHISPER_TURBO,
 };
+use thalvi_desktop::transducer::SpeechChoice;
+use thalvi_desktop::whisper::WhisperBackend;
 
 const GOOD: &[u8] = b"pretend this is a model";
 
@@ -824,4 +826,127 @@ async fn a_speech_model_is_downloaded_once_at_a_time() {
         .run("m", &store, &assets, |_| {})
         .await
         .expect("a finished or cancelled download frees the model");
+}
+
+#[tokio::test]
+async fn the_whisper_entries_are_listed_with_one_shared_download_that_marks_both_cached() {
+    let dir = dir("whisper");
+    fs::create_dir_all(&dir).expect("dir");
+    let store = ModelStore::in_dir(&dir);
+    let listed = |models: &[thalvi_desktop::models::SpeechModelInfo]| {
+        models
+            .iter()
+            .map(|model| (model.name, model.title, model.cached))
+            .collect::<Vec<_>>()
+    };
+
+    let before = store.whisper_models().await;
+    assert_eq!(
+        listed(&before),
+        [
+            (
+                "whisper_turbo_cpu",
+                "Whisper Turbo \u{b7} CPU (experimental)",
+                false
+            ),
+            (
+                "whisper_turbo_vulkan",
+                "Whisper Turbo \u{b7} Vulkan GPU (experimental)",
+                false
+            ),
+        ]
+    );
+    for model in &before {
+        assert_eq!(model.size, 574_041_195 + 885_098);
+        assert_eq!(model.license, "MIT");
+        assert_eq!(model.source, "https://huggingface.co/ggerganov/whisper.cpp");
+        assert!(
+            model.description.contains("Experimental")
+                && model.description.contains("only after you stop speaking")
+                && model.description.contains("word list is ignored"),
+            "{}",
+            model.description
+        );
+    }
+    assert!(
+        before[0].description.contains("slow") && before[1].description.contains("untested"),
+        "each card says its own trade-off"
+    );
+
+    for asset in [WHISPER_TURBO.model, WHISPER_TURBO.vad] {
+        fs::File::create(dir.join(asset.file_name))
+            .and_then(|file| file.set_len(asset.size))
+            .expect("a file at the pinned size");
+    }
+    assert!(
+        store
+            .whisper_models()
+            .await
+            .iter()
+            .all(|model| model.cached)
+    );
+    let catalog = store
+        .speech_models(|_| Device::Cpu(Fallback::CpuModel))
+        .await;
+    assert!(
+        catalog.iter().all(|model| !model.cached),
+        "the catalog is untouched"
+    );
+}
+
+#[test]
+fn the_whisper_files_are_pinned_and_a_listed_model_provides_only_the_files_its_entry_loads() {
+    for asset in [WHISPER_TURBO.model, WHISPER_TURBO.vad] {
+        assert!(
+            asset.url.starts_with("https://huggingface.co/"),
+            "{}",
+            asset.url
+        );
+        assert!(
+            !asset.url.contains("/main/"),
+            "pinned to a commit: {}",
+            asset.url
+        );
+        assert_eq!(asset.sha256.len(), 64);
+    }
+    assert_eq!(
+        (WHISPER_TURBO.model.size, WHISPER_TURBO.vad.size),
+        (574_041_195, 885_098)
+    );
+    let cpu = SpeechChoice::Whisper(WhisperBackend::Cpu);
+    let vulkan = SpeechChoice::Whisper(WhisperBackend::Vulkan);
+    let nemotron = SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms);
+    let listed = |name| ListedSpeech::named(name).expect("listed");
+    for (case, name, choice, provides) in [
+        ("the same Whisper entry", "whisper_turbo_cpu", &cpu, true),
+        (
+            "the other Whisper entry shares the files",
+            "whisper_turbo_cpu",
+            &vulkan,
+            true,
+        ),
+        (
+            "a catalog model does not load Whisper's files",
+            "nemotron_160ms",
+            &cpu,
+            false,
+        ),
+        (
+            "Whisper does not provide a catalog model",
+            "whisper_turbo_vulkan",
+            &nemotron,
+            false,
+        ),
+        ("the same catalog model", "nemotron_160ms", &nemotron, true),
+        ("another catalog model", "unified_160ms", &nemotron, false),
+        (
+            "a folder is never downloaded",
+            "nemotron_160ms",
+            &SpeechChoice::Folder("/m".into()),
+            false,
+        ),
+    ] {
+        assert_eq!(listed(name).provides(choice), provides, "{case}");
+    }
+    assert_eq!(ListedSpeech::named("elsewhere"), None);
 }

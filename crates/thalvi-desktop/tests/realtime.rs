@@ -185,6 +185,7 @@ async fn chosen_realtime_entry_streams_audio_and_forwards_endings() {
             Recorder::disabled().metrics(),
             &WordList::default(),
             Adapters::default(),
+            std::path::Path::new("unused"),
         );
         let session = tokio::time::timeout(WAIT, chosen.connect())
             .await

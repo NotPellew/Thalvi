@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::mpsc as std_mpsc;
@@ -12,7 +13,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use thalvi_desktop::audio::{Frames, InputGate, Microphone};
 use thalvi_desktop::capture::{CaptureRoute, EndingPauses, Endings};
-use thalvi_desktop::chosen::Chosen;
+use thalvi_desktop::chosen::{Chosen, Preload};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::{Bound, Delivery, Finished};
 use thalvi_desktop::device::Step;
@@ -26,13 +27,11 @@ use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{Desktop, Host};
-use thalvi_desktop::local::{LocalRecognizer, ModelSource};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
-use thalvi_desktop::models::{self, CatalogSpeech, ModelStore};
+use thalvi_desktop::models::{self, ListedSpeech, ModelStore};
 use thalvi_desktop::report::{UserError, causes};
 use thalvi_desktop::speech_device::SpeechDevices;
 use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
-use thalvi_desktop::transducer::{SpeechChoice, TransducerSource};
 use thalvi_desktop::wake::{WakeConfig, WakeEngine};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, LocalSet};
@@ -66,7 +65,7 @@ pub enum Control {
     /// Stops for an update, but only if nothing is going on.
     RestartIfIdle(Restart),
     /// A download of this catalog model finished; load it if the active entry uses it and it is not loaded.
-    ReloadSpeechModel(CatalogSpeech),
+    ReloadSpeechModel(ListedSpeech),
     /// Cancels any capture, closes the microphone and the recognizer, and stops.
     Quit,
 }
@@ -133,6 +132,7 @@ impl EngineLink {
         drafts: Arc<Drafts>,
         devices: Arc<SpeechDevices>,
         paused: bool,
+        whisper_helpers: PathBuf,
     ) -> Result<Self, String> {
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
@@ -181,6 +181,7 @@ impl EngineLink {
                         devices,
                         feeding: Arc::new(feeding_tx),
                         paused,
+                        whisper_helpers,
                     },
                 );
                 LocalSet::new().block_on(&runtime, runner.run());
@@ -453,7 +454,7 @@ impl Publisher {
 }
 
 /// Loads the model, showing each step it takes until it is ready, and a failure as a notice.
-async fn load_showing<S: ModelSource>(local: &LocalRecognizer<S>, publisher: &Publisher) {
+async fn load_showing(local: &(impl Preload + ?Sized), publisher: &Publisher) {
     let mut steps = local.steps();
     let load = local.load();
     tokio::pin!(load);
@@ -488,10 +489,7 @@ async fn load_showing<S: ModelSource>(local: &LocalRecognizer<S>, publisher: &Pu
 }
 
 /// Whether a finished download calls for loading the model again: it is the one in use and not loaded.
-fn reload_wanted<S: ModelSource>(
-    uses_downloaded: bool,
-    local: Option<&LocalRecognizer<S>>,
-) -> bool {
+fn reload_wanted<P: Preload + ?Sized>(uses_downloaded: bool, local: Option<&P>) -> bool {
     uses_downloaded && local.is_some_and(|local| local.device().is_none())
 }
 
@@ -499,9 +497,9 @@ fn reload_wanted<S: ModelSource>(
 struct Session {
     engine: Engine<Chosen, WakeEngine, CpalCuePlayer>,
     /// The local recognizer, whose model loads ahead of the first dictation.
-    local: Option<Arc<LocalRecognizer<TransducerSource>>>,
+    local: Option<Arc<dyn Preload>>,
     /// The on-device recognizers of the streaming extras, loaded ahead the same way.
-    extra_locals: Vec<Arc<LocalRecognizer<TransducerSource>>>,
+    extra_locals: Vec<Arc<dyn Preload>>,
     handle: EngineHandle,
     gate: InputGate,
     device: Option<String>,
@@ -611,6 +609,8 @@ struct Shared {
     feeding: Arc<watch::Sender<bool>>,
     /// Whether listening starts paused.
     paused: bool,
+    /// The packaged Whisper helpers: a `cpu` and a `vulkan` folder.
+    whisper_helpers: PathBuf,
 }
 
 struct Runner {
@@ -636,6 +636,7 @@ struct Runner {
     devices: Arc<SpeechDevices>,
     feeding: Arc<watch::Sender<bool>>,
     http: reqwest::Client,
+    whisper_helpers: PathBuf,
     /// Loads the current engine's speech model.
     loading: Option<JoinHandle<()>>,
     /// The hold key, for presses the engine is not listening for.
@@ -672,6 +673,7 @@ impl Runner {
             devices: shared.devices,
             feeding: shared.feeding,
             http: reqwest::Client::new(),
+            whisper_helpers: shared.whisper_helpers,
             loading: None,
             key: Presses::new(shared.key.clone()),
             key_state: shared.key,
@@ -749,10 +751,10 @@ impl Runner {
     }
 
     /// Loads the model again after its download finished, unless the active entry does not use it or it is loaded.
-    fn reload_speech_model(&mut self, downloaded: CatalogSpeech) {
+    fn reload_speech_model(&mut self, downloaded: ListedSpeech) {
         let uses_downloaded = matches!(
             &self.config.stt.entries.active_live().kind,
-            LiveKind::OnDevice(SpeechChoice::Catalog(active)) if *active == downloaded
+            LiveKind::OnDevice(active) if downloaded.provides(active)
         );
         let local = self
             .session
@@ -804,6 +806,7 @@ impl Runner {
                 metrics.clone(),
                 &config.stt.phrases,
                 self.devices.adapters(),
+                &self.whisper_helpers,
             )
         };
         let extras: Vec<_> = config
@@ -1571,7 +1574,7 @@ struct Requests {
     /// A refused hold key, to show once the capture is over.
     hold_problem: Option<String>,
     /// A model whose download finished, to load once the capture is over.
-    reload: Option<CatalogSpeech>,
+    reload: Option<ListedSpeech>,
 }
 
 impl Requests {
@@ -1700,7 +1703,8 @@ mod tests {
     use std::time::Duration;
 
     use thalvi_desktop::device::Export;
-    use thalvi_desktop::models::{self, CatalogHead};
+    use thalvi_desktop::local::{LocalRecognizer, ModelSource};
+    use thalvi_desktop::models::{self, CatalogHead, CatalogSpeech};
 
     use super::*;
     use crate::overlay::Visibility;
@@ -2049,8 +2053,9 @@ mod tests {
     #[test]
     fn a_download_that_finishes_during_a_capture_is_kept_for_after_it() {
         let mut requests = Requests::default();
-        assert!(!requests.take(Some(Control::ReloadSpeechModel(CatalogSpeech::ALL[0]))));
-        assert_eq!(requests.reload, Some(CatalogSpeech::ALL[0]));
+        let downloaded = ListedSpeech::Catalog(CatalogSpeech::ALL[0]);
+        assert!(!requests.take(Some(Control::ReloadSpeechModel(downloaded))));
+        assert_eq!(requests.reload, Some(downloaded));
     }
 
     const WAIT: Duration = Duration::from_secs(5);

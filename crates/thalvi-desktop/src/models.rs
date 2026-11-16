@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::device::{Device, Export};
 use crate::report::UserError;
+use crate::transducer::SpeechChoice;
+use crate::whisper::WhisperBackend;
 
 /// The most a download may take besides moving its bytes.
 const DOWNLOAD_BASE: Duration = Duration::from_secs(120);
@@ -202,6 +204,53 @@ pub struct WakeModelInfo {
     pub threshold: f32,
 }
 
+/// The files of one downloadable speech model.
+pub trait ModelFiles {
+    fn files(&self) -> Vec<Asset<'_>>;
+}
+
+/// The two files that both Whisper Turbo entries load, MIT-licensed: `OpenAI`'s Whisper large-v3-turbo
+/// quantized to `q5_0` by whisper.cpp, and the Silero voice activity detector in whisper.cpp's format.
+#[derive(Debug, Clone, Copy)]
+pub struct WhisperAssets<'a> {
+    pub model: Asset<'a>,
+    pub vad: Asset<'a>,
+}
+
+pub const WHISPER_TURBO: WhisperAssets<'static> = WhisperAssets {
+    model: Asset {
+        kind: ModelKind::Speech,
+        file_name: "ggml-large-v3-turbo-q5_0.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin",
+        size: 574_041_195,
+        sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+    },
+    vad: Asset {
+        kind: ModelKind::Speech,
+        file_name: "ggml-silero-v6.2.0.bin",
+        url: "https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin",
+        size: 885_098,
+        sha256: "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987",
+    },
+};
+
+impl WhisperAssets<'_> {
+    /// The bytes of both files together.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.model.size + self.vad.size
+    }
+}
+
+impl ModelFiles for WhisperAssets<'_> {
+    fn files(&self) -> Vec<Asset<'_>> {
+        vec![self.model, self.vad]
+    }
+}
+
+/// The page of the whisper.cpp models that Whisper Turbo's files come from.
+const WHISPER_SOURCE: &str = "https://huggingface.co/ggerganov/whisper.cpp";
+
 /// A speech model that ships in the catalog and is chosen by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogSpeech {
@@ -234,6 +283,12 @@ impl<'a> SpeechAssets<'a> {
     #[must_use]
     pub fn size(&self) -> u64 {
         self.all().map(|asset| asset.size).sum()
+    }
+}
+
+impl ModelFiles for SpeechAssets<'_> {
+    fn files(&self) -> Vec<Asset<'_>> {
+        self.all().collect()
     }
 }
 
@@ -527,6 +582,42 @@ impl CatalogSpeech {
     }
 }
 
+/// A speech model that the settings window lists and downloads by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListedSpeech {
+    Catalog(CatalogSpeech),
+    Whisper(WhisperBackend),
+}
+
+impl ListedSpeech {
+    /// The listed model called `name` in config.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        CatalogSpeech::named(name)
+            .map(Self::Catalog)
+            .or_else(|| WhisperBackend::named(name).map(Self::Whisper))
+    }
+
+    /// The page of the model the files come from.
+    #[must_use]
+    pub fn source(self) -> &'static str {
+        match self {
+            Self::Catalog(model) => model.source(),
+            Self::Whisper(_) => WHISPER_SOURCE,
+        }
+    }
+
+    /// Whether the files of this model are the ones `choice` loads; both Whisper entries load the same.
+    #[must_use]
+    pub fn provides(self, choice: &SpeechChoice) -> bool {
+        match (self, choice) {
+            (Self::Catalog(listed), SpeechChoice::Catalog(chosen)) => listed == *chosen,
+            (Self::Whisper(_), SpeechChoice::Whisper(_)) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Why a model could not be provided. Messages are shown to the user as written.
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
@@ -732,8 +823,8 @@ impl ModelStore {
 
     /// Whether every file of `assets` is on disk at its pinned size. Cheap, for showing download
     /// state; [`fetch`](Self::fetch) still verifies each checksum before a model is used.
-    pub async fn is_cached(&self, assets: &SpeechAssets<'_>) -> bool {
-        for asset in assets.all() {
+    pub async fn is_cached(&self, assets: &impl ModelFiles) -> bool {
+        for asset in assets.files() {
             match tokio::fs::metadata(self.dir.join(asset.file_name)).await {
                 Ok(meta) if meta.len() == asset.size => {}
                 _ => return false,
@@ -790,17 +881,35 @@ impl ModelStore {
         models
     }
 
+    /// The Whisper Turbo entries, which share one download, with whether it is on disk.
+    pub async fn whisper_models(&self) -> Vec<SpeechModelInfo> {
+        let cached = self.is_cached(&WHISPER_TURBO).await;
+        WhisperBackend::ALL
+            .map(|backend| SpeechModelInfo {
+                name: backend.name(),
+                title: backend.title(),
+                description: backend.description(),
+                size: WHISPER_TURBO.size(),
+                source: WHISPER_SOURCE,
+                license: "MIT",
+                languages: &["English", "German"],
+                cached,
+            })
+            .to_vec()
+    }
+
     /// Fetches the files of `assets` that are not intact yet, telling `progress` how it goes.
     ///
     /// # Errors
     /// The first file's error; files fetched before it stay.
     pub async fn fetch_speech(
         &self,
-        assets: &SpeechAssets<'_>,
+        assets: &impl ModelFiles,
         mut progress: impl FnMut(SpeechProgress),
     ) -> Result<(), ModelError> {
         progress(SpeechProgress::Verifying);
-        let total = assets.size();
+        let files = assets.files();
+        let total = files.iter().map(|asset| asset.size).sum::<u64>();
         let mut done = 0;
         let mut shown = None;
         let mut report = |bytes: u64| {
@@ -811,7 +920,7 @@ impl ModelStore {
                 progress(SpeechProgress::Downloading { percent });
             }
         };
-        for asset in assets.all() {
+        for asset in files {
             let path = self.dir.join(asset.file_name);
             if !matches!(stored(&path, &asset).await, Stored::Intact) {
                 self.fetch_reporting(&asset, |bytes| report(done + bytes))
@@ -860,7 +969,7 @@ impl SpeechDownloads {
         &self,
         name: &str,
         store: &ModelStore,
-        assets: &SpeechAssets<'_>,
+        assets: &impl ModelFiles,
         mut progress: impl FnMut(SpeechProgress),
     ) -> Result<(), ModelError> {
         match self

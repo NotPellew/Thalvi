@@ -84,7 +84,7 @@ jobs:
     name: package (${{ matrix.os }})
     needs: gate
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: true
       matrix:
@@ -102,7 +102,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, respects rust-toolchain.toml
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libvulkan-dev glslc spirv-headers
+      - if: matrix.os == 'windows-latest'
+        run: .github/scripts/vulkan-sdk.ps1
+        shell: pwsh
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
@@ -110,13 +113,17 @@ jobs:
           cache-dependency-path: crates/thalvi-app/ui/package-lock.json
       - run: npm ci --prefix crates/thalvi-app/ui
       - run: npm run build --prefix crates/thalvi-app/ui
-      - run: npm exec --prefix ui -- tauri build --bundles ${{ matrix.bundle }} --config "{\"version\":\"$VERSION\"}" -- --locked
+      - run: .github/scripts/whisper-helper crates/thalvi-app/helpers/whisper
+        shell: bash
+      - run: npm exec --prefix ui -- tauri build --bundles ${{ matrix.bundle }} --config tauri.whisper.json --config "{\"version\":\"$VERSION\"}" -- --locked
         working-directory: crates/thalvi-app
         shell: bash
         env:
           VERSION: ${{ needs.gate.outputs.version }}
           # linuxdeploy looks for libwebgpu_dawn.so, which the build links into the target folder, on this path.
           LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
+          # The Vulkan loader stays the system's, which comes with the driver; Dawn would load a bundled one.
+          LINUXDEPLOY_EXCLUDED_LIBRARIES: libvulkan.so*
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.bundle }}
