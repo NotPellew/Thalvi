@@ -304,7 +304,7 @@ areas your change touches. Editing rules are in
 - **Repeatable property cases, separate exploration.** Cargo defaults to 256 ChaCha cases with a fixed seed;
   exploratory runs override and record the seed, and failures become minimized regressions.
   Why: required checks need replayable inputs while exploration needs new ones. Rejected: fixed seeds alone.
-- **Selective lint enforcement.** Production unwrap, expect, panic and todo are denied; redundant clones join
-  the existing pedantic gate, with narrow reasoned expectations for invariants and platform requirements.
-  Why: catch mistakes without forcing artificial error paths or fragmented functions.
-  Rejected: all nursery lints, a blanket indexing ban, lower hard complexity caps, suppression to pass a gate.
+- **Selective lint enforcement.** Vardli and Thalvi share one Rust lint set: pedantic except `missing_errors_doc` and
+  `must_use_candidate`; production unwrap, expect, panic, todo and unimplemented denied; narrow reasoned expectations (16 Nov 2026).
+  Why: catch mistakes without forcing artificial error paths, fragmented functions or docs that restate a signature.
+  Rejected: all nursery lints, a blanket indexing ban (Vardli has one; #508 decides), lower hard complexity caps, suppression to pass a gate.
