@@ -106,8 +106,7 @@ pub fn overlay_failure(reason: &str) -> (&'static str, String) {
     )
 }
 
-/// Text to paste: line breaks (as `\n`) and tabs, but no other control character, so pasting it
-/// can only insert text and never act in a terminal.
+/// Clipboard text for delivery: line breaks (as `\n`) and tabs, but no other control character.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PasteText(String);
 

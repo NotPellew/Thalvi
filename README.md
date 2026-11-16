@@ -241,18 +241,20 @@ Say "Hey Thalvi" in any window, dictate, then end with a phrase:
 
 | Say | Thalvi |
 | --- | --- |
-| "paste that" or "finish dictation" | pastes the text into the window you were in |
-| "write that out" | has the writing model turn the words into proper text, then pastes that ([Write it out](#write-a-dictation-out)) |
+| "paste that" or "finish dictation" | pastes one line into the window you were in, or copies text with line breaks or tabs |
+| "write that out" | has the writing model turn the words into proper text, then pastes one line or copies multiple lines ([Write it out](#write-a-dictation-out)) |
 | "submit" | pastes it and presses Enter |
 | "do that" | runs a configured action, such as opening a site or focusing an app; the action also runs without "do that" when the whole capture is the command, for example "open google.com" |
 | "scratch that" | drops the last piece |
 | "never mind" | drops the whole capture |
 
-Thalvi puts the text on the clipboard and presses the paste shortcut in the window,
-so line breaks arrive as line breaks and nothing is sent by them; the text stays on
-the clipboard. The shortcut is Ctrl+V, and Ctrl+Shift+V in a known terminal on
-Hyprland (kitty, foot, Alacritty, WezTerm, Ghostty, GNOME Console and Terminal,
-Konsole, Ptyxis, xterm). In another terminal Ctrl+V pastes nothing; paste yourself.
+Thalvi puts the text on the clipboard and presses the paste shortcut in the window.
+For Paste and Write, text with a line break or tab stays on the clipboard for you to
+paste yourself, because some terminals act on pasted lines. Submit still pastes the
+confirmed text and presses Enter. The shortcut is Ctrl+V, and Ctrl+Shift+V in a
+known terminal on Hyprland (kitty, foot, Alacritty, WezTerm, Ghostty, GNOME
+Console and Terminal, Konsole, Ptyxis, xterm). In another terminal Ctrl+V pastes
+nothing; paste yourself.
 An overlay at the top of the
 screen shows what Thalvi is doing and never takes focus. The tray pauses,
 cancels, copies the last error and opens Settings.
@@ -571,10 +573,11 @@ shows why it has no hold key and no controls.
 Say "tell Anna I'm late, sorry, write that out", or hold the write key the way
 you hold the hold key, and Thalvi sends the words you said to a model that turns
 them into proper text in the language you spoke. The overlay says "Writing…" and
-shows the text as it streams in; when the stream ends the text is pasted like any
-other dictation, and **Ctrl+Z** undoes it. Cancel as usual before then and nothing
-is pasted. Without "write that out" or the write key, the words are pasted as
-recognized. There is no write-and-send: press Enter yourself after reading it.
+shows the text as it streams in. When the stream ends, one line is pasted like any
+other dictation and **Ctrl+Z** undoes it; text with a line break or tab stays on the
+clipboard for you to paste yourself. Cancel as usual before then and nothing is
+pasted. Without "write that out" or the write key, the words are handled the same
+way as recognized. There is no write-and-send: press Enter yourself after reading it.
 
 The model is any OpenAI-compatible chat completions endpoint (Glimmer, Baseten, a
 llama.cpp server, Meta), set under **Settings → Chat model → Writing** as `writing`

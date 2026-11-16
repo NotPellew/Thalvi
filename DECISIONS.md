@@ -135,9 +135,9 @@ areas your change touches. Editing rules are in
 - **A keyword spotter only warns about missed endings.** sherpa-onnx's 3.3M keyword model listens beside the recognizer; when the covering final lacks an ending it heard and the user then stays quiet for that ending's pause, the cancelled cue plays and a notice names the phrase. Nothing is cut, retried or acted on.
   Why: spotted times run 0.2–0.5 s late and finals carry no word times; a recheck by the same recognizer rescued 0 of 12 disputed hits in 62.8 min; the quiet gate keeps false alarms (16 in that time) silent.
   Rejected: cutting at the spotted time, a recheck, acting on the spotter alone, judging on a short timer (24 of 36 finals came late), quoting dictated words.
-- **Delivery is a paste.** Dictation and writing go on the clipboard and the bound window gets Ctrl+V (Ctrl+Shift+V in a known Linux terminal class); text may hold line breaks and tabs, no other control character. Hyprland sends the keys with `sendshortcut` and the keycode of V from the first layout (libxkbcommon).
-  Why: a paste inserts line breaks without Enter; GTK 3 ignores wtype's Ctrl keys, and `sendshortcut` keeps a key name's first keycode across layout changes.
-  Rejected: typing with Shift+Enter for line breaks, typing single lines and pasting multi-line text (two paths), wtype keys, keeping multi-line text out of terminals (a shell with bracketed paste off runs pasted lines, as the user's own paste does).
+- **Delivery is a safe paste.** Single-line dictation and writing go on the clipboard and the bound window gets Ctrl+V (Ctrl+Shift+V in a known Linux terminal class); unconfirmed text with line breaks or tabs stays on the clipboard, while Submit and clipboard-only desktops keep it. No other control character enters delivery.
+  Why: a shell with bracketed paste off can run pasted lines; one delivery check covers unknown terminals, while Hyprland's `sendshortcut` still handles layouts and GTK 3.
+  Rejected: trusting bracketed paste, trying to classify every terminal, typing with Shift+Enter, wtype Ctrl keys.
 - **Check, then paste.** Delivery re-verifies the bound window just before pressing keys,
   which go to whatever window is focused, except Hyprland's paste keys, which are addressed to it. Why: Enter and Windows
   input cannot be addressed to one window, so a switch in those milliseconds can misdirect them.
@@ -160,7 +160,7 @@ areas your change touches. Editing rules are in
 - **AltGr alone may be a hold key on Windows.** `AltRight` held alone dictates; AltGr with any other key is a chord that types, so the hook passes every event, ignores the Ctrl Windows adds, and starts the hold only after 0.2 s alone, keeping the audio from the press. Why: AltGr types `@`, `€` and `{` on layouts that have it, and a swallowed AltGr would break typing for them. Reversible: a hold started by AltGr and a second key stays a hold.
   Rejected: swallowing AltGr, starting the hold at the press and cancelling on a chord (cue and overlay would flash on every `@`).
 - **Writing is one direct chat call, words only.** "write that out" or the write key sends the recognized words to an
-  OpenAI-compatible endpoint from Settings and pastes what streams back, line breaks included; no context, no Enter, 15 s at most;
+  OpenAI-compatible endpoint from Settings and returns what streams back; single-line text is pasted, while text with line breaks or tabs stays on the clipboard; no context, no Enter, 15 s at most;
   reasoning shows as thinking, never pasted, and the request says nothing about thinking; any failure pastes nothing and puts the words
   on the clipboard. Why: no server needed, unsaid text never sent unread, strict endpoints refuse unknown fields. Rejected: the Thalvi server, write-and-send, sending `enable_thinking`.
 - **The writing prompt is a stored override of one built-in default.** `writing.prompt` is the system message; it is

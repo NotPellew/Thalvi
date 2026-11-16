@@ -177,11 +177,24 @@ where
         }
         let result = match (&bound.0, PasteText::new(text)) {
             (Ok(target), Ok(pasted)) => {
-                let target = target.clone();
-                self.call(recorder, "deliver", move |host| {
-                    host.deliver(&target, &pasted, enter)
-                })
-                .await
+                if !enter
+                    && !self.host.copies_only()
+                    && pasted
+                        .as_str()
+                        .chars()
+                        .any(|character| matches!(character, '\n' | '\t'))
+                {
+                    Err(HostError::NothingTyped(
+                        "The text contains a line break or tab that could act in a terminal. Nothing was pasted."
+                            .to_owned(),
+                    ))
+                } else {
+                    let target = target.clone();
+                    self.call(recorder, "deliver", move |host| {
+                        host.deliver(&target, &pasted, enter)
+                    })
+                    .await
+                }
             }
             (_, Err(error)) => Err(error),
             (Err(error), Ok(_)) => Err(HostError::NothingTyped(format!(
@@ -451,7 +464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paste_and_submit_hand_the_host_the_text_with_line_breaks_kept_and_normalized() {
+    async fn paste_and_submit_hand_safe_text_to_the_host() {
         for (route, text, expected) in [
             (
                 CaptureRoute::Paste,
@@ -460,13 +473,13 @@ mod tests {
             ),
             (
                 CaptureRoute::Write,
-                "Hi Anna,\r\n\r\n\tSorry\rBob",
-                "deliver:the editor:\"Hi Anna,\\n\\n\\tSorry\\nBob\":enter=false",
+                "Hi Anna, sorry about that.",
+                "deliver:the editor:\"Hi Anna, sorry about that.\":enter=false",
             ),
             (
                 CaptureRoute::Submit,
-                "run it",
-                "deliver:the editor:\"run it\":enter=true",
+                "printf one\r\nprintf two",
+                "deliver:the editor:\"printf one\\nprintf two\":enter=true",
             ),
             (
                 CaptureRoute::Submit,
@@ -487,18 +500,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unconfirmed_line_breaks_and_tabs_are_copied_without_pasting() {
+        for (route, text) in [
+            (CaptureRoute::Paste, "first\nsecond"),
+            (CaptureRoute::Paste, "first\rsecond"),
+            (CaptureRoute::Write, "first\r\nsecond"),
+            (CaptureRoute::Write, "first\tsecond"),
+        ] {
+            let (finished, seen) = finish(FakeHost::default(), accepted(route, text)).await;
+            let finished = finished.unwrap();
+            assert!(!finished.delivered, "{route:?} {text:?}");
+            assert_eq!(
+                finished.notice,
+                "The text contains a line break or tab that could act in a terminal. Nothing was pasted. Captured text is on the clipboard.",
+                "{route:?} {text:?}"
+            );
+            assert_eq!(
+                seen,
+                calls(&["capture_target", &format!("copy:{text:?}")]),
+                "{route:?} {text:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_desktop_that_only_copies_says_so_and_does_not_copy_twice() {
-        for (route, enter, notice) in [
-            (CaptureRoute::Paste, false, "Copied — press Ctrl+V to paste"),
+        for (route, text, enter, notice) in [
+            (
+                CaptureRoute::Write,
+                "first\r\n\tsecond",
+                false,
+                "Copied — press Ctrl+V to paste",
+            ),
             (
                 CaptureRoute::Submit,
+                "secret words",
                 true,
                 "Copied — press Ctrl+V then Enter",
             ),
         ] {
             let (finished, seen) = finish(
                 FakeHost::default().clipboard_only(),
-                accepted(route, "secret words"),
+                accepted(route, text),
             )
             .await;
             let finished = finished.unwrap();
@@ -508,7 +551,10 @@ mod tests {
                 seen,
                 calls(&[
                     "capture_target",
-                    &format!("deliver:the editor:\"secret words\":enter={enter}"),
+                    &format!(
+                        "deliver:the editor:{:?}:enter={enter}",
+                        text.replace("\r\n", "\n").replace('\r', "\n")
+                    ),
                 ]),
                 "{route:?}: the host's delivery is the one copy"
             );
