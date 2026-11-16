@@ -22,7 +22,7 @@ use thalvi_desktop::models::{
     CatalogHead, ListedSpeech, ModelError, ModelFiles, ModelStore, SpeechDownloads,
     SpeechModelInfo, SpeechProgress, WHISPER_TURBO, WakeModelInfo,
 };
-use thalvi_desktop::report::{Report, System};
+use thalvi_desktop::report::{Report, System, causes};
 use thalvi_desktop::transducer::check_folder;
 use thalvi_desktop::wake::validate_wake_model;
 
@@ -285,6 +285,33 @@ struct SpeechModelProgress<'a> {
     status: &'static str,
     /// Why it failed, in plain words; only with `failed`.
     message: Option<String>,
+    /// What lay behind the failure, outermost first; only with `failed`.
+    causes: Vec<String>,
+}
+
+/// Why a speech model download failed: what the UI shows and what the report copies.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DownloadFailed {
+    pub message: String,
+    pub causes: Vec<String>,
+}
+
+impl From<String> for DownloadFailed {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            causes: Vec::new(),
+        }
+    }
+}
+
+impl From<&ModelError> for DownloadFailed {
+    fn from(error: &ModelError) -> Self {
+        Self {
+            message: error.to_string(),
+            causes: causes(error),
+        }
+    }
 }
 
 impl<'a> SpeechModelProgress<'a> {
@@ -299,15 +326,17 @@ impl<'a> SpeechModelProgress<'a> {
             percent,
             status,
             message: None,
+            causes: Vec::new(),
         }
     }
 
-    fn failed(name: &'a str, message: String) -> Self {
+    fn failed(name: &'a str, failed: DownloadFailed) -> Self {
         Self {
             name,
             percent: 0,
             status: "failed",
-            message: Some(message),
+            message: Some(failed.message),
+            causes: failed.causes,
         }
     }
 }
@@ -355,18 +384,22 @@ pub async fn download_speech_model(
     name: String,
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<(), DownloadFailed> {
     download_speech(&app, &state, &name).await
 }
 
 /// Downloads a catalog speech model, telling the UI how far it is.
 ///
 /// # Errors
-/// The plain reason the download failed.
-pub async fn download_speech(app: &AppHandle, state: &AppState, name: &str) -> Result<(), String> {
+/// The plain reason the download failed, with what lay behind it.
+pub async fn download_speech(
+    app: &AppHandle,
+    state: &AppState,
+    name: &str,
+) -> Result<(), DownloadFailed> {
     let model = ListedSpeech::named(name)
         .ok_or_else(|| format!("{name} is not a speech model Thalvi can download."))?;
-    let store = ModelStore::per_user().map_err(|error| error.to_string())?;
+    let store = ModelStore::per_user().map_err(|error| DownloadFailed::from(&error))?;
     let recorder =
         Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
     let emit = |progress| {
@@ -412,7 +445,7 @@ struct Download<'a, F: ModelFiles> {
 
 impl<F: ModelFiles> Download<'_, F> {
     /// Fetches the files the store lacks, telling `emit` each step and a failure, and records the outcome.
-    async fn run(&self, emit: impl Fn(SpeechModelProgress<'static>)) -> Result<(), String> {
+    async fn run(&self, emit: impl Fn(SpeechModelProgress<'static>)) -> Result<(), DownloadFailed> {
         let started = Instant::now();
         let result = self
             .downloads
@@ -420,19 +453,21 @@ impl<F: ModelFiles> Download<'_, F> {
                 emit(SpeechModelProgress::of(self.name, progress));
             })
             .await;
-        if matches!(result, Err(ModelError::AlreadyDownloading { .. })) {
-            return result.map_err(|error| error.to_string());
+        if let Err(error @ ModelError::AlreadyDownloading { .. }) = &result {
+            return Err(error.into());
         }
         self.recorder.metric(
             Event::SpeechDownload,
-            if result.is_ok() { "ok" } else { "error" },
+            &result
+                .as_ref()
+                .map_or_else(ModelError::metric_kind, |()| "ok".to_owned()),
             Some(started.elapsed()),
             json!({"model": self.name}),
         );
         result.map_err(|error| {
-            let message = error.to_string();
-            emit(SpeechModelProgress::failed(self.name, message.clone()));
-            message
+            let failed = DownloadFailed::from(&error);
+            emit(SpeechModelProgress::failed(self.name, failed.clone()));
+            failed
         })
     }
 }
@@ -611,7 +646,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_download_that_fails_tells_the_ui_how_far_it_got_and_why_and_records_the_error() {
+    async fn a_download_that_fails_tells_the_ui_how_far_it_got_and_why_and_records_the_kind_of_failure()
+     {
         let dir = std::env::temp_dir().join(format!("thalvi-download-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // A port nothing listens on, so the download fails at once without a network.
@@ -657,16 +693,22 @@ mod tests {
         .run(|progress| emitted.borrow_mut().push(progress))
         .await;
 
-        let message = result.unwrap_err();
+        let failed = result.unwrap_err();
+        assert_eq!(
+            failed.message,
+            "Could not download the speech model m.onnx: could not connect to 127.0.0.1. Check the internet connection and try again."
+        );
+        assert!(!failed.causes.is_empty(), "{failed:?}");
         assert!(
-            message.starts_with("Could not download the speech model m.onnx"),
-            "{message}"
+            failed.causes.iter().all(|cause| !cause.contains("/m.onnx")),
+            "{:?}",
+            failed.causes
         );
         assert_eq!(
             *emitted.borrow(),
             [
                 SpeechModelProgress::of("m", SpeechProgress::Verifying),
-                SpeechModelProgress::failed("m", message),
+                SpeechModelProgress::failed("m", failed),
             ]
         );
         recorder.finish().await;
@@ -676,7 +718,7 @@ mod tests {
             (&line["event"], &line["outcome"], &line["model"]),
             (
                 &json!("desktop_speech_download"),
-                &json!("error"),
+                &json!("connect"),
                 &json!("m")
             )
         );
@@ -688,15 +730,15 @@ mod tests {
         for (progress, expected) in [
             (
                 SpeechProgress::Verifying,
-                json!({"name": "m", "percent": 0, "status": "verifying", "message": null}),
+                json!({"name": "m", "percent": 0, "status": "verifying", "message": null, "causes": []}),
             ),
             (
                 SpeechProgress::Downloading { percent: 42 },
-                json!({"name": "m", "percent": 42, "status": "downloading", "message": null}),
+                json!({"name": "m", "percent": 42, "status": "downloading", "message": null, "causes": []}),
             ),
             (
                 SpeechProgress::Done,
-                json!({"name": "m", "percent": 100, "status": "done", "message": null}),
+                json!({"name": "m", "percent": 100, "status": "done", "message": null, "causes": []}),
             ),
         ] {
             assert_eq!(
@@ -705,8 +747,17 @@ mod tests {
             );
         }
         assert_eq!(
-            serde_json::to_value(SpeechModelProgress::failed("m", "No network.".to_owned())).ok(),
-            Some(json!({"name": "m", "percent": 0, "status": "failed", "message": "No network."}))
+            serde_json::to_value(SpeechModelProgress::failed(
+                "m",
+                DownloadFailed {
+                    message: "No network.".to_owned(),
+                    causes: vec!["dns error".to_owned()],
+                }
+            ))
+            .ok(),
+            Some(
+                json!({"name": "m", "percent": 0, "status": "failed", "message": "No network.", "causes": ["dns error"]})
+            )
         );
     }
 }
