@@ -39,7 +39,10 @@ change) only retypes `Control::ReloadSpeechModel`'s payload, which `Requests::ta
 an ending, and passes the helper folder into `Chosen::new`; `drive`, `Runner::capture` and `Settling::settle`
 are unchanged. Its `WhisperSession` (`crates/thalvi-desktop/src/whisper.rs`) buffers like `OpenAiSession`:
 `cancel` and `close` return at once, and dropping a session with its request in flight aborts the request
-task and kills the helper, so a late reply has no receiver. Model actions are unchanged.
+task and kills the helper, so a late reply has no receiver. Model actions are unchanged. `Live::tail` now waits `RecognizerSession::final_wait()`
+after the release of a buffered capture (11 s by default, the helper's request timeout plus a second for
+Whisper) instead of a fixed 11 s; running out is the same non-accepted failure, polled after cancellation,
+so the model actions are unchanged.
 
 The five checked invariants have these exact meanings:
 

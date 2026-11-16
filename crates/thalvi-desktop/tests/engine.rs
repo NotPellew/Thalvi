@@ -6533,6 +6533,42 @@ async fn a_long_buffered_hold_is_not_cut_off_as_idle() {
         .await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_released_buffered_hold_waits_as_long_as_its_recognizer_needs_for_the_final() {
+    let too_long = CaptureError::Recognizer(RecognizerError::said(
+        "The speech server took too long to transcribe this capture. Nothing was delivered.",
+    ));
+    let cases = [
+        (
+            30_000,
+            15_000,
+            accepted(CaptureRoute::Paste, "slow but in time"),
+        ),
+        (30_000, 30_001, failed(too_long.clone())),
+        (11_000, 11_001, failed(too_long)),
+    ];
+    for (wait, arrives_after, outcome) in cases {
+        LocalSet::new()
+            .run_until(async {
+                let (mut rig, engine, frames) = Rig::new("{}");
+                rig.server.buffer_audio();
+                rig.server.final_wait(ms(wait));
+                let task = hold_task(engine, frames);
+                rig.hold().await;
+                rig.feed_until(2_000, Kind::Voice).await;
+                rig.release(2_100).await;
+                rig.at(2_100 + arrives_after).await;
+                rig.finals("slow but in time").await;
+                assert_eq!(
+                    finished(task).await,
+                    outcome,
+                    "wait {wait} ms, final after {arrives_after} ms"
+                );
+            })
+            .await;
+    }
+}
+
 /// A config with a realtime server live, a chat endpoint at `chat_url` and these realtime
 /// entries switched on as extras.
 fn with_streaming(chat_url: &str, extras: &[&str]) -> String {

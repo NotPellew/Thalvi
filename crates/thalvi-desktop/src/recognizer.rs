@@ -4,8 +4,9 @@ use std::{
     future::Future,
     sync::{
         Arc, LazyLock, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use tokio::sync::{mpsc, oneshot, watch};
@@ -250,11 +251,20 @@ impl RecognizerError {
     }
 }
 
+/// How long a buffering session gets for its final after the capture ends: a buffered upload's 10 s
+/// timeout and a second to spare.
+const BUFFERED_FINAL_WAIT: Duration = Duration::from_secs(11);
+
 /// One open recognition stream; it exists only after the recognizer said it is ready.
 pub trait RecognizerSession: Send {
     /// Whether audio is buffered until the user ends the capture.
     fn buffers_audio(&self) -> bool {
         false
+    }
+
+    /// How long a buffering session may take for its final once the capture has ended.
+    fn final_wait(&self) -> Duration {
+        BUFFERED_FINAL_WAIT
     }
 
     /// Signals that all audio for a buffered capture has arrived.
@@ -390,6 +400,7 @@ pub struct FakeRecognizer {
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
+    final_wait_ms: Arc<AtomicU64>,
     load: Option<watch::Receiver<Step>>,
 }
 
@@ -401,6 +412,7 @@ pub struct FakeControl {
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
+    final_wait_ms: Arc<AtomicU64>,
     load: Option<watch::Sender<Step>>,
 }
 
@@ -410,6 +422,7 @@ pub struct FakeSession {
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
+    final_wait_ms: Arc<AtomicU64>,
 }
 
 impl FakeRecognizer {
@@ -435,6 +448,9 @@ impl FakeRecognizer {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let stalled = Arc::new(AtomicBool::new(false));
         let buffers = Arc::new(AtomicBool::new(false));
+        let final_wait_ms = Arc::new(AtomicU64::new(
+            u64::try_from(BUFFERED_FINAL_WAIT.as_millis()).unwrap_or(u64::MAX),
+        ));
         let ready = Arc::new(Mutex::new(Some(ready_rx)));
         let events = Arc::new(Mutex::new(Some(events_rx)));
         (
@@ -444,6 +460,7 @@ impl FakeRecognizer {
                 calls: Arc::clone(&calls),
                 stalled: Arc::clone(&stalled),
                 buffers: Arc::clone(&buffers),
+                final_wait_ms: Arc::clone(&final_wait_ms),
                 load: load_rx,
             },
             FakeControl {
@@ -453,6 +470,7 @@ impl FakeRecognizer {
                 calls,
                 stalled,
                 buffers,
+                final_wait_ms,
                 load: load_tx,
             },
         )
@@ -480,6 +498,7 @@ impl Recognizer for FakeRecognizer {
             calls: Arc::clone(&self.calls),
             stalled: Arc::clone(&self.stalled),
             buffers: Arc::clone(&self.buffers),
+            final_wait_ms: Arc::clone(&self.final_wait_ms),
         })
     }
 
@@ -532,6 +551,12 @@ impl FakeControl {
         self.buffers.store(true, Ordering::Relaxed);
     }
 
+    /// How long the buffering session says its final may take after the capture ends.
+    pub fn final_wait(&self, wait: Duration) {
+        let millis = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+        self.final_wait_ms.store(millis, Ordering::Relaxed);
+    }
+
     /// Everything the session was asked to do so far.
     pub fn calls(&self) -> Vec<FakeCall> {
         self.calls
@@ -553,6 +578,10 @@ impl FakeSession {
 impl RecognizerSession for FakeSession {
     fn buffers_audio(&self) -> bool {
         self.buffers.load(Ordering::Relaxed)
+    }
+
+    fn final_wait(&self) -> Duration {
+        Duration::from_millis(self.final_wait_ms.load(Ordering::Relaxed))
     }
 
     #[expect(

@@ -632,7 +632,7 @@ impl<S: RecognizerSession> Live<S> {
         match self.release {
             Release::Tail(at) => Some(
                 at + if self.session.buffers_audio() {
-                    Duration::from_secs(11)
+                    self.session.final_wait()
                 } else {
                     RELEASE_LIMIT
                 },

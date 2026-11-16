@@ -40,6 +40,8 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(25);
 /// What a request is given besides one second per second of audio.
 const BASE_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the engine waits past a request's own timeout, so that timeout's error is the one shown.
+const FINAL_MARGIN: Duration = Duration::from_secs(1);
 const SAMPLE_RATE: u32 = 16_000;
 const BOUNDARY: &str = "thalvi-whisper-boundary-4c1e9a7d2b";
 /// Lines of the helper's output that are kept: enough for the load's own report, which names the device.
@@ -832,7 +834,7 @@ impl<L: Launcher> Recognizer for WhisperRecognizer<L> {
             shared: Arc::clone(&self.shared),
             running,
             frames: Vec::new(),
-            finished: false,
+            finished_frames: None,
             finished_signal: Notify::new(),
             request: Request::Buffering,
         })
@@ -860,7 +862,8 @@ pub struct WhisperSession<L: Launcher = ProcessLauncher> {
     shared: Arc<Shared<L>>,
     running: Arc<Running<L::Process>>,
     frames: Vec<Frame>,
-    finished: bool,
+    /// The frames buffered when the capture ended, once it has.
+    finished_frames: Option<usize>,
     finished_signal: Notify,
     request: Request,
 }
@@ -907,12 +910,16 @@ impl<L: Launcher> RecognizerSession for WhisperSession<L> {
         true
     }
 
+    fn final_wait(&self) -> Duration {
+        request_timeout(self.finished_frames.unwrap_or(self.frames.len())) + FINAL_MARGIN
+    }
+
     #[expect(
         clippy::unused_async_trait_impl,
         reason = "Finishing only updates buffered capture state."
     )]
     async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
-        self.finished = true;
+        self.finished_frames = Some(self.frames.len());
         self.finished_signal.notify_one();
         Ok(())
     }
@@ -927,7 +934,7 @@ impl<L: Launcher> RecognizerSession for WhisperSession<L> {
     }
 
     async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
-        if !self.finished {
+        if self.finished_frames.is_none() {
             self.finished_signal.notified().await;
         }
         if matches!(self.request, Request::Buffering) {
@@ -1743,6 +1750,28 @@ mod tests {
         );
         assert_eq!(fake.launches(), 1);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_capture_gets_a_second_past_its_request_timeout_for_the_final_even_after_the_upload_starts()
+     {
+        let scratch = Scratch::with_files("final-wait");
+        for (frames, seconds) in [(0, 21), (50, 25), (750, 81)] {
+            let fake = Fake::new([Plan {
+                replies: vec![Reply::Text("ok")],
+                ..Plan::default()
+            }]);
+            let recognizer = recognizer(&fake, WhisperBackend::Cpu, &scratch);
+            let mut session = within(recognizer.connect()).await.unwrap();
+            for _ in 0..frames {
+                session.send_frame(&frame(1)).await.unwrap();
+            }
+            session.finish_audio().await.unwrap();
+            let wait = Duration::from_secs(seconds);
+            assert_eq!(session.final_wait(), wait, "{frames} frames buffered");
+            within(session.next_event()).await.unwrap();
+            assert_eq!(session.final_wait(), wait, "{frames} frames uploaded");
+        }
     }
 
     #[tokio::test]

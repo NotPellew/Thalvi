@@ -4,6 +4,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::watch;
 
@@ -190,6 +191,15 @@ impl Recognizer for Chosen {
 impl RecognizerSession for ChosenSession {
     fn buffers_audio(&self) -> bool {
         matches!(self, Self::OpenAi(_) | Self::Whisper(..))
+    }
+
+    fn final_wait(&self) -> Duration {
+        match self {
+            Self::Realtime(session) => session.final_wait(),
+            Self::OpenAi(session) => session.final_wait(),
+            Self::Local(session, _) => session.final_wait(),
+            Self::Whisper(session, _) => session.final_wait(),
+        }
     }
 
     async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
