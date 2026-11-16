@@ -769,16 +769,19 @@ impl<L: Launcher> Shared<L> {
             }
             tokio::time::sleep(POLL).await;
         }
-        // The Vulkan helper compiles its pipelines on its first request, which would otherwise be the user's.
-        let silence = wav(&vec![0; SAMPLE_RATE as usize]);
-        let fields = [
-            ("response_format", "json"),
-            ("language", "auto"),
-            ("vad", "false"),
-        ];
-        infer(client, launch.port, &fields, &silence, READY_TIMEOUT)
-            .await
-            .map_err(|failure| HelperError::WarmUp(describe(&failure)))?;
+        // The Vulkan helper compiles its pipelines on its first request, which would otherwise be the
+        // user's; on the CPU the same request only costs a 30 s window's encoding.
+        if launch.backend == WhisperBackend::Vulkan {
+            let silence = wav(&vec![0; SAMPLE_RATE as usize]);
+            let fields = [
+                ("response_format", "json"),
+                ("language", "auto"),
+                ("vad", "false"),
+            ];
+            infer(client, launch.port, &fields, &silence, READY_TIMEOUT)
+                .await
+                .map_err(|failure| HelperError::WarmUp(describe(&failure)))?;
+        }
         Ok(Running {
             device: device_of(launch.backend, &process.output())?,
             process,
@@ -1534,43 +1537,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_helper_is_ready_only_after_it_answers_health_and_one_warm_up_without_voice_detection()
+    async fn the_helper_is_ready_once_it_answers_health_and_a_vulkan_one_after_a_warm_up_without_voice_detection()
      {
-        let scratch = Scratch::with_files("start");
-        let fake = Fake::new([Plan {
-            unready: 3,
-            ..Plan::default()
-        }]);
-        let recognizer = recognizer(&fake, WhisperBackend::Cpu, &scratch);
-        assert_eq!(
-            recognizer.device(),
-            None,
-            "nothing starts before it is asked for"
-        );
-        assert_eq!(fake.launches(), 0);
+        for (backend, output, warm_ups) in [
+            (WhisperBackend::Cpu, Vec::new(), 0),
+            (WhisperBackend::Vulkan, GPU_OUTPUT.to_vec(), 1),
+        ] {
+            let scratch = Scratch::with_files("start");
+            let fake = Fake::new([Plan {
+                unready: 3,
+                output,
+                ..Plan::default()
+            }]);
+            let recognizer = recognizer(&fake, backend, &scratch);
+            assert_eq!(
+                recognizer.device(),
+                None,
+                "nothing starts before it is asked for"
+            );
+            assert_eq!(fake.launches(), 0);
 
-        within(recognizer.load()).await.unwrap();
+            within(recognizer.load()).await.unwrap();
 
-        let helper = fake.helper(0);
-        assert!(
-            helper.server.health_calls.load(Ordering::SeqCst) >= 4,
-            "health was waited for"
-        );
-        let seen = helper.seen();
-        assert_eq!(seen.len(), 1, "one warm-up and nothing else");
-        assert_eq!(seen[0].field("vad"), Some("false"));
-        assert!(seen[0].samples().iter().all(|sample| *sample == 0));
-        assert_eq!(seen[0].samples().len(), 16_000, "one second");
-        assert_eq!(recognizer.device(), Some(Device::Cpu(Fallback::CpuChoice)));
-        assert_eq!(helper.launch.model, scratch.store().path(&FAKE_FILES.model));
-        assert_eq!(helper.launch.vad, scratch.store().path(&FAKE_FILES.vad));
-        assert_eq!(
-            helper.launch.executable,
-            scratch
-                .helpers()
-                .join("cpu")
-                .join(format!("whisper-server{}", std::env::consts::EXE_SUFFIX))
-        );
+            let helper = fake.helper(0);
+            assert!(
+                helper.server.health_calls.load(Ordering::SeqCst) >= 4,
+                "health was waited for"
+            );
+            let seen = helper.seen();
+            assert_eq!(
+                seen.len(),
+                warm_ups,
+                "{backend:?}: warm-ups and nothing else"
+            );
+            for warm_up in &seen {
+                assert_eq!(warm_up.field("vad"), Some("false"));
+                assert!(warm_up.samples().iter().all(|sample| *sample == 0));
+                assert_eq!(warm_up.samples().len(), 16_000, "one second");
+            }
+            assert_eq!(helper.launch.model, scratch.store().path(&FAKE_FILES.model));
+            assert_eq!(helper.launch.vad, scratch.store().path(&FAKE_FILES.vad));
+            assert_eq!(
+                helper.launch.executable,
+                scratch
+                    .helpers()
+                    .join(backend.folder())
+                    .join(format!("whisper-server{}", std::env::consts::EXE_SUFFIX))
+            );
+        }
     }
 
     #[tokio::test]
@@ -1796,8 +1810,12 @@ mod tests {
         );
 
         let seen = fake.helper(0).seen();
-        assert_eq!(seen.len(), 2, "the warm-up and the capture");
-        let capture = &seen[1];
+        assert_eq!(
+            seen.len(),
+            1,
+            "the capture alone; the CPU helper is not warmed up"
+        );
+        let capture = &seen[0];
         assert_eq!(
             capture.fields,
             [
@@ -1861,7 +1879,7 @@ mod tests {
         let stuck = fake.helper(0);
         tokio::select! {
             event = first.next_event() => panic!("the held request answered: {event:?}"),
-            () = stuck.seen_requests(2) => {}
+            () = stuck.seen_requests(1) => {}
         }
 
         first.cancel().await;
@@ -1875,11 +1893,11 @@ mod tests {
         assert_eq!(event, RecognizerEvent::Final("second text".to_owned()));
         assert_eq!(fake.launches(), 2);
         let fresh = fake.helper(1).seen();
-        assert_eq!(fresh.len(), 2, "a warm-up and the new capture only");
-        assert_eq!(fresh[1].samples().len(), 2 * FRAME_SAMPLES);
+        assert_eq!(fresh.len(), 1, "the new capture only");
+        assert_eq!(fresh[0].samples().len(), 2 * FRAME_SAMPLES);
         assert_eq!(
             stuck.seen().len(),
-            2,
+            1,
             "nothing reached the old helper afterwards"
         );
     }
@@ -1904,7 +1922,7 @@ mod tests {
         let stuck = fake.helper(0);
         tokio::select! {
             event = session.next_event() => panic!("the held request answered: {event:?}"),
-            () = stuck.seen_requests(2) => {}
+            () = stuck.seen_requests(1) => {}
         }
         session.close().await;
         fake.launched(2).await;
