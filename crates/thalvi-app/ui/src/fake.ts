@@ -259,6 +259,8 @@ export function fakeBackend(params: URLSearchParams): Backend {
     },
     onOpenPage: () => undefined,
     getHoldKeyUnavailable: () => Promise.resolve(null),
+    getAppStylesUnavailable: () => Promise.resolve(null),
+    getCurrentApp: () => Promise.resolve({ app: "firefox", title: "Gmail" }),
     getHoldKeyDefaults: () => Promise.resolve({ hold_key: "Alt+KeyZ", write_key: "Alt+KeyX" }),
     getStartAtLogin: () =>
       Promise.resolve(
@@ -303,18 +305,18 @@ export function fakeBackend(params: URLSearchParams): Backend {
     listSpeechModels: () => Promise.resolve(structuredClone(speechModels)),
     downloadSpeechModel: (name) =>
       new Promise((resolve) => {
-        speak({ name, percent: 0, status: "verifying", message: null });
+        speak({ name, percent: 0, status: "verifying", message: null, causes: [] });
         let percent = 0;
         const timer = setInterval(() => {
           percent += 10;
           if (percent < 100) {
-            speak({ name, percent, status: "downloading", message: null });
+            speak({ name, percent, status: "downloading", message: null, causes: [] });
             return;
           }
           clearInterval(timer);
           const model = speechModels.find((candidate) => candidate.name === name);
           if (model) model.cached = true;
-          speak({ name, percent: 100, status: "done", message: null });
+          speak({ name, percent: 100, status: "done", message: null, causes: [] });
           resolve();
         }, 400);
       }),

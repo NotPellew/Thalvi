@@ -84,15 +84,19 @@ sends two settings requests at once reaches it without the user, because
 
 ## Covers
 
-Sync commit: `8df760f8587cdcf268e878eea4a551a856057019`. [source.json](source.json)
+Sync commit: `bc83c62031c5768ff836ab35b762bad1541fbe24`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 
-Changes since the previous sync `f87174d1` were read: `8df760f` adds the
-overlay's failure sink and a replay of a failure that arrived before the tray,
-both inside `setup` and `follow_engine`. Neither writes `desktop.json` nor
-`AppState::config`, and neither takes the save lock. The model and its three
-invariants are unchanged.
+Changes since the previous sync `8df760f` were read: `bc83c62` (#464) registers
+two read-only Settings commands in `start` (the current app and why app styles
+may not apply) and adds agent tests for `writing.apps`; `writing.apps` is
+checked by the same config load as every other field. None of it writes
+`desktop.json` or `AppState::config`, or takes the save lock. The model and its
+three invariants are unchanged. The hashes describe that branch merged with main's
+word-list report (`e1981db`), which adds one test field in `agent.rs`, and its
+download failure report (#493), which changes what `download_speech_model`
+returns in `commands.rs` and `app.rs`; neither adds a writer.
 
 `app.rs`'s `run` now returns from `Launch::Watch` before setup, so a terminal
 view never opens the app, writes `desktop.json`, or takes the save lock.

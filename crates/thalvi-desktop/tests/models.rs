@@ -20,6 +20,7 @@ use thalvi_desktop::models::{
     Asset, CatalogSpeech, ListedSpeech, ModelError, ModelKind, ModelStore, SPOTTER, SpeechAssets,
     SpeechDownloads, SpeechProgress, WHISPER_TURBO,
 };
+use thalvi_desktop::report::causes;
 use thalvi_desktop::transducer::SpeechChoice;
 use thalvi_desktop::whisper::WhisperBackend;
 
@@ -49,6 +50,7 @@ async fn serve() -> (SocketAddr, tokio::task::JoinHandle<()>) {
         )
         .route("/other.onnx", get(|| async { "something else entirely" }))
         .route("/gone.onnx", get(|| async { StatusCode::NOT_FOUND }))
+        .route("/forbidden.onnx", get(|| async { StatusCode::FORBIDDEN }))
         .route(
             "/endless.onnx",
             get(|| async {
@@ -199,9 +201,107 @@ async fn a_failed_download_says_so_and_leaves_nothing_behind() {
     assert!(matches!(error, ModelError::Download { .. }));
     assert_eq!(
         error.to_string(),
-        "Could not download the wake model good.onnx. Check the internet connection and try again."
+        "Could not download the wake model good.onnx: the server refused it (HTTP 404 Not Found). Try again, and report it if it keeps happening."
     );
     assert_eq!(leftovers(&dir), Vec::<String>::new());
+}
+
+/// Serves one connection with `reply` written verbatim, then closes it.
+async fn serve_raw(reply: &'static [u8]) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("address");
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut request = [0; 1024];
+        let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, reply).await;
+    });
+    address
+}
+
+#[tokio::test]
+async fn a_failed_download_says_which_step_failed_and_keeps_the_causes_without_the_address() {
+    let (address, _server) = serve().await;
+    let refused = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.local_addr().expect("address")
+    };
+    let cut = serve_raw(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nsome bytes").await;
+    let sha = sha256(GOOD);
+    for (url, message, metric) in [
+        (
+            format!("http://{refused}/good.onnx?signature=secret"),
+            "could not connect to 127.0.0.1. Check the internet connection and try again.",
+            "connect",
+        ),
+        (
+            format!("http://{address}/forbidden.onnx?signature=secret"),
+            "the server refused it (HTTP 403 Forbidden). Try again, and report it if it keeps happening.",
+            "status:403",
+        ),
+        (
+            format!("http://{cut}/good.onnx?signature=secret"),
+            "the download broke off. Try again, and report it if it keeps happening.",
+            "body",
+        ),
+    ] {
+        let dir = dir("failure");
+        let error = ModelStore::in_dir(&dir)
+            .fetch(&asset(&url, &sha))
+            .await
+            .expect_err("fails");
+
+        assert_eq!(
+            error.to_string(),
+            format!("Could not download the speech model good.onnx: {message}")
+        );
+        assert_eq!(error.metric_kind(), metric, "{url}");
+        let causes = causes(&error);
+        assert!(!causes.is_empty(), "{url}");
+        assert!(
+            causes.iter().all(|cause| !cause.contains("signature")),
+            "{causes:?}"
+        );
+        assert_eq!(leftovers(&dir), Vec::<String>::new(), "{url}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_download_that_stalls_times_out_instead_of_hanging() {
+    let (address, _server) = serve().await;
+    let url = format!("http://{address}/stalls.onnx");
+    let sha = sha256(GOOD);
+
+    let error = ModelStore::in_dir(dir("timeout"))
+        .fetch(&asset(&url, &sha))
+        .await
+        .expect_err("times out");
+
+    assert_eq!(
+        error.to_string(),
+        "Could not download the speech model good.onnx: the download timed out. Check the internet connection and try again."
+    );
+    assert_eq!(error.metric_kind(), "timeout");
+    assert!(!causes(&error).is_empty(), "{error}");
+}
+
+#[tokio::test]
+async fn the_kind_of_a_failure_after_a_damaged_file_was_removed_is_the_failure_itself() {
+    let (address, _server) = serve().await;
+    let dir = dir("damaged-kind");
+    fs::create_dir_all(&dir).expect("dir");
+    fs::write(dir.join("good.onnx"), b"half a mod").expect("damaged file");
+    let url = format!("http://{address}/gone.onnx");
+    let sha = sha256(GOOD);
+
+    let error = ModelStore::in_dir(&dir)
+        .fetch(&asset(&url, &sha))
+        .await
+        .expect_err("cannot download");
+
+    assert_eq!(error.metric_kind(), "status:404");
 }
 
 #[tokio::test]
@@ -309,7 +409,7 @@ async fn a_damaged_file_is_removed_even_when_it_cannot_be_downloaded_again() {
     assert!(matches!(error, ModelError::Replaced { .. }));
     assert_eq!(
         error.to_string(),
-        "The stored speech model good.onnx was damaged, so it was removed. Could not download the speech model good.onnx. Check the internet connection and try again."
+        "The stored speech model good.onnx was damaged, so it was removed. Could not download the speech model good.onnx: the server refused it (HTTP 404 Not Found). Try again, and report it if it keeps happening."
     );
     assert_eq!(leftovers(&dir), Vec::<String>::new());
 }

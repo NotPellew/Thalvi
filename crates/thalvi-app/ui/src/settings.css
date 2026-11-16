@@ -45,6 +45,7 @@ input[type="checkbox"]::after { content: ""; position: absolute; left: 2px; top:
 input[type="checkbox"]:checked { background: var(--neon); }
 input[type="checkbox"]:checked::after { transform: translateX(16px); background: light-dark(#fff, #02120a); }
 .badge { font: 12px var(--mono); border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; }
+.ctl > .badge { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
 .badge[data-on="true"] { color: var(--neon); border-color: var(--neon); }
 
 .meter { display: block; width: 150px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
@@ -52,6 +53,9 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 
 .table, .cards { display: flex; flex-direction: column; gap: 6px; }
 .trow { display: flex; align-items: center; gap: 8px; }
+.trow.pick { min-width: 0; max-width: 100%; }
+.trow.pick > .stack { min-width: 0; max-width: 100%; }
+.trow.pick select { max-width: 100%; min-width: 0; box-sizing: border-box; }
 .trow .phrase { flex: 1; white-space: nowrap; font: 13px var(--mono); }
 .trow.file .unit:last-child { overflow-wrap: anywhere; }
 .trow.add { justify-content: flex-end; }

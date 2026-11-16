@@ -37,6 +37,30 @@ pub enum WritingSettingsError {
     OpeningPrompt(String),
     #[error("writing.openings has “{0}” twice.")]
     OpeningTwice(String),
+    #[error("writing.apps has a blank app.")]
+    App,
+    #[error("writing.apps has a blank prompt.")]
+    AppPrompt,
+}
+
+/// Which rule chose the writing prompt. The app name is never recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptSource {
+    Opening,
+    App,
+    Default,
+}
+
+impl PromptSource {
+    /// The metric field.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Opening => "opening",
+            Self::App => "app",
+            Self::Default => "default",
+        }
+    }
 }
 
 /// The words of `text` as matching compares them: lowercase, each run of characters that are
@@ -59,6 +83,17 @@ pub struct Opening {
     pub prompt: String,
 }
 
+/// A writing prompt for one app, optionally only when its window title contains `title`.
+/// `app` is the Hyprland class or the Windows executable name, stored trimmed.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppStyle {
+    pub app: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub prompt: String,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawWriting {
@@ -69,6 +104,8 @@ struct RawWriting {
     prompt: Option<String>,
     #[serde(default)]
     openings: Vec<Opening>,
+    #[serde(default)]
+    apps: Vec<AppStyle>,
 }
 
 /// The chat endpoint that writes dictation out: its base address, model, API key and the prompt
@@ -84,6 +121,8 @@ pub struct Writing {
     prompt: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     openings: Vec<Opening>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    apps: Vec<AppStyle>,
 }
 
 impl fmt::Debug for Writing {
@@ -98,15 +137,16 @@ impl fmt::Debug for Writing {
 impl Writing {
     /// # Errors
     /// Fails when `url` is not an `http` or `https` base URL without credentials, query or
-    /// fragment, `model` is blank, `prompt` is given and blank, or an opening has no word in its
-    /// phrase, a blank prompt or the same normalized phrase as another. `None` and the default
-    /// text both mean the default prompt.
+    /// fragment, `model` is blank, `prompt` is given and blank, an opening has no word in its
+    /// phrase, a blank prompt or the same normalized phrase as another, or an app style has a
+    /// blank app or prompt. `None` and the default text both mean the default prompt.
     pub fn new(
         url: &str,
         model: &str,
         api_key: String,
         prompt: Option<&str>,
         openings: Vec<Opening>,
+        apps: Vec<AppStyle>,
     ) -> Result<Self, WritingSettingsError> {
         let url = base_url(url).ok_or(WritingSettingsError::Url)?;
         let model = model.trim();
@@ -136,12 +176,33 @@ impl Writing {
                 prompt: prompt.to_owned(),
             });
         }
+        let mut styles = Vec::with_capacity(apps.len());
+        for style in apps {
+            let app = style.app.trim();
+            if app.is_empty() {
+                return Err(WritingSettingsError::App);
+            }
+            let prompt = style.prompt.trim();
+            if prompt.is_empty() {
+                return Err(WritingSettingsError::AppPrompt);
+            }
+            let title = style.title.and_then(|title| {
+                let title = title.trim();
+                (!title.is_empty()).then(|| title.to_owned())
+            });
+            styles.push(AppStyle {
+                app: app.to_owned(),
+                title,
+                prompt: prompt.to_owned(),
+            });
+        }
         Ok(Self {
             url,
             model: model.to_owned(),
             api_key,
             prompt,
             openings: checked,
+            apps: styles,
         })
     }
 
@@ -151,10 +212,36 @@ impl Writing {
         self.prompt.as_deref().unwrap_or(DEFAULT_PROMPT)
     }
 
-    /// The system message for `words`: the prompt of the opening they begin with, the longest
-    /// phrase winning, else [`prompt`](Self::prompt). Whole words only.
+    /// The system message for an explicit write of `words` into `window`: the opening they begin
+    /// with (longest phrase wins), else the first app style `window` matches, else
+    /// [`prompt`](Self::prompt). An opening and an app style are never combined. Whole words only.
+    /// `window` is `None` when nothing was bound or this desktop names no app.
     #[must_use]
-    pub fn prompt_for(&self, words: &str) -> &str {
+    pub fn prompt_for(&self, words: &str, window: Option<&crate::host::WindowApp>) -> &str {
+        match self.prompt_source(words, window) {
+            PromptSource::Opening => self.opening_prompt(words).unwrap_or_else(|| self.prompt()),
+            PromptSource::App => self.app_prompt(window).unwrap_or_else(|| self.prompt()),
+            PromptSource::Default => self.prompt(),
+        }
+    }
+
+    /// Which rule [`prompt_for`](Self::prompt_for) used. The app name is not part of the answer.
+    #[must_use]
+    pub fn prompt_source(
+        &self,
+        words: &str,
+        window: Option<&crate::host::WindowApp>,
+    ) -> PromptSource {
+        if self.opening_prompt(words).is_some() {
+            PromptSource::Opening
+        } else if self.app_prompt(window).is_some() {
+            PromptSource::App
+        } else {
+            PromptSource::Default
+        }
+    }
+
+    fn opening_prompt(&self, words: &str) -> Option<&str> {
         let words = normalize(words);
         self.openings
             .iter()
@@ -164,7 +251,24 @@ impl Writing {
                     .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
             })
             .max_by_key(|opening| opening.phrase.len())
-            .map_or_else(|| self.prompt(), |opening| opening.prompt.as_str())
+            .map(|opening| opening.prompt.as_str())
+    }
+
+    /// The first style whose app matches and whose title, when set, is contained in the window's.
+    fn app_prompt(&self, window: Option<&crate::host::WindowApp>) -> Option<&str> {
+        let window = window?;
+        self.apps
+            .iter()
+            .find(|style| {
+                style.app.eq_ignore_ascii_case(window.app())
+                    && style.title.as_ref().is_none_or(|title| {
+                        window
+                            .title()
+                            .to_ascii_lowercase()
+                            .contains(&title.to_ascii_lowercase())
+                    })
+            })
+            .map(|style| style.prompt.as_str())
     }
 
     /// The model named in each request.
@@ -190,7 +294,21 @@ impl Writing {
         client: &reqwest::Client,
         words: &str,
     ) -> Result<Reply, WritingError> {
-        self.ask(client, self.prompt_for(words), words).await
+        self.ask(client, self.prompt_for(words, None), words).await
+    }
+
+    /// Asks the endpoint to write `words` out under `prompt`. The request carries the words and
+    /// the prompt only: never the app name or the window title.
+    ///
+    /// # Errors
+    /// As [`start`](Self::start).
+    pub async fn ask_with(
+        &self,
+        client: &reqwest::Client,
+        prompt: &str,
+        words: &str,
+    ) -> Result<Reply, WritingError> {
+        self.ask(client, prompt, words).await
     }
 
     /// Asks the endpoint to merge `texts`, the transcripts of one capture, into one, under
@@ -258,6 +376,7 @@ impl TryFrom<RawWriting> for Writing {
             raw.api_key,
             raw.prompt.as_deref(),
             raw.openings,
+            raw.apps,
         )
     }
 }
@@ -445,12 +564,26 @@ mod tests {
             ("http://host/v1", "  ", Err(WritingSettingsError::Model)),
         ];
         for (url, model, expected) in cases {
-            let result = Writing::new(url, model, "secret".to_owned(), None, Vec::new())
-                .map(|writing| writing.url);
+            let result = Writing::new(
+                url,
+                model,
+                "secret".to_owned(),
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
+            .map(|writing| writing.url);
             assert_eq!(result, expected.map(str::to_owned), "{url:?} {model:?}");
         }
-        let writing =
-            Writing::new("http://host/v1", "m", "secret".to_owned(), None, Vec::new()).unwrap();
+        let writing = Writing::new(
+            "http://host/v1",
+            "m",
+            "secret".to_owned(),
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
         assert_eq!(writing.key(), "secret");
         assert_eq!(
             format!("{writing:?}"),
@@ -461,8 +594,15 @@ mod tests {
     #[test]
     fn the_prompt_in_effect_is_the_users_unless_it_is_blank_or_the_default() {
         let prompt = |given: Option<&str>| {
-            Writing::new("http://host/v1", "m", String::new(), given, Vec::new())
-                .map(|writing| (writing.prompt().to_owned(), writing.prompt.is_some()))
+            Writing::new(
+                "http://host/v1",
+                "m",
+                String::new(),
+                given,
+                Vec::new(),
+                Vec::new(),
+            )
+            .map(|writing| (writing.prompt().to_owned(), writing.prompt.is_some()))
         };
         let default = (DEFAULT_PROMPT.to_owned(), false);
         assert_eq!(prompt(None), Ok(default.clone()));
@@ -487,7 +627,14 @@ mod tests {
         prompt: Option<&str>,
         openings: Vec<Opening>,
     ) -> Result<Writing, WritingSettingsError> {
-        Writing::new("http://host/v1", "m", String::new(), prompt, openings)
+        Writing::new(
+            "http://host/v1",
+            "m",
+            String::new(),
+            prompt,
+            openings,
+            Vec::new(),
+        )
     }
 
     #[test]
@@ -515,9 +662,9 @@ mod tests {
             ("", "FALLBACK"),
         ];
         for (said, expected) in cases {
-            assert_eq!(writing.prompt_for(said), expected, "{said:?}");
+            assert_eq!(writing.prompt_for(said, None), expected, "{said:?}");
         }
-        assert_eq!(default.prompt_for("nothing like it"), DEFAULT_PROMPT);
+        assert_eq!(default.prompt_for("nothing like it", None), DEFAULT_PROMPT);
     }
 
     #[test]
@@ -550,6 +697,93 @@ mod tests {
         assert_eq!(
             with_openings(None, Vec::new()).unwrap().openings,
             Vec::<Opening>::new()
+        );
+    }
+
+    fn style(app: &str, title: Option<&str>, prompt: &str) -> AppStyle {
+        AppStyle {
+            app: app.to_owned(),
+            title: title.map(str::to_owned),
+            prompt: prompt.to_owned(),
+        }
+    }
+
+    fn with_styles(styles: Vec<AppStyle>) -> Result<Writing, WritingSettingsError> {
+        Writing::new(
+            "http://host/v1",
+            "m",
+            String::new(),
+            Some("FALLBACK"),
+            vec![opening("write me an email", "EMAIL")],
+            styles,
+        )
+    }
+
+    #[test]
+    fn an_explicit_write_uses_the_opening_then_the_first_matching_app_then_the_default() {
+        use crate::host::WindowApp;
+
+        let writing = with_styles(vec![
+            style("Slack.exe", None, "CHAT"),
+            style("firefox", Some("Gmail"), "MAIL"),
+            style("firefox", None, "BROWSER"),
+            style("kitty", None, "COMMIT"),
+        ])
+        .unwrap();
+        let slack = WindowApp::new("slack.exe", "general");
+        let gmail = WindowApp::new("Firefox", "Inbox - Gmail");
+        let firefox = WindowApp::new("firefox", "News");
+        let kitty = WindowApp::new("KITTY", "");
+        let other = WindowApp::new("code", "main.rs");
+        // (words, window, prompt, which rule chose it)
+        let cases = [
+            (
+                "write me an email to Anna",
+                Some(&slack),
+                "EMAIL",
+                PromptSource::Opening,
+            ),
+            ("I'm late", Some(&slack), "CHAT", PromptSource::App),
+            ("I'm late", Some(&gmail), "MAIL", PromptSource::App),
+            ("I'm late", Some(&firefox), "BROWSER", PromptSource::App),
+            ("fix the build", Some(&kitty), "COMMIT", PromptSource::App),
+            (
+                "fix the build",
+                Some(&other),
+                "FALLBACK",
+                PromptSource::Default,
+            ),
+            ("fix the build", None, "FALLBACK", PromptSource::Default),
+            (
+                "Write me an email",
+                Some(&kitty),
+                "EMAIL",
+                PromptSource::Opening,
+            ),
+        ];
+        for (said, window, prompt, source) in cases {
+            assert_eq!(writing.prompt_for(said, window), prompt, "{said:?}");
+            assert_eq!(writing.prompt_source(said, window), source, "{said:?}");
+        }
+    }
+
+    #[test]
+    fn app_styles_are_stored_trimmed_and_refused_when_blank() {
+        let stored = with_styles(vec![style("  kitty ", Some("  "), "  One line. ")]).unwrap();
+        assert_eq!(stored.apps, [style("kitty", None, "One line.")]);
+        let titled = with_styles(vec![style(" firefox ", Some(" Gmail "), " Polite. ")]).unwrap();
+        assert_eq!(titled.apps, [style("firefox", Some("Gmail"), "Polite.")]);
+        assert_eq!(
+            with_styles(vec![style("  ", None, "p")]).unwrap_err(),
+            WritingSettingsError::App
+        );
+        assert_eq!(
+            with_styles(vec![style("kitty", None, " \n")]).unwrap_err(),
+            WritingSettingsError::AppPrompt
+        );
+        assert_eq!(
+            with_styles(Vec::new()).unwrap().apps,
+            Vec::<AppStyle>::new()
         );
     }
 

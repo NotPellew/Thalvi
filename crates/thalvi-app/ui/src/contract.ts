@@ -125,6 +125,17 @@ export interface WritingOpening {
   prompt: string;
 }
 
+export interface WritingAppStyle {
+  app: string;
+  title?: string;
+  prompt: string;
+}
+
+export interface CurrentApp {
+  app: string;
+  title: string;
+}
+
 export interface WritingSettings {
   url: string;
   model: string;
@@ -134,6 +145,8 @@ export interface WritingSettings {
   prompt?: string;
   /** Absent when there are none. */
   openings?: WritingOpening[];
+  /** Absent when there are none. */
+  apps?: WritingAppStyle[];
 }
 export type LiveEntry = RealtimeEntry | OnDeviceEntry | OpenAiEntry;
 export type SpeechEntry = LiveEntry | ExtraEntry;
@@ -240,12 +253,23 @@ export interface WakeModelInfo {
   threshold: number;
 }
 
-/** One step of a speech model download; `message` is the plain reason, only with `failed`. */
+/** One step of a speech model download; `message` is the plain reason and `causes` what lay behind it, only with `failed`. */
 export interface SpeechModelProgress {
   name: string;
   percent: number;
   status: "verifying" | "downloading" | "done" | "failed";
   message: string | null;
+  causes: string[];
+}
+
+/** Why a speech model download failed: the plain reason, and the causes a copied report adds. */
+export class DownloadFailure extends Error {
+  constructor(
+    message: string,
+    readonly causes: string[],
+  ) {
+    super(message);
+  }
 }
 
 /** What the update is doing; mirrors `Phase` in crates/thalvi-app/src/update.rs. */
@@ -302,6 +326,10 @@ export interface Backend {
   onOpenPage(listener: (page: string) => void): void;
   /** Why this desktop offers no hold key to dictate with, or null where it does. */
   getHoldKeyUnavailable(): Promise<string | null>;
+  /** Why this desktop cannot match app styles, or null where it can. */
+  getAppStylesUnavailable(): Promise<string | null>;
+  /** The app focused before Settings, or the last bound target; null when neither is known. */
+  getCurrentApp(): Promise<CurrentApp | null>;
   /** The keys this desktop starts with, which Settings restores. */
   getHoldKeyDefaults(): Promise<HoldKeyDefaults>;
   /** Whether the OS starts Thalvi at login, read from the OS, and why Thalvi could not put its entry back on start. */
@@ -324,7 +352,7 @@ export interface Backend {
   /** The `.onnx` file the user picked, or null when they cancelled. */
   pickWakeModelFile(): Promise<string | null>;
   listSpeechModels(): Promise<SpeechModelInfo[]>;
-  /** Resolves when the model is on disk and verified; rejects with the plain reason it is not. */
+  /** Resolves when the model is on disk and verified; rejects with a `DownloadFailure`. */
   downloadSpeechModel(name: string): Promise<void>;
   onSpeechModelProgress(listener: (progress: SpeechModelProgress) => void): void;
   /** Where the model runs, or will run when it loads, in plain words: the GPU, or the CPU and why. */

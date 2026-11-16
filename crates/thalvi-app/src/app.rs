@@ -543,6 +543,8 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::list_microphones,
             commands::open_recordings,
             commands::get_hold_key_unavailable,
+            commands::get_app_styles_unavailable,
+            commands::get_current_app,
             commands::get_hold_key_defaults,
             commands::get_start_at_login,
             commands::set_start_at_login,
@@ -1055,7 +1057,9 @@ impl Running for Live {
         let state = self.0.state::<AppState>();
         match kind {
             Catalog::Wake => commands::download_wake(&state, name).await,
-            Catalog::Speech => commands::download_speech(&self.0, &state, name).await,
+            Catalog::Speech => commands::download_speech(&self.0, &state, name)
+                .await
+                .map_err(|failed| failed.message),
         }
     }
 

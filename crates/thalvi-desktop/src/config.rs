@@ -922,6 +922,14 @@ mod tests {
                 r#"{"writing": {"url": "http://x", "model": "m", "openings": [{"phrase": "A b", "prompt": "p"}, {"phrase": "a, B!", "prompt": "q"}]}}"#,
                 "writing.openings has “a b” twice.",
             ),
+            (
+                r#"{"writing": {"url": "http://x", "model": "m", "apps": [{"app": " ", "prompt": "p"}]}}"#,
+                "writing.apps has a blank app.",
+            ),
+            (
+                r#"{"writing": {"url": "http://x", "model": "m", "apps": [{"app": "kitty", "prompt": " \n"}]}}"#,
+                "writing.apps has a blank prompt.",
+            ),
         ] {
             let error = writing(json).unwrap_err().to_string();
             assert!(error.contains(expected), "{json}: {error}");
@@ -948,27 +956,46 @@ mod tests {
     }
 
     #[test]
-    fn writing_openings_round_trip_normalized_and_an_empty_list_is_not_written() {
+    fn writing_rules_round_trip_normalized_and_empty_lists_are_not_written() {
         let endpoint = json!({"url": "http://x", "model": "m"});
-        let written = |openings: serde_json::Value| {
-            let mut writing = endpoint.clone();
-            writing["openings"] = openings;
-            let config = parse(&json!({"writing": writing}).to_string()).unwrap();
-            let written = serde_json::to_value(&config).unwrap();
-            assert_eq!(parse(&written.to_string()).unwrap(), config);
-            written["writing"].clone()
-        };
-        assert_eq!(
-            written(json!([{"phrase": "Write me an e-mail", "prompt": " Short. "}]))["openings"],
-            json!([{"phrase": "write me an e mail", "prompt": "Short."}])
-        );
-        assert!(written(json!([])).get("openings").is_none());
-        let plain = parse(&json!({"writing": endpoint}).to_string()).unwrap();
-        assert!(
-            serde_json::to_value(&plain).unwrap()["writing"]
-                .get("openings")
-                .is_none()
-        );
+        for (field, input, normalized) in [
+            (
+                "openings",
+                json!([{"phrase": "Write me an e-mail", "prompt": " Short. "}]),
+                json!([{"phrase": "write me an e mail", "prompt": "Short."}]),
+            ),
+            (
+                "apps",
+                json!([
+                    {"app": " kitty ", "prompt": " One line. "},
+                    {"app": " firefox ", "title": " Gmail ", "prompt": " Polite. "},
+                    {"app": " editor ", "title": " ", "prompt": " Clear. "}
+                ]),
+                json!([
+                    {"app": "kitty", "prompt": "One line."},
+                    {"app": "firefox", "title": "Gmail", "prompt": "Polite."},
+                    {"app": "editor", "prompt": "Clear."}
+                ]),
+            ),
+        ] {
+            let written = |rules: serde_json::Value| {
+                let mut writing = endpoint.clone();
+                writing[field] = rules;
+                let config = parse(&json!({"writing": writing}).to_string()).unwrap();
+                let written = serde_json::to_value(&config).unwrap();
+                assert_eq!(parse(&written.to_string()).unwrap(), config);
+                written["writing"].clone()
+            };
+            assert_eq!(written(input)[field], normalized, "{field}");
+            assert!(written(json!([])).get(field).is_none(), "{field}");
+            let plain = parse(&json!({"writing": endpoint}).to_string()).unwrap();
+            assert!(
+                serde_json::to_value(&plain).unwrap()["writing"]
+                    .get(field)
+                    .is_none(),
+                "{field}"
+            );
+        }
     }
 
     #[test]

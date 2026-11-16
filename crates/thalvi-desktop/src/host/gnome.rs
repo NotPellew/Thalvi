@@ -8,7 +8,9 @@ use std::fmt;
 use std::path::Path;
 
 use super::command::{CommandRunner, SystemRunner, tool};
-use super::{App, Delivered, HoldSource, Host, HostError, PasteText, WebUrl};
+use super::{
+    App, AppMatchLimit, Delivered, HoldSource, Host, HostError, PasteText, WebUrl, WindowApp,
+};
 use crate::hold::{HoldChange, HoldKey, HoldKind};
 
 /// Where GNOME dictation goes: there is no window to bind, so the text waits on the clipboard.
@@ -82,6 +84,14 @@ impl<R: CommandRunner, T: Toolkit> Host for Gnome<R, T> {
 
     fn copies_only(&self) -> bool {
         true
+    }
+
+    fn writing_target(&self, _target: &Clipboard) -> Result<WindowApp, AppMatchLimit> {
+        Err(AppMatchLimit::Gnome)
+    }
+
+    fn recent_app(&self) -> Result<Option<WindowApp>, AppMatchLimit> {
+        Err(AppMatchLimit::Gnome)
     }
 
     fn capture_target(&self) -> Result<Clipboard, HostError> {
@@ -179,6 +189,17 @@ mod tests {
 
     fn typed(text: &str) -> PasteText {
         PasteText::new(text).unwrap()
+    }
+
+    #[test]
+    fn app_styles_are_unavailable_because_gnome_names_no_app() {
+        let host = host(|_, _| panic!("app matching must not run a command"));
+        assert_eq!(host.writing_target(&Clipboard), Err(AppMatchLimit::Gnome));
+        assert_eq!(host.recent_app(), Err(AppMatchLimit::Gnome));
+        assert_eq!(
+            AppMatchLimit::Gnome.reason(),
+            "GNOME doesn't say which app you're in, so app styles don't apply here."
+        );
     }
 
     #[test]

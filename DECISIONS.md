@@ -162,15 +162,13 @@ areas your change touches. Editing rules are in
 - **Writing is one direct chat call, words only.** "write that out" or the write key sends the recognized words to an
   OpenAI-compatible endpoint from Settings and pastes what streams back, line breaks included; no context, no Enter, 15 s at most;
   reasoning shows as thinking, never pasted, and the request says nothing about thinking; any failure pastes nothing and puts the words
-  on the clipboard. Why: no server needed, unsaid text never sent unread, strict endpoints refuse unknown fields. Rejected: the Thalvi server, app-aware tone, write-and-send, sending `enable_thinking`.
+  on the clipboard. Why: no server needed, unsaid text never sent unread, strict endpoints refuse unknown fields. Rejected: the Thalvi server, write-and-send, sending `enable_thinking`.
 - **The writing prompt is a stored override of one built-in default.** `writing.prompt` is the system message; it is
   saved only when it differs from the default, and a blank one is refused where the config loads. Why: users who never
   edited it get a better default later, and Settings, the agent surface and the file share one check. Rejected:
   storing the default text, a prompt without an endpoint.
-- **Opening phrases pick the writing prompt.** `writing.openings` maps a normalized phrase to a prompt; the words the writing call sends,
-  when they start with a phrase as whole words, get its prompt (longest wins), else `writing.prompt`; the words go as said, opening included.
-  Only an explicit write uses them. Why: small models follow one long prompt unevenly, and local matching adds no call. Rejected: dropping
-  the opening from the message, a switch per rule, a routing model call, inferring the target app, one prompt with a section per kind.
+- **Opening phrases, then the bound app, pick the writing prompt.** An explicit write whose words start with a `writing.openings` phrase as whole words gets its prompt (longest wins); else the first `writing.apps` style whose app (Hyprland class, Windows executable) and optional title fragment match the window bound at wake; else `writing.prompt`. Never combined; words go as said; app and title only match locally, never sent or recorded; GNOME names no window, so styles don't apply there.
+  Why: small models follow one long prompt unevenly, and local matching adds no call. Rejected: dropping the opening from the message, a switch per rule, a routing model call, combining an opening with an app style, one prompt with a section per kind.
 - **Hold release flush.** At release a hold sends 800 ms of generated silence, kept out of the recording, and pastes on the next
   final or after 250 ms. Why: a streaming recognizer emits a word only after audio past it; measured headless on the server
   recognizer, no last word lost in 336 releases (75% before when released on the word's end). Rejected: a fixed 500 ms tail;

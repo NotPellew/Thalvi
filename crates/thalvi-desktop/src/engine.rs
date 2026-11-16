@@ -474,6 +474,8 @@ pub struct Engine<R, W, C> {
     refused: bool,
     /// The wake word that opened the next capture.
     woke: Option<Woke>,
+    /// The window the capture in progress was bound to, for choosing a writing prompt.
+    writing_window: Option<crate::host::WindowApp>,
     /// The latest frames scored while listening.
     wake_clip: VecDeque<Queued>,
     key: Presses,
@@ -1077,6 +1079,7 @@ where
             wake_words: config.wake.enabled(),
             refused: false,
             woke: None,
+            writing_window: None,
             wake_clip: VecDeque::new(),
             key: Presses::new(parts.hold),
             listening: ListenState::Stopped,
@@ -1412,8 +1415,14 @@ where
     ///
     /// Call after [`listen`](Self::listen) returned [`WakeTrigger::Capture`] or
     /// [`WakeTrigger::Hold`]. Cancellation through [`EngineHandle::cancel`] applies to this call
-    /// only. Returns to listening in every case.
-    pub async fn capture(&mut self, frames: &mut impl FrameSource) -> CaptureOutcome {
+    /// only. Returns to listening in every case. `window` is the app bound at wake, used only to
+    /// choose a writing prompt; `None` when nothing was bound or this desktop names no app.
+    pub async fn capture(
+        &mut self,
+        frames: &mut impl FrameSource,
+        window: Option<crate::host::WindowApp>,
+    ) -> CaptureOutcome {
+        self.writing_window = window;
         self.cancel.borrow_and_update();
         self.set_state(EngineState::StartingCapture);
         let source = if frames.fed() { "file" } else { "microphone" };
@@ -2712,16 +2721,20 @@ where
         let deadline = started + writing::LIMIT;
         let mut first = FirstPieces::default();
         let mut text = String::new();
+        let prompt = settings.prompt_for(&words, self.writing_window.as_ref());
+        let source = settings.prompt_source(&words, self.writing_window.as_ref());
         let mut reply = match bounded(
             &mut self.cancel,
             deadline,
-            settings.start(&self.http, &words),
+            settings.ask_with(&self.http, prompt, &words),
         )
         .await
         .finish()
         {
             Ok(reply) => reply,
-            Err(stop) => return self.not_written(&words, stop, Some((started, first))),
+            Err(stop) => {
+                return self.not_written(&words, stop, Some((started, first, Some(source))));
+            }
         };
         loop {
             match bounded(&mut self.cancel, deadline, reply.next())
@@ -2742,48 +2755,59 @@ where
                 Ok(None) => break,
                 Err(stop) => {
                     let stop = stop.map(|error| first.explain(error));
-                    return self.not_written(&words, stop, Some((started, first)));
+                    return self.not_written(&words, stop, Some((started, first, Some(source))));
                 }
             }
         }
         let written = text.trim();
         if written.is_empty() {
-            return self.not_written(&words, Some(WritingError::Empty), Some((started, first)));
+            return self.not_written(
+                &words,
+                Some(WritingError::Empty),
+                Some((started, first, Some(source))),
+            );
         }
-        self.writing_metric("ok", started, first);
+        self.writing_metric("ok", started, first, Some(source));
         CaptureOutcome::Accepted(CaptureRequest {
             route: CaptureRoute::Paste,
             text: written.to_owned(),
         })
     }
 
-    fn writing_metric(&self, outcome: &str, started: Instant, first: FirstPieces) {
+    fn writing_metric(
+        &self,
+        outcome: &str,
+        started: Instant,
+        first: FirstPieces,
+        source: Option<writing::PromptSource>,
+    ) {
         let Some(settings) = &self.writing else {
             return;
         };
-        self.recorder.metric(
-            Event::Writing,
-            outcome,
-            Some(started.elapsed()),
-            json!({
-                "model": settings.model(),
-                "first_token_ms": first.text.map(millis),
-                "first_reasoning_ms": first.reasoning.map(millis),
-            }),
-        );
+        let mut fields = json!({
+            "model": settings.model(),
+            "first_token_ms": first.text.map(millis),
+            "first_reasoning_ms": first.reasoning.map(millis),
+        });
+        if let Some(source) = source {
+            fields["prompt_source"] = json!(source.as_str());
+        }
+        self.recorder
+            .metric(Event::Writing, outcome, Some(started.elapsed()), fields);
     }
 
     /// The outcome of a writing call that gave no text: `error`, or a cancel when `None`.
-    /// `call` is when the call started and what had arrived, `None` when none was made.
+    /// `call` is when the call started, what had arrived and which prompt was chosen, `None`
+    /// when none was made.
     fn not_written(
         &self,
         words: &str,
         error: Option<WritingError>,
-        call: Option<(Instant, FirstPieces)>,
+        call: Option<(Instant, FirstPieces, Option<writing::PromptSource>)>,
     ) -> CaptureOutcome {
         let outcome = error.map_or("cancelled", WritingError::kind);
         match call {
-            Some((started, first)) => self.writing_metric(outcome, started, first),
+            Some((started, first, source)) => self.writing_metric(outcome, started, first, source),
             None => self
                 .recorder
                 .metric(Event::Writing, outcome, None, Value::Null),

@@ -4,7 +4,16 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AudioStatus, Backend, Draft, HistoryEntry, HoldKeyDefaults, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+import { DownloadFailure, errorText } from "./contract.ts";
+import type { AudioStatus, Backend, CurrentApp, Draft, HistoryEntry, HoldKeyDefaults, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+
+/** The rejection of `download_speech_model`, which carries `{ message, causes }`, as a typed error. */
+function downloadFailure(rejection: unknown): DownloadFailure {
+  if (typeof rejection === "object" && rejection !== null && "message" in rejection && typeof rejection.message === "string" && "causes" in rejection && Array.isArray(rejection.causes)) {
+    return new DownloadFailure(rejection.message, rejection.causes.filter((cause): cause is string => typeof cause === "string"));
+  }
+  return new DownloadFailure(errorText(rejection), []);
+}
 
 export function tauriBackend(): Backend {
   return {
@@ -50,6 +59,8 @@ export function tauriBackend(): Backend {
       });
     },
     getHoldKeyUnavailable: () => invoke<string | null>("get_hold_key_unavailable"),
+    getAppStylesUnavailable: () => invoke<string | null>("get_app_styles_unavailable"),
+    getCurrentApp: () => invoke<CurrentApp | null>("get_current_app"),
     getHoldKeyDefaults: () => invoke<HoldKeyDefaults>("get_hold_key_defaults"),
     getStartAtLogin: () => invoke<SwitchState>("get_start_at_login"),
     setStartAtLogin: (on) => invoke<undefined>("set_start_at_login", { on }),
@@ -69,7 +80,10 @@ export function tauriBackend(): Backend {
       return typeof picked === "string" ? picked : null;
     },
     listSpeechModels: () => invoke<SpeechModelInfo[]>("list_speech_models"),
-    downloadSpeechModel: (name) => invoke<undefined>("download_speech_model", { name }),
+    downloadSpeechModel: (name) =>
+      invoke<undefined>("download_speech_model", { name }).catch((rejection: unknown) => {
+        throw downloadFailure(rejection);
+      }),
     onSpeechModelProgress: (listener) => {
       void listen<SpeechModelProgress>("thalvi://speech-model-progress", (event) => {
         listener(event.payload);

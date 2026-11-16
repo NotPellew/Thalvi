@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::device::{Device, Export};
-use crate::report::UserError;
+use crate::report::{CertificateProblem, UserError};
 use crate::transducer::SpeechChoice;
 use crate::whisper::WhisperBackend;
 
@@ -625,13 +625,11 @@ impl ListedSpeech {
 pub enum ModelError {
     #[error("Thalvi could not find a folder to keep its models in.")]
     NoDataDir,
-    #[error(
-        "Could not download the {} {file}. Check the internet connection and try again.",
-        kind.noun()
-    )]
+    #[error("Could not download the {} {file}: {failure}", kind.noun())]
     Download {
         kind: ModelKind,
         file: String,
+        failure: DownloadFailure,
         #[source]
         source: reqwest::Error,
     },
@@ -660,11 +658,90 @@ pub enum ModelError {
     },
 }
 
+/// Which step of a download failed, as far as the user can act on it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DownloadFailure {
+    #[error("could not connect to {host}. Check the internet connection and try again.")]
+    Connect { host: String },
+    #[error("the download timed out. Check the internet connection and try again.")]
+    Timeout,
+    #[error("the server refused it (HTTP {0}). Try again, and report it if it keeps happening.")]
+    Status(reqwest::StatusCode),
+    #[error(
+        "the server's certificate was not trusted. Check this computer's date and time, or ask your IT team about the company certificate, then try again."
+    )]
+    Tls,
+    #[error("the download broke off. Try again, and report it if it keeps happening.")]
+    Broken,
+}
+
+impl DownloadFailure {
+    fn of(error: &reqwest::Error) -> Self {
+        if error.is_timeout() {
+            Self::Timeout
+        } else if let Some(status) = error.status() {
+            Self::Status(status)
+        } else if error.is_connect() {
+            if CertificateProblem::from_error(error).is_some() {
+                Self::Tls
+            } else {
+                Self::Connect {
+                    host: error
+                        .url()
+                        .and_then(|url| url.host_str())
+                        .unwrap_or("the server")
+                        .to_owned(),
+                }
+            }
+        } else {
+            Self::Broken
+        }
+    }
+}
+
+impl ModelError {
+    fn download(kind: ModelKind, file: &str, source: reqwest::Error) -> Self {
+        Self::Download {
+            kind,
+            file: file.to_owned(),
+            failure: DownloadFailure::of(&source),
+            // The signed CDN address in the error's text would reach the report.
+            source: source.without_url(),
+        }
+    }
+
+    /// What failed, for the opt-in metrics: `connect`, `timeout`, `status:<code>`, `tls`, `body`,
+    /// `checksum`, `io`, `no_data_dir` or `already_downloading`.
+    #[must_use]
+    pub fn metric_kind(&self) -> String {
+        match self {
+            Self::NoDataDir => "no_data_dir".to_owned(),
+            Self::Download { failure, .. } => match failure {
+                DownloadFailure::Connect { .. } => "connect".to_owned(),
+                DownloadFailure::Timeout => "timeout".to_owned(),
+                DownloadFailure::Status(status) => format!("status:{}", status.as_u16()),
+                DownloadFailure::Tls => "tls".to_owned(),
+                DownloadFailure::Broken => "body".to_owned(),
+            },
+            Self::Checksum { .. } => "checksum".to_owned(),
+            Self::Replaced { cause, .. } => cause.metric_kind(),
+            Self::AlreadyDownloading { .. } => "already_downloading".to_owned(),
+            Self::Io { .. } => "io".to_owned(),
+        }
+    }
+}
+
 impl UserError for ModelError {
     fn headline(&self) -> &'static str {
         match self {
             Self::NoDataDir => "No folder to keep models in",
-            Self::Download { .. } => "Download failed — check internet",
+            Self::Download { failure, .. } => match failure {
+                DownloadFailure::Connect { .. } => "Can't reach the download server",
+                DownloadFailure::Timeout => "Download timed out",
+                DownloadFailure::Status(_) => "Download refused by server",
+                DownloadFailure::Tls => "Download certificate not trusted",
+                DownloadFailure::Broken => "Download broke off",
+            },
             Self::Checksum { .. } => "Downloaded model was damaged",
             Self::Replaced { .. } => "Stored model was damaged",
             Self::AlreadyDownloading { .. } => "Model is already downloading",
@@ -760,11 +837,7 @@ impl ModelStore {
             dir: self.dir.clone(),
             source,
         };
-        let net = |source| ModelError::Download {
-            kind: asset.kind,
-            file: asset.file_name.to_owned(),
-            source,
-        };
+        let net = |source| ModelError::download(asset.kind, asset.file_name, source);
         tokio::fs::create_dir_all(path.parent().unwrap_or(&self.dir))
             .await
             .map_err(io)?;

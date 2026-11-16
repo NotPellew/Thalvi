@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry, Status, UpdateState } from "./contract.ts";
+import { DownloadFailure } from "./contract.ts";
 import settingsCss from "./settings.css?raw";
 import settingsLooksCss from "./settings-looks.css?raw";
 import { fakeBackend } from "./fake.ts";
@@ -171,7 +172,7 @@ describe("pages", () => {
         id: "chat",
         title: "Chat model",
         groups: {
-          Writing: ["writing endpoint address", "writing model", "writing api key", "writing prompt", "opening phrases"],
+          Writing: ["writing endpoint address", "writing model", "writing api key", "writing prompt", "opening phrases", "app styles"],
         },
       },
       {
@@ -1768,7 +1769,7 @@ describe("the speech model catalog", () => {
 
     // A download finishes without a state change, so its end makes the row ask again too.
     stub.backend.speechDevice.mockResolvedValue("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
-    stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null });
+    stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null, causes: [] });
     await settle();
     expect(row()?.querySelector(".device")?.textContent).toBe("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
 
@@ -1829,13 +1830,13 @@ describe("the speech model catalog", () => {
     expect(download().disabled).toBe(true);
     expect(text("[role=status]")).toBe("Checking files…");
 
-    stub.speechProgress({ name: "nemotron_160ms", percent: 40, status: "downloading", message: null });
+    stub.speechProgress({ name: "nemotron_160ms", percent: 40, status: "downloading", message: null, causes: [] });
     expect(text("[role=status]")).toBe("Downloading… 40%");
     expect(meter().value).toBe(40);
     expect(meter().hidden).toBe(false);
     expect(text(".badge")).toBe("Not downloaded");
 
-    stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null });
+    stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null, causes: [] });
     finish();
     await settle();
     expect(text(".badge")).toBe("Downloaded");
@@ -1860,9 +1861,36 @@ describe("the speech model catalog", () => {
     expect(text(".badge")).toBe("Downloaded");
   });
 
+  it("copies the report of a failed download with its causes, and only after a failure", async () => {
+    const stub = await openCatalog();
+    const copy = (): HTMLButtonElement | undefined => [...card().querySelectorAll("button")].find((candidate) => candidate.textContent.startsWith("Cop"));
+    expect(copy()?.hidden).toBe(true);
+
+    const message = "Could not download the speech model encoder: could not connect to huggingface.co. Check the internet connection and try again.";
+    stub.backend.downloadSpeechModel.mockRejectedValueOnce(new DownloadFailure(message, ["error sending request", "connection refused"]));
+    download().click();
+    await settle();
+    expect(alert()).toBe(message);
+    expect(copy()?.hidden).toBe(false);
+
+    stub.backend.copyReport.mockRejectedValueOnce("No clipboard tool is installed.");
+    copy()?.click();
+    await settle();
+    expect(card().textContent).toContain("Could not copy: No clipboard tool is installed.");
+    expect(copy()?.textContent).toBe("Copy report");
+
+    copy()?.click();
+    await settle();
+    expect(stub.backend.copyReport).toHaveBeenLastCalledWith(message, ["error sending request", "connection refused"]);
+    expect(copy()?.textContent).toBe("Copied");
+
+    download().click();
+    expect(copy()?.hidden).toBe(true);
+  });
+
   it("shows the reason from a failed event too", async () => {
     const stub = await openCatalog();
-    stub.speechProgress({ name: "nemotron_160ms", percent: 0, status: "failed", message: "The download did not match its checksum." });
+    stub.speechProgress({ name: "nemotron_160ms", percent: 0, status: "failed", message: "The download did not match its checksum.", causes: [] });
     expect(alert()).toBe("The download did not match its checksum.");
   });
 
@@ -1912,7 +1940,7 @@ describe("the speech model catalog", () => {
 
   it("keeps showing the download of a model while another one is picked", async () => {
     const stub = await openCatalog();
-    stub.speechProgress({ name: "unified_160ms", percent: 40, status: "downloading", message: null });
+    stub.speechProgress({ name: "unified_160ms", percent: 40, status: "downloading", message: null, causes: [] });
     expect(rowOf("Speech model").querySelector(".badge")?.textContent).toBe("Not downloaded");
     choose(picker(), "unified_160ms");
     expect(text("[role=status]")).toBe("Downloading… 40%");
@@ -2128,6 +2156,157 @@ describe("writing", () => {
       await settle();
       expect(notice()).toBe("writing.openings has a blank prompt for “write me an email”.");
       expect(promptOf("write me an email").value).toBe("  ");
+    });
+  });
+
+  describe("app styles", () => {
+    const saved = { url: endpoint.url, model: endpoint.model, has_key: true };
+    const style = { app: "firefox", prompt: "Polite email." };
+    const rows = (): HTMLElement => rowOf("App styles");
+    const field = (label: string): HTMLInputElement | HTMLTextAreaElement =>
+      rows().querySelector(`[aria-label="${label}"]`) as HTMLInputElement | HTMLTextAreaElement;
+    const notice = (): string => rows().querySelector(".ctl > .stack > .note:not([hidden])")?.textContent ?? "";
+
+    it.each([undefined, "Be brief."])("adds by name with a copy of the Writing prompt (%s)", async (prompt) => {
+      const writing = { ...saved, ...(prompt === undefined ? {} : { prompt }) };
+      const stub = await open({ ...SETTINGS, writing });
+      goTo("chat");
+      within(rows(), "Add by name").click();
+      typeIn(field("New app"), "  Slack.exe  ");
+      within(rows(), "Add").click();
+      await settle();
+      expect(sent(stub).writing).toEqual({ ...writing, apps: [{ app: "Slack.exe", prompt: prompt ?? SETTINGS.writing_default_prompt }] });
+      expect(field("Prompt for app “Slack.exe”").value).toBe(prompt ?? SETTINGS.writing_default_prompt);
+      expect(field("Title contains for “Slack.exe”").getAttribute("placeholder")).toBe("—");
+      expect(field("New app").value).toBe("");
+      expect(document.activeElement).toBe(within(rows(), "Add by name"));
+      expect(rows().textContent).toContain("The app name and title are only matched on this computer and are never sent to the writing model.");
+      expect(rows().textContent).toContain("A spoken opening phrase wins over an app style.");
+    });
+
+    it.each(["Gmail", ""])("offers the current app's title and lets it be cleared before adding (%s)", async (title) => {
+      const stub = await open({ ...SETTINGS, writing: saved });
+      stub.backend.getCurrentApp.mockResolvedValue({ app: "firefox", title: "Gmail" });
+      goTo("chat");
+      within(rows(), "Add the app you're in now").click();
+      await settle();
+      expect(stub.backend.getCurrentApp).toHaveBeenCalledOnce();
+      expect(field("New app").value).toBe("firefox");
+      expect(field("New title contains (optional)").value).toBe("Gmail");
+      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+      typeIn(field("New title contains (optional)"), title);
+      within(rows(), "Add").click();
+      await settle();
+      expect(sent(stub).writing?.apps).toEqual([{ app: "firefox", ...(title === "" ? {} : { title }), prompt: SETTINGS.writing_default_prompt }]);
+    });
+
+    it.each([
+      ["App", undefined, "kitty", { app: "kitty" }],
+      ["Prompt for app", undefined, "One-line commit message.", { prompt: "One-line commit message." }],
+      ["Title contains", undefined, "  Gmail  ", { title: "Gmail" }],
+      ["Title contains", "Gmail", "  ", {}],
+    ] as const)("saves an edit of %s from title %s to %s, keeping the other style", async (label, title, value, changed) => {
+      const apps = [{ ...style, ...(title === undefined ? {} : { title }) }, { ...style, title: "Work", prompt: "Work email." }];
+      const stub = await open({ ...SETTINGS, writing: { ...saved, apps } });
+      goTo("chat");
+      type(field(`${label}${label === "Prompt for app" ? "" : " for"} “firefox”`), value);
+      await settle();
+      expect(sent(stub).writing?.apps).toEqual([{ ...style, ...changed }, apps[1]]);
+    });
+
+    it("removes only the chosen style and drops apps from settings when the last is gone", async () => {
+      const apps = [style, { ...style, title: "Work", prompt: "Work email." }];
+      const openings = [{ phrase: "write an email", prompt: "Email." }];
+      const stub = await open({ ...SETTINGS, writing: { ...saved, apps, openings } });
+      goTo("chat");
+      const remove = (): HTMLButtonElement => rows().querySelector('button[aria-label="Remove app style for “firefox”"]') as HTMLButtonElement;
+      remove().click();
+      await settle();
+      expect(sent(stub).writing).toEqual({ ...saved, apps: [apps[1]], openings });
+      remove().click();
+      await settle();
+      expect(sent(stub).writing).toEqual({ ...saved, openings });
+      expect(stub.backend.saveSettings).toHaveBeenLastCalledWith({ writing: { apps: null } });
+      expect(rows().querySelector("textarea")).toBeNull();
+    });
+
+    it.each([
+      [saved, "  ", "Type the app name to add first."],
+      [null, "firefox", "Set the writing endpoint first: the address and the model."],
+    ])("refuses an add with endpoint %s and app %s", async (writing, app, message) => {
+      const stub = await open({ ...SETTINGS, writing });
+      goTo("chat");
+      within(rows(), "Add by name").click();
+      typeIn(field("New app"), app);
+      within(rows(), "Add").click();
+      await settle();
+      expect(notice()).toBe(message);
+      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+      expect(field("New app").value).toBe(app);
+    });
+
+    it.each(["add", "prompt", "remove"])("shows a refused %s in the section and keeps the saved list", async (action) => {
+      const stub = await open({ ...SETTINGS, writing: { ...saved, apps: [style] } });
+      const refusal = "Thalvi could not save the app style: the config file is read-only.";
+      stub.backend.saveSettings.mockRejectedValue(refusal);
+      goTo("chat");
+      if (action === "add") {
+        within(rows(), "Add by name").click();
+        typeIn(field("New app"), "kitty");
+        within(rows(), "Add").click();
+      } else if (action === "prompt") {
+        type(field("Prompt for app “firefox”"), "Be brief.");
+      } else {
+        within(rows(), "Remove").click();
+      }
+      await settle();
+      expect(notice()).toBe(refusal);
+      expect(stub.applied()).toEqual([]);
+      expect(field("App for “firefox”").value).toBe("firefox");
+      expect(rows().querySelector(".applied")?.textContent ?? "").toBe("");
+    });
+
+    it.each([false, true])("explains an unknown current app or a lookup failure (failure %s)", async (failure) => {
+      const stub = await open({ ...SETTINGS, writing: saved });
+      if (failure) stub.backend.getCurrentApp.mockRejectedValue("Thalvi could not read the current app.");
+      goTo("chat");
+      within(rows(), "Add the app you're in now").click();
+      await settle();
+      expect(notice()).toBe(failure ? "Thalvi could not read the current app." : "Thalvi doesn't know which app you were in yet. Choose Add by name, or write into the app once and try again.");
+      expect(field("New app").closest("[hidden]")).not.toBeNull();
+      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    });
+
+    it("shows GNOME's reason and the existing app styles read-only", async () => {
+      const apps = [style, { app: "kitty", title: "Thalvi", prompt: "One-line commit message." }];
+      const stub = stubBackend({ ...SETTINGS, writing: { ...saved, apps } });
+      const reason = "GNOME doesn't say which app you're in, so app styles don't apply here.";
+      stub.backend.getAppStylesUnavailable.mockResolvedValue(reason);
+      mountSettings(root, stub.backend);
+      await settle();
+      goTo("chat");
+      expect(rows().textContent).toContain(reason);
+      expect(rows().textContent).toContain("firefox");
+      expect(rows().textContent).toContain("Title contains: —");
+      expect(rows().textContent).toContain("Title contains: Thalvi");
+      expect(Array.from(rows().querySelectorAll("textarea"), (area) => [area.value, area.readOnly])).toEqual(apps.map((app) => [app.prompt, true]));
+      expect(rows().querySelector("input, button")).toBeNull();
+      expect(stub.backend.getCurrentApp).not.toHaveBeenCalled();
+      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { apps: [style] },
+      { openings: [{ phrase: "write an email", prompt: "Email." }] },
+    ])("refuses to clear an endpoint that still has rules (%s)", async (rules) => {
+      const stub = await open({ ...SETTINGS, writing: { ...saved, ...rules } });
+      goTo("chat");
+      type(control("Writing endpoint address", "input"), "");
+      await settle();
+      type(control("Writing model", "input"), "");
+      await settle();
+      expect(reason("Writing model")).toBe("Set the address and the model of the writing endpoint first.");
+      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
     });
   });
 
@@ -2463,10 +2642,32 @@ describe("live controls", () => {
     expect(refusal()).toBe("");
   });
 
+  it.each<[string, string | null, string, string]>([
+    ["the system default", null, "Default Audio Device", "System default (Default Audio Device)"],
+    ["a named device", "USB Microphone", "USB Microphone", "USB Microphone"],
+  ])("names the open microphone when %s is chosen", async (_chosen, selected, active, shown) => {
+    const stub = await open({ ...SETTINGS, microphone: selected });
+    goTo("listening");
+    stub.audio({ selected, active, paused: false, problem: null });
+    expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe(shown);
+  });
+
+  it("lays the microphone picker out like the wake model row", async () => {
+    await open();
+    goTo("listening");
+    const microphone = rowOf("Microphone");
+    const wake = rowOf("Wake model (dictation)");
+    expect(microphone.classList.contains("wide")).toBe(wake.classList.contains("wide"));
+    expect(microphone.querySelector(".stack.wide .trow.pick select")).not.toBeNull();
+    expect(microphone.querySelector(".what small")?.textContent).toBe(
+      "Choosing a device opens it right away, or after the capture that is running.",
+    );
+  });
+
   it("shows the active microphone separately from the chosen one and stays paused after choosing while paused", async () => {
     const stub = await open();
     goTo("listening");
-    expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe("Built-in");
+    expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe("System default (Built-in)");
     stub.emit({ state: "paused" });
     expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe("None — no microphone is open");
     choose(control("Microphone", "select"), "USB Microphone");
