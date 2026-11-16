@@ -253,12 +253,23 @@ export interface WakeModelInfo {
   threshold: number;
 }
 
-/** One step of a speech model download; `message` is the plain reason, only with `failed`. */
+/** One step of a speech model download; `message` is the plain reason and `causes` what lay behind it, only with `failed`. */
 export interface SpeechModelProgress {
   name: string;
   percent: number;
   status: "verifying" | "downloading" | "done" | "failed";
   message: string | null;
+  causes: string[];
+}
+
+/** Why a speech model download failed: the plain reason, and the causes a copied report adds. */
+export class DownloadFailure extends Error {
+  constructor(
+    message: string,
+    readonly causes: string[],
+  ) {
+    super(message);
+  }
 }
 
 /** What the update is doing; mirrors `Phase` in crates/thalvi-app/src/update.rs. */
@@ -341,7 +352,7 @@ export interface Backend {
   /** The `.onnx` file the user picked, or null when they cancelled. */
   pickWakeModelFile(): Promise<string | null>;
   listSpeechModels(): Promise<SpeechModelInfo[]>;
-  /** Resolves when the model is on disk and verified; rejects with the plain reason it is not. */
+  /** Resolves when the model is on disk and verified; rejects with a `DownloadFailure`. */
   downloadSpeechModel(name: string): Promise<void>;
   onSpeechModelProgress(listener: (progress: SpeechModelProgress) => void): void;
   /** Where the model runs, or will run when it loads, in plain words: the GPU, or the CPU and why. */

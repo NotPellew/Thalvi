@@ -1057,7 +1057,9 @@ impl Running for Live {
         let state = self.0.state::<AppState>();
         match kind {
             Catalog::Wake => commands::download_wake(&state, name).await,
-            Catalog::Speech => commands::download_speech(&self.0, &state, name).await,
+            Catalog::Speech => commands::download_speech(&self.0, &state, name)
+                .await
+                .map_err(|failed| failed.message),
         }
     }
 

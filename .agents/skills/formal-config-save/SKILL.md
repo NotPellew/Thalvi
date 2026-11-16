@@ -94,7 +94,9 @@ may not apply) and adds agent tests for `writing.apps`; `writing.apps` is
 checked by the same config load as every other field. None of it writes
 `desktop.json` or `AppState::config`, or takes the save lock. The model and its
 three invariants are unchanged. The hashes describe that branch merged with main's
-word-list report (`e1981db`), which adds one test field in `agent.rs` and no writer.
+word-list report (`e1981db`), which adds one test field in `agent.rs`, and its
+download failure report (#493), which changes what `download_speech_model`
+returns in `commands.rs` and `app.rs`; neither adds a writer.
 
 `app.rs`'s `run` now returns from `Launch::Watch` before setup, so a terminal
 view never opens the app, writes `desktop.json`, or takes the save lock.
