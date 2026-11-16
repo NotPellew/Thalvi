@@ -9,7 +9,7 @@ use thalvi_desktop::capture::CaptureFullError;
 use thalvi_desktop::engine::{CaptureError, ListenError};
 use thalvi_desktop::host::HostError;
 use thalvi_desktop::metrics::RecorderError;
-use thalvi_desktop::models::{ModelError, ModelKind};
+use thalvi_desktop::models::{DownloadFailure, ModelError, ModelKind};
 use thalvi_desktop::recognizer::{
     ConnectFailure, Detail, RecognizerError, SpeechSource, TranscriptionFailure,
 };
@@ -97,9 +97,10 @@ fn recognition() -> Cases {
             Box::new(RecognizerError::from(ModelError::Download {
                 kind: ModelKind::Speech,
                 file: "f".to_owned(),
+                failure: DownloadFailure::Timeout,
                 source: download(),
             })),
-            "Download failed — check internet",
+            "Download timed out",
         ),
         (
             Box::new(CaptureError::Recognizer(unreachable())),
@@ -244,14 +245,6 @@ fn everything_else() -> Cases {
             "Wake model can't be used",
         ),
         (
-            Box::new(ModelError::Download {
-                kind: ModelKind::Speech,
-                file: "f".to_owned(),
-                source: download(),
-            }),
-            "Download failed — check internet",
-        ),
-        (
             Box::new(ModelError::Checksum {
                 kind: ModelKind::Wake,
                 file: "f".to_owned(),
@@ -318,5 +311,34 @@ fn each_error_kind_has_a_headline_that_fits_the_overlay() {
             headline.chars().count() <= MAX_HEADLINE_CHARS,
             "{headline} is longer than {MAX_HEADLINE_CHARS} characters"
         );
+    }
+}
+
+#[test]
+fn each_download_failure_has_its_own_headline_that_fits_the_overlay() {
+    for (failure, expected) in [
+        (
+            DownloadFailure::Connect {
+                host: "h".to_owned(),
+            },
+            "Can't reach the download server",
+        ),
+        (DownloadFailure::Timeout, "Download timed out"),
+        (
+            DownloadFailure::Status(reqwest::StatusCode::FORBIDDEN),
+            "Download refused by server",
+        ),
+        (DownloadFailure::Tls, "Download certificate not trusted"),
+        (DownloadFailure::Broken, "Download broke off"),
+    ] {
+        let headline = ModelError::Download {
+            kind: ModelKind::Speech,
+            file: "f".to_owned(),
+            failure,
+            source: download(),
+        }
+        .headline();
+        assert_eq!(headline, expected);
+        assert!(headline.chars().count() <= MAX_HEADLINE_CHARS, "{headline}");
     }
 }
