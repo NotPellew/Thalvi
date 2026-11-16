@@ -234,6 +234,143 @@ pub async fn download_wake(state: &AppState, name: &str) -> Result<(), String> {
     result.map(|_| ()).map_err(|error| error.to_string())
 }
 
+/// The local chat download and the runtime selected on this computer.
+#[tauri::command]
+pub async fn get_chat_model(
+    build: Option<thalvi_desktop::chat::Build>,
+    state: State<'_, AppState>,
+) -> Result<thalvi_desktop::chat::Info, String> {
+    chat_model(&state, build).await
+}
+
+/// The local chat model's Settings view.
+///
+/// # Errors
+/// Why the model store or hardware check could not be reached.
+pub async fn chat_model(
+    state: &AppState,
+    build: Option<thalvi_desktop::chat::Build>,
+) -> Result<thalvi_desktop::chat::Info, String> {
+    use thalvi_desktop::chat::{Build, Info};
+    let store = ModelStore::per_user().map_err(|error| error.to_string())?;
+    let requested = build.or_else(|| {
+        state
+            .config()
+            .writing
+            .as_ref()
+            .and_then(thalvi_desktop::writing::Writing::on_computer)
+            .flatten()
+    });
+    tauri::async_runtime::spawn_blocking(move || {
+        let preferred = requested.unwrap_or(Build::Vulkan);
+        let chosen = if preferred.files().server_path(&store).is_some() {
+            Build::installed(&store, requested)
+        } else {
+            preferred
+        };
+        Info::of(&store, chosen)
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// Installs the pinned chat model and prebuilt runtime, with CPU fallback when Vulkan has no GPU.
+#[tauri::command]
+pub async fn download_chat_model(
+    build: thalvi_desktop::chat::Build,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), DownloadFailed> {
+    download_chat(&app, &state, build).await
+}
+
+/// Installs only in this user's model store and reports the checksum-verified download.
+///
+/// # Errors
+/// A concurrent installation or the first download/unpack failure.
+pub async fn download_chat(
+    app: &AppHandle,
+    state: &AppState,
+    build: thalvi_desktop::chat::Build,
+) -> Result<(), DownloadFailed> {
+    use thalvi_desktop::chat::{self, Build};
+    let _install = state.chat_install.try_lock().map_err(|_| {
+        DownloadFailed::from("The chat model installation is already changing.".to_owned())
+    })?;
+    let store = ModelStore::per_user().map_err(|error| DownloadFailed::from(&error))?;
+    let recorder =
+        Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
+    let started = Instant::now();
+    let emit = |progress| {
+        let _ = app.emit(
+            "thalvi://chat-model-progress",
+            SpeechModelProgress::of("chat", progress),
+        );
+    };
+    let result = async {
+        chat::install(&store, &build.files(), |progress| {
+            if progress != SpeechProgress::Done {
+                emit(progress);
+            }
+        })
+        .await?;
+        let checked_store = store.clone();
+        let chosen = tauri::async_runtime::spawn_blocking(move || {
+            Build::installed(&checked_store, Some(build))
+        })
+        .await
+        .unwrap_or(Build::Cpu);
+        if chosen != build {
+            chat::install(&store, &chosen.files(), |progress| {
+                if progress != SpeechProgress::Done {
+                    emit(progress);
+                }
+            })
+            .await?;
+        }
+        Ok::<(), ModelError>(())
+    }
+    .await;
+    recorder.metric(
+        Event::ChatDownload,
+        &result
+            .as_ref()
+            .map_or_else(ModelError::metric_kind, |()| "ok".to_owned()),
+        Some(started.elapsed()),
+        json!({"model": chat::MODEL.asset.file_name, "build": build.name()}),
+    );
+    match result {
+        Ok(()) => {
+            emit(SpeechProgress::Done);
+            Ok(())
+        }
+        Err(error) => {
+            let failed = DownloadFailed::from(&error);
+            let _ = app.emit(
+                "thalvi://chat-model-progress",
+                SpeechModelProgress::failed("chat", failed.clone()),
+            );
+            Err(failed)
+        }
+    }
+}
+
+/// Removes the local model after the Settings window has asked for confirmation.
+#[tauri::command]
+pub async fn remove_chat_model(state: State<'_, AppState>) -> Result<(), String> {
+    let _install = state
+        .chat_install
+        .try_lock()
+        .map_err(|_| "Wait for the chat model installation to finish.".to_owned())?;
+    let (reply, removed) = tokio::sync::oneshot::channel();
+    state.link.send(Control::RemoveChat(reply));
+    tokio::time::timeout(std::time::Duration::from_secs(5), removed)
+        .await
+        .map_err(|_| "The chat model could not be stopped in time.".to_owned())?
+        .map_err(|_| "The engine is no longer running.".to_owned())??;
+    Ok(())
+}
+
 /// The catalog speech models and whether each is downloaded; the files counted are those the model loads here.
 #[tauri::command]
 pub async fn list_speech_models(

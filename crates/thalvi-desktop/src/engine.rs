@@ -43,7 +43,7 @@ use crate::spotter::KeywordSpotter;
 use crate::vad::VadDetector;
 use crate::wake::{WakeEngine, WakeError, WakeEvent, WakeFrame};
 use crate::wake_stats::{Latency, LatencySummary, NearMisses};
-use crate::writing::{self, Piece, Writing, WritingError};
+use crate::writing::{self, Destination, Endpoint, Piece, Writing, WritingError};
 pub use streaming::StreamingExtra;
 use streaming::Streams;
 
@@ -229,6 +229,10 @@ pub enum EngineState {
     },
     /// The writing model is reasoning and has written no text yet.
     Thinking,
+    /// The app-owned chat runtime is loading, independently of generation.
+    StartingChat {
+        again: bool,
+    },
 }
 
 /// Why a capture failed; `Display` is the plain notice for the user.
@@ -414,6 +418,7 @@ pub struct Parts<R, W, C> {
     /// The gate of the microphone `frames` come from.
     pub gate: InputGate,
     pub http: reqwest::Client,
+    pub chat: Option<crate::chat::Chat>,
     /// Whether the dictation key is down.
     pub hold: watch::Receiver<KeyState>,
     /// Tells the user about something that did not stop the capture.
@@ -454,6 +459,7 @@ pub struct Engine<R, W, C> {
     /// Dropping the engine aborts them.
     recorded_only: Vec<JoinSet<Answer>>,
     writing: Option<Writing>,
+    chat: Option<crate::chat::Chat>,
     speech: SpeechSource,
     http: reqwest::Client,
     recorder: Recorder,
@@ -1063,6 +1069,7 @@ where
             streams: Streams::default(),
             recorded_only: Vec::new(),
             writing: config.writing.clone(),
+            chat: parts.chat,
             speech: config.speech_source(),
             http: parts.http,
             recorder,
@@ -1090,6 +1097,18 @@ where
             merge_note: None,
         };
         (engine, handle)
+    }
+
+    /// Stops and removes the local chat model between captures.
+    ///
+    /// # Errors
+    /// Why its file could not be deleted.
+    pub async fn remove_chat(&mut self) -> std::io::Result<()> {
+        if let Some(chat) = self.chat.as_mut() {
+            return chat.remove().await;
+        }
+        let store = crate::models::ModelStore::per_user().map_err(std::io::Error::other)?;
+        crate::chat::remove_model(&store, &crate::chat::Build::Cpu.files()).await
     }
 
     /// The recorder the engine writes to, for the caller's own events.
@@ -2537,6 +2556,24 @@ where
         inputs: &[String],
         deadline: Instant,
     ) -> Asked {
+        let loading = Instant::now();
+        let previous = self.state.borrow().clone();
+        let endpoint = match self.endpoint(writing).await {
+            Ok(endpoint) => endpoint,
+            Err(None) => return Asked::Cancelled,
+            Err(Some(error)) => {
+                return Asked::Skipped {
+                    why: Skipped::Failed(error),
+                    chat: None,
+                };
+            }
+        };
+        let deadline = if matches!(writing.destination(), Destination::Computer { .. }) {
+            deadline + loading.elapsed()
+        } else {
+            deadline
+        };
+        self.set_state(previous);
         let asked = Instant::now();
         let stopped = |stop: Option<WritingError>| match stop {
             None => Asked::Cancelled,
@@ -2551,7 +2588,7 @@ where
         let mut reply = match bounded(
             &mut self.cancel,
             deadline,
-            writing.start_merge(&self.http, inputs),
+            endpoint.start_merge(&self.http, inputs),
         )
         .await
         .finish()
@@ -2714,6 +2751,10 @@ where
         let Some(settings) = self.writing.clone() else {
             return self.not_written(&words, Some(WritingError::NotSetUp), None);
         };
+        let endpoint = match self.endpoint(&settings).await {
+            Ok(endpoint) => endpoint,
+            Err(stop) => return self.not_written(&words, stop, None),
+        };
         self.set_state(EngineState::Writing {
             text: String::new(),
         });
@@ -2726,7 +2767,7 @@ where
         let mut reply = match bounded(
             &mut self.cancel,
             deadline,
-            settings.ask_with(&self.http, prompt, &words),
+            endpoint.ask_with(&self.http, prompt, &words),
         )
         .await
         .finish()
@@ -2772,6 +2813,50 @@ where
             route: CaptureRoute::Paste,
             text: written.to_owned(),
         })
+    }
+
+    async fn endpoint<'a>(
+        &mut self,
+        writing: &'a Writing,
+    ) -> Result<std::borrow::Cow<'a, Endpoint>, Option<WritingError>> {
+        if let Destination::Manual(endpoint) = writing.destination() {
+            return Ok(std::borrow::Cow::Borrowed(endpoint));
+        }
+        let Some(chat) = self.chat.as_mut() else {
+            return Err(Some(WritingError::NotInstalled));
+        };
+        let state = self.state.clone();
+        let started = Instant::now();
+        let result = tokio::select! {
+            biased;
+            _ = self.cancel.changed() => {
+                self.recorder.metric(Event::ChatLoad, "cancelled", Some(started.elapsed()), json!({"build": chat.build().name()}));
+                return Err(None);
+            }
+            result = chat.ready(|again| { state.send_replace(EngineState::StartingChat { again }); }) => result,
+        };
+        match result {
+            Ok(ready) => {
+                if let Some(took) = ready.started {
+                    self.recorder.metric(
+                        Event::ChatLoad,
+                        "ok",
+                        Some(took),
+                        json!({"build": chat.build().name()}),
+                    );
+                }
+                Ok(std::borrow::Cow::Owned(ready.endpoint))
+            }
+            Err(failed) => {
+                self.recorder.metric(
+                    Event::ChatLoad,
+                    failed.error.kind(),
+                    failed.after,
+                    json!({"build": chat.build().name()}),
+                );
+                Err(Some(failed.error))
+            }
+        }
     }
 
     fn writing_metric(
@@ -2889,6 +2974,7 @@ mod tests {
                 cues,
                 gate,
                 http: reqwest::Client::new(),
+                chat: None,
                 hold,
                 notice: Box::new(|_| {}),
                 spotter: None,
@@ -2980,3 +3066,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod chat_tests;

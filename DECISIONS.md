@@ -142,6 +142,9 @@ areas your change touches. Editing rules are in
   OpenAI-compatible endpoint from Settings and pastes what streams back, line breaks included; no context, no Enter, 15 s at most;
   reasoning shows as thinking, never pasted, and the request says nothing about thinking; any failure pastes nothing and puts the words
   on the clipboard. Why: no server needed, unsaid text never sent unread, strict endpoints refuse unknown fields. Rejected: the Thalvi server, write-and-send, sending `enable_thinking`.
+- **Local chat is a pinned prebuilt child.** Settings installs llama.cpp b12255 and Qwen3 4B Q4_K_M (Apache-2.0); the runtime's own Vulkan device check chooses GPU or CPU, with a CPU override. Writing and merging lazily share one loopback child with a fresh key, deterministic sampling and thinking disabled in the template; loading is cancellable and measured separately. One crash gets one restart on the next use, and quitting stops it.
+  Why: the 4B kept EN/DE/ES meaning in the fixed comparison and CPU generation stayed below 1.6 s on the desktop; the smaller candidates invented text or translated it. Windows laptop acceptance remains required.
+  Rejected: user builds, containers, OS services, a reasoning-budget flag alone, and downloading into a remote server.
 - **The writing prompt is a stored override of one built-in default.** `writing.prompt` is the system message; it is
   saved only when it differs from the default, and a blank one is refused where the config loads. Why: users who never
   edited it get a better default later, and Settings, the agent surface and the file share one check. Rejected:

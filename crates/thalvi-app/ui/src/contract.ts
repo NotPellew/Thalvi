@@ -136,9 +136,23 @@ export interface CurrentApp {
   title: string;
 }
 
+export type ChatBuild = "cpu" | "vulkan";
+export interface ChatModelInfo {
+  title: string;
+  size: number;
+  license: string;
+  languages: string[];
+  build: ChatBuild;
+  build_label: string;
+  model_installed: boolean;
+  runtime_installed: boolean;
+}
+
 export interface WritingSettings {
-  url: string;
-  model: string;
+  url?: string;
+  model?: string;
+  local?: boolean;
+  chat_build?: ChatBuild;
   api_key?: string;
   has_key?: boolean;
   /** Set only when it differs from `Settings.writing_default_prompt`; Settings shows the prompt in effect. */
@@ -351,6 +365,10 @@ export interface Backend {
   downloadWakeModel(name: string): Promise<void>;
   /** The `.onnx` file the user picked, or null when they cancelled. */
   pickWakeModelFile(): Promise<string | null>;
+  getChatModel(build?: ChatBuild): Promise<ChatModelInfo>;
+  downloadChatModel(build: ChatBuild): Promise<void>;
+  removeChatModel(): Promise<void>;
+  onChatModelProgress(listener: (progress: SpeechModelProgress) => void): void;
   listSpeechModels(): Promise<SpeechModelInfo[]>;
   /** Resolves when the model is on disk and verified; rejects with a `DownloadFailure`. */
   downloadSpeechModel(name: string): Promise<void>;

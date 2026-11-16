@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::agent::{Catalog, Request};
 use crate::startup::LOGIN_ARG;
 
-const USAGE: &str = "Usage: thalvi-desktop [toggle | pause | resume | cancel | hold-start | hold-end | write-start | write-end | copy-error | state | status | watch [--json] | show [page] | quit | feed <wav-file> | models | model-download <wake|speech> <name> | speech-check <json> | settings get | settings check <json> | settings set <json> | metrics summary | config-file]";
+const USAGE: &str = "Usage: thalvi-desktop [toggle | pause | resume | cancel | hold-start | hold-end | write-start | write-end | copy-error | state | status | watch [--json] | show [page] | quit | feed <wav-file> | models | model-download <wake|speech|chat> <name> | speech-check <json> | settings get | settings check <json> | settings set <json> | metrics summary | config-file]";
 
 /// The command line after the program name.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,6 +80,7 @@ impl Launch {
                 let kind = match *kind {
                     "wake" => Catalog::Wake,
                     "speech" => Catalog::Speech,
+                    "chat" => Catalog::Chat,
                     _ => return Err(USAGE.to_owned()),
                 };
                 Ok(Self::Ask(Request::ModelDownload {
