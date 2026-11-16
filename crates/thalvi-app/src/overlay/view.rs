@@ -230,6 +230,8 @@ impl View {
             }
             Status::Writing { .. } => self.working("WRITING…"),
             Status::Thinking { .. } => self.working("THINKING…"),
+            Status::StartingChat { again: false, .. } => self.working("STARTING MODEL…"),
+            Status::StartingChat { again: true, .. } => self.working("RESTARTING MODEL…"),
             Status::Transcribing { .. } => self.working("TRANSCRIBING…"),
             Status::Merging { .. } => self.working("MERGING…"),
             Status::Working { .. } => self.working("WORKING"),
@@ -323,6 +325,7 @@ impl View {
                     | Status::Pending { .. }
                     | Status::Writing { .. }
                     | Status::Thinking { .. }
+                    | Status::StartingChat { .. }
                     | Status::Working {
                         cancellable: true,
                         ..

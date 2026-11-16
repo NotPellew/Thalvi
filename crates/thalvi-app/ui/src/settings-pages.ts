@@ -3,6 +3,7 @@
 import type {
   AudioStatus,
   Backend,
+  ChatBuild,
   Draft,
   DraftOutcome,
   Ending,
@@ -1589,6 +1590,68 @@ function speech(context: PageContext): SpeechRows {
   const extraBlock = el("div", { class: "stack wide" }, extraState, needsEndpoint, extraList, extraApplied, addExtra);
 
   const writing = settings.writing;
+  const chatProblem = note();
+  const source = controls.select([["manual", "Manual endpoint"], ["local", "On this computer"]], writing?.local === true ? "local" : "manual", (value) => {
+    return apply((next) => {
+      if (value === "local") next.writing = { ...next.writing, local: true };
+      else if (next.writing?.url && next.writing.model) next.writing.local = false;
+      else next.writing = null;
+    }).then(() => { syncChatSource(); syncExtras(); });
+  });
+  let chosenBuild: ChatBuild = writing?.chat_build ?? "vulkan";
+  const chatBuild = controls.select([["vulkan", "Vulkan GPU, with CPU fallback"], ["cpu", "CPU"]], chosenBuild, (value) => {
+    chosenBuild = value === "cpu" ? "cpu" : "vulkan";
+    return apply((next) => {
+      if (next.writing?.local === true) next.writing.chat_build = chosenBuild;
+    }).then(refreshChat);
+  });
+  const chatDetails = el("p", { class: "note ok" });
+  const chatProgress = el("progress", { max: "100", value: "0", hidden: true, "aria-label": "Chat model download" });
+  const chatState = el("output", { class: "note ok" });
+  let installingChat = false;
+  const installChat = button("Download chat model", () => {
+    say(chatProblem, "");
+    installingChat = true;
+    installChat.disabled = true;
+    chatProgress.hidden = false;
+    backend.downloadChatModel(chosenBuild).then(() => {
+      chatState.textContent = "Installed. Starts when writing or merging first needs it.";
+    }, (error: unknown) => { say(chatProblem, errorText(error)); }).finally(() => {
+      installingChat = false;
+      chatProgress.hidden = true;
+      void refreshChat();
+    });
+  });
+  const removeChat = confirmed("Remove chat model", "Delete the downloaded chat model from this computer?", "Yes, delete model", "Keep model", () => {
+    say(chatProblem, "");
+    backend.removeChatModel().then(refreshChat, (error: unknown) => { say(chatProblem, errorText(error)); });
+  });
+  function refreshChat(): Promise<void> {
+    return backend.getChatModel(chosenBuild).then((info) => {
+      chatDetails.textContent = `${info.title} · ${formatSize(info.size)} · ${info.license} · ${info.languages.join(", ")}. Runs on ${info.build_label}.`;
+      const installed = info.model_installed && info.runtime_installed;
+      installChat.textContent = installed ? "Installed" : "Download chat model";
+      installChat.disabled = installed || installingChat;
+      removeChat.hidden = !info.model_installed;
+    }, (error: unknown) => { say(chatProblem, errorText(error)); });
+  }
+  backend.onChatModelProgress((progress) => {
+    chatProgress.value = progress.percent;
+    if (progress.status === "verifying") chatState.textContent = "Checking the installation and download checksums…";
+    else if (progress.status === "downloading") chatState.textContent = `Downloading and checking checksums… ${String(progress.percent)}%`;
+    else if (progress.status === "failed") { say(chatProblem, progress.message ?? "The download failed."); }
+  });
+  void refreshChat();
+  const localRows = [
+    row("Local chat runtime", "Vulkan runs on a GPU when one is usable and falls back to the CPU otherwise.", chatBuild),
+    row("Local chat model", "Downloads only to this computer. No server to manage. Updating Thalvi keeps these files; removal keeps the runtime.", el("div", { class: "stack wide" }, chatDetails, el("span", { class: "trow" }, installChat, removeChat), chatProgress, chatState, chatProblem)),
+  ];
+  const manualRows: HTMLElement[] = [];
+  function syncChatSource(): void {
+    const local = settings.writing?.local === true;
+    for (const item of localRows) item.classList.toggle("off", !local);
+    for (const item of manualRows) item.classList.toggle("off", local);
+  }
   const writingUrl = controls.text(writing?.url ?? "", () => applyWriting(), { placeholder: "http://127.0.0.1:8000/v1" });
   const writingModel = controls.text(writing?.model ?? "", () => applyWriting());
   const writingKey = controls.text(writing?.api_key ?? "", () => applyWriting(true), { type: "password", placeholder: writing?.has_key === true ? "A key is saved" : "" });
@@ -1628,7 +1691,8 @@ function speech(context: PageContext): SpeechRows {
     const custom = promptArea.value.trim() !== defaultPrompt.trim();
     const hasOpenings = (settings.writing?.openings ?? []).length > 0;
     const hasAppStyles = (settings.writing?.apps ?? []).length > 0;
-    if (url.trim() === "" && model.trim() === "") {
+    const local = settings.writing?.local === true;
+    if (!local && url.trim() === "" && model.trim() === "") {
       if (custom || hasOpenings || hasAppStyles || (keyInput?.value ?? "") !== "") {
         return Promise.reject(new Error("Set the address and the model of the writing endpoint first."));
       }
@@ -1636,11 +1700,11 @@ function speech(context: PageContext): SpeechRows {
         next.writing = null;
       }).then(syncExtras);
     }
-    if (url.trim() === "" || model.trim() === "") {
+    if (!local && (url.trim() === "" || model.trim() === "")) {
       return Promise.reject(new Error("The address and the model of the writing endpoint go together: fill in both."));
     }
     return apply((next) => {
-      const endpoint: WritingSettings = { ...next.writing, url, model, ...(replaceKey ? { api_key: keyInput?.value ?? "" } : {}) };
+      const endpoint: WritingSettings = { ...next.writing, ...(url.trim() !== "" || model.trim() !== "" ? { url, model } : {}), ...(replaceKey ? { api_key: keyInput?.value ?? "" } : {}) };
       if (custom) endpoint.prompt = promptArea.value;
       else delete endpoint.prompt;
       next.writing = endpoint;
@@ -1841,6 +1905,12 @@ function speech(context: PageContext): SpeechRows {
   render();
   checkWordList();
 
+  manualRows.push(
+    row("Writing endpoint address", "A chat completions endpoint that writes a dictation out as proper text when you say “write that out” or hold the write key. Only the words you said are sent. Applying never calls it.", writingUrl),
+    row("Writing model", "The model the endpoint should use.", writingModel),
+    row("Writing API key", "Stored in the desktop config file; unchanged keeps the saved key.", writingKeyField),
+  );
+  syncChatSource();
   return {
     recognition: [
       group("Live dictation"),
@@ -1861,13 +1931,9 @@ function speech(context: PageContext): SpeechRows {
     ],
     chat: [
       group("Writing"),
-      row(
-        "Writing endpoint address",
-        "A chat completions endpoint that writes a dictation out as proper text when you say “write that out” or hold the write key. Only the words you said are sent. Applying never calls it.",
-        writingUrl,
-      ),
-      row("Writing model", "The model the endpoint should use.", writingModel),
-      row("Writing API key", "Stored in the desktop config file; unchanged keeps the saved key.", writingKeyField),
+      row("Chat model source", "Writing and extra recognizers use this choice. Switching keeps your manual endpoint and downloaded model.", source),
+      ...localRows,
+      ...manualRows,
       row(
         "Writing prompt",
         "The instructions the writing model gets with every dictation; the words you said go in as the message itself. Blank is not allowed. Applying never calls the model.",

@@ -52,6 +52,7 @@ impl Icon {
             | Status::Merging { .. }
             | Status::Writing { .. }
             | Status::Thinking { .. }
+            | Status::StartingChat { .. }
             | Status::Loading { .. } => Self::Working,
             Status::Failed { .. } => Self::Error,
         }
@@ -171,6 +172,7 @@ pub fn title(status: &Status) -> String {
         Status::Merging { .. } => "merging".to_owned(),
         Status::Writing { .. } => "writing".to_owned(),
         Status::Thinking { .. } => "thinking".to_owned(),
+        Status::StartingChat { .. } => "starting the chat model".to_owned(),
         Status::Loading { .. } => "starting".to_owned(),
         Status::Failed { .. } => "something went wrong".to_owned(),
     };
@@ -197,6 +199,7 @@ pub fn can_cancel(status: &Status) -> bool {
             | Status::Pending { .. }
             | Status::Writing { .. }
             | Status::Thinking { .. }
+            | Status::StartingChat { .. }
             | Status::Working {
                 cancellable: true,
                 ..

@@ -357,6 +357,15 @@ fn pill_words(view: &View) -> (Tone, String, Option<&str>) {
         }
         Status::Writing { target, .. } => (Tone::Working, words("WRITING…"), target.as_deref()),
         Status::Thinking { target } => (Tone::Working, words("THINKING…"), target.as_deref()),
+        Status::StartingChat { target, again } => (
+            Tone::Working,
+            words(if *again {
+                "RESTARTING MODEL…"
+            } else {
+                "STARTING MODEL…"
+            }),
+            target.as_deref(),
+        ),
         Status::Transcribing { target, .. } => {
             (Tone::Working, words("TRANSCRIBING…"), target.as_deref())
         }

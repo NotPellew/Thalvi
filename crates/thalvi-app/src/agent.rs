@@ -65,6 +65,7 @@ const PAGES: [&str; 7] = [
 pub enum Catalog {
     Wake,
     Speech,
+    Chat,
 }
 
 /// What an outside program may ask. A request is one JSON object naming its `command`.
@@ -259,6 +260,20 @@ impl ModelRow {
         }
     }
 
+    /// The one local chat model and its chosen runtime.
+    #[must_use]
+    pub fn chat(info: &thalvi_desktop::chat::Info) -> Self {
+        Self {
+            kind: Catalog::Chat,
+            name: "chat",
+            title: info.title,
+            size: info.size,
+            downloaded: info.model_installed && info.runtime_installed,
+            progress_percent: None,
+            runs_on: Some(info.build_label.to_owned()),
+        }
+    }
+
     /// `runs_on` is the Recognition page's hardware line; `progress` the download running now, if any.
     #[must_use]
     pub fn speech(
@@ -389,7 +404,7 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
         | Status::Transcribing { .. } => "transcribing",
         Status::Merging { .. } => "merging",
         Status::Working { .. } => "delivering",
-        Status::Writing { .. } | Status::Thinking { .. } => "writing",
+        Status::Writing { .. } | Status::Thinking { .. } | Status::StartingChat { .. } => "writing",
         Status::Failed { .. } => "failed",
     }
 }
@@ -406,7 +421,9 @@ fn overlay_word(status: &Status, on: bool) -> &'static str {
         | Status::Loading {
             downloading: false, ..
         } => "hidden",
-        Status::Starting { loading: true, .. } | Status::Loading { .. } => "loading",
+        Status::Starting { loading: true, .. }
+        | Status::Loading { .. }
+        | Status::StartingChat { .. } => "loading",
         Status::Starting { .. } | Status::Capturing { .. } => "listening",
         Status::Pending {
             waiting_for_quiet: true,
@@ -499,6 +516,7 @@ fn capturing(status: &Status) -> bool {
             | Status::Pending { .. }
             | Status::Writing { .. }
             | Status::Thinking { .. }
+            | Status::StartingChat { .. }
             | Status::Working {
                 cancellable: true,
                 ..
