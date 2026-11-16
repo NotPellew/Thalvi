@@ -122,6 +122,8 @@ jobs:
           VERSION: ${{ needs.gate.outputs.version }}
           # linuxdeploy looks for libwebgpu_dawn.so, which the build links into the target folder, on this path.
           LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
+          # The Vulkan loader stays the system's, which comes with the driver; Dawn would load a bundled one.
+          LINUXDEPLOY_EXCLUDED_LIBRARIES: libvulkan.so*
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.bundle }}

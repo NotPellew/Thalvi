@@ -63,7 +63,9 @@ gate_server() {
   tests --workspace
   RUSTDOCFLAGS="-D warnings" step cargo docs
   # linuxdeploy looks for libwebgpu_dawn.so, which the build links into the target folder, on this path.
-  bundle appimage env LD_LIBRARY_PATH="${CARGO_TARGET_DIR:-$PWD/target}/release"
+  # The Vulkan loader stays the system's, which comes with the driver; Dawn would load a bundled one.
+  bundle appimage env LD_LIBRARY_PATH="${CARGO_TARGET_DIR:-$PWD/target}/release" \
+    LINUXDEPLOY_EXCLUDED_LIBRARIES='libvulkan.so*'
 }
 
 gate_desktop_windows() {
