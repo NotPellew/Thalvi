@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry, Status, UpdateState } from "./contract.ts";
+import { DownloadFailure } from "./contract.ts";
 import settingsCss from "./settings.css?raw";
 import settingsLooksCss from "./settings-looks.css?raw";
 import { fakeBackend } from "./fake.ts";
@@ -1708,7 +1709,7 @@ describe("the speech model catalog", () => {
 
     // A download finishes without a state change, so its end makes the row ask again too.
     stub.backend.speechDevice.mockResolvedValue("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
-    stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null });
+    stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null, causes: [] });
     await settle();
     expect(row()?.querySelector(".device")?.textContent).toBe("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
 
@@ -1769,13 +1770,13 @@ describe("the speech model catalog", () => {
     expect(download().disabled).toBe(true);
     expect(text("[role=status]")).toBe("Checking files…");
 
-    stub.speechProgress({ name: "nemotron_160ms", percent: 40, status: "downloading", message: null });
+    stub.speechProgress({ name: "nemotron_160ms", percent: 40, status: "downloading", message: null, causes: [] });
     expect(text("[role=status]")).toBe("Downloading… 40%");
     expect(meter().value).toBe(40);
     expect(meter().hidden).toBe(false);
     expect(text(".badge")).toBe("Not downloaded");
 
-    stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null });
+    stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null, causes: [] });
     finish();
     await settle();
     expect(text(".badge")).toBe("Downloaded");
@@ -1800,9 +1801,36 @@ describe("the speech model catalog", () => {
     expect(text(".badge")).toBe("Downloaded");
   });
 
+  it("copies the report of a failed download with its causes, and only after a failure", async () => {
+    const stub = await openCatalog();
+    const copy = (): HTMLButtonElement | undefined => [...card().querySelectorAll("button")].find((candidate) => candidate.textContent.startsWith("Cop"));
+    expect(copy()?.hidden).toBe(true);
+
+    const message = "Could not download the speech model encoder: could not connect to huggingface.co. Check the internet connection and try again.";
+    stub.backend.downloadSpeechModel.mockRejectedValueOnce(new DownloadFailure(message, ["error sending request", "connection refused"]));
+    download().click();
+    await settle();
+    expect(alert()).toBe(message);
+    expect(copy()?.hidden).toBe(false);
+
+    stub.backend.copyReport.mockRejectedValueOnce("No clipboard tool is installed.");
+    copy()?.click();
+    await settle();
+    expect(card().textContent).toContain("Could not copy: No clipboard tool is installed.");
+    expect(copy()?.textContent).toBe("Copy report");
+
+    copy()?.click();
+    await settle();
+    expect(stub.backend.copyReport).toHaveBeenLastCalledWith(message, ["error sending request", "connection refused"]);
+    expect(copy()?.textContent).toBe("Copied");
+
+    download().click();
+    expect(copy()?.hidden).toBe(true);
+  });
+
   it("shows the reason from a failed event too", async () => {
     const stub = await openCatalog();
-    stub.speechProgress({ name: "nemotron_160ms", percent: 0, status: "failed", message: "The download did not match its checksum." });
+    stub.speechProgress({ name: "nemotron_160ms", percent: 0, status: "failed", message: "The download did not match its checksum.", causes: [] });
     expect(alert()).toBe("The download did not match its checksum.");
   });
 
@@ -1852,7 +1880,7 @@ describe("the speech model catalog", () => {
 
   it("keeps showing the download of a model while another one is picked", async () => {
     const stub = await openCatalog();
-    stub.speechProgress({ name: "unified_160ms", percent: 40, status: "downloading", message: null });
+    stub.speechProgress({ name: "unified_160ms", percent: 40, status: "downloading", message: null, causes: [] });
     expect(rowOf("Speech model").querySelector(".badge")?.textContent).toBe("Not downloaded");
     choose(picker(), "unified_160ms");
     expect(text("[role=status]")).toBe("Downloading… 40%");

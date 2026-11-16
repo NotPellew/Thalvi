@@ -29,7 +29,7 @@ import type {
   WritingOpening,
   WritingSettings,
 } from "./contract.ts";
-import { errorText } from "./contract.ts";
+import { DownloadFailure, errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
 import { el } from "./dom.ts";
@@ -724,15 +724,29 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
   const status = el("span", { class: "unit", role: "status" });
   const device = el("small", { class: "device" });
   const problem = note();
-  const download = button("Download", () => {
-    say(problem, "");
-    show({ name: info.name, percent: 0, status: "verifying", message: null });
-    backend.downloadSpeechModel(info.name).then(
+  const copyProblem = note();
+  let failure: Pick<SpeechModelProgress, "message" | "causes"> = { message: null, causes: [] };
+  const copyReport = button("Copy report", () => {
+    backend.copyReport(failure.message ?? "", failure.causes).then(
       () => {
-        show({ name: info.name, percent: 100, status: "done", message: null });
+        say(copyProblem, "");
+        copyReport.textContent = "Copied";
       },
       (error: unknown) => {
-        show({ name: info.name, percent: 0, status: "failed", message: errorText(error) });
+        say(copyProblem, `Could not copy: ${errorText(error)}`);
+      },
+    );
+  });
+  copyReport.hidden = true;
+  const download = button("Download", () => {
+    say(problem, "");
+    show({ name: info.name, percent: 0, status: "verifying", message: null, causes: [] });
+    backend.downloadSpeechModel(info.name).then(
+      () => {
+        show({ name: info.name, percent: 100, status: "done", message: null, causes: [] });
+      },
+      (error: unknown) => {
+        show({ name: info.name, percent: 0, status: "failed", message: errorText(error), causes: error instanceof DownloadFailure ? error.causes : [] });
       },
     );
   });
@@ -763,7 +777,13 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
       cached(true);
       showDevice();
     }
-    if (event.status === "failed") say(problem, event.message ?? "The download failed.");
+    if (event.status === "failed") {
+      failure = event;
+      say(problem, event.message ?? "The download failed.");
+    }
+    copyReport.hidden = event.status !== "failed";
+    copyReport.textContent = "Copy report";
+    say(copyProblem, "");
   }
 
   function showDevice(): void {
@@ -799,8 +819,9 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
       ),
       device,
       details,
-      el("div", { class: "trow" }, download, meter, status),
+      el("div", { class: "trow" }, download, copyReport, meter, status),
       problem,
+      copyProblem,
     ),
     progress: show,
     setSelected: (on) => {
