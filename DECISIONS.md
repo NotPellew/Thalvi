@@ -232,9 +232,9 @@ areas your change touches. Editing rules are in
   reply. Rejected: an MCP client for one source, blocking the first reply, headlines on disk or in
   history, briefing access in private conversations.
 - **Briefing search is two bounded read-only tools on the same source.** `search_briefing` and
-  `read_briefing_item` call `POST /v1/briefings/search` and `GET /v1/briefings/items/{id}` inside the
-  three-round tool loop; each call has its own 5 s deadline and 64 KiB cap, and a failure is a plain tool
-  result. Why: rounds don't bound calls within a round. Rejected: searching on every turn, an `ask_agent` tool.
+  `read_briefing_item` call it inside the three-round tool loop, each with a 5 s deadline and 64 KiB cap;
+  after a valid history search both fail before HTTP for that reply. Why: saved excerpts returned in one
+  reply must not reach the outside source from it. Rejected: prompt-only separation, an `ask_agent` tool.
 - **Opt-in retirement with editable learnings.** `THALVI_RETIRE_DAYS` replaces
   old transcripts with summaries and keeps durable facts in a separate editable
   store. Why: bound retention without losing useful context. Rejected:

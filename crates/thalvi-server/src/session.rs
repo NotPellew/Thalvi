@@ -47,6 +47,8 @@ const MISHEARD_LINE: &str = "Sorry, I didn't catch that.";
 const MAX_TOOL_ROUNDS: usize = 3;
 const SEARCH_LABEL: &str = "Searching conversations";
 const UNKNOWN_TOOL_LABEL: &str = "Running a tool";
+const BRIEFING_AFTER_HISTORY: &str =
+    "For privacy, briefing tools are unavailable after searching conversation history in the same reply.";
 
 type AckCache = Arc<std::sync::Mutex<std::collections::HashMap<(String, &'static str), Bytes>>>;
 
@@ -1844,6 +1846,12 @@ struct ToolRun {
     turn: u64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BriefingEgress {
+    Available,
+    BlockedAfterHistory,
+}
+
 struct ModelCall<'a> {
     run: &'a ToolRun,
     round: usize,
@@ -1908,10 +1916,10 @@ impl Drop for ModelCall<'_> {
 }
 
 /// The tools a reply may call: history search, plus the briefing tools when the conversation
-/// has a briefing source.
-fn offered_tools(run: &ToolRun) -> Vec<ToolDefinition> {
+/// has a briefing source and no history result has entered this reply.
+fn offered_tools(run: &ToolRun, briefing_egress: BriefingEgress) -> Vec<ToolDefinition> {
     let mut definitions = vec![history::tool_definition()];
-    if run.briefing.source.is_some() {
+    if run.briefing.source.is_some() && briefing_egress == BriefingEgress::Available {
         definitions.extend(briefing_tools::definitions());
     }
     definitions
@@ -1931,7 +1939,7 @@ where
 {
     let (clip, caption) = audio.unzip();
     let briefing = &tools.briefing.context;
-    let definitions = offered_tools(&tools);
+    let mut briefing_egress = BriefingEgress::Available;
     let mut results: Vec<ToolResult> = Vec::new();
     let mut splitter = SentenceSplitter::new();
     let mut first_sentence_sent = false;
@@ -1940,6 +1948,7 @@ where
         let mut round_start = true;
         let mut heard = String::new();
         let mut echo_checked = caption.is_none();
+        let definitions = offered_tools(&tools, briefing_egress);
         let offered: &[ToolDefinition] = if round < MAX_TOOL_ROUNDS {
             &definitions
         } else {
@@ -2016,7 +2025,15 @@ where
             return false;
         }
         for call in calls {
-            let Some(result) = run_tool_call(call, &history, &tools, &events).await else {
+            let Some(result) = run_tool_call(
+                call,
+                &history,
+                &tools,
+                &events,
+                &mut briefing_egress,
+            )
+            .await
+            else {
                 return false;
             };
             results.push(result);
@@ -2056,11 +2073,12 @@ async fn run_tool_call(
     history: &[ChatMessage],
     run: &ToolRun,
     events: &mpsc::Sender<ReplyEvent>,
+    briefing_egress: &mut BriefingEgress,
 ) -> Option<ToolResult> {
     if briefing_tools::is_briefing_tool(&call.name)
         && let Some(source) = &run.briefing.source
     {
-        return run_briefing_call(call, source, run, events).await;
+        return run_briefing_call(call, source, run, events, *briefing_egress).await;
     }
     let known = call.name == history::tool_definition().name;
     let label = if known {
@@ -2079,9 +2097,12 @@ async fn run_tool_call(
     events.send(step(TaskStatus::Running, None)).await.ok()?;
     let started = Instant::now();
     let outcome: Result<Vec<HistoryMatch>, String> = if known {
-        history::parse_arguments(&call.arguments).map(|query| match &run.past {
-            Some(store) => store.search_history(&run.session_id, history, &query),
-            None => history::search_live(&run.session_id, history, &query.text),
+        history::parse_arguments(&call.arguments).map(|query| {
+            *briefing_egress = BriefingEgress::BlockedAfterHistory;
+            match &run.past {
+                Some(store) => store.search_history(&run.session_id, history, &query),
+                None => history::search_live(&run.session_id, history, &query.text),
+            }
         })
     } else {
         Err("That tool doesn't exist.".to_string())
@@ -2152,6 +2173,7 @@ async fn run_briefing_call(
     source: &Briefing,
     run: &ToolRun,
     events: &mpsc::Sender<ReplyEvent>,
+    briefing_egress: BriefingEgress,
 ) -> Option<ToolResult> {
     let label = briefing_tools::label(&call.name);
     let step = |status, detail| {
@@ -2173,21 +2195,33 @@ async fn run_briefing_call(
         started: Instant::now(),
         recorded: false,
     };
-    let finished = briefing_tools::run(source, &call).await;
-    record.finish(finished.outcome.as_str(), finished.matches);
-    let status = if finished.outcome.is_failure() {
-        TaskStatus::Failed
-    } else {
-        TaskStatus::Done
+    let (content, detail, outcome, matches, status) = match briefing_egress {
+        BriefingEgress::Available => {
+            let finished = briefing_tools::run(source, &call).await;
+            let status = if finished.outcome.is_failure() {
+                TaskStatus::Failed
+            } else {
+                TaskStatus::Done
+            };
+            (
+                finished.content,
+                finished.detail,
+                finished.outcome.as_str(),
+                finished.matches,
+                status,
+            )
+        }
+        BriefingEgress::BlockedAfterHistory => (
+            json!({"error": BRIEFING_AFTER_HISTORY}).to_string(),
+            BRIEFING_AFTER_HISTORY.to_string(),
+            "blocked",
+            None,
+            TaskStatus::Failed,
+        ),
     };
-    events
-        .send(step(status, Some(finished.detail)))
-        .await
-        .ok()?;
-    Some(ToolResult {
-        call,
-        content: finished.content,
-    })
+    record.finish(outcome, matches);
+    events.send(step(status, Some(detail))).await.ok()?;
+    Some(ToolResult { call, content })
 }
 
 /// True when the guard should discard the answer.

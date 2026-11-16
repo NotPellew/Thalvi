@@ -4755,6 +4755,68 @@ async fn a_search_then_a_read_feed_the_model_and_show_task_steps() {
 }
 
 #[tokio::test]
+async fn history_results_block_briefing_egress_for_the_reply() {
+    let source = BriefingSource::start("Markets rally", false).await;
+    source.answer(200, found_items(1));
+    source.answer(200, full_item());
+    let mut harness = start_with_source(&source, RecordingConfig::disabled()).await;
+    save_past_conversation(&harness, "The vault phrase is cobalt meadow.").await;
+    harness.model.add_script(vec![search_call(
+        "history",
+        r#"{"query":"cobalt meadow"}"#,
+    )]);
+    harness.model.add_script(vec![
+        briefing_call(
+            "search",
+            "search_briefing",
+            r#"{"query":"The vault phrase is cobalt meadow."}"#,
+        ),
+        briefing_call(
+            "read",
+            "read_briefing_item",
+            r#"{"id":"cobalt-meadow"}"#,
+        ),
+    ]);
+    harness
+        .model
+        .add_script(vec![ModelChunk::Delta("I kept that private.".to_string())]);
+    send_json(
+        &mut harness,
+        &json!({"type": "text", "text": "what was the vault phrase?"}),
+    )
+    .await;
+    let received = finish_reply(&mut harness).await;
+
+    let refusal =
+        "For privacy, briefing tools are unavailable after searching conversation history in the same reply.";
+    let failed: Vec<Value> = tasks(&received)
+        .into_iter()
+        .filter(|step| step["status"] == "failed")
+        .collect();
+    assert_eq!(failed.len(), 2);
+    assert!(failed.iter().all(|step| step["detail"] == refusal));
+    assert_eq!(source.tool_requests(), Vec::<String>::new());
+
+    let rounds = harness.model.tool_rounds();
+    assert_eq!(rounds.len(), 3);
+    assert_eq!(
+        rounds[0].offered,
+        ["search_history", "search_briefing", "read_briefing_item"]
+    );
+    assert_eq!(rounds[1].offered, ["search_history"]);
+    assert_eq!(rounds[2].offered, ["search_history"]);
+    assert_eq!(rounds[2].results.len(), 3);
+    for result in &rounds[2].results[1..] {
+        assert_eq!(
+            serde_json::from_str::<Value>(&result.content).unwrap()["error"],
+            refusal
+        );
+    }
+    assert_eq!(reply_text(&received), "I kept that private.");
+    harness.server.abort();
+}
+
+#[tokio::test]
 async fn every_tool_outcome_is_recorded_without_what_was_asked_or_returned() {
     let source = BriefingSource::start("Markets rally", false).await;
     source.answer(200, found_items(2));
