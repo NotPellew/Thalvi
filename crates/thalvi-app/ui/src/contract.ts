@@ -224,6 +224,8 @@ export interface SpeechModelInfo {
   languages: string[];
   /** Every file is on disk and matches its checksum. */
   cached: boolean;
+  /** Whether recognition favours the word list. */
+  word_list: boolean;
 }
 
 /** A wake head Thalvi can download, as the Rust catalog describes it. */

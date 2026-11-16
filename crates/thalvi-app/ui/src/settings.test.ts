@@ -5,7 +5,7 @@ import settingsLooksCss from "./settings-looks.css?raw";
 import { fakeBackend } from "./fake.ts";
 import { settingsPatch } from "./patch.ts";
 import { APPLIED_LATER_TEXT, APPLIED_TEXT, mountSettings } from "./settings.ts";
-import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO } from "./testing.ts";
+import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO, WHISPER } from "./testing.ts";
 
 let root: HTMLElement;
 
@@ -786,6 +786,12 @@ describe("a custom speech model folder", () => {
 });
 
 describe("the word list", () => {
+  const FAVOURED =
+    "Names and terms to spell your way, added one at a time. Recognition on this computer and recognizers reached directly can favour them.";
+  const VULKAN_TITLE = "Whisper Turbo · Vulkan GPU (experimental)";
+  const ignored = (title: string): string =>
+    `Names and terms to spell your way, added one at a time. ${title}, the recognizer in use, ignores them; the other models on this computer and recognizers reached directly can favour them.`;
+
   async function openWordList(phrases?: string[]) {
     const stub = await open({ ...SETTINGS, stt: { entries: [device()], ...(phrases ? { phrases } : {}) } });
     goTo("recognition");
@@ -794,6 +800,20 @@ describe("the word list", () => {
 
   function chips(): string[] {
     return Array.from(rowOf("Word list").querySelectorAll(".chip > span")).map((chip) => chip.textContent);
+  }
+
+  function wordHint(): string {
+    return rowOf("Word list").querySelector(".what small")?.textContent ?? "";
+  }
+
+  function listedModels() {
+    return [
+      { ...NEMOTRON },
+      { ...UNIFIED },
+      { ...NEMOTRON, name: "parakeet_tdt_v3", title: "Parakeet TDT" },
+      { ...WHISPER },
+      { ...WHISPER, name: "whisper_turbo_vulkan", title: VULKAN_TITLE },
+    ];
   }
 
   async function add(word: string, by: "plus" | "enter" = "plus"): Promise<void> {
@@ -833,6 +853,46 @@ describe("the word list", () => {
     await settle();
     expect(stub.backend.wordListSupport).toHaveBeenCalledWith(expect.objectContaining({ kind: "realtime" }));
     expect(rowOf("Word list").classList.contains("off")).toBe(true);
+    expect(wordHint()).toBe(FAVOURED);
+  });
+
+  it.each([
+    ["Whisper Turbo on the CPU", "whisper_turbo_cpu", ignored(WHISPER.title)],
+    ["Whisper Turbo on the Vulkan GPU", "whisper_turbo_vulkan", ignored(VULKAN_TITLE)],
+    ["Nemotron", "nemotron_160ms", FAVOURED],
+    ["Parakeet", "parakeet_tdt_v3", FAVOURED],
+    ["no model", undefined, FAVOURED],
+    ["a model folder", "/models/mine", FAVOURED],
+  ] as const)("with %s active, the word list hint says whether that recognizer uses it", async (_name, model, expected) => {
+    const stub = stubBackend({ ...SETTINGS, stt: { entries: [device(model)] } });
+    stub.backend.listSpeechModels.mockResolvedValue(listedModels());
+    mountSettings(root, stub.backend);
+    await settle();
+    expect(wordHint()).toBe(expected);
+    expect(rowOf("Word list").hidden).toBe(false);
+    expect(rowOf("Word list").classList.contains("off")).toBe(false);
+    expect((rowOf("Word list").querySelector('input[aria-label="New word"]') as HTMLInputElement).disabled).toBe(false);
+  });
+
+  it("updates the hint when Use switches between a recognizer that ignores the list and one that favours it", async () => {
+    const stub = stubBackend({
+      ...SETTINGS,
+      stt: {
+        entries: [device("whisper_turbo_cpu"), { ...device("nemotron_160ms", false), id: "nemotron", name: "Nemotron Streaming" }],
+      },
+    });
+    stub.backend.listSpeechModels.mockResolvedValue(listedModels());
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("recognition");
+    expect(wordHint()).toBe(ignored(WHISPER.title));
+    use("Nemotron Streaming");
+    await settle();
+    expect(wordHint()).toBe(FAVOURED);
+    use("On this computer");
+    await settle();
+    expect(wordHint()).toBe(ignored(WHISPER.title));
+    expect(stub.backend.wordListSupport).not.toHaveBeenCalled();
   });
 });
 
