@@ -587,5 +587,10 @@ mod tests {
         );
         let desktop = Desktop::Gnome(Gnome::system());
         assert_eq!(desktop.capture_target(), Ok(Target::Clipboard(Clipboard)));
+        assert_eq!(desktop.recent_app(), Err(AppMatchLimit::Gnome));
+        assert_eq!(
+            desktop.writing_target(&Target::Clipboard(Clipboard)),
+            Err(AppMatchLimit::Gnome)
+        );
     }
 }
