@@ -1400,6 +1400,69 @@ mod tests {
     }
 
     #[test]
+    fn writing_apps_are_checked_and_set_like_settings() {
+        let rig = Rig::new(
+            "writing-apps",
+            r#"{"writing": {"url": "http://127.0.0.1:9/v1", "model": "m"}}"#,
+        );
+        let before = rig.fake.config();
+        for (style, message) in [
+            (
+                json!({"app": " ", "prompt": "p"}),
+                "writing.apps has a blank app.",
+            ),
+            (
+                json!({"app": "kitty", "prompt": " \n"}),
+                "writing.apps has a blank prompt.",
+            ),
+        ] {
+            let change = json!({"writing": {"apps": [style]}});
+            assert_eq!(
+                rig.ask(&Request::SettingsCheck {
+                    settings: change.clone()
+                }),
+                json!({"ok": false, "error": message, "valid": false})
+            );
+            assert_eq!(
+                rig.set(change),
+                json!({"ok": false, "error": message, "changed": false})
+            );
+            assert_eq!(rig.fake.config(), before);
+        }
+        let styles = json!([
+            {"app": " kitty ", "prompt": " One line. "},
+            {"app": " firefox ", "title": " Gmail ", "prompt": " Polite. "}
+        ]);
+        let change = json!({"writing": {"apps": styles}});
+        assert_eq!(
+            rig.ask(&Request::SettingsCheck {
+                settings: change.clone()
+            }),
+            json!({"ok": true, "valid": true})
+        );
+        assert_eq!(rig.fake.config(), before, "checking saves nothing");
+        assert_eq!(
+            rig.set(change),
+            json!({"ok": true, "changed": true, "applies": "now"})
+        );
+        assert_eq!(
+            rig.ask(&Request::SettingsGet)["settings"]["writing"]["apps"],
+            json!([
+                {"app": "kitty", "prompt": "One line."},
+                {"app": "firefox", "title": "Gmail", "prompt": "Polite."}
+            ])
+        );
+        assert_eq!(rig.fake.saves.store.load().unwrap(), rig.fake.config());
+        assert_eq!(rig.set(json!({"writing": {"apps": []}}))["ok"], true);
+        assert!(
+            rig.ask(&Request::SettingsGet)["settings"]["writing"]
+                .get("apps")
+                .is_none()
+        );
+        assert_eq!(rig.fake.saves.store.load().unwrap(), rig.fake.config());
+    }
+
+    #[test]
     fn a_refused_change_says_what_settings_says_and_changes_nothing() {
         let rig = Rig::new("refused", "{}");
         let before = rig.fake.config();
