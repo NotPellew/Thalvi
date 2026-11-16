@@ -147,7 +147,28 @@ impl Rig {
 
     /// A rig whose recognizer loads a model on this computer, which the test steps through.
     fn loading(config: &str, recorder: Recorder) -> (Self, TestEngine, FakeFrames) {
-        Self::assemble(config, recorder, (None, None), FakeRecognizer::on_device())
+        Self::assemble(
+            config,
+            recorder,
+            (None, None),
+            FakeRecognizer::on_device(),
+            None,
+        )
+    }
+
+    /// Like [`loading`](Self::loading), but the microphone keeps only `limit` unread frames.
+    fn loading_with_queue(
+        config: &str,
+        recorder: Recorder,
+        limit: usize,
+    ) -> (Self, TestEngine, FakeFrames) {
+        Self::assemble(
+            config,
+            recorder,
+            (None, None),
+            FakeRecognizer::on_device(),
+            Some(limit),
+        )
     }
 
     /// A rig whose engine also has an ending spotter that hears what the test scripts.
@@ -171,6 +192,7 @@ impl Rig {
             recorder,
             (spotter, spotter_off),
             FakeRecognizer::new(),
+            None,
         )
     }
 
@@ -179,10 +201,14 @@ impl Rig {
         recorder: Recorder,
         (spotter, spotter_off): (Option<FakeSpotter>, Option<&str>),
         (recognizer, server): (FakeRecognizer, FakeControl),
+        queue: Option<usize>,
     ) -> (Self, TestEngine, FakeFrames) {
         let config = DesktopConfig::from_json_str(config).unwrap();
         let gate = InputGate::default();
-        let (frames, feed) = FakeFrames::new(&gate);
+        let (frames, feed) = match queue {
+            Some(limit) => FakeFrames::capped(&gate, limit),
+            None => FakeFrames::new(&gate),
+        };
         let (wake_detector, wake) = FakeWake::new();
         let (cue_player, cues) = FakeCuePlayer::new();
         let notices = Rc::new(RefCell::new(Vec::new()));
@@ -742,6 +768,42 @@ async fn a_hold_released_while_the_model_is_read_is_dictated_once_it_is_ready() 
             settle().await;
             rig.partial("hello world").await;
             rig.at(20_250).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "hello world")
+            );
+        })
+        .await;
+}
+
+/// Unread 80 ms frames the microphone queue holds before the next one is dropped: 10 s.
+const MICROPHONE_QUEUE: u64 = 125;
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_released_during_a_long_model_load_is_delivered_and_the_microphone_is_not_dropped() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::loading_with_queue(
+                "{}",
+                Recorder::disabled(),
+                usize::try_from(MICROPHONE_QUEUE).unwrap(),
+            );
+            let task = hold_task(engine, frames);
+            rig.press().await;
+            rig.feed_until(1_000, Kind::Voice).await;
+            rig.release(1_000).await;
+            // 1040 ms is the first frame after the release. One past the queue, still unread
+            // while the model loads, is what stops the capture.
+            let overflow_at = 1_040 + MICROPHONE_QUEUE * FRAME_MS;
+            rig.feed_until(overflow_at, Kind::Quiet).await;
+            assert!(
+                !task.is_finished(),
+                "the load is still running when the queue would have overflowed"
+            );
+            rig.server.ready();
+            settle().await;
+            rig.partial("hello world").await;
+            rig.at(overflow_at + 250).await;
             assert_eq!(
                 finished(task).await,
                 accepted(CaptureRoute::Paste, "hello world")
