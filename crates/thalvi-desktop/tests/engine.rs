@@ -13,7 +13,7 @@ use thalvi_desktop::audio::{AudioError, InputGate};
 use thalvi_desktop::capture::{CaptureRequest, CaptureRoute, Ending};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::cues::{Cue, CueTiming};
-use thalvi_desktop::device::{Export, Step};
+use thalvi_desktop::device::{Download, Export, Step};
 use thalvi_desktop::engine::fakes::{
     CueControl, CueLog, FakeCuePlayer, FakeFrames, FakeSpotter, FakeWake, FrameFeed,
     SpotterControl, WakeControl,
@@ -26,6 +26,7 @@ use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::hold::{HoldInput, HoldKind, Refusal};
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
+use thalvi_desktop::models::CatalogSpeech;
 use thalvi_desktop::recognizer::{
     FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, SpeechSource,
 };
@@ -616,6 +617,17 @@ async fn a_dictation_waits_for_a_model_read_from_disk_and_sends_what_was_said_me
         .await;
 }
 
+fn speech_download(export: Export) -> Download {
+    let model = CatalogSpeech::Unified160ms;
+    Download {
+        export,
+        size: match export {
+            Export::Gpu => model.gpu_assets().expect("unified gpu files").size(),
+            Export::Cpu => model.assets().size(),
+        },
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_dictation_that_cannot_wait_for_the_model_ends_when_it_does_and_says_why() {
     #[derive(Clone, Copy)]
@@ -634,17 +646,17 @@ async fn a_dictation_that_cannot_wait_for_the_model_ends_when_it_does_and_says_w
     // What happens, how the dictation ends, and when the error cue plays.
     let cases = [
         (
-            Happens::DownloadingAtWake(Step::Fetching(Export::Gpu)),
+            Happens::DownloadingAtWake(Step::Fetching(speech_download(Export::Gpu))),
             failed(downloading(0)),
             Some(0),
         ),
         (
-            Happens::DownloadingAtWake(Step::Downloading(Export::Cpu, 45)),
+            Happens::DownloadingAtWake(Step::Downloading(speech_download(Export::Cpu), 45)),
             failed(downloading(45)),
             Some(0),
         ),
         (
-            Happens::Download(Step::Downloading(Export::Gpu, 7)),
+            Happens::Download(Step::Downloading(speech_download(Export::Gpu), 7)),
             failed(downloading(7)),
             Some(12_000),
         ),

@@ -189,20 +189,33 @@ impl LastError {
 /// What the notice says while the speech model loads: from disk, or which download it is waiting for and how far it is.
 #[must_use]
 pub fn load_notice(step: Step) -> String {
-    match step {
-        Step::Reading => "Loading the speech model.".to_owned(),
-        Step::Fetching(Export::Cpu) => {
-            "Loading the speech model. Downloading about 650 MB.".to_owned()
+    let (download, percent) = match step {
+        Step::Reading => return "Loading the speech model.".to_owned(),
+        Step::Fetching(download) => (download, None),
+        Step::Downloading(download, percent) => (download, Some(percent)),
+    };
+    let size = format_size(download.size);
+    match (download.export, percent) {
+        (Export::Cpu, None) => format!("Loading the speech model. Downloading about {size}."),
+        (Export::Gpu, None) => {
+            format!("Loading the speech model. Downloading the model for the GPU, about {size}.")
         }
-        Step::Fetching(Export::Gpu) => {
-            "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.".to_owned()
+        (Export::Cpu, Some(percent)) => {
+            format!("Downloading the speech model, about {size} \u{2014} {percent}%")
         }
-        Step::Downloading(Export::Cpu, percent) => {
-            format!("Downloading the speech model, about 650 MB \u{2014} {percent}%")
+        (Export::Gpu, Some(percent)) => {
+            format!("Downloading the model for the GPU, about {size} \u{2014} {percent}%")
         }
-        Step::Downloading(Export::Gpu, percent) => {
-            format!("Downloading the model for the GPU, about 1.3 GB \u{2014} {percent}%")
-        }
+    }
+}
+
+/// Settings' size text: one decimal gigabyte from a billion bytes, otherwise whole megabytes.
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        let tenths = (bytes + 50_000_000) / 100_000_000;
+        format!("{}.{} GB", tenths / 10, tenths % 10)
+    } else {
+        format!("{} MB", (bytes + 500_000) / 1_000_000)
     }
 }
 
@@ -341,6 +354,7 @@ impl View {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use thalvi_desktop::device::Download;
     use thalvi_desktop::recognizer::{ConnectFailure, Detail, RecognizerError, SpeechSource};
 
     use super::*;
@@ -634,25 +648,51 @@ mod tests {
     fn the_loading_notice_names_the_download_and_its_percent_and_the_overlay_shows_only_downloads()
     {
         use Export::{Cpu, Gpu};
+        use thalvi_desktop::models::{CatalogSpeech, WHISPER_TURBO};
+        let cpu = |model: CatalogSpeech| Download {
+            export: Cpu,
+            size: model.assets().size(),
+        };
+        let Some(unified_gpu) = CatalogSpeech::Unified160ms.gpu_assets() else {
+            panic!("Nemotron Unified has GPU files");
+        };
+        let gpu = Download {
+            export: Gpu,
+            size: unified_gpu.size(),
+        };
+        let whisper = Download {
+            export: Cpu,
+            size: WHISPER_TURBO.size(),
+        };
         for (step, notice, downloading) in [
             (Step::Reading, "Loading the speech model.", false),
             (
-                Step::Fetching(Cpu),
-                "Loading the speech model. Downloading about 650 MB.",
+                Step::Fetching(whisper),
+                "Loading the speech model. Downloading about 575 MB.",
                 true,
             ),
             (
-                Step::Fetching(Gpu),
+                Step::Fetching(cpu(CatalogSpeech::Nemotron160ms)),
+                "Loading the speech model. Downloading about 662 MB.",
+                true,
+            ),
+            (
+                Step::Downloading(cpu(CatalogSpeech::Unified160ms), 7),
+                "Downloading the speech model, about 647 MB \u{2014} 7%",
+                true,
+            ),
+            (
+                Step::Downloading(cpu(CatalogSpeech::ParakeetTdtV3), 40),
+                "Downloading the speech model, about 671 MB \u{2014} 40%",
+                true,
+            ),
+            (
+                Step::Fetching(gpu),
                 "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.",
                 true,
             ),
             (
-                Step::Downloading(Cpu, 7),
-                "Downloading the speech model, about 650 MB \u{2014} 7%",
-                true,
-            ),
-            (
-                Step::Downloading(Gpu, 100),
+                Step::Downloading(gpu, 100),
                 "Downloading the model for the GPU, about 1.3 GB \u{2014} 100%",
                 true,
             ),

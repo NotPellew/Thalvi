@@ -319,7 +319,7 @@ as saved and never again; leave it blank to keep it. A server that cannot be
 reached is named in the error, and Thalvi never falls back to another one.
 
 For the on-device model, Thalvi downloads a missing model when it starts (once:
-about 650 MB, or 1.3 GB for Nemotron Unified's GPU files), and Next dictation
+575 to 671 MB depending on the model, or 1.3 GB for Nemotron Unified's GPU files; the notice names the size), and Next dictation
 shows the download's percent until it is ready. While it
 downloads or if it fails, **Use a speech server instead** opens the form to add
 a server, and after a failure **Retry** fetches the model again; Thalvi never

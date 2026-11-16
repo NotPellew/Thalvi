@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use thalvi_desktop::device::{
-    Adapter, Adapters, Device, Export, Fallback, Gpu, Nodes, Placement, Provider, Step,
+    Adapter, Adapters, Device, Download, Export, Fallback, Gpu, Nodes, Placement, Provider, Step,
 };
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::local::{LocalRecognizer, ModelSource, SpeechModel, SpeechStream};
@@ -481,7 +481,13 @@ async fn a_catalog_model_that_cannot_be_provided_fails_with_the_model_errors_own
         .err()
         .expect("no folder to fetch into");
 
-    assert_eq!(*steps.lock().unwrap(), [Step::Fetching(Export::Cpu)]);
+    assert_eq!(
+        *steps.lock().unwrap(),
+        [Step::Fetching(Download {
+            export: Export::Cpu,
+            size: CatalogSpeech::Nemotron160ms.assets().size(),
+        })]
+    );
 
     assert_eq!(error.headline(), "Can't save the model file");
     assert!(
@@ -522,9 +528,22 @@ async fn a_gpu_plan_that_cannot_save_its_files_tries_the_cpu_files_next_and_each
         .err()
         .expect("no folder to fetch into");
 
+    let model = CatalogSpeech::Unified160ms;
+    let Some(gpu_assets) = model.gpu_assets() else {
+        panic!("Nemotron Unified has GPU files");
+    };
     assert_eq!(
         *steps.lock().expect("steps"),
-        [Step::Fetching(Export::Gpu), Step::Fetching(Export::Cpu)]
+        [
+            Step::Fetching(Download {
+                export: Export::Gpu,
+                size: gpu_assets.size(),
+            }),
+            Step::Fetching(Download {
+                export: Export::Cpu,
+                size: model.assets().size(),
+            }),
+        ]
     );
     assert!(
         error
@@ -677,7 +696,13 @@ async fn the_load_reports_how_many_nodes_of_each_network_the_gpu_took() {
 #[tokio::test]
 async fn a_load_goes_on_after_the_dictation_that_began_it_gives_up_and_a_failed_one_is_not_left_downloading()
  {
-    let downloading = Step::Downloading(Export::Cpu, 40);
+    let downloading = Step::Downloading(
+        Download {
+            export: Export::Cpu,
+            size: CatalogSpeech::Nemotron160ms.assets().size(),
+        },
+        40,
+    );
     for failures in [0, 1] {
         let rig = rig(&format!("detached-{failures}"), dictation, None, failures);
         let release = Arc::new(Notify::new());

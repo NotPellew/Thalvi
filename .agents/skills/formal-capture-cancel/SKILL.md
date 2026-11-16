@@ -47,6 +47,10 @@ so the model actions are unchanged. Its Vulkan previews (#482) are `RecognizerEv
 never admits one to delivery, the same path the model abstracts for streaming recognizers. The model does not
 cover preview ordering inside the session; `whisper.rs` tests do.
 
+The download-size notice (#485, stacked on `feat/speech-trials`) changes only `runner.rs`'s tests module, for
+`Step`'s new `Download` payload; `runner.rs`'s hash describes the commit that adds this paragraph. No mapped function
+changed, and `engine.rs`, `recognizer.rs` and `local.rs` are untouched, so the model actions are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty

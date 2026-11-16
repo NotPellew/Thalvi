@@ -17,7 +17,7 @@ use tokio::sync::{Notify, OnceCell, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::chosen::Preload;
-use crate::device::{self, Device, Export, Fallback, Gpu, Step};
+use crate::device::{self, Device, Download, Export, Fallback, Gpu, Step};
 use crate::frame::Frame;
 use crate::metrics::{Event, Metrics};
 use crate::models::{ModelStore, WHISPER_TURBO, WhisperAssets};
@@ -702,14 +702,18 @@ impl<L: Launcher> Shared<L> {
 
     async fn download(&self) -> Result<(PathBuf, PathBuf), RecognizerError> {
         let assets = self.assets;
+        let download = Download {
+            export: Export::Cpu,
+            size: assets.size(),
+        };
         self.tell(if self.store.is_cached(&assets).await {
             Step::Reading
         } else {
-            Step::Fetching(Export::Cpu)
+            Step::Fetching(download)
         });
         let step = |step| self.tell(step);
         self.store
-            .fetch_speech(&assets, device::downloading(Export::Cpu, &step))
+            .fetch_speech(&assets, device::downloading(download, &step))
             .await?;
         Ok((self.store.path(&assets.model), self.store.path(&assets.vad)))
     }
@@ -1874,7 +1878,14 @@ mod tests {
             tokio::select! {
                 _ = &mut loading => panic!("the load ended before the download was released"),
                 step = steps.wait_for(|step| matches!(step, Step::Fetching(_) | Step::Downloading(..))) => {
-                    assert!(matches!(*step.unwrap(), Step::Fetching(Export::Cpu) | Step::Downloading(Export::Cpu, _)));
+                    let expected = Download {
+                        export: Export::Cpu,
+                        size: assets.size(),
+                    };
+                    assert!(matches!(
+                        *step.unwrap(),
+                        Step::Fetching(download) | Step::Downloading(download, _) if download == expected
+                    ));
                 }
             }
         })

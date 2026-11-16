@@ -73,7 +73,7 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   address so it cannot connect to the developer's server:
   `{"stt":{"entries":[{"kind":"thalvi_server","id":"rig","name":"Rig","active":true,"address":"ws://127.0.0.1:1"}]}}`.
   An on-device entry (`{"kind":"on_device","id":"dev","name":"On this computer","active":true,"model":"nemotron_160ms"}`)
-  downloads about 650 MB at start; add `--env HTTPS_PROXY=http://127.0.0.1:1`
+  downloads that model's files at start; add `--env HTTPS_PROXY=http://127.0.0.1:1`
   unless the download is the point. Add `"recordings":{"metrics":true,"text":true,"audio":false}`
   for the evidence below.
 - Copy model files read-only from a cache into `$R/home/.local/share/thalvi/models/`
