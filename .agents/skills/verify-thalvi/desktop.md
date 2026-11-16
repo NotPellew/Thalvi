@@ -4,8 +4,7 @@ Runs the real `thalvi-desktop` (a chosen commit's debug build) on a real
 Hyprland, nested in a headless compositor, inside `bwrap`. The developer's
 home, desktop, microphone, audio, config, model cache and running Thalvi are out
 of reach (the rest of `/` is read-only, and the network is shared unless the run
-is `--offline`; see Isolation), so an agent can use it with no developer involved. The web client has
-its own recipes (`SKILL.md`); this file is the desktop counterpart.
+is `--offline`; see Isolation), so an agent can use it with no developer involved.
 
 It covers what shows on screen and in stdout: the overlay, the Settings window at
 any size and look, model downloads, pause and resume. It has no real tray (use
@@ -372,9 +371,8 @@ Do not routinely plan hardware fixtures or supervised headset sessions. If an
 issue or PR needs physical audio for acceptance, ask the developer before merge
 under the exception in [synthetic-audio.md](synthetic-audio.md); do not assume
 the setup or participation is available. Synthetic audio
-can exercise real recognizers and digital playback; it does not establish
-physical transducers, room acoustics, comfort or perceived voice quality.
-See [synthetic-audio.md](synthetic-audio.md) for browser fault and playback checks.
+can exercise real recognizers; it does not establish physical transducers,
+room acoustics or comfort.
 
 ## Isolation, and its limits
 
