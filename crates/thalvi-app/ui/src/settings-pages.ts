@@ -1762,6 +1762,12 @@ function speech(context: PageContext): SpeechRows {
   };
 }
 
+function openMicrophoneName(audio: AudioStatus): string {
+  if (audio.active === null) return "None — no microphone is open";
+  if (audio.selected === null) return `System default (${audio.active})`;
+  return audio.active;
+}
+
 function microphone({ settings, backend, controls, microphones, live, audio, apply }: PageContext): HTMLElement[] {
   const names = Array.isArray(microphones) ? microphones : [];
   const chosen = settings.microphone;
@@ -1778,7 +1784,7 @@ function microphone({ settings, backend, controls, microphones, live, audio, app
   const active = el("output", { class: "badge" }, "");
   const refused = el("p", { class: "note", role: "alert", hidden: true });
   const showAudio = (next: AudioStatus): void => {
-    active.textContent = next.active ?? "None — no microphone is open";
+    active.textContent = openMicrophoneName(next);
     active.dataset["on"] = String(next.active !== null);
     say(
       refused,
@@ -1788,7 +1794,7 @@ function microphone({ settings, backend, controls, microphones, live, audio, app
   showAudio(audio);
   live.audio = showAudio;
   const chosenDevice = row("Microphone", Array.isArray(microphones) ? "Choosing a device opens it right away, or after the capture that is running." : null, {
-    node: el("span", { class: "stack" }, picker.node, refused),
+    node: el("div", { class: "stack wide" }, el("div", { class: "trow pick" }, picker.node), refused),
     field: picker.field,
   });
   const meter = el("b");
