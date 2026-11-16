@@ -51,6 +51,13 @@ The download-size notice (#485, stacked on `feat/speech-trials`) changes only `r
 `Step`'s new `Download` payload; `runner.rs`'s hash describes the commit that adds this paragraph. No mapped function
 changed, and `engine.rs`, `recognizer.rs` and `local.rs` are untouched, so the model actions are unchanged.
 
+Holding unconfirmed lines back from a terminal adds a branch to `Delivery::paste_in` after admission: when the
+route is not Submit, the text has a line break and `Host::is_terminal` (a synchronous read of the bound target) says
+the window is a terminal, it keeps the text on the clipboard through `keep` instead of calling `deliver`. Both are
+host actions after `FinishEmpty`, with no new await, queue step or write to cancellation state, so `delivered`
+still abstracts the admission and model actions are unchanged. `runner.rs` changes only in its tests module, for
+the new host method. The hashes of `runner.rs` and `delivery.rs` describe the commit that adds this paragraph.
+
 The app styles change (#464) passes the bound window's app and title into
 `Engine::capture` and keeps a local copy for Settings before capture begins.
 `Delivery::writing_target` reads the retained target without a platform call.

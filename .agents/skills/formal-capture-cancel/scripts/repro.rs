@@ -43,6 +43,9 @@ impl Host for RecordingHost {
     fn copies_only(&self) -> bool {
         false
     }
+    fn is_terminal(&self, _target: &String) -> bool {
+        false
+    }
     fn writing_target(&self, target: &String) -> Result<WindowApp, AppMatchLimit> {
         Ok(WindowApp::new(target.clone(), ""))
     }
