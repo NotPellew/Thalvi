@@ -2642,10 +2642,32 @@ describe("live controls", () => {
     expect(refusal()).toBe("");
   });
 
+  it.each<[string, string | null, string, string]>([
+    ["the system default", null, "Default Audio Device", "System default (Default Audio Device)"],
+    ["a named device", "USB Microphone", "USB Microphone", "USB Microphone"],
+  ])("names the open microphone when %s is chosen", async (_chosen, selected, active, shown) => {
+    const stub = await open({ ...SETTINGS, microphone: selected });
+    goTo("listening");
+    stub.audio({ selected, active, paused: false, problem: null });
+    expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe(shown);
+  });
+
+  it("lays the microphone picker out like the wake model row", async () => {
+    await open();
+    goTo("listening");
+    const microphone = rowOf("Microphone");
+    const wake = rowOf("Wake model (dictation)");
+    expect(microphone.classList.contains("wide")).toBe(wake.classList.contains("wide"));
+    expect(microphone.querySelector(".stack.wide .trow.pick select")).not.toBeNull();
+    expect(microphone.querySelector(".what small")?.textContent).toBe(
+      "Choosing a device opens it right away, or after the capture that is running.",
+    );
+  });
+
   it("shows the active microphone separately from the chosen one and stays paused after choosing while paused", async () => {
     const stub = await open();
     goTo("listening");
-    expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe("Built-in");
+    expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe("System default (Built-in)");
     stub.emit({ state: "paused" });
     expect(rowOf("Active microphone").querySelector("output")?.textContent).toBe("None — no microphone is open");
     choose(control("Microphone", "select"), "USB Microphone");
