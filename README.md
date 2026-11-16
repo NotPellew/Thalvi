@@ -319,7 +319,7 @@ as saved and never again; leave it blank to keep it. A server that cannot be
 reached is named in the error, and Thalvi never falls back to another one.
 
 For the on-device model, Thalvi downloads a missing model when it starts (once:
-about 650 MB, or 1.3 GB for Nemotron Unified's GPU files), and Next dictation
+575 to 671 MB depending on the model, or 1.3 GB for Nemotron Unified's GPU files; the notice names the size), and Next dictation
 shows the download's percent until it is ready. While it
 downloads or if it fails, **Use a speech server instead** opens the form to add
 a server, and after a failure **Retry** fetches the model again; Thalvi never
@@ -340,7 +340,7 @@ each).
 | Nemotron Unified (`unified_160ms`) | Nemotron Unified ASR 0.6B | 25 European languages | 3.03% | 6.35% | Punctuation and capitals. Re-reads the last 6 s every 160 ms: about 70 ms of work per step on 4 cores of a Ryzen, so on the CPU it needs a fast CPU. On Linux with a discrete GPU it runs there instead, through WebGPU and an fp16 export (about 30 ms a step on an RTX 5070 Ti, a 1.3 GB download); Settings says which it uses. Until the GPU files are downloaded it runs on the CPU, and Settings offers the download. Text appears about 0.5 s later. Our own export, under OpenMDW-1.1. |
 | Parakeet TDT (`parakeet_tdt_v3`) | Parakeet TDT 0.6B v3 | 25 European languages | 2.33%* | 4.76%* | Punctuation and capitals. Light on the CPU: about a seventh of real time on 4 cores, against about one for Unified. Not a streaming model: it re-reads the last 2.6 s every 640 ms, so words may change while you speak, and the text is final about a second after you pause. At the pause it re-reads the whole stretch once, so the final comes later after a long unbroken stretch: that re-read took about 1 s after 30 s of speech and 3.5 s after 90 s, on 4 cores. Under CC BY 4.0. |
 | Whisper Turbo · CPU (`whisper_turbo_cpu`), experimental | Whisper large-v3-turbo, q5_0, in whisper.cpp | Many; detected per capture (tried: English, German) | – | – | Text appears only after you stop speaking. Runs in a whisper.cpp helper that Thalvi ships, starts and stops itself; no server or console. Slow: about real time or slower on 8 cores of a Ryzen 9800X3D (an 8 s capture took 9–15 s). Ignores the word list, so custom names may be misheard. 575 MB, MIT. |
-| Whisper Turbo · Vulkan GPU (`whisper_turbo_vulkan`), experimental | the same files | the same | – | – | The same helper built with Vulkan, on the first GPU it finds; Settings names it, and says so when there is none or the driver lacks Vulkan, without falling back to the CPU. On an RTX 5070 Ti an 8 s capture took about 0.1 s after a 4 s first warm-up; a small integrated GPU was slower than the CPU. Untested on other GPUs. |
+| Whisper Turbo · Vulkan GPU (`whisper_turbo_vulkan`), experimental | the same files | the same | – | – | The same helper built with Vulkan, on the first GPU it finds. While you speak, it re-reads everything said so far on the GPU and shows it as provisional text, which the final replaces after you stop; only the final is pasted. Settings names the GPU, and says so when there is none or the driver lacks Vulkan, without falling back to the CPU. On an RTX 5070 Ti an 8 s capture took about 0.1 s after a 4 s first warm-up; a small integrated GPU was slower than the CPU. Untested on other GPUs. |
 
 Nemotron Speech Streaming at 80 ms and 560 ms (3.62% and 3.46% on LibriSpeech)
 are left out because they offer no real choice over 160 ms; either works as your

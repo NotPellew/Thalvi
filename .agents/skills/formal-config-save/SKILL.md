@@ -93,7 +93,8 @@ two read-only Settings commands in `start` (the current app and why app styles
 may not apply) and adds agent tests for `writing.apps`; `writing.apps` is
 checked by the same config load as every other field. None of it writes
 `desktop.json` or `AppState::config`, or takes the save lock. The model and its
-three invariants are unchanged.
+three invariants are unchanged. The hashes describe that branch merged with main's
+word-list report (`e1981db`), which adds one test field in `agent.rs` and no writer.
 
 `app.rs`'s `run` now returns from `Launch::Watch` before setup, so a terminal
 view never opens the app, writes `desktop.json`, or takes the save lock.

@@ -1149,6 +1149,7 @@ mod tests {
                 license: "l",
                 languages: &["en"],
                 cached: false,
+                word_list: true,
             };
             std::future::ready(Ok(vec![
                 ModelRow::wake(&wake),

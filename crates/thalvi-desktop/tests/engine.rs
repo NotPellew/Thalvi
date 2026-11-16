@@ -13,7 +13,7 @@ use thalvi_desktop::audio::{AudioError, InputGate};
 use thalvi_desktop::capture::{CaptureRequest, CaptureRoute, Ending};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::cues::{Cue, CueTiming};
-use thalvi_desktop::device::{Export, Step};
+use thalvi_desktop::device::{Download, Export, Step};
 use thalvi_desktop::engine::fakes::{
     CueControl, CueLog, FakeCuePlayer, FakeFrames, FakeSpotter, FakeWake, FrameFeed,
     SpotterControl, WakeControl,
@@ -27,6 +27,7 @@ use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::hold::{HoldInput, HoldKind, Refusal};
 use thalvi_desktop::host::WindowApp;
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
+use thalvi_desktop::models::CatalogSpeech;
 use thalvi_desktop::recognizer::{
     FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, SpeechSource,
 };
@@ -625,6 +626,17 @@ async fn a_dictation_waits_for_a_model_read_from_disk_and_sends_what_was_said_me
         .await;
 }
 
+fn speech_download(export: Export) -> Download {
+    let model = CatalogSpeech::Unified160ms;
+    Download {
+        export,
+        size: match export {
+            Export::Gpu => model.gpu_assets().expect("unified gpu files").size(),
+            Export::Cpu => model.assets().size(),
+        },
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_dictation_that_cannot_wait_for_the_model_ends_when_it_does_and_says_why() {
     #[derive(Clone, Copy)]
@@ -643,17 +655,17 @@ async fn a_dictation_that_cannot_wait_for_the_model_ends_when_it_does_and_says_w
     // What happens, how the dictation ends, and when the error cue plays.
     let cases = [
         (
-            Happens::DownloadingAtWake(Step::Fetching(Export::Gpu)),
+            Happens::DownloadingAtWake(Step::Fetching(speech_download(Export::Gpu))),
             failed(downloading(0)),
             Some(0),
         ),
         (
-            Happens::DownloadingAtWake(Step::Downloading(Export::Cpu, 45)),
+            Happens::DownloadingAtWake(Step::Downloading(speech_download(Export::Cpu), 45)),
             failed(downloading(45)),
             Some(0),
         ),
         (
-            Happens::Download(Step::Downloading(Export::Gpu, 7)),
+            Happens::Download(Step::Downloading(speech_download(Export::Gpu), 7)),
             failed(downloading(7)),
             Some(12_000),
         ),
@@ -6636,6 +6648,83 @@ async fn a_long_buffered_hold_is_not_cut_off_as_idle() {
             rig.finals("a long dictation").await;
             let got = finished(task).await;
             assert!(matches!(got, CaptureOutcome::Accepted(_)), "{got:?}");
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn previews_from_a_buffering_recognizer_are_shown_but_never_paste_end_or_cancel_a_capture() {
+    // (a hold, what the previews say, the final, the outcome)
+    type Case = (bool, [&'static str; 2], &'static str, CaptureOutcome);
+    let cases: [Case; 2] = [
+        (
+            true,
+            ["draft words send that", "draft never mind"],
+            "draft words",
+            accepted(CaptureRoute::Paste, "draft words"),
+        ),
+        (
+            false,
+            ["Run tests submit", "never mind"],
+            "Run tests submit",
+            accepted(CaptureRoute::Submit, "Run tests"),
+        ),
+    ];
+    LocalSet::new()
+        .run_until(async {
+            for (hold, previews, last, outcome) in cases {
+                let label = format!("hold {hold}");
+                let (mut rig, engine, frames) = Rig::new(r#"{"ending_pause":{"paste":1.0}}"#);
+                rig.server.buffer_audio();
+                let task = if hold {
+                    hold_task(engine, frames)
+                } else {
+                    capture_task(engine, frames)
+                };
+                if hold {
+                    rig.hold().await;
+                } else {
+                    rig.open().await;
+                }
+                rig.feed_until(1200, Kind::Voice).await;
+                for preview in previews {
+                    rig.partial(preview).await;
+                    assert_eq!(
+                        rig.state(),
+                        EngineState::Capturing {
+                            committed: String::new(),
+                            partial: Some(preview.to_owned()),
+                            notice: None
+                        },
+                        "{label}: the overlay shows the preview"
+                    );
+                }
+                assert!(!task.is_finished(), "{label}: no preview ended the capture");
+                for cue in [Cue::Provisional, Cue::Cancelled, Cue::Accepted, Cue::Error] {
+                    assert!(rig.started(cue).is_empty(), "{label}: {cue:?} played");
+                }
+                assert!(!rig.server.calls().contains(&FakeCall::FinishAudio));
+
+                if hold {
+                    rig.release(1400).await;
+                } else {
+                    rig.feed_until(3500, Kind::Quiet).await;
+                }
+                assert!(
+                    matches!(rig.state(), EngineState::TranscribingLive { .. }),
+                    "{label}: {:?}",
+                    rig.state()
+                );
+                rig.finals(last).await;
+                assert_eq!(finished(task).await, outcome, "{label}");
+                let finishes = rig
+                    .server
+                    .calls()
+                    .iter()
+                    .filter(|call| matches!(call, FakeCall::FinishAudio))
+                    .count();
+                assert_eq!(finishes, 1, "{label}");
+            }
         })
         .await;
 }

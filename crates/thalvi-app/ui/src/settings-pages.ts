@@ -1064,11 +1064,14 @@ function speech(context: PageContext): SpeechRows {
   const summaryActions = el("div", { class: "trow", hidden: true }, useServer, retry, retryProblem);
   let currentStatus: Status = { state: "listening" };
   const modelTitles = new Map<string, string>();
+  let speechModelList: SpeechModelInfo[] = [];
   const speechModels: Promise<SpeechModelInfo[]> = backend.listSpeechModels();
   speechModels.then(
     (models) => {
+      speechModelList = models;
       for (const info of models) modelTitles.set(info.name, info.title);
       render();
+      checkWordList();
     },
     () => undefined,
   );
@@ -1778,17 +1781,25 @@ function speech(context: PageContext): SpeechRows {
   const words = wordListTable(context);
   const wordProblem = note();
   words.node.append(wordProblem);
-  const wordRow = row(
-    "Word list",
-    "Names and terms to spell your way, added one at a time. Recognition on this computer and recognizers reached directly can favour them.",
-    words.node,
-  );
+  const wordListHint =
+    "Names and terms to spell your way, added one at a time. Recognition on this computer and recognizers reached directly can favour them.";
+  const wordRow = row("Word list", wordListHint, words.node);
+  const wordHint = wordRow.querySelector(".what small");
   let wordListRequest = 0;
+  function wordListNotice(active: LiveEntry | undefined): string {
+    if (active?.kind !== "on_device") return wordListHint;
+    const name = active.model;
+    if (name === undefined) return wordListHint;
+    const info = speechModelList.find((known) => known.name === name);
+    if (info === undefined || info.word_list) return wordListHint;
+    return `Names and terms to spell your way, added one at a time. ${info.title}, the recognizer in use, ignores them; the other models on this computer and recognizers reached directly can favour them.`;
+  }
   function checkWordList(): void {
     const request = (wordListRequest += 1);
     const active = activeLive();
     wordRow.classList.remove("off");
     say(wordProblem, "");
+    if (wordHint) wordHint.textContent = wordListNotice(active);
     if (active === undefined || active.kind !== "realtime") {
       words.enable(true);
       return;
