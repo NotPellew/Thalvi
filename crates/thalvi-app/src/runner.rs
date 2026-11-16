@@ -2878,6 +2878,10 @@ mod tests {
             false
         }
 
+        fn is_terminal(&self, _: &String) -> bool {
+            false
+        }
+
         fn writing_target(
             &self,
             target: &String,

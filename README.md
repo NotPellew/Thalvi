@@ -41,8 +41,10 @@ Say "Hey Thalvi" in any window, dictate, then end with a phrase:
 | "never mind" | drops the whole capture |
 
 Thalvi puts the text on the clipboard and presses the paste shortcut in the window,
-so line breaks arrive as line breaks and nothing is sent by them; the text stays on
-the clipboard. The shortcut is Ctrl+V, and Ctrl+Shift+V in a known terminal on
+so line breaks arrive as line breaks; the text stays on the clipboard. A terminal can
+run each pasted line, so there Thalvi pastes one line only: text with line breaks
+stays on the clipboard for you to paste once you have read it, and "submit" pastes
+it after showing it to you. The shortcut is Ctrl+V, and Ctrl+Shift+V in a known terminal on
 Hyprland (kitty, foot, Alacritty, WezTerm, Ghostty, GNOME Console and Terminal,
 Konsole, Ptyxis, xterm). In another terminal Ctrl+V pastes nothing; paste yourself.
 An overlay at the top of the
