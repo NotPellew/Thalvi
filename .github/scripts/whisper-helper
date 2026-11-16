@@ -20,7 +20,9 @@ for variant in "${variants[@]}"; do
 done
 [[ ${#pending[@]} -eq 0 ]] && { echo "whisper-helper: ${variants[*]} already built"; exit 0; }
 
-work=${TMPDIR:-/tmp}/whisper-helper-$COMMIT
+# Beside OUT rather than in TMPDIR: Windows runners' temp path is an 8.3 short name (RUNNER~1), and
+# the Vulkan build's nested configure of vulkan-shaders-gen found no compiler there.
+work=$(dirname "$out")/.whisper-build-$COMMIT
 if [[ $(git -C "$work" rev-parse HEAD 2>/dev/null) != "$COMMIT" ]]; then
   rm -rf "$work"
   git init -q "$work"
@@ -47,7 +49,10 @@ for variant in "${pending[@]}"; do
   esac
   build=$work/build-$variant
   cmake -S "$work" -B "$build" "${common[@]}" "${flags[@]}"
-  cmake --build "$build" --config Release --target whisper-server -j "$(nproc 2>/dev/null || echo 4)"
+  if ! cmake --build "$build" --config Release --target whisper-server -j "$(nproc 2>/dev/null || echo 4)"; then
+    find "$build" -name CMakeConfigureLog.yaml -path '*vulkan-shaders-gen*' -exec tail -n 120 {} \;
+    exit 1
+  fi
   rm -rf "${out:?}/$variant"
   mkdir -p "$out/$variant"
   server=$(find "$build/bin" -maxdepth 2 -type f \( -name whisper-server -o -name whisper-server.exe \) | head -n 1)
