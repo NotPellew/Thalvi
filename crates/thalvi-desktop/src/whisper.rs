@@ -771,7 +771,7 @@ impl<L: Launcher> Shared<L> {
         client: &reqwest::Client,
     ) -> Result<Running<L::Process>, HelperError> {
         let process = self.launcher.launch(launch)?;
-        let began = Instant::now();
+        let began = tokio::time::Instant::now();
         loop {
             if let Some(exit) = process.exit() {
                 let output = process.output();
@@ -1128,6 +1128,7 @@ mod tests {
     use axum::http::StatusCode;
     use axum::routing::{get, post};
     use serde_json::Value;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::Notify;
 
     use super::*;
@@ -1135,7 +1136,7 @@ mod tests {
     use crate::metrics::{RecordKinds, Recorder};
     use crate::models::{Asset, ModelKind};
 
-    const WAIT: Duration = Duration::from_secs(120);
+    const WAIT: Duration = Duration::from_secs(5);
 
     const MODEL: &[u8] = b"model-bytes";
     const VAD: &[u8] = b"vad-bytes";
@@ -1202,6 +1203,190 @@ mod tests {
             .expect("the awaited event happened in time")
     }
 
+    #[test]
+    fn helper_process_fixture() {
+        use std::io::{Read, Write};
+
+        let Some(address) = std::env::var_os("THALVI_WHISPER_TEST_CHILD") else {
+            return;
+        };
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            rustix::process::parent_process_death_signal().unwrap(),
+            Some(rustix::process::Signal::KILL)
+        );
+        let mut stream = std::net::TcpStream::connect(address.to_str().unwrap()).unwrap();
+        stream.set_read_timeout(Some(WAIT * 4)).unwrap();
+        for number in 0..KEPT_LINES + 2 {
+            eprintln!("helper line {number}");
+        }
+        stream.write_all(&std::process::id().to_le_bytes()).unwrap();
+        let _ = stream.read(&mut [0]);
+        std::process::exit(7);
+    }
+
+    async fn helper_child() -> (Child, tokio::net::TcpStream, u32) {
+        let listener = within(tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "whisper::tests::helper_process_fixture",
+                "--nocapture",
+            ])
+            .env(
+                "THALVI_WHISPER_TEST_CHILD",
+                listener.local_addr().unwrap().to_string(),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        native::prepare(&mut command);
+        let child = command.spawn().unwrap();
+        native::bind(&child).unwrap();
+        let (mut stream, _) = within(listener.accept()).await.unwrap();
+        let pid = within(stream.read_u32_le()).await.unwrap();
+        assert_eq!(pid, child.id());
+        (child, stream, pid)
+    }
+
+    fn helper_process(mut child: Child) -> HelperProcess {
+        let output = Arc::default();
+        let reader = read_lines(child.stderr.take().unwrap(), Arc::clone(&output)).unwrap();
+        HelperProcess {
+            child: Mutex::new(child),
+            output,
+            reader: Mutex::new(Some(reader)),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_real_helper_reports_its_pid_exit_code_and_last_output() {
+        let (child, mut stream, pid) = helper_child().await;
+        let process = helper_process(child);
+        assert_eq!(process.id(), pid);
+        assert_eq!(process.exit(), None);
+        within(stream.write_all(&[1])).await.unwrap();
+        let exit = within(async {
+            loop {
+                if let Some(exit) = process.exit() {
+                    break exit;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert_eq!(exit, Exit(Some(7)));
+        assert_eq!(
+            process.output(),
+            (2..KEPT_LINES + 2)
+                .map(|number| format!("helper line {number}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_helpers_exit_waits_for_its_last_output_to_be_read() {
+        let (child, mut stream, _) = helper_child().await;
+        let output = Arc::new(Mutex::new(VecDeque::new()));
+        let (release, read) = std::sync::mpsc::channel();
+        let reader = std::thread::Builder::new()
+            .name("thalvi-whisper-test-log".to_owned())
+            .spawn({
+                let output = Arc::clone(&output);
+                move || {
+                    read.recv().unwrap();
+                    locked(&output).push_back("last message".to_owned());
+                }
+            })
+            .unwrap();
+        let process = Arc::new(HelperProcess {
+            child: Mutex::new(child),
+            output,
+            reader: Mutex::new(Some(reader)),
+        });
+        within(stream.write_all(&[1])).await.unwrap();
+        within(async {
+            while locked(&process.child).try_wait().unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let (checking, checked) = oneshot::channel();
+        let mut exit = tokio::task::spawn_blocking({
+            let process = Arc::clone(&process);
+            move || {
+                checking.send(()).unwrap();
+                process.exit()
+            }
+        });
+        within(checked).await.unwrap();
+        let checked = tokio::time::timeout(Duration::from_millis(100), &mut exit).await;
+        let waited = checked.is_err();
+        release.send(()).unwrap();
+        let ended = match checked {
+            Ok(ended) => ended.unwrap(),
+            Err(_) => within(exit).await.unwrap(),
+        };
+        assert!(
+            waited,
+            "exit must wait for the log reader before reporting the exit code"
+        );
+        assert_eq!(ended, Some(Exit(Some(7))));
+        assert_eq!(process.output(), ["last message"]);
+    }
+
+    #[tokio::test]
+    async fn killing_or_dropping_a_real_helper_ends_its_process() {
+        for drop_owner in [false, true] {
+            let (child, mut stream, _) = helper_child().await;
+            let process = helper_process(child);
+            if drop_owner {
+                drop(process);
+            } else {
+                process.kill();
+            }
+            let ended = tokio::time::timeout(WAIT, stream.read(&mut [0])).await;
+            drop(stream);
+            assert!(
+                matches!(ended, Ok(Ok(0)))
+                    || matches!(&ended, Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionReset),
+                "drop={drop_owner}: the helper closed its connection when it ended: {ended:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dropping_a_running_helper_ends_a_process_that_has_no_destructor() {
+        struct PassiveProcess(Arc<AtomicBool>);
+
+        impl Process for PassiveProcess {
+            fn output(&self) -> Vec<String> {
+                Vec::new()
+            }
+
+            fn exit(&self) -> Option<Exit> {
+                None
+            }
+
+            fn kill(&self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let killed = Arc::new(AtomicBool::new(false));
+        let running = Running {
+            process: PassiveProcess(Arc::clone(&killed)),
+            port: 1234,
+            device: Device::Cpu(Fallback::CpuChoice),
+            client: reqwest::Client::new(),
+        };
+        drop(running);
+        assert!(killed.load(Ordering::SeqCst));
+    }
+
     /// What the fake helper's server received in one inference request.
     #[derive(Clone, Debug)]
     struct Seen {
@@ -1266,15 +1451,22 @@ mod tests {
     struct Server {
         health_calls: AtomicUsize,
         unready: usize,
+        health_release: Mutex<Option<Arc<Notify>>>,
         seen: Mutex<Vec<Seen>>,
         seen_count: watch::Sender<usize>,
         replies: Mutex<VecDeque<Reply>>,
+        warm_up: Mutex<Option<Reply>>,
         release: Notify,
         killed: Arc<AtomicBool>,
     }
 
     async fn health(State(server): State<Arc<Server>>) -> StatusCode {
-        if server.health_calls.fetch_add(1, Ordering::SeqCst) < server.unready {
+        let call = server.health_calls.fetch_add(1, Ordering::SeqCst);
+        let release = locked(&server.health_release).take();
+        if let Some(release) = release {
+            release.notified().await;
+        }
+        if call < server.unready {
             StatusCode::SERVICE_UNAVAILABLE
         } else {
             StatusCode::OK
@@ -1287,7 +1479,7 @@ mod tests {
         locked(&server.seen).push(seen);
         server.seen_count.send_modify(|count| *count += 1);
         let reply = if warm_up {
-            Reply::Text("")
+            locked(&server.warm_up).take().unwrap_or(Reply::Text(""))
         } else {
             locked(&server.replies)
                 .pop_front()
@@ -1313,10 +1505,12 @@ mod tests {
     struct Plan {
         /// Health checks answered 503 before the first 200.
         unready: usize,
+        health_release: Option<Arc<Notify>>,
         output: Vec<&'static str>,
         /// The helper has ended with this code as soon as it starts.
         exits_with: Option<i32>,
         replies: Vec<Reply>,
+        warm_up: Option<Reply>,
     }
 
     /// The test's view of one helper the fake started.
@@ -1395,9 +1589,11 @@ mod tests {
             let server = Arc::new(Server {
                 health_calls: AtomicUsize::new(0),
                 unready: plan.unready,
+                health_release: Mutex::new(plan.health_release),
                 seen: Mutex::default(),
                 seen_count: watch::channel(0).0,
                 replies: Mutex::new(plan.replies.into()),
+                warm_up: Mutex::new(plan.warm_up),
                 release: Notify::new(),
                 killed: Arc::clone(&killed),
             });
@@ -1722,6 +1918,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_vulkan_warm_up_explains_why_the_helper_cannot_start() {
+        for (reply, reason) in [
+            (Reply::Status(503), "it answered HTTP 503"),
+            (Reply::Garbage, "its answer was unreadable"),
+        ] {
+            let scratch = Scratch::with_files("warm-up-failed");
+            let fake = Fake::new([Plan {
+                warm_up: Some(reply),
+                ..vulkan(Vec::new())
+            }]);
+            let recognizer = recognizer(&fake, WhisperBackend::Vulkan, &scratch);
+            let error = within(recognizer.load()).await.unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "The Whisper helper started but could not transcribe its first request: {reason}"
+                )
+            );
+            assert_eq!(recognizer.device(), None);
+            assert!(fake.helper(0).killed.load(Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
     async fn a_helper_that_ends_before_it_is_ready_is_reported_with_its_last_messages_and_tried_again_next_time()
      {
         let scratch = Scratch::with_files("early-exit");
@@ -1760,6 +1980,76 @@ mod tests {
             assert_eq!(within(recognizer.load()).await.is_ok(), loads, "{case}");
             assert_eq!(fake.launches(), launches, "{case}");
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_helper_that_never_becomes_healthy_explains_its_readiness_timeout() {
+        let scratch = Scratch::with_files("not-ready");
+        let fake = Fake::new([Plan {
+            unready: usize::MAX,
+            ..Plan::default()
+        }]);
+        let recognizer = recognizer(&fake, WhisperBackend::Cpu, &scratch);
+        let error = tokio::time::timeout(READY_TIMEOUT + HEALTH_TIMEOUT + WAIT, recognizer.load())
+            .await
+            .expect("the helper's readiness deadline ends it first")
+            .unwrap_err();
+        assert_eq!(error.to_string(), HelperError::NotReady.to_string());
+        assert_eq!(recognizer.device(), None);
+        assert_eq!(fake.launches(), 1);
+        assert!(fake.helper(0).killed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn readiness_at_the_deadline_still_gets_one_more_health_check() {
+        let scratch = Scratch::with_files("ready-at-deadline");
+        let release = Arc::new(Notify::new());
+        let fake = Fake::new([Plan {
+            unready: 1,
+            health_release: Some(Arc::clone(&release)),
+            ..Plan::default()
+        }]);
+        let recognizer = recognizer(&fake, WhisperBackend::Cpu, &scratch);
+        let launch = Launch {
+            backend: WhisperBackend::Cpu,
+            executable: scratch
+                .helpers()
+                .join("cpu")
+                .join(format!("whisper-server{}", std::env::consts::EXE_SUFFIX)),
+            model: scratch.store().path(&FAKE_FILES.model),
+            vad: scratch.store().path(&FAKE_FILES.vad),
+            port: free_port().unwrap(),
+            threads: 1,
+        };
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let loading = recognizer.shared.try_start(&launch, &client);
+        tokio::pin!(loading);
+        let began = Instant::now();
+        within(async {
+            tokio::select! {
+                _ = &mut loading => panic!("loading ended before the first health check answered"),
+                () = async {
+                    while fake.launches() == 0
+                        || fake.helper(0).server.health_calls.load(Ordering::SeqCst) == 0
+                    {
+                        assert!(began.elapsed() < WAIT, "the first health check arrived within five wall-clock seconds");
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
+            }
+        })
+        .await;
+        tokio::time::advance(READY_TIMEOUT).await;
+        release.notify_one();
+        assert!(
+            futures_util::poll!(&mut loading).is_pending(),
+            "a health check at exactly the readiness deadline can still be retried"
+        );
+        tokio::time::resume();
+        let running = within(loading).await.unwrap();
+        assert_eq!(running.device, Device::Cpu(Fallback::CpuChoice));
+        assert_eq!(fake.launches(), 1);
+        assert_eq!(fake.helper(0).server.health_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -1804,6 +2094,36 @@ mod tests {
 
     #[tokio::test]
     async fn a_helper_that_is_not_in_the_build_is_a_message_the_user_can_act_on() {
+        const CHILD: &str = "THALVI_WHISPER_MISSING_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "whisper::tests::a_helper_that_is_not_in_the_build_is_a_message_the_user_can_act_on",
+                ])
+                .env(CHILD, "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            native::prepare(&mut command);
+            let mut child = tokio::process::Command::from(command)
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let ended = tokio::time::timeout(WAIT, child.wait()).await;
+            if ended.is_err() {
+                child.kill().await.unwrap();
+            }
+            assert!(
+                ended
+                    .expect("missing-helper startup ends within five seconds")
+                    .unwrap()
+                    .success(),
+                "the missing-helper message assertion passed in the child"
+            );
+            return;
+        }
         let scratch = Scratch::with_files("missing");
         let recognizer = WhisperRecognizer::with_launcher(
             ProcessLauncher,
@@ -1871,6 +2191,7 @@ mod tests {
             Recorder::disabled().metrics(),
         );
         let mut steps = recognizer.steps();
+        let loading_steps = recognizer.loading().expect("captures can follow the load");
 
         let loading = recognizer.load();
         tokio::pin!(loading);
@@ -1890,6 +2211,7 @@ mod tests {
             }
         })
         .await;
+        assert_eq!(*loading_steps.borrow(), *steps.borrow());
         assert!(!scratch.store().is_cached(&assets).await);
         release.notify_one();
         within(&mut loading).await.unwrap();
@@ -1898,11 +2220,8 @@ mod tests {
             scratch.store().is_cached(&assets).await,
             "both files are in the store"
         );
-        assert_eq!(
-            *recognizer.steps().borrow(),
-            Step::Reading,
-            "the download step is over"
-        );
+        assert_eq!(*steps.borrow(), Step::Reading, "the download step is over");
+        assert_eq!(*loading_steps.borrow(), Step::Reading);
         assert_eq!(fake.launches(), 1);
         server.abort();
     }
@@ -1975,11 +2294,31 @@ mod tests {
             16_000
         );
         assert_eq!(
+            u32::from_le_bytes(capture.wav[28..32].try_into().unwrap()),
+            32_000,
+            "bytes per second"
+        );
+        assert_eq!(
+            u16::from_le_bytes(capture.wav[32..34].try_into().unwrap()),
+            2,
+            "bytes per sample frame"
+        );
+        assert_eq!(
             u16::from_le_bytes([capture.wav[34], capture.wav[35]]),
             16,
             "bits"
         );
         assert_eq!(capture.samples(), frames.as_flattened());
+        assert_eq!(
+            u32::from_le_bytes(capture.wav[4..8].try_into().unwrap()) as usize,
+            capture.wav.len() - 8,
+            "RIFF length"
+        );
+        assert_eq!(
+            u32::from_le_bytes(capture.wav[40..44].try_into().unwrap()) as usize,
+            capture.wav.len() - 44,
+            "audio data length"
+        );
     }
 
     #[tokio::test]
@@ -2157,7 +2496,7 @@ mod tests {
         }
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_request_that_never_answers_ends_as_a_timeout() {
         let scratch = Scratch::with_files("timeout");
         let fake = Fake::new([Plan {
@@ -2165,13 +2504,18 @@ mod tests {
             ..Plan::default()
         }]);
         let recognizer = recognizer(&fake, WhisperBackend::Cpu, &scratch);
-        let mut session = recognizer.connect().await.unwrap();
+        let mut session = within(recognizer.connect()).await.unwrap();
         session.send_frame(&frame(1)).await.unwrap();
         session.finish_audio().await.unwrap();
-        let error = tokio::time::timeout(Duration::from_secs(120), session.next_event())
-            .await
-            .expect("the request's own timeout ends it first")
-            .unwrap_err();
+        let helper = fake.helper(0);
+        tokio::select! {
+            event = session.next_event() => panic!("the held request answered: {event:?}"),
+            () = helper.seen_requests(1) => {}
+        }
+        tokio::time::pause();
+        tokio::time::advance(session.final_wait()).await;
+        tokio::time::resume();
+        let error = within(session.next_event()).await.unwrap_err();
         assert!(
             matches!(&error, RecognizerError::Transcription { failure: TranscriptionFailure::Timeout, message }
                 if message.contains("took too long") && message.contains("Nothing was delivered.")),
@@ -2434,7 +2778,7 @@ mod tests {
         }
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_preview_that_never_answers_is_dropped_after_five_seconds_and_the_next_one_goes_on() {
         let scratch = Scratch::with_files("preview-timeout");
         let fake = Fake::new([vulkan(vec![
@@ -2444,9 +2788,13 @@ mod tests {
         ])]);
         let recognizer = recognizer(&fake, WhisperBackend::Vulkan, &scratch);
         let frames = numbered(23);
-        let mut session = recognizer.connect().await.unwrap();
+        let mut session = within(recognizer.connect()).await.unwrap();
         send_all(&mut session, &frames).await;
+        fake.helper(0).seen_requests(2).await;
         let began = tokio::time::Instant::now();
+        tokio::time::pause();
+        tokio::time::advance(PREVIEW_TIMEOUT).await;
+        tokio::time::resume();
         assert_eq!(
             within(session.next_event()).await.unwrap(),
             partial("recovered")
@@ -2494,7 +2842,7 @@ mod tests {
         );
         helper.server.release.notify_waiters();
         assert!(
-            session.next_event().await.is_err(),
+            within(session.next_event()).await.is_err(),
             "no event follows the final, and a late preview is not one"
         );
         let seen = helper.seen();
@@ -2638,6 +2986,24 @@ mod tests {
     #[cfg(target_os = "linux")]
     mod real {
         use super::*;
+
+        async fn within<T>(what: impl Future<Output = T>) -> T {
+            tokio::time::timeout(READY_TIMEOUT * 2 + WAIT, what)
+                .await
+                .expect("the real helper answered within its loading and warm-up deadlines")
+        }
+
+        async fn dictate(
+            recognizer: &WhisperRecognizer,
+            frames: &[Frame],
+        ) -> Result<RecognizerEvent, RecognizerError> {
+            let mut session = within(recognizer.connect()).await.unwrap();
+            send_all(&mut session, frames).await;
+            session.finish_audio().await.unwrap();
+            tokio::time::timeout(session.final_wait() + WAIT, session.next_event())
+                .await
+                .expect("the real helper answered within the capture's deadline")
+        }
 
         struct Files {
             helpers: PathBuf,
@@ -2820,7 +3186,7 @@ mod tests {
                 files.store(&scratch),
                 Recorder::disabled().metrics(),
             );
-            recognizer.load().await.unwrap();
+            within(recognizer.load()).await.unwrap();
             let helper = pid(&recognizer);
             assert!(alive(helper));
             drop(recognizer);
@@ -2844,7 +3210,7 @@ mod tests {
                 Recorder::disabled().metrics(),
             );
             if std::env::var_os(CHILD).is_some() {
-                recognizer.load().await.unwrap();
+                within(recognizer.load()).await.unwrap();
                 println!("HELPER_PID={}", pid(&recognizer));
                 std::process::abort();
             }
