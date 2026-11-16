@@ -97,10 +97,13 @@ pub struct AppStyle {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawWriting {
-    url: String,
-    model: String,
+    url: Option<String>,
+    model: Option<String>,
     #[serde(default)]
     api_key: String,
+    #[serde(default)]
+    local: bool,
+    chat_build: Option<crate::chat::Build>,
     prompt: Option<String>,
     #[serde(default)]
     openings: Vec<Opening>,
@@ -108,29 +111,93 @@ struct RawWriting {
     apps: Vec<AppStyle>,
 }
 
-/// The chat endpoint that writes dictation out: its base address, model, API key and the prompt
-/// it is given. The default prompt is not stored, so a better default reaches everyone who never
-/// changed it.
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+/// A validated chat-completions destination. Its key is omitted from debug output.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    pub url: String,
+    pub model: String,
+    pub key: String,
+}
+
+impl fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("url", &self.url)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The selected model, retaining the manual setup while the local model is selected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Destination {
+    Manual(Endpoint),
+    Computer { saved: Option<Endpoint> },
+}
+
+/// Validated writing destination and prompt rules.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "RawWriting")]
 pub struct Writing {
-    url: String,
-    model: String,
-    api_key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    destination: Destination,
+    chat_build: Option<crate::chat::Build>,
     prompt: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     openings: Vec<Opening>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     apps: Vec<AppStyle>,
 }
 
 impl fmt::Debug for Writing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Writing")
-            .field("url", &self.url)
-            .field("model", &self.model)
-            .finish_non_exhaustive()
+        match &self.destination {
+            Destination::Manual(endpoint) => f
+                .debug_struct("Writing")
+                .field("url", &endpoint.url)
+                .field("model", &endpoint.model)
+                .finish_non_exhaustive(),
+            Destination::Computer { .. } => f
+                .debug_struct("Writing")
+                .field("local", &true)
+                .field("build", &self.chat_build)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl Serialize for Writing {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Stored<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            url: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            model: Option<&'a str>,
+            api_key: &'a str,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            local: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            chat_build: Option<crate::chat::Build>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            prompt: Option<&'a str>,
+            #[serde(skip_serializing_if = "<[Opening]>::is_empty")]
+            openings: &'a [Opening],
+            #[serde(skip_serializing_if = "<[AppStyle]>::is_empty")]
+            apps: &'a [AppStyle],
+        }
+        let (endpoint, local) = match &self.destination {
+            Destination::Manual(endpoint) => (Some(endpoint), false),
+            Destination::Computer { saved } => (saved.as_ref(), true),
+        };
+        Stored {
+            url: endpoint.map(|e| e.url.as_str()),
+            model: endpoint.map(|e| e.model.as_str()),
+            api_key: self.key(),
+            local,
+            chat_build: self.chat_build,
+            prompt: self.prompt.as_deref(),
+            openings: &self.openings,
+            apps: &self.apps,
+        }
+        .serialize(serializer)
     }
 }
 
@@ -153,6 +220,26 @@ impl Writing {
         if model.is_empty() {
             return Err(WritingSettingsError::Model);
         }
+        Self::with_destination(
+            Destination::Manual(Endpoint {
+                url,
+                model: model.to_owned(),
+                key: api_key,
+            }),
+            None,
+            prompt,
+            openings,
+            apps,
+        )
+    }
+
+    fn with_destination(
+        destination: Destination,
+        chat_build: Option<crate::chat::Build>,
+        prompt: Option<&str>,
+        openings: Vec<Opening>,
+        apps: Vec<AppStyle>,
+    ) -> Result<Self, WritingSettingsError> {
         let prompt = match prompt.map(str::trim) {
             Some("") => return Err(WritingSettingsError::Prompt),
             Some(prompt) if prompt != DEFAULT_PROMPT => Some(prompt.to_owned()),
@@ -197,9 +284,8 @@ impl Writing {
             });
         }
         Ok(Self {
-            url,
-            model: model.to_owned(),
-            api_key,
+            destination,
+            chat_build,
             prompt,
             openings: checked,
             apps: styles,
@@ -274,13 +360,40 @@ impl Writing {
     /// The model named in each request.
     #[must_use]
     pub fn model(&self) -> &str {
-        &self.model
+        match &self.destination {
+            Destination::Manual(endpoint) => &endpoint.model,
+            Destination::Computer { .. } => crate::chat::MODEL.asset.file_name,
+        }
+    }
+
+    /// The chosen destination, including any retained manual setup.
+    #[must_use]
+    pub fn destination(&self) -> &Destination {
+        &self.destination
+    }
+
+    /// The retained local backend preference, even while the manual endpoint is selected.
+    #[must_use]
+    pub fn chat_build(&self) -> Option<crate::chat::Build> {
+        self.chat_build
+    }
+
+    /// When the model on this computer writes, the build asked for (`None` lets the installed
+    /// runtime choose); `None` when a manual endpoint writes.
+    #[must_use]
+    pub fn on_computer(&self) -> Option<Option<crate::chat::Build>> {
+        matches!(self.destination, Destination::Computer { .. }).then_some(self.chat_build)
     }
 
     /// The key kept in the config when a settings form leaves it unchanged.
     #[must_use]
     pub fn key(&self) -> &str {
-        &self.api_key
+        match &self.destination {
+            Destination::Manual(endpoint) => &endpoint.key,
+            Destination::Computer { saved, .. } => {
+                saved.as_ref().map_or("", |endpoint| endpoint.key.as_str())
+            }
+        }
     }
 
     /// Asks the endpoint to write `words` out, with nothing else about the user: the reply is
@@ -294,14 +407,20 @@ impl Writing {
         client: &reqwest::Client,
         words: &str,
     ) -> Result<Reply, WritingError> {
-        self.ask(client, self.prompt_for(words, None), words).await
+        let Destination::Manual(endpoint) = &self.destination else {
+            return Err(WritingError::NotInstalled);
+        };
+        endpoint
+            .ask(client, self.prompt_for(words, None), words)
+            .await
     }
+}
 
-    /// Asks the endpoint to write `words` out under `prompt`. The request carries the words and
-    /// the prompt only: never the app name or the window title.
+impl Endpoint {
+    /// Streams writing under the selected prompt.
     ///
     /// # Errors
-    /// As [`start`](Self::start).
+    /// The connection, status or response failure.
     pub async fn ask_with(
         &self,
         client: &reqwest::Client,
@@ -311,11 +430,10 @@ impl Writing {
         self.ask(client, prompt, words).await
     }
 
-    /// Asks the endpoint to merge `texts`, the transcripts of one capture, into one, under
-    /// [`MERGE_PROMPT`] and not the writing prompt.
+    /// Merges transcripts using the same selected endpoint as writing.
     ///
     /// # Errors
-    /// As [`start`](Self::start).
+    /// The connection, status or response failure.
     pub async fn start_merge(
         &self,
         client: &reqwest::Client,
@@ -343,8 +461,8 @@ impl Writing {
             .post(format!("{}/chat/completions", self.url))
             .header("Accept", "text/event-stream")
             .json(&body);
-        if !self.api_key.is_empty() {
-            request = request.bearer_auth(&self.api_key);
+        if !self.key.is_empty() {
+            request = request.bearer_auth(&self.key);
         }
         let response = request.send().await.map_err(|error| {
             crate::report::CertificateProblem::from_error(&error)
@@ -370,10 +488,34 @@ impl TryFrom<RawWriting> for Writing {
     type Error = WritingSettingsError;
 
     fn try_from(raw: RawWriting) -> Result<Self, Self::Error> {
-        Self::new(
-            &raw.url,
-            &raw.model,
-            raw.api_key,
+        let endpoint = match (raw.url, raw.model) {
+            (None, None) if raw.local => None,
+            (None, _) => return Err(WritingSettingsError::Url),
+            (_, None) => return Err(WritingSettingsError::Model),
+            (Some(url), Some(model)) => {
+                let url = base_url(&url).ok_or(WritingSettingsError::Url)?;
+                let model = model.trim();
+                if model.is_empty() {
+                    return Err(WritingSettingsError::Model);
+                }
+                Some(Endpoint {
+                    url,
+                    model: model.to_owned(),
+                    key: raw.api_key,
+                })
+            }
+        };
+        let destination = if raw.local {
+            Destination::Computer { saved: endpoint }
+        } else {
+            match endpoint {
+                Some(endpoint) => Destination::Manual(endpoint),
+                None => return Err(WritingSettingsError::Url),
+            }
+        };
+        Self::with_destination(
+            destination,
+            raw.chat_build,
             raw.prompt.as_deref(),
             raw.openings,
             raw.apps,
@@ -398,6 +540,14 @@ pub enum WritingError {
     StillThinking,
     #[error("The writing model could not be reached.")]
     Unreachable,
+    #[error("The chat model is not installed. Download it under Settings → Chat model.")]
+    NotInstalled,
+    #[error("The chat model could not start. Check its installation under Settings → Chat model.")]
+    StartFailed,
+    #[error(
+        "The chat model stopped again. Switch it off and on under Settings → Chat model before trying again."
+    )]
+    Stopped,
     #[error("The writing model failed with status {0}.")]
     Status(u16),
     #[error("The writing model sent an answer Thalvi could not read.")]
@@ -415,6 +565,9 @@ impl WritingError {
             Self::Timeout => "timeout",
             Self::StillThinking => "still_thinking",
             Self::Unreachable => "unreachable",
+            Self::NotInstalled => "not_installed",
+            Self::StartFailed => "start_failed",
+            Self::Stopped => "stopped",
             Self::Certificate(_) => "certificate",
             Self::Status(_) => "status",
             Self::BadResponse => "bad_response",
@@ -430,6 +583,9 @@ impl UserError for WritingError {
             Self::Timeout => "Writing took too long",
             Self::StillThinking => "Writing model still thinking",
             Self::Unreachable => "Writing model unreachable",
+            Self::NotInstalled => "Chat model not installed",
+            Self::StartFailed => "Chat model could not start",
+            Self::Stopped => "Chat model stopped",
             Self::Certificate(_) => "Server certificate problem",
             Self::Status(_) => "Writing model failed",
             Self::BadResponse => "Writing reply unreadable",
@@ -572,7 +728,10 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             )
-            .map(|writing| writing.url);
+            .map(|writing| match writing.destination {
+                Destination::Manual(endpoint) => endpoint.url,
+                Destination::Computer { .. } => panic!("manual"),
+            });
             assert_eq!(result, expected.map(str::to_owned), "{url:?} {model:?}");
         }
         let writing = Writing::new(

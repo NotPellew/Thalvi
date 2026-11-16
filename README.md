@@ -316,8 +316,8 @@ the network, and a command never starts the app or the microphone.
 | `state` | `{"ok": true, "state": "listening", "paused": false, "copy_error": false, "feeding": false, "overlay": {"state": "hidden"}, "recognizer": {"name": "On this computer", "kind": "on_device", "model": "nemotron_160ms", "status": "ready"}}`. `state` is `paused`, `loading`, `listening`, `keyboard` (listening with wake words off), `capturing`, `pending`, `transcribing`, `merging`, `delivering` or `failed`; `failed` adds `"failure": {"headline", "reason"}` (`reason` is left out for a delivery failure, whose notice can hold the dictated text), and `awaiting_confirmation: true` marks a submit that waits for you. `overlay.state` is what the overlay shows: `hidden` (also when the overlay is off), `listening`, `quiet`, `countdown`, `writing`, `merging`, `working`, `delivered`, `error` (with the `headline` shown) or `loading`. `recognizer` is the speech entry that handles the next dictation (`model` only for a catalog model) and whether it is `ready`, `loading`, `failed` or `paused`, as the Recognition page says. Nothing that was said is in it. |
 | `watch [--json]` | Follows the running app and prints again only when the view changes. In a terminal it redraws in place: the phase, the overlay and any error headline, the next recognizer, the latest dictation's route and outcome, and the recent window's stage medians. `--json` prints one JSON line per change, the `state` fields plus that dictation as `capture`. Anywhere else it prints one plain line per change. When Thalvi is not running, or quits, it prints `Thalvi is not running. Waiting for it…` (or `{"running": false}`) and keeps waiting. Ctrl+C ends it. Nothing that was said is in it. |
 | `feed <wav-file>` | Plays the file's audio in place of the microphone, at the pace of speech, through the same wake word, recognition, endings and delivery as spoken audio; the microphone is ignored while it plays. Replies when the file has been fed: `{"ok": true, "took_effect": true, "state": "…"}`, with the state then; a capture it started carries on. Refused with `"Thalvi is paused."`, `"A capture is running."`, or the reason for a file that is missing, unreadable, not a mono or stereo 16-bit PCM WAV, or longer than the capture limit. Needs an absolute path (the command makes it absolute). `cancel` stops the feed and any capture it started. Capture metrics record `"source": "file"`. |
-| `models` | `{"ok": true, "models": [{"kind": "speech", "name", "title", "size", "downloaded", "progress_percent", "runs_on"}, …]}`: the wake and speech catalog models, `progress_percent` only while one downloads, `runs_on` (the Recognition page's hardware line) only for speech models. |
-| `model-download <wake\|speech> <name>` | Downloads the model; replies when it is ready, `{"ok": true, "downloaded": true}`, or has failed, `{"ok": false, "downloaded": false, "error": "…"}`. `models` shows the progress meanwhile. |
+| `models` | `{"ok": true, "models": [{"kind": "speech", "name", "title", "size", "downloaded", "progress_percent", "runs_on"}, …]}`: the wake, speech and local chat models, `progress_percent` only while one downloads, `runs_on` (the Recognition page's hardware line) only for speech models. |
+| `model-download <wake\|speech\|chat> <name>` | Downloads the model (`chat chat` for the local chat model); replies when it is ready, `{"ok": true, "downloaded": true}`, or has failed, `{"ok": false, "downloaded": false, "error": "…"}`. `models` shows the progress meanwhile. |
 | `speech-check '<json>'` | Checks one speech server entry exactly as Settings does before saving it: `{"ok": true, "ready": true}`, or `{"ok": false, "ready": false, "error": "…"}`. Saves nothing; keys are never repeated. |
 | `show [page]` | Opens Settings, at `listening`, `recognition`, `commands`, `chat`, `overlay`, `history` or `app` when one is named: `{"ok": true, "took_effect": true}`. |
 | `quit` | Quits as the tray's Quit does: `{"ok": true, "took_effect": true}`. |
@@ -399,9 +399,22 @@ other dictation, and **Ctrl+Z** undoes it. Cancel as usual before then and nothi
 is pasted. Without "write that out" or the write key, the words are pasted as
 recognized. There is no write-and-send: press Enter yourself after reading it.
 
-The model is any OpenAI-compatible chat completions endpoint (Glimmer, Baseten, a
-llama.cpp server, Meta), set under **Settings → Chat model → Writing** as `writing`
-in the config: `url`, `model` and `api_key`. The model gets the **Writing prompt**
+Under **Settings → Chat model → Writing**, choose **On this computer** and
+**Download chat model** to install Qwen3 4B (Q4_K_M, about 2.5 GB, Apache-2.0;
+English, German and Spanish). Settings shows the total size before downloading.
+Thalvi downloads a pinned, checksum-verified prebuilt llama.cpp runtime: Vulkan
+when it finds a usable GPU, otherwise CPU. You can select CPU explicitly.
+Nothing is compiled and no service needs managing. The first writing or merge
+loads the model with a visible notice; that load is separate from the 15-second
+writing limit. The child listens only on loopback with a fresh private key and
+thinking disabled, and stops when Thalvi quits. A crash restarts it once on the
+next use. Updating Thalvi keeps the download; **Remove chat model** asks before
+deleting the model and keeps the runtime.
+
+Choose **Manual endpoint** instead for any OpenAI-compatible chat completions
+endpoint (Glimmer, Baseten, llama.cpp, Meta): `writing.url`, `model` and `api_key`
+in the config. Switching sources keeps the saved endpoint and downloaded model.
+The model gets the **Writing prompt**
 (`prompt`) as its instructions and the recognized words as the message: no window,
 app or other context. The default prompt follows what you ask for (an email, a tone,
 a wording), invents nothing and keeps line breaks to where the text needs them, such as an
@@ -414,7 +427,7 @@ Ctrl+V.
 A model that reasons before it answers, such as Qwen3, shows "Thinking…" until its
 text starts; what it reasons is never shown or pasted. The 15 seconds include the
 thinking, and it often takes longer, so turn thinking off on the model server: for a
-llama.cpp server, start `llama-server` with `--reasoning-budget 0`. Thalvi does not
+llama.cpp server, use `--reasoning-budget 0 --jinja --chat-template-kwargs '{"enable_thinking":false}'`. Thalvi does not
 ask the model itself, because some endpoints refuse a request with a setting they
 don't know.
 

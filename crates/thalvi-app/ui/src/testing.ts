@@ -2,7 +2,13 @@
 
 import { vi } from "vitest";
 import { applyPatch, type SettingsPatch } from "./patch.ts";
-import type { AudioStatus, Backend, CurrentApp, Draft, HistoryEntry, HoldKeyDefaults, LiveEntry, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, ChatBuild, ChatModelInfo, CurrentApp, Draft, HistoryEntry, HoldKeyDefaults, LiveEntry, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+
+export const CHAT_MODEL: ChatModelInfo = {
+  title: "Qwen3 4B · Q4_K_M", size: 2533261953, license: "Apache-2.0",
+  languages: ["English", "German", "Spanish"], build: "vulkan", build_label: "Vulkan",
+  model_installed: false, runtime_installed: false,
+};
 
 export const SETTINGS: Settings = {
   wake: {
@@ -174,6 +180,10 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     }),
     downloadWakeModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     pickWakeModelFile: vi.fn<() => Promise<string | null>>(() => Promise.resolve("/models/custom.onnx")),
+    getChatModel: vi.fn<(build?: ChatBuild) => Promise<ChatModelInfo>>((build) => Promise.resolve({ ...CHAT_MODEL, ...(build ? { build, build_label: build === "cpu" ? "CPU" : "Vulkan" } : {}) })),
+    downloadChatModel: vi.fn<(build: ChatBuild) => Promise<void>>(() => Promise.resolve()),
+    removeChatModel: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+    onChatModelProgress: vi.fn<(listener: (progress: SpeechModelProgress) => void) => void>(),
     listSpeechModels: vi.fn<() => Promise<SpeechModelInfo[]>>(() => Promise.resolve([{ ...NEMOTRON }, { ...UNIFIED }])),
     downloadSpeechModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     onSpeechModelProgress: vi.fn((listener: (progress: SpeechModelProgress) => void) => speechListeners.push(listener)),

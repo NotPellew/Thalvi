@@ -73,6 +73,10 @@ pub enum Event {
     SpeechLoad,
     /// Downloading a catalog speech model from the settings window.
     SpeechDownload,
+    /// Installing the local chat model and prebuilt runtime.
+    ChatDownload,
+    /// Starting the local chat runtime, excluding generation.
+    ChatLoad,
     /// Asking the server about its word list (`check`) or saving the list there (`share`).
     WordList,
     /// One local recognition: its engine, device, model latency and outcome.
@@ -121,6 +125,8 @@ impl Event {
             Self::Writing => "desktop_writing",
             Self::SpeechLoad => "desktop_speech_load",
             Self::SpeechDownload => "desktop_speech_download",
+            Self::ChatDownload => "desktop_chat_download",
+            Self::ChatLoad => "desktop_chat_load",
             Self::WordList => "desktop_word_list",
             Self::LocalStt => "desktop_local_stt",
             Self::ReadyCue => "desktop_ready_cue",
