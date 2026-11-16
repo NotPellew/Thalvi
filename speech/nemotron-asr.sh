@@ -70,8 +70,8 @@ Installed. Start it, and at every boot, with:
   loginctl enable-linger   # keeps user services running without a login session
 After an upgrade, restart it: systemctl --user restart thalvi-asr
 It needs about 3 GB of VRAM and is ready once it logs "listening".
-Then put this in Thalvi's .env and restart the server:
-  STT_URL=ws://$HOST:$PORT
-  STT_MODEL=nemotron-labs-unified-asr-0.6b
-  STT_API_KEY=
+Then add it in Thalvi's Settings → Recognition as a Live as you speak entry:
+  address  ws://$HOST:$PORT
+  model    nemotron-labs-unified-asr-0.6b
+  API key  (leave it empty)
 DONE
