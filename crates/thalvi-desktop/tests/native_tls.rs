@@ -97,6 +97,7 @@ async fn check(fixture: &Fixture) {
                 String::new(),
                 None,
                 vec![],
+                vec![],
             )
             .unwrap();
             let error = writer.start(&client, "Test").await.err().unwrap();

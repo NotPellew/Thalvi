@@ -15,8 +15,8 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `0342449a6d2b2a6c32435e46f8fb45d83aa3d2e8`. The source hashes describe this commit.
-The previous sync was `f87174d14c2651d7ad1a88e44334ca8ed38ae391`.
+Sync commit: `44c706d7bc197d566b0f3198072c29307a417f90`. The source hashes describe this commit.
+The previous sync was `0342449a6d2b2a6c32435e46f8fb45d83aa3d2e8`.
 The covered changes through this commit include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
 waiting for an on-device load. Their mapped actions remain below. Microphone
@@ -50,6 +50,16 @@ cover preview ordering inside the session; `whisper.rs` tests do.
 The download-size notice (#485, stacked on `feat/speech-trials`) changes only `runner.rs`'s tests module, for
 `Step`'s new `Download` payload; `runner.rs`'s hash describes the commit that adds this paragraph. No mapped function
 changed, and `engine.rs`, `recognizer.rs` and `local.rs` are untouched, so the model actions are unchanged.
+
+The app styles change (#464) passes the bound window's app and title into
+`Engine::capture` and keeps a local copy for Settings before capture begins.
+`Delivery::writing_target` reads the retained target without a platform call.
+Prompt selection and its metric are synchronous local values; the writing
+request still runs under the same cancellation-biased `bounded` call.
+`Requests`, `drive`, `Settling::settle`, the close/cue joins, merge waits and
+loading waits are unchanged. No model action, await boundary or bound changes.
+Its hashes describe that branch merged with main's download-size notice and Vulkan
+previews (above), which touch no mapped function.
 
 The five checked invariants have these exact meanings:
 

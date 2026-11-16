@@ -177,6 +177,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     }
     const microphones = await backend.listMicrophones().catch((error: unknown) => ({ error: errorText(error) }));
     const holdKeyUnavailable = await backend.getHoldKeyUnavailable();
+    const appStylesUnavailable = await backend.getAppStylesUnavailable();
     const holdKeyDefaults = await backend.getHoldKeyDefaults();
     const startAtLogin = await backend.getStartAtLogin().catch((error: unknown): SwitchRead => ({ kind: "unreadable", message: errorText(error) }));
     const menuEntry = await backend.getMenuEntry().catch((error: unknown): SwitchRead => ({ kind: "unreadable", message: errorText(error) }));
@@ -189,7 +190,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     settings = loaded;
     applyLook(root, loaded.look);
     pages = buildPages({
-      settings: loaded, backend, root, open, controls, microphones, audio, holdKeyUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, apply,
+      settings: loaded, backend, root, open, controls, microphones, audio, holdKeyUnavailable, appStylesUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, apply,
     });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {

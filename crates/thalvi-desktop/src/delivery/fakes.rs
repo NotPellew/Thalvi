@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::host::{App, Delivered, Host, HostError, PasteText, WebUrl};
+use crate::host::{App, AppMatchLimit, Delivered, Host, HostError, PasteText, WebUrl, WindowApp};
 
 /// The window the fake host binds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,6 +80,21 @@ impl Host for FakeHost {
 
     fn copies_only(&self) -> bool {
         self.clipboard_only
+    }
+
+    fn writing_target(&self, target: &FakeWindow) -> Result<WindowApp, AppMatchLimit> {
+        if self.clipboard_only {
+            return Err(AppMatchLimit::Gnome);
+        }
+        Ok(WindowApp::new(target.0, ""))
+    }
+
+    fn recent_app(&self) -> Result<Option<WindowApp>, AppMatchLimit> {
+        if self.clipboard_only {
+            Err(AppMatchLimit::Gnome)
+        } else {
+            Ok(Some(WindowApp::new("the editor", "")))
+        }
     }
 
     fn capture_target(&self) -> Result<FakeWindow, HostError> {

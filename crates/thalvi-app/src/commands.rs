@@ -6,6 +6,7 @@
 )]
 
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,7 @@ use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::draft::DraftView;
 use thalvi_desktop::entries::{self, Realtime};
 use thalvi_desktop::history::{Entry, HistoryError, Store as History};
-use thalvi_desktop::host::{Desktop, Host, WebUrl};
+use thalvi_desktop::host::{AppMatchLimit, Desktop, Host, WebUrl, WindowApp};
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{
     CatalogHead, ListedSpeech, ModelError, ModelFiles, ModelStore, SpeechDownloads,
@@ -570,6 +571,40 @@ pub fn get_hold_key_unavailable(state: State<'_, AppState>) -> Option<&'static s
     state.hold_key_unavailable()
 }
 
+/// Why this desktop cannot match app styles, or `None` where it can.
+#[tauri::command(async)]
+pub fn get_app_styles_unavailable(state: State<'_, AppState>) -> Option<&'static str> {
+    state.host().recent_app().err().map(AppMatchLimit::reason)
+}
+
+/// An app offered only to the local Settings window.
+#[derive(Serialize)]
+pub struct CurrentApp {
+    app: String,
+    title: String,
+}
+
+impl CurrentApp {
+    fn of(
+        recent: Result<Option<WindowApp>, AppMatchLimit>,
+        last: &Mutex<Option<WindowApp>>,
+    ) -> Option<Self> {
+        let window = recent
+            .ok()?
+            .or_else(|| last.lock().unwrap_or_else(PoisonError::into_inner).clone())?;
+        Some(Self {
+            app: window.app().to_owned(),
+            title: window.title().to_owned(),
+        })
+    }
+}
+
+/// The most recent app outside Thalvi, falling back to the last bound window.
+#[tauri::command(async)]
+pub fn get_current_app(state: State<'_, AppState>) -> Option<CurrentApp> {
+    CurrentApp::of(state.host().recent_app(), &state.link.last_writing_window)
+}
+
 /// The hold and write keys this desktop starts with, named as in the settings.
 #[tauri::command]
 pub fn get_hold_key_defaults() -> Value {
@@ -635,6 +670,35 @@ mod tests {
     use thalvi_desktop::models::{Asset, ModelKind, SpeechAssets};
 
     use super::*;
+
+    #[test]
+    fn the_current_app_prefers_recent_focus_falls_back_and_is_absent_on_gnome() {
+        let last = WindowApp::new("kitty", "secret-title");
+        for (recent, bound, expected) in [
+            (
+                Ok(Some(WindowApp::new("firefox", "Inbox"))),
+                Some(last.clone()),
+                json!({"app": "firefox", "title": "Inbox"}),
+            ),
+            (
+                Ok(None),
+                Some(last.clone()),
+                json!({"app": "kitty", "title": "secret-title"}),
+            ),
+            (
+                Ok(Some(WindowApp::new("editor", ""))),
+                None,
+                json!({"app": "editor", "title": ""}),
+            ),
+            (Ok(None), None, Value::Null),
+            (Err(AppMatchLimit::Gnome), Some(last), Value::Null),
+        ] {
+            assert_eq!(
+                serde_json::to_value(CurrentApp::of(recent, &Mutex::new(bound))).unwrap(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn the_defaults_the_ui_restores_are_this_desktops_keys_as_the_settings_name_them() {

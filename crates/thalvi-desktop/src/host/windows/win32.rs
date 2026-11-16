@@ -34,11 +34,11 @@ use ::windows::Win32::UI::Input::KeyboardAndMouse::{
 use ::windows::Win32::UI::Shell::ShellExecuteW;
 use ::windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetMessageW,
-    GetWindow, GetWindowLongW, GetWindowThreadProcessId, HC_ACTION, IsIconic, IsWindow,
-    IsWindowVisible, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, MB_ICONERROR, MB_OK, MSG,
-    MessageBoxW, PostThreadMessageW, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow,
-    SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
-    WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WS_EX_TOOLWINDOW,
+    GetWindow, GetWindowLongW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+    HC_ACTION, IsIconic, IsWindow, IsWindowVisible, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
+    LLKHF_INJECTED, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostThreadMessageW, SW_RESTORE,
+    SW_SHOWNORMAL, SetForegroundWindow, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx,
+    WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WS_EX_TOOLWINDOW,
 };
 use ::windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
@@ -422,6 +422,23 @@ impl Win32 for Real {
         // SAFETY: GetForegroundWindow takes no arguments.
         let window = unsafe { GetForegroundWindow() };
         (!window.0.is_null()).then_some(window.0 as Hwnd)
+    }
+
+    fn title(&self, window: Hwnd) -> String {
+        let window = handle(window);
+        // SAFETY: a stale handle returns 0, so nothing is read.
+        let length = unsafe { GetWindowTextLengthW(window) };
+        if length <= 0 {
+            return String::new();
+        }
+        let mut buffer = vec![0u16; usize::try_from(length).unwrap_or(0).saturating_add(1)];
+        // SAFETY: `buffer` has room for the text and a null, and outlives the call.
+        let written = unsafe { GetWindowTextW(window, &mut buffer) };
+        if written <= 0 {
+            return String::new();
+        }
+        let end = usize::try_from(written).unwrap_or(0).min(buffer.len());
+        String::from_utf16_lossy(&buffer[..end])
     }
 
     fn process(&self, window: Hwnd) -> Option<Process> {
