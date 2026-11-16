@@ -2345,10 +2345,10 @@ where
             }
             Done::Accepted(request) => {
                 self.gate.set_enabled(false);
-                let merging = self
-                    .merging
-                    .clone()
-                    .filter(|_| !scratched && has_words(&request.text));
+                // A task acts on the text the user heard before it ran; a merge could pick another action.
+                let merging = self.merging.clone().filter(|_| {
+                    !scratched && has_words(&request.text) && request.route != CaptureRoute::Task
+                });
                 if merging.is_some() {
                     self.streams.finish(request.route, has_endings);
                 } else {

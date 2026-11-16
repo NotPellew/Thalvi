@@ -2400,6 +2400,61 @@ async fn the_texts_of_the_live_recognizer_and_the_extras_are_merged_into_the_tex
         .await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_submit_sends_the_merged_text_and_a_task_acts_on_the_live_text_without_merging() {
+    LocalSet::new()
+        .run_until(async {
+            // (route, live final, extra's answer, what the merge says, delivered, merged)
+            for (route, live, extra_text, merged_text, delivered, merges) in [
+                (
+                    CaptureRoute::Submit,
+                    "send the report submit",
+                    r#"{"text": "send the reports submit"}"#,
+                    says!("send the reports"),
+                    "send the reports",
+                    true,
+                ),
+                (
+                    CaptureRoute::Task,
+                    "run the tests do that",
+                    r#"{"text": "run the test do that"}"#,
+                    says!("run the test"),
+                    "run the tests",
+                    false,
+                ),
+                (
+                    CaptureRoute::Task,
+                    "open example.com do that",
+                    r#"{"text": "open example.org do that"}"#,
+                    says!("open example.org"),
+                    "open example.com",
+                    false,
+                ),
+            ] {
+                let (extra, mut uploads) = serve(Reply::Json(extra_text)).await;
+                let (chat_url, mut asked, _feed) = chat(Chat::Stream(merged_text)).await;
+                let (mut rig, engine, frames) =
+                    Rig::new(&with_extras(&chat_url, &[("Extra", &extra, true)]));
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals(live).await;
+                rig.feed_until(3499, Kind::Quiet).await;
+                rig.at(3500).await;
+
+                assert_eq!(
+                    finished(task).await,
+                    accepted(route, delivered),
+                    "{route:?}"
+                );
+                assert_eq!(uploads.try_recv().is_ok(), merges, "{route:?}: upload");
+                assert_eq!(asked.try_recv().is_ok(), merges, "{route:?}: merge call");
+                assert_eq!(rig.notices(), Vec::<String>::new(), "{route:?}");
+            }
+        })
+        .await;
+}
+
 struct Skip {
     name: &'static str,
     /// How the extra `A` answers.
