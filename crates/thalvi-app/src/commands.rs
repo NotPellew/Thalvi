@@ -19,8 +19,8 @@ use thalvi_desktop::history::{Entry, HistoryError, Store as History};
 use thalvi_desktop::host::{Desktop, Host, WebUrl};
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{
-    CatalogHead, CatalogSpeech, ModelError, ModelStore, SpeechAssets, SpeechDownloads,
-    SpeechModelInfo, SpeechProgress, WakeModelInfo,
+    CatalogHead, ListedSpeech, ModelError, ModelFiles, ModelStore, SpeechDownloads,
+    SpeechModelInfo, SpeechProgress, WHISPER_TURBO, WakeModelInfo,
 };
 use thalvi_desktop::report::{Report, System};
 use thalvi_desktop::transducer::check_folder;
@@ -247,9 +247,11 @@ pub async fn list_speech_models(
 /// Why the model store cannot be reached.
 pub async fn speech_models(state: &AppState) -> Result<Vec<SpeechModelInfo>, String> {
     let store = ModelStore::per_user().map_err(|error| error.to_string())?;
-    Ok(store
+    let mut models = store
         .speech_models(state.speech_devices.plans().await)
-        .await)
+        .await;
+    models.extend(store.whisper_models().await);
+    Ok(models)
 }
 
 /// What the Speech section says about the hardware a catalog model runs on: where it is running if the engine
@@ -264,10 +266,15 @@ pub async fn speech_device(name: String, state: State<'_, AppState>) -> Result<S
 /// # Errors
 /// That the model is not in the catalog, or why the model store cannot be reached.
 pub async fn speech_device_line(state: &AppState, name: &str) -> Result<String, String> {
-    let model = CatalogSpeech::named(name)
+    let model = ListedSpeech::named(name)
         .ok_or_else(|| format!("{name} is not a speech model Thalvi knows."))?;
-    let store = ModelStore::per_user().map_err(|error| error.to_string())?;
-    Ok(state.speech_devices.line(&store, model).await)
+    match model {
+        ListedSpeech::Catalog(model) => {
+            let store = ModelStore::per_user().map_err(|error| error.to_string())?;
+            Ok(state.speech_devices.line(&store, model).await)
+        }
+        ListedSpeech::Whisper(backend) => Ok(state.speech_devices.whisper_line(backend)),
+    }
 }
 
 /// What `thalvi://speech-model-progress` carries.
@@ -357,38 +364,53 @@ pub async fn download_speech_model(
 /// # Errors
 /// The plain reason the download failed.
 pub async fn download_speech(app: &AppHandle, state: &AppState, name: &str) -> Result<(), String> {
-    let model = CatalogSpeech::named(name)
+    let model = ListedSpeech::named(name)
         .ok_or_else(|| format!("{name} is not a speech model Thalvi can download."))?;
     let store = ModelStore::per_user().map_err(|error| error.to_string())?;
     let recorder =
         Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
-    let assets = model.assets_on(&state.speech_devices.plans().await(model));
-    let download = Download {
-        name: model.name(),
-        assets: &assets,
-        store: &store,
-        downloads: &state.speech_downloads,
-        recorder: &recorder,
+    let emit = |progress| {
+        let _ = app.emit("thalvi://speech-model-progress", progress);
     };
-    download
-        .run(|progress| {
-            let _ = app.emit("thalvi://speech-model-progress", progress);
-        })
-        .await?;
+    match model {
+        ListedSpeech::Catalog(catalog) => {
+            let assets = catalog.assets_on(&state.speech_devices.plans().await(catalog));
+            Download {
+                name: catalog.name(),
+                assets: &assets,
+                store: &store,
+                downloads: &state.speech_downloads,
+                recorder: &recorder,
+            }
+            .run(emit)
+            .await?;
+        }
+        ListedSpeech::Whisper(backend) => {
+            Download {
+                name: backend.name(),
+                assets: &WHISPER_TURBO,
+                store: &store,
+                downloads: &state.speech_downloads,
+                recorder: &recorder,
+            }
+            .run(emit)
+            .await?;
+        }
+    }
     state.link.send(Control::ReloadSpeechModel(model));
     Ok(())
 }
 
-/// One download of a catalog speech model's files, with what reports it.
-struct Download<'a> {
+/// One download of a speech model's files, with what reports it.
+struct Download<'a, F: ModelFiles> {
     name: &'static str,
-    assets: &'a SpeechAssets<'a>,
+    assets: &'a F,
     store: &'a ModelStore,
     downloads: &'a SpeechDownloads,
     recorder: &'a Recorder,
 }
 
-impl Download<'_> {
+impl<F: ModelFiles> Download<'_, F> {
     /// Fetches the files the store lacks, telling `emit` each step and a failure, and records the outcome.
     async fn run(&self, emit: impl Fn(SpeechModelProgress<'static>)) -> Result<(), String> {
         let started = Instant::now();
@@ -421,7 +443,7 @@ pub async fn open_speech_model_source(
     name: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let model = CatalogSpeech::named(&name)
+    let model = ListedSpeech::named(&name)
         .ok_or_else(|| format!("{name} is not a speech model Thalvi knows."))?;
     let url = WebUrl::parse(model.source()).map_err(|error| error.to_string())?;
     let host = state.host();
@@ -575,7 +597,7 @@ mod tests {
 
     use serde_json::json;
     use thalvi_desktop::metrics::RecordKinds;
-    use thalvi_desktop::models::{Asset, ModelKind};
+    use thalvi_desktop::models::{Asset, ModelKind, SpeechAssets};
 
     use super::*;
 

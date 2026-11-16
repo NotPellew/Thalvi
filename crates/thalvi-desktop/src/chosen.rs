@@ -1,13 +1,16 @@
 //! Owns the choice of recognizer that the active live entry makes.
 
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use crate::device::{Adapters, Step};
+use crate::device::{Adapters, Device, Step};
 use crate::entries::{LiveEntry, LiveKind};
 use crate::frame::Frame;
-use crate::local::{LocalRecognizer, LocalSession};
+use crate::local::{LocalRecognizer, LocalSession, ModelSource};
 use crate::metrics::Metrics;
 use crate::models::ModelStore;
 use crate::openai_live::{OpenAiRecognizer, OpenAiSession};
@@ -16,7 +19,59 @@ use crate::realtime::{RealtimeRecognizer, RealtimeSession};
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
 };
-use crate::transducer::TransducerSource;
+use crate::transducer::{SpeechChoice, TransducerSource};
+use crate::whisper::{WhisperRecognizer, WhisperSession};
+
+/// A recognizer whose model loads on this computer, which can be loaded ahead of the first dictation.
+pub trait Preload: Send + Sync {
+    /// The name that labels the model in metrics.
+    fn name(&self) -> &str;
+
+    /// What the load in progress is doing; [`Step::Reading`] while none runs.
+    fn steps(&self) -> watch::Receiver<Step>;
+
+    /// Where the model runs now, or `None` when it is not loaded.
+    fn device(&self) -> Option<Device>;
+
+    /// Fetches and loads the model now instead of at the first dictation; later calls are free.
+    fn load(&self) -> Pin<Box<dyn Future<Output = Result<(), RecognizerError>> + Send + '_>>;
+}
+
+impl<P: Preload + ?Sized> Preload for Arc<P> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn steps(&self) -> watch::Receiver<Step> {
+        (**self).steps()
+    }
+
+    fn device(&self) -> Option<Device> {
+        (**self).device()
+    }
+
+    fn load(&self) -> Pin<Box<dyn Future<Output = Result<(), RecognizerError>> + Send + '_>> {
+        (**self).load()
+    }
+}
+
+impl<S: ModelSource> Preload for LocalRecognizer<S> {
+    fn name(&self) -> &str {
+        Self::name(self)
+    }
+
+    fn steps(&self) -> watch::Receiver<Step> {
+        Self::steps(self)
+    }
+
+    fn device(&self) -> Option<Device> {
+        Self::device(self)
+    }
+
+    fn load(&self) -> Pin<Box<dyn Future<Output = Result<(), RecognizerError>> + Send + '_>> {
+        Box::pin(Self::load(self))
+    }
+}
 
 /// The recognizer a config asks for.
 pub enum Chosen {
@@ -26,6 +81,10 @@ pub enum Chosen {
         recognizer: Arc<LocalRecognizer<TransducerSource>>,
         speech: SpeechSource,
     },
+    Whisper {
+        recognizer: Arc<WhisperRecognizer>,
+        speech: SpeechSource,
+    },
 }
 
 /// An open recognition of any kind.
@@ -33,11 +92,13 @@ pub enum ChosenSession {
     Realtime(Box<RealtimeSession>),
     OpenAi(Box<OpenAiSession>),
     Local(LocalSession, SpeechSource),
+    Whisper(Box<WhisperSession>, SpeechSource),
 }
 
 impl Chosen {
     /// The recognizer for `entry`; nothing is fetched or loaded until [`Self::local`]'s `load`
-    /// or the first dictation. `adapters` keeps what the load's check of the graphics adapter finds.
+    /// or the first dictation. `adapters` keeps what the load's check of the graphics adapter finds;
+    /// `helpers` holds the `cpu` and `vulkan` folders of the Whisper helpers that the build packages.
     #[must_use]
     pub fn new(
         entry: &LiveEntry,
@@ -46,6 +107,7 @@ impl Chosen {
         metrics: Metrics,
         phrases: &WordList,
         adapters: Adapters,
+        helpers: &Path,
     ) -> Self {
         match &entry.kind {
             LiveKind::Realtime(realtime) => {
@@ -57,6 +119,10 @@ impl Chosen {
                 http,
                 metrics,
             )),
+            LiveKind::OnDevice(SpeechChoice::Whisper(backend)) => Self::Whisper {
+                recognizer: Arc::new(WhisperRecognizer::new(*backend, helpers, store, metrics)),
+                speech: entry.source(),
+            },
             LiveKind::OnDevice(choice) => Self::Local {
                 recognizer: Arc::new(LocalRecognizer::new(
                     TransducerSource::new(store, choice.clone(), phrases, adapters),
@@ -68,11 +134,12 @@ impl Chosen {
         }
     }
 
-    /// The local recognizer, to load its model ahead of the first dictation.
+    /// The recognizer that loads a model on this computer, to load it ahead of the first dictation.
     #[must_use]
-    pub fn local(&self) -> Option<Arc<LocalRecognizer<TransducerSource>>> {
+    pub fn local(&self) -> Option<Arc<dyn Preload>> {
         match self {
-            Self::Local { recognizer, .. } => Some(Arc::clone(recognizer)),
+            Self::Local { recognizer, .. } => Some(Arc::clone(recognizer) as Arc<dyn Preload>),
+            Self::Whisper { recognizer, .. } => Some(Arc::clone(recognizer) as Arc<dyn Preload>),
             Self::Realtime(_) | Self::OpenAi(_) => None,
         }
     }
@@ -107,6 +174,11 @@ impl Recognizer for Chosen {
                 .await
                 .map(|session| ChosenSession::Local(session, speech.clone()))
                 .map_err(|error| named(speech, error)),
+            Self::Whisper { recognizer, speech } => recognizer
+                .connect()
+                .await
+                .map(|session| ChosenSession::Whisper(Box::new(session), speech.clone()))
+                .map_err(|error| named(speech, error)),
         }
     }
 
@@ -117,13 +189,17 @@ impl Recognizer for Chosen {
 
 impl RecognizerSession for ChosenSession {
     fn buffers_audio(&self) -> bool {
-        matches!(self, Self::OpenAi(_))
+        matches!(self, Self::OpenAi(_) | Self::Whisper(..))
     }
 
     async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
         match self {
             Self::OpenAi(session) => session.finish_audio().await,
-            _ => Ok(()),
+            Self::Whisper(session, speech) => session
+                .finish_audio()
+                .await
+                .map_err(|error| named(speech, error)),
+            Self::Realtime(_) | Self::Local(..) => Ok(()),
         }
     }
 
@@ -132,6 +208,10 @@ impl RecognizerSession for ChosenSession {
             Self::Realtime(session) => session.send_frame(frame).await,
             Self::OpenAi(session) => session.send_frame(frame).await,
             Self::Local(session, speech) => session
+                .send_frame(frame)
+                .await
+                .map_err(|error| named(speech, error)),
+            Self::Whisper(session, speech) => session
                 .send_frame(frame)
                 .await
                 .map_err(|error| named(speech, error)),
@@ -146,6 +226,10 @@ impl RecognizerSession for ChosenSession {
                 .next_event()
                 .await
                 .map_err(|error| named(speech, error)),
+            Self::Whisper(session, speech) => session
+                .next_event()
+                .await
+                .map_err(|error| named(speech, error)),
         }
     }
 
@@ -154,6 +238,7 @@ impl RecognizerSession for ChosenSession {
             Self::Realtime(session) => session.cancel().await,
             Self::OpenAi(session) => session.cancel().await,
             Self::Local(session, _) => session.cancel().await,
+            Self::Whisper(session, _) => session.cancel().await,
         }
     }
 
@@ -162,6 +247,7 @@ impl RecognizerSession for ChosenSession {
             Self::Realtime(session) => session.close().await,
             Self::OpenAi(session) => session.close().await,
             Self::Local(session, _) => session.close().await,
+            Self::Whisper(session, _) => session.close().await,
         }
     }
 }

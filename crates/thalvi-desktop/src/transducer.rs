@@ -21,6 +21,7 @@ use crate::recognizer::{RecognizerError, RecognizerEvent};
 use crate::runtime;
 use crate::segments::{FrameDecoder, Revising, Segments, SnapshotDecoder};
 use crate::tdt::{DURATIONS, tdt_greedy};
+use crate::whisper::WhisperBackend;
 
 /// Silence after speech that ends a stretch of it, as a `Final`.
 const ENDPOINT_MS: usize = 600;
@@ -1257,6 +1258,8 @@ impl<B: Backend> FrameDecoder for Buffered<B> {
 pub enum SpeechChoice {
     Catalog(CatalogSpeech),
     Folder(PathBuf),
+    /// The experimental Whisper Turbo, run by a helper process.
+    Whisper(WhisperBackend),
 }
 
 impl SpeechChoice {
@@ -1266,6 +1269,7 @@ impl SpeechChoice {
         match self {
             Self::Catalog(catalog) => catalog.name().to_owned(),
             Self::Folder(path) => path.display().to_string(),
+            Self::Whisper(backend) => backend.name().to_owned(),
         }
     }
 }
@@ -1324,7 +1328,7 @@ impl Provider for TransducerSource {
             SpeechChoice::Catalog(catalog) => {
                 self.store.is_cached(&catalog.assets_of(export)).await
             }
-            SpeechChoice::Folder(_) => true,
+            SpeechChoice::Folder(_) | SpeechChoice::Whisper(_) => true,
         }
     }
 
@@ -1348,6 +1352,10 @@ impl Provider for TransducerSource {
                 })
             }
             SpeechChoice::Folder(dir) => Ok(TransducerFiles::in_folder(dir)),
+            SpeechChoice::Whisper(backend) => Err(RecognizerError::said(format!(
+                "{} runs through its own helper, which this loader does not start.",
+                backend.title()
+            ))),
         }
     }
 

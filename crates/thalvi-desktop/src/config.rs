@@ -697,6 +697,7 @@ mod tests {
     use crate::secondary::{SecondaryApi, SecondaryStt};
     use crate::transducer::SpeechChoice;
     use crate::wake::HeadModel;
+    use crate::whisper::WhisperBackend;
     use crate::writing::DEFAULT_PROMPT;
 
     fn parse(json: &str) -> Result<DesktopConfig, ConfigError> {
@@ -1140,6 +1141,14 @@ mod tests {
             (
                 r#"{"stt": {"engine": "local", "model": "parakeet_tdt_v3"}}"#,
                 LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ParakeetTdtV3)),
+            ),
+            (
+                r#"{"stt": {"engine": "local", "model": "whisper_turbo_cpu"}}"#,
+                LiveKind::OnDevice(SpeechChoice::Whisper(WhisperBackend::Cpu)),
+            ),
+            (
+                r#"{"stt": {"engine": "local", "model": "whisper_turbo_vulkan"}}"#,
+                LiveKind::OnDevice(SpeechChoice::Whisper(WhisperBackend::Vulkan)),
             ),
             (
                 r#"{"stt": {"engine": "local", "model": "/models/mine"}}"#,

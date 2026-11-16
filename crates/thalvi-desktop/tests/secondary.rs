@@ -397,6 +397,7 @@ async fn chosen_live_openai_entry_buffers_and_forwards_the_whole_capture() {
         Recorder::disabled().metrics(),
         &WordList::default(),
         Adapters::default(),
+        std::path::Path::new("unused"),
     );
     let mut session = chosen.connect().await.expect("connects before upload");
     assert!(session.buffers_audio(), "audio waits until capture ends");
@@ -454,6 +455,7 @@ fn only_an_on_device_entry_has_a_preloadable_recognizer() {
         Recorder::disabled().metrics(),
         &WordList::default(),
         Adapters::default(),
+        std::path::Path::new("unused"),
     );
     assert!(chosen.local().is_some());
 }
@@ -946,6 +948,7 @@ async fn chat_entry_sends_the_wav_as_input_audio_and_delivers_the_reply() {
             Recorder::disabled().metrics(),
             &WordList::default(),
             Adapters::default(),
+            std::path::Path::new("unused"),
         );
         let mut session = chosen.connect().await.expect("connected");
         session.send_frame(&ramp(0)).await.expect("buffer frame");

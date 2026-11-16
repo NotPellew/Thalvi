@@ -11,6 +11,7 @@ use crate::secondary::{
     Language, LiveRequest, OpenAiLive, SecondaryApi, SecondaryStt, SecondarySttError,
 };
 use crate::transducer::SpeechChoice;
+use crate::whisper::WhisperBackend;
 
 /// The longest entry name, in characters.
 pub const MAX_NAME_CHARS: usize = 60;
@@ -426,6 +427,8 @@ fn speech_choice(model: Option<&str>) -> Result<SpeechChoice, String> {
         .find(|catalog| catalog.name() == model)
     {
         Ok(SpeechChoice::Catalog(*catalog))
+    } else if let Some(backend) = WhisperBackend::named(model) {
+        Ok(SpeechChoice::Whisper(backend))
     } else if model.contains(['/', '\\']) {
         Ok(SpeechChoice::Folder(PathBuf::from(model)))
     } else {
@@ -795,6 +798,7 @@ mod tests {
 
     use super::*;
     use crate::config::DesktopConfig;
+    use crate::whisper::WhisperBackend;
 
     fn entries(json: &str) -> Result<Entries, String> {
         DesktopConfig::from_json_str(json)
@@ -953,6 +957,35 @@ mod tests {
             DesktopConfig::from_json_str(&written).unwrap(),
             config,
             "{written}"
+        );
+    }
+
+    #[test]
+    fn an_on_device_entry_naming_a_whisper_backend_is_saved_under_that_name_and_an_unknown_name_is_still_refused()
+     {
+        for backend in WhisperBackend::ALL {
+            let entry = json!({"kind": "on_device", "id": "w", "name": "Whisper", "active": true,
+                               "model": backend.name()});
+            let config = DesktopConfig::from_json_str(
+                &json!({"stt": {"entries": [entry.clone()]}}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(
+                config.stt.entries.active_live().kind,
+                LiveKind::OnDevice(SpeechChoice::Whisper(backend))
+            );
+            let written = serde_json::to_value(&config).unwrap();
+            assert_eq!(written["stt"]["entries"][0], entry, "{}", backend.name());
+        }
+        let error = entries(
+            &json!({"stt": {"entries": [{"kind": "on_device", "id": "w", "name": "Whisper",
+                                          "active": true, "model": "whisper_turbo"}]}})
+            .to_string(),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("Unknown speech model \"whisper_turbo\""),
+            "{error}"
         );
     }
 

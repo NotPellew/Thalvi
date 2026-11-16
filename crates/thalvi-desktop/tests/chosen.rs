@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use thalvi_desktop::chosen::{Chosen, ChosenSession};
+use thalvi_desktop::chosen::{Chosen, ChosenSession, Preload};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::device::Adapters;
 use thalvi_desktop::frame::FRAME_SAMPLES;
@@ -29,6 +29,7 @@ fn chosen(entry: &Value) -> Chosen {
         Recorder::disabled().metrics(),
         &WordList::new(Vec::new()).expect("list"),
         Adapters::default(),
+        std::path::Path::new("unused"),
     )
 }
 
@@ -98,4 +99,23 @@ fn only_an_on_device_entry_has_a_model_to_preload() {
     let on_device = json!({"kind": "on_device", "id": "d", "name": "Device", "active": true});
     assert!(chosen(&on_device).local().is_some());
     assert!(chosen(&realtime("ws://127.0.0.1:9")).local().is_none());
+}
+
+#[test]
+fn a_whisper_entry_has_a_preloadable_recognizer_named_by_its_model() {
+    for model in ["whisper_turbo_cpu", "whisper_turbo_vulkan"] {
+        let chosen = chosen(&json!({"kind": "on_device", "id": "w", "name": "Whisper",
+                                    "active": true, "model": model}));
+        let local = chosen.local().expect("an on-device entry loads a model");
+        assert_eq!(local.name(), model);
+        assert_eq!(
+            local.device(),
+            None,
+            "nothing is loaded before it is asked for"
+        );
+        assert!(
+            chosen.loading().is_some(),
+            "{model}: a dictation waits for the load"
+        );
+    }
 }

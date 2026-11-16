@@ -51,6 +51,8 @@ pub enum Fallback {
     /// Only Nemotron Unified is faster on a GPU.
     CpuModel,
     WindowsUnsupported,
+    /// The entry is the Whisper CPU helper, which never uses a GPU.
+    CpuChoice,
 }
 
 impl Fallback {
@@ -64,6 +66,7 @@ impl Fallback {
             Self::GpuFilesMissing => "the GPU model isn't downloaded",
             Self::CpuModel => "this model runs on the CPU",
             Self::WindowsUnsupported => "GPU recognition isn't supported on Windows yet",
+            Self::CpuChoice => "you chose the CPU entry",
         }
     }
 
@@ -75,6 +78,7 @@ impl Fallback {
             Self::GpuFilesMissing => "gpu_files_missing",
             Self::CpuModel => "cpu_model",
             Self::WindowsUnsupported => "windows_unsupported",
+            Self::CpuChoice => "cpu_choice",
         }
     }
 }
@@ -308,7 +312,7 @@ pub async fn load<P: Provider>(
 }
 
 /// Turns what a download reports into steps; a download's percent is shown only while it runs.
-fn downloading(
+pub(crate) fn downloading(
     export: Export,
     step: &(impl Fn(Step) + Send + Sync),
 ) -> impl FnMut(SpeechProgress) + Send {
