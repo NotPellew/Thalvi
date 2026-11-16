@@ -5128,6 +5128,7 @@ dependencies = [
  "cpal",
  "dirs 7.0.0",
  "futures-util",
+ "getrandom 0.4.3",
  "gtk",
  "nix",
  "ort",
