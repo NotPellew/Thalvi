@@ -654,7 +654,7 @@ mod tests {
         desktop.api.with(|state| {
             state
                 .titles
-                .insert(NOTEPAD, "notes.txt - Notepad".to_owned())
+                .insert(NOTEPAD, "notes.txt - Notepad".to_owned());
         });
         let target = desktop.capture_target().unwrap();
         assert_eq!(target.window, NOTEPAD);
@@ -665,9 +665,9 @@ mod tests {
             WindowApp::new("notepad.exe", "notes.txt - Notepad")
         );
 
-        desktop
-            .api
-            .with(|state| state.titles.insert(NOTEPAD, "renamed.txt".to_owned()));
+        desktop.api.with(|state| {
+            state.titles.insert(NOTEPAD, "renamed.txt".to_owned());
+        });
         assert_eq!(desktop.capture_target().unwrap(), target);
         assert_eq!(
             desktop.writing_target(&target).unwrap().title(),
