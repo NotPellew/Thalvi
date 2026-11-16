@@ -21,7 +21,7 @@ environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM"]
+select = ["E", "F", "I", "B", "UP", "SIM", "BLE", "S110", "PGH", "RUF100"]
 
 [tool.pytest.ini_options]
 testpaths = ["."]
