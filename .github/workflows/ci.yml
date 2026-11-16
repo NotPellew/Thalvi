@@ -99,7 +99,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - if: needs.changes.outputs.server == 'false'
         run: echo 'No change affects this job, so its steps are skipped.'
@@ -120,7 +120,12 @@ jobs:
           path: ~/.cache/thalvi/test-models
           key: spotter-models-${{ runner.os }}-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
       - if: needs.changes.outputs.server != 'false'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libvulkan-dev glslc
+      - if: needs.changes.outputs.server != 'false' && needs.changes.outputs.bundle != 'false'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: crates/thalvi-app/helpers/whisper
+          key: whisper-helpers-${{ runner.os }}-${{ hashFiles('.github/scripts/whisper-helper') }}
       - if: needs.changes.outputs.server != 'false'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -145,7 +150,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() }}
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - if: needs.changes.outputs.windows == 'false'
         run: echo 'No change affects this job, so its steps are skipped.'
@@ -170,6 +175,15 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: crates/thalvi-app/ui/package-lock.json
+      - if: needs.changes.outputs.windows != 'false' && needs.changes.outputs.bundle != 'false'
+        id: helpers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: crates/thalvi-app/helpers/whisper
+          key: whisper-helpers-${{ runner.os }}-${{ hashFiles('.github/scripts/whisper-helper', '.github/scripts/vulkan-sdk.ps1') }}
+      - if: needs.changes.outputs.windows != 'false' && needs.changes.outputs.bundle != 'false' && steps.helpers.outputs.cache-hit != 'true'
+        run: .github/scripts/vulkan-sdk.ps1
+        shell: pwsh
       - if: needs.changes.outputs.windows != 'false'
         run: .github/scripts/gates desktop-windows
         shell: bash

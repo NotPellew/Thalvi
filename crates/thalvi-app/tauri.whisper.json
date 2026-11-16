@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "helpers/whisper/cpu/": "whisper/cpu/",
+      "helpers/whisper/vulkan/": "whisper/vulkan/"
+    }
+  }
+}

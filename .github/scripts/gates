@@ -50,7 +50,9 @@ bundle() {
   if [[ ${BUNDLE:-true} == false ]]; then
     echo "SKIPPED the $1 package: BUNDLE=false; it did not run and is not reported as passed"
   else
-    in_dir crates/thalvi-app "${@:2}" npm exec --prefix ui -- tauri build --bundles "$1" -- --locked
+    step .github/scripts/whisper-helper crates/thalvi-app/helpers/whisper
+    in_dir crates/thalvi-app "${@:2}" npm exec --prefix ui -- tauri build --bundles "$1" \
+      --config tauri.whisper.json -- --locked
   fi
 }
 
@@ -89,7 +91,7 @@ gate_speech() {
 }
 
 gate_issue_sync() {
-  step "${SHELLCHECK[@]}" .github/scripts/gates .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh \
+  step "${SHELLCHECK[@]}" .github/scripts/gates .github/scripts/whisper-helper .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh \
     .github/scripts/changed .github/scripts/changed.test.sh
   step .github/scripts/issue-refs.test.sh
   step .github/scripts/changed.test.sh

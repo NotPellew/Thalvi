@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Builds the pinned whisper.cpp server twice, CPU only and with Vulkan, into OUT/{cpu,vulkan}.
+# Usage: whisper-helper OUT [cpu|vulkan]...   (both by default). A variant whose OUT/<variant>.built
+# names this script's hash is kept. Needs git, cmake and a C++ compiler; the Vulkan build also needs
+# the Vulkan headers, loader library and glslc.
+set -euo pipefail
+
+COMMIT=d1be6fde11ac6e0407606b4e42fe72d34add8037
+REPO=https://github.com/ggml-org/whisper.cpp
+
+out=$(mkdir -p "$1" && cd "$1" && pwd)
+shift
+variants=("$@")
+[[ $# -eq 0 ]] && variants=(cpu vulkan)
+
+stamp=$(sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1)
+pending=()
+for variant in "${variants[@]}"; do
+  [[ $(cat "$out/$variant.built" 2>/dev/null) == "$stamp" ]] || pending+=("$variant")
+done
+[[ ${#pending[@]} -eq 0 ]] && { echo "whisper-helper: ${variants[*]} already built"; exit 0; }
+
+work=${TMPDIR:-/tmp}/whisper-helper-$COMMIT
+if [[ $(git -C "$work" rev-parse HEAD 2>/dev/null) != "$COMMIT" ]]; then
+  rm -rf "$work"
+  git init -q "$work"
+  git -C "$work" fetch -q --depth 1 "$REPO" "$COMMIT"
+  git -C "$work" checkout -q FETCH_HEAD
+fi
+[[ $(git -C "$work" rev-parse HEAD) == "$COMMIT" ]]
+
+# x86-64-v3 (AVX2, FMA, F16C) without -march=native, so a build machine's CPU is not baked in;
+# no OpenMP and MSVC's static runtime, so no runtime library has to ship beside the server.
+common=(
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF
+  -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON
+  -DGGML_OPENMP=OFF -DGGML_CCACHE=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+  -DWHISPER_BUILD_SERVER=ON -DWHISPER_SDL2=OFF -DWHISPER_CURL=OFF
+  -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+)
+
+for variant in "${pending[@]}"; do
+  case $variant in
+    cpu) flags=(-DGGML_VULKAN=OFF) ;;
+    vulkan) flags=(-DGGML_VULKAN=ON) ;;
+    *) echo "whisper-helper: unknown variant $variant" >&2; exit 2 ;;
+  esac
+  build=$work/build-$variant
+  cmake -S "$work" -B "$build" "${common[@]}" "${flags[@]}"
+  cmake --build "$build" --config Release --target whisper-server -j "$(nproc 2>/dev/null || echo 4)"
+  rm -rf "${out:?}/$variant"
+  mkdir -p "$out/$variant"
+  server=$(find "$build/bin" -maxdepth 2 -type f \( -name whisper-server -o -name whisper-server.exe \) | head -n 1)
+  cp "$server" "$out/$variant/"
+  cp "$work/LICENSE" "$out/$variant/LICENSE-whisper.cpp"
+  echo "$stamp" > "$out/$variant.built"
+  echo "whisper-helper: $variant -> $out/$variant/$(basename "$server") ($COMMIT)"
+done
