@@ -14,6 +14,7 @@ export default defineConfig(
     },
     rules: {
       "@typescript-eslint/no-explicit-any": "error",
+      "no-empty": ["error", { allowEmptyCatch: false }],
     },
   },
   {
