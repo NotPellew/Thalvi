@@ -843,6 +843,50 @@ async fn a_speech_fetch_of_files_already_on_disk_reports_no_download() {
 }
 
 #[tokio::test]
+async fn a_file_already_at_its_pinned_size_is_kept_without_reading_it() {
+    let sha = sha256(GOOD);
+    let unreachable = "http://127.0.0.1:1/none";
+    let present = dir("pinned-size-other-bytes");
+    fs::create_dir_all(&present).expect("dir");
+    let filler = vec![0xAB; GOOD.len()];
+    for file in FILES {
+        fs::write(present.join(file), &filler).expect("file");
+    }
+    let assets = speech([unreachable; 4], &sha);
+    let mut events = Vec::new();
+    ModelStore::in_dir(&present)
+        .fetch_speech(&assets, |event| events.push(event))
+        .await
+        .expect("kept");
+    assert_eq!(
+        events,
+        [SpeechProgress::Verifying, SpeechProgress::Done],
+        "a file on disk is not fetched"
+    );
+    for file in FILES {
+        assert_eq!(fs::read(present.join(file)).expect("still there"), filler);
+    }
+
+    // A directory can be statted and cannot be read as a file. Its metadata length is the pin.
+    let unreadable = dir("pinned-size-unreadable");
+    let file = unreadable.join("good.onnx");
+    fs::create_dir_all(&file).expect("unreadable");
+    let size = fs::metadata(&file).expect("metadata").len();
+    let asset = Asset {
+        kind: ModelKind::Wake,
+        file_name: "good.onnx",
+        url: unreachable,
+        size,
+        sha256: &sha,
+    };
+    ModelStore::in_dir(&unreadable)
+        .fetch(&asset)
+        .await
+        .expect("kept without reading");
+    assert!(fs::metadata(&file).expect("still there").is_dir());
+}
+
+#[tokio::test]
 async fn a_speech_download_with_a_bad_checksum_says_so_and_is_not_cached() {
     let (address, _server) = serve().await;
     let dir = dir("speech-checksum");

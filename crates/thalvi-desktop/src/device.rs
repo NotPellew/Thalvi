@@ -197,7 +197,7 @@ pub struct Download {
 /// What a load is doing now, for the notice shown while it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// Reading the files from disk, checking them as it goes.
+    /// Reading the files from disk.
     Reading,
     /// Downloading an export that is not on disk, before the first percent has arrived.
     Fetching(Download),

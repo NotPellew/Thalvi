@@ -305,7 +305,7 @@ pub struct SpeechModelInfo {
     pub license: &'static str,
     /// The languages it recognizes.
     pub languages: &'static [&'static str],
-    /// Every file is on disk and matches its checksum.
+    /// Every file is on disk at its pinned size.
     pub cached: bool,
     /// Whether recognition favours the word list.
     pub word_list: bool,
@@ -750,7 +750,8 @@ impl UserError for ModelError {
     }
 }
 
-/// A directory of verified model files that fills itself by downloading on first use.
+/// A directory of model files. A download is checked against its checksum once, as it is written;
+/// a file already there is kept when its size matches.
 #[derive(Debug, Clone)]
 pub struct ModelStore {
     dir: PathBuf,
@@ -777,8 +778,9 @@ impl ModelStore {
         self.dir.join(asset.file_name)
     }
 
-    /// Returns the path of the verified file, downloading it first if it is missing. A stored file
-    /// that does not match its checksum is deleted before anything else.
+    /// Returns the path of the file, downloading it first if it is missing or the wrong size.
+    /// A stored file of the pinned size is kept without reading it. A file of any other size is
+    /// deleted before it is downloaded again.
     ///
     /// # Errors
     /// Fails when the download fails, the checksum does not match (the file is deleted), or the
@@ -896,8 +898,7 @@ impl ModelStore {
         }
     }
 
-    /// Whether every file of `assets` is on disk at its pinned size. Cheap, for showing download
-    /// state; [`fetch`](Self::fetch) still verifies each checksum before a model is used.
+    /// Whether every file of `assets` is on disk at its pinned size.
     pub async fn is_cached(&self, assets: &impl ModelFiles) -> bool {
         for asset in assets.files() {
             match tokio::fs::metadata(self.dir.join(asset.file_name)).await {
@@ -908,8 +909,7 @@ impl ModelStore {
         true
     }
 
-    /// Whether one pinned file is on disk at its pinned size. Cheap, for showing download
-    /// state; [`fetch`](Self::fetch) still verifies its checksum before it is used.
+    /// Whether one pinned file is on disk at its pinned size.
     pub async fn is_asset_cached(&self, asset: &Asset<'_>) -> bool {
         match tokio::fs::metadata(self.dir.join(asset.file_name)).await {
             Ok(meta) => meta.len() == asset.size,
@@ -1108,34 +1108,14 @@ enum Stored {
     Damaged,
 }
 
-/// Checks the file on disk against the pin; streamed, because speech models are large.
+/// A file on disk is intact when it has the pinned size. The checksum is checked once, while the
+/// download is written.
 async fn stored(path: &Path, asset: &Asset<'_>) -> Stored {
-    let (path, sha256) = (path.to_owned(), asset.sha256.to_owned());
-    tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        let mut file = match std::fs::File::open(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Stored::Missing,
-            Err(_) => return Stored::Damaged,
-        };
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0; 1 << 20];
-        loop {
-            match file.read(&mut buffer) {
-                Ok(0) => {
-                    return if hex(&hasher.finalize()) == sha256 {
-                        Stored::Intact
-                    } else {
-                        Stored::Damaged
-                    };
-                }
-                Ok(read) => hasher.update(&buffer[..read]),
-                Err(_) => return Stored::Damaged,
-            }
-        }
-    })
-    .await
-    .unwrap_or(Stored::Damaged)
+    match tokio::fs::metadata(path).await {
+        Ok(meta) if meta.len() == asset.size => Stored::Intact,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Stored::Missing,
+        _ => Stored::Damaged,
+    }
 }
 
 fn hex(digest: &[u8]) -> String {

@@ -2,6 +2,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -20,26 +22,56 @@ use crate::wake::{self, WakeError, WakeEvent, WakeFrame};
 pub struct FakeFrames {
     gate: InputGate,
     frames: mpsc::UnboundedReceiver<(u64, Result<Queued, AudioError>)>,
+    /// Set when a feed is told to keep only this many unread frames, as the microphone queue does.
+    cap: Option<Arc<Cap>>,
+}
+
+/// How many frames are waiting, and whether one more was refused.
+struct Cap {
+    limit: usize,
+    waiting: AtomicUsize,
+    overrun: AtomicBool,
 }
 
 /// Test-side handle of [`FakeFrames`].
 pub struct FrameFeed {
     gate: InputGate,
     frames: mpsc::UnboundedSender<(u64, Result<Queued, AudioError>)>,
+    cap: Option<Arc<Cap>>,
 }
 
 impl FakeFrames {
     #[must_use]
     pub fn new(gate: &InputGate) -> (Self, FrameFeed) {
+        Self::with_cap(gate, None)
+    }
+
+    /// Like [`new`](Self::new), but the `limit`th unread frame is kept and the next one sticks
+    /// [`AudioError::Dropped`], the way the microphone queue does when nothing is reading.
+    #[must_use]
+    pub fn capped(gate: &InputGate, limit: usize) -> (Self, FrameFeed) {
+        Self::with_cap(
+            gate,
+            Some(Arc::new(Cap {
+                limit,
+                waiting: AtomicUsize::new(0),
+                overrun: AtomicBool::new(false),
+            })),
+        )
+    }
+
+    fn with_cap(gate: &InputGate, cap: Option<Arc<Cap>>) -> (Self, FrameFeed) {
         let (tx, rx) = mpsc::unbounded_channel();
         (
             Self {
                 gate: gate.clone(),
                 frames: rx,
+                cap: cap.clone(),
             },
             FrameFeed {
                 gate: gate.clone(),
                 frames: tx,
+                cap,
             },
         )
     }
@@ -49,9 +81,21 @@ impl FrameFeed {
     /// Delivers a frame captured now; lost when the gate is off.
     pub fn send(&self, frame: Frame) {
         let (enabled, epoch) = self.gate.state();
-        if enabled {
-            let _ = self.frames.send((epoch, Ok(Queued::now(frame))));
+        if !enabled {
+            return;
         }
+        if let Some(cap) = &self.cap {
+            if cap.overrun.load(Ordering::Acquire) {
+                return;
+            }
+            // A full queue refuses this frame and every later read, as the capture callback does.
+            if cap.waiting.load(Ordering::Acquire) >= cap.limit {
+                cap.overrun.store(true, Ordering::Release);
+                return;
+            }
+            cap.waiting.fetch_add(1, Ordering::AcqRel);
+        }
+        let _ = self.frames.send((epoch, Ok(Queued::now(frame))));
     }
 
     /// Fails the microphone.
@@ -64,7 +108,19 @@ impl FrameFeed {
 impl FrameSource for FakeFrames {
     async fn next(&mut self) -> Result<Queued, AudioError> {
         loop {
+            if self
+                .cap
+                .as_ref()
+                .is_some_and(|cap| cap.overrun.load(Ordering::Acquire))
+            {
+                return Err(AudioError::Dropped);
+            }
             let (epoch, frame) = self.frames.recv().await.ok_or(AudioError::Closed)?;
+            if let Some(cap) = &self.cap
+                && frame.is_ok()
+            {
+                cap.waiting.fetch_sub(1, Ordering::AcqRel);
+            }
             if frame.is_err() || epoch == self.gate.state().1 {
                 return frame;
             }

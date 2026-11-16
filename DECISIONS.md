@@ -116,6 +116,10 @@ areas your change touches. Editing rules are in
   name or a local `.onnx` path with its own threshold; catalog files download on first
   use into the user data directory and must match their SHA-256. Why: users change a
   phrase without a rebuild, and we never re-host CC BY-NC-SA heads. Rejected: bundled models.
+- **Model files checked once, on download.** A pinned model file must match its SHA-256 as it is
+  downloaded; a file already on disk counts as intact when it has the pinned size, else it is replaced.
+  Why: hashing 0.6–1.9 GB on every load made switching back to a model take 11–20 s (#494).
+  Rejected: hashing on every load; trusting a file of the wrong size.
 - **Capture starts after the wake cue.** Dictation plays the wake cue at once and sends
   only later speech, buffered while the recognizer connects; confirmations wait for ready,
   then the cue. Why: wake audio leaked the phrase into 1 in 5 live transcripts even with

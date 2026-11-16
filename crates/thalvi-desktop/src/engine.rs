@@ -1650,7 +1650,8 @@ where
                     self.cue_failed(&end, "The capture continues.");
                 }
                 () = until((session.is_some() || !loads_model).then_some(deadline)) => break Some(Done::Failed(self.not_ready())),
-                frame = frames.next(), if cue_ended && released.is_none() => match frame {
+                // Keep reading after release so a long load cannot fill the queue; the cutoff drops what follows.
+                frame = frames.next(), if cue_ended => match frame {
                     Ok(queued) if !held.is_some_and(|held| held.release.precedes(queued.order)) => backlog.push(queued),
                     Ok(_) => {}
                     Err(error) => break Some(Done::Failed(error.into())),

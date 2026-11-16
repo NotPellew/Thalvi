@@ -83,6 +83,8 @@ Receive == /\ phase \in {"active", "ending", "secondary", "writing"}
 \* limit, so this wait may last any number of steps. It ends when the model is ready, when the load
 \* fails or reaches a download (a failed capture that delivers nothing, ending in conclude, which
 \* cancels the extras), or by a cancel observed first (ActiveCancelled).
+\* Frames read during the wait, including after a hold is released, are not a step here: the cutoff
+\* discards what follows the release, and that read neither admits delivery nor changes this wait.
 Loaded == /\ phase = "active" /\ starting /\ ~cancelPending /\ starting' = FALSE
           /\ UNCHANGED <<phase, queue, sent, off, quit, preEnds, ended, intentOff,
                          stopRequested, cancelPending, cueDone, cueAccepted,

@@ -61,6 +61,12 @@ loading waits are unchanged. No model action, await boundary or bound changes.
 Its hashes describe that branch merged with main's download-size notice and Vulkan
 previews (above), which touch no mapped function.
 
+A hold released while an on-device model is still loading keeps `Engine::start` reading microphone frames.
+Frames after the release cutoff are discarded and are not delivered. The read stays in the same
+cancellation-first select: the wait is still unbounded, `Accept` is still enabled only after `Loaded`,
+and a cancel still wins. Model actions are unchanged. The `engine.rs` hash describes
+that change merged with the app styles change above.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
@@ -95,7 +101,7 @@ Matching hashes establish synchronization only, not correctness of the model.
 | Same file: `Runner::capture`, `Settling::settle` | `FinishEmpty` admits an Accepted result only if `ended` is clear. This is delivery admission at the last empty receive, not an atomic physical host effect. An ended capture skips `Delivery::finish` and is kept as cancelled. |
 | `crates/thalvi-desktop/src/engine.rs`: `EngineHandle::cancel`, `Engine::capture` | `cancelPending` represents the watch version change; capture entry consumes the old version. `Accept` and `ActiveCancelled` abstract capture work before the ending. |
 | Same file: `Engine::conclude`, `Engine::end_cue`, `Engine::end_with` | `CueReturns`, `CloseReturns`; the cue's cancellation-biased select and recognizer release are separate futures joined together. A completed cue retains its bool while close is still Pending. Neither completion is a transaction encompassing the other. |
-| Same file: `Engine::start`, `download_started`; `recognizer.rs`: `Recognizer::loading`; `local.rs`: `LocalRecognizer::connect`, `loading` | `starting`, `Loaded`, `LoadFailed`; the wait for an on-device model is unbounded and polls cancellation first. `Accept` is enabled only after `Loaded`. A download or load failure is `LoadFailed`, a failed capture that delivers nothing. |
+| Same file: `Engine::start`, `download_started`; `recognizer.rs`: `Recognizer::loading`; `local.rs`: `LocalRecognizer::connect`, `loading` | `starting`, `Loaded`, `LoadFailed`; the wait for an on-device model is unbounded and polls cancellation first. `Accept` is enabled only after `Loaded`. A download or load failure is `LoadFailed`, a failed capture that delivers nothing. Frames read during that wait, including after a hold is released, are not a delivery or cancellation step. |
 | Same file: `Engine::merge`, `Engine::ask_merge`, `Engine::write`, `bounded` | `secondary` (the merge of the extras' texts), `writing`, `SecondaryReturns`, `WritingReturns`; disabled stages are skipped, awaiting stages poll cancellation first; repeated waits stutter in this abstraction. A synchronous skipped merge returns without another poll; the runner's final drain still guards delivery. |
 | `crates/thalvi-desktop/src/engine/streaming.rs`: `Streams::start`, `Streams::finish`, `Streams::cancel`, `send_frame`, `hear`, `park`, `run`; `engine.rs`: `Engine::drop_streams` | `extras`, `extra`, `merged`: `PreEmpty` opens the extra sessions, `Accept` (merge will not run), `ActiveCancelled`, `CueReturns`/`CloseReturns` (ending cancelled) and `SecondaryReturns` (cancel) request their cancellation, an uncancelled `SecondaryReturns` leaves them `late`. The model tracks ownership and notification only; the task awaits `RecognizerSession::cancel` or `close` separately. |
 | `crates/thalvi-desktop/src/recognizer.rs`: `RecognizerSession`; `crates/thalvi-desktop/src/realtime.rs`: `RealtimeSession::close`; `crates/thalvi-desktop/src/openai_live.rs`: `OpenAiSession::cancel`, `OpenAiSession::close` | `CloseReturns` may occur before or after the cue. Network close is awaited under a timeout, so it can remain Pending; `OpenAiSession::close` aborts its upload task and returns at once. |
