@@ -67,6 +67,11 @@ cancellation-first select: the wait is still unbounded, `Accept` is still enable
 and a cancel still wins. Model actions are unchanged. The `engine.rs` hash describes
 that change merged with the app styles change above.
 
+`Engine::conclude` no longer merges a Task capture: it takes the existing no-merge branch, calling
+`Engine::drop_streams` before `end_with`, the `Accept (merge will not run)` step the model already has.
+No await, queue step or delivery path is added, so model actions are unchanged. The `engine.rs` hash
+describes that working change on top of the hold change above.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
