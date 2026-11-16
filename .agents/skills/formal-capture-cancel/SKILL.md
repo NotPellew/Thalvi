@@ -34,8 +34,8 @@ and loading methods are unchanged: failed connections still deliver nothing,
 with no new await or queue step. Model actions remain unchanged; source hashes
 include these diagnostics at the sync commit above.
 
-The experimental Whisper entry (#481, uncommitted at this sync; `runner.rs`'s hash describes the working
-change) only retypes `Control::ReloadSpeechModel`'s payload, which `Requests::take` still does not count as
+The experimental Whisper entry (#481, branch `feat/speech-trials`; the hashes of `runner.rs`, `engine.rs` and
+`recognizer.rs` describe its commit `98c254fb`, after the sync commit above) only retypes `Control::ReloadSpeechModel`'s payload, which `Requests::take` still does not count as
 an ending, and passes the helper folder into `Chosen::new`; `drive`, `Runner::capture` and `Settling::settle`
 are unchanged. Its `WhisperSession` (`crates/thalvi-desktop/src/whisper.rs`) buffers like `OpenAiSession`:
 `cancel` and `close` return at once, and dropping a session with its request in flight aborts the request

@@ -99,7 +99,7 @@ view never opens the app, writes `desktop.json`, or takes the save lock.
 `agent.rs`'s `metrics_summary` reads the metrics log and writes no config.
 Neither is a writer of the file or of `AppState::config`.
 
-The experimental Whisper entry (#481; these hashes describe the uncommitted working change) adds no writer:
+The experimental Whisper entry (#481, branch `feat/speech-trials`; these hashes describe its commit `98c254fb`) adds no writer:
 `commands.rs` lists the Whisper models, words their device line and downloads their files into the model
 store, `app.rs` passes the packaged helper folder into `AppState::start`, and `agent.rs` names the model in
 `recognizer`. None writes `desktop.json` or `AppState::config` or takes the save lock.
