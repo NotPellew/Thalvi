@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 SHELLCHECK=(pipx run --spec shellcheck-py==0.11.0.1 shellcheck)
-components=(server desktop-windows web desktop-ui speech issue-sync release formal)
+components=(server desktop-windows desktop-ui speech issue-sync release formal)
 
 step() {
   printf '\n==> %s\n' "$*"
@@ -76,17 +76,12 @@ gate_desktop_windows() {
   bundle nsis
 }
 
-gate_web() {
-  node_checks web
-}
-
 gate_desktop_ui() {
   node_checks crates/thalvi-app/ui
 }
 
 gate_speech() {
-  step docker compose --profile kokoro --profile vllm-omni config -q
-  step "${SHELLCHECK[@]}" speech/qwentts.sh speech/nemotron-asr.sh
+  step "${SHELLCHECK[@]}" speech/nemotron-asr.sh
   in_dir speech/asr uv run --frozen ruff check
   in_dir speech/asr uv run --frozen ruff format --check
   in_dir speech/asr uv run --frozen pytest
@@ -115,7 +110,6 @@ run_component() {
   case $1 in
     server) gate_server ;;
     desktop-windows) gate_desktop_windows ;;
-    web) gate_web ;;
     desktop-ui) gate_desktop_ui ;;
     speech) gate_speech ;;
     issue-sync) gate_issue_sync ;;
@@ -128,13 +122,13 @@ run_all() {
   local runnable skipped reason component
   case $(uname -s) in
     Linux)
-      runnable=(server web desktop-ui speech issue-sync release formal)
+      runnable=(server desktop-ui speech issue-sync release formal)
       skipped=(desktop-windows)
       reason="needs Windows"
       ;;
     MINGW* | MSYS* | CYGWIN*)
       runnable=(desktop-windows)
-      skipped=(server web desktop-ui speech issue-sync release formal)
+      skipped=(server desktop-ui speech issue-sync release formal)
       reason="CI runs it on Linux"
       ;;
     *)

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Prints the units the changes from BASE to HEAD affect, space-separated,
-# `none` when only Markdown outside crates/, web/ and speech/ changed, or
+# `none` when only Markdown outside crates/ and speech/ changed, or
 # `all` when any change can affect everything or the diff can't be read.
-# Units: server desktop app desktop-ui web speech issues.
+# Units: desktop app desktop-ui speech issues.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -19,12 +19,10 @@ fi
 units=()
 while IFS= read -r file; do
   case $file in
-    crates/thalvi-server/*) units+=(server) ;;
     crates/thalvi-desktop/*) units+=(desktop app) ;;
     crates/thalvi-app/ui/*) units+=(desktop-ui) ;;
     crates/thalvi-app/src/*) units+=(app) ;;
-    web/*) units+=(web) ;;
-    speech/* | compose.yaml) units+=(speech) ;;
+    speech/*) units+=(speech) ;;
     .github/scripts/issue-refs*) units+=(issues) ;;
     *.md)
       if [[ $file == crates/* ]]; then
@@ -44,6 +42,6 @@ if (( ${#units[@]} == 0 )); then
   exit 0
 fi
 
-for unit in server desktop app desktop-ui web speech issues; do
+for unit in desktop app desktop-ui speech issues; do
   if [[ " ${units[*]} " == *" $unit "* ]]; then echo "$unit"; fi
 done | paste -sd ' '
