@@ -117,7 +117,7 @@ change it. These hashes describe the working tree at sync commit
 
 An unreadable look, and a built-in-look save that fails, are recorded on `LastError` for the tray and Settings. Neither writes `desktop.json` or takes the save lock.
 
-The opt-in dictation cleanup (#465) adds one agent test in `agent.rs`. `settings_set` is unchanged: the new field is refused by the same config load as every other writing field. No writer of `desktop.json` or `AppState::config` is added, so the model and its three invariants are unchanged. The `agent.rs` hash describes commit `bbec78a`.
+The opt-in dictation cleanup (#465) adds one agent test in `agent.rs`. `settings_set` is unchanged: the new field is refused by the same config load as every other writing field. No writer of `desktop.json` or `AppState::config` is added, so the model and its three invariants are unchanged. The `agent.rs` hash describes commit `4d534df`, after the theme model merged.
 
 The experimental Whisper entry (#481, branch `feat/speech-trials`; these hashes describe its commit `98c254fb`) adds no writer:
 `commands.rs` lists the Whisper models, words their device line and downloads their files into the model

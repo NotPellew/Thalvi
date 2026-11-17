@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `bbec78a934c8a84cfe9b876df52f6e7ac7db85c7`. The source hashes describe this commit.
+Sync commit: `4d534dfaabb70a47994790f785055ee38c6b0a55`. The source hashes describe this commit.
 The previous sync was `c7e6524ccdc225b4cf8f099ab6a5e2f2da2bc999` on main.
 The covered changes through this commit include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
@@ -84,7 +84,7 @@ microphone blocking work behind `Rig` and `Input`, with the same awaits and FIFO
 `Requests::take`, `Requests::read_queued`, `drive`, `Runner::capture` and `Settling::settle`
 keep their bodies unchanged. `follow` now publishes a new engine's initial status; it adds
 no cancellation write, await or delivery path. The model actions and bounds are unchanged;
-the runner hash describes that inspected commit and its test-only host extension.
+that change merged with the cleanup change below is what the sync commit's runner hash describes.
 
 Opt-in dictation cleanup (#465) adds `Engine::clean`, the same cancellation-first `bounded` shape
 as `Engine::write`. A submit is cleaned before its confirmation is shown (`Prepare`, then
