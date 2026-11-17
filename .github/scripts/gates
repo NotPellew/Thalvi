@@ -59,6 +59,8 @@ bundle() {
 gate_server() {
   desktop_ui
   step cargo fmt --all -- --check
+  step python3 .github/scripts/rust-layout
+  step .github/scripts/rust-layout.test.sh
   step cargo lint
   tests --workspace
   RUSTDOCFLAGS="-D warnings" step cargo docs
@@ -89,7 +91,7 @@ gate_speech() {
 
 gate_issue_sync() {
   step "${SHELLCHECK[@]}" .github/scripts/gates .github/scripts/whisper-helper .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh \
-    .github/scripts/changed .github/scripts/changed.test.sh
+    .github/scripts/changed .github/scripts/changed.test.sh .github/scripts/rust-layout.test.sh
   step .github/scripts/issue-refs.test.sh
   step .github/scripts/changed.test.sh
 }
