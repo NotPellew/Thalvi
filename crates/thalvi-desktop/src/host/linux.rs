@@ -1,6 +1,7 @@
 //! The Linux desktop host: picks Hyprland or GNOME Wayland at startup and forwards every call to it.
 
 mod layer;
+mod place;
 mod xwayland;
 
 use std::fmt;
