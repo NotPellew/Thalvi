@@ -141,7 +141,8 @@ jobs:
           packages=()
           if [[ $SCOPE != all ]]; then packages=(--package "$SCOPE"); fi
           status=0
-          cargo mutants --in-place --colors never --in-diff "$RUNNER_TEMP/changed.diff" "${packages[@]}" --shard ${{ matrix.shard }}/8 || status=$?
+          # Round-robin, so one file's slow survivors don't all land on one shard and overrun the step.
+          cargo mutants --in-place --colors never --in-diff "$RUNNER_TEMP/changed.diff" "${packages[@]}" --shard ${{ matrix.shard }}/8 --sharding round-robin || status=$?
           {
             for outcome in missed timeout; do
               if [[ -s mutants.out/$outcome.txt ]]; then
