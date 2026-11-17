@@ -238,8 +238,16 @@ function changedSummary(parts: readonly (readonly [string, string | number, stri
 
 function button(label: string, onClick: () => void, className = ""): HTMLButtonElement {
   const node = el("button", { type: "button", class: className }, label);
-  node.addEventListener("click", onClick);
+  node.addEventListener("click", () => {
+    if (node.getAttribute("aria-disabled") !== "true") onClick();
+  });
   return node;
+}
+
+/** Marks a `button` busy: unlike `disabled`, it keeps keyboard focus, and its presses are ignored. */
+function busy(node: HTMLButtonElement, on: boolean): void {
+  if (on) node.setAttribute("aria-disabled", "true");
+  else node.removeAttribute("aria-disabled");
 }
 
 function note(): HTMLElement {
@@ -2795,7 +2803,8 @@ function updates({ settings, backend, controls, live, apply }: PageContext): HTM
     status.textContent = updateText(next, installed);
     status.className = phase.state === "failed" || phase.state === "unsupported" ? "note" : "note ok";
     check.textContent = phase.state === "failed" ? "Retry" : "Check for updates";
-    check.disabled = phase.state === "checking" || phase.state === "downloading" || phase.state === "installing" || phase.state === "unsupported";
+    check.disabled = phase.state === "unsupported";
+    busy(check, phase.state === "checking" || phase.state === "downloading" || phase.state === "installing");
     notes.hidden = next.notes === null;
     const told = next.notice !== null && (phase.state === "idle" || phase.state === "upToDate");
     notice.hidden = !told;
