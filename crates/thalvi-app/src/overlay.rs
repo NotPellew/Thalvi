@@ -16,6 +16,7 @@ use thalvi_desktop::host::{
     HostError, OverlayEvent, OverlayFrame, OverlayPlan, OverlaySurface, OverlayWaker,
     overlay_failure,
 };
+use thalvi_desktop::metrics::{Event, Metrics, RecordKinds, Recorder};
 
 use crate::status::{Failure, FailureKind, LastError, Status};
 use painter::Painter;
@@ -84,6 +85,8 @@ enum Message {
     Look(Look),
     /// Whether the system's theme is dark.
     Theme(bool),
+    /// The recordings choice now in effect. A later one replaces the metrics the overlay writes.
+    Recordings(RecordKinds),
 }
 
 /// Where an overlay failure is shown, off the overlay's own thread.
@@ -138,8 +141,15 @@ impl Overlay {
     }
 
     /// Starts the overlay's thread, which opens `plan`'s surface; `cancel` runs when its cancel
-    /// button is pressed. A second call does nothing.
-    pub fn start(&self, plan: OverlayPlan, takes_clicks: bool, cancel: impl Fn() + Send + 'static) {
+    /// button is pressed. A second call does nothing. `recorder` records each show, and a later
+    /// [`Self::set_recordings`] changes which kinds it writes.
+    pub fn start(
+        &self,
+        plan: OverlayPlan,
+        takes_clicks: bool,
+        recorder: Recorder,
+        cancel: impl Fn() + Send + 'static,
+    ) {
         let Some(messages) = self
             .waiting
             .lock()
@@ -169,6 +179,7 @@ impl Overlay {
                         level,
                         failures,
                         sink,
+                        recorder,
                     },
                     &cancel,
                 );
@@ -218,6 +229,12 @@ impl Overlay {
         self.send(Message::Theme(dark));
     }
 
+    /// Records with `kinds` from now on. A show after metrics are turned off writes no line, and
+    /// one after they are turned on does.
+    pub fn set_recordings(&self, kinds: RecordKinds) {
+        self.send(Message::Recordings(kinds));
+    }
+
     /// The microphone's loudness, 0 to 1; the wave picks it up on its next frame.
     pub fn level(&self, level: f32) {
         self.level.store(level.to_bits(), Ordering::Relaxed);
@@ -240,6 +257,7 @@ struct Thread {
     level: Arc<AtomicU32>,
     failures: LastError,
     sink: Option<FailureSink>,
+    recorder: Recorder,
 }
 
 fn run(thread: Thread, cancel: &dyn Fn()) {
@@ -251,6 +269,7 @@ fn run(thread: Thread, cancel: &dyn Fn()) {
         level,
         failures,
         sink,
+        recorder,
     } = thread;
     let mut surface = match plan.open(view::WIDTH, view::HEIGHT, takes_clicks) {
         Ok(surface) => surface,
@@ -269,7 +288,7 @@ fn run(thread: Thread, cancel: &dyn Fn()) {
         );
         return;
     };
-    let mut overlay = Overlaying::new(takes_clicks, Instant::now());
+    let mut overlay = Overlaying::with(takes_clicks, Instant::now(), recorder);
     loop {
         while let Ok(message) = messages.try_recv() {
             overlay.take(message, Instant::now());
@@ -369,6 +388,11 @@ struct Overlaying {
     retry_at: Option<Instant>,
     /// The look, and whether the system's theme is dark.
     style: (Look, bool),
+    /// When the status that asked for this show arrived. `None` once its frame is attached or it failed.
+    asked_at: Option<Instant>,
+    /// The recorder the overlay started with. A recordings change switches its kinds in place.
+    recorder: Recorder,
+    metrics: Metrics,
 }
 
 /// What one settle did with the surface.
@@ -384,7 +408,13 @@ enum Draw {
 }
 
 impl Overlaying {
+    #[cfg(test)]
     fn new(takes_clicks: bool, now: Instant) -> Self {
+        Self::with(takes_clicks, now, Recorder::disabled())
+    }
+
+    fn with(takes_clicks: bool, now: Instant, recorder: Recorder) -> Self {
+        let metrics = recorder.metrics();
         Self {
             view: View::new(takes_clicks),
             started: now,
@@ -395,7 +425,24 @@ impl Overlaying {
             failure: None,
             retry_at: None,
             style: (Look::default(), true),
+            asked_at: None,
+            recorder,
+            metrics,
         }
+    }
+
+    /// One show, from the status that asked for it. A later status while this one is still
+    /// placing keeps the first ask, so the duration is the wait the user saw.
+    fn note(&mut self, outcome: &str, now: Instant) {
+        let Some(asked) = self.asked_at.take() else {
+            return;
+        };
+        self.metrics.metric(
+            Event::OverlayShown,
+            outcome,
+            Some(now.saturating_duration_since(asked)),
+            serde_json::Value::Null,
+        );
     }
 
     fn mark_stale(&mut self) {
@@ -428,10 +475,16 @@ impl Overlaying {
                 self.style.1 = dark;
                 self.mark_stale();
             }
+            Message::Recordings(kinds) => self.recorder.set_kinds(kinds),
         }
     }
 
     fn want(&mut self, visibility: Visibility, now: Instant) {
+        if matches!(visibility, Visibility::Show | Visibility::ShowFor(_))
+            && self.asked_at.is_none()
+        {
+            self.asked_at = Some(now);
+        }
         let (wanted, hide_at) = match visibility {
             Visibility::Show => (true, None),
             Visibility::Hide => (false, None),
@@ -488,6 +541,8 @@ impl Overlaying {
             }
             self.frame_at = None;
             self.retry_at = None;
+            // A hide before the frame attached is a show that never happened.
+            self.asked_at = None;
             return Draw::Idle;
         }
         if self.retry_at.is_some_and(|at| now < at) {
@@ -508,11 +563,16 @@ impl Overlaying {
         } else {
             surface.show(frame)
         };
+        // A redraw of a surface already showing is the same show.
+        let first_frame = !matches!(self.shown, Shown::Showing { .. });
         let outcome = match drawn {
             Ok(()) => {
                 self.shown = Shown::Showing { stale: false };
                 self.failure = None;
                 self.retry_at = None;
+                if first_frame {
+                    self.note("ok", now);
+                }
                 Draw::Shown
             }
             Err(HostError::Unsupported(message)) if message.contains("not placed yet") => {
@@ -528,6 +588,7 @@ impl Overlaying {
                 let fresh = self.failure.as_ref() != Some(&message);
                 self.failure = Some(message.clone());
                 if fresh {
+                    self.note(&message, now);
                     Draw::Failed(message)
                 } else {
                     Draw::Idle
@@ -974,5 +1035,129 @@ mod tests {
         );
         overlay.failures.clear_overlay();
         assert!(overlay.failure().is_none());
+    }
+
+    /// A folder removed when the test ends. The recorder creates it on the first line it writes.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "thalvi-overlay-test-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_nanos())
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            Self(dir)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// One show, from the ask through the frame attaching. Returns the lines written under `root`.
+    async fn shown_lines(
+        overlay: &mut Overlaying,
+        root: &std::path::Path,
+    ) -> Vec<serde_json::Value> {
+        let start = Instant::now();
+        let mut painter = Painter::new(1.0, Look::Gunmetal, true).unwrap();
+        let mut surface = Fake {
+            pending: true,
+            ..Fake::default()
+        };
+        overlay.take(
+            Message::Status(Box::new(capturing()), Visibility::Show),
+            start,
+        );
+        overlay.settle(&mut surface, &mut painter, 0.0, start);
+        surface.pending = false;
+        let placed = start + PLACE_AFTER;
+        let drawn = overlay.settle(&mut surface, &mut painter, 0.0, placed);
+        assert!(matches!(drawn, Draw::Shown), "the frame attached");
+        // A redraw of the same show records nothing more.
+        overlay.shown = Shown::Showing { stale: true };
+        overlay.settle(
+            &mut surface,
+            &mut painter,
+            0.0,
+            placed + Duration::from_millis(40),
+        );
+        // finish joins the writer, so the lines below are everything this show queued.
+        let recorder = std::mem::replace(&mut overlay.recorder, Recorder::disabled());
+        recorder.finish().await;
+        metric_lines(root)
+    }
+
+    fn metric_lines(root: &std::path::Path) -> Vec<serde_json::Value> {
+        let path = root.join("metrics.jsonl");
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_show_records_how_long_it_took_to_place_the_first_frame() {
+        let root = Scratch::new("shown");
+        let recorder = Recorder::in_dir(
+            RecordKinds {
+                metrics: true,
+                ..RecordKinds::default()
+            },
+            root.path(),
+        )
+        .unwrap();
+        let mut overlay = Overlaying::with(false, Instant::now(), recorder);
+        let lines = shown_lines(&mut overlay, root.path()).await;
+        assert_eq!(lines.len(), 1, "one event per show");
+        assert_eq!(lines[0]["event"], "desktop_overlay_shown");
+        assert_eq!(lines[0]["outcome"], "ok");
+        assert_eq!(lines[0]["duration_ms"], PLACE_AFTER.as_secs_f64() * 1000.0);
+    }
+
+    #[tokio::test]
+    async fn a_recordings_change_decides_whether_the_next_show_is_written() {
+        let root = Scratch::new("off");
+        let recorder = Recorder::in_dir(
+            RecordKinds {
+                metrics: true,
+                ..RecordKinds::default()
+            },
+            root.path(),
+        )
+        .unwrap();
+        let mut overlay = Overlaying::with(false, Instant::now(), recorder);
+        overlay.take(Message::Recordings(RecordKinds::default()), Instant::now());
+        let none = shown_lines(&mut overlay, root.path()).await;
+        assert!(
+            none.is_empty(),
+            "turning metrics off writes no line for the next show"
+        );
+
+        let root = Scratch::new("on");
+        let recorder = Recorder::in_dir(RecordKinds::default(), root.path()).unwrap();
+        let mut overlay = Overlaying::with(false, Instant::now(), recorder);
+        overlay.take(
+            Message::Recordings(RecordKinds {
+                metrics: true,
+                ..RecordKinds::default()
+            }),
+            Instant::now(),
+        );
+        let lines = shown_lines(&mut overlay, root.path()).await;
+        assert_eq!(lines.len(), 1, "turning metrics on writes the next show");
+        assert_eq!(lines[0]["event"], "desktop_overlay_shown");
     }
 }
