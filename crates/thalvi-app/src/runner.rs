@@ -1903,6 +1903,9 @@ async fn follow(
 }
 
 #[cfg(test)]
+mod controls;
+
+#[cfg(test)]
 mod tests {
     use std::cell::Cell;
     use std::time::Duration;
@@ -3053,7 +3056,10 @@ mod tests {
 
     /// The window and the calls a host saw.
     #[derive(Clone, Default)]
-    struct TestHost(Arc<Mutex<Vec<&'static str>>>);
+    pub(super) struct TestHost(
+        pub(super) Arc<Mutex<Vec<&'static str>>>,
+        pub(super) Arc<Mutex<Vec<String>>>,
+    );
 
     impl TestHost {
         fn called(&self, call: &'static str) {
@@ -3097,15 +3103,17 @@ mod tests {
         fn deliver(
             &self,
             _: &String,
-            _: &thalvi_desktop::host::PasteText,
+            text: &thalvi_desktop::host::PasteText,
             _: bool,
         ) -> Result<thalvi_desktop::host::Delivered, thalvi_desktop::host::HostError> {
             self.called("deliver");
+            self.1.lock().unwrap().push(text.as_str().to_owned());
             Ok(thalvi_desktop::host::Delivered::InWindow)
         }
 
-        fn copy(&self, _: &str) -> Result<(), thalvi_desktop::host::HostError> {
+        fn copy(&self, text: &str) -> Result<(), thalvi_desktop::host::HostError> {
             self.called("copy");
+            self.1.lock().unwrap().push(text.to_owned());
             Ok(())
         }
 
