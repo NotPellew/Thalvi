@@ -1335,6 +1335,25 @@ mod tests {
     }
 
     #[test]
+    fn settings_set_suspends_the_active_look_without_deleting_its_overrides() {
+        let rig = Rig::new(
+            "suspend",
+            r##"{"look":"holo","themes":{"version":1,"holo":{"colors":{"dark":{"accent":"#ffffff"}}}}}"##,
+        );
+        let set = rig.set(json!({"themes": {"holo": {"suspended": true}}}));
+        assert_eq!(set["ok"], true);
+        let config = rig.fake.config();
+        let overrides = match config.themes.of(Look::Holo) {
+            Some(thalvi_desktop::theme::LookOverrides::Usable(overrides)) => overrides,
+            other => panic!("{other:?}"),
+        };
+        assert!(overrides.suspended);
+        assert_eq!(overrides.colors.dark.accent.unwrap().to_hex(), "#ffffff");
+        let style = thalvi_desktop::theme::Style::resolve(Look::Holo, config.themes.of(Look::Holo));
+        assert_eq!(style.dark.accent.to_hex(), "#6bf8ff");
+    }
+
+    #[test]
     fn the_writing_prompt_is_read_checked_and_set_like_settings_with_the_key_masked() {
         let rig = Rig::new(
             "prompt",
