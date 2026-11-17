@@ -22,6 +22,8 @@ pub const COPY_ERROR: &str = "copy-error";
 pub const UPDATE: &str = "update";
 pub const LAST_DICTATION: &str = "last-dictation";
 pub const SETTINGS: &str = "settings";
+/// Turns the active look's customizations off without deleting them.
+pub const BUILT_IN_LOOK: &str = "built-in-look";
 pub const QUIT: &str = "quit";
 
 /// The seven looks of the tray icon.
@@ -287,6 +289,13 @@ impl Tray {
             None::<&str>,
         )?;
         let last = MenuItem::with_id(app, LAST_DICTATION, "Last dictation…", true, None::<&str>)?;
+        let built_in = MenuItem::with_id(
+            app,
+            BUILT_IN_LOOK,
+            "Use the built-in look",
+            true,
+            None::<&str>,
+        )?;
         let settings = MenuItem::with_id(app, SETTINGS, "Settings…", true, None::<&str>)?;
         let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
         let menu = Menu::with_items(
@@ -298,6 +307,7 @@ impl Tray {
                 &copy_error,
                 &last,
                 &update,
+                &built_in,
                 &settings,
                 &quit,
             ],

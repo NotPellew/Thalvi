@@ -24,8 +24,8 @@ button.quiet { color: var(--mut); }
 
 main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .pages { flex: 1; overflow-y: auto; padding: 14px 22px; }
-h3 { margin: 0 0 2px; font: 700 13px var(--mono); letter-spacing: 0.12em; color: var(--neon); text-transform: uppercase; }
-h4 { margin: 16px 0 4px; font: 600 12px system-ui; color: var(--mut); text-transform: uppercase; letter-spacing: 0.06em; }
+h3 { margin: 0 0 2px; font: 700 13px var(--mono); letter-spacing: 0.12em; color: var(--neon); }
+h4 { margin: 16px 0 4px; font: 600 12px system-ui; color: var(--mut); letter-spacing: 0.06em; }
 
 .row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 8px 0; border-bottom: 1px solid var(--line); }
 .row.wide { flex-direction: column; align-items: stretch; gap: 8px; }
@@ -78,9 +78,11 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .table > .editor { margin-left: 1.5em; padding: 0 10px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
 .next-dictation { margin: 6px 0; font-size: 13px; }
 .next-dictation:empty { display: none; }
-details.entry-details, details.model-details { font-size: 12px; color: var(--mut); }
+details.entry-details, details.model-details, details.fold { font-size: 12px; color: var(--mut); }
 .trow.server details.entry-details { flex-basis: 100%; }
-details.entry-details summary, details.model-details summary { cursor: pointer; }
+details.entry-details summary, details.model-details summary, details.fold summary { cursor: pointer; }
+details.fold { margin: 6px 0; }
+details.fold .row { padding-left: 8px; }
 textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .entries { display: flex; flex-direction: column; gap: 6px; max-height: 24em; overflow-y: auto; }
 .entry { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; }
@@ -122,7 +124,7 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
 .model progress { flex: 1; min-width: 4em; accent-color: var(--neon); }
 .own { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
 .model a { color: var(--neon); }
-.row.off { display: none; }
+.row.off, details.fold.off { display: none; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chips:empty { display: none; }
 .chip { display: inline-flex; align-items: center; gap: 2px; font: 13px var(--mono); }

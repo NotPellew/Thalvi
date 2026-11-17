@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt::Write as _;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::config::DesktopConfig;
 
@@ -104,7 +104,7 @@ impl System {
 pub struct Report {
     pub message: String,
     pub causes: Vec<String>,
-    pub at: DateTime<Utc>,
+    pub at: Timestamp,
     pub version: String,
     pub system: System,
     settings: Vec<(&'static str, String)>,
@@ -119,12 +119,12 @@ impl Report {
         system: System,
         config: &DesktopConfig,
     ) -> Self {
-        Self::at(Utc::now(), message, causes, version, system, config)
+        Self::at(Timestamp::now(), message, causes, version, system, config)
     }
 
     #[must_use]
     pub fn at(
-        at: DateTime<Utc>,
+        at: Timestamp,
         message: &str,
         causes: &[String],
         version: &str,
@@ -167,7 +167,7 @@ impl Report {
         let _ = write!(
             text,
             "\nTime: {}\nThalvi: {}\nSystem: {}{}{}\n\nSettings:\n",
-            self.at.format("%Y-%m-%d %H:%M:%S UTC"),
+            self.at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             self.version,
             self.system.os,
             if self.system.desktop.is_empty() {
@@ -186,8 +186,6 @@ impl Report {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone as _;
-
     use super::*;
     use crate::recognizer::{ConnectFailure, Detail, RecognizerError, SpeechSource};
 
@@ -258,7 +256,7 @@ mod tests {
         ];
         for (desktop, causes, json, expected) in cases {
             let report = Report::at(
-                Utc.with_ymd_and_hms(2026, 11, 3, 12, 34, 56).unwrap(),
+                "2026-11-03T12:34:56Z".parse().unwrap(),
                 "Thalvi could not reach the speech server.",
                 &causes,
                 "1.2.3",

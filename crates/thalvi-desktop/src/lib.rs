@@ -35,6 +35,7 @@ pub mod speech_device;
 pub mod spotter;
 pub mod tasks;
 mod tdt;
+pub mod theme;
 pub mod transducer;
 pub mod vad;
 pub mod wake;

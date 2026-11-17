@@ -46,6 +46,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   let pages: Page[] = [];
   let navButtons: HTMLButtonElement[] = [];
   let current = "recognition";
+  /** Disclosures this search opened, so clearing it closes only those. */
+  const openedBySearch = new Set<HTMLDetailsElement>();
+  /** Disclosures whose open state search just set, so that toggle is not a user touch. */
+  const openedProgrammatically = new Set<HTMLDetailsElement>();
+  /** Disclosures the user opened or closed while searching; those keep that state. */
+  const touchedDuringSearch = new Set<HTMLDetailsElement>();
   // What the desktop holds; pages read it and change it only through `apply`.
   let settings: Settings | null = null;
   let runtimeFailure = "";
@@ -68,17 +74,43 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   };
   const controls = createControls((atOnce = false) => (!atOnce && DURING_CAPTURE.includes(status.state) ? APPLIED_LATER_TEXT : APPLIED_TEXT));
 
+  /** A row, a nested field, or its hint matches. */
+  function matchesQuery(node: HTMLElement, query: string): boolean {
+    if (query === "") return true;
+    const label = node.dataset["label"] ?? "";
+    return label.toLowerCase().includes(query);
+  }
+
   function applyView(): void {
     const query = search.value.trim().toLowerCase();
+    if (query === "") {
+      for (const node of openedBySearch) {
+        if (!touchedDuringSearch.has(node)) node.open = false;
+      }
+      openedBySearch.clear();
+      touchedDuringSearch.clear();
+    }
     let matches = 0;
     for (const page of pages) {
       const rows = page.node.querySelectorAll<HTMLElement>(".row");
       let shown = 0;
       for (const row of rows) {
-        const match = query === "" || (row.dataset["label"] ?? "").includes(query);
+        const match = matchesQuery(row, query);
         row.hidden = !match;
         // A row its page can't offer right now hides by its class and doesn't count as found.
         if (match && !row.classList.contains("off")) shown += 1;
+        if (query !== "" && match) reveal(row);
+      }
+      // A nested field is not a row, so it is matched on its own and its ancestors are opened.
+      if (query !== "") {
+        for (const field of page.node.querySelectorAll<HTMLElement>(".mini")) {
+          const name = field.querySelector("span")?.textContent ?? "";
+          const labelled = field.querySelector("[aria-label]")?.getAttribute("aria-label") ?? "";
+          if (`${name}\n${labelled}`.toLowerCase().includes(query)) {
+            shown += 1;
+            reveal(field);
+          }
+        }
       }
       for (const heading of page.node.querySelectorAll<HTMLElement>("[data-group]")) heading.hidden = query !== "";
       page.node.hidden = query === "" ? page.id !== current : shown === 0;
@@ -88,6 +120,21 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     for (const button of navButtons) {
       if (query === "" && button.dataset["page"] === current) button.setAttribute("aria-current", "page");
       else button.removeAttribute("aria-current");
+    }
+  }
+
+  /** Opens every disclosure and hidden ancestor between `node` and its page, so a folded match can be used. */
+  function reveal(node: HTMLElement): void {
+    let currentNode: HTMLElement | null = node;
+    while (currentNode !== null && !currentNode.matches("section[data-page]")) {
+      if (currentNode instanceof HTMLDetailsElement && !currentNode.open) {
+        openedBySearch.add(currentNode);
+        openedProgrammatically.add(currentNode);
+        currentNode.open = true;
+      }
+      const ancestor: HTMLElement | null = currentNode.parentElement;
+      if (ancestor?.hidden === true && !ancestor.matches("section[data-page]")) ancestor.hidden = false;
+      currentNode = ancestor;
     }
   }
 
@@ -238,6 +285,22 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   }
 
   search.addEventListener("input", applyView);
+  const touchedByUser = (event: Event): void => {
+    if (search.value.trim() === "") return;
+    const node = event.target instanceof Element ? event.target.closest("details") : null;
+    if (!(node instanceof HTMLDetailsElement) || !openedBySearch.has(node)) return;
+    // Setting open fires toggle, synchronously in jsdom and later in WebKit. Both are the open
+    // search made, so they are ignored until the user clicks the summary.
+    if (event.type === "toggle" && openedProgrammatically.has(node)) return;
+    openedProgrammatically.delete(node);
+    touchedDuringSearch.add(node);
+  };
+  // jsdom flips <details> on a summary click and does not fire toggle, so both are recorded.
+  pagesNode.addEventListener("toggle", touchedByUser, true);
+  pagesNode.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element) || !event.target.closest("summary")) return;
+    queueMicrotask(() => { touchedByUser(event); });
+  }, true);
 
   copy.addEventListener("click", () => {
     const causes = loadFailure === "" ? runtimeCauses : [];

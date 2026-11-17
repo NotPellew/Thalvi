@@ -341,6 +341,17 @@ impl AppState {
         Ok(())
     }
 
+    /// Turns the active look's customizations off and keeps them, then applies the built-in look.
+    ///
+    /// # Errors
+    /// Why the config file could not be written.
+    pub fn use_built_in_look(&self) -> Result<(), String> {
+        let look = self.config().look;
+        self.remember(|config| config.themes.suspend(look))?;
+        self.apply(&self.config());
+        Ok(())
+    }
+
     /// Saves the user's choice to have Thalvi in the app menu, apart from the settings form.
     ///
     /// # Errors
@@ -631,6 +642,10 @@ fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), Stri
             "Your Thalvi server speech entry was removed: Thalvi now connects to speech servers directly. On this computer is in use instead.",
         );
     }
+    note_start(
+        &app.state::<AppState>().last_error,
+        app.state::<AppState>().config().themes.notices(),
+    );
     follow_engine(app).map_err(|error| error.to_string())?;
     follow_updates(app);
     run_updates(app, inbox, arrival);
@@ -914,6 +929,23 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Puts each unreadable look on the failure sink startup already uses. No dialog.
+fn note_start(errors: &LastError, notices: Vec<String>) {
+    for notice in notices {
+        note_failure(errors, "Look customizations", notice);
+    }
+}
+
+/// Records a non-fatal failure for the tray and Settings. It does not open a dialog.
+fn note_failure(errors: &LastError, headline: &'static str, notice: String) {
+    errors.note(Failure {
+        notice,
+        headline,
+        causes: Vec::new(),
+        kind: FailureKind::Other,
+    });
+}
+
 fn show(app: &AppHandle, status: &Status) {
     let state = app.state::<AppState>();
     if let Some(failure) = state.overlay.failure() {
@@ -1107,6 +1139,12 @@ pub fn on_menu(app: &AppHandle, id: &str) {
                 let _ = copy_last_error(&app).await;
             });
         }
+        tray::BUILT_IN_LOOK => {
+            let state = app.state::<AppState>();
+            if let Err(error) = state.use_built_in_look() {
+                note_failure(&state.last_error, "Use the built-in look", error);
+            }
+        }
         tray::SETTINGS => show_settings(app),
         tray::UPDATE => match app.state::<AppState>().updates.snapshot().tray().1 {
             TrayClick::Check => app.state::<AppState>().updates.check_now(),
@@ -1265,6 +1303,67 @@ mod tests {
             file.look
         );
         assert_eq!(leftovers, ["desktop.json"], "no temporary file is left");
+    }
+
+    #[test]
+    fn use_built_in_look_suspends_the_active_look_and_keeps_its_overrides() {
+        let dir = std::env::temp_dir().join(format!("thalvi-app-builtin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::new(Some(dir.join("desktop.json"))).unwrap();
+        let start = DesktopConfig::from_json_str(
+            r##"{"look":"holo","themes":{"version":1,"holo":{"colors":{"dark":{"accent":"#ffffff"}}}}}"##,
+        )
+        .unwrap();
+        store.write(&start).unwrap();
+        let saves = SyncedConfig::new(store, start);
+        saves
+            .remember(|config| config.themes.suspend(config.look))
+            .unwrap();
+        let running = saves.config();
+        let file = saves.store.load().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let kept = match running.themes.of(thalvi_desktop::config::Look::Holo) {
+            Some(thalvi_desktop::theme::LookOverrides::Usable(overrides)) => overrides,
+            other => panic!("{other:?}"),
+        };
+        assert!(kept.suspended);
+        assert_eq!(kept.colors.dark.accent.unwrap().to_hex(), "#ffffff");
+        let style = thalvi_desktop::theme::Style::resolve(
+            thalvi_desktop::config::Look::Holo,
+            running.themes.of(thalvi_desktop::config::Look::Holo),
+        );
+        assert_eq!(style.dark.accent.to_hex(), "#6bf8ff");
+        assert_eq!(file.themes, running.themes);
+    }
+
+    #[test]
+    fn an_unreadable_look_is_noted_at_start_without_a_dialog() {
+        let dir = std::env::temp_dir().join(format!("thalvi-app-notice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("desktop.json");
+        std::fs::write(
+            &path,
+            r#"{"look":"holo","themes":{"version":1,"holo":{"colors":{"dark":{"accent":"red"}}}}}"#,
+        )
+        .unwrap();
+        let store = Store::new(Some(path)).unwrap();
+        let (config, _, _) = store.start().unwrap();
+        let errors = LastError::default();
+        // `setup` calls this with the loaded config before the tray exists.
+        note_start(&errors, config.themes.notices());
+        let failure = errors.get().expect("the notice is kept");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            failure
+                .notice
+                .starts_with("Your Holo customizations could not be read"),
+            "{}",
+            failure.notice
+        );
+        assert!(failure.notice.contains("until you reset Holo."));
+        assert_eq!(failure.headline, "Look customizations");
+        assert_eq!(failure.kind, FailureKind::Other);
     }
 
     /// Saves like `Live::save` does, for a form built under the lock.
@@ -1430,6 +1529,36 @@ mod tests {
         assert_eq!(error, "F7 is already bound in Hyprland.");
         assert!(!written, "nothing is written");
         assert_eq!(saves.config(), start, "the running config is unchanged");
+    }
+
+    #[test]
+    fn an_agent_settings_set_and_a_settings_patch_keep_both_theme_changes() {
+        let dir = std::env::temp_dir().join(format!("thalvi-app-both-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("desktop.json");
+        let start = DesktopConfig::from_json_str(r#"{"look":"holo"}"#).unwrap();
+        let saves = SyncedConfig::new(Store::new(Some(path)).unwrap(), start);
+        let agent = serde_json::json!({"themes": {"version": 1, "holo": {"font": {"scale": 1.1}}}});
+        save_over(&saves, |current| {
+            let merged = crate::settings::merged(current, &agent)?;
+            Ok(((), Some(merged)))
+        })
+        .unwrap();
+        let window =
+            serde_json::json!({"themes": {"version": 1, "gunmetal": {"font": {"scale": 1.2}}}});
+        save_over(&saves, crate::commands::settings_patch(&window)).unwrap();
+        let running = saves.config();
+        let file = saves.store.load().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let scale = |look| match running.themes.of(look) {
+            Some(thalvi_desktop::theme::LookOverrides::Usable(overrides)) => {
+                overrides.font.scale.unwrap().get()
+            }
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(scale(thalvi_desktop::config::Look::Holo), 1.1);
+        assert_eq!(scale(thalvi_desktop::config::Look::Gunmetal), 1.2);
+        assert_eq!(file.themes, running.themes);
     }
 
     #[test]

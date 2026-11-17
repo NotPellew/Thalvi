@@ -19,8 +19,8 @@ use thalvi_desktop::delivery::{Bound, Delivery, Finished};
 use thalvi_desktop::device::Step;
 use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
-    CaptureOutcome, CpalCuePlayer, Engine, EngineHandle, EngineState, Parts, StreamingExtra,
-    WakeTrigger,
+    CaptureOutcome, CpalCuePlayer, CuePlayer, Engine, EngineHandle, EngineState, FrameSource,
+    Parts, StreamingExtra, WakeDetector, WakeTrigger,
 };
 use thalvi_desktop::entries::LiveKind;
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
@@ -29,6 +29,7 @@ use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{Desktop, Host, WindowApp};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::{self, ListedSpeech, ModelStore};
+use thalvi_desktop::recognizer::Recognizer;
 use thalvi_desktop::report::{UserError, causes};
 use thalvi_desktop::speech_device::SpeechDevices;
 use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
@@ -137,24 +138,8 @@ impl EngineLink {
         paused: bool,
         whisper_helpers: PathBuf,
     ) -> Result<Self, String> {
-        let last_writing_window = Arc::new(Mutex::new(None));
-        let writing_window = Arc::clone(&last_writing_window);
-        let (control, control_rx) = mpsc::unbounded_channel();
-        let (status_tx, status) = watch::channel(Status::Loading {
-            notice: STARTING_NOTICE.to_owned(),
-            downloading: false,
-        });
-        let (level_tx, level) = watch::channel(0.0);
-        let (audio_tx, audio) = watch::channel(AudioStatus {
-            selected: config.microphone.clone(),
-            active: None,
-            paused,
-            problem: None,
-        });
-        let (feeding_tx, feeding) = watch::channel(false);
-        let (key, key_state) = HoldInput::new();
+        let (link, ends, stopped) = Self::wire(&config, paused);
         let (ready_tx, ready) = std_mpsc::channel();
-        let (stopped_tx, stopped) = std_mpsc::channel();
         std::thread::Builder::new()
             .name("thalvi-engine".to_owned())
             .spawn(move || {
@@ -170,34 +155,42 @@ impl EngineLink {
                     }
                 };
                 let _ = ready_tx.send(Ok(()));
-                let publisher = Publisher::new(status_tx, config.ending_pause);
-                publisher.update(|view| view.wake_words = config.wake.enabled());
-                let runner = Runner::new(
-                    config,
-                    delivery,
-                    control_rx,
-                    publisher,
-                    Arc::new(level_tx),
-                    audio_tx,
-                    Shared {
-                        key: key_state,
-                        history,
-                        drafts,
-                        devices,
-                        feeding: Arc::new(feeding_tx),
-                        paused,
-                        whisper_helpers,
-                        last_writing_window: writing_window,
-                    },
+                let rig = DesktopRig {
+                    http: reqwest::Client::new(),
+                    devices,
+                    whisper_helpers,
+                };
+                LocalSet::new().block_on(
+                    &runtime,
+                    ends.run(config, paused, rig, delivery, history, drafts),
                 );
-                LocalSet::new().block_on(&runtime, runner.run());
-                finish_runtime(runtime, &stopped_tx);
+                finish_runtime(runtime, &stopped);
             })
             .map_err(|error| format!("Thalvi could not start: {error}"))?;
         ready
             .recv()
             .map_err(|_| "Thalvi could not start the engine.".to_owned())??;
-        Ok(Self {
+        Ok(link)
+    }
+
+    fn wire(config: &DesktopConfig, paused: bool) -> (Self, RunnerEnds, std_mpsc::Sender<()>) {
+        let last_writing_window = Arc::new(Mutex::new(None));
+        let (control, control_rx) = mpsc::unbounded_channel();
+        let (status_tx, status) = watch::channel(Status::Loading {
+            notice: STARTING_NOTICE.to_owned(),
+            downloading: false,
+        });
+        let (level_tx, level) = watch::channel(0.0);
+        let (audio_tx, audio) = watch::channel(AudioStatus {
+            selected: config.microphone.clone(),
+            active: None,
+            paused,
+            problem: None,
+        });
+        let (feeding_tx, feeding) = watch::channel(false);
+        let (key, key_state) = HoldInput::new();
+        let (stopped_tx, stopped) = std_mpsc::channel();
+        let link = Self {
             control,
             status,
             level,
@@ -205,8 +198,18 @@ impl EngineLink {
             feeding,
             stopped: Mutex::new(stopped),
             key,
+            last_writing_window: Arc::clone(&last_writing_window),
+        };
+        let ends = RunnerEnds {
+            control: control_rx,
+            status: status_tx,
+            level: Arc::new(level_tx),
+            audio: audio_tx,
+            feeding: Arc::new(feeding_tx),
+            key: key_state,
             last_writing_window,
-        })
+        };
+        (link, ends, stopped_tx)
     }
 
     /// Where the hold key's presses and releases come in.
@@ -283,6 +286,50 @@ impl EngineLink {
     }
 }
 
+struct RunnerEnds {
+    control: mpsc::UnboundedReceiver<Control>,
+    status: watch::Sender<Status>,
+    level: Arc<watch::Sender<f32>>,
+    audio: watch::Sender<AudioStatus>,
+    feeding: Arc<watch::Sender<bool>>,
+    key: watch::Receiver<KeyState>,
+    last_writing_window: Arc<Mutex<Option<WindowApp>>>,
+}
+
+impl RunnerEnds {
+    async fn run<S: Rig>(
+        self,
+        config: DesktopConfig,
+        paused: bool,
+        rig: S,
+        delivery: Arc<Delivery<S::Host>>,
+        history: Arc<History>,
+        drafts: Arc<Drafts>,
+    ) {
+        let publisher = Publisher::new(self.status, config.ending_pause);
+        publisher.update(|view| view.wake_words = config.wake.enabled());
+        Runner::new(
+            config,
+            delivery,
+            self.control,
+            publisher,
+            self.level,
+            self.audio,
+            Shared {
+                rig,
+                key: self.key,
+                history,
+                drafts,
+                feeding: self.feeding,
+                paused,
+                last_writing_window: self.last_writing_window,
+            },
+        )
+        .run()
+        .await;
+    }
+}
+
 /// Finishes background writes before letting the app exit.
 fn finish_runtime(runtime: tokio::runtime::Runtime, stopped: &std_mpsc::Sender<()>) {
     drop(runtime);
@@ -352,7 +399,7 @@ async fn load_spotter(
 }
 
 /// Derives the status from the view and publishes it when it changes.
-struct Publisher {
+pub(crate) struct Publisher {
     view: RefCell<View>,
     out: watch::Sender<Status>,
     /// The failure the last speech model load showed, so a reload clears that and no other.
@@ -500,9 +547,179 @@ fn reload_wanted<P: Preload + ?Sized>(uses_downloaded: bool, local: Option<&P>) 
     uses_downloaded && local.is_some_and(|local| local.device().is_none())
 }
 
+pub(crate) trait Rig: Sized {
+    type Recognizer: Recognizer + 'static;
+    type Wake: WakeDetector;
+    type Cues: CuePlayer + 'static;
+    type Input: Input;
+    type Host: Host + 'static;
+
+    async fn load(
+        &self,
+        config: &DesktopConfig,
+        gate: &InputGate,
+        publisher: &Rc<Publisher>,
+    ) -> Result<Loaded<Self>, Failure>;
+    fn input(&self, gate: InputGate, device: Option<String>, metrics: Metrics) -> Self::Input;
+}
+
+pub(crate) trait Input: Sized {
+    type Frames: FrameSource;
+
+    fn active_name(&self) -> Option<&str>;
+    fn select(&mut self, device: Option<String>);
+    fn pause(&mut self);
+    async fn open(self) -> Result<(Self, Result<Self::Frames, Failure>), Failure>;
+    async fn replace(self) -> Result<(Self, Result<Self::Frames, Failure>), Failure>;
+}
+
+impl Input for Microphone {
+    type Frames = Frames;
+
+    fn active_name(&self) -> Option<&str> {
+        self.active_name()
+    }
+
+    fn select(&mut self, device: Option<String>) {
+        self.select(device);
+    }
+
+    fn pause(&mut self) {
+        self.pause();
+    }
+
+    async fn open(mut self) -> Result<(Self, Result<Frames, Failure>), Failure> {
+        let (microphone, frames) = tokio::task::spawn_blocking(move || {
+            let frames = Microphone::open(&mut self);
+            (self, frames)
+        })
+        .await
+        .map_err(|error| audio_thread_crashed(&error))?;
+        Ok((microphone, frames.map_err(|error| Failure::of(&error))))
+    }
+
+    async fn replace(mut self) -> Result<(Self, Result<Frames, Failure>), Failure> {
+        let (microphone, frames) = tokio::task::spawn_blocking(move || {
+            let frames = Microphone::replace(&mut self);
+            (self, frames)
+        })
+        .await
+        .map_err(|error| audio_thread_crashed(&error))?;
+        Ok((microphone, frames.map_err(|error| Failure::of(&error))))
+    }
+}
+
+pub(crate) struct Loaded<S: Rig> {
+    recognizer: S::Recognizer,
+    wake: S::Wake,
+    cues: S::Cues,
+    recorder: Recorder,
+    http: reqwest::Client,
+    chat: Option<thalvi_desktop::chat::Chat>,
+    spotter: Option<Box<dyn KeywordSpotter>>,
+    spotter_off: Option<String>,
+    extras: Vec<StreamingExtra<S::Recognizer>>,
+    local: Option<Arc<dyn Preload>>,
+    extra_locals: Vec<Arc<dyn Preload>>,
+}
+
+struct DesktopRig {
+    http: reqwest::Client,
+    devices: Arc<SpeechDevices>,
+    whisper_helpers: PathBuf,
+}
+
+impl Rig for DesktopRig {
+    type Recognizer = Chosen;
+    type Wake = WakeEngine;
+    type Cues = CpalCuePlayer;
+    type Input = Microphone;
+    type Host = Desktop;
+
+    async fn load(
+        &self,
+        config: &DesktopConfig,
+        gate: &InputGate,
+        publisher: &Rc<Publisher>,
+    ) -> Result<Loaded<Self>, Failure> {
+        let recorder =
+            Recorder::per_user(config.recordings).map_err(|error| Failure::of(&error))?;
+        let store = ModelStore::per_user().map_err(|error| Failure::of(&error))?;
+        let started = Instant::now();
+        let (wake, (spotter, spotter_off)) = tokio::join!(
+            load_wake(
+                publisher,
+                &config.wake,
+                &store,
+                WakeEngine::load(&config.wake, &store),
+            ),
+            load_spotter(publisher, &config.endings, &store, &recorder, async {
+                OnnxSpotter::load(&config.endings, &store)
+                    .await
+                    .map(|spotter| Box::new(spotter) as Box<dyn KeywordSpotter>)
+            }),
+        );
+        recorder.metric(
+            Event::WakeLoad,
+            if wake.is_ok() { "ok" } else { "error" },
+            Some(started.elapsed()),
+            Value::Null,
+        );
+        let wake = wake.map_err(|error| Failure::of(&error))?;
+        let metrics = recorder.metrics();
+        let chosen = |entry, store| {
+            Chosen::new(
+                entry,
+                store,
+                self.http.clone(),
+                metrics.clone(),
+                &config.stt.phrases,
+                self.devices.adapters(),
+                &self.whisper_helpers,
+            )
+        };
+        let extras: Vec<_> = config
+            .stt
+            .entries
+            .streaming_extras()
+            .map(|entry| StreamingExtra {
+                entry: entry.clone(),
+                recognizer: Arc::new(chosen(entry, store.clone())),
+            })
+            .collect();
+        let extra_locals = extras
+            .iter()
+            .filter_map(|extra| extra.recognizer.local())
+            .collect();
+        let chat = (config.writing.as_ref())
+            .and_then(thalvi_desktop::writing::Writing::on_computer)
+            .map(|requested| thalvi_desktop::chat::Chat::on_computer(store.clone(), requested));
+        let recognizer = chosen(config.stt.entries.active_live(), store);
+        let local = recognizer.local();
+        self.devices.use_recognizer(local.clone());
+        Ok(Loaded {
+            recognizer,
+            wake,
+            cues: CpalCuePlayer::new(config.cues, gate.clone()),
+            recorder,
+            http: self.http.clone(),
+            chat,
+            spotter,
+            spotter_off,
+            extras,
+            local,
+            extra_locals,
+        })
+    }
+
+    fn input(&self, gate: InputGate, device: Option<String>, metrics: Metrics) -> Microphone {
+        Microphone::new(gate, device, metrics)
+    }
+}
+
 /// Everything one engine needs; replaced when settings change.
-struct Session {
-    engine: Engine<Chosen, WakeEngine, CpalCuePlayer>,
+struct Session<S: Rig> {
+    engine: Engine<S::Recognizer, S::Wake, S::Cues>,
     /// The local recognizer, whose model loads ahead of the first dictation.
     local: Option<Arc<dyn Preload>>,
     /// The on-device recognizers of the streaming extras, loaded ahead the same way.
@@ -511,12 +728,12 @@ struct Session {
     gate: InputGate,
     device: Option<String>,
     metrics: Metrics,
-    microphone: Option<Microphone>,
-    frames: Option<Fed<Frames>>,
+    microphone: Option<S::Input>,
+    frames: Option<Fed<<S::Input as Input>::Frames>>,
     feeder: Feeder,
 }
 
-impl Session {
+impl<S: Rig> Session<S> {
     fn active_device(&self) -> Option<String> {
         self.frames.as_ref()?;
         self.microphone
@@ -533,21 +750,13 @@ impl Session {
         }
     }
 
-    async fn open_microphone(&mut self) -> Result<(), Failure> {
-        let mut microphone = self.microphone.take().unwrap_or_else(|| {
-            Microphone::new(self.gate.clone(), self.device.clone(), self.metrics.clone())
+    async fn open_microphone(&mut self, rig: &S) -> Result<(), Failure> {
+        let microphone = self.microphone.take().unwrap_or_else(|| {
+            rig.input(self.gate.clone(), self.device.clone(), self.metrics.clone())
         });
-        let (microphone, frames) = tokio::task::spawn_blocking(move || {
-            let frames = microphone.open();
-            (microphone, frames)
-        })
-        .await
-        .map_err(|error| audio_thread_crashed(&error))?;
+        let (microphone, frames) = microphone.open().await?;
         self.microphone = Some(microphone);
-        self.frames = Some(
-            self.feeder
-                .wrap(frames.map_err(|error| Failure::of(&error))?),
-        );
+        self.frames = Some(self.feeder.wrap(frames?));
         Ok(())
     }
 
@@ -564,14 +773,9 @@ impl Session {
             self.microphone = Some(microphone);
             return Ok(());
         }
-        let (microphone, frames) = tokio::task::spawn_blocking(move || {
-            let frames = microphone.replace();
-            (microphone, frames)
-        })
-        .await
-        .map_err(|error| audio_thread_crashed(&error))?;
+        let (microphone, frames) = microphone.replace().await?;
         self.microphone = Some(microphone);
-        let frames = frames.map_err(|error| Failure::of(&error))?;
+        let frames = frames?;
         let presses = self.engine.stop_listening();
         self.frames = Some(self.feeder.wrap(frames));
         self.engine.resume_listening(presses);
@@ -605,25 +809,22 @@ enum Woke {
 }
 
 /// What the app shares with the runner besides its controls.
-struct Shared {
+struct Shared<S: Rig> {
+    rig: S,
     last_writing_window: Arc<Mutex<Option<WindowApp>>>,
     /// Whether the hold key is down.
     key: watch::Receiver<KeyState>,
     history: Arc<History>,
     drafts: Arc<Drafts>,
-    /// Where the speech model runs, for Settings.
-    devices: Arc<SpeechDevices>,
     /// Whether a file's audio is being fed in place of the microphone's.
     feeding: Arc<watch::Sender<bool>>,
     /// Whether listening starts paused.
     paused: bool,
-    /// The packaged Whisper helpers: a `cpu` and a `vulkan` folder.
-    whisper_helpers: PathBuf,
 }
 
-struct Runner {
+struct Runner<S: Rig> {
     config: DesktopConfig,
-    session: Option<Session>,
+    session: Option<Session<S>>,
     paused: bool,
     stopping: bool,
     /// Set while listening wants a microphone it does not have: how many reopen attempts failed.
@@ -641,13 +842,11 @@ struct Runner {
     publisher: Rc<Publisher>,
     level: Arc<watch::Sender<f32>>,
     audio: watch::Sender<AudioStatus>,
-    delivery: Arc<Delivery<Desktop>>,
+    delivery: Arc<Delivery<S::Host>>,
     history: Arc<History>,
     drafts: Arc<Drafts>,
-    devices: Arc<SpeechDevices>,
     feeding: Arc<watch::Sender<bool>>,
-    http: reqwest::Client,
-    whisper_helpers: PathBuf,
+    rig: S,
     /// Loads the current engine's speech model.
     loading: Option<JoinHandle<()>>,
     /// The hold key, for presses the engine is not listening for.
@@ -655,15 +854,15 @@ struct Runner {
     key_state: watch::Receiver<KeyState>,
 }
 
-impl Runner {
+impl<S: Rig> Runner<S> {
     fn new(
         config: DesktopConfig,
-        delivery: Arc<Delivery<Desktop>>,
+        delivery: Arc<Delivery<S::Host>>,
         control: mpsc::UnboundedReceiver<Control>,
         publisher: Rc<Publisher>,
         level: Arc<watch::Sender<f32>>,
         audio: watch::Sender<AudioStatus>,
-        shared: Shared,
+        shared: Shared<S>,
     ) -> Self {
         Self {
             config,
@@ -682,10 +881,8 @@ impl Runner {
             delivery,
             history: shared.history,
             drafts: shared.drafts,
-            devices: shared.devices,
             feeding: shared.feeding,
-            http: reqwest::Client::new(),
-            whisper_helpers: shared.whisper_helpers,
+            rig: shared.rig,
             loading: None,
             key: Presses::new(shared.key.clone()),
             key_state: shared.key,
@@ -783,71 +980,30 @@ impl Runner {
         self.publisher.mode(Mode::Failed(failure));
     }
 
-    async fn build(&self, config: &DesktopConfig) -> Result<Session, Failure> {
-        let recorder =
-            Recorder::per_user(config.recordings).map_err(|error| Failure::of(&error))?;
-        let store = ModelStore::per_user().map_err(|error| Failure::of(&error))?;
-        let started = Instant::now();
-        let (wake, (spotter, spotter_off)) = tokio::join!(
-            load_wake(
-                &self.publisher,
-                &config.wake,
-                &store,
-                WakeEngine::load(&config.wake, &store),
-            ),
-            load_spotter(&self.publisher, &config.endings, &store, &recorder, async {
-                OnnxSpotter::load(&config.endings, &store)
-                    .await
-                    .map(|spotter| Box::new(spotter) as Box<dyn KeywordSpotter>)
-            }),
-        );
-        recorder.metric(
-            Event::WakeLoad,
-            if wake.is_ok() { "ok" } else { "error" },
-            Some(started.elapsed()),
-            Value::Null,
-        );
-        let wake = wake.map_err(|error| Failure::of(&error))?;
+    async fn build(&self, config: &DesktopConfig) -> Result<Session<S>, Failure> {
         let gate = InputGate::default();
+        let Loaded {
+            recognizer,
+            wake,
+            cues,
+            recorder,
+            http,
+            chat,
+            spotter,
+            spotter_off,
+            extras,
+            local,
+            extra_locals,
+        } = self.rig.load(config, &gate, &self.publisher).await?;
         let metrics = recorder.metrics();
-        let chosen = |entry, store| {
-            Chosen::new(
-                entry,
-                store,
-                self.http.clone(),
-                metrics.clone(),
-                &config.stt.phrases,
-                self.devices.adapters(),
-                &self.whisper_helpers,
-            )
-        };
-        let extras: Vec<_> = config
-            .stt
-            .entries
-            .streaming_extras()
-            .map(|entry| StreamingExtra {
-                entry: entry.clone(),
-                recognizer: Arc::new(chosen(entry, store.clone())),
-            })
-            .collect();
-        let extra_locals = extras
-            .iter()
-            .filter_map(|extra| extra.recognizer.local())
-            .collect();
-        let chat = (config.writing.as_ref())
-            .and_then(thalvi_desktop::writing::Writing::on_computer)
-            .map(|requested| thalvi_desktop::chat::Chat::on_computer(store.clone(), requested));
-        let recognizer = chosen(config.stt.entries.active_live(), store);
-        let local = recognizer.local();
-        self.devices.use_recognizer(local.clone());
         let (engine, handle) = Engine::new(
             Parts {
                 recognizer,
                 chat,
                 wake,
-                cues: CpalCuePlayer::new(config.cues, gate.clone()),
+                cues,
                 gate: gate.clone(),
-                http: self.http.clone(),
+                http,
                 hold: self.key_state.clone(),
                 notice: self.publisher.notice_sink(),
                 spotter,
@@ -939,7 +1095,7 @@ impl Runner {
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        match session.open_microphone().await {
+        match session.open_microphone(&self.rig).await {
             Ok(()) => {
                 self.reopen_failures = None;
                 self.publisher.mode(Mode::Idle);
@@ -1742,6 +1898,7 @@ async fn follow(
     level_out: Arc<watch::Sender<f32>>,
     audio: watch::Receiver<AudioStatus>,
 ) {
+    publisher.update(|view| view.engine = state.borrow_and_update().clone());
     loop {
         tokio::select! {
             changed = state.changed() => {
@@ -1765,6 +1922,9 @@ async fn follow(
         }
     }
 }
+
+#[cfg(test)]
+mod controls;
 
 #[cfg(test)]
 mod tests {
@@ -2917,7 +3077,10 @@ mod tests {
 
     /// The window and the calls a host saw.
     #[derive(Clone, Default)]
-    struct TestHost(Arc<Mutex<Vec<&'static str>>>);
+    pub(super) struct TestHost(
+        pub(super) Arc<Mutex<Vec<&'static str>>>,
+        pub(super) Arc<Mutex<Vec<String>>>,
+    );
 
     impl TestHost {
         fn called(&self, call: &'static str) {
@@ -2961,15 +3124,17 @@ mod tests {
         fn deliver(
             &self,
             _: &String,
-            _: &thalvi_desktop::host::PasteText,
+            text: &thalvi_desktop::host::PasteText,
             _: bool,
         ) -> Result<thalvi_desktop::host::Delivered, thalvi_desktop::host::HostError> {
             self.called("deliver");
+            self.1.lock().unwrap().push(text.as_str().to_owned());
             Ok(thalvi_desktop::host::Delivered::InWindow)
         }
 
-        fn copy(&self, _: &str) -> Result<(), thalvi_desktop::host::HostError> {
+        fn copy(&self, text: &str) -> Result<(), thalvi_desktop::host::HostError> {
             self.called("copy");
+            self.1.lock().unwrap().push(text.to_owned());
             Ok(())
         }
 

@@ -34,7 +34,7 @@ import type {
 import { DownloadFailure, errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
-import { el } from "./dom.ts";
+import { disclosureMemory, el } from "./dom.ts";
 import { applyLook, lookPicker } from "./look.ts";
 
 /** What a control says once its value is applied. */
@@ -128,7 +128,7 @@ const SPEECH_MODEL = "nemotron_160ms";
 const isModelFolder = (name: string): boolean => /[\\/]/.test(name);
 const CUES: readonly (readonly [keyof Settings["cues"], string, string])[] = [
   ["wake", "Wake", "Thalvi heard the wake phrase and is listening."],
-  ["provisional", "Ending heard", "An ending phrase was heard; the countdown has begun."],
+  ["provisional", "Ending heard", "An ending phrase was heard; the countdown began."],
   ["cancelled", "Cancelled", "The capture was cancelled."],
   ["accepted", "Accepted", "The capture was delivered."],
   ["error", "Error", "Something failed."],
@@ -149,6 +149,16 @@ const DRAFT_OUTCOMES: Record<DraftOutcome, string> = {
 /** While one of these runs the status changes with every word; the draft is read again once it ends. */
 const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working", "cleaningUp"];
 const WHEN = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+
+/**
+ * Characters a hint may use and still fit on one line at a 400 px window, in every look.
+ * At `max-width: 560px` the page padding is 10 px a side. Neon leaves a folded row 372 px.
+ * Holo and Gunmetal pad the group as well (16 px and 14 px a side) and draw a 1 px or 3 px
+ * border, leaving 340 px and 344 px. Their hints are 11.5 px monospace (`--mono`, Noto Sans
+ * Mono here) at 6.90 px a character of ordinary prose, so `floor(340 / 6.90)` is 49. Neon is
+ * wider. 48 stays inside that and inside the kind-help line, which has no row padding.
+ */
+export const HINT_BUDGET = 48;
 
 export function row(label: string, hint: string | null, control: Field | HTMLElement): HTMLElement {
   const labelId = uid("l");
@@ -176,6 +186,54 @@ export function row(label: string, hint: string | null, control: Field | HTMLEle
 
 function group(title: string): HTMLElement {
   return el("h4", { "data-group": "" }, title);
+}
+
+/** Open disclosures, for the life of this window. Keyed by page, group and entry, not by the node a rebuild replaces. */
+const disclosed = disclosureMemory();
+
+/**
+ * Secondary controls behind the existing native Details pattern.
+ * A default starts closed. A changed value stays closed and the summary names what changed.
+ * An invalid value opens the disclosure so it is never hidden. A secret is only "key set".
+ */
+function details(
+  id: string,
+  summary: string,
+  body: HTMLElement[],
+  options: { open?: boolean; invalid?: boolean } = {},
+): HTMLDetailsElement {
+  const node = el("details", { class: "fold", "data-fold": id }, el("summary", {}, summary), ...body);
+  const open = options.invalid === true || disclosed.has(id);
+  node.open = open;
+  if (options.invalid === true) disclosed.add(id);
+  const remember = (): void => {
+    if (node.open) disclosed.add(id);
+    else disclosed.delete(id);
+  };
+  node.addEventListener("toggle", remember);
+  // A summary click flips the disclosure. jsdom does that without a toggle event, so the click is remembered too.
+  node.querySelector("summary")?.addEventListener("click", () => {
+    queueMicrotask(remember);
+  });
+  return node;
+}
+
+/** The catalog threshold of a dictation wake model; a file of the user's own starts at 0.5. */
+function defaultThreshold(model: string): number {
+  if (model === "hey_thalvi") return 0.7;
+  return 0.5;
+}
+
+/** A number as its row shows it: a slider prints two decimals and drops trailing zeros. */
+export function shownNumber(value: number): string {
+  return value.toFixed(2).replace(/\.?0+$/, "");
+}
+
+/** A short summary of values that differ from the defaults; empty when nothing does. */
+function changedSummary(parts: readonly (readonly [string, string | number, string | number])[]): string {
+  const text = (value: string | number): string => typeof value === "number" ? shownNumber(value) : value;
+  const changed = parts.filter(([, value, start]) => value !== start).map(([name, value]) => `${name} ${text(value)}`);
+  return changed.length === 0 ? "" : ` · ${changed.join(", ")}`;
 }
 
 function button(label: string, onClick: () => void, className = ""): HTMLButtonElement {
@@ -379,14 +437,17 @@ function wakeHeads(context: PageContext): HTMLElement[] {
       node: el("div", { class: "stack wide" }, el("div", { class: "trow pick" }, picker, badge, download), customRow, applied, problem),
       field: picker,
     };
+    const thresholdRow = row(
+      `Threshold (${name})`,
+      "Higher wakes less often; lower catches more.",
+      threshold,
+    );
+    const shown = settings.wake.capture.threshold;
+    const start = defaultThreshold(model());
     return [
       group(title),
-      row(`Wake model (${name})`, "Pick a built-in phrase, or your own .onnx wake model file.", field),
-      row(
-        `Threshold (${name})`,
-        "Higher wakes less often by mistake; lower catches quieter speech.",
-        threshold,
-      ),
+      row(`Wake model (${name})`, "A built-in phrase, or your own .onnx file.", field),
+      details(`listening/${title}/threshold`, `Details${changedSummary([["threshold", shown, start]])}`, [thresholdRow]),
     ];
   }
 
@@ -584,7 +645,7 @@ function wakeSwitch({ settings, controls, backend, apply }: PageContext): HTMLEl
   show();
   return [
     group("Wake words"),
-    row("Wake words", "Off: Thalvi keeps listening, but only the hold keys start a dictation.", {
+    row("Wake words", "Off: only the hold keys start a dictation.", {
       node: el("span", { class: "stack" }, toggle.node, state),
       field: input,
     }),
@@ -679,7 +740,7 @@ function holdKeys(context: PageContext): HTMLElement[] {
   return [
     group("Hold keys"),
     holdKeyRow("Dictate key", "Hold it, speak, let go to paste.", "hold_key", context, notices),
-    holdKeyRow("Write key", "Hold it, speak, let go to have the words written out, then pasted.", "write_key", context, notices),
+    holdKeyRow("Write key", "Hold it to write the words out, then paste.", "write_key", context, notices),
   ];
 }
 
@@ -695,13 +756,21 @@ function commands(context: PageContext): HTMLElement[] {
         }),
       ),
     );
-  return [
-    group("Endings"),
-    row("Ending phrases", "Say one to finish a capture. Every action needs at least one phrase.", endingsTable(context)),
-    group("Quiet before acting"),
+  const timings = [
     pause("paste", "Quiet before paste"),
     pause("submit", "Quiet before paste and Enter"),
     pause("task", "Quiet before running a task"),
+  ];
+  const pauses = settings.ending_pause;
+  return [
+    group("Endings"),
+    row("Ending phrases", "Say one to finish. Every action needs one.", endingsTable(context)),
+    group("Quiet before acting"),
+    details(
+      "commands/quiet/timings",
+      `Details${changedSummary([["paste", pauses.paste, 0.7], ["paste and Enter", pauses.submit, 2.5], ["task", pauses.task, 2.5]])}`,
+      timings,
+    ),
     ...tasks(context),
   ];
 }
@@ -803,13 +872,12 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
   showDevice();
 
   cached(info.cached);
-  const details = el(
-    "details",
-    { class: "model-details" },
-    el("summary", {}, "Details"),
-    el("small", {}, `ID: ${info.name}. License: ${info.license}. Source: ${info.source}. `),
-    source,
+  const detailsNode = details(
+    `recognition/model/${info.name}/details`,
+    "Details",
+    [el("small", {}, `ID: ${info.name}. License: ${info.license}. Source: ${info.source}. `), source],
   );
+  detailsNode.classList.add("model-details");
   return {
     node: el(
       "div",
@@ -822,7 +890,7 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
         `Languages: ${info.languages.join(", ")}.${info.languages.length > 1 ? " The language is detected automatically." : ""}`,
       ),
       device,
-      details,
+      detailsNode,
       el("div", { class: "trow" }, download, copyReport, meter, status),
       problem,
       copyProblem,
@@ -855,8 +923,7 @@ const LIVE_KINDS: readonly (readonly [LiveEntry["kind"], string])[] = [
   ["open_ai", KIND_NAMES.open_ai],
   ["on_device", KIND_NAMES.on_device],
 ];
-const KIND_HELP =
-  "Live as you speak needs a server that streams audio in (Meta’s realtime ASR protocol, such as Thalvi’s own self-hosted recognizer). After you stop works with any OpenAI-compatible /v1/audio/transcriptions address; the text streams back once the recording is sent.";
+const KIND_HELP = "Live streams. After you stop sends it.";
 
 function isLive(entry: SpeechEntry): entry is LiveEntry {
   return entry.kind !== "extra";
@@ -875,13 +942,13 @@ function hasKey(entry: SpeechEntry): boolean {
 function summary(entry: SpeechEntry): string {
   switch (entry.kind) {
     case "realtime":
-      return `${entry.address} · ${entry.model}`;
+      return [entry.address, entry.model].filter((part) => part !== "").join(" · ");
     case "open_ai":
-      return `${entry.address} · ${entry.model}`;
+      return [entry.address, entry.model].filter((part) => part !== "").join(" · ");
     case "on_device":
       return entry.model ?? SPEECH_MODEL;
     case "extra":
-      return `${entry.address} · ${entry.model} · ${APIS.find(([value]) => value === entry.api)?.[1] ?? entry.api}`;
+      return [entry.address, entry.model, APIS.find(([value]) => value === entry.api)?.[1] ?? entry.api].filter((part) => part !== "").join(" · ");
   }
 }
 
@@ -965,19 +1032,6 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
     listModels();
   });
 
-  modelPicker.addEventListener("change", () => {
-    if (modelPicker.value === OWN_FOLDER) {
-      ownFolderPicked = true;
-      chosen = modelInput.value.trim();
-      modelInput.focus();
-    } else {
-      ownFolderPicked = false;
-      chosen = modelPicker.value;
-      modelInput.value = "";
-    }
-    syncModel();
-  });
-
   (sharedModels ?? backend.listSpeechModels()).then(
     (models) => {
       for (const info of models) {
@@ -1024,10 +1078,6 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
     else checkFolder(path).catch(() => undefined);
   });
   ownFolder.append(el("div", { class: "trow check" }, speechModel.node, checkButton), folderResult);
-  const speechModelField: Field = {
-    node: el("div", { class: "stack wide" }, modelPicker, modelList, listProblem, ownFolder),
-    field: modelPicker,
-  };
 
   function syncModel(): void {
     latestCheck += 1;
@@ -1040,21 +1090,52 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
     showSelection();
   }
 
+  const folderEmpty = ownFolderPicked && chosen === "";
+  const folderDetails = details(
+    `recognition/on-device/${working.id}/folder`,
+    "Details · your own model folder",
+    [
+      ownFolder,
+      el("p", { class: "kind-help" }, "encoder, decoder, joiner .int8.onnx, tokens.txt."),
+    ],
+    { open: folderEmpty || ownFolderPicked, invalid: folderEmpty },
+  );
+  modelPicker.addEventListener("change", () => {
+    if (modelPicker.value === OWN_FOLDER) {
+      ownFolderPicked = true;
+      chosen = modelInput.value.trim();
+      folderDetails.open = true;
+      disclosed.add(folderDetails.dataset["fold"] ?? "");
+      modelInput.focus();
+    } else {
+      ownFolderPicked = false;
+      chosen = modelPicker.value;
+      modelInput.value = "";
+    }
+    syncModel();
+  });
+  const speechModelField: Field = {
+    node: el("div", { class: "stack wide" }, modelPicker, modelList, listProblem, folderDetails),
+    field: modelPicker,
+  };
   return {
     rows: [
-      row("Show models for", "Filters this list. Each model recognizes the languages on its card.", { node: languagePicker, field: languagePicker }),
-      row(
-        "Speech model",
-        `For recognition on this computer. Pick a model; it downloads on first use, or with its Download button. A model you pick applies from the next capture. Or point to your own model folder, which holds encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx and tokens.txt.`,
-        speechModelField,
-      ),
+      row("Show models for", "Filters this list by each card's languages.", { node: languagePicker, field: languagePicker }),
+      row("Speech model", "Downloads on first use. A pick applies next.", speechModelField),
     ],
     validate: () => {
       if (ownFolderPicked && chosen === "") {
         showFolder("Type the folder path first.", false);
+        folderDetails.open = true;
+        disclosed.add(folderDetails.dataset["fold"] ?? "");
         return Promise.reject(new Error("Type the folder path of your own speech model first."));
       }
-      return ownFolderPicked && !isCatalog(chosen) ? checkFolder(chosen) : Promise.resolve();
+      if (!(ownFolderPicked && !isCatalog(chosen))) return Promise.resolve();
+      return checkFolder(chosen).catch((error: unknown) => {
+        folderDetails.open = true;
+        disclosed.add(folderDetails.dataset["fold"] ?? "");
+        throw error;
+      });
     },
   };
 }
@@ -1186,12 +1267,13 @@ function speech(context: PageContext): SpeechRows {
   }
 
   function entryDetails(entry: SpeechEntry): HTMLElement {
-    return el(
-      "details",
-      { class: "entry-details" },
-      el("summary", {}, "Details"),
-      el("small", {}, `ID: ${entry.id}. ${summary(entry)}.`),
+    const node = details(
+      `recognition/entry/${entry.id}/details`,
+      "Details",
+      [el("small", {}, `ID: ${entry.id}. ${summary(entry)}.`)],
     );
+    node.classList.add("entry-details");
+    return node;
   }
 
   function uniqueName(base: string): string {
@@ -1470,7 +1552,7 @@ function speech(context: PageContext): SpeechRows {
     const message = note();
     let validate: () => Promise<void> = () => Promise.resolve();
     const rows: HTMLElement[] = [
-      row("Name", "How this server is listed, and named when something goes wrong.", controls.draftText(working.name, (value) => {
+      row("Name", "How this server is listed when something fails.", controls.draftText(working.name, (value) => {
         working.name = value;
       })),
     ];
@@ -1499,27 +1581,36 @@ function speech(context: PageContext): SpeechRows {
         cleared.hidden = false;
       }, "quiet");
       clear.hidden = !saved;
-      return row("API key", "Stored in the desktop config file. The saved key is never shown again.", {
+      return row("API key", "Saved in the config. Never shown again.", {
         node: el("div", { class: "stack wide" }, field.node, clear, cleared),
         field: field.field,
       });
     };
+    const connection = (hint: string, placeholder: string): void => {
+      const fields = [address(hint, placeholder), modelRow(), keyRow()];
+      const unset = "address" in working && (working.address.trim() === "" || working.model.trim() === "");
+      const where = summary(working);
+      rows.push(details(
+        `recognition/server/${working.id}/connection`,
+        `Details${where === "" ? "" : ` · ${where}`}${hasKey(working) ? " · key set" : ""}`,
+        fields,
+        { open: unset, invalid: unset },
+      ));
+    };
     switch (working.kind) {
       case "realtime":
-        rows.push(address("The ws:// or wss:// address of a speech server that speaks Meta's realtime protocol, such as the self-hosted one.", "ws://127.0.0.1:8012"), modelRow(), keyRow());
+        connection("A ws:// or wss:// Meta realtime server.", "ws://127.0.0.1:8012");
         break;
       case "open_ai":
         rows.push(
-          address("Where each capture is sent for transcription.", "http://127.0.0.1:9000/v1"),
-          modelRow(),
-          row("Request", "Transcriptions uses /audio/transcriptions. Chat with audio sends the recording to /chat/completions, for servers that offer only that.", controls.draftSelect(OPEN_AI_REQUESTS, working.request, (value) => {
+          row("Request", "Transcriptions, or Chat with audio.", controls.draftSelect(OPEN_AI_REQUESTS, working.request, (value) => {
             working.request = value;
           })),
-          row("Language", "Two-letter code such as de. Leave empty to let the server detect it.", controls.draftText(working.language, (value) => {
+          row("Language", "A two-letter code such as de. Empty detects it.", controls.draftText(working.language, (value) => {
             working.language = value;
           }, { placeholder: "Detect automatically" })),
-          keyRow(),
         );
+        connection("Where each capture is sent for transcription.", "http://127.0.0.1:9000/v1");
         break;
       case "on_device": {
         const built = onDeviceRows(working, context, speechModels);
@@ -1528,14 +1619,10 @@ function speech(context: PageContext): SpeechRows {
         break;
       }
       case "extra": {
-        rows.push(
-          address("Where the capture is sent for the extra transcription.", "http://127.0.0.1:9000/v1"),
-          modelRow(),
-          row("API", "Which transcription API the endpoint speaks.", controls.draftSelect(APIS, working.api, (value) => {
-            working.api = value;
-          })),
-          keyRow(),
-        );
+        rows.push(row("API", "Which transcription API the endpoint speaks.", controls.draftSelect(APIS, working.api, (value) => {
+          working.api = value;
+        })));
+        connection("Where the extra transcription is sent.", "http://127.0.0.1:9000/v1");
         break;
       }
     }
@@ -1665,18 +1752,21 @@ function speech(context: PageContext): SpeechRows {
   });
   void refreshChat();
   const localRows = [
-    row("Local chat runtime", "Vulkan runs on a GPU when one is usable and falls back to the CPU otherwise.", chatBuild),
-    row("Local chat model", "Downloads only to this computer. No server to manage. Updating Thalvi keeps these files; removal keeps the runtime.", el("div", { class: "stack wide" }, chatDetails, el("span", { class: "trow" }, installChat, removeChat), chatProgress, chatState, chatProblem)),
+    row("Local chat runtime", "A usable GPU, otherwise the CPU.", chatBuild),
+    row("Local chat model", "Downloads only to this computer.", el("div", { class: "stack wide" }, chatDetails, el("span", { class: "trow" }, installChat, removeChat), chatProgress, chatState, chatProblem)),
   ];
   const manualRows: HTMLElement[] = [];
   function syncChatSource(): void {
     const local = settings.writing?.local === true;
     for (const item of localRows) item.classList.toggle("off", !local);
-    for (const item of manualRows) item.classList.toggle("off", local);
+    for (const item of manualRows) {
+      item.classList.toggle("off", local);
+      for (const row of item.querySelectorAll<HTMLElement>(".row")) row.classList.toggle("off", local);
+    }
   }
   const writingUrl = controls.text(writing?.url ?? "", () => applyWriting(), { placeholder: "http://127.0.0.1:8000/v1" });
   const writingModel = controls.text(writing?.model ?? "", () => applyWriting());
-  const writingKey = controls.text(writing?.api_key ?? "", () => applyWriting(true), { type: "password", placeholder: writing?.has_key === true ? "A key is saved" : "" });
+  const writingKey = controls.text("", () => applyWriting(true), { type: "password", placeholder: writing?.has_key === true ? "A key is saved" : "" });
   const writingInputs = [writingUrl, writingModel, writingKey].map((field) => field.field as HTMLInputElement);
   const defaultPrompt = settings.writing_default_prompt;
   const writingPrompt = controls.text(writing?.prompt ?? defaultPrompt, () => applyWriting().then(showPromptState), { rows: 8 });
@@ -1889,8 +1979,7 @@ function speech(context: PageContext): SpeechRows {
   const words = wordListTable(context);
   const wordProblem = note();
   words.node.append(wordProblem);
-  const wordListHint =
-    "Names and terms to spell your way, added one at a time. Recognition on this computer and recognizers reached directly can favour them.";
+  const wordListHint = "Names and terms, added one at a time.";
   const wordRow = row("Word list", wordListHint, words.node);
   const wordHint = wordRow.querySelector(".what small");
   let wordListRequest = 0;
@@ -1900,7 +1989,8 @@ function speech(context: PageContext): SpeechRows {
     if (name === undefined) return wordListHint;
     const info = speechModelList.find((known) => known.name === name);
     if (info === undefined || info.word_list) return wordListHint;
-    return `Names and terms to spell your way, added one at a time. ${info.title}, the recognizer in use, ignores them; the other models on this computer and recognizers reached directly can favour them.`;
+    const note = `${info.title} ignores them.`;
+    return note.length <= HINT_BUDGET ? note : "This recognizer ignores them.";
   }
   function checkWordList(): void {
     const request = (wordListRequest += 1);
@@ -1928,33 +2018,32 @@ function speech(context: PageContext): SpeechRows {
   render();
   checkWordList();
 
-  manualRows.push(
-    row("Writing endpoint address", "A chat completions endpoint that writes a dictation out as proper text when you say “write that out” or hold the write key. Only the words you said are sent. Applying never calls it.", writingUrl),
-    row("Writing model", "The model the endpoint should use.", writingModel),
-    row("Writing API key", "Stored in the desktop config file; unchanged keeps the saved key.", writingKeyField),
-  );
+  const writingUnset = (writing?.url ?? "").trim() === "" || (writing?.model ?? "").trim() === "";
+  const writingWhere = [writing?.url ?? "", writing?.model ?? ""].filter((part) => part !== "").join(" · ");
+  manualRows.push(details(
+    "chat/writing/endpoint",
+    `Details${writingWhere === "" ? "" : ` · ${writingWhere}`}${writing?.has_key === true ? " · key set" : ""}`,
+    [
+      row("Writing endpoint address", "Writes a dictation out on “write that out”.", writingUrl),
+      row("Writing model", "The model the endpoint should use.", writingModel),
+      row("Writing API key", "Saved in the config. Blank keeps the saved key.", writingKeyField),
+    ],
+    { open: writingUnset, invalid: writingUnset },
+  ));
   syncChatSource();
   return {
     recognition: [
       group("Live dictation"),
       nextDictation,
       summaryActions,
-      row(
-        "Speech servers",
-        "The one marked Live shows your words and hears the ending phrases. Use switches at once and applies from the next capture; a capture already running keeps its recognizer. Web conversations use the server's own recognizer.",
-        liveBlock,
-      ),
+      row("Speech servers", "The one marked Live shows your words.", liveBlock),
       wordRow,
       group("Extra recognizers"),
-      row(
-        "Extra recognizers",
-        "Each recognizer switched on here also transcribes your dictation. The chat model merges their texts with the live one, and the merged text is pasted. If the merge fails or takes too long, the live text is pasted. Switching one on or off applies at once.",
-        extraBlock,
-      ),
+      row("Extra recognizers", "Each one switched on also transcribes.", extraBlock),
     ],
     chat: [
       group("Writing"),
-      row("Chat model source", "Writing and extra recognizers use this choice. Switching keeps your manual endpoint and downloaded model.", source),
+      row("Chat model source", "Writing and extras use this.", source),
       ...localRows,
       ...manualRows,
       row(
@@ -1964,17 +2053,17 @@ function speech(context: PageContext): SpeechRows {
       ),
       row(
         "Writing prompt",
-        "The instructions the writing model gets with every dictation; the words you said go in as the message itself. Blank is not allowed. Applying never calls the model.",
+        "Sent with every dictation. Blank is not allowed.",
         writingPromptField,
       ),
       row(
         "Opening phrases",
-        "When a dictation you write out begins with one of these phrases, its prompt is used instead of the Writing prompt; the longest matching phrase wins. A new rule starts as a copy of the Writing prompt. Case and punctuation are ignored. Applying never calls the model.",
+        "A matching start uses its prompt.",
         openingsField,
       ),
       row(
         "App styles",
-        "Use a prompt for the app you write into, optionally matching part of its window title. App names match exactly, ignoring case; the first matching style wins. A new style starts as a copy of the Writing prompt. The app name and title are only matched on this computer and are never sent to the writing model. A spoken opening phrase wins over an app style.",
+        "A prompt for the app you write into.",
         appStylesField,
       ),
     ],
@@ -2012,7 +2101,7 @@ function microphone({ settings, backend, controls, microphones, live, audio, app
   };
   showAudio(audio);
   live.audio = showAudio;
-  const chosenDevice = row("Microphone", Array.isArray(microphones) ? "Choosing a device opens it right away, or after the capture that is running." : null, {
+  const chosenDevice = row("Microphone", Array.isArray(microphones) ? "Opens now, or after the capture that is running." : null, {
     node: el("div", { class: "stack wide" }, el("div", { class: "trow pick" }, picker.node), refused),
     field: picker.field,
   });
@@ -2060,7 +2149,7 @@ function microphone({ settings, backend, controls, microphones, live, audio, app
 function overlay({ settings, controls, apply }: PageContext): HTMLElement[] {
   return [
     group("Overlay"),
-    row("Show the overlay", "A small pill at the top of the screen while Thalvi is capturing.",
+    row("Show the overlay", "A small pill at the top while capturing.",
       controls.toggle(settings.overlay.show, (value) =>
         apply((next) => {
           next.overlay.show = value;
@@ -2150,13 +2239,21 @@ function appsTable({ settings, controls, apply }: PageContext, onApps: () => voi
               const entry = next.apps[appName];
               if (entry) entry[key] = parseList(value);
             }), { label: `${label} of ${appName}` }));
+        const fields = [
+          edit("Window classes", app.classes, "classes"),
+          edit("Executables", app.executables, "executables"),
+          edit("Keys pressed after focusing", app.input_keys, "input_keys"),
+        ];
+        const where = [...app.classes, ...app.executables].filter((part) => part !== "").join(", ");
         return el(
           "fieldset",
           { class: "card" },
           el("legend", {}, appName),
-          edit("Window classes", app.classes, "classes"),
-          edit("Executables", app.executables, "executables"),
-          edit("Keys pressed after focusing", app.input_keys, "input_keys"),
+          details(
+            `commands/apps/${appName}/match`,
+            `Details · ${appName}${where === "" ? "" : ` · ${where}`}`,
+            fields,
+          ),
           remove,
         );
       }),
@@ -2227,7 +2324,11 @@ function scriptsTable({ settings, controls, apply }: PageContext, appNames: HTML
               if (found) found.action = value;
             }), `Action of script ${String(index + 1)}`)),
           miniField("Destination", controls.text(script.destination, edit((found, value) => { found.destination = value; }), { list: appNames.id, label: `Destination of script ${String(index + 1)}` })),
-          miniField("Label", controls.text(script.label ?? "", edit((found, value) => { found.label = value === "" ? null : value; }), { label: `Label of script ${String(index + 1)}` })),
+          details(
+            `commands/scripts/${String(index)}/label`,
+            `Details${script.label ? ` · ${script.label}` : ""}`,
+            [miniField("Label", controls.text(script.label ?? "", edit((found, value) => { found.label = value === "" ? null : value; }), { label: `Label of script ${String(index + 1)}` }))],
+          ),
           remove,
         );
       }),
@@ -2275,25 +2376,32 @@ function tasks(context: PageContext): HTMLElement[] {
   return [
     appNames,
     group("Apps"),
-    row("Apps", "Windows a script can focus, matched by window class or executable.", appsTable(context, refresh)),
+    row("Apps", "Windows a script can focus.", appsTable(context, refresh)),
     group("Scripts"),
-    row("Scripts", "Say “do that” after one of these phrases to run it. For Discord, the words after the phrase are the message.", scriptsTable(context, appNames)),
+    row("Scripts", "Say “do that” after a phrase to run it.", scriptsTable(context, appNames)),
   ];
 }
 
 function limits({ settings, controls, apply }: PageContext): HTMLElement[] {
+  const limits = settings.capture_limits;
   return [
     group("Capture limits"),
-    row("Stop after silence", "Stops a capture that hears no words for this long, 10 to 600 s.",
-      controls.number(settings.capture_limits.idle, { min: 10, max: 600, step: 1, unit: "s" }, (value) =>
-        apply((next) => {
-          next.capture_limits.idle = value;
-        }))),
-    row("Stop after", "Stops any capture that runs this long, 60 to 3600 s.",
-      controls.number(settings.capture_limits.max, { min: 60, max: 3600, step: 1, unit: "s" }, (value) =>
-        apply((next) => {
-          next.capture_limits.max = value;
-        }))),
+    details(
+      "listening/capture-limits/limits",
+      `Details${changedSummary([["silence", limits.idle, 60], ["stop after", limits.max, 300]])}`,
+      [
+        row("Stop after silence", "No words for this long ends it, 10 to 600 s.",
+          controls.number(limits.idle, { min: 10, max: 600, step: 1, unit: "s" }, (value) =>
+            apply((next) => {
+              next.capture_limits.idle = value;
+            }))),
+        row("Stop after", "This long stops any capture, 60 to 3600 s.",
+          controls.number(limits.max, { min: 60, max: 3600, step: 1, unit: "s" }, (value) =>
+            apply((next) => {
+              next.capture_limits.max = value;
+            }))),
+      ],
+    ),
   ];
 }
 
@@ -2364,14 +2472,14 @@ function startup({ backend, controls, startAtLogin, menuEntry }: PageContext): H
     group("Startup"),
     switchRow(
       "Start Thalvi when I log in",
-      "Starts the voice app at login, listening as it normally does.",
+      "Starts the voice app at login.",
       startAtLogin,
       controls,
       { read: () => backend.getStartAtLogin(), set: (on) => backend.setStartAtLogin(on), copy: () => backend.copyLoginLine() },
     ),
     switchRow(
       "Show Thalvi in the app menu",
-      "Lets you start Thalvi from your desktop's app menu.",
+      "Starts Thalvi from your desktop's app menu.",
       menuEntry,
       controls,
       { read: () => backend.getMenuEntry(), set: (on) => backend.setMenuEntry(on) },
@@ -2381,9 +2489,9 @@ function startup({ backend, controls, startAtLogin, menuEntry }: PageContext): H
 
 function recordings({ settings, backend, controls, apply }: PageContext): HTMLElement[] {
   const kinds = [
-    ["Metrics", "metrics", "When each wake, capture and model call happened, how long it took and how it ended. No words or audio."],
-    ["Text", "text", "The words you dictated and what Thalvi did with them."],
-    ["Audio", "audio", "What the microphone heard during each capture, and about two seconds before each wake word."],
+    ["Metrics", "metrics", "When each wake, capture and model call happened."],
+    ["Text", "text", "The words you dictated, and what Thalvi did."],
+    ["Audio", "audio", "What the microphone heard during a capture."],
   ] as const;
   const problem = note();
   const open = button("Open folder", () => {
@@ -2395,7 +2503,7 @@ function recordings({ settings, backend, controls, apply }: PageContext): HTMLEl
   return [
     group("Recordings"),
     ...kinds.map(([label, kind, hint]) =>
-      row(`${label} recording`, `${hint} Kept on this computer only. Off unless you turn it on.`,
+      row(`${label} recording`, hint,
         controls.toggle(settings.recordings[kind], (value) =>
           apply((next) => {
             next.recordings[kind] = value;
@@ -2541,7 +2649,7 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
   return {
     nodes: [
       group("Last dictation"),
-      row("Last dictation", "Fix it, then copy it. Editing sends and copies nothing. Kept in memory only, until you discard it or quit.",
+      row("Last dictation", "Fix it, then copy it. Editing sends nothing.",
         { node: el("div", { class: "stack wide" }, empty, editor, problem), field: text }),
     ],
     refresh,
@@ -2584,19 +2692,19 @@ function history(context: PageContext): HTMLElement[] {
   return [
     ...last.nodes,
     group("Keeping"),
-    row("Keep a history", "What you dictate, when, where it went and how it ended; never audio. Kept on this computer only, never uploaded. Turning this off stops new entries and deletes none: delete them below.",
+    row("Keep a history", "What you dictate and where it went.",
       controls.toggle(settings.history.enabled, (value) =>
         apply((next) => {
           next.history.enabled = value;
         }))),
-    row("Entries to keep", "The oldest entries go first past this number, 1 to 1000.",
+    row("Entries to keep", "The oldest go first past this number, 1 to 1000.",
       controls.number(settings.history.limit, { min: 1, max: 1000, step: 1 }, (value) =>
         apply((next) => {
           next.history.limit = value;
         }))),
     group("Kept so far"),
     row("Recent dictations", "Newest first. Deleting takes effect at once.", el("div", { class: "stack wide" }, problem, list)),
-    row("Clear history", "Deletes every entry for good, and a damaged history file with them.",
+    row("Clear history", "Deletes every entry, and a damaged file.",
       confirmed("Clear history", "Delete every entry? This cannot be undone.", "Yes, clear history", "Keep history", () => {
         change(backend.clearHistory());
       })),
@@ -2715,9 +2823,9 @@ function updates({ settings, backend, controls, live, apply }: PageContext): HTM
   );
   return [
     group("Updates"),
-    row("Update channel", "Stable follows released versions. Development also follows the builds the developer approves for testing. Thalvi never goes back to an older version.",
+    row("Update channel", "Stable, or Development for test builds.",
       { node: el("span", { class: "stack" }, channel.node, switchNote), field: channel.field }),
-    row("Check for updates", "Thalvi checks by itself once a day and installs while idle. A check sends only what is needed to find the right version; it takes effect now.",
+    row("Check for updates", "Checks once a day and installs while idle.",
       { node: el("span", { class: "stack" }, status, notice, el("span", { class: "num" }, check, notes), problem), field: check }),
   ];
 }

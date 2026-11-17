@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Local, TimeZone};
+use jiff::Zoned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -204,11 +204,8 @@ struct Names {
 }
 
 impl Names {
-    fn next<Tz: TimeZone>(&mut self, at: &DateTime<Tz>) -> Dictation
-    where
-        Tz::Offset: Display,
-    {
-        let name = at.format("%Y-%m-%d/%H-%M-%S").to_string();
+    fn next(&mut self, at: &Zoned) -> Dictation {
+        let name = at.strftime("%Y-%m-%d/%H-%M-%S").to_string();
         if name == self.last {
             self.repeats += 1;
             return Dictation(format!("{name}-{}", self.repeats + 1));
@@ -362,7 +359,7 @@ impl Recorder {
         self.names
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .next(&Local::now())
+            .next(&Zoned::now())
     }
 
     /// Queues one line for the dictation's `text.txt`.
@@ -874,8 +871,13 @@ mod tests {
 
     #[test]
     fn folders_are_named_by_local_date_and_time_and_repeats_within_a_second_are_numbered() {
-        let zone = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
-        let at = |second| zone.with_ymd_and_hms(2026, 11, 3, 23, 59, second).unwrap();
+        let zone = jiff::tz::offset(-5).to_time_zone();
+        let at = |second| {
+            jiff::civil::date(2026, 11, 3)
+                .at(23, 59, second, 0)
+                .to_zoned(zone.clone())
+                .unwrap()
+        };
         let mut names = Names::default();
         let seen: Vec<_> = [58, 58, 58, 59]
             .into_iter()

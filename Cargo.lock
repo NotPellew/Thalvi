@@ -5068,6 +5068,7 @@ version = "0.1.3"
 dependencies = [
  "cosmic-text",
  "dirs 7.0.0",
+ "proptest",
  "reqwest 0.12.28",
  "semver",
  "serde",
@@ -5102,12 +5103,12 @@ version = "0.1.3"
 dependencies = [
  "axum",
  "base64 0.23.1",
- "chrono",
  "cpal",
  "dirs 7.0.0",
  "futures-util",
  "getrandom 0.4.3",
  "gtk",
+ "jiff",
  "nix",
  "ort",
  "proptest",
