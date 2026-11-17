@@ -17,16 +17,44 @@ use crate::status::LastError;
 
 #[derive(Default)]
 struct Devices {
-    server: Option<FakeControl>,
     wake: Option<WakeControl>,
     feed: Option<FrameFeed>,
 }
 
+#[derive(Default)]
+struct Recognition {
+    server: Option<FakeControl>,
+    capture: Option<usize>,
+    next_capture: usize,
+}
+
 #[derive(Clone, Default)]
-struct FakeRig(Rc<RefCell<Devices>>);
+struct FakeRig {
+    devices: Rc<RefCell<Devices>>,
+    recognition: Arc<Mutex<Recognition>>,
+}
+
+struct Connections {
+    recognizer: FakeRecognizer,
+    recognition: Arc<Mutex<Recognition>>,
+}
+
+impl Recognizer for Connections {
+    type Session = <FakeRecognizer as Recognizer>::Session;
+
+    async fn connect(&self) -> Result<Self::Session, RecognizerError> {
+        {
+            let mut recognition = self.recognition.lock().unwrap();
+            recognition.capture = Some(recognition.next_capture);
+            recognition.next_capture += 1;
+            recognition.server.as_mut().unwrap().connect_again();
+        }
+        self.recognizer.connect().await
+    }
+}
 
 impl Rig for FakeRig {
-    type Recognizer = FakeRecognizer;
+    type Recognizer = Connections;
     type Wake = FakeWake;
     type Cues = FakeCuePlayer;
     type Input = FakeInput;
@@ -45,10 +73,13 @@ impl Rig for FakeRig {
         let (recognizer, server) = FakeRecognizer::new();
         let (wake, control) = FakeWake::new();
         let (cues, _) = FakeCuePlayer::new();
-        self.0.borrow_mut().server = Some(server);
-        self.0.borrow_mut().wake = Some(control);
+        self.recognition.lock().unwrap().server = Some(server);
+        self.devices.borrow_mut().wake = Some(control);
         Ok(Loaded {
-            recognizer,
+            recognizer: Connections {
+                recognizer,
+                recognition: Arc::clone(&self.recognition),
+            },
             wake,
             cues,
             recorder: Recorder::disabled(),
@@ -92,7 +123,7 @@ impl Input for FakeInput {
 
     fn pause(&mut self) {
         self.active = None;
-        self.rig.0.borrow_mut().feed = None;
+        self.rig.devices.borrow_mut().feed = None;
     }
 
     #[expect(
@@ -101,7 +132,7 @@ impl Input for FakeInput {
     )]
     async fn open(mut self) -> Result<(Self, Result<FakeFrames, Failure>), Failure> {
         let (frames, feed) = FakeFrames::new(&self.gate);
-        self.rig.0.borrow_mut().feed = Some(feed);
+        self.rig.devices.borrow_mut().feed = Some(feed);
         self.active = Some(
             self.selected
                 .clone()
@@ -220,8 +251,6 @@ struct Case {
     host: TestHost,
     config: DesktopConfig,
     last_error: LastError,
-    capture: Option<usize>,
-    next_capture: usize,
     emitted: BTreeSet<String>,
     cancelled: BTreeSet<String>,
     held: bool,
@@ -248,8 +277,6 @@ impl Case {
             host,
             config,
             last_error: LastError::default(),
-            capture: None,
-            next_capture: 0,
             emitted: BTreeSet::new(),
             cancelled: BTreeSet::new(),
             held: false,
@@ -260,6 +287,29 @@ impl Case {
     }
 
     async fn synchronize(&self) {
+        tokio::time::timeout(quiet_bound(&self.config), async {
+            self.checkpoint().await;
+            // One blocking worker makes this a FIFO barrier for host calls and history writes.
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+            self.checkpoint().await;
+            tokio::task::yield_now().await;
+            let mut updates = self.link.status_updates();
+            while matches!(
+                *updates.borrow_and_update(),
+                Status::Working {
+                    cancellable: false,
+                    ..
+                }
+            ) {
+                updates.changed().await.unwrap();
+            }
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+        })
+        .await
+        .expect("never stuck: delivery or history did not finish");
+    }
+
+    async fn checkpoint(&self) {
         let (reply, received) = oneshot::channel();
         self.link.send(Control::RestartIfIdle(Restart::new(
             |_| Err("Observation only.".to_owned()),
@@ -270,7 +320,6 @@ impl Case {
             .expect("never stuck: the runner stopped answering controls")
             .expect("the runner closed its control reply");
         assert!(matches!(result, Stop::Busy | Stop::Refused(_)));
-        tokio::task::yield_now().await;
     }
 
     fn observe(&mut self) {
@@ -315,32 +364,31 @@ impl Case {
                 );
             }
         }
-        if resting(&status) {
-            if self.capture.take().is_some() {
-                self.rig
-                    .0
-                    .borrow_mut()
-                    .server
-                    .as_mut()
-                    .unwrap()
-                    .connect_again();
-            }
-        } else if self.capture.is_none() {
-            self.capture = Some(self.next_capture);
-            self.next_capture += 1;
-        }
     }
 
     fn stop_capture(&mut self) {
-        if !matches!(
-            self.link.status(),
-            Status::Working {
-                cancellable: false,
-                ..
-            }
-        ) && let Some(id) = self.capture
+        let status = self.link.status();
+        if !resting(&status)
+            && !matches!(
+                status,
+                Status::Working {
+                    cancellable: false,
+                    ..
+                }
+            )
+            && let Some(id) = self.rig.recognition.lock().unwrap().capture
         {
-            self.cancelled.insert(format!("capture{id}"));
+            let id = format!("capture{id}");
+            if !self
+                .host
+                .1
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|text| text.split_whitespace().any(|word| word == id))
+            {
+                self.cancelled.insert(id);
+            }
         }
     }
 
@@ -352,7 +400,7 @@ impl Case {
                     *sample = if i % 100 < 50 { 4_000 } else { -4_000 };
                 }
             }
-            if let Some(feed) = &self.rig.0.borrow().feed {
+            if let Some(feed) = &self.rig.devices.borrow().feed {
                 feed.send(frame);
             }
             self.synchronize().await;
@@ -407,22 +455,15 @@ impl Case {
     }
 
     async fn action(&mut self, action: Action) -> bool {
-        let starts = self.capture.is_none()
-            && self.link.audio().active.is_some()
+        let starts = resting(&self.link.status())
             && match action {
-                Action::Wake => self.config.wake.enabled(),
+                Action::Wake => self.link.audio().active.is_some() && self.config.wake.enabled(),
                 Action::HoldDown => !self.held,
                 _ => false,
             };
         let mut updates = self.link.status_updates();
-        if starts {
-            self.rig
-                .0
-                .borrow_mut()
-                .server
-                .as_mut()
-                .unwrap()
-                .connect_again();
+        if self.link.audio().active.is_none() {
+            updates.borrow_and_update();
         }
         if !self.perform(action).await {
             return false;
@@ -446,7 +487,7 @@ impl Case {
         self.observe();
         // A wake result belongs to this frame; an unscored one cannot wake a later capture.
         self.rig
-            .0
+            .devices
             .borrow()
             .wake
             .as_ref()
@@ -459,7 +500,7 @@ impl Case {
         match action {
             Action::Wake => {
                 self.rig
-                    .0
+                    .devices
                     .borrow()
                     .wake
                     .as_ref()
@@ -467,7 +508,7 @@ impl Case {
                     .fire(WakeEvent::Capture);
                 let mut frame = [0; FRAME_SAMPLES];
                 frame[0] = 1_500;
-                if let Some(feed) = &self.rig.0.borrow().feed {
+                if let Some(feed) = &self.rig.devices.borrow().feed {
                     feed.send(frame);
                 }
             }
@@ -482,23 +523,34 @@ impl Case {
             }
             Action::Speech(count) => self.frames(count, true).await,
             Action::Silence(count) => self.frames(count, false).await,
-            Action::Ready => self.rig.0.borrow_mut().server.as_mut().unwrap().ready(),
+            Action::Ready => self
+                .rig
+                .recognition
+                .lock()
+                .unwrap()
+                .server
+                .as_mut()
+                .unwrap()
+                .ready(),
             Action::Answer(ending) => {
-                let id = format!("capture{}", self.capture.unwrap_or(self.next_capture));
+                let mut recognition = self.rig.recognition.lock().unwrap();
+                let id = format!(
+                    "capture{}",
+                    recognition.capture.unwrap_or(recognition.next_capture)
+                );
                 self.emitted.insert(id.clone());
                 let text = if ending && !self.held {
                     format!("{id} paste that")
                 } else {
                     id
                 };
-                let mut devices = self.rig.0.borrow_mut();
-                let server = devices.server.as_mut().unwrap();
+                let server = recognition.server.as_mut().unwrap();
                 server.ready();
                 server.emit(Ok(RecognizerEvent::Final(text)));
             }
             Action::Fail => {
-                let mut devices = self.rig.0.borrow_mut();
-                let server = devices.server.as_mut().unwrap();
+                let mut recognition = self.rig.recognition.lock().unwrap();
+                let server = recognition.server.as_mut().unwrap();
                 server.fail("Speech recognition disconnected. Nothing was delivered.");
                 server.emit(Err(RecognizerError::said(
                     "Speech recognition disconnected. Nothing was delivered.",
@@ -527,7 +579,7 @@ impl Case {
                 }
             }
             Action::DeviceLost => {
-                if let Some(feed) = &self.rig.0.borrow().feed {
+                if let Some(feed) = &self.rig.devices.borrow().feed {
                     feed.fail(AudioError::DeviceLost);
                 }
             }
@@ -593,9 +645,13 @@ impl Case {
             .expect("quit ends: the runner exceeded QUIT_TIMEOUT")
             .unwrap();
         assert!(
-            self.rig.0.borrow().feed.is_none(),
+            self.rig.devices.borrow().feed.is_none(),
             "quit ends: the microphone stayed open"
         );
+        tokio::time::timeout(QUIT_TIMEOUT, tokio::task::spawn_blocking(|| ()))
+            .await
+            .expect("quit ends: history did not finish")
+            .unwrap();
         self.observe();
     }
 }
@@ -610,6 +666,7 @@ fn run(actions: &[Action]) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .start_paused(true)
+        .max_blocking_threads(1)
         .build()
         .unwrap();
     LocalSet::new().block_on(&runtime, async {
