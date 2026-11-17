@@ -103,6 +103,20 @@ view never opens the app, writes `desktop.json`, or takes the save lock.
 `agent.rs`'s `metrics_summary` reads the metrics log and writes no config.
 Neither is a writer of the file or of `AppState::config`.
 
+`themes` is one more form field. `Store::check` and `judge` both restore an unchanged look and
+refuse a changed look this build cannot use, still inside the save lock for a
+save and before `write_atomically`. `settings check` calls `judge` and writes
+nothing. A whole-file or per-look `null` removes that key through the existing
+merge patch. `AppState::use_built_in_look` sets the active look's `suspended`
+flag through `SyncedConfig::remember`, the same lock as the login switch. The
+tray item and an agent `settings set` of that flag are callers of those writers.
+No new writer, lock, or temporary name is added. A `themes` value this build
+keeps whole is written back by the same restore step when the save does not
+change it. These hashes describe the working tree at sync commit
+`113634abc24e4433e421d159fed509c7d916f75a`.
+
+An unreadable look, and a built-in-look save that fails, are recorded on `LastError` for the tray and Settings. Neither writes `desktop.json` or takes the save lock.
+
 The experimental Whisper entry (#481, branch `feat/speech-trials`; these hashes describe its commit `98c254fb`) adds no writer:
 `commands.rs` lists the Whisper models, words their device line and downloads their files into the model
 store, `app.rs` passes the packaged helper folder into `AppState::start`, and `agent.rs` names the model in

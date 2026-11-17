@@ -14,6 +14,7 @@ use crate::host::{App, Desktop, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
 use crate::phrases::WordList;
 use crate::recognizer::SpeechSource;
+use crate::theme::Themes;
 use crate::wake::WakeConfig;
 use crate::writing::Writing;
 
@@ -56,6 +57,8 @@ pub struct DesktopConfig {
     /// The input device to open; `None` is the system default.
     pub microphone: Option<String>,
     pub look: Look,
+    /// Per-look customizations. Empty when the file has no `themes` key.
+    pub themes: Themes,
     /// Which builds the app updates itself to.
     pub update_channel: UpdateChannel,
     /// What is recorded on this computer; nothing unless the user turns it on.
@@ -105,6 +108,9 @@ struct RawDesktopConfig {
     microphone: Option<String>,
     #[serde(default)]
     look: Look,
+    /// Read as JSON so a damaged theme never fails the config. Validated in `build`.
+    #[serde(default)]
+    themes: Option<serde_json::Value>,
     #[serde(default)]
     update_channel: UpdateChannel,
     #[serde(default)]
@@ -132,7 +138,7 @@ impl DesktopConfig {
 }
 
 /// How the overlay and the settings window look; `Gunmetal` unless the user picks another.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(try_from = "String", rename_all = "lowercase")]
 pub enum Look {
     Neon,
@@ -280,6 +286,10 @@ fn build(
         overlay: raw.overlay,
         microphone,
         look: raw.look,
+        themes: raw
+            .themes
+            .as_ref()
+            .map_or_else(Themes::default, Themes::load),
         update_channel: raw.update_channel,
         recordings: raw.recordings,
         history: raw.history,
@@ -504,6 +514,8 @@ struct FileForm<'a> {
     overlay: &'a OverlayConfig,
     microphone: Option<&'a str>,
     look: Look,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    themes: Option<serde_json::Value>,
     update_channel: UpdateChannel,
     recordings: RecordKinds,
     history: HistoryConfig,
@@ -610,6 +622,7 @@ impl DesktopConfig {
             overlay: &self.overlay,
             microphone: self.microphone.as_deref(),
             look: self.look,
+            themes: (!self.themes.is_empty()).then(|| self.themes.to_value()),
             update_channel: self.update_channel,
             recordings: self.recordings,
             history: self.history,
@@ -1840,6 +1853,7 @@ mod tests {
             let config = parse(&format!(r#"{{"look": "{name}"}}"#)).unwrap();
             assert_eq!(config.look, look);
         }
+        assert!(parse("{}").unwrap().themes.is_empty());
         for json in [r#"{"look": "classic"}"#, r#"{"look": "Holo"}"#] {
             let error = parse(json).unwrap_err().to_string();
             assert!(
@@ -1847,6 +1861,38 @@ mod tests {
                 "{json}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn a_config_with_only_look_round_trips_byte_for_byte() {
+        let original = "{\n  \"look\": \"holo\"\n}";
+        let config = parse(original).unwrap();
+        assert_eq!(config.look, Look::Holo);
+        assert!(config.themes.is_empty());
+        let written = serde_json::to_string_pretty(&config).unwrap();
+        assert!(
+            !written.contains("\"themes\""),
+            "an empty theme set adds no key: {written}"
+        );
+        let again = parse(&written).unwrap();
+        assert_eq!(serde_json::to_string_pretty(&again).unwrap(), written);
+    }
+
+    #[test]
+    fn a_malformed_holo_theme_loads_and_keeps_gunmetal() {
+        let json = r##"{"look":"holo","themes":{"version":1,"holo":{"colors":{"dark":{"accent":"red"}}},"gunmetal":{"colors":{"dark":{"accent":"#ffffff"}}}}}"##;
+        let config = parse(json).unwrap();
+        let style = crate::theme::Style::resolve(Look::Holo, config.themes.of(Look::Holo));
+        assert_eq!(style.dark.accent.to_hex(), "#6bf8ff");
+        let gunmetal =
+            crate::theme::Style::resolve(Look::Gunmetal, config.themes.of(Look::Gunmetal));
+        assert_eq!(gunmetal.dark.accent.to_hex(), "#ffffff");
+        let notices = config.themes.notices();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].starts_with("Your Holo customizations could not be read"));
+        assert!(notices[0].contains("until you reset Holo."));
+        let written = serde_json::to_value(&config).unwrap();
+        assert_eq!(written["themes"]["holo"]["colors"]["dark"]["accent"], "red");
     }
 
     #[test]

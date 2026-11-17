@@ -19,10 +19,9 @@ areas your change touches. Editing rules are in
   Why: no IPC; the overlay holds no WebView or GPU device (Windows GPU memory 27–33 → 0 MiB, binary +4 MB, #384); on GNOME's Mutter a Wayland window and `wl-copy` each take focus, an X11 window and clipboard do not (measured).
   Rejected: WebView overlay (per-desktop focus tricks; a layer-shell WebView is blank), Rune (#367: +116 MiB GPU on Windows, +28.6 MB, pre-release, takes no pull requests),
   GTK-only overlay, egui, native Wayland GTK on GNOME.
-- **Three looks for the desktop UI.** `look` picks gunmetal (default), holo or neon for the overlay
-  and settings window; the overlay hangs from the top of the usable screen area, one 460 × 200 size
-  for all looks, and neon follows the system's light or dark theme. Why: the developer chose gunmetal,
-  the others stay as options. Rejected: dropping the neon pill, y = 0 (a bar covers it), a size per look.
+- **Three looks for the desktop UI.** `look` is gunmetal (default), holo or neon. Each look's built-in colours and measures can be overridden under `themes` (`version: 1`), resolved as those defaults plus the sparse changes. The overlay hangs from the top of the usable area, one 460 × 200 size, and neon follows the system light or dark theme.
+  Why: gunmetal is the developer's choice and the others stay; a damaged theme must not stop startup, so `themes` is the only key loaded leniently — an unreadable look keeps its JSON and draws the built-in look, and a save refuses a theme it changes into something unusable.
+  Rejected: dropping the neon pill, y = 0 (a bar covers it), a size per look, rejecting the whole file when a theme is damaged, deleting customizations to recover.
 - **Local recognition in the desktop app.** `stt.engine: local` runs a catalog model on `ort`, picked in Settings from a Language drop-down (filters only, not saved) and a Model drop-down: Nemotron Streaming (0.6B, 160 ms, default), Nemotron Unified (0.6B, buffered) or Parakeet TDT v3 (0.6B, offline, re-read every 640 ms). Why: offline; a model is listed for a real trade-off, not only for the fewest errors; word errors on
   LibriSpeech and the developer's takes 3.46/7.14% and 3.03/6.35%, Unified also 8.38% German, 7.09% Spanish; Parakeet about 0.15× real time against Unified's 1×, at 2.33/4.76% (Unified 2.25/4.76% on those clips), 12.44% German, 7.95% Spanish. Rejected: Moonshine (7.4%), Zipformer
   (28%), Nemotron 3.5 (15%), the 80 and 560 ms exports (no real choice; 3.62 and 3.46% on LibriSpeech).
