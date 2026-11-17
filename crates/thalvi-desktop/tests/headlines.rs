@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use thalvi_desktop::audio::AudioError;
 use thalvi_desktop::capture::CaptureFullError;
+use thalvi_desktop::delivery::TerminalLines;
 use thalvi_desktop::engine::{CaptureError, ListenError};
 use thalvi_desktop::host::HostError;
 use thalvi_desktop::metrics::RecorderError;
@@ -295,6 +296,7 @@ fn everything_else() -> Cases {
             "Some text may have been pasted",
         ),
         (Box::new(NotConfigured), "That task isn't configured yet"),
+        (Box::new(TerminalLines), "Copied — paste the lines yourself"),
     ]
 }
 

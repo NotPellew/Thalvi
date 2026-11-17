@@ -126,6 +126,7 @@ pub struct AppState {
     saves: SyncedConfig,
     pub overlay: Overlay,
     pub speech_downloads: SpeechDownloads,
+    pub chat_install: tokio::sync::Mutex<()>,
     /// Where the speech model runs, shared with the engine thread that loads it.
     pub speech_devices: Arc<SpeechDevices>,
     /// The dictation history, shared with the engine thread that writes it.
@@ -207,6 +208,7 @@ impl AppState {
             saves: SyncedConfig::new(store, config.clone()),
             overlay: Overlay::default(),
             speech_downloads: SpeechDownloads::default(),
+            chat_install: tokio::sync::Mutex::new(()),
             speech_devices,
             history,
             drafts,
@@ -555,6 +557,9 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::list_wake_models,
             commands::validate_wake_model_choices,
             commands::download_wake_model,
+            commands::get_chat_model,
+            commands::download_chat_model,
+            commands::remove_chat_model,
             commands::list_speech_models,
             commands::speech_device,
             commands::download_speech_model,
@@ -1050,12 +1055,22 @@ impl Running for Live {
             let progress = state.speech_downloads.progress(info.name);
             rows.push(ModelRow::speech(&info, line, progress));
         }
+        rows.push(ModelRow::chat(&commands::chat_model(&state, None).await?));
         Ok(rows)
     }
 
     async fn download_model(&self, kind: Catalog, name: &str) -> Result<(), String> {
         let state = self.0.state::<AppState>();
         match kind {
+            Catalog::Chat => {
+                if name != "chat" {
+                    return Err("The local chat model is named chat.".to_owned());
+                }
+                let info = commands::chat_model(&state, None).await?;
+                commands::download_chat(&self.0, &state, info.build)
+                    .await
+                    .map_err(|failed| failed.message)
+            }
             Catalog::Wake => commands::download_wake(&state, name).await,
             Catalog::Speech => commands::download_speech(&self.0, &state, name)
                 .await

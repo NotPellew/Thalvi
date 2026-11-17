@@ -14,22 +14,27 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
 allow_attributes = "warn"
+allow_attributes_without_reason = "deny"
 undocumented_unsafe_blocks = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 todo = "deny"
+unimplemented = "deny"
+manual_midpoint = "deny"
+mod_module_files = "deny"
 redundant_clone = "warn"
 
 [workspace.dependencies]
+getrandom = "0.4.3"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.23"
-bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cpal = "0.18"
 dirs = "7"
-dotenvy = "0.15"
 futures-util = { version = "0.3", features = ["sink"] }
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
 proptest = { version = "1.12", default-features = false, features = ["std"] }
@@ -59,7 +64,6 @@ tauri-plugin-single-instance = "2.5"
 tauri-plugin-updater = "2.14"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots", "rustls-tls-native-roots"] }
 thalvi-asr = { path = "crates/thalvi-asr" }
-tower-http = { version = "0.7", features = ["fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 webrtc-vad = "0.4"

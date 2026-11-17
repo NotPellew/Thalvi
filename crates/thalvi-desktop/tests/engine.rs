@@ -236,6 +236,7 @@ impl Rig {
                 wake: wake_detector,
                 cues: cue_player,
                 gate: gate.clone(),
+                chat: None,
                 http: reqwest::Client::new(),
                 hold,
                 notice: Box::new(move |notice| sink.borrow_mut().push(notice.to_owned())),

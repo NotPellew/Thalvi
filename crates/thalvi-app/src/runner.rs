@@ -66,6 +66,8 @@ pub enum Control {
     RestartIfIdle(Restart),
     /// A download of this catalog model finished; load it if the active entry uses it and it is not loaded.
     ReloadSpeechModel(ListedSpeech),
+    /// Stops the local chat child and removes its model between captures.
+    RemoveChat(oneshot::Sender<Result<(), String>>),
     /// Cancels any capture, closes the microphone and the recognizer, and stops.
     Quit,
 }
@@ -832,12 +834,16 @@ impl Runner {
             .iter()
             .filter_map(|extra| extra.recognizer.local())
             .collect();
+        let chat = (config.writing.as_ref())
+            .and_then(thalvi_desktop::writing::Writing::on_computer)
+            .map(|requested| thalvi_desktop::chat::Chat::on_computer(store.clone(), requested));
         let recognizer = chosen(config.stt.entries.active_live(), store);
         let local = recognizer.local();
         self.devices.use_recognizer(local.clone());
         let (engine, handle) = Engine::new(
             Parts {
                 recognizer,
+                chat,
                 wake,
                 cues: CpalCuePlayer::new(config.cues, gate.clone()),
                 gate: gate.clone(),
@@ -1067,6 +1073,25 @@ impl Runner {
             Control::HoldKeyFailed(notice) => self.hold_problem = Some(notice),
             Control::Overlay(failure) => self.overlay(failure),
             Control::ReloadSpeechModel(model) => self.reload_speech_model(model),
+            Control::RemoveChat(reply) => {
+                let result = match self.session.as_mut() {
+                    Some(session) => session
+                        .engine
+                        .remove_chat()
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => match ModelStore::per_user() {
+                        Ok(store) => thalvi_desktop::chat::remove_model(
+                            &store,
+                            &thalvi_desktop::chat::Build::Cpu.files(),
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                        Err(error) => Err(error.to_string()),
+                    },
+                };
+                let _ = reply.send(result);
+            }
             Control::RestartIfIdle(restart) => {
                 let held = self.key_state.borrow().down;
                 return answer_restart(restart, self.paused, held, *self.feeding.borrow());
@@ -1631,6 +1656,13 @@ impl Requests {
                 false
             }
             Some(Control::Overlay(_)) => false,
+            Some(Control::RemoveChat(reply)) => {
+                let _ = reply.send(Err(
+                    "Wait for the current dictation to finish before removing the chat model."
+                        .to_owned(),
+                ));
+                false
+            }
             Some(Control::ReloadSpeechModel(model)) => {
                 self.reload = Some(model);
                 false
@@ -2330,6 +2362,7 @@ mod tests {
             let (recognizer, _server) = FakeRecognizer::new();
             let (input, hold) = HoldInput::new();
             let (mut engine, _) = Engine::new(Parts {
+                chat: None,
                 recognizer, wake, cues, gate, hold,
                 http: reqwest::Client::new(),
                 notice: publisher.notice_sink(),
@@ -2639,6 +2672,7 @@ mod tests {
                 let key = hold.clone();
                 let (mut engine, _) = Engine::new(
                     Parts {
+                        chat: None,
                         recognizer,
                         wake,
                         cues,
@@ -2875,6 +2909,10 @@ mod tests {
         type Target = String;
 
         fn copies_only(&self) -> bool {
+            false
+        }
+
+        fn is_terminal(&self, _: &String) -> bool {
             false
         }
 

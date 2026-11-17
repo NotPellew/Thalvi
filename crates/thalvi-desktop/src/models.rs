@@ -30,6 +30,8 @@ pub enum ModelKind {
     Wake,
     Speech,
     Spotter,
+    ChatModel,
+    ChatRuntime,
 }
 
 impl ModelKind {
@@ -38,6 +40,8 @@ impl ModelKind {
             Self::Wake => "wake model",
             Self::Speech => "speech model",
             Self::Spotter => "ending phrase model",
+            Self::ChatModel => "chat model",
+            Self::ChatRuntime => "chat runtime",
         }
     }
 }
@@ -648,6 +652,8 @@ pub enum ModelError {
     },
     #[error("The speech model {name} is already being downloaded.")]
     AlreadyDownloading { name: String },
+    #[error("The downloaded chat runtime {file} could not be unpacked: {reason}")]
+    Unpack { file: String, reason: String },
     #[error("Could not save the {} {file} in {}: {source}", kind.noun(), dir.display())]
     Io {
         kind: ModelKind,
@@ -727,6 +733,7 @@ impl ModelError {
             Self::Replaced { cause, .. } => cause.metric_kind(),
             Self::AlreadyDownloading { .. } => "already_downloading".to_owned(),
             Self::Io { .. } => "io".to_owned(),
+            Self::Unpack { .. } => "unpack".to_owned(),
         }
     }
 }
@@ -745,6 +752,7 @@ impl UserError for ModelError {
             Self::Checksum { .. } => "Downloaded model was damaged",
             Self::Replaced { .. } => "Stored model was damaged",
             Self::AlreadyDownloading { .. } => "Model is already downloading",
+            Self::Unpack { .. } => "Can't unpack the chat runtime",
             Self::Io { .. } => "Can't save the model file",
         }
     }
@@ -770,6 +778,12 @@ impl ModelStore {
     #[must_use]
     pub fn in_dir(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
+    }
+
+    /// The directory holding verified model files and their runtimes.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// Where `asset` is or would be stored; the file is not checked.
@@ -1118,7 +1132,8 @@ async fn stored(path: &Path, asset: &Asset<'_>) -> Stored {
     }
 }
 
-fn hex(digest: &[u8]) -> String {
+/// `digest` as lowercase hexadecimal.
+pub(crate) fn hex(digest: &[u8]) -> String {
     use std::fmt::Write;
     digest.iter().fold(String::new(), |mut out, byte| {
         let _ = write!(out, "{byte:02x}");

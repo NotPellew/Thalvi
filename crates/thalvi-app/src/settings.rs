@@ -300,12 +300,11 @@ pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
             );
         }
     }
-    if let Some(writing) = settings.get_mut("writing").and_then(Value::as_object_mut)
-        && let Some(key) = writing.remove("api_key")
-    {
+    if let Some(writing) = settings.get_mut("writing").and_then(Value::as_object_mut) {
+        let key = writing.remove("api_key").unwrap_or(Value::Null);
         writing.insert(
             "has_key".to_owned(),
-            Value::Bool(key != Value::String(String::new())),
+            Value::Bool(key.as_str().is_some_and(|key| !key.is_empty())),
         );
         writing.insert(
             "prompt".to_owned(),
@@ -405,6 +404,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("nested").join("desktop.json");
         (Store::new(Some(path)).unwrap(), dir)
+    }
+
+    #[test]
+    fn local_chat_keeps_the_manual_setup_key_and_prompt_across_saved_source_switches() {
+        let config = DesktopConfig::from_json_str(r#"{"writing":{"url":"http://localhost:8080/v1","model":"saved","api_key":"test-secret","prompt":"Keep my wording."}}"#).unwrap();
+        let local = merged(
+            &config,
+            &json!({"writing":{"local":true,"chat_build":"cpu"}}),
+        )
+        .unwrap();
+        let config = judge(local, &config).unwrap();
+        let shown = settings_json(&config).unwrap();
+        assert_eq!(shown["writing"]["local"], true);
+        assert_eq!(shown["writing"]["prompt"], "Keep my wording.");
+        assert_eq!(shown["writing"]["has_key"], true);
+        assert!(shown["writing"].get("api_key").is_none());
+        assert!(!format!("{:?}", config.writing).contains("test-secret"));
+        let manual = merged(&config, &json!({"writing":{"local":false}})).unwrap();
+        let config = judge(manual, &config).unwrap();
+        assert_eq!(config.writing.as_ref().unwrap().key(), "test-secret");
+        assert_eq!(
+            config.writing.as_ref().unwrap().chat_build(),
+            Some(thalvi_desktop::chat::Build::Cpu)
+        );
+        assert_eq!(settings_json(&config).unwrap()["writing"]["model"], "saved");
+        let local = DesktopConfig::from_json_str(r#"{"writing":{"local":true}}"#).unwrap();
+        assert_eq!(
+            settings_json(&local).unwrap()["writing"]["prompt"],
+            DEFAULT_PROMPT
+        );
     }
 
     #[test]

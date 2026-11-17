@@ -62,6 +62,7 @@ impl Visibility {
             | Status::Pending { .. }
             | Status::Writing { .. }
             | Status::Thinking { .. }
+            | Status::StartingChat { .. }
             | Status::Working { .. }
             | Status::Transcribing { .. }
             | Status::Merging { .. }
@@ -733,6 +734,13 @@ mod tests {
             (
                 Status::Thinking {
                     target: target.clone(),
+                },
+                Visibility::Show,
+            ),
+            (
+                Status::StartingChat {
+                    target: target.clone(),
+                    again: false,
                 },
                 Visibility::Show,
             ),

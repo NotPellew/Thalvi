@@ -904,7 +904,7 @@ mod tests {
             ),
             (
                 r#"{"writing": {"url": "http://x"}}"#,
-                "missing field `model`",
+                "writing.model must be",
             ),
             (
                 r#"{"writing": {"url": "http://x", "model": "m", "tone": 1}}"#,

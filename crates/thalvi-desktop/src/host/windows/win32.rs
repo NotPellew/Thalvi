@@ -33,12 +33,13 @@ use ::windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use ::windows::Win32::UI::Shell::ShellExecuteW;
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetMessageW,
-    GetWindow, GetWindowLongW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    HC_ACTION, IsIconic, IsWindow, IsWindowVisible, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
-    LLKHF_INJECTED, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostThreadMessageW, SW_RESTORE,
-    SW_SHOWNORMAL, SetForegroundWindow, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WS_EX_TOOLWINDOW,
+    CallNextHookEx, EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow,
+    GetMessageW, GetWindow, GetWindowLongW, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, HC_ACTION, IsIconic, IsWindow, IsWindowVisible, KBDLLHOOKSTRUCT,
+    LLKHF_EXTENDED, LLKHF_INJECTED, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostThreadMessageW,
+    SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, SetWindowsHookExW, ShowWindow,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WS_EX_TOOLWINDOW,
 };
 use ::windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
@@ -437,6 +438,15 @@ impl Win32 for Real {
         if written <= 0 {
             return String::new();
         }
+        let end = usize::try_from(written).unwrap_or(0).min(buffer.len());
+        String::from_utf16_lossy(&buffer[..end])
+    }
+
+    fn class(&self, window: Hwnd) -> String {
+        // Window class names are at most 256 characters.
+        let mut buffer = [0u16; 256];
+        // SAFETY: a stale handle returns 0, so nothing is read; `buffer` outlives the call.
+        let written = unsafe { GetClassNameW(handle(window), &mut buffer) };
         let end = usize::try_from(written).unwrap_or(0).min(buffer.len());
         String::from_utf16_lossy(&buffer[..end])
     }

@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { DownloadFailure, errorText } from "./contract.ts";
-import type { AudioStatus, Backend, CurrentApp, Draft, HistoryEntry, HoldKeyDefaults, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, ChatModelInfo, CurrentApp, Draft, HistoryEntry, HoldKeyDefaults, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 
 /** The rejection of `download_speech_model`, which carries `{ message, causes }`, as a typed error. */
 function downloadFailure(rejection: unknown): DownloadFailure {
@@ -79,6 +79,10 @@ export function tauriBackend(): Backend {
       });
       return typeof picked === "string" ? picked : null;
     },
+    getChatModel: (build) => invoke<ChatModelInfo>("get_chat_model", { build }),
+    downloadChatModel: (build) => invoke<undefined>("download_chat_model", { build }).catch((rejection: unknown) => { throw downloadFailure(rejection); }),
+    removeChatModel: () => invoke<undefined>("remove_chat_model"),
+    onChatModelProgress: (listener) => { void listen<SpeechModelProgress>("thalvi://chat-model-progress", (event) => { listener(event.payload); }); },
     listSpeechModels: () => invoke<SpeechModelInfo[]>("list_speech_models"),
     downloadSpeechModel: (name) =>
       invoke<undefined>("download_speech_model", { name }).catch((rejection: unknown) => {

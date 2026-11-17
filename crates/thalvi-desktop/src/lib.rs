@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod boosting;
 pub mod capture;
+pub mod chat;
 pub mod chosen;
 pub mod claim;
 pub mod config;

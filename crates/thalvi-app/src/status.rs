@@ -57,6 +57,11 @@ pub enum Status {
     Thinking {
         target: Option<String>,
     },
+    /// The chat model on this computer is starting before it writes or merges; `again` after it stopped.
+    StartingChat {
+        target: Option<String>,
+        again: bool,
+    },
     /// The delivery is running, or the user's capture is being finished.
     Working {
         target: Option<String>,
@@ -346,6 +351,10 @@ impl View {
                     text: text.clone(),
                 },
                 EngineState::Thinking => Status::Thinking { target },
+                EngineState::StartingChat { again } => Status::StartingChat {
+                    target,
+                    again: *again,
+                },
             },
         }
     }
@@ -508,6 +517,13 @@ mod tests {
                 EngineState::Thinking,
                 Status::Thinking {
                     target: Some(kitty()),
+                },
+            ),
+            (
+                EngineState::StartingChat { again: true },
+                Status::StartingChat {
+                    target: Some(kitty()),
+                    again: true,
                 },
             ),
             (

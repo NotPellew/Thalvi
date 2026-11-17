@@ -172,7 +172,7 @@ describe("pages", () => {
         id: "chat",
         title: "Chat model",
         groups: {
-          Writing: ["writing endpoint address", "writing model", "writing api key", "writing prompt", "opening phrases", "app styles"],
+          Writing: ["chat model source", "local chat runtime", "local chat model", "writing endpoint address", "writing model", "writing api key", "writing prompt", "opening phrases", "app styles"],
         },
       },
       {
@@ -3282,5 +3282,50 @@ describe("the failure bar", () => {
     expect(Array.from(bar.querySelectorAll("button"), (candidate) => candidate.textContent)).toEqual(["Copy", "×"]);
     stub.emit({ state: "listening" });
     expect(getComputedStyle(bar).display).toBe("none");
+  });
+});
+
+describe("local chat model", () => {
+  it("preserves the manual endpoint and prompt while switching to the local model and back", async () => {
+    const writing = { url: "http://127.0.0.1:8181/v1", model: "saved", has_key: true, prompt: "Keep my words." };
+    const stub = await open({ ...SETTINGS, writing });
+    goTo("chat");
+    choose(control("Chat model source", "select"), "local");
+    await settle();
+    expect(sent(stub).writing).toEqual({ ...writing, local: true });
+    expect(rowOf("Writing endpoint address").classList.contains("off")).toBe(true);
+    expect(rowOf("Local chat model").classList.contains("off")).toBe(false);
+    expect(rowOf("Local chat model").textContent).toContain("Apache-2.0");
+    expect(rowOf("Local chat model").textContent).toContain("English, German, Spanish");
+    choose(control("Chat model source", "select"), "manual");
+    await settle();
+    expect(sent(stub).writing).toEqual({ ...writing, local: false });
+    expect(rowOf("Writing endpoint address").classList.contains("off")).toBe(false);
+    expect(rowOf("Local chat model").classList.contains("off")).toBe(true);
+    expect(control("Writing endpoint address", "input").value).toBe(writing.url);
+  });
+
+  it("installs with checksum progress and asks before removing the file", async () => {
+    const stub = await open({ ...SETTINGS, writing: { local: true } });
+    goTo("chat");
+    expect(rowOf("Local chat model").textContent).toContain("Qwen3 4B");
+    stub.backend.downloadChatModel.mockImplementation(() => {
+      const progress = stub.backend.onChatModelProgress.mock.calls[0]?.[0];
+      progress?.({ name: "chat", percent: 42, status: "downloading", message: null, causes: [] });
+      expect(rowOf("Local chat model").textContent).toContain("checking checksums… 42%");
+      stub.backend.getChatModel.mockResolvedValue({ title: "Qwen3 4B", size: 2533261953, license: "Apache-2.0", languages: ["English", "German", "Spanish"], build: "vulkan", build_label: "Vulkan", model_installed: true, runtime_installed: true });
+      return Promise.resolve();
+    });
+    button("Download chat model").click();
+    await settle();
+    expect(stub.backend.downloadChatModel).toHaveBeenCalledWith("vulkan");
+    button("Remove chat model").click();
+    expect(stub.backend.removeChatModel).not.toHaveBeenCalled();
+    button("Keep model").click();
+    expect(stub.backend.removeChatModel).not.toHaveBeenCalled();
+    button("Remove chat model").click();
+    button("Yes, delete model").click();
+    await settle();
+    expect(stub.backend.removeChatModel).toHaveBeenCalledOnce();
   });
 });

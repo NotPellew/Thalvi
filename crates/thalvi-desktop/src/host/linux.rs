@@ -299,6 +299,14 @@ impl Host for Desktop {
         }
     }
 
+    fn is_terminal(&self, target: &Target) -> bool {
+        match (self, target) {
+            (Self::Hyprland(host), Target::Window(window)) => host.is_terminal(window),
+            (Self::Gnome(host), Target::Clipboard(clipboard)) => host.is_terminal(clipboard),
+            _ => false,
+        }
+    }
+
     fn writing_target(&self, target: &Target) -> Result<WindowApp, AppMatchLimit> {
         match (self, target) {
             (Self::Hyprland(host), Target::Window(window)) => host.writing_target(window),

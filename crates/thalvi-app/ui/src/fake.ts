@@ -1,6 +1,6 @@
 // Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the status to the n-th of the script and `?look=holo` or `?look=gunmetal` picks the look.
 
-import type { AudioStatus, Backend, Draft, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, ChatModelInfo, Draft, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 import { LOOKS } from "./look.ts";
 import { applyPatch } from "./patch.ts";
 
@@ -115,6 +115,12 @@ export function fakeBackend(params: URLSearchParams): Backend {
     { name: "hey_mycroft", title: "Hey Mycroft", size: 857_691, cached: false, threshold: 0.5 },
     { name: "hey_jarvis", title: "Hey Jarvis", size: 1_271_370, cached: false, threshold: 0.5 },
   ];
+  const chatModel: ChatModelInfo = {
+    title: "Qwen3 4B · Q4_K_M", size: 2533261953, license: "Apache-2.0",
+    languages: ["English", "German", "Spanish"], build: "vulkan", build_label: "Vulkan",
+    model_installed: false, runtime_installed: false,
+  };
+  const chatListeners: ((progress: SpeechModelProgress) => void)[] = [];
   const speechModels: SpeechModelInfo[] = [
     {
       name: "nemotron_160ms",
@@ -302,6 +308,17 @@ export function fakeBackend(params: URLSearchParams): Backend {
       return Promise.resolve();
     },
     pickWakeModelFile: () => Promise.resolve("/models/custom.onnx"),
+    getChatModel: (build) => Promise.resolve({ ...chatModel, ...(build ? { build, build_label: build === "cpu" ? "CPU" : "Vulkan" } : {}) }),
+    downloadChatModel: (build) => {
+      chatModel.build = build;
+      chatModel.build_label = build === "cpu" ? "CPU" : "Vulkan";
+      chatModel.model_installed = true;
+      chatModel.runtime_installed = true;
+      for (const listener of chatListeners) listener({ name: "chat", percent: 100, status: "done", message: null, causes: [] });
+      return Promise.resolve();
+    },
+    removeChatModel: () => { chatModel.model_installed = false; return Promise.resolve(); },
+    onChatModelProgress: (listener) => chatListeners.push(listener),
     listSpeechModels: () => Promise.resolve(structuredClone(speechModels)),
     downloadSpeechModel: (name) =>
       new Promise((resolve) => {

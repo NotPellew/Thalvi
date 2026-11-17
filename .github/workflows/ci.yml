@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       scope:
-        description: A crate, web or desktop-ui to narrow the run to; all runs everything
+        description: A crate or desktop-ui to narrow the run to; all runs everything
         type: string
         default: all
 
@@ -31,7 +31,6 @@ jobs:
       bundle: ${{ steps.units.outputs.bundle }}
       tests: ${{ steps.units.outputs.tests }}
       windows_tests: ${{ steps.units.outputs.windows_tests }}
-      web: ${{ steps.units.outputs.web }}
       desktop_ui: ${{ steps.units.outputs.desktop_ui }}
       speech: ${{ steps.units.outputs.speech }}
       issues: ${{ steps.units.outputs.issues }}
@@ -53,13 +52,11 @@ jobs:
           fi
           echo "Changed units: $units"
           server=false windows=false bundle=false tests=none windows_tests=none
-          web=false desktop_ui=false speech=false issues=false
+          desktop_ui=false speech=false issues=false
           has() { [[ " $units " == *" $1 "* ]]; }
-          if [[ $SCOPE == thalvi-app || $SCOPE == thalvi-asr || $SCOPE == thalvi-desktop || $SCOPE == thalvi-server ]]; then
+          if [[ $SCOPE == thalvi-app || $SCOPE == thalvi-asr || $SCOPE == thalvi-desktop ]]; then
             server=true tests="-p $SCOPE"
             if [[ $SCOPE == thalvi-app || $SCOPE == thalvi-desktop ]]; then windows=true windows_tests="-p $SCOPE"; fi
-          elif [[ $SCOPE == web ]]; then
-            web=true
           elif [[ $SCOPE == desktop-ui ]]; then
             desktop_ui=true
           elif [[ $SCOPE != all ]]; then
@@ -67,17 +64,15 @@ jobs:
             exit 1
           elif [[ $units == all ]]; then
             server=true windows=true bundle=true tests=--workspace windows_tests="-p thalvi-desktop -p thalvi-app"
-            web=true desktop_ui=true speech=true issues=true
+            desktop_ui=true speech=true issues=true
           else
             packages=() windows_packages=()
-            if has server; then packages+=(-p thalvi-server); fi
             if has desktop; then packages+=(-p thalvi-desktop) windows_packages+=(-p thalvi-desktop); fi
             if has app; then packages+=(-p thalvi-app) windows_packages+=(-p thalvi-app); fi
             if has app || has desktop-ui; then bundle=true windows=true; fi
             if (( ${#packages[@]} )); then server=true tests="${packages[*]}"; fi
             if [[ $bundle == true ]]; then server=true; fi
             if (( ${#windows_packages[@]} )); then windows_tests="${windows_packages[*]}"; fi
-            if has web; then web=true; fi
             if has desktop-ui; then desktop_ui=true; fi
             if has speech; then speech=true; fi
             if has issues; then issues=true; fi
@@ -88,7 +83,6 @@ jobs:
           bundle=$bundle
           tests=$tests
           windows_tests=$windows_tests
-          web=$web
           desktop_ui=$desktop_ui
           speech=$speech
           issues=$issues
@@ -230,26 +224,6 @@ jobs:
           path: smoke
           retention-days: 7
 
-  web:
-    name: web
-    needs: changes
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - if: needs.changes.outputs.web == 'false'
-        run: echo 'No change affects this job, so its steps are skipped.'
-      - if: needs.changes.outputs.web != 'false'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - if: needs.changes.outputs.web != 'false'
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .node-version
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - if: needs.changes.outputs.web != 'false'
-        run: .github/scripts/gates web
-
   desktop-ui:
     name: desktop-ui
     needs: changes
@@ -320,7 +294,7 @@ jobs:
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version-file: .python-version
       - run: .github/scripts/gates formal

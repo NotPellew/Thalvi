@@ -43,6 +43,19 @@ pub fn submit_notice(state: &EngineState, window: &str) -> Option<String> {
     }
 }
 
+/// Why unconfirmed lines were kept on the clipboard instead of pasted into a terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "Thalvi did not paste these lines into the terminal, because a pasted line break can run a command."
+)]
+pub struct TerminalLines;
+
+impl UserError for TerminalLines {
+    fn headline(&self) -> &'static str {
+        "Copied — paste the lines yourself"
+    }
+}
+
 /// What delivering a capture came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Finished {
@@ -177,6 +190,9 @@ where
         }
         let result = match (&bound.0, PasteText::new(text)) {
             (Ok(target), Ok(pasted)) => {
+                if !enter && pasted.as_str().contains('\n') && self.host.is_terminal(target) {
+                    return self.keep(recorder, text, &TerminalLines).await;
+                }
                 let target = target.clone();
                 self.call(recorder, "deliver", move |host| {
                     host.deliver(&target, &pasted, enter)
@@ -483,6 +499,52 @@ mod tests {
                 calls(&["capture_target", expected]),
                 "{route:?} {text}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_terminal_gets_only_single_lines_and_confirmed_submits() {
+        let held_back = "Thalvi did not paste these lines into the terminal, because a pasted line break can run a command. Captured text is on the clipboard.";
+        for (route, text, delivered, host_call, notice) in [
+            (
+                CaptureRoute::Paste,
+                "first\nsecond",
+                false,
+                "copy:\"first\\nsecond\"",
+                held_back,
+            ),
+            (
+                CaptureRoute::Write,
+                "first\r\nsecond",
+                false,
+                "copy:\"first\\r\\nsecond\"",
+                held_back,
+            ),
+            (
+                CaptureRoute::Paste,
+                "ls\t-la",
+                true,
+                "deliver:the editor:\"ls\\t-la\":enter=false",
+                "Delivered.",
+            ),
+            (
+                CaptureRoute::Submit,
+                "first\nsecond",
+                true,
+                "deliver:the editor:\"first\\nsecond\":enter=true",
+                "Delivered.",
+            ),
+        ] {
+            let (finished, seen) =
+                finish(FakeHost::default().terminal(), accepted(route, text)).await;
+            let finished = finished.unwrap();
+            assert_eq!(
+                seen,
+                calls(&["capture_target", host_call]),
+                "{route:?} {text:?}"
+            );
+            assert_eq!(finished.delivered, delivered, "{route:?} {text:?}");
+            assert_eq!(finished.notice, notice, "{route:?} {text:?}");
         }
     }
 

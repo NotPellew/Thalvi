@@ -6,14 +6,11 @@ areas your change touches. Editing rules are in
 
 ## Architecture
 
-- **Rust server with desktop and web clients.** Rust owns sessions and model
-  calls; the desktop client owns native audio, wake words and window
-  delivery; TypeScript owns browser media and UI. Why: use native wake/audio
-  libraries without moving model orchestration. Rejected: a WASM UI.
-- **Two products, one repo.** Desktop voice control and the conversational
-  assistant are separate tracks, joined only by `/session`. Why: different
-  platforms, thin boundary. Rejected for now:
-  phone-to-PC dictation; separate repos until desktop needs its own releases.
+- **Thalvi is the desktop voice accessory.** The Rust desktop app owns native audio, wake words,
+  recognition and window delivery, and remembers nothing beyond its settings, opt-in recordings and
+  dictation history. Why: Vardli owns anything that remembers, decides or acts while the user is away,
+  and the conversation server duplicated it. Rejected: Thalvi as Vardli's voice front end, freezing the
+  server (it lives at tag `conversation-final`).
 - **Desktop on Hyprland, GNOME Wayland and Windows.** GNOME gets dictation on
   the clipboard only: it exposes neither the focused window nor focus by ID.
   Why: the desktops we can qualify. Rejected: KDE, X11 and macOS until needed,
@@ -33,13 +30,12 @@ areas your change touches. Editing rules are in
   Why: the app never loads Vulkan, so a missing driver fails only that choice; an empty overlay hid what was being heard (#482), and a CPU read takes as long as the speech; on 40 FLEURS clips 4.3% German, 5.0% English errors, f16 no better; without VAD silence became "Thank you.", without timestamps a sentence after 30 s vanished; a dropped request held the next one ~5 s on the CPU.
   Rejected: linking whisper.cpp into the app, one binary for both (it needs vulkan-1.dll even on the CPU), transcribe.cpp (untested), the word list as a prompt (#381), a device picker.
 - **Self-hosted recognition speaks Meta's ASR protocol.** `speech/asr` serves Nemotron unified ASR
-  0.6B (NeMo, buffered, 0.56 s lookahead, language detected) behind `STT_URL`. Why: no server change;
-  5.8–6.6% word errors on the developer's takes (Meta-free, en/de/es), fits next to TTS on an 8 GB
-  RTX 2080. Rejected: Voxtral 4B Realtime (too big), Nemotron 3.5 streaming (15%), Qwen3-ASR (2 s chunks).
+  0.6B (NeMo, buffered, 0.56 s lookahead, language detected) as a realtime speech entry. Why: the app
+  already speaks it; 5.8–6.6% word errors on the developer's takes (Meta-free, en/de/es), fits on an
+  8 GB RTX 2080. Rejected: Voxtral 4B Realtime (too big), Nemotron 3.5 streaming (15%), Qwen3-ASR (2 s chunks).
 - **The desktop connects to its recognizer itself, from a list of speech servers.** `stt.entries` holds realtime
   ASR, OpenAI-compatible buffered transcription (request kind Transcriptions or Chat with audio, optional language), on-device and extra entries; one live entry is active, and every extra switched on
-  feeds the chat-model merge; `STT_URL` stays for web conversations. Why: switch recognizers with one click, no `.env` edit or
-  restart, and no ranking to manage. Rejected: one setting per recognizer, a silent fallback between entries, several live entries, ranking extras, a first-answer-wins fallback (#228).
+  feeds the chat-model merge. Why: switch recognizers with one click, no config edit or restart, and no ranking to manage. Rejected: one setting per recognizer, a silent fallback between entries, several live entries, ranking extras, a first-answer-wins fallback (#228).
 - **A fresh install recognizes on this computer.** With no `stt.entries` the one active entry is On this computer
   with Nemotron Streaming; the first start writes the defaults, opens Settings on Recognition and downloads the model.
   Why: the packaged app ships no server. Rejected: a setup wizard, waiting for a click before downloading.
@@ -53,26 +49,14 @@ areas your change touches. Editing rules are in
 - **Local boosting fuses NeMo's phrase tree into the greedy search at alpha 2.** Why: "Cybrex2", digit
   and all, in 8 of 8 dictations, no new errors on 48 takes with a two-entry list, about 1 ms more per
   step. Rejected: a beam of 4 (0 of 8 at alpha 1, twice the step time), NeMo's alpha 1 (0 of 8).
-- **Self-hosted; parts swap by endpoint.** Config sets each part's address on a
-  standard protocol (Chat Completions, OpenAI speech, MCP, versioned JSON for
-  briefings); Meta's realtime ASR and Qwen3-TTS's framed PCM stream are the
-  custom adapters. Why: any provider or local server plugs in without code.
-  Rejected: a plugin system (no faster, much more code).
-- **Same-site browser requests only.** The server refuses a request whose `Origin` names another
-  host than its `Host`; native clients send none. Why: browsers skip cross-origin checks on
-  WebSockets, so any page could open `/session`. Rejected for now: a token (no accounts), a host
-  allowlist against DNS rebinding (a new setting).
-- **Chat Completions first.** Self-hosted servers speak it. Why: one adapter
-  covers Meta, Ollama and vLLM. Revisit: add Responses for Meta if its search
-  grounding beats an MCP search tool on the road briefing.
-- **Qwen3-TTS clone of af_heart; Kokoro on CPU.** vLLM-Omni serves it, qwentts.cpp
-  on GPUs vLLM-Omni can't use. Why: the developer preferred its sound, and first
-  audio takes ~50 ms where Kokoro synthesizes a whole sentence first. Rejected:
-  Chatterbox (AGPL), Kyutai (no cloning), Orpheus and qwen3-tts-server (slower).
-- **Opt-in recordings.** Metrics, turn, dictation and reply text, and mic audio (with ~2 s
-  before each wake) are each written locally off the reply path: on the server by
-  `THALVI_RECORD`, on the desktop by settings switches, applied between captures. Why: to judge
-  changes and misrecognitions on real use. Off by default: they are personal data.
+- **Self-hosted; parts swap by endpoint.** Settings names each speech server and the writing model by
+  address on a standard protocol (Meta realtime ASR, OpenAI transcriptions, Chat Completions). Why: any
+  provider or local server plugs in without code. Rejected: a plugin system (no faster, much more code).
+- **Chat Completions first.** Writing and the extra-recognizer merge speak it. Why: one adapter
+  covers Meta, Ollama, vLLM and llama.cpp.
+- **Opt-in recordings.** Metrics, dictation text and mic audio (with ~2 s before each wake) are each
+  written locally by settings switches, applied between captures. Why: to judge changes and
+  misrecognitions on real use. Off by default: they are personal data.
 - **Dictation history is on by default.** `history` keeps the text, time, target and outcome of the last 200
   captures (1 to 1000) in one file in the per-user data directory; switching it off stops writes and deletes nothing.
   Why: the user can recover what they dictated, and text alone never leaves the computer. Rejected: opt-in like the
@@ -87,17 +71,11 @@ areas your change touches. Editing rules are in
   (scoring latency, seconds with sound and quiet, switches between them). Why: one dictation in one place;
   95% of old lines were per frame. Rejected: day files linked by timestamp, a line per frame
   or per sound/quiet switch.
-- **Hands-free turns.** The recognizer runs in endpointing mode, and the user
-  interrupts a reply by speaking while mic input is on. Why: hands and eyes are
-  busy. Rejected: push-to-talk.
-- **Input and reply audio are separate.** `/session` takes `input` (`text` or `mic`) and
-  `reply_audio` (on or off); only `mic` opens a recognizer, only reply audio calls speech
-  synthesis. Web: Voice sets both, Speak replies only reply audio. Why: typed or locally
-  recognized input can get spoken replies. Rejected: one `voice` switch, a compat message.
-- **Two wake entries, endings select the capture route.** Trained capture and conversation heads;
-  the desktop runs only capture until it has conversations. A capture whose whole text is an
-  `open_url`/`focus_app` phrase or `open <host>` runs as a task with no ending. Why: a ready command
-  needs no ending; a head with no handler dropped wakes. Rejected: one phrase; hiding it in Settings.
+- **Two wake entries, endings select the capture route.** Trained capture and conversation heads; the
+  desktop runs only capture, and the saved conversation head stays unused now that conversations left
+  Thalvi. A capture whose whole text is an `open_url`/`focus_app` phrase or `open <host>` runs as a task
+  with no ending. Why: a ready command needs no ending; a head with no handler dropped wakes.
+  Rejected: one phrase; hiding it in Settings.
 - **Wake context.** Both trained heads use 16 embedding frames. Why: this
   supports first-frame inference with upstream startup and reset history.
   Rejected: accepting longer contexts that need additional warm-up history.
@@ -135,9 +113,9 @@ areas your change touches. Editing rules are in
 - **A keyword spotter only warns about missed endings.** sherpa-onnx's 3.3M keyword model listens beside the recognizer; when the covering final lacks an ending it heard and the user then stays quiet for that ending's pause, the cancelled cue plays and a notice names the phrase. Nothing is cut, retried or acted on.
   Why: spotted times run 0.2–0.5 s late and finals carry no word times; a recheck by the same recognizer rescued 0 of 12 disputed hits in 62.8 min; the quiet gate keeps false alarms (16 in that time) silent.
   Rejected: cutting at the spotted time, a recheck, acting on the spotter alone, judging on a short timer (24 of 36 finals came late), quoting dictated words.
-- **Delivery is a paste.** Dictation and writing go on the clipboard and the bound window gets Ctrl+V (Ctrl+Shift+V in a known Linux terminal class); text may hold line breaks and tabs, no other control character. Hyprland sends the keys with `sendshortcut` and the keycode of V from the first layout (libxkbcommon).
-  Why: a paste inserts line breaks without Enter; GTK 3 ignores wtype's Ctrl keys, and `sendshortcut` keeps a key name's first keycode across layout changes.
-  Rejected: typing with Shift+Enter for line breaks, typing single lines and pasting multi-line text (two paths), wtype keys, keeping multi-line text out of terminals (a shell with bracketed paste off runs pasted lines, as the user's own paste does).
+- **Delivery is a paste, held back from terminals.** Dictation and writing go on the clipboard and the bound window gets Ctrl+V (Ctrl+Shift+V in a known Linux terminal class); text may hold line breaks and tabs, no other control character. Unconfirmed text with a line break stays on the clipboard when the window is a terminal Thalvi pastes into: the Hyprland terminal classes, the Windows console and Windows Terminal. Submit pastes it after its confirmation shows the text. Hyprland sends the keys with `sendshortcut` and the keycode of V from the first layout (libxkbcommon).
+  Why: a paste inserts line breaks without Enter, but a shell with bracketed paste off runs each pasted line, and recognized or written text arrives unread; GTK 3 ignores wtype's Ctrl keys, and `sendshortcut` keeps a key name's first keycode across layout changes.
+  Rejected: typing with Shift+Enter for line breaks, typing single lines and pasting multi-line text (two paths), wtype keys, holding back all multi-line text (breaks emails in every app), holding back tabs (they run nothing), trusting bracketed paste.
 - **Check, then paste.** Delivery re-verifies the bound window just before pressing keys,
   which go to whatever window is focused, except Hyprland's paste keys, which are addressed to it. Why: Enter and Windows
   input cannot be addressed to one window, so a switch in those milliseconds can misdirect them.
@@ -164,6 +142,9 @@ areas your change touches. Editing rules are in
   OpenAI-compatible endpoint from Settings and pastes what streams back, line breaks included; no context, no Enter, 15 s at most;
   reasoning shows as thinking, never pasted, and the request says nothing about thinking; any failure pastes nothing and puts the words
   on the clipboard. Why: no server needed, unsaid text never sent unread, strict endpoints refuse unknown fields. Rejected: the Thalvi server, write-and-send, sending `enable_thinking`.
+- **Local chat is a pinned prebuilt child.** Settings installs llama.cpp b12255 and Qwen3 4B Q4_K_M (Apache-2.0); the runtime's own Vulkan device check chooses GPU or CPU, with a CPU override. Writing and merging lazily share one loopback child with a fresh key, deterministic sampling and thinking disabled in the template; loading is cancellable and measured separately. One crash gets one restart on the next use, and quitting stops it.
+  Why: the 4B kept EN/DE/ES meaning in the fixed comparison and CPU generation stayed below 1.6 s on the desktop; the smaller candidates invented text or translated it. Windows laptop acceptance remains required.
+  Rejected: user builds, containers, OS services, a reasoning-budget flag alone, and downloading into a remote server.
 - **The writing prompt is a stored override of one built-in default.** `writing.prompt` is the system message; it is
   saved only when it differs from the default, and a blank one is refused where the config loads. Why: users who never
   edited it get a better default later, and Settings, the agent surface and the file share one check. Rejected:
@@ -193,61 +174,6 @@ areas your change touches. Editing rules are in
   call and the message stays on the clipboard. Why: trusted input can reach an existing
   child editor outside the gate, and a key acknowledgement is no delivery receipt.
   Rejected: shipping the unsafe path, channel webhooks and private REST.
-- **Spoken acknowledgement.** With `THALVI_ACK=on`, a slow reply first plays a
-  canned line (rotated, synthesized once and cached per session) when no first
-  sentence arrives within 500 ms. Why: it covers the model's thinking gap with
-  no extra model call, and recordings report its first audio separately from
-  the real answer's. Rejected: a small model writing the line (adds the
-  latency it should hide), and on by default (no off baseline to compare).
-- **Measure setups with an LLM judge on a fixed prompt set.** `measure` times
-  setups interleaved, then a judge model grades answers 1 to 5 against a rubric.
-  Why: setups compare in minutes, with numbers, repeatably. Rejected: rating by
-  hand (slow), and a router or fast-model role before the numbers ask for one.
-
-- **Audio input is the current turn only.** With `LLM_AUDIO_INPUT=on`, a
-  spoken turn reaches the model as its audio alone, with no transcript beside
-  it, while earlier turns stay text. Why: the model was trained on audio only,
-  and old clips would grow every request. Rejected: audio plus transcript
-  (off-distribution), audio for the whole history.
-- **Heard guard.** Only the reasoning line opening "The user said:" is the echo;
-  other reasoning stays private, and no echo is trusted. Reject empty captions or
-  >50% word disagreement, say "Sorry, I didn't catch that.", omit the turn from
-  history; matching one-word replies pass. Why: stop invented requests without
-  blocking short answers. Rejected: a two-word minimum, comparing any reasoning.
-- **Keyword history search.** `search_history` searches the current and past
-  sessions and returns short excerpts as data; task steps stay collapsed. Why:
-  recover earlier details without whole-history context. Rejected: embeddings
-  and code mode before a keyword tool proves useful.
-- **Reading a conversation never takes it over.** `GET /sessions/{id}` previews;
-  only an explicit Continue here resumes, moving a live one from its device.
-  Why: browsing must not cut off the device in use. Rejected: resume on open,
-  shared ownership. Desktop conversation clients follow the same split.
-- **Private conversations hold no store.** `/session?private=1` opens one with no store handle: never saved,
-  listed, titled, retired or searched from others, metrics only whatever `THALVI_RECORD` says; closing ends it
-  and a `private-` id can't be resumed. Desktop clients send the same flag and keep nothing derived locally.
-  Why: a type that cannot write beats a flag that must not. Rejected: a private flag on saved sessions, reconnecting into a fresh saved one.
-- **Briefing headlines are a bounded JSON snapshot, fetched off the reply path.** `BRIEFING_URL` and
-  `BRIEFING_TOKEN` name `GET /v1/briefings/latest`; the server prefetches and refreshes in the background,
-  and an ordinary conversation captures the fresh (24 h) snapshot when it opens, as its own data-only model
-  message. Private conversations hold no handle to it. Why: a cold or failed fetch must never delay a
-  reply. Rejected: an MCP client for one source, blocking the first reply, headlines on disk or in
-  history, briefing access in private conversations.
-- **Briefing search is two bounded read-only tools on the same source.** `search_briefing` and
-  `read_briefing_item` call `POST /v1/briefings/search` and `GET /v1/briefings/items/{id}` inside the
-  three-round tool loop; each call has its own 5 s deadline and 64 KiB cap, and a failure is a plain tool
-  result. Why: rounds don't bound calls within a round. Rejected: searching on every turn, an `ask_agent` tool.
-- **Opt-in retirement with editable learnings.** `THALVI_RETIRE_DAYS` replaces
-  old transcripts with summaries and keeps durable facts in a separate editable
-  store. Why: bound retention without losing useful context. Rejected:
-  automatic deletion by default or hiding learnings inside summaries.
-- **Model and speech requests fail on a stall, not on total time.** A request fails when no byte
-  arrives for 30 s (model) or 10 s (speech), headers and every chunk gap included; the user gets a
-  plain notice and metrics record `timeout`. Why: replies stream for as long as they need. Rejected: a
-  total deadline (cuts long replies and tool rounds).
-- **Per-device voices on the configured engine.** `TTS_VOICES` offers names;
-  browsers preview and save their own choice. Why: simple personalization
-  without shared-device surprises. Rejected: runtime engine switching and a
-  server-wide voice preference.
 
 ## Repository
 
@@ -287,7 +213,7 @@ areas your change touches. Editing rules are in
   and mutation runs on the Linux one, only read them. Why: a PR can read only its own and its base branch's caches,
   so per-PR copies left every new PR cold and filled the 10 GB limit. Rejected: saving on every PR.
 - **PRs run what changed; `main` runs everything.** A PR runs the steps its paths affect, and anything unmapped
-  runs all, except Markdown outside `crates/`, `web/` and `speech/`, which runs no unit; `heavy.yml` runs every gate plus mutants on `main`, nightly and on request. Why: PRs get a fast answer,
+  runs all, except Markdown outside `crates/` and `speech/`, which runs no unit; `heavy.yml` runs every gate plus mutants on `main`, nightly and on request. Why: PRs get a fast answer,
   and a slip past detection is caught on `main` with the commits since `verified`. Rejected: mutants on every PR.
 - **Local checks run in three stages.** Editing runs the closest check; before pushing, each component `changed origin/main HEAD` names runs `gates` once, with `TESTS` and `BUNDLE=false`, and only `all` (an unmapped diff) builds a package locally; PR CI and `main` are unchanged (13 Nov 2026).
   Why: in 54 PR server jobs the AppImage took a median 135 s of a 261 s gate (53%), and a branch ran the full gate 2.3 times on average.
@@ -304,7 +230,7 @@ areas your change touches. Editing rules are in
 - **Repeatable property cases, separate exploration.** Cargo defaults to 256 ChaCha cases with a fixed seed;
   exploratory runs override and record the seed, and failures become minimized regressions.
   Why: required checks need replayable inputs while exploration needs new ones. Rejected: fixed seeds alone.
-- **Selective lint enforcement.** Production unwrap, expect, panic and todo are denied; redundant clones join
-  the existing pedantic gate, with narrow reasoned expectations for invariants and platform requirements.
-  Why: catch mistakes without forcing artificial error paths or fragmented functions.
-  Rejected: all nursery lints, a blanket indexing ban, lower hard complexity caps, suppression to pass a gate.
+- **Selective lint enforcement.** Vardli and Thalvi share one Rust lint set: pedantic except `missing_errors_doc` and
+  `must_use_candidate`; production unwrap, expect, panic, todo and unimplemented denied; narrow reasoned expectations (16 Nov 2026).
+  Why: catch mistakes without forcing artificial error paths, fragmented functions or docs that restate a signature.
+  Rejected: all nursery lints, a blanket indexing ban (Vardli has one; #508 decides), lower hard complexity caps, suppression to pass a gate.
