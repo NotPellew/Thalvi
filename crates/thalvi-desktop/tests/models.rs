@@ -327,6 +327,28 @@ async fn a_damaged_file_on_disk_is_downloaded_again() {
     assert_eq!(fs::read(path).expect("saved"), GOOD);
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_file_blocking_the_model_folder_reports_that_the_path_is_not_a_directory() {
+    let dir = dir("folder-is-a-file");
+    fs::write(&dir, b"a file, not the model folder").expect("blocked folder");
+    let sha = sha256(GOOD);
+    let error = ModelStore::in_dir(&dir)
+        .fetch(&asset("http://127.0.0.1:1/good.onnx", &sha))
+        .await
+        .expect_err("a file cannot contain model files");
+
+    assert!(
+        matches!(&error, ModelError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotADirectory),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read(&dir).expect("blocking file remains"),
+        b"a file, not the model folder"
+    );
+    fs::remove_file(dir).expect("cleanup");
+}
+
 #[tokio::test]
 async fn a_speech_model_is_named_as_one_when_it_cannot_be_trusted() {
     let (address, _server) = serve().await;
@@ -614,6 +636,11 @@ async fn the_catalog_lists_each_model_with_its_size_license_languages_source_and
     );
     for model in &models {
         assert!(CatalogSpeech::named(model.name).is_some(), "{}", model.name);
+        assert_eq!(
+            ListedSpeech::named(model.name).expect("listed").source(),
+            model.source,
+            "the model page opened from Settings"
+        );
     }
     assert_eq!(CatalogSpeech::named("elsewhere"), None);
 }
@@ -1004,6 +1031,11 @@ async fn the_whisper_entries_are_listed_with_one_shared_download_that_marks_both
         assert_eq!(model.size, 574_041_195 + 885_098);
         assert_eq!(model.license, "MIT");
         assert_eq!(model.source, "https://huggingface.co/ggerganov/whisper.cpp");
+        assert_eq!(
+            ListedSpeech::named(model.name).expect("listed").source(),
+            model.source,
+            "the model page opened from Settings"
+        );
         assert!(
             model.description.contains("Experimental")
                 && model.description.contains("word list is ignored"),

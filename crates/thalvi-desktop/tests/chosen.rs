@@ -79,6 +79,7 @@ async fn audio_reaches_the_entry_and_closing_or_cancelling_ends_its_stream() {
             .await
             .expect("connects")
             .expect("ready");
+        assert_eq!(session.final_wait(), Duration::from_secs(11));
         session
             .send_frame(&[100; FRAME_SAMPLES])
             .await
