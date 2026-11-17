@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Check the Rust layout rules of AGENTS.md: OS cfg only selects OS modules, every module starts with `//!`, `lib.rs` only declares."""
+import re
+import sys
+from pathlib import Path
+
+OS_MODULES = {'linux', 'windows', 'gnome', 'hyprland'}
+OS_PREDICATES = {'target_os', 'target_family', 'windows', 'unix'}
+ALLOWANCES = '.github/scripts/rust-layout.allow'
+
+OS_CFG_FIX = (
+    'OS cfg in shared code: move the OS-specific part into the `linux`/`windows` module pair behind the desktop host '
+    'interface (crates/thalvi-desktop/src/host.rs), select those modules with `#[cfg(target_os)]` on `mod` or `use` '
+    'only, and let each OS return a typed reason the user sees where it cannot do the thing; do not raise the allowance'
+)
+TEST_MODULE_FIX = (
+    'inline test module is not the end of the file: keep `#[cfg(test)] mod tests {` as the last item, '
+    'followed at most by `#[cfg(test)] mod name;` declarations; move other test code into such a file'
+)
+DOC_LINE_FIX = 'the file does not start with a `//!` line: add one line saying what this module owns'
+LIB_FIX = (
+    'lib.rs holds more than module declarations and re-exports: move this into its own module file, '
+    'declare it with `mod name;` and re-export what callers need with `pub use`'
+)
+
+SOURCE_START = re.compile(r'//|/\*|(?<!\w)b?r(#*)"|"|\'')
+STRING = re.compile(r'"(?:\\.|[^"\\])*"', re.S)
+CHAR = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)|[^\\'\n])'")
+COMMENT_EDGE = re.compile(r'/\*|\*/')
+CFG = re.compile(r'#!?\[\s*(cfg|cfg_attr)\s*\(|(?<![\w])cfg\s*!\s*\(')
+TEST_MODULE = re.compile(r'^#\[cfg\(test\)\]\s*\n\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{', re.M)
+TEST_DECLARATION = re.compile(r'#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*;')
+ATTRIBUTE = re.compile(r'\s*#\[')
+OS_ITEM = re.compile(r'\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:mod|use)\b')
+LIB_ITEM = re.compile(r'(?:pub(?:\s*\([^)]*\))?\s+)?(?:mod\s+\w+\s*;|use\b[^;]*;)')
+
+
+def mask(src: str) -> str:
+    """The source with comments and string and char literals blanked; offsets and newlines are kept."""
+    out = list(src)
+    pos = 0
+    while m := SOURCE_START.search(src, pos):
+        token = m.group()
+        if token == '//':
+            end = src.find('\n', m.start())
+            end = len(src) if end < 0 else end
+        elif token == '/*':
+            depth, end = 1, m.end()
+            while depth and (nxt := COMMENT_EDGE.search(src, end)):
+                depth += 1 if nxt.group() == '/*' else -1
+                end = nxt.end()
+            end = end if depth == 0 else len(src)
+        elif token == '"':
+            literal = STRING.match(src, m.start())
+            end = literal.end() if literal else len(src)
+        elif token == "'":
+            literal = CHAR.match(src, m.start())
+            if not literal:
+                pos = m.end()
+                continue
+            end = literal.end()
+        else:
+            close = '"' + m.group(1)
+            found = src.find(close, m.end())
+            end = len(src) if found < 0 else found + len(close)
+        for i in range(m.start(), end):
+            if out[i] != '\n':
+                out[i] = ' '
+        pos = end
+    return ''.join(out)
+
+
+def closing(text: str, open_at: int) -> int:
+    """Offset just past the bracket that closes the one at `open_at`, or the end of the text."""
+    depth = 0
+    for i in range(open_at, len(text)):
+        if text[i] in '([{':
+            depth += 1
+        elif text[i] in ')]}':
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(text)
+
+
+def first_argument(args: str) -> str:
+    depth = 0
+    for i, c in enumerate(args):
+        depth += c in '([{'
+        depth -= c in ')]}'
+        if c == ',' and depth == 0:
+            return args[:i]
+    return args
+
+
+def line_of(text: str, offset: int) -> int:
+    return text.count('\n', 0, offset) + 1
+
+
+def os_cfg_lines(masked: str, exempt_from: int) -> list[int]:
+    """Lines of OS cfg uses before `exempt_from` that are not on a `mod` or `use` item."""
+    lines = []
+    for m in CFG.finditer(masked, 0, exempt_from):
+        paren = m.end() - 1
+        args = masked[paren + 1 : closing(masked, paren) - 1]
+        predicate = first_argument(args) if m.group(1) == 'cfg_attr' else args
+        if not OS_PREDICATES & set(re.findall(r'[A-Za-z_]\w*', predicate)):
+            continue
+        if m.group().startswith('#['):
+            after = masked.index(']', closing(masked, paren)) + 1
+            while attribute := ATTRIBUTE.match(masked, after):
+                after = closing(masked, attribute.end() - 1)
+            if OS_ITEM.match(masked, after):
+                continue
+        lines.append(line_of(masked, m.start()))
+    return lines
+
+
+def check_lib(masked: str) -> list[int]:
+    lines = []
+    pos = 0
+    while pos < len(masked):
+        if masked[pos].isspace():
+            pos += 1
+        elif masked.startswith(('#[', '#![')):
+            pos = closing(masked, masked.index('[', pos))
+        elif item := LIB_ITEM.match(masked, pos):
+            pos = item.end()
+        else:
+            lines.append(line_of(masked, pos))
+            break
+    return lines
+
+
+def read_allowances(root: Path) -> tuple[dict[str, int], list[str]]:
+    allowed: dict[str, int] = {}
+    problems = []
+    path = root / ALLOWANCES
+    for number, line in enumerate(path.read_text().splitlines() if path.exists() else [], 1):
+        fields = line.split(' ')
+        if len(fields) == 2 and fields[1].isdigit():
+            allowed[fields[0]] = int(fields[1])
+        else:
+            problems.append(f'{ALLOWANCES}:{number}: expected `path count`, one per line, nothing else')
+    return allowed, problems
+
+
+def main() -> int:
+    root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parents[2]
+    allowed, problems = read_allowances(root)
+    seen: set[str] = set()
+    for file in sorted(root.glob('crates/*/src/**/*.rs')):
+        rel = file.relative_to(root)
+        name = rel.as_posix()
+        src = file.read_text()
+        if not src.startswith('//!'):
+            problems.append(f'{name}:1: {DOC_LINE_FIX}')
+        masked = mask(src)
+        if file.name == 'lib.rs':
+            problems += [f'{name}:{n}: {LIB_FIX}' for n in check_lib(masked)]
+        if OS_MODULES & {*rel.parts[:-1], file.stem}:
+            continue
+        exempt_from = len(masked)
+        if tests := TEST_MODULE.search(masked):
+            exempt_from = tests.start()
+            end = masked.find('\n}', tests.end())
+            if end < 0 or TEST_DECLARATION.sub('', masked[end + 2 :]).strip():
+                problems.append(f'{name}:{line_of(masked, tests.start())}: {TEST_MODULE_FIX}')
+        lines = os_cfg_lines(masked, exempt_from)
+        seen.add(name)
+        limit = allowed.get(name, 0)
+        if len(lines) > limit:
+            problems.append(f'{name}:{lines[0]}: {len(lines)} OS cfg uses, allowed {limit}; the new ones are listed below')
+            problems += [f'{name}:{n}: {OS_CFG_FIX}' for n in lines]
+        elif len(lines) < limit:
+            problems.append(f'{name}:1: {len(lines)} OS cfg uses left, allowed {limit}: lower this file to `{name} {len(lines)}` in {ALLOWANCES}, or delete the line at 0')
+    problems += [
+        f'{ALLOWANCES}: {name} is allowed {limit} OS cfg uses but no such file has any: delete the line'
+        for name, limit in allowed.items()
+        if name not in seen and limit > 0
+    ]
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    return 1 if problems else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
