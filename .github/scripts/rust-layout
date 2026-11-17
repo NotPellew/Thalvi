@@ -122,7 +122,7 @@ def check_lib(masked: str) -> list[int]:
     while pos < len(masked):
         if masked[pos].isspace():
             pos += 1
-        elif masked.startswith(('#[', '#![')):
+        elif masked.startswith(('#[', '#!['), pos):
             pos = closing(masked, masked.index('[', pos))
         elif item := LIB_ITEM.match(masked, pos):
             pos = item.end()
