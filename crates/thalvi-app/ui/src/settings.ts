@@ -48,6 +48,8 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   let current = "recognition";
   /** Disclosures this search opened, so clearing it closes only those. */
   const openedBySearch = new Set<HTMLDetailsElement>();
+  /** Disclosures whose open state search just set, so that toggle is not a user touch. */
+  const openedProgrammatically = new Set<HTMLDetailsElement>();
   /** Disclosures the user opened or closed while searching; those keep that state. */
   const touchedDuringSearch = new Set<HTMLDetailsElement>();
   // What the desktop holds; pages read it and change it only through `apply`.
@@ -127,6 +129,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     while (currentNode !== null && !currentNode.matches("section[data-page]")) {
       if (currentNode instanceof HTMLDetailsElement && !currentNode.open) {
         openedBySearch.add(currentNode);
+        openedProgrammatically.add(currentNode);
         currentNode.open = true;
       }
       const ancestor: HTMLElement | null = currentNode.parentElement;
@@ -285,7 +288,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   const touchedByUser = (event: Event): void => {
     if (search.value.trim() === "") return;
     const node = event.target instanceof Element ? event.target.closest("details") : null;
-    if (node instanceof HTMLDetailsElement && openedBySearch.has(node)) touchedDuringSearch.add(node);
+    if (!(node instanceof HTMLDetailsElement) || !openedBySearch.has(node)) return;
+    // Setting open fires toggle, synchronously in jsdom and later in WebKit. Both are the open
+    // search made, so they are ignored until the user clicks the summary.
+    if (event.type === "toggle" && openedProgrammatically.has(node)) return;
+    openedProgrammatically.delete(node);
+    touchedDuringSearch.add(node);
   };
   // jsdom flips <details> on a summary click and does not fire toggle, so both are recorded.
   pagesNode.addEventListener("toggle", touchedByUser, true);

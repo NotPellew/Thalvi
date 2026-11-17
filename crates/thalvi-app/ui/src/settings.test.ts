@@ -6,7 +6,7 @@ import settingsLooksCss from "./settings-looks.css?raw";
 import { disclosureMemory } from "./dom.ts";
 import { fakeBackend } from "./fake.ts";
 import { settingsPatch } from "./patch.ts";
-import { HINT_BUDGET } from "./settings-pages.ts";
+import { HINT_BUDGET, shownNumber } from "./settings-pages.ts";
 import { APPLIED_LATER_TEXT, APPLIED_TEXT, mountSettings } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO, WHISPER } from "./testing.ts";
 
@@ -798,7 +798,7 @@ describe("a custom speech model folder", () => {
 });
 
 describe("the word list", () => {
-  const FAVOURED = "Names and terms to spell your way, added one at a time.";
+  const FAVOURED = "Names and terms, added one at a time.";
   const VULKAN_TITLE = "Whisper Turbo · Vulkan GPU (experimental)";
   const ignored = (title: string): string => {
     const named = `${title} ignores them.`;
@@ -986,7 +986,7 @@ describe("the speech server list", () => {
       ["open_ai", OPEN_AI],
       ["on_device", "On this computer"],
     ]);
-    expect(root.querySelector(".kind-help")?.textContent).toContain("Live streams to a realtime server.");
+    expect(root.querySelector(".kind-help")?.textContent).toContain("Live streams.");
     expect(names(live as HTMLElement)).toEqual(["Realtime speech server", "Cybrex2", "On this computer"]);
     expect(names(extra as HTMLElement)).toEqual(["OpenAI", "Meta"]);
     expect(badgesOf("Realtime speech server")).toEqual([REALTIME, "Live"]);
@@ -1219,7 +1219,7 @@ describe("extra recognizers", () => {
     expect(tickOf("OpenAI").getAttribute("aria-label")).toBe("Also transcribe with OpenAI");
     expect(entryNamed("OpenAI").querySelector(".unit")?.textContent).toBe("Audio goes to api.openai.com");
     expect(entryNamed("Meta").querySelector(".unit")?.textContent).toBe("Audio goes to meta.example");
-    expect(extraGroup().textContent).toContain("Each one switched on also transcribes; the chat model merges them.");
+    expect(extraGroup().textContent).toContain("Each one switched on also transcribes.");
   });
 
   const states = [
@@ -2192,7 +2192,7 @@ describe("writing", () => {
       expect(field("Title contains for “Slack.exe”").getAttribute("placeholder")).toBe("—");
       expect(field("New app").value).toBe("");
       expect(document.activeElement).toBe(within(rows(), "Add by name"));
-      expect(rows().textContent).toContain("A prompt for the app you write into. A spoken phrase wins.");
+      expect(rows().textContent).toContain("A prompt for the app you write into.");
     });
 
     it.each(["Gmail", ""])("offers the current app's title and lets it be cleared before adding (%s)", async (title) => {
@@ -2351,6 +2351,29 @@ describe("folded settings", () => {
     expect(rowOf(label).hidden).toBe(false);
   });
 
+  it.each([
+    [0.6000000238418579, "0.6"],
+    [0.55, "0.55"],
+    [0.7, "0.7"],
+  ])("names a threshold of %s as %s, the way its slider shows it", async (value, shown) => {
+    expect(shownNumber(value)).toBe(shown);
+    await open({ ...SETTINGS, wake: { ...SETTINGS.wake, capture: { model: "hey_jarvis", threshold: value } } });
+    goTo("listening");
+    expect(summaryOf("Threshold (dictation)")).toBe(`Details · threshold ${shown}`);
+  });
+
+  it("shows a group whose rows all sit inside a fold", async () => {
+    await open();
+    const hide = settingsLooksCss.match(/\.grp:not\(:has\(.+?\)\)\)/)?.[0];
+    if (hide === undefined) throw new Error("no group hiding rule");
+    for (const title of ["Capture limits", "Quiet before acting"]) {
+      const heading = Array.from(root.querySelectorAll("h4")).find((node) => node.textContent === title);
+      const group = heading?.closest(".grp");
+      if (!(group instanceof HTMLElement)) throw new Error(`no group ${title}`);
+      expect(group.matches(hide), title).toBe(false);
+    }
+  });
+
   it("opens the details of a number the field itself refuses, so the invalid value stays visible", async () => {
     await open();
     goTo("listening");
@@ -2488,6 +2511,8 @@ describe("search", () => {
     expect(limits.open).toBe(true);
     expect(limits.closest("section")?.hidden).toBe(false);
     expect(rowOf("Stop after silence").hidden).toBe(false);
+    const limitsGroup = limits.closest(".grp");
+    expect(limitsGroup?.matches(".grp:not(:has(.row:not([hidden])))")).toBe(false);
 
     type(search, "window classes");
     expect(app.open).toBe(true);
@@ -2496,6 +2521,9 @@ describe("search", () => {
     expect(classes?.closest("[hidden]")).toBeNull();
 
     app.open = false;
+    // WebKit fires toggle asynchronously after the programmatic open, which must not count as a touch.
+    await new Promise((resolve) => { setTimeout(resolve, 0); });
+    limits.dispatchEvent(new Event("toggle", { bubbles: true }));
     type(search, "");
     expect(limits.open).toBe(false);
     expect(app.open).toBe(false);
@@ -3244,7 +3272,6 @@ describe("history", () => {
     expect(control("Keep a history", "input").checked).toBe(true);
     expect(control("Entries to keep", "input").value).toBe("200");
     expect(rowOf("Keep a history").textContent).toContain("What you dictate and where it went.");
-    expect(rowOf("Keep a history").textContent).toContain("Off stops new entries");
 
     flip(control("Keep a history", "input"));
     type(control("Entries to keep", "input"), "50");

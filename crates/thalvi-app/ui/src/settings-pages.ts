@@ -151,13 +151,14 @@ const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pe
 const WHEN = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 /**
- * Characters a hint may use and still fit on one line at a 400 px window.
- * At `max-width: 560px` the page padding is 10 px a side, so a row is 380 px wide;
- * a folded row adds 8 px of left padding, leaving 372 px. Hints are 11 px system-ui,
- * which resolves to Noto Sans. A run of ordinary hint prose (lowercase, spaces and
- * punctuation) measures 5.26 px a character there, and 372 / 5.26 rounded down is 70.
+ * Characters a hint may use and still fit on one line at a 400 px window, in every look.
+ * At `max-width: 560px` the page padding is 10 px a side. Neon leaves a folded row 372 px.
+ * Holo and Gunmetal pad the group as well (16 px and 14 px a side) and draw a 1 px or 3 px
+ * border, leaving 340 px and 344 px. Their hints are 11.5 px monospace (`--mono`, Noto Sans
+ * Mono here) at 6.90 px a character of ordinary prose, so `floor(340 / 6.90)` is 49. Neon is
+ * wider. 48 stays inside that and inside the kind-help line, which has no row padding.
  */
-export const HINT_BUDGET = 70;
+export const HINT_BUDGET = 48;
 
 export function row(label: string, hint: string | null, control: Field | HTMLElement): HTMLElement {
   const labelId = uid("l");
@@ -223,9 +224,15 @@ function defaultThreshold(model: string): number {
   return 0.5;
 }
 
+/** A number as its row shows it: a slider prints two decimals and drops trailing zeros. */
+export function shownNumber(value: number): string {
+  return value.toFixed(2).replace(/\.?0+$/, "");
+}
+
 /** A short summary of values that differ from the defaults; empty when nothing does. */
 function changedSummary(parts: readonly (readonly [string, string | number, string | number])[]): string {
-  const changed = parts.filter(([, value, start]) => value !== start).map(([name, value]) => `${name} ${String(value)}`);
+  const text = (value: string | number): string => typeof value === "number" ? shownNumber(value) : value;
+  const changed = parts.filter(([, value, start]) => value !== start).map(([name, value]) => `${name} ${text(value)}`);
   return changed.length === 0 ? "" : ` · ${changed.join(", ")}`;
 }
 
@@ -432,7 +439,7 @@ function wakeHeads(context: PageContext): HTMLElement[] {
     };
     const thresholdRow = row(
       `Threshold (${name})`,
-      "Higher wakes less often; lower catches quieter speech.",
+      "Higher wakes less often; lower catches more.",
       threshold,
     );
     const shown = settings.wake.capture.threshold;
@@ -733,7 +740,7 @@ function holdKeys(context: PageContext): HTMLElement[] {
   return [
     group("Hold keys"),
     holdKeyRow("Dictate key", "Hold it, speak, let go to paste.", "hold_key", context, notices),
-    holdKeyRow("Write key", "Hold it to have the words written out, then pasted.", "write_key", context, notices),
+    holdKeyRow("Write key", "Hold it to write the words out, then paste.", "write_key", context, notices),
   ];
 }
 
@@ -916,7 +923,7 @@ const LIVE_KINDS: readonly (readonly [LiveEntry["kind"], string])[] = [
   ["open_ai", KIND_NAMES.open_ai],
   ["on_device", KIND_NAMES.on_device],
 ];
-const KIND_HELP = "Live streams to a realtime server. After you stop sends the recording.";
+const KIND_HELP = "Live streams. After you stop sends it.";
 
 function isLive(entry: SpeechEntry): entry is LiveEntry {
   return entry.kind !== "extra";
@@ -1089,7 +1096,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
     "Details · your own model folder",
     [
       ownFolder,
-      el("p", { class: "kind-help" }, "encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt."),
+      el("p", { class: "kind-help" }, "encoder, decoder, joiner .int8.onnx, tokens.txt."),
     ],
     { open: folderEmpty || ownFolderPicked, invalid: folderEmpty },
   );
@@ -1114,7 +1121,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
   return {
     rows: [
       row("Show models for", "Filters this list by each card's languages.", { node: languagePicker, field: languagePicker }),
-      row("Speech model", "Downloads on first use. A pick applies from the next capture.", speechModelField),
+      row("Speech model", "Downloads on first use. A pick applies next.", speechModelField),
     ],
     validate: () => {
       if (ownFolderPicked && chosen === "") {
@@ -1724,7 +1731,7 @@ function speech(context: PageContext): SpeechRows {
   void refreshChat();
   const localRows = [
     row("Local chat runtime", "A usable GPU, otherwise the CPU.", chatBuild),
-    row("Local chat model", "Downloads only to this computer. No server to manage.", el("div", { class: "stack wide" }, chatDetails, el("span", { class: "trow" }, installChat, removeChat), chatProgress, chatState, chatProblem)),
+    row("Local chat model", "Downloads only to this computer.", el("div", { class: "stack wide" }, chatDetails, el("span", { class: "trow" }, installChat, removeChat), chatProgress, chatState, chatProblem)),
   ];
   const manualRows: HTMLElement[] = [];
   function syncChatSource(): void {
@@ -1949,7 +1956,7 @@ function speech(context: PageContext): SpeechRows {
   const words = wordListTable(context);
   const wordProblem = note();
   words.node.append(wordProblem);
-  const wordListHint = "Names and terms to spell your way, added one at a time.";
+  const wordListHint = "Names and terms, added one at a time.";
   const wordRow = row("Word list", wordListHint, words.node);
   const wordHint = wordRow.querySelector(".what small");
   let wordListRequest = 0;
@@ -2006,10 +2013,10 @@ function speech(context: PageContext): SpeechRows {
       group("Live dictation"),
       nextDictation,
       summaryActions,
-      row("Speech servers", "The one marked Live shows your words and hears the endings.", liveBlock),
+      row("Speech servers", "The one marked Live shows your words.", liveBlock),
       wordRow,
       group("Extra recognizers"),
-      row("Extra recognizers", "Each one switched on also transcribes; the chat model merges them.", extraBlock),
+      row("Extra recognizers", "Each one switched on also transcribes.", extraBlock),
     ],
     chat: [
       group("Writing"),
@@ -2018,17 +2025,17 @@ function speech(context: PageContext): SpeechRows {
       ...manualRows,
       row(
         "Writing prompt",
-        "Instructions sent with every dictation. Blank is not allowed.",
+        "Sent with every dictation. Blank is not allowed.",
         writingPromptField,
       ),
       row(
         "Opening phrases",
-        "A matching start uses its prompt; the longest phrase wins.",
+        "A matching start uses its prompt.",
         openingsField,
       ),
       row(
         "App styles",
-        "A prompt for the app you write into. A spoken phrase wins.",
+        "A prompt for the app you write into.",
         appStylesField,
       ),
     ],
@@ -2114,7 +2121,7 @@ function microphone({ settings, backend, controls, microphones, live, audio, app
 function overlay({ settings, controls, apply }: PageContext): HTMLElement[] {
   return [
     group("Overlay"),
-    row("Show the overlay", "A small pill at the top while Thalvi is capturing.",
+    row("Show the overlay", "A small pill at the top while capturing.",
       controls.toggle(settings.overlay.show, (value) =>
         apply((next) => {
           next.overlay.show = value;
@@ -2355,7 +2362,7 @@ function limits({ settings, controls, apply }: PageContext): HTMLElement[] {
       "listening/capture-limits/limits",
       `Details${changedSummary([["silence", limits.idle, 60], ["stop after", limits.max, 300]])}`,
       [
-        row("Stop after silence", "No words for this long ends the capture, 10 to 600 s.",
+        row("Stop after silence", "No words for this long ends it, 10 to 600 s.",
           controls.number(limits.idle, { min: 10, max: 600, step: 1, unit: "s" }, (value) =>
             apply((next) => {
               next.capture_limits.idle = value;
@@ -2437,7 +2444,7 @@ function startup({ backend, controls, startAtLogin, menuEntry }: PageContext): H
     group("Startup"),
     switchRow(
       "Start Thalvi when I log in",
-      "Starts the voice app at login, listening as usual.",
+      "Starts the voice app at login.",
       startAtLogin,
       controls,
       { read: () => backend.getStartAtLogin(), set: (on) => backend.setStartAtLogin(on), copy: () => backend.copyLoginLine() },
@@ -2455,7 +2462,7 @@ function startup({ backend, controls, startAtLogin, menuEntry }: PageContext): H
 function recordings({ settings, backend, controls, apply }: PageContext): HTMLElement[] {
   const kinds = [
     ["Metrics", "metrics", "When each wake, capture and model call happened."],
-    ["Text", "text", "The words you dictated and what Thalvi did with them."],
+    ["Text", "text", "The words you dictated, and what Thalvi did."],
     ["Audio", "audio", "What the microphone heard during a capture."],
   ] as const;
   const problem = note();
@@ -2657,7 +2664,7 @@ function history(context: PageContext): HTMLElement[] {
   return [
     ...last.nodes,
     group("Keeping"),
-    row("Keep a history", "What you dictate and where it went. Off stops new entries.",
+    row("Keep a history", "What you dictate and where it went.",
       controls.toggle(settings.history.enabled, (value) =>
         apply((next) => {
           next.history.enabled = value;
@@ -2669,7 +2676,7 @@ function history(context: PageContext): HTMLElement[] {
         }))),
     group("Kept so far"),
     row("Recent dictations", "Newest first. Deleting takes effect at once.", el("div", { class: "stack wide" }, problem, list)),
-    row("Clear history", "Deletes every entry, and a damaged file with them.",
+    row("Clear history", "Deletes every entry, and a damaged file.",
       confirmed("Clear history", "Delete every entry? This cannot be undone.", "Yes, clear history", "Keep history", () => {
         change(backend.clearHistory());
       })),
@@ -2788,9 +2795,9 @@ function updates({ settings, backend, controls, live, apply }: PageContext): HTM
   );
   return [
     group("Updates"),
-    row("Update channel", "Stable follows releases. Development follows test builds.",
+    row("Update channel", "Stable, or Development for test builds.",
       { node: el("span", { class: "stack" }, channel.node, switchNote), field: channel.field }),
-    row("Check for updates", "Thalvi checks once a day and installs while idle.",
+    row("Check for updates", "Checks once a day and installs while idle.",
       { node: el("span", { class: "stack" }, status, notice, el("span", { class: "num" }, check, notes), problem), field: check }),
   ];
 }
