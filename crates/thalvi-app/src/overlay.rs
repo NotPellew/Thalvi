@@ -66,6 +66,7 @@ impl Visibility {
             | Status::Working { .. }
             | Status::Transcribing { .. }
             | Status::Merging { .. }
+            | Status::CleaningUp { .. }
             | Status::Loading {
                 downloading: true, ..
             } => Self::Show,

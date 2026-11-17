@@ -41,6 +41,8 @@ pub struct DraftView {
     pub outcome: DraftOutcome,
     /// A newer dictation ended while this one had edits; discarding this one shows it.
     pub newer_waiting: bool,
+    /// The words as recognized, when a cleanup pasted something else; absent when they are `original`.
+    pub raw: Option<String>,
 }
 
 /// One dictation: what was heard, the user's edits and where it was meant to go.
@@ -51,6 +53,8 @@ pub struct Draft {
     text: String,
     target: Option<String>,
     outcome: DraftOutcome,
+    /// The words as recognized, when they differ from what was pasted.
+    raw: Option<String>,
 }
 
 impl Draft {
@@ -61,6 +65,18 @@ impl Draft {
         outcome: &CaptureOutcome,
         finished: Option<&Finished>,
         bound: &Bound<T>,
+    ) -> Option<Self> {
+        Self::with_raw(outcome, finished, bound, None)
+    }
+
+    /// Like [`of`](Self::of), and keeps `raw` (the words as recognized) when a cleanup pasted
+    /// something else, so a bad cleanup can be recovered.
+    #[must_use]
+    pub fn with_raw<T: Display>(
+        outcome: &CaptureOutcome,
+        finished: Option<&Finished>,
+        bound: &Bound<T>,
+        raw: Option<String>,
     ) -> Option<Self> {
         if matches!(outcome, CaptureOutcome::Accepted(request) if request.route == CaptureRoute::Task)
         {
@@ -75,12 +91,15 @@ impl Draft {
             }
             Outcome::Failed => DraftOutcome::Failed,
         };
+        // Equal words are the pasted text itself, so the draft keeps them once.
+        let raw = raw.filter(|raw| raw != &capture.text);
         Some(Self {
             id: 0,
             original: capture.text.clone(),
             text: capture.text,
             target: capture.target,
             outcome,
+            raw,
         })
     }
 }
@@ -133,6 +152,7 @@ impl Drafts {
             target: draft.target.clone(),
             outcome: draft.outcome,
             newer_waiting: slot.newer.is_some(),
+            raw: draft.raw.clone(),
         })
     }
 
@@ -165,6 +185,13 @@ mod tests {
     use crate::host::HostError;
     use crate::metrics::Recorder;
 
+    fn outcome_text(outcome: &CaptureOutcome) -> Option<&str> {
+        match outcome {
+            CaptureOutcome::Accepted(request) => Some(&request.text),
+            _ => None,
+        }
+    }
+
     fn paste_outcome(text: &str) -> CaptureOutcome {
         CaptureOutcome::Accepted(CaptureRequest {
             route: CaptureRoute::Paste,
@@ -189,7 +216,12 @@ mod tests {
         let finished = delivery
             .finish(outcome, &bound, &config, &Recorder::disabled())
             .await;
-        (Draft::of(outcome, finished.as_ref(), &bound), delivery)
+        let raw = (outcome_text(outcome) == Some("Ship it on Friday."))
+            .then(|| "I think we should ship it on Friday".to_owned());
+        (
+            Draft::with_raw(outcome, finished.as_ref(), &bound, raw),
+            delivery,
+        )
     }
 
     async fn offered(host: FakeHost, outcome: &CaptureOutcome) -> (Drafts, Delivery<FakeHost>) {
@@ -260,6 +292,12 @@ mod tests {
             ),
             ("blank text", FakeHost::default(), paste_outcome("  "), None),
             (
+                "cleaned text keeps the raw words",
+                FakeHost::default(),
+                paste_outcome("Ship it on Friday."),
+                Some(DraftOutcome::Delivered),
+            ),
+            (
                 "a task",
                 FakeHost::default(),
                 CaptureOutcome::Accepted(CaptureRequest {
@@ -272,15 +310,23 @@ mod tests {
             let view = offered(host, &outcome).await.0.view();
             assert_eq!(view.as_ref().map(|view| view.outcome), expected, "{label}");
             if let Some(view) = view {
+                let heard = if label == "cleaned text keeps the raw words" {
+                    "Ship it on Friday."
+                } else {
+                    "hello"
+                };
                 assert_eq!(
                     (
                         view.original.as_str(),
                         view.text.as_str(),
                         view.target.as_deref()
                     ),
-                    ("hello", "hello", Some("the editor")),
+                    (heard, heard, Some("the editor")),
                     "{label}"
                 );
+                let raw = (label == "cleaned text keeps the raw words")
+                    .then_some("I think we should ship it on Friday");
+                assert_eq!(view.raw.as_deref(), raw, "{label}");
             }
         }
     }

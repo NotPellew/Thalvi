@@ -75,6 +75,10 @@ pub enum Status {
         route: CaptureRoute,
         cancellable: bool,
     },
+    /// A dictation is being cleaned before it is pasted; it can still be cancelled.
+    CleaningUp {
+        target: Option<String>,
+    },
     /// The extra recognizers' texts are being merged with the live text; it can still be cancelled.
     Merging {
         target: Option<String>,
@@ -346,6 +350,7 @@ impl View {
                     route: *route,
                     cancellable: true,
                 },
+                EngineState::CleaningUp => Status::CleaningUp { target },
                 EngineState::Writing { text } => Status::Writing {
                     target,
                     text: text.clone(),

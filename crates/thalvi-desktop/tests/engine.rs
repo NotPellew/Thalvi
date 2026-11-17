@@ -34,7 +34,7 @@ use thalvi_desktop::recognizer::{
 use thalvi_desktop::spotter::KeywordSpotter;
 use thalvi_desktop::vad::VadDetector;
 use thalvi_desktop::wake::WakeEvent;
-use thalvi_desktop::writing::{DEFAULT_PROMPT, MERGE_PROMPT, WritingError};
+use thalvi_desktop::writing::{CLEANUP_PROMPT, DEFAULT_PROMPT, MERGE_PROMPT, WritingError};
 use tokio::sync::{oneshot, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
@@ -144,6 +144,54 @@ impl Rig {
     fn recording(config: &str, recorder: Recorder) -> (Self, TestEngine, FakeFrames) {
         let (rig, engine, frames) = Self::build(config, recorder, None, None);
         (rig, engine, frames)
+    }
+
+    /// A rig whose writing endpoint is the app-owned chat runtime.
+    fn with_chat(
+        config: &DesktopConfig,
+        recorder: Recorder,
+        chat: thalvi_desktop::chat::Chat,
+    ) -> (Self, TestEngine, FakeFrames) {
+        let gate = InputGate::default();
+        let (frames, feed) = FakeFrames::new(&gate);
+        let (wake_detector, wake) = FakeWake::new();
+        let (cue_player, cues) = FakeCuePlayer::new();
+        let notices = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&notices);
+        let (key, hold) = HoldInput::new();
+        let (recognizer, server) = FakeRecognizer::new();
+        let (engine, handle) = Engine::new(
+            Parts {
+                recognizer,
+                wake: wake_detector,
+                cues: cue_player,
+                gate: gate.clone(),
+                chat: Some(chat),
+                http: reqwest::Client::new(),
+                hold,
+                notice: Box::new(move |notice| sink.borrow_mut().push(notice.to_owned())),
+                spotter: None,
+                spotter_off: None,
+                extras: Vec::new(),
+            },
+            config,
+            recorder,
+        );
+        (
+            Self {
+                feed,
+                wake,
+                cues,
+                server,
+                extras: Vec::new(),
+                handle,
+                gate,
+                notices,
+                key,
+            },
+            engine,
+            frames,
+        )
     }
 
     /// A rig whose recognizer loads a model on this computer, which the test steps through.
@@ -6154,6 +6202,243 @@ async fn each_writing_call_records_its_times_to_first_reasoning_and_first_text_t
                     );
                 }
             }
+        })
+        .await;
+}
+
+fn cleaning(url: &str) -> String {
+    with_writing(url).replace(
+        r#""model": "m""#,
+        r#""model": "m", "clean_dictation": true, "prompt": "REWRITE", "openings": [{"phrase": "tell anna", "prompt": "OPENING"}], "apps": [{"app": "kitty", "prompt": "APP"}]"#,
+    )
+}
+
+/// A dictation that ends as a paste or a submit. Returns when the ending final arrived: the
+/// dictation final, where a cleanup's 3 s limit starts.
+async fn dictate(rig: &mut Rig, route: CaptureRoute) -> u64 {
+    let said = match route {
+        CaptureRoute::Submit => format!("{WORDS} submit"),
+        _ => format!("{WORDS} paste that"),
+    };
+    rig.open().await;
+    rig.feed_until(1000, Kind::Quiet).await;
+    let decided = rig.now();
+    rig.finals(&said).await;
+    rig.feed_until(3499, Kind::Quiet).await;
+    rig.at(3600).await;
+    decided
+}
+
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table of the cleanup's replies, fallbacks and a cancel"
+)]
+async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
+    LocalSet::new()
+        .run_until(async {
+            // (name, route, the reply, what is delivered, the notice, whether the cancelled cue played)
+            let cases = [
+                (
+                    "a reply in time",
+                    CaptureRoute::Paste,
+                    Chat::After(500, says!("I think we should ship it on Friday.")),
+                    Some("I think we should ship it on Friday."),
+                    None,
+                    false,
+                ),
+                (
+                    "a submit shows the cleaned text",
+                    CaptureRoute::Submit,
+                    Chat::After(500, says!("Tell Anna I am late.")),
+                    Some("Tell Anna I am late."),
+                    None,
+                    false,
+                ),
+                (
+                    "an error pastes the raw words",
+                    CaptureRoute::Paste,
+                    Chat::Status(500),
+                    Some(WORDS),
+                    Some("Cleanup failed: The writing model failed with status 500. — pasted as said"),
+                    false,
+                ),
+                (
+                    "no reply by the limit pastes the raw words",
+                    CaptureRoute::Submit,
+                    Chat::Stall,
+                    Some(WORDS),
+                    Some("Cleanup failed: The cleanup took longer than 3 seconds. — pasted as said"),
+                    false,
+                ),
+            ];
+            for (name, route, reply, delivered, notice, _) in cases {
+                let (url, mut asked, _feed) = chat(reply).await;
+                let dir = record_dir(&format!("cleanup-{name}"));
+                let (mut rig, engine, frames) = Rig::recording(
+                    &cleaning(&url),
+                    Recorder::in_dir(ALL, &dir).unwrap(),
+                );
+                let task = capture_in(
+                    engine,
+                    frames,
+                    WakeTrigger::Capture,
+                    Some(WindowApp::new("kitty", "secret")),
+                );
+                let decided = dictate(&mut rig, route).await;
+                let body = request(&mut asked).await.body;
+                assert_eq!(
+                    body["messages"][0]["content"], CLEANUP_PROMPT,
+                    "{name}: openings, the prompt and the app style never choose it"
+                );
+                assert_eq!(body["messages"][1]["content"], WORDS, "{name}");
+                assert!(
+                    !body.to_string().contains("kitty"),
+                    "{name}: the app stays out of the request"
+                );
+                if matches!(reply, Chat::Stall) {
+                    // A submit is cleaned before its confirmation, from the dictation final.
+                    rig.state_is(EngineState::CleaningUp).await;
+                    rig.at(decided + 2_999).await;
+                    assert!(
+                        !matches!(rig.state(), EngineState::PendingEnding { .. }),
+                        "{name}: the confirmation waits for the cleanup"
+                    );
+                    assert!(!task.is_finished(), "{name}: still within the 3 s");
+                    rig.at(decided + 3_000).await;
+                    rig.state_is(EngineState::PendingEnding {
+                        route,
+                        text: WORDS.to_owned(),
+                        waiting_for_quiet: false,
+                    })
+                    .await;
+                    rig.at(rig.now() + 2_500).await;
+                } else if route == CaptureRoute::Submit {
+                    rig.state_is(EngineState::PendingEnding {
+                        route,
+                        text: delivered.unwrap().to_owned(),
+                        waiting_for_quiet: false,
+                    })
+                    .await;
+                    rig.at(rig.now() + 2_500).await;
+                }
+                let text = delivered.unwrap();
+                assert_eq!(finished(task).await, accepted(route, text), "{name}");
+                assert_eq!(rig.notices(), notice.into_iter().collect::<Vec<_>>(), "{name}");
+                let row = read_lines(&dir.join("metrics.jsonl"))
+                    .into_iter()
+                    .find(|line| line["event"] == "desktop_cleanup")
+                    .expect("a cleanup metric");
+                assert!(row["model_ms"].is_number(), "{name}: {row}");
+                assert!(row["perceived_ms"].is_number(), "{name}: {row}");
+                assert!(
+                    row["perceived_ms"].as_f64().unwrap() >= row["model_ms"].as_f64().unwrap(),
+                    "{name}: the wait from the final is its own field, {row}"
+                );
+                std::fs::remove_dir_all(&dir).unwrap();
+            }
+
+            // A cancel during cleanup pastes nothing and plays the cancelled cue.
+            let (url, mut asked, _feed) = chat(Chat::Stall).await;
+            let (mut rig, engine, frames) = Rig::new(&cleaning(&url));
+            let task = capture_task(engine, frames);
+            dictate(&mut rig, CaptureRoute::Paste).await;
+            request(&mut asked).await;
+            rig.state_is(EngineState::CleaningUp).await;
+            rig.handle.cancel();
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some(WORDS.to_owned())
+                }
+            );
+            assert_eq!(rig.started(Cue::Cancelled).len(), 1);
+            assert_eq!(rig.notices(), Vec::<String>::new());
+        })
+        .await;
+}
+
+/// An endpoint that is not ready within 3 s of the dictation final falls back to the raw words
+/// then, before any chat call. The confirmation of a submit shows those words.
+#[tokio::test(start_paused = true)]
+async fn cleanup_falls_back_when_the_endpoint_is_not_ready_within_3_s_of_the_final() {
+    use thalvi_desktop::chat::fakes::FakeLaunch;
+    use thalvi_desktop::chat::{Build, Chat, Files};
+    use thalvi_desktop::models::{Asset, ModelKind, ModelStore};
+
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("cleanup-slow-endpoint");
+            std::fs::create_dir_all(dir.join("runtime")).unwrap();
+            std::fs::write(dir.join("runtime/llama-server"), "fake").unwrap();
+            std::fs::write(dir.join("model.gguf"), "gguf").unwrap();
+            let files = Files {
+                runtime: Build::Cpu.files().runtime,
+                folder: "runtime",
+                model: Asset {
+                    kind: ModelKind::ChatModel,
+                    file_name: "model.gguf",
+                    url: "http://127.0.0.1:9/unused",
+                    size: 4,
+                    sha256: "unused",
+                },
+            };
+            let (launch, child) = FakeLaunch::new();
+            child.loading_from_now();
+            child.delay_health(ms(10_000));
+            let chat = Chat::new(
+                ModelStore::in_dir(dir.clone()),
+                Build::Cpu,
+                files,
+                Box::new(launch),
+            );
+            let config = DesktopConfig::from_json_str(
+                r#"{"writing": {"local": true, "clean_dictation": true}}"#,
+            )
+            .unwrap();
+            let (mut rig, engine, frames) =
+                Rig::with_chat(&config, Recorder::in_dir(ALL, &dir).unwrap(), chat);
+            let task = capture_task(engine, frames);
+            let decided = dictate(&mut rig, CaptureRoute::Submit).await;
+            // The child has been asked to start and stays unhealthy past the limit.
+            settle().await;
+            assert_eq!(child.spawns(), 1, "the endpoint was asked to start");
+            rig.at(decided + 2_999).await;
+            assert!(
+                !matches!(rig.state(), EngineState::PendingEnding { .. }),
+                "still waiting on the endpoint at 2999 ms: {:?}",
+                rig.state()
+            );
+            assert!(!task.is_finished(), "the capture has not confirmed yet");
+            rig.at(decided + 3_000).await;
+            rig.state_is(EngineState::PendingEnding {
+                route: CaptureRoute::Submit,
+                text: WORDS.to_owned(),
+                waiting_for_quiet: false,
+            })
+            .await;
+            assert_eq!(
+                rig.notices(),
+                vec![
+                    "Cleanup failed: The cleanup took longer than 3 seconds. — pasted as said"
+                        .to_owned()
+                ]
+            );
+            // No chat call was made: the endpoint never became ready.
+            assert_eq!(child.spawns(), 1);
+            rig.at(rig.now() + 2_500).await;
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Submit, WORDS));
+            let row = read_lines(&dir.join("metrics.jsonl"))
+                .into_iter()
+                .find(|line| line["event"] == "desktop_cleanup")
+                .expect("a cleanup metric");
+            assert!(
+                row.get("model_ms").is_none_or(serde_json::Value::is_null),
+                "{row}"
+            );
+            assert_eq!(row["perceived_ms"], 3_000.0, "{row}");
+            assert_eq!(row["outcome"], "timeout", "{row}");
+            std::fs::remove_dir_all(&dir).unwrap();
         })
         .await;
 }

@@ -35,6 +35,7 @@ export type Status =
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
   | { state: "transcribing"; target: string | null; route: Route; cancellable: boolean }
   | { state: "merging"; target: string | null; route: Route } // extra recognizers' texts are being merged with the live text; cancellable
+  | { state: "cleaningUp"; target: string | null } // a dictation is being cleaned before it is pasted; cancellable
   | { state: "done"; target: string | null; route: Route; notice: string }
   | { state: "failed"; notice: string; headline: string; causes: string[]; kind: FailureKind } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report
   | { state: "loading"; notice: string }; // the speech model is being fetched or loaded
@@ -161,6 +162,8 @@ export interface WritingSettings {
   openings?: WritingOpening[];
   /** Absent when there are none. */
   apps?: WritingAppStyle[];
+  /** Present only when dictation is cleaned before it is pasted. */
+  clean_dictation?: boolean;
 }
 export type LiveEntry = RealtimeEntry | OnDeviceEntry | OpenAiEntry;
 export type SpeechEntry = LiveEntry | ExtraEntry;
@@ -235,6 +238,8 @@ export interface Draft {
   outcome: DraftOutcome;
   /** A newer dictation ended while this one had unsent edits; discarding this one shows it. */
   newerWaiting: boolean;
+  /** The words as recognized, when a cleanup pasted something else. */
+  raw?: string | null;
 }
 
 /** A speech model Thalvi can download, as the Rust catalog describes it. */

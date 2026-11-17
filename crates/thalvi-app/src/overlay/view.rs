@@ -234,6 +234,7 @@ impl View {
             Status::StartingChat { again: true, .. } => self.working("RESTARTING MODEL…"),
             Status::Transcribing { .. } => self.working("TRANSCRIBING…"),
             Status::Merging { .. } => self.working("MERGING…"),
+            Status::CleaningUp { .. } => self.working("CLEANING UP…"),
             Status::Working { .. } => self.working("WORKING"),
             Status::Done { .. } => self.tone = Tone::Done,
             Status::Failed { kind, .. } => {
@@ -324,6 +325,7 @@ impl View {
                     | Status::Capturing { .. }
                     | Status::Pending { .. }
                     | Status::Writing { .. }
+                    | Status::CleaningUp { .. }
                     | Status::Thinking { .. }
                     | Status::StartingChat { .. }
                     | Status::Working {

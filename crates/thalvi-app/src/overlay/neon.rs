@@ -370,6 +370,7 @@ fn pill_words(view: &View) -> (Tone, String, Option<&str>) {
             (Tone::Working, words("TRANSCRIBING…"), target.as_deref())
         }
         Status::Merging { target, .. } => (Tone::Working, words("MERGING…"), target.as_deref()),
+        Status::CleaningUp { target } => (Tone::Working, words("CLEANING UP…"), target.as_deref()),
         Status::Working { target, .. } => (Tone::Working, words("WORKING"), target.as_deref()),
         Status::Done {
             target,

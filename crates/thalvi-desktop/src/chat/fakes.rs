@@ -26,6 +26,8 @@ struct Flags {
     exited: Cell<bool>,
     healthy: Cell<bool>,
     killed: Cell<bool>,
+    /// How long `healthy` waits before answering, so a test can outlast the cleanup limit.
+    delay: Cell<std::time::Duration>,
 }
 
 /// How one process was started.
@@ -50,6 +52,8 @@ struct Shared {
     port: Option<u16>,
     refuse: bool,
     born: Born,
+    /// How long a process waits before answering its health request.
+    delay: std::time::Duration,
     spawned: Vec<Spawned>,
     flags: Vec<Rc<Flags>>,
 }
@@ -69,6 +73,7 @@ impl FakeLaunch {
             port: None,
             refuse: false,
             born: Born::Ready,
+            delay: std::time::Duration::ZERO,
             spawned: Vec::new(),
             flags: Vec::new(),
         }));
@@ -84,7 +89,13 @@ impl Process for FakeProcess {
     }
 
     fn healthy(&self) -> Pin<Box<dyn Future<Output = bool> + '_>> {
-        Box::pin(async { self.0.healthy.get() })
+        Box::pin(async {
+            let delay = self.0.delay.get();
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            self.0.healthy.get()
+        })
     }
 }
 
@@ -110,6 +121,7 @@ impl Launch for FakeLaunch {
         let flags = Rc::new(Flags::default());
         flags.healthy.set(shared.born == Born::Ready);
         flags.exited.set(shared.born == Born::Dead);
+        flags.delay.set(shared.delay);
         shared.flags.push(Rc::clone(&flags));
         shared.spawned.push(Spawned {
             program: program.to_owned(),
@@ -160,6 +172,11 @@ impl LaunchControl {
     /// Processes started from now on are still loading their model.
     pub fn loading_from_now(&self) {
         self.0.borrow_mut().born = Born::Loading;
+    }
+
+    /// Processes started from now on take `delay` to answer their health request.
+    pub fn delay_health(&self, delay: std::time::Duration) {
+        self.0.borrow_mut().delay = delay;
     }
 
     /// Processes started from now on have ended before they answer.

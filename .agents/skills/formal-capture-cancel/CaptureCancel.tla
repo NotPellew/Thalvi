@@ -5,10 +5,10 @@ CONSTANTS MaxControls, Scenario, DropCompletionGuard, ForgetEarlierStop, LeakExt
 Commands == {"cancel", "pause", "resume", "toggle", "apply", "restart", "quit"}
 VARIABLES phase, queue, sent, off, quit, preEnds, ended, intentOff,
           stopRequested, cancelPending, cueDone, cueAccepted, closeDone,
-          secondary, writing, result, delivered, extras, extra, merged, starting
+          secondary, writing, cleaning, result, delivered, extras, extra, merged, starting
 vars == <<phase, queue, sent, off, quit, preEnds, ended, intentOff,
           stopRequested, cancelPending, cueDone, cueAccepted, closeDone,
-          secondary, writing, result, delivered, extras, extra, merged, starting>>
+          secondary, writing, cleaning, result, delivered, extras, extra, merged, starting>>
 extraVars == <<extras, extra, merged, starting>>
 
 NextOff(c, old) == CASE c = "pause" -> TRUE
@@ -26,7 +26,11 @@ Init == /\ phase = "pre"
         /\ preEnds = FALSE /\ ended = FALSE /\ intentOff = FALSE
         /\ stopRequested = FALSE /\ cancelPending = FALSE
         /\ cueDone = FALSE /\ cueAccepted = FALSE /\ closeDone = FALSE
-        /\ secondary \in BOOLEAN /\ writing \in BOOLEAN /\ result = "none" /\ delivered = FALSE
+        \* `cleaning` is opt-in dictation cleanup of a submit, before its confirmation is shown.
+        \* A paste is cleaned after the ending instead, which this one stage also stands for.
+        \* It runs only when an explicit write does not.
+        /\ secondary \in BOOLEAN /\ writing \in BOOLEAN /\ cleaning \in BOOLEAN /\ (~writing \/ ~cleaning)
+        /\ result = "none" /\ delivered = FALSE
         \* `extras`: streaming extras are on. Without `secondary` they exist but the merge does not run
         \* (a scratched capture, or one with no words of its own).
         /\ extras \in BOOLEAN /\ extra = "none" /\ merged = FALSE
@@ -40,7 +44,7 @@ Send(c) == /\ phase # "done" /\ sent < MaxControls
            /\ intentOff' = NextOff(c, intentOff)
            /\ stopRequested' = (stopRequested \/ Ends(c, intentOff))
            /\ UNCHANGED <<phase, off, quit, preEnds, ended, cancelPending,
-                          cueDone, cueAccepted, closeDone, secondary, writing, result, delivered,
+                          cueDone, cueAccepted, closeDone, secondary, writing, cleaning, result, delivered,
                           extraVars>>
 
 \* One try_recv + Requests::take; the producer does not access Requests. Requests::take keeps
@@ -53,7 +57,7 @@ DrainOne == /\ phase \in {"pre", "finish"} /\ Len(queue) > 0
                /\ ended' = Accumulate(ended, Ends(c, off))
             /\ queue' = Tail(queue)
             /\ UNCHANGED <<phase, sent, intentOff, stopRequested, cancelPending,
-                           cueDone, cueAccepted, closeDone, secondary, writing, result, delivered,
+                           cueDone, cueAccepted, closeDone, secondary, writing, cleaning, result, delivered,
                            extraVars>>
 
 \* No control branch precedes the capture's first poll (biased select). Engine::capture starts
@@ -63,10 +67,10 @@ PreEmpty == /\ phase = "pre" /\ queue = <<>>
             /\ extra' = IF ~preEnds /\ extras THEN "open" ELSE extra
             /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                            stopRequested, cancelPending, cueDone, cueAccepted,
-                           closeDone, secondary, writing, result, delivered, extras, merged, starting>>
+                           closeDone, secondary, writing, cleaning, result, delivered, extras, merged, starting>>
 
-\* The engine is Pending here: capture, ending join, second pass or writing.
-Receive == /\ phase \in {"active", "ending", "secondary", "writing"}
+\* The engine is Pending here: capture, a submit's cleanup, ending join, second pass or writing.
+Receive == /\ phase \in {"active", "cleaning", "ending", "secondary", "writing"}
            /\ ~quit /\ Len(queue) > 0
            /\ (~cancelPending \/ (phase = "ending" /\ cueDone))
            /\ (Scenario = "all" \/ ~cueDone)
@@ -76,7 +80,7 @@ Receive == /\ phase \in {"active", "ending", "secondary", "writing"}
               /\ ended' = Accumulate(ended, Ends(c, off))
            /\ queue' = Tail(queue)
            /\ UNCHANGED <<phase, sent, preEnds, intentOff, stopRequested,
-                          cueDone, cueAccepted, closeDone, secondary, writing, result, delivered,
+                          cueDone, cueAccepted, closeDone, secondary, writing, cleaning, result, delivered,
                           extraVars>>
 
 \* Engine::start with a model still loading: the select polls cancellation first and has no time
@@ -88,28 +92,47 @@ Receive == /\ phase \in {"active", "ending", "secondary", "writing"}
 Loaded == /\ phase = "active" /\ starting /\ ~cancelPending /\ starting' = FALSE
           /\ UNCHANGED <<phase, queue, sent, off, quit, preEnds, ended, intentOff,
                          stopRequested, cancelPending, cueDone, cueAccepted,
-                         closeDone, secondary, writing, result, delivered, extras, extra, merged>>
+                         closeDone, secondary, writing, cleaning, result, delivered, extras, extra, merged>>
 LoadFailed == /\ phase = "active" /\ starting /\ ~cancelPending
               /\ phase' = "finish" /\ result' = "failed" /\ starting' = FALSE
               /\ extra' = Released(extra)
               /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                              stopRequested, cancelPending, cueDone, cueAccepted,
-                             closeDone, secondary, writing, delivered, extras, merged>>
+                             closeDone, secondary, writing, cleaning, delivered, extras, merged>>
+
+\* A submit with cleanup on is cleaned before its confirmation is shown. The confirmation is the
+\* ending pause, so this await is before Accept. A cancel here yields a cancelled result and
+\* delivers nothing. A paste's cleanup is after the ending; this stage stands for the submit.
+Prepare == /\ phase = "active" /\ ~starting /\ ~cancelPending /\ cleaning /\ ~secondary
+           /\ phase' = "cleaning"
+           /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
+                          stopRequested, cancelPending, cueDone, cueAccepted,
+                          closeDone, secondary, writing, cleaning, result, delivered, extraVars>>
+
+\* Dictation cleanup. Engine::clean polls cancellation first; a cancel pastes nothing.
+CleanupReturns == /\ phase = "cleaning"
+                  /\ phase' = IF cancelPending THEN "finish" ELSE "active"
+                  /\ result' = IF cancelPending THEN "cancelled" ELSE "none"
+                  /\ cleaning' = FALSE
+                  /\ extra' = IF cancelPending THEN Released(extra) ELSE extra
+                  /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
+                                 stopRequested, cancelPending, cueDone, cueAccepted,
+                                 closeDone, secondary, writing, delivered, extras, merged, starting>>
 
 \* Abstract the pre-accept capture awaits: observed cancellation cannot accept. Engine::conclude
 \* sends Finish to the extras when the merge will run, and cancels them when it will not.
-Accept == /\ phase = "active" /\ ~starting /\ ~cancelPending /\ phase' = "ending"
+Accept == /\ phase = "active" /\ ~starting /\ ~cancelPending /\ (~cleaning \/ secondary) /\ phase' = "ending"
           /\ extra' = IF extras /\ ~secondary THEN Released(extra) ELSE extra
           /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                          stopRequested, cancelPending, cueDone, cueAccepted,
-                         closeDone, secondary, writing, result, delivered, extras, merged, starting>>
+                         closeDone, secondary, writing, cleaning, result, delivered, extras, merged, starting>>
 \* Every end without an accept (cancel, failure, "never mind") cancels the extras in conclude.
 ActiveCancelled == /\ phase = "active" /\ cancelPending
                    /\ phase' = "finish" /\ result' = "cancelled"
                    /\ extra' = Released(extra)
                    /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                   stopRequested, cancelPending, cueDone, cueAccepted,
-                                  closeDone, secondary, writing, delivered, extras, merged, starting>>
+                                  closeDone, secondary, writing, cleaning, delivered, extras, merged, starting>>
 
 AfterEnding == IF secondary THEN "secondary" ELSE IF writing THEN "writing" ELSE "finish"
 
@@ -123,7 +146,7 @@ CueReturns == /\ phase = "ending" /\ ~cueDone
                             ELSE IF cancelPending THEN "cancelled" ELSE "accepted"
               /\ extra' = IF phase' = "finish" /\ result' = "cancelled" THEN Released(extra) ELSE extra
               /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
-                             stopRequested, cancelPending, closeDone, secondary, writing, delivered,
+                             stopRequested, cancelPending, closeDone, secondary, writing, cleaning, delivered,
                              extras, merged, starting>>
 
 \* end_with's join retains the cue's earlier bool while close is Pending.
@@ -136,13 +159,14 @@ CloseReturns == /\ phase = "ending" /\ ~closeDone
                 /\ extra' = IF phase' = "finish" /\ result' = "cancelled" THEN Released(extra) ELSE extra
                 /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                stopRequested, cancelPending, cueDone, cueAccepted,
-                               secondary, writing, delivered, extras, merged, starting>>
+                               secondary, writing, cleaning, delivered, extras, merged, starting>>
 
 \* Second-pass completion and writing completion are distinct cancellation-first awaits. A cancel
 \* here cancels the extras still running (Streams::cancel); a merge that ran leaves the ones it did
 \* not wait for to finish on their own; they feed no capture outcome. Cleanup is not modeled.
 SecondaryReturns == /\ phase = "secondary"
-                    /\ phase' = IF ~cancelPending /\ writing THEN "writing" ELSE "finish"
+                    /\ phase' = IF cancelPending THEN "finish"
+                                 ELSE IF writing THEN "writing" ELSE "finish"
                     /\ result' = IF cancelPending THEN "cancelled"
                                   ELSE IF writing THEN "none" ELSE "accepted"
                     /\ extra' = IF cancelPending THEN Released(extra)
@@ -150,13 +174,14 @@ SecondaryReturns == /\ phase = "secondary"
                     /\ merged' = (~cancelPending /\ extras)
                     /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                    stopRequested, cancelPending, cueDone, cueAccepted,
-                                   closeDone, secondary, writing, delivered, extras, starting>>
+                                   closeDone, secondary, writing, cleaning, delivered, extras, starting>>
 
+\* An explicit write. It never continues into dictation cleanup: cleanup is the other path.
 WritingReturns == /\ phase = "writing" /\ phase' = "finish"
                   /\ result' = IF cancelPending THEN "cancelled" ELSE "accepted"
                   /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                  stopRequested, cancelPending, cueDone, cueAccepted,
-                                 closeDone, secondary, writing, delivered, extraVars>>
+                                 closeDone, secondary, writing, cleaning, delivered, extraVars>>
 
 \* Last empty try_recv is the admission fence; later sends belong to the next flow. Settling
 \* delivers an outcome only if no ending control was consumed anywhere in drive.
@@ -165,10 +190,11 @@ FinishEmpty == /\ phase = "finish" /\ queue = <<>> /\ phase' = "done"
                                 /\ (DropCompletionGuard \/ ~ended))
                /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                               stopRequested, cancelPending, cueDone, cueAccepted,
-                              closeDone, secondary, writing, result, extraVars>>
+                              closeDone, secondary, writing, cleaning, result, extraVars>>
 
 Next == (\E c \in Commands : Send(c)) \/ DrainOne \/ PreEmpty \/ Receive
-        \/ Loaded \/ LoadFailed \/ Accept \/ ActiveCancelled \/ CueReturns \/ CloseReturns
+        \/ Loaded \/ LoadFailed \/ Prepare \/ CleanupReturns \/ Accept \/ ActiveCancelled
+        \/ CueReturns \/ CloseReturns
         \/ SecondaryReturns \/ WritingReturns \/ FinishEmpty
 Spec == Init /\ [][Next]_vars
 NoDeliveryAfterStop == delivered => ~stopRequested
@@ -178,7 +204,7 @@ ExtrasNeverLeftOpen == phase = "done" => extra # "open"
 ReleasedWhenCancelled == (phase = "done" /\ result = "cancelled" /\ ~merged)
                          => extra \in {"none", "released"}
 \* Nothing is accepted while the model is still loading.
-AcceptedOnlyAfterLoad == phase \in {"ending", "secondary", "writing"} => ~starting
+AcceptedOnlyAfterLoad == phase \in {"cleaning", "ending", "secondary", "writing"} => ~starting
 \* Only a completed merge stage (including skipped text merging) hands extras off without cancellation.
 LateOnlyAfterMerge == extra = "late" => merged
 =============================================================================

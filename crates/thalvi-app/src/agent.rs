@@ -403,6 +403,7 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
         }
         | Status::Transcribing { .. } => "transcribing",
         Status::Merging { .. } => "merging",
+        Status::CleaningUp { .. } => "cleaning",
         Status::Working { .. } => "delivering",
         Status::Writing { .. } | Status::Thinking { .. } | Status::StartingChat { .. } => "writing",
         Status::Failed { .. } => "failed",
@@ -435,6 +436,7 @@ fn overlay_word(status: &Status, on: bool) -> &'static str {
         Status::Working { .. } => "working",
         Status::Transcribing { .. } => "transcribing",
         Status::Merging { .. } => "merging",
+        Status::CleaningUp { .. } => "cleaning",
         Status::Done { .. } => "delivered",
         Status::Failed { .. } => "error",
     }
@@ -526,6 +528,7 @@ fn capturing(status: &Status) -> bool {
                 ..
             }
             | Status::Merging { .. }
+            | Status::CleaningUp { .. }
     )
 }
 
@@ -1416,6 +1419,46 @@ mod tests {
         rig.set(json!({"writing": {"openings": []}}));
         let shown = rig.ask(&Request::SettingsGet);
         assert!(shown["settings"]["writing"].get("openings").is_none());
+    }
+
+    #[test]
+    fn clean_dictation_is_refused_without_a_writing_endpoint_and_stored_only_when_on() {
+        let bare = Rig::new("clean-bare", "{}");
+        let change = json!({"writing": {"clean_dictation": true}});
+        let message = "writing.clean_dictation needs a writing endpoint. Set one under Settings → Chat model → Writing first.";
+        assert_eq!(
+            bare.ask(&Request::SettingsCheck {
+                settings: change.clone()
+            })["error"],
+            message
+        );
+        assert_eq!(bare.set(change)["error"], message);
+        assert!(bare.fake.config().writing.is_none());
+
+        let rig = Rig::new(
+            "clean",
+            r#"{"writing": {"url": "http://127.0.0.1:9/v1", "model": "m"}}"#,
+        );
+        let set = rig.set(json!({"writing": {"clean_dictation": true}}));
+        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
+        assert!(
+            rig.fake
+                .config()
+                .writing
+                .as_ref()
+                .unwrap()
+                .clean_dictation()
+        );
+        let shown = rig.ask(&Request::SettingsGet);
+        assert_eq!(shown["settings"]["writing"]["clean_dictation"], true);
+        rig.set(json!({"writing": {"clean_dictation": false}}));
+        let shown = rig.ask(&Request::SettingsGet);
+        assert!(
+            shown["settings"]["writing"]
+                .get("clean_dictation")
+                .is_none()
+        );
+        assert!(!rig.fake.config().writing.unwrap().clean_dictation());
     }
 
     #[test]

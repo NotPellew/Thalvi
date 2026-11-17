@@ -101,6 +101,9 @@ pub struct Entry {
     /// The window the capture was bound to, when there was one.
     pub target: Option<String>,
     pub outcome: Outcome,
+    /// How a dictation cleanup ended, `cleaned` or `raw: <reason>`; absent when none ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<String>,
 }
 
 /// A finished capture to record; the store adds the id and the time.
@@ -109,6 +112,8 @@ pub struct Capture {
     pub text: String,
     pub target: Option<String>,
     pub outcome: Outcome,
+    /// How a dictation cleanup ended; `None` when none ran.
+    pub cleanup: Option<String>,
 }
 
 impl Capture {
@@ -145,6 +150,7 @@ impl Capture {
             text,
             target,
             outcome,
+            cleanup: None,
         })
     }
 }
@@ -228,6 +234,7 @@ impl Store {
             text: capture.text,
             target: capture.target,
             outcome: capture.outcome,
+            cleanup: capture.cleanup,
         });
         drop_oldest(&mut entries, config.limit());
         self.write(&entries)
@@ -402,6 +409,7 @@ mod tests {
             text: text.to_owned(),
             target: Some("Slack".to_owned()),
             outcome: Outcome::Accepted,
+            cleanup: None,
         }
     }
 
@@ -454,6 +462,7 @@ mod tests {
                 text: text.to_owned(),
                 target,
                 outcome,
+                cleanup: None,
             })
         };
         for (name, outcome, delivery, expected) in [
@@ -564,6 +573,7 @@ mod tests {
                     text: "second".to_owned(),
                     target: None,
                     outcome: Outcome::Cancelled,
+                    cleanup: None,
                 },
             )
             .unwrap();
@@ -594,6 +604,21 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(keys, ["id", "outcome", "target", "text", "timestamp_ms"]);
         assert_eq!(file[0]["outcome"], "accepted");
+
+        store
+            .record(
+                on,
+                Capture {
+                    cleanup: Some("cleaned".to_owned()),
+                    ..capture("tidied")
+                },
+            )
+            .unwrap();
+        let again = Store::at(dir.file()).list().unwrap();
+        assert_eq!(again[0].text, "tidied");
+        assert_eq!(again[0].cleanup.as_deref(), Some("cleaned"));
+        let raw = serde_json::to_value(&again[0]).unwrap();
+        assert_eq!(raw["cleanup"], "cleaned");
     }
 
     #[test]
