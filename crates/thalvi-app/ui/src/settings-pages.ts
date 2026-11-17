@@ -2048,7 +2048,7 @@ function speech(context: PageContext): SpeechRows {
       ...manualRows,
       row(
         "Clean up dictation",
-        "Each dictation is tidied before it is pasted: filler words and false starts are removed and punctuation is fixed. A slow or failed cleanup pastes the words as said. Explicit writes are unchanged.",
+        "Tidies each dictation before it is pasted.",
         cleanupField,
       ),
       row(

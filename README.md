@@ -476,6 +476,11 @@ the model.
 Change the write key in the **Write key** row of the same **Hold keys** group
 (`write_key` in the config). It must differ from the dictate key.
 
+**Clean up dictation** (`writing.clean_dictation`, needs a writing endpoint) tidies
+each dictation before it is pasted: filler words and false starts are removed and
+punctuation is fixed. A slow or failed cleanup pastes the words as said. Explicit
+writes are unchanged.
+
 ### Config
 
 Settings edit `desktop.json` in `thalvi/` under the user config folder
