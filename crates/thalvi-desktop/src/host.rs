@@ -362,6 +362,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_window_app_displays_only_the_app_name() {
+        let window = WindowApp::new("firefox", "Private window title");
+        assert_eq!(window.app(), "firefox");
+        assert_eq!(window.title(), "Private window title");
+        assert_eq!(window.to_string(), "firefox");
+    }
+
+    #[test]
     fn paste_text_keeps_line_breaks_and_tabs_and_refuses_other_control_characters() {
         for (text, pasted) in [
             ("äöüß é 👋 plain words", Some("äöüß é 👋 plain words")),
