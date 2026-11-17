@@ -375,6 +375,7 @@ impl AppState {
             .store(config.overlay.show, Ordering::SeqCst);
         self.overlay.show_draft(config.overlay.draft);
         self.overlay.set_look(config.look);
+        self.overlay.set_recordings(config.recordings);
         self.saves.set(config);
         self.link.send(Control::Apply(Box::new(config.clone())));
         self.updates.config_changed();
@@ -816,12 +817,17 @@ fn start_overlay(app: &AppHandle, state: &AppState) {
     let config = state.config();
     state.overlay.show_draft(config.overlay.draft);
     state.overlay.set_look(config.look);
+    // Kept for the thread's life: a later apply reaches it through set_recordings.
+    let recorder = Recorder::per_user(config.recordings).unwrap_or_else(|_| Recorder::disabled());
     let handle = app.clone();
-    state
-        .overlay
-        .start(plan, state.host.overlay_takes_clicks(), move || {
+    state.overlay.start(
+        plan,
+        state.host.overlay_takes_clicks(),
+        recorder,
+        move || {
             handle.state::<AppState>().link.send(Control::Cancel);
-        });
+        },
+    );
 }
 
 fn create_windows(app: &AppHandle) -> tauri::Result<()> {
