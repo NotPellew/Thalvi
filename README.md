@@ -122,7 +122,9 @@ a capture already running keeps the model it started with. Settings shows each
 model's description, languages and size, whether it is **Selected** and
 **Downloaded** or **Not downloaded**, and can download it; its ID, source and
 license are under the card's collapsed **Details**. Or you can point to your
-own model folder and check it before it is used.
+own model folder and check it before it is used. That folder sits under the speech
+model's **Details**: it holds `encoder.int8.onnx`, `decoder.int8.onnx`,
+`joiner.int8.onnx` and `tokens.txt`.
 Word errors below are on LibriSpeech (120 clips) and on 48 of the developer's
 own takes, int8 on the CPU, language detected automatically. The unified model
 also made 8.38% on German and 7.09% on Spanish (80 Multilingual LibriSpeech clips
@@ -209,7 +211,7 @@ API key.
 With it, Settings → Recognition shows a **Word list**: names and terms, one per
 line, whose spelling recognition should favour (such as "Cybrex2"). The list
 is used by local recognition and sent to direct realtime speech servers at
-each connection.
+each connection. A model that ignores the list says so on the row.
 
 ### Microphone
 
@@ -268,7 +270,12 @@ build until a newer stable release exists.
 ### Recordings
 
 Settings → History & recordings → Recordings has a switch each for metrics, text and audio recordings, all
-off by default; a switch applies between captures. They stay on this computer.
+off by default; a switch applies between captures. Metrics record when each wake,
+capture and model call happened, with no words or audio. Audio recordings include
+what the microphone heard and about two seconds before a wake. They stay on this
+computer and are never uploaded. History keeps what you dictate, when, where it
+went and how it ended, never the audio. Turning history off stops new entries and
+deletes none.
 **Open folder** opens `recordings/` in the data folder (`~/.local/share/thalvi`
 on Linux, `%LOCALAPPDATA%\thalvi` on Windows):
 
@@ -342,7 +349,12 @@ and exits 1, and one that is not a command exits 2.
 
 ### Wake words off
 
-Settings → Listening → **Wake words** is a switch, on by default. Off, Thalvi keeps
+Settings → Listening → **Wake words** is a switch, on by default. **Threshold**
+is under **Details**: higher wakes less often by mistake, lower catches quieter
+speech. The catalog phrases start at 0.7 (Hey Thalvi) or 0.5 (the others); a
+file of your own starts at 0.5. **Capture limits**, also under **Details**,
+stop a capture that hears no words (10 to 600 s, starting at 60) or that runs
+too long (60 to 3600 s, starting at 300). Off, Thalvi keeps
 listening for the hold keys and the microphone stays open, but no wake word starts
 anything, plays a cue or delivers, and the wake model scores nothing. It applies at
 once, without a restart, survives restarts and pause and resume, and is
@@ -359,6 +371,12 @@ a third of a second, or with no words, pastes nothing and says so. No spoken
 phrase ends or cancels a hold: words such as "never mind" are dictated as text.
 To abandon a hold, use the `cancel` command: the tray's **Cancel**, or a key
 bound to `thalvi-desktop cancel` (the Hyprland examples bind SUPER+Escape).
+
+**Settings → Commands → Quiet before acting** is under **Details**: time to keep
+talking or cancel, 0 to 5 s, starting at 0.7 s before a paste and 2.5 s before
+paste-and-Enter or a task. An app's window classes, executables and keys, and a
+script's label, are under that entry's **Details**. For Discord, the words
+after the phrase are the message.
 
 Choose the keys under **Settings → Listening → Hold keys**: **Change…** records the
 next combination you press in the Settings window (Escape cancels), and **Restore
@@ -414,12 +432,16 @@ deleting the model and keeps the runtime.
 Choose **Manual endpoint** instead for any OpenAI-compatible chat completions
 endpoint (Glimmer, Baseten, llama.cpp, Meta): `writing.url`, `model` and `api_key`
 in the config. Switching sources keeps the saved endpoint and downloaded model.
+The address, model and key of a manual endpoint are under **Details**, which stays
+open until both the address and the model are set; a saved key is shown only as
+"key set". A speech server's address, model and key fold the same way.
 The model gets the **Writing prompt**
 (`prompt`) as its instructions and the recognized words as the message: no window,
 app or other context. The default prompt follows what you ask for (an email, a tone,
 a wording), invents nothing and keeps line breaks to where the text needs them, such as an
 email; edit it in Settings or restore the default there.
-How closely a model follows it depends on the model. Applying never calls the model.
+How closely a model follows it depends on the model. Changing the prompt never
+calls the model.
 If it is not set up, fails, answers with nothing, or takes longer than 15 seconds, nothing is pasted,
 Thalvi says what happened, and your own words go on the clipboard to paste with
 Ctrl+V.
@@ -438,7 +460,15 @@ punctuation, that rule's prompt is used instead of the Writing prompt, and the
 longest matching phrase wins. The words are sent as said, opening included. No
 match uses the Writing prompt. Rules apply only when you write out with "write that
 out" or the write key. A new rule starts as a copy of the Writing prompt, and a
-rule edited in Settings applies from the next capture.
+rule edited in Settings applies from the next capture. Adding or editing a rule
+never calls the model.
+
+**App styles** (`writing.apps`) use a prompt for the app you write into, optionally
+matching part of its window title. App names match exactly, ignoring case, and the
+first matching style wins. The app name and title are matched only on this computer
+and are never sent to the writing model. A spoken opening phrase wins over an app
+style. A new style starts as a copy of the Writing prompt. Changing one never calls
+the model.
 
 - **Hyprland:** F10, with no modifier, bound by Thalvi like the hold key.
 - **Windows:** Alt and X, kept from the focused app like the hold key.

@@ -3,14 +3,17 @@ import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry, Status,
 import { DownloadFailure } from "./contract.ts";
 import settingsCss from "./settings.css?raw";
 import settingsLooksCss from "./settings-looks.css?raw";
+import { disclosureMemory } from "./dom.ts";
 import { fakeBackend } from "./fake.ts";
 import { settingsPatch } from "./patch.ts";
+import { HINT_BUDGET } from "./settings-pages.ts";
 import { APPLIED_LATER_TEXT, APPLIED_TEXT, mountSettings } from "./settings.ts";
 import { NEMOTRON, SETTINGS, settle, stubBackend, UNIFIED, WAKE_MODELS_INFO, WHISPER } from "./testing.ts";
 
 let root: HTMLElement;
 
 beforeEach(() => {
+  disclosureMemory().clear();
   document.body.innerHTML = '<div id="settings"></div>';
   root = document.getElementById("settings") as HTMLElement;
 });
@@ -298,6 +301,8 @@ describe("applying a change", () => {
 
   it("shows the reason under a number out of its range and sends nothing", async () => {
     const stub = await open();
+    const limits = control("Stop after silence", "input").closest("details");
+    if (limits instanceof HTMLDetailsElement) limits.open = true;
     type(control("Stop after silence", "input"), "5");
     await settle();
     expect(stub.backend.saveSettings).not.toHaveBeenCalled();
@@ -423,6 +428,8 @@ describe("applying a change", () => {
       changed.ending_pause.submit = 4;
       changed.overlay.draft = false;
       stub.backend.getSettings.mockImplementation(() => Promise.resolve(structuredClone(changed)));
+      const timings = control("Quiet before paste", "input").closest("details");
+      if (timings instanceof HTMLDetailsElement) timings.open = true;
       typeIn(control("Quiet before paste", "input"), "1.5");
       control("Quiet before paste", "input").focus();
       stub.changedElsewhere();
@@ -525,6 +532,10 @@ describe("tables", () => {
   it("edits an app and a script, and adds a script from its own form", async () => {
     const stub = await open();
     goTo("commands");
+    const app = root.querySelector<HTMLDetailsElement>('details[data-fold="commands/apps/slack/match"]');
+    const script = root.querySelector<HTMLDetailsElement>('details[data-fold="commands/scripts/0/label"]');
+    if (app) app.open = true;
+    if (script) script.open = true;
     type(root.querySelector<HTMLInputElement>('input[aria-label="Executables of slack"]') as HTMLInputElement, "slack, slack.exe");
     type(root.querySelector<HTMLInputElement>('input[aria-label="Label of script 1"]') as HTMLInputElement, "");
     type(root.querySelector<HTMLInputElement>('input[aria-label="New script phrase"]') as HTMLInputElement, "focus slack");
@@ -787,11 +798,12 @@ describe("a custom speech model folder", () => {
 });
 
 describe("the word list", () => {
-  const FAVOURED =
-    "Names and terms to spell your way, added one at a time. Recognition on this computer and recognizers reached directly can favour them.";
+  const FAVOURED = "Names and terms to spell your way, added one at a time.";
   const VULKAN_TITLE = "Whisper Turbo · Vulkan GPU (experimental)";
-  const ignored = (title: string): string =>
-    `Names and terms to spell your way, added one at a time. ${title}, the recognizer in use, ignores them; the other models on this computer and recognizers reached directly can favour them.`;
+  const ignored = (title: string): string => {
+    const named = `${title} ignores them.`;
+    return named.length <= HINT_BUDGET ? named : "This recognizer ignores them.";
+  };
 
   async function openWordList(phrases?: string[]) {
     const stub = await open({ ...SETTINGS, stt: { entries: [device()], ...(phrases ? { phrases } : {}) } });
@@ -974,7 +986,7 @@ describe("the speech server list", () => {
       ["open_ai", OPEN_AI],
       ["on_device", "On this computer"],
     ]);
-    expect(root.querySelector(".kind-help")?.textContent).toContain("Live as you speak needs a server that streams audio in");
+    expect(root.querySelector(".kind-help")?.textContent).toContain("Live streams to a realtime server.");
     expect(names(live as HTMLElement)).toEqual(["Realtime speech server", "Cybrex2", "On this computer"]);
     expect(names(extra as HTMLElement)).toEqual(["OpenAI", "Meta"]);
     expect(badgesOf("Realtime speech server")).toEqual([REALTIME, "Live"]);
@@ -1207,7 +1219,7 @@ describe("extra recognizers", () => {
     expect(tickOf("OpenAI").getAttribute("aria-label")).toBe("Also transcribe with OpenAI");
     expect(entryNamed("OpenAI").querySelector(".unit")?.textContent).toBe("Audio goes to api.openai.com");
     expect(entryNamed("Meta").querySelector(".unit")?.textContent).toBe("Audio goes to meta.example");
-    expect(extraGroup().textContent).toContain("The chat model merges their texts with the live one, and the merged text is pasted. If the merge fails or takes too long, the live text is pasted.");
+    expect(extraGroup().textContent).toContain("Each one switched on also transcribes; the chat model merges them.");
   });
 
   const states = [
@@ -1586,7 +1598,7 @@ describe("the next dictation summary and state words", () => {
     await open(local());
     goTo("recognition");
     await editLocal();
-    expect(rowOf("Show models for").textContent).toContain("Filters this list. Each model recognizes the languages on its card.");
+    expect(rowOf("Show models for").textContent).toContain("Filters this list by each card's languages.");
     expect(control("Show models for", "select").getAttribute("aria-label")).toBe("Show models for");
     const cardEl = rowOf("Speech model").querySelector<HTMLElement>(".model:not([hidden])") as HTMLElement;
     const cardBadges = Array.from(cardEl.querySelectorAll(".badge")).map((badge) => badge.textContent);
@@ -2180,8 +2192,7 @@ describe("writing", () => {
       expect(field("Title contains for “Slack.exe”").getAttribute("placeholder")).toBe("—");
       expect(field("New app").value).toBe("");
       expect(document.activeElement).toBe(within(rows(), "Add by name"));
-      expect(rows().textContent).toContain("The app name and title are only matched on this computer and are never sent to the writing model.");
-      expect(rows().textContent).toContain("A spoken opening phrase wins over an app style.");
+      expect(rows().textContent).toContain("A prompt for the app you write into. A spoken phrase wins.");
     });
 
     it.each(["Gmail", ""])("offers the current app's title and lets it be cleared before adding (%s)", async (title) => {
@@ -2315,6 +2326,121 @@ describe("writing", () => {
   }
 });
 
+describe("folded settings", () => {
+  const foldOf = (label: string): HTMLDetailsElement => {
+    const row = rowOf(label);
+    const fold = row.closest("details.fold") ?? row.parentElement?.querySelector<HTMLDetailsElement>(":scope > details.fold");
+    if (!(fold instanceof HTMLDetailsElement)) throw new Error(`no details around ${label}`);
+    return fold;
+  };
+  const summaryOf = (label: string): string => foldOf(label).querySelector("summary")?.textContent ?? "";
+
+  it.each([
+    ["a default threshold stays closed with no summary", { ...SETTINGS, wake: { ...SETTINGS.wake, capture: { model: "hey_thalvi", threshold: 0.7 } } }, "Threshold (dictation)", false, "Details"],
+    ["a changed threshold stays closed and names the value", { ...SETTINGS, wake: { ...SETTINGS.wake, capture: { model: "hey_thalvi", threshold: 0.6 } } }, "Threshold (dictation)", false, "Details · threshold 0.6"],
+    ["a default capture limit stays closed", { ...SETTINGS }, "Stop after silence", false, "Details"],
+    ["a changed capture limit stays closed and names it", { ...SETTINGS, capture_limits: { idle: 90, max: 300 } }, "Stop after silence", false, "Details · silence 90"],
+    ["default quiet timings stay closed", { ...SETTINGS }, "Quiet before paste", false, "Details"],
+    ["a changed quiet timing stays closed and names it", { ...SETTINGS, ending_pause: { paste: 1.2, submit: 2.5, task: 2.5 } }, "Quiet before paste", false, "Details · paste 1.2"],
+  ])("%s", async (_name, settings, label, isOpen, summary) => {
+    await open(settings);
+    goTo(label.startsWith("Quiet") ? "commands" : "listening");
+    const fold = foldOf(label);
+    expect(fold.open).toBe(isOpen);
+    expect(fold.querySelector("summary")?.textContent).toBe(summary);
+    expect(rowOf(label).hidden).toBe(false);
+  });
+
+  it("opens the details of a number the field itself refuses, so the invalid value stays visible", async () => {
+    await open();
+    goTo("listening");
+    const fold = foldOf("Stop after silence");
+    expect(fold.open).toBe(false);
+    fold.open = true;
+    type(control("Stop after silence", "input"), "5");
+    await settle();
+    expect(control("Stop after silence", "input").getAttribute("aria-invalid")).toBe("true");
+    expect(fold.open).toBe(true);
+    expect(rowOf("Stop after silence").querySelector(".note:not([hidden])")?.textContent).toBe("Enter a number from 10 to 600 s.");
+  });
+
+  it.each([
+    ["an unset writing endpoint stays open", null, true, "Details"],
+    ["a configured writing endpoint closes and names the address, never the key", { url: "http://127.0.0.1:8000/v1", model: "writer", has_key: true, api_key: "secret-value" }, false, "Details · http://127.0.0.1:8000/v1 · writer · key set"],
+  ])("%s", async (_name, writing, isOpen, summary) => {
+    await open({ ...SETTINGS, writing });
+    goTo("chat");
+    const fold = root.querySelector<HTMLDetailsElement>('details[data-fold="chat/writing/endpoint"]');
+    if (!fold) throw new Error("no writing details");
+    expect(fold.open).toBe(isOpen);
+    expect(fold.querySelector("summary")?.textContent).toBe(summary);
+    expect(fold.textContent).not.toContain("secret-value");
+    expect(control("Writing API key", "input").value).toBe("");
+  });
+
+  it("keeps a speech server's address folded once it is set, and summarizes the key as set", async () => {
+    await open();
+    goTo("recognition");
+    edit("Realtime speech server");
+    const fold = root.querySelector<HTMLDetailsElement>('details[data-fold="recognition/server/direct/connection"]');
+    if (!fold) throw new Error("no server details");
+    expect(fold.open).toBe(false);
+    expect(fold.querySelector("summary")?.textContent).toBe("Details · ws://127.0.0.1:8012 · nemotron");
+    expect(fold.textContent).not.toMatch(/api_key|secret/);
+  });
+
+  it("leaves an unset speech server form open so it can be filled in", async () => {
+    await open();
+    goTo("recognition");
+    button("Add").click();
+    const fold = root.querySelector<HTMLDetailsElement>(".editor details.fold");
+    if (!fold) throw new Error("no add-server details");
+    expect(fold.open).toBe(true);
+    expect(root.querySelector<HTMLInputElement>('.editor input[placeholder="ws://127.0.0.1:8012"]')).not.toBeNull();
+  });
+
+  it("folds an app's window classes and a script label, naming the class and the label", async () => {
+    await open();
+    goTo("commands");
+    const app = root.querySelector<HTMLDetailsElement>('details[data-fold="commands/apps/slack/match"]');
+    const script = root.querySelector<HTMLDetailsElement>('details[data-fold="commands/scripts/0/label"]');
+    if (!app || !script) throw new Error("no app or script details");
+    expect(app.open).toBe(false);
+    expect(app.querySelector("summary")?.textContent).toBe("Details · slack · Slack");
+    expect(script.open).toBe(false);
+    expect(script.querySelector("summary")?.textContent).toBe("Details · docs");
+  });
+
+  it("keeps every hint inside one line at the narrow width", async () => {
+    const stub = stubBackend(local());
+    stub.backend.listSpeechModels.mockResolvedValue([
+      { ...WHISPER, title: "Whisper Turbo · Vulkan GPU (experimental)" },
+    ]);
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("recognition");
+    edit("On this computer");
+    await settle();
+    const hints = Array.from(root.querySelectorAll<HTMLElement>(".what small, .kind-help")).map((node) => node.textContent || "");
+    const over = hints.filter((hint) => hint.length > HINT_BUDGET);
+    expect(over).toEqual([]);
+  });
+
+  it("remembers a disclosure the user opened across a settings reload", async () => {
+    const stub = await open();
+    goTo("listening");
+    const before = foldOf("Stop after silence");
+    before.querySelector("summary")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(before.dataset["fold"]).toBe("listening/capture-limits/limits");
+    await Promise.resolve();
+    stub.changedElsewhere();
+    await settle();
+    goTo("listening");
+    expect(foldOf("Stop after silence").open).toBe(true);
+    expect(summaryOf("Stop after silence")).toBe("Details");
+  });
+});
+
 describe("search", () => {
   it.each([
     ["listening", "Stop after silence"],
@@ -2348,6 +2474,80 @@ describe("search", () => {
     type(search, "");
     expect(root.querySelector<HTMLElement>("section[data-page=recognition]")?.hidden).toBe(false);
     expect(root.querySelector<HTMLElement>("section[data-page=listening]")?.hidden).toBe(true);
+  });
+
+  it("finds a folded setting and a nested app field, opens their details, and closes only what the search opened", async () => {
+    await open();
+    const search = root.querySelector<HTMLInputElement>(".search") as HTMLInputElement;
+    const limits = root.querySelector<HTMLDetailsElement>('details[data-fold="listening/capture-limits/limits"]');
+    const app = root.querySelector<HTMLDetailsElement>('details[data-fold="commands/apps/slack/match"]');
+    if (!limits || !app) throw new Error("missing details");
+    expect(limits.open).toBe(false);
+
+    type(search, "stop after silence");
+    expect(limits.open).toBe(true);
+    expect(limits.closest("section")?.hidden).toBe(false);
+    expect(rowOf("Stop after silence").hidden).toBe(false);
+
+    type(search, "window classes");
+    expect(app.open).toBe(true);
+    expect(app.closest("section")?.hidden).toBe(false);
+    const classes = root.querySelector<HTMLElement>('[aria-label="Window classes of slack"]');
+    expect(classes?.closest("[hidden]")).toBeNull();
+
+    app.open = false;
+    type(search, "");
+    expect(limits.open).toBe(false);
+    expect(app.open).toBe(false);
+    expect(root.querySelector<HTMLElement>("section[data-page=recognition]")?.hidden).toBe(false);
+  });
+
+  it("keeps a disclosure the user opened during a search after the search is cleared", async () => {
+    await open();
+    const search = root.querySelector<HTMLInputElement>(".search") as HTMLInputElement;
+    type(search, "quiet before paste");
+    const fold = root.querySelector<HTMLDetailsElement>('details[data-fold="commands/quiet/timings"]');
+    if (!fold) throw new Error("no timings details");
+    expect(fold.open).toBe(true);
+    fold.querySelector("summary")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(fold.open).toBe(false);
+    await Promise.resolve();
+    fold.querySelector("summary")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(fold.open).toBe(true);
+    await Promise.resolve();
+    type(search, "");
+    goTo("commands");
+    expect(root.querySelector<HTMLDetailsElement>('details[data-fold="commands/quiet/timings"]')?.open).toBe(true);
+  });
+
+  it("keeps a disclosure open across page navigation and an entry re-render", async () => {
+    const stub = await open(local());
+    goTo("listening");
+    const limits = root.querySelector<HTMLDetailsElement>('details[data-fold="listening/capture-limits/limits"]');
+    if (!limits) throw new Error("no limits");
+    limits.querySelector("summary")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+    goTo("recognition");
+    goTo("listening");
+    expect(root.querySelector<HTMLDetailsElement>('details[data-fold="listening/capture-limits/limits"]')?.open).toBe(true);
+
+    const search = root.querySelector<HTMLInputElement>(".search");
+    if (search && search.value !== "") type(search, "");
+    goTo("recognition");
+    await settle();
+    edit("On this computer");
+    await settle();
+    const card = root.querySelector<HTMLDetailsElement>("details.model-details");
+    if (!card) throw new Error("no model details");
+    card.querySelector("summary")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+    const id = card.dataset["fold"];
+    stub.emit({ state: "loading", notice: "Loading." });
+    await settle();
+    edit("On this computer");
+    await settle();
+    const again = root.querySelector<HTMLDetailsElement>(`details[data-fold="${id ?? ""}"]`);
+    expect(again?.open).toBe(true);
   });
 });
 
@@ -2660,7 +2860,7 @@ describe("live controls", () => {
     expect(microphone.classList.contains("wide")).toBe(wake.classList.contains("wide"));
     expect(microphone.querySelector(".stack.wide .trow.pick select")).not.toBeNull();
     expect(microphone.querySelector(".what small")?.textContent).toBe(
-      "Choosing a device opens it right away, or after the capture that is running.",
+      "Opens now, or after the capture that is running.",
     );
   });
 
@@ -2785,7 +2985,6 @@ describe("live controls", () => {
       (name) => control(name, "input").checked,
     );
     expect(switches).toEqual([true, false, false]);
-    expect(rowOf(label).textContent).toContain("Kept on this computer only");
     expect(rowOf(label).textContent).not.toContain("THALVI_RECORD");
 
     flip(control(label, "input"));
@@ -3044,8 +3243,8 @@ describe("history", () => {
     const stub = await open();
     expect(control("Keep a history", "input").checked).toBe(true);
     expect(control("Entries to keep", "input").value).toBe("200");
-    expect(rowOf("Keep a history").textContent).toContain("Kept on this computer only, never uploaded");
-    expect(rowOf("Keep a history").textContent).toContain("deletes none");
+    expect(rowOf("Keep a history").textContent).toContain("What you dictate and where it went.");
+    expect(rowOf("Keep a history").textContent).toContain("Off stops new entries");
 
     flip(control("Keep a history", "input"));
     type(control("Entries to keep", "input"), "50");
