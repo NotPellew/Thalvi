@@ -15,8 +15,8 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `44c706d7bc197d566b0f3198072c29307a417f90`. The source hashes describe this commit.
-The previous sync was `0342449a6d2b2a6c32435e46f8fb45d83aa3d2e8`.
+Sync commit: `c7e6524ccdc225b4cf8f099ab6a5e2f2da2bc999`. The source hashes describe this commit.
+The previous sync was `113634abc24e4433e421d159fed509c7d916f75a`.
 The covered changes through this commit include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
 waiting for an on-device load. Their mapped actions remain below. Microphone
@@ -78,6 +78,13 @@ that change merged with the app styles change above.
 `Engine::drop_streams` before `end_with`, the `Accept (merge will not run)` step the model already has.
 No await, queue step or delivery path is added, so model actions are unchanged. The `engine.rs` hash
 describes that working change on top of the hold change above.
+
+The runner-control property (#525; inspected through `c7e6524`) moves desktop loading and
+microphone blocking work behind `Rig` and `Input`, with the same awaits and FIFO controls.
+`Requests::take`, `Requests::read_queued`, `drive`, `Runner::capture` and `Settling::settle`
+keep their bodies unchanged. `follow` now publishes a new engine's initial status; it adds
+no cancellation write, await or delivery path. The model actions and bounds are unchanged;
+the runner hash describes that inspected commit and its test-only host extension.
 
 The five checked invariants have these exact meanings:
 

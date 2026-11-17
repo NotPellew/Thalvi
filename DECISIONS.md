@@ -224,8 +224,9 @@ areas your change touches. Editing rules are in
   verified commit, in the heavy tier, on Linux; locally it runs only when an issue asks, `--in-diff` against the base (13 Nov 2026).
   Why: it found real gaps but can't tell them from equivalent mutants, and 250 local runs wrote 577 GiB in 4.5 hours.
   Rejected: a required gate, whole-workspace runs (3,197 mutants, about 18 hours on a CI runner), Windows runs, local runs by default.
-- **Property tests only where event order is the rule.** Today only the hold hook. Why: it found what tables
-  missed there; on streaming and capture code it found nothing tables wouldn't. Rejected: properties everywhere.
+- **Property tests only where event order is the rule.** The hold hook and runner controls across captures.
+  Why: random controls explore capture, cancellation, settings and shutdown orders beyond the bounded models.
+  Rejected: properties everywhere.
 - **Repeatable property cases, separate exploration.** Cargo defaults to 256 ChaCha cases with a fixed seed;
   exploratory runs override and record the seed, and failures become minimized regressions.
   Why: required checks need replayable inputs while exploration needs new ones. Rejected: fixed seeds alone.
