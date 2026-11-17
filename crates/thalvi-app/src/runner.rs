@@ -1878,6 +1878,7 @@ async fn follow(
     level_out: Arc<watch::Sender<f32>>,
     audio: watch::Receiver<AudioStatus>,
 ) {
+    publisher.update(|view| view.engine = state.borrow_and_update().clone());
     loop {
         tokio::select! {
             changed = state.changed() => {

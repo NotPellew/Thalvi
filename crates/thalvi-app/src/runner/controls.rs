@@ -617,4 +617,36 @@ proptest! {
 #[test]
 fn rebuilding_after_an_unready_capture_publishes_the_new_engines_resting_state() {
     run(&[Action::Wake, Action::Apply(Apply::Cues), Action::Quiet]);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    LocalSet::new().block_on(&runtime, async {
+        let (link, ends, _) = EngineLink::wire(&DesktopConfig::from_json_str("{}").unwrap(), false);
+        let publisher = Publisher::new(ends.status, EndingPauses::default());
+        publisher.update(|view| {
+            view.mode = Mode::Idle;
+            view.engine = EngineState::StartingCapture;
+        });
+        let (_state, state) = watch::channel(EngineState::Listening);
+        let (_level, level) = watch::channel(0.0);
+        let follower = tokio::task::spawn_local(follow(
+            state,
+            level,
+            publisher,
+            ends.level,
+            ends.audio.subscribe(),
+        ));
+        let mut status = link.status_updates();
+        tokio::time::timeout(QUIT_TIMEOUT, async {
+            while *status.borrow_and_update() != Status::Listening {
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("the replacement engine never published its initial Listening state");
+        follower.abort();
+        assert!(follower.await.unwrap_err().is_cancelled());
+    });
 }
