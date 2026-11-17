@@ -369,21 +369,29 @@ impl Case {
                     .config
                     .wake
                     .clone()
-                    .with_enabled(!self.config.wake.enabled())
+                    .with_enabled(!self.config.wake.enabled());
             }
             Apply::Recordings => {
                 self.config.recordings =
                     serde_json::from_value(json!({"metrics": !self.config.recordings.metrics}))
-                        .unwrap()
+                        .unwrap();
             }
             Apply::History => {
                 self.config.history =
                     serde_json::from_value(json!({"enabled": !self.config.history.enabled()}))
-                        .unwrap()
+                        .unwrap();
             }
             Apply::EndingPause => {
-                self.config.ending_pause =
-                    serde_json::from_value(json!({"paste":0.2,"submit":0.5})).unwrap()
+                self.config.ending_pause = serde_json::from_value(
+                    if self.config.ending_pause.get(CaptureRoute::Paste)
+                        == Duration::from_millis(200)
+                    {
+                        json!({"paste":0.7,"submit":2.5})
+                    } else {
+                        json!({"paste":0.2,"submit":0.5})
+                    },
+                )
+                .unwrap();
             }
             Apply::Cues => self.config.cues.wake = !self.config.cues.wake,
             Apply::Microphone => {
@@ -416,6 +424,38 @@ impl Case {
                 .unwrap()
                 .connect_again();
         }
+        if !self.perform(action).await {
+            return false;
+        }
+        if starts {
+            tokio::time::timeout(quiet_bound(&self.config), async {
+                loop {
+                    updates.changed().await.unwrap();
+                    if !matches!(
+                        *updates.borrow_and_update(),
+                        Status::Listening | Status::KeyboardOnly | Status::Done { .. }
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("the trigger was neither taken nor refused");
+        }
+        self.synchronize().await;
+        self.observe();
+        // A wake result belongs to this frame; an unscored one cannot wake a later capture.
+        self.rig
+            .0
+            .borrow()
+            .wake
+            .as_ref()
+            .unwrap()
+            .score_and_detect(0.0, 1.0);
+        true
+    }
+
+    async fn perform(&mut self, action: Action) -> bool {
         match action {
             Action::Wake => {
                 self.rig
@@ -482,26 +522,9 @@ impl Case {
             }
             Action::Apply(change) => self.apply(change),
             Action::Restart(refuse) => {
-                let (reply, received) = oneshot::channel();
-                self.link.send(Control::RestartIfIdle(Restart::new(
-                    move |_| {
-                        if refuse {
-                            Err("The update could not be prepared.".to_owned())
-                        } else {
-                            Ok(())
-                        }
-                    },
-                    reply,
-                )));
-                let result = tokio::time::timeout(quiet_bound(&self.config), received)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                if matches!(result, Stop::Stopped) {
-                    self.stopped().await;
+                if !self.restart(refuse).await {
                     return false;
                 }
-                assert!(matches!(result, Stop::Busy | Stop::Refused(_)));
             }
             Action::DeviceLost => {
                 if let Some(feed) = &self.rig.0.borrow().feed {
@@ -515,31 +538,30 @@ impl Case {
                 return false;
             }
         }
-        if starts {
-            tokio::time::timeout(quiet_bound(&self.config), async {
-                loop {
-                    updates.changed().await.unwrap();
-                    if !matches!(
-                        *updates.borrow_and_update(),
-                        Status::Listening | Status::KeyboardOnly | Status::Done { .. }
-                    ) {
-                        break;
-                    }
+        true
+    }
+
+    async fn restart(&mut self, refuse: bool) -> bool {
+        let (reply, received) = oneshot::channel();
+        self.link.send(Control::RestartIfIdle(Restart::new(
+            move |_| {
+                if refuse {
+                    Err("The update could not be prepared.".to_owned())
+                } else {
+                    Ok(())
                 }
-            })
+            },
+            reply,
+        )));
+        let result = tokio::time::timeout(quiet_bound(&self.config), received)
             .await
-            .expect("the trigger was neither taken nor refused");
-        }
-        self.synchronize().await;
-        self.observe();
-        // A wake result belongs to this frame; an unscored one cannot wake a later capture.
-        self.rig
-            .0
-            .borrow()
-            .wake
-            .as_ref()
             .unwrap()
-            .score_and_detect(0.0, 1.0);
+            .unwrap();
+        if matches!(result, Stop::Stopped) {
+            self.stopped().await;
+            return false;
+        }
+        assert!(matches!(result, Stop::Busy | Stop::Refused(_)));
         true
     }
 
