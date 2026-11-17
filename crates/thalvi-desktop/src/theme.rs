@@ -380,6 +380,9 @@ pub struct Themes {
     looks: BTreeMap<Look, LookOverrides>,
     /// Keys beside `version` and the look names, kept verbatim.
     unknown: Map<String, Value>,
+    /// The whole `themes` value when this build must write it back exactly: a newer version, or a
+    /// value that is not an object. `reason` is reported when no look notice already names it.
+    preserved: Option<(Value, String)>,
 }
 
 impl Default for Themes {
@@ -388,15 +391,19 @@ impl Default for Themes {
             version: VERSION,
             looks: BTreeMap::new(),
             unknown: Map::new(),
+            preserved: None,
         }
     }
 }
 
 impl Themes {
-    /// No customizations.
+    /// No customizations. A preserved value is never empty: it is written back as read.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.looks.is_empty() && self.unknown.is_empty() && self.version == VERSION
+        self.preserved.is_none()
+            && self.looks.is_empty()
+            && self.unknown.is_empty()
+            && self.version == VERSION
     }
 
     /// One look's customizations.
@@ -422,9 +429,13 @@ impl Themes {
         }
     }
 
-    /// The plain notice for each look this build could not read.
+    /// The plain notice for each look this build could not read. A preserved value is one notice
+    /// that names no look.
     #[must_use]
     pub fn notices(&self) -> Vec<String> {
+        if let Some((_, reason)) = &self.preserved {
+            return vec![preserved_notice(reason)];
+        }
         self.looks
             .iter()
             .filter_map(|(look, overrides)| match overrides {
@@ -436,9 +447,12 @@ impl Themes {
             .collect()
     }
 
-    /// The file form. Empty themes are omitted by the caller.
+    /// The file form. Empty themes are omitted by the caller. A preserved value is returned unchanged.
     #[must_use]
     pub fn to_value(&self) -> Value {
+        if let Some((preserved, _)) = &self.preserved {
+            return preserved.clone();
+        }
         let mut object = Map::new();
         object.insert("version".to_owned(), Value::from(self.version));
         for (key, value) in &self.unknown {
@@ -451,35 +465,33 @@ impl Themes {
     }
 
     /// Reads `themes` without ever failing the config. A look this build cannot use keeps its JSON.
+    /// A newer version, or a value that is not an object, is kept whole.
     #[must_use]
     pub fn load(value: &Value) -> Self {
         let Some(object) = value.as_object() else {
-            return Self {
-                version: VERSION,
-                looks: BTreeMap::from([(
-                    Look::Gunmetal,
-                    LookOverrides::Unreadable {
-                        raw: value.clone(),
-                        reason: "themes must be an object".to_owned(),
-                    },
-                )]),
-                unknown: Map::new(),
-            };
+            return preserved(value.clone(), "themes must be an object");
         };
+        if object.is_empty() {
+            return Self::default();
+        }
         let version = object.get("version").and_then(Value::as_u64);
         let Some(version) = version else {
             return unreadable_all(object, "themes.version must be 1");
         };
         if version > u64::from(VERSION) {
-            return unreadable_all(
-                object,
+            return preserved(
+                value.clone(),
                 &format!("themes.version {version} is newer than this Thalvi"),
             );
         }
+        if version != u64::from(VERSION) {
+            return unreadable_all(object, &format!("themes.version must be {VERSION}"));
+        }
         let mut themes = Self {
-            version: u32::try_from(version).unwrap_or(VERSION),
+            version: VERSION,
             looks: BTreeMap::new(),
             unknown: Map::new(),
+            preserved: None,
         };
         for (key, value) in object {
             if key == "version" {
@@ -497,6 +509,16 @@ impl Themes {
             }
         }
         themes
+    }
+}
+
+/// Keeps `value` exactly. Every look draws its built-in defaults.
+fn preserved(value: Value, reason: &str) -> Themes {
+    Themes {
+        version: VERSION,
+        looks: BTreeMap::new(),
+        unknown: Map::new(),
+        preserved: Some((value, reason.to_owned())),
     }
 }
 
@@ -522,20 +544,18 @@ fn unreadable_all(object: &Map<String, Value>, reason: &str) -> Themes {
             }
         }
     }
-    if looks.is_empty() {
-        looks.insert(
-            Look::Gunmetal,
-            LookOverrides::Unreadable {
-                raw: Value::Object(object.clone()),
-                reason: reason.to_owned(),
-            },
-        );
-    }
     Themes {
         version: VERSION,
         looks,
         unknown,
+        preserved: None,
     }
+}
+
+/// The sentence shown when the whole `themes` value cannot be read. It names no look.
+#[must_use]
+pub fn preserved_notice(reason: &str) -> String {
+    format!("Your look customizations could not be read ({reason}).")
 }
 
 /// The sentence shown when a look's customizations cannot be read.
@@ -1761,8 +1781,12 @@ fn insert_motion(object: &mut Map<String, Value>, motion: &MotionOverrides) {
 }
 
 /// The settings form of every look: usable changes as stored, unreadable ones as `{ "unreadable": reason }`.
+/// A preserved value is the original JSON, so a save that does not edit it writes that JSON back.
 #[must_use]
 pub fn form_of_themes(themes: &Themes) -> Value {
+    if let Some((preserved, _)) = &themes.preserved {
+        return preserved.clone();
+    }
     let mut object = Map::new();
     object.insert("version".to_owned(), Value::from(themes.version));
     for (key, value) in &themes.unknown {
@@ -1794,7 +1818,21 @@ pub fn refuse_changed(current: &Themes, next: &Value) -> Result<(), String> {
     if current.to_value() == *next {
         return Ok(());
     }
+    let Some(object) = next.as_object() else {
+        return Err("themes must be an object".to_owned());
+    };
+    match object.get("version").and_then(Value::as_u64) {
+        Some(version) if version == u64::from(VERSION) => {}
+        Some(_) | None => return Err(format!("themes.version must be {VERSION}")),
+    }
     let loaded = Themes::load(next);
+    if loaded.preserved.is_some() {
+        return Err(loaded
+            .notices()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| format!("themes.version must be {VERSION}")));
+    }
     for (look, overrides) in &loaded.looks {
         if let LookOverrides::Unreadable { reason, .. } = overrides {
             let previous = current.of(*look);
@@ -2140,16 +2178,64 @@ mod tests {
         let json =
             r##"{"version":9,"holo":{"colors":{"dark":{"accent":"#ffffff"}},"future":true}}"##;
         let loaded = themes(json);
-        match loaded.of(Look::Holo) {
-            Some(LookOverrides::Unreadable { raw, reason }) => {
-                assert!(reason.contains("newer"), "{reason}");
-                assert_eq!(raw["future"], true);
-            }
-            other => panic!("{other:?}"),
-        }
+        assert!(loaded.of(Look::Holo).is_none(), "no look is invented");
         let style = Style::resolve(Look::Holo, loaded.of(Look::Holo));
         assert_eq!(style.dark.accent.to_hex(), "#6bf8ff");
-        assert!(loaded.notices()[0].contains("Your Holo customizations could not be read"));
+        let written = loaded.to_value();
+        assert_eq!(written, serde_json::from_str::<Value>(json).unwrap());
+        assert_eq!(loaded.notices().len(), 1);
+        assert_eq!(
+            loaded.notices()[0],
+            "Your look customizations could not be read (themes.version 9 is newer than this Thalvi)."
+        );
+        assert!(!loaded.notices()[0].contains("Holo"));
+    }
+
+    #[test]
+    fn a_themes_value_that_is_not_an_object_is_kept_and_names_no_look() {
+        for json in [r#""bad""#, "[]", "1", "true"] {
+            let loaded = themes(json);
+            assert!(loaded.of(Look::Gunmetal).is_none());
+            assert!(loaded.of(Look::Holo).is_none());
+            assert!(loaded.of(Look::Neon).is_none());
+            assert_eq!(
+                loaded.to_value(),
+                serde_json::from_str::<Value>(json).unwrap()
+            );
+            assert!(!loaded.is_empty());
+            assert_eq!(loaded.notices().len(), 1);
+            assert_eq!(
+                loaded.notices()[0],
+                "Your look customizations could not be read (themes must be an object)."
+            );
+            for look in [Look::Neon, Look::Holo, Look::Gunmetal] {
+                let style = Style::resolve(look, loaded.of(look));
+                assert_eq!(style, Style::resolve(look, None));
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_themes_object_is_empty() {
+        let loaded = themes("{}");
+        assert!(loaded.is_empty());
+        assert_eq!(loaded.notices(), Vec::<String>::new());
+        assert!(loaded.of(Look::Gunmetal).is_none());
+    }
+
+    #[test]
+    fn a_changed_theme_whose_version_is_not_1_is_refused() {
+        let current = themes(r#"{"version":1,"holo":{"font":{"scale":1.1}}}"#);
+        for next in [
+            r#"{"version":0,"holo":{"font":{"scale":0.85}}}"#,
+            r#"{"version":2,"holo":{"font":{"scale":0.85}}}"#,
+            r#"{"holo":{"font":{"scale":0.85}}}"#,
+        ] {
+            let error = refuse_changed(&current, &serde_json::from_str(next).unwrap()).unwrap_err();
+            assert_eq!(error, "themes.version must be 1", "{next}");
+        }
+        let same = current.to_value();
+        assert!(refuse_changed(&current, &same).is_ok());
     }
 
     #[test]

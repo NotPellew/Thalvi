@@ -1335,6 +1335,78 @@ mod tests {
     }
 
     #[test]
+    fn settings_check_refuses_the_same_theme_changes_a_set_would() {
+        let cases: &[(&str, Value, bool, &str)] = &[
+            (
+                r#"{"look":"holo"}"#,
+                json!({"themes": {"version": 1, "gunmetal": {"colors": {"dark": {"accent": "blue"}}}}}),
+                false,
+                "themes.gunmetal.colors.dark.accent: use a colour like #6bf8ff",
+            ),
+            (
+                r#"{"look":"holo","themes":{"version":1,"holo":{"font":{"scale":1.1}}}}"#,
+                json!({"themes": {"version": 0, "holo": {"font": {"scale": 0.85}}}}),
+                false,
+                "themes.version must be 1",
+            ),
+            (
+                r#"{"look":"holo","themes":{"version":1,"holo":{"font":{"scale":1.1}}}}"#,
+                json!({"themes": {"version": 2, "holo": {"font": {"scale": 0.85}}}}),
+                false,
+                "themes.version must be 1",
+            ),
+            (
+                r#"{"look":"holo"}"#,
+                json!({"themes": {"holo": {"font": {"scale": 0.85}}}}),
+                true,
+                "",
+            ),
+            (
+                r##"{"look":"holo","themes":{"version":2,"holo":{"colors":{"dark":{"accent":"#ffffff"}}}}}"##,
+                json!({"overlay": {"draft": false}}),
+                true,
+                "",
+            ),
+            (
+                r#"{"look":"holo","themes":{"version":1,"holo":{"colors":{"dark":{"accent":"red"}}}}}"#,
+                json!({"microphone": "USB Mic"}),
+                true,
+                "",
+            ),
+        ];
+        for (index, (config, change, ok, needle)) in cases.iter().enumerate() {
+            let rig = Rig::new(&format!("theme-check-{index}"), config);
+            let before = rig.fake.config().themes.to_value();
+            let check = rig.ask(&Request::SettingsCheck {
+                settings: change.clone(),
+            });
+            let set = rig.set(change.clone());
+            if *ok {
+                assert_eq!(check["ok"], true, "{change}");
+                assert_eq!(check["valid"], true, "{change}");
+                assert_eq!(set["ok"], true, "{change}: {set}");
+            } else {
+                assert_eq!(check["ok"], false, "{change}");
+                assert_eq!(check["valid"], false, "{change}");
+                assert!(
+                    check["error"].as_str().unwrap_or("").contains(needle),
+                    "{change}: {check}"
+                );
+                assert_eq!(set["ok"], false, "{change}");
+                assert!(
+                    set["error"].as_str().unwrap_or("").contains(needle),
+                    "{change}: {set}"
+                );
+                assert_eq!(
+                    rig.fake.config().themes.to_value(),
+                    before,
+                    "a refused check and set leave the themes"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn settings_set_suspends_the_active_look_without_deleting_its_overrides() {
         let rig = Rig::new(
             "suspend",
