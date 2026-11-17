@@ -103,7 +103,7 @@ view never opens the app, writes `desktop.json`, or takes the save lock.
 `agent.rs`'s `metrics_summary` reads the metrics log and writes no config.
 Neither is a writer of the file or of `AppState::config`.
 
-The opt-in dictation cleanup (#465) adds one agent test in `agent.rs`. `settings_set` is unchanged: the new field is refused by the same config load as every other writing field. No writer of `desktop.json` or `AppState::config` is added, so the model and its three invariants are unchanged. The `agent.rs` hash describes commit `10c8ea7`.
+The opt-in dictation cleanup (#465) adds one agent test in `agent.rs`. `settings_set` is unchanged: the new field is refused by the same config load as every other writing field. No writer of `desktop.json` or `AppState::config` is added, so the model and its three invariants are unchanged. The `agent.rs` hash describes commit `bbec78a`.
 
 The experimental Whisper entry (#481, branch `feat/speech-trials`; these hashes describe its commit `98c254fb`) adds no writer:
 `commands.rs` lists the Whisper models, words their device line and downloads their files into the model

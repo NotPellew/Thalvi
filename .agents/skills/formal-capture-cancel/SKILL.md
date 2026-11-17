@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `ef013ed7d1a0e54c7ce5a6bbfae5b9a767c86032`. The source hashes describe this commit.
+Sync commit: `bbec78a934c8a84cfe9b876df52f6e7ac7db85c7`. The source hashes describe this commit.
 The previous sync was `0342449a6d2b2a6c32435e46f8fb45d83aa3d2e8`.
 The covered changes through this commit include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
