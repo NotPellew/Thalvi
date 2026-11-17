@@ -153,9 +153,24 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
 
   let lastState: Status["state"] | null = null;
 
+  /** Reads again what lives on disk; focus stays on the user's control, or moves to its replacement when a page rebuilt it. */
+  function refresh(): void {
+    const focusable = ":is(button, input, select, textarea, summary, [tabindex]):not(:disabled)";
+    const active = document.activeElement;
+    const container = active && pagesNode.contains(active) ? active.closest<HTMLElement>("[data-id]") : null;
+    const page = container?.closest<HTMLElement>("section[data-page]")?.dataset["page"];
+    const id = container?.dataset["id"];
+    const index = active && container ? Array.from(container.querySelectorAll(focusable)).indexOf(active) : -1;
+    live.refresh();
+    if (index < 0 || pagesNode.contains(document.activeElement)) return;
+    const rebuilt = Array.from(pages.find((known) => known.id === page)?.node.querySelectorAll<HTMLElement>("[data-id]") ?? [])
+      .find((known) => known.dataset["id"] === id);
+    rebuilt?.querySelectorAll<HTMLElement>(focusable)[index]?.focus();
+  }
+
   function showStatus(next: Status): void {
     // A download or retry finishes behind this long-lived window, so what lives on disk is read again when the app's state changes.
-    if (lastState !== null && next.state !== lastState) live.refresh();
+    if (lastState !== null && next.state !== lastState) refresh();
     lastState = next.state;
     // A change made during a capture is in effect once the capture is over.
     if (DURING_CAPTURE.includes(status.state) && !DURING_CAPTURE.includes(next.state)) {
@@ -335,7 +350,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   backend.onAudio(showAudio);
   backend.onSpeechModelProgress((progress) => {
     live.speechModel(progress);
-    if (progress.status === "done") live.refresh();
+    if (progress.status === "done") refresh();
   });
   backend.onOpenPage(open);
   backend.onUpdate((state) => {

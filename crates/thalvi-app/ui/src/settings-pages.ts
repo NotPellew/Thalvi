@@ -34,7 +34,7 @@ import type {
 import { DownloadFailure, errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
-import { disclosureMemory, el } from "./dom.ts";
+import { disclosureMemory, el, setChildren } from "./dom.ts";
 import { applyLook, lookPicker } from "./look.ts";
 
 /** What a control says once its value is applied. */
@@ -1513,8 +1513,8 @@ function speech(context: PageContext): SpeechRows {
     });
     if (editingAdd && editingExtra) extraChildren.push(editor);
     if (!liveChildren.includes(editor) && !extraChildren.includes(editor)) liveChildren.push(editor);
-    liveList.replaceChildren(...liveChildren);
-    extraList.replaceChildren(...extraChildren);
+    setChildren(liveList, ...liveChildren);
+    setChildren(extraList, ...extraChildren);
     extraList.hidden = extras.length === 0 && !((editingId !== null && editingExtra) || (editingAdd && editingExtra));
     syncExtras();
     updateSummary();
