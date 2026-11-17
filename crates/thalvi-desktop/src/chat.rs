@@ -14,7 +14,6 @@ use tokio::time::Instant;
 use crate::models::{Asset, ModelError, ModelKind, ModelStore, SpeechProgress};
 use crate::writing::{Endpoint, WritingError};
 
-#[cfg(test)]
 pub mod fakes;
 
 /// How often a starting server is asked whether it is ready.

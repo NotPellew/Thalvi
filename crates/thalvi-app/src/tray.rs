@@ -52,6 +52,7 @@ impl Icon {
             Status::Working { .. }
             | Status::Transcribing { .. }
             | Status::Merging { .. }
+            | Status::CleaningUp { .. }
             | Status::Writing { .. }
             | Status::Thinking { .. }
             | Status::StartingChat { .. }
@@ -172,6 +173,7 @@ pub fn title(status: &Status) -> String {
         Status::Working { .. } => "working".to_owned(),
         Status::Transcribing { .. } => "transcribing".to_owned(),
         Status::Merging { .. } => "merging".to_owned(),
+        Status::CleaningUp { .. } => "cleaning up".to_owned(),
         Status::Writing { .. } => "writing".to_owned(),
         Status::Thinking { .. } => "thinking".to_owned(),
         Status::StartingChat { .. } => "starting the chat model".to_owned(),
@@ -211,6 +213,7 @@ pub fn can_cancel(status: &Status) -> bool {
                 ..
             }
             | Status::Merging { .. }
+            | Status::CleaningUp { .. }
     )
 }
 

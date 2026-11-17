@@ -131,8 +131,8 @@ def main():
                 ('late-without-merge', 'LateOnlyAfterMerge', (),
                  ('THEN "released" ELSE x', 'THEN "late" ELSE x')),
                 ('accept-before-load', 'AcceptedOnlyAfterLoad', (),
-                 ('phase = "active" /\\ ~starting /\\ ~cancelPending',
-                  'phase = "active" /\\ ~cancelPending')),
+                 ('phase = "active" /\\ ~starting /\\ ~cancelPending /\\ (~cleaning \\/ secondary)',
+                  'phase = "active" /\\ ~cancelPending /\\ (~cleaning \\/ secondary)')),
             ]
             for label, invariant, flags, mutation in controls:
                 caught = run(java, jar, evidence, label, flags=flags,

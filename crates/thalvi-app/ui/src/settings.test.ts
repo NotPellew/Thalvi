@@ -175,7 +175,7 @@ describe("pages", () => {
         id: "chat",
         title: "Chat model",
         groups: {
-          Writing: ["chat model source", "local chat runtime", "local chat model", "writing endpoint address", "writing model", "writing api key", "writing prompt", "opening phrases", "app styles"],
+          Writing: ["chat model source", "local chat runtime", "local chat model", "writing endpoint address", "writing model", "writing api key", "clean up dictation", "writing prompt", "opening phrases", "app styles"],
         },
       },
       {
@@ -2085,6 +2085,33 @@ describe("writing", () => {
       await settle();
       expect(reason("Writing prompt")).toBe("writing.prompt must not be blank. Restore the default to start over.");
       expect(area().value).toBe("  ");
+    });
+  });
+
+  describe("clean up dictation", () => {
+    const toggle = (): HTMLInputElement => control("Clean up dictation", "input");
+
+    it("is disabled until a writing endpoint is set, then stores the switch only when on", async () => {
+      const stub = await open();
+      goTo("chat");
+      expect(toggle().disabled).toBe(true);
+      expect(rowOf("Clean up dictation").querySelector(".note.why:not([hidden])")?.textContent).toBe("Set a writing endpoint first");
+      toggle().click();
+      await settle();
+      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+
+      type(control("Writing endpoint address", "input"), endpoint.url);
+      type(control("Writing model", "input"), endpoint.model);
+      await settle();
+      expect(toggle().disabled).toBe(false);
+      expect(rowOf("Clean up dictation").querySelector(".note.why:not([hidden])")).toBeNull();
+      toggle().click();
+      await settle();
+      expect(sent(stub).writing).toMatchObject({ clean_dictation: true });
+
+      toggle().click();
+      await settle();
+      expect(sent(stub).writing).not.toHaveProperty("clean_dictation");
     });
   });
 

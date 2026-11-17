@@ -24,7 +24,7 @@ use tokio::time::Instant;
 use crate::audio::{AudioError, Frames, InputGate};
 use crate::capture::{
     CaptureFullError, CaptureLimits, CaptureRequest, CaptureRoute, CaptureSession, EndingPauses,
-    Endings, FinalStep, QuietWindow, has_words,
+    Endings, FinalStep, PendingEnding, QuietWindow, has_words,
 };
 use crate::claim::{Effect, Resolution, Watch};
 use crate::config::{DesktopConfig, Script};
@@ -227,6 +227,8 @@ pub enum EngineState {
     Writing {
         text: String,
     },
+    /// The writing model is cleaning a dictation before it is pasted; the reply is pasted whole.
+    CleaningUp,
     /// The writing model is reasoning and has written no text yet.
     Thinking,
     /// The app-owned chat runtime is loading, independently of generation.
@@ -496,6 +498,10 @@ pub struct Engine<R, W, C> {
     ignored: Vec<Refusal>,
     /// What the last merge told the user, until the caller takes it to show beside the delivery.
     merge_note: Option<String>,
+    /// What the last dictation cleanup told the user, until the caller takes it to show beside the paste.
+    cleanup_note: Option<String>,
+    /// How the last cleanup ended (`cleaned` or `raw: <reason>`), and the words as recognized.
+    cleanup_record: Option<(String, String)>,
 }
 
 /// A press of the dictation key that opened a capture.
@@ -672,6 +678,8 @@ enum Done {
     /// The user said "never mind".
     NeverMind(Option<String>),
     Accepted(CaptureRequest),
+    /// A submit must be merged and cleaned before its confirmation is shown.
+    Prepare(CaptureRequest),
     Failed(CaptureError),
 }
 
@@ -1095,6 +1103,8 @@ where
             held_for: None,
             ignored: Vec::new(),
             merge_note: None,
+            cleanup_note: None,
+            cleanup_record: None,
         };
         (engine, handle)
     }
@@ -1133,6 +1143,17 @@ where
     /// follows would otherwise replace the notice on the overlay.
     pub fn take_merge_note(&mut self) -> Option<String> {
         self.merge_note.take()
+    }
+
+    /// What the cleanup of the capture that just ended told the user, if it fell back to the raw
+    /// words: the delivery that follows would otherwise replace the notice on the overlay.
+    pub fn take_cleanup_note(&mut self) -> Option<String> {
+        self.cleanup_note.take()
+    }
+
+    /// How the cleanup of the capture that just ended went, and the words as recognized.
+    pub fn take_cleanup(&mut self) -> Option<(String, String)> {
+        self.cleanup_record.take()
     }
 
     /// The presses of the dictation key that started nothing since this was last called: each
@@ -1854,7 +1875,14 @@ where
                 }
             };
             if let Some(done) = done {
-                return (done, Instant::now());
+                let Done::Prepare(request) = done else {
+                    return (done, Instant::now());
+                };
+                // `decided` is the dictation final. The confirmation shows whatever this returns.
+                let decided = Instant::now();
+                if let Some(done) = self.prepare_submit(live, request, decided).await {
+                    return (done, decided);
+                }
             }
         }
     }
@@ -2059,6 +2087,13 @@ where
                     live.speech_run = 0;
                 }
                 live.last_audio = now;
+                // A submit is settled (merged, then cleaned) before its confirmation is shown.
+                if self.cleans_before_confirm(&pending) {
+                    return Some(Done::Prepare(CaptureRequest {
+                        route: pending.route,
+                        text: pending.text,
+                    }));
+                }
                 self.ending_state(match (pending.window, pending.without_ending) {
                     (QuietWindow::WaitingForQuiet, false) => "waiting_for_quiet",
                     (QuietWindow::WaitingForQuiet, true) => "waiting_for_quiet_without_ending",
@@ -2387,12 +2422,28 @@ where
                         {
                             self.write(request.text).await
                         }
+                        // A submit is cleaned before its confirmation is shown, so this is a paste.
+                        CaptureOutcome::Accepted(request)
+                            if request.route == CaptureRoute::Paste
+                                && self
+                                    .writing
+                                    .as_ref()
+                                    .is_some_and(writing::Writing::clean_dictation)
+                                && has_words(&request.text) =>
+                        {
+                            // `decided` is the dictation final; the call starts after the ending cue.
+                            self.clean(request, decided).await
+                        }
                         outcome => outcome,
                     }
                 } else {
                     self.drop_streams();
                     CaptureOutcome::cancelled_with(request.text)
                 }
+            }
+            // A submit is prepared inside the capture, before its confirmation.
+            Done::Prepare(_) => {
+                CaptureOutcome::cancelled_with(recoverable_text.unwrap_or_default())
             }
         };
         self.recorder.text(
@@ -2738,6 +2789,194 @@ where
         self.record_answer(&judged, false);
     }
 
+    /// Whether an armed submit is cleaned before its confirmation, so that confirmation shows
+    /// the text that will be sent. Paste is cleaned after its pause, in [`Self::conclude`].
+    fn cleans_before_confirm(&self, pending: &PendingEnding) -> bool {
+        pending.route == CaptureRoute::Submit
+            && self
+                .writing
+                .as_ref()
+                .is_some_and(writing::Writing::clean_dictation)
+            && has_words(&pending.text)
+    }
+
+    /// Cleans an armed submit before its confirmation is published, so that confirmation is the
+    /// text that will be sent. A cancel sends nothing. `decided` is the dictation final, where
+    /// the 3 s limit starts.
+    async fn prepare_submit(
+        &mut self,
+        live: &mut Live<R::Session>,
+        request: CaptureRequest,
+        decided: Instant,
+    ) -> Option<Done> {
+        match self.clean(request, decided).await {
+            CaptureOutcome::Cancelled { .. } => Some(Done::Stopped),
+            CaptureOutcome::Failed { error, .. } => Some(Done::Failed(error)),
+            CaptureOutcome::Accepted(cleaned) => {
+                if let Some(pending) = live.text.pending_mut() {
+                    pending.text = cleaned.text;
+                    // The pause is the confirmation of this text, so it starts now. Time spent
+                    // cleaning does not count toward it.
+                    if matches!(pending.window, QuietWindow::CountingDown { .. }) {
+                        pending.window = QuietWindow::CountingDown {
+                            since: Instant::now(),
+                        };
+                    }
+                }
+                self.arm_pending(live);
+                self.publish(live);
+                None
+            }
+        }
+    }
+
+    /// Records and announces an armed ending. The caller publishes afterwards.
+    fn arm_pending(&self, live: &mut Live<R::Session>) {
+        let Some(pending) = live.text.pending() else {
+            return;
+        };
+        self.ending_state(match (pending.window, pending.without_ending) {
+            (QuietWindow::WaitingForQuiet, false) => "waiting_for_quiet",
+            (QuietWindow::WaitingForQuiet, true) => "waiting_for_quiet_without_ending",
+            (QuietWindow::CountingDown { .. }, false) => "pending",
+            (QuietWindow::CountingDown { .. }, true) => "pending_without_ending",
+        });
+        self.queue_cue(live, Cue::Provisional);
+    }
+
+    /// Sends the text that would be delivered through the writing endpoint with the built-in
+    /// cleanup prompt. The whole wait, including the endpoint becoming ready, is bounded by
+    /// [`writing::CLEANUP_LIMIT`] from `decided` (the dictation final). A complete reply inside
+    /// that limit is delivered instead; an error or the limit pastes the raw words and says so;
+    /// a cancel pastes nothing.
+    async fn clean(&mut self, request: CaptureRequest, decided: Instant) -> CaptureOutcome {
+        let raw = request.text.clone();
+        let deadline = decided + writing::CLEANUP_LIMIT;
+        let Some(settings) = self.writing.clone() else {
+            return CaptureOutcome::Accepted(request);
+        };
+        let endpoint = match self.endpoint_by(&settings, Some(deadline)).await {
+            Ok(endpoint) => endpoint,
+            Err(None) => return self.cleanup_cancelled(request.route, raw).await,
+            Err(Some(error)) => return self.cleanup_fell_back(request, error, decided, None),
+        };
+        if Instant::now() >= deadline {
+            return self.cleanup_fell_back(request, WritingError::Timeout, decided, None);
+        }
+        self.set_state(EngineState::CleaningUp);
+        let started = Instant::now();
+        let mut reply = match bounded(
+            &mut self.cancel,
+            deadline,
+            endpoint.ask_with(&self.http, writing::CLEANUP_PROMPT, &raw),
+        )
+        .await
+        {
+            Bounded::Done(Ok(reply)) => reply,
+            Bounded::Cancelled => return self.cleanup_cancelled(request.route, raw).await,
+            Bounded::TimedOut => {
+                return self.cleanup_fell_back(
+                    request,
+                    WritingError::Timeout,
+                    decided,
+                    Some(started),
+                );
+            }
+            Bounded::Done(Err(error)) => {
+                return self.cleanup_fell_back(request, error, decided, Some(started));
+            }
+        };
+        let mut text = String::new();
+        loop {
+            match bounded(&mut self.cancel, deadline, reply.next()).await {
+                Bounded::Done(Ok(Some(Piece::Text(piece)))) => text.push_str(&piece),
+                Bounded::Done(Ok(Some(Piece::Thinking))) => {}
+                Bounded::Done(Ok(None)) => break,
+                Bounded::Cancelled => return self.cleanup_cancelled(request.route, raw).await,
+                Bounded::TimedOut => {
+                    return self.cleanup_fell_back(
+                        request,
+                        WritingError::Timeout,
+                        decided,
+                        Some(started),
+                    );
+                }
+                Bounded::Done(Err(error)) => {
+                    return self.cleanup_fell_back(request, error, decided, Some(started));
+                }
+            }
+        }
+        let cleaned = text.trim();
+        if cleaned.is_empty() {
+            return self.cleanup_fell_back(request, WritingError::Empty, decided, Some(started));
+        }
+        self.record_cleanup("cleaned", decided, Some(started));
+        self.cleanup_record = Some(("cleaned".to_owned(), raw.clone()));
+        CaptureOutcome::Accepted(CaptureRequest {
+            route: request.route,
+            text: cleaned.to_owned(),
+        })
+    }
+
+    /// A cancel during cleanup pastes nothing. A paste has already played its accepted cue, so
+    /// this plays the cancelled one without waiting on the cancel watch: that change was already
+    /// consumed. A submit is cleaned before its confirmation, so no accepted cue has played and
+    /// none is played here.
+    async fn cleanup_cancelled(&mut self, route: CaptureRoute, raw: String) -> CaptureOutcome {
+        if route == CaptureRoute::Submit {
+            return CaptureOutcome::cancelled_with(raw);
+        }
+        let started = Instant::now();
+        let end = self.cue(Cue::Cancelled, started).await;
+        self.cue_metric(Event::EndCue, &end);
+        self.cue_failed(&end, "Nothing was pasted.");
+        CaptureOutcome::cancelled_with(raw)
+    }
+
+    /// The raw words, with a notice the caller shows beside the paste.
+    fn cleanup_fell_back(
+        &mut self,
+        request: CaptureRequest,
+        error: WritingError,
+        decided: Instant,
+        asked: Option<Instant>,
+    ) -> CaptureOutcome {
+        let reason = match error {
+            // The shared timeout says 15 seconds, which is the explicit-write limit.
+            WritingError::Timeout => {
+                format!(
+                    "The cleanup took longer than {} seconds.",
+                    writing::CLEANUP_LIMIT.as_secs()
+                )
+            }
+            other => other.to_string(),
+        };
+        let note = format!("Cleanup failed: {reason} — pasted as said");
+        (self.notice)(&note);
+        self.cleanup_note = Some(note);
+        self.record_cleanup(error.kind(), decided, asked);
+        self.cleanup_record = Some((format!("raw: {reason}"), request.text.clone()));
+        CaptureOutcome::Accepted(request)
+    }
+
+    /// `model_ms` is the chat call's own latency, absent when no call was made; `perceived_ms`
+    /// is from the dictation final (`decided`) until the text to paste is known.
+    fn record_cleanup(&self, outcome: &str, decided: Instant, asked: Option<Instant>) {
+        let Some(settings) = &self.writing else {
+            return;
+        };
+        self.recorder.metric(
+            Event::Cleanup,
+            outcome,
+            asked.map(|asked| asked.elapsed()),
+            json!({
+                "model": settings.model(),
+                "model_ms": asked.map(|asked| millis(asked.elapsed())),
+                "perceived_ms": millis(decided.elapsed()),
+            }),
+        );
+    }
+
     /// Has the writing model put `words` into proper text and hands it on as a paste. Nothing is
     /// pasted unless text came back whole within [`writing::LIMIT`]: otherwise the words are kept
     /// for the clipboard with the reason, or, when the user cancels meanwhile, as cancelled.
@@ -2819,6 +3058,16 @@ where
         &mut self,
         writing: &'a Writing,
     ) -> Result<std::borrow::Cow<'a, Endpoint>, Option<WritingError>> {
+        self.endpoint_by(writing, None).await
+    }
+
+    /// [`Self::endpoint`], also giving up at `deadline` with [`WritingError::Timeout`]. A cancel
+    /// still wins that tie. `None` waits as long as the runtime takes to become ready.
+    async fn endpoint_by<'a>(
+        &mut self,
+        writing: &'a Writing,
+        deadline: Option<Instant>,
+    ) -> Result<std::borrow::Cow<'a, Endpoint>, Option<WritingError>> {
         if let Destination::Manual(endpoint) = writing.destination() {
             return Ok(std::borrow::Cow::Borrowed(endpoint));
         }
@@ -2833,6 +3082,7 @@ where
                 self.recorder.metric(Event::ChatLoad, "cancelled", Some(started.elapsed()), json!({"build": chat.build().name()}));
                 return Err(None);
             }
+            () = until(deadline) => return Err(Some(WritingError::Timeout)),
             result = chat.ready(|again| { state.send_replace(EngineState::StartingChat { again }); }) => result,
         };
         match result {

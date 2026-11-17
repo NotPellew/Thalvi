@@ -15,8 +15,8 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `c7e6524ccdc225b4cf8f099ab6a5e2f2da2bc999`. The source hashes describe this commit.
-The previous sync was `113634abc24e4433e421d159fed509c7d916f75a`.
+Sync commit: `4d534dfaabb70a47994790f785055ee38c6b0a55`. The source hashes describe this commit.
+The previous sync was `c7e6524ccdc225b4cf8f099ab6a5e2f2da2bc999` on main.
 The covered changes through this commit include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
 waiting for an on-device load. Their mapped actions remain below. Microphone
@@ -84,7 +84,16 @@ microphone blocking work behind `Rig` and `Input`, with the same awaits and FIFO
 `Requests::take`, `Requests::read_queued`, `drive`, `Runner::capture` and `Settling::settle`
 keep their bodies unchanged. `follow` now publishes a new engine's initial status; it adds
 no cancellation write, await or delivery path. The model actions and bounds are unchanged;
-the runner hash describes that inspected commit and its test-only host extension.
+that change merged with the cleanup change below is what the sync commit's runner hash describes.
+
+Opt-in dictation cleanup (#465) adds `Engine::clean`, the same cancellation-first `bounded` shape
+as `Engine::write`. A submit is cleaned before its confirmation is shown (`Prepare`, then
+`CleanupReturns`, then the ending). A paste is cleaned after the ending cue; one `cleaning` stage
+stands for both orders, and it is never on together with `writing`. `CleanupReturns` is its own
+await: a cancel there yields a cancelled result, so the runner admits nothing. A cleanup that
+finishes or falls back returns to the capture, and delivery still meets `FinishEmpty`. The 3 s
+bound, including the endpoint becoming ready, is not a cancellation step. The hashes of `engine.rs`
+and `runner.rs` describe the sync commit above.
 
 The five checked invariants have these exact meanings:
 
@@ -121,7 +130,7 @@ Matching hashes establish synchronization only, not correctness of the model.
 | `crates/thalvi-desktop/src/engine.rs`: `EngineHandle::cancel`, `Engine::capture` | `cancelPending` represents the watch version change; capture entry consumes the old version. `Accept` and `ActiveCancelled` abstract capture work before the ending. |
 | Same file: `Engine::conclude`, `Engine::end_cue`, `Engine::end_with` | `CueReturns`, `CloseReturns`; the cue's cancellation-biased select and recognizer release are separate futures joined together. A completed cue retains its bool while close is still Pending. Neither completion is a transaction encompassing the other. |
 | Same file: `Engine::start`, `download_started`; `recognizer.rs`: `Recognizer::loading`; `local.rs`: `LocalRecognizer::connect`, `loading` | `starting`, `Loaded`, `LoadFailed`; the wait for an on-device model is unbounded and polls cancellation first. `Accept` is enabled only after `Loaded`. A download or load failure is `LoadFailed`, a failed capture that delivers nothing. Frames read during that wait, including after a hold is released, are not a delivery or cancellation step. |
-| Same file: `Engine::merge`, `Engine::ask_merge`, `Engine::write`, `bounded` | `secondary` (the merge of the extras' texts), `writing`, `SecondaryReturns`, `WritingReturns`; disabled stages are skipped, awaiting stages poll cancellation first; repeated waits stutter in this abstraction. A synchronous skipped merge returns without another poll; the runner's final drain still guards delivery. |
+| Same file: `Engine::merge`, `Engine::ask_merge`, `Engine::write`, `Engine::clean`, `Engine::prepare_submit`, `bounded` | `secondary` (the merge of the extras' texts), `writing`, `cleaning`, `Prepare`, `SecondaryReturns`, `WritingReturns`, `CleanupReturns`; disabled stages are skipped, awaiting stages poll cancellation first; repeated waits stutter in this abstraction. A synchronous skipped merge returns without another poll; the runner's final drain still guards delivery. Cleanup runs only for a paste or submit with the switch on, and never after an explicit write (`~writing \/ ~cleaning`). A submit's cleanup is `Prepare` before `Accept`, so its confirmation shows the text that will be sent; a paste's is after the ending, and one stage stands for both. A cancel during it returns a cancelled outcome, so nothing is pasted. |
 | `crates/thalvi-desktop/src/engine/streaming.rs`: `Streams::start`, `Streams::finish`, `Streams::cancel`, `send_frame`, `hear`, `park`, `run`; `engine.rs`: `Engine::drop_streams` | `extras`, `extra`, `merged`: `PreEmpty` opens the extra sessions, `Accept` (merge will not run), `ActiveCancelled`, `CueReturns`/`CloseReturns` (ending cancelled) and `SecondaryReturns` (cancel) request their cancellation, an uncancelled `SecondaryReturns` leaves them `late`. The model tracks ownership and notification only; the task awaits `RecognizerSession::cancel` or `close` separately. |
 | `crates/thalvi-desktop/src/recognizer.rs`: `RecognizerSession`; `crates/thalvi-desktop/src/realtime.rs`: `RealtimeSession::close`; `crates/thalvi-desktop/src/openai_live.rs`: `OpenAiSession::cancel`, `OpenAiSession::close` | `CloseReturns` may occur before or after the cue. Network close is awaited under a timeout, so it can remain Pending; `OpenAiSession::close` aborts its upload task and returns at once. |
 | `crates/thalvi-desktop/src/delivery.rs`: `Delivery::finish`, `paste_in`, `call` | `delivered` abstracts admission to a valid configured host action. Actual host execution is outside the proof; once admitted it can run via `spawn_blocking`. Other changes to this file are not covered by the model. |
@@ -150,8 +159,9 @@ Temurin JRE `21.0.9+10` in the same user cache, verifying archive SHA-256
 Other platforms need a user-installed Java on PATH. No system package install
 is performed. Downloads require network access only on the first run.
 
-A faithful run here explores 62,800 distinct states (174,187 generated) with no
-error; a warm full check takes about 1 s, and the self-test about 5 s.
+A faithful run here explores 87,418 distinct states (243,481 generated) with no
+error; a warm full check takes about 2 s, and the self-test about 10 s. The extra
+states are the dictation-cleanup stage, which a submit takes before its confirmation.
 Each TLC invocation has a 120 s limit and 512 MB heap limit. State counts are
 receipts for this model, not acceptance criteria for a changed model.
 

@@ -1404,6 +1404,10 @@ impl<S: Rig> Runner<S> {
     }
 
     /// Takes one capture from the wake word to its delivery.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one capture's drive, settle and the notes it leaves are one sequence"
+    )]
     async fn capture(&mut self) -> Flow {
         let bound = {
             let Some(session) = self.session.as_ref() else {
@@ -1455,7 +1459,7 @@ impl<S: Rig> Runner<S> {
             ))
             .await;
             let mut ignored = engine.take_ignored();
-            let note = engine.take_merge_note();
+            let note = engine.take_merge_note().or(engine.take_cleanup_note());
             match outcome {
                 None => {
                     // The wake word closed the gate and only a capture opens it again.
@@ -1471,6 +1475,7 @@ impl<S: Rig> Runner<S> {
                         publisher.mode(Mode::Delivering(route));
                     }
                     let refused = RefCell::new(Vec::new());
+                    let cleanup = engine.take_cleanup();
                     let finished = Settling {
                         delivery,
                         history,
@@ -1478,10 +1483,17 @@ impl<S: Rig> Runner<S> {
                         config,
                         recorder: engine.recorder(),
                     }
-                    .settle(&outcome, requests.ended, &bound, key, |refusal, count| {
-                        report_refusal(engine.recorder(), refusal, count);
-                        refused.borrow_mut().push(refusal);
-                    })
+                    .settle(
+                        &outcome,
+                        cleanup.as_ref(),
+                        requests.ended,
+                        &bound,
+                        key,
+                        |refusal, count| {
+                            report_refusal(engine.recorder(), refusal, count);
+                            refused.borrow_mut().push(refusal);
+                        },
+                    )
                     .await;
                     ignored.extend(refused.into_inner());
                     (finished, route, ignored, note)
@@ -1525,6 +1537,7 @@ impl<H: Host + 'static> Settling<'_, H> {
     async fn settle(
         &self,
         outcome: &CaptureOutcome,
+        cleanup: Option<&(String, String)>,
         ended: bool,
         bound: &Bound<H::Target>,
         key: &mut Presses,
@@ -1543,13 +1556,14 @@ impl<H: Host + 'static> Settling<'_, H> {
             )
             .await
         };
-        self.keep(outcome, ended, finished.as_ref(), bound);
+        self.keep(outcome, cleanup, ended, finished.as_ref(), bound);
         finished
     }
 
     fn keep(
         &self,
         outcome: &CaptureOutcome,
+        cleanup: Option<&(String, String)>,
         ended: bool,
         finished: Option<&Finished>,
         bound: &Bound<H::Target>,
@@ -1570,11 +1584,17 @@ impl<H: Host + 'static> Settling<'_, H> {
             CaptureOutcome::Accepted(request) if request.route == CaptureRoute::Task
         );
         let window = (!task).then(|| bound.window()).flatten();
-        if let Some(capture) = Capture::of(kept, finished, window) {
+        if let Some(mut capture) = Capture::of(kept, finished, window) {
+            if let Some((how, _)) = cleanup {
+                capture.cleanup = Some(how.clone());
+            }
             self.history
                 .record_in_background(self.config.history, capture);
         }
-        if !task && let Some(draft) = Draft::of(kept, finished, bound) {
+        if !task
+            && let Some(draft) =
+                Draft::with_raw(kept, finished, bound, cleanup.map(|(_, raw)| raw.clone()))
+        {
             self.drafts.offer(draft);
         }
     }
@@ -3180,7 +3200,7 @@ mod tests {
             config: &config,
             recorder: &recorder,
         }
-        .settle(outcome, ended, &bound, &mut key, |_, _| {})
+        .settle(outcome, None, ended, &bound, &mut key, |_, _| {})
         .await;
         // The history is written on a blocking thread: wait for what it will hold.
         let entries = tokio::time::timeout(Duration::from_secs(10), async {

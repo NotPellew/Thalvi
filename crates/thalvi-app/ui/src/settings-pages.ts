@@ -43,7 +43,7 @@ export const APPLIED_TEXT = "Applied.";
 export const APPLIED_LATER_TEXT = "Applied. From the next dictation.";
 
 /** While one of these runs, a change is held until the capture is over. */
-export const DURING_CAPTURE: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working", "transcribing", "merging"];
+export const DURING_CAPTURE: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working", "transcribing", "merging", "cleaningUp"];
 
 /** The settings as the desktop holds them: pages read them and change them only through `apply`. */
 type DeepReadonly<T> = T extends (infer U)[] ? readonly DeepReadonly<U>[] : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
@@ -147,7 +147,7 @@ const DRAFT_OUTCOMES: Record<DraftOutcome, string> = {
   maybePartial: "Thalvi may or may not have pasted this text. Check the window before trying again, or use Copy text.",
 };
 /** While one of these runs the status changes with every word; the draft is read again once it ends. */
-const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working"];
+const CAPTURE_STATES: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working", "cleaningUp"];
 const WHEN = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 /**
@@ -1211,6 +1211,8 @@ function speech(context: PageContext): SpeechRows {
         return "Transcribing…";
       case "merging":
         return "Merging…";
+      case "cleaningUp":
+        return "Cleaning up…";
       case "loading":
         return status.notice;
       case "paused":
@@ -1440,6 +1442,7 @@ function speech(context: PageContext): SpeechRows {
     const loads = on.some((entry) => entry.kind === "on_device") ? " Each on-device extra loads its own model, which adds memory and processing." : "";
     extraState.textContent = on.length === 0 ? "Off. Dictation pastes the live text." : `On: ${on.map((entry) => entry.name).join(", ")}. ${merged}${loads}`;
     needsEndpoint.hidden = settings.writing !== null;
+    syncCleanup();
   }
 
   function extraRow(entry: ExtraEntry): HTMLElement {
@@ -1470,6 +1473,25 @@ function speech(context: PageContext): SpeechRows {
     }
     return null;
   }
+
+  const hasEndpoint = (): boolean => settings.writing !== null;
+  const cleanup = controls.toggle(settings.writing?.clean_dictation === true, (on) => {
+    if (!hasEndpoint()) return Promise.reject(new Error("Set a writing endpoint first"));
+    return apply((next) => {
+      if (next.writing === null) throw new Error("Set a writing endpoint first");
+      if (on) next.writing.clean_dictation = true;
+      else delete next.writing.clean_dictation;
+    });
+  });
+  const cleanupInput = cleanup.field as HTMLInputElement;
+  const cleanupWhy = el("p", { class: "note why" }, "Set a writing endpoint first");
+  function syncCleanup(): void {
+    const locked = !hasEndpoint();
+    cleanupInput.disabled = locked;
+    cleanupWhy.hidden = !locked;
+    if (locked) cleanupInput.checked = false;
+  }
+  const cleanupField = { node: el("div", { class: "stack" }, cleanup.node, cleanupWhy), field: cleanupInput };
 
   function render(): void {
     if (editingId !== null && !entries().some((entry) => entry.id === editingId)) {
@@ -1798,7 +1820,7 @@ function speech(context: PageContext): SpeechRows {
       if (custom) endpoint.prompt = promptArea.value;
       else delete endpoint.prompt;
       next.writing = endpoint;
-    }).then(syncExtras);
+    }).then(() => { syncExtras(); syncCleanup(); });
   }
 
   const openingsList = el("div", { class: "stack wide" });
@@ -1833,6 +1855,7 @@ function speech(context: PageContext): SpeechRows {
     );
   }
   renderOpenings();
+
   const addOpening = button("Add", () => {
     const input = openingPhrase.field as HTMLInputElement;
     const phrase = openingWords(input.value);
@@ -2023,6 +2046,11 @@ function speech(context: PageContext): SpeechRows {
       row("Chat model source", "Writing and extras use this.", source),
       ...localRows,
       ...manualRows,
+      row(
+        "Clean up dictation",
+        "Tidies each dictation before it is pasted.",
+        cleanupField,
+      ),
       row(
         "Writing prompt",
         "Sent with every dictation. Blank is not allowed.",

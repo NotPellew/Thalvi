@@ -457,6 +457,11 @@ impl CaptureSession {
         self.pending.as_ref()
     }
 
+    /// The armed ending, to replace its text with what the user will confirm.
+    pub fn pending_mut(&mut self) -> Option<&mut PendingEnding> {
+        self.pending.as_mut()
+    }
+
     /// When the armed ending's running countdown started; `None` until quiet starts.
     #[must_use]
     pub fn quiet_since(&self) -> Option<Instant> {

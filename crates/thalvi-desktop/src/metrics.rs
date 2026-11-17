@@ -69,6 +69,9 @@ pub enum Event {
     LiveSttDelta,
     /// One call to the writing model: time to the first text and in all, and how it ended.
     Writing,
+    /// One dictation cleanup: the chat call's own latency and outcome, and separately how long
+    /// the user waited from the dictation final until the paste.
+    Cleanup,
     /// Fetching and loading the local speech model.
     SpeechLoad,
     /// Downloading a catalog speech model from the settings window.
@@ -126,6 +129,7 @@ impl Event {
             Self::LiveSttFirstText => "desktop_live_stt_first_text",
             Self::LiveSttDelta => "desktop_live_stt_delta",
             Self::Writing => "desktop_writing",
+            Self::Cleanup => "desktop_cleanup",
             Self::SpeechLoad => "desktop_speech_load",
             Self::SpeechDownload => "desktop_speech_download",
             Self::ChatDownload => "desktop_chat_download",

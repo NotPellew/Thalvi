@@ -943,6 +943,10 @@ mod tests {
                 r#"{"writing": {"url": "http://x", "model": "m", "apps": [{"app": "kitty", "prompt": " \n"}]}}"#,
                 "writing.apps has a blank prompt.",
             ),
+            (
+                r#"{"writing": {"clean_dictation": true}}"#,
+                "writing.clean_dictation needs a writing endpoint",
+            ),
         ] {
             let error = writing(json).unwrap_err().to_string();
             assert!(error.contains(expected), "{json}: {error}");
@@ -961,6 +965,19 @@ mod tests {
                 written["writing"].get("prompt").cloned(),
             )
         };
+        let cleaned =
+            parse(r#"{"writing": {"url": "http://x", "model": "m", "clean_dictation": true}}"#)
+                .unwrap();
+        assert!(cleaned.writing.as_ref().unwrap().clean_dictation());
+        let stored_flag = serde_json::to_value(&cleaned).unwrap();
+        assert_eq!(stored_flag["writing"]["clean_dictation"], true);
+        let off = parse(r#"{"writing": {"url": "http://x", "model": "m"}}"#).unwrap();
+        assert!(!off.writing.as_ref().unwrap().clean_dictation());
+        assert!(
+            serde_json::to_value(&off).unwrap()["writing"]
+                .get("clean_dictation")
+                .is_none()
+        );
         assert_eq!(stored(DEFAULT_PROMPT), (DEFAULT_PROMPT.to_owned(), None));
         assert_eq!(
             stored("  Be brief.\n"),
