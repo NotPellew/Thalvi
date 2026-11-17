@@ -103,10 +103,13 @@ pub enum Event {
     /// update server; `install` is how long the restart into the new version took. Fields hold only
     /// the step, the channel and versions.
     Update,
+    /// One overlay show: from the status that asked for it to the first frame attached, or to the
+    /// failure when the surface never appeared. `ok` or that failure.
+    OverlayShown,
 }
 
 impl Event {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::WakeLoad => "desktop_wake_load",
             Self::WakeInference => "desktop_wake_inference",
@@ -141,6 +144,7 @@ impl Event {
             Self::HostCall => "desktop_host_call",
             Self::AudioGap => "desktop_audio_gap",
             Self::Update => "desktop_update",
+            Self::OverlayShown => "desktop_overlay_shown",
         }
     }
 }
@@ -611,6 +615,8 @@ pub struct Stages {
     pub final_lag: StageSummary,
     /// Typing or copying the text.
     pub delivery: StageSummary,
+    /// The status that asked for the overlay to the first frame attached.
+    pub overlay: StageSummary,
 }
 
 /// One recent dictation, as far as its capture-flow line says. It names the route and the source,
@@ -658,7 +664,7 @@ pub fn summarize(dir: &Path, window: Duration) -> Result<Summary, UnreadableLog>
     let since = now_ms().saturating_sub(u64::try_from(window.as_millis()).unwrap_or(u64::MAX));
     let path = dir.join("metrics.jsonl");
     let mut summary = Summary::default();
-    let mut times: [Vec<f64>; 4] = Default::default();
+    let mut times: [Vec<f64>; 5] = Default::default();
     for file in [backup(&path, 2), backup(&path, 1), path] {
         let text = match std::fs::read_to_string(file) {
             Ok(text) => text,
@@ -694,6 +700,7 @@ pub fn summarize(dir: &Path, window: Duration) -> Result<Summary, UnreadableLog>
                 {
                     (&mut summary.stages.delivery, 3)
                 }
+                Some("desktop_overlay_shown") => (&mut summary.stages.overlay, 4),
                 _ => continue,
             };
             stage.0.count += 1;
@@ -708,6 +715,7 @@ pub fn summarize(dir: &Path, window: Duration) -> Result<Summary, UnreadableLog>
         &mut summary.stages.partial_lag,
         &mut summary.stages.final_lag,
         &mut summary.stages.delivery,
+        &mut summary.stages.overlay,
     ]
     .into_iter()
     .zip(times)
@@ -854,6 +862,7 @@ mod tests {
             (Event::HoldEnd, "desktop_hold_end"),
             (Event::HostCall, "desktop_host_call"),
             (Event::Update, "desktop_update"),
+            (Event::OverlayShown, "desktop_overlay_shown"),
         ] {
             assert_eq!(event.name(), name);
         }
@@ -1264,6 +1273,40 @@ mod tests {
             ])
         );
         assert!(!recent.to_string().contains("words"));
+    }
+
+    #[tokio::test]
+    async fn an_overlay_show_is_counted_in_the_summary() {
+        let dir = TempDir::new("overlay-shown");
+        let recorder = Recorder::in_dir(METRICS, dir.root()).unwrap();
+        recorder.metric(
+            Event::OverlayShown,
+            "ok",
+            Some(Duration::from_millis(40)),
+            Value::Null,
+        );
+        recorder.metric(
+            Event::OverlayShown,
+            "The status overlay could not open a layer surface: Hyprland did not place it.",
+            Some(Duration::from_millis(1_000)),
+            Value::Null,
+        );
+        recorder.finish().await;
+
+        let written = lines(&dir.root().join("metrics.jsonl"));
+        assert_eq!(written.len(), 2, "one line per show");
+        assert_eq!(written[0]["event"], "desktop_overlay_shown");
+        assert_eq!(written[0]["outcome"], "ok");
+        assert_eq!(written[0]["duration_ms"], 40.0);
+        assert!(written[0]["ts_ms"].as_u64().unwrap() > 1_700_000_000_000);
+
+        let summary = summarize(&dir.root(), SUMMARY_WINDOW).unwrap();
+        assert_eq!(summary.stages.overlay.count, 2);
+        assert_eq!(summary.stages.overlay.outcomes.get("ok").copied(), Some(1));
+        assert_eq!(
+            (summary.stages.overlay.p50_ms, summary.stages.overlay.p95_ms),
+            (Some(40.0), Some(1_000.0))
+        );
     }
 
     #[test]

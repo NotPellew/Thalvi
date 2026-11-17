@@ -1,7 +1,6 @@
 //! Hyprland's overlay surface: a layer-shell surface on the overlay layer, drawn from shared memory.
 
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
-use std::time::Duration;
 
 use crate::host::OverlayEvent;
 
@@ -22,26 +21,12 @@ use wayland_client::{Connection, QueueHandle};
 
 use crate::host::{HostError, OVERLAY_TITLE, OverlayFrame};
 
-/// How long a new layer surface may wait for the compositor's first configure.
-const CONFIGURE_WITHIN: Duration = Duration::from_secs(1);
+use super::place::{self, Configure, Seat};
 
 fn failed(cause: impl std::fmt::Display) -> HostError {
     HostError::Unsupported(format!(
         "The status overlay could not open a layer surface: {cause}."
     ))
-}
-
-/// What the compositor said about the layer surface last made.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Configure {
-    Ready,
-    Closed,
-}
-
-/// The latest configure still in force: a later one replaces an earlier one, so a `Ready` queued
-/// ahead of a `Closed` cannot hide the closure.
-fn coalesce(queued: impl IntoIterator<Item = Configure>) -> Option<Configure> {
-    queued.into_iter().last()
 }
 
 /// A layer surface committed and not yet placed, and when that wait started.
@@ -142,75 +127,63 @@ impl Layer {
     }
 
     pub fn show(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
-        self.drain();
-        // A surface that is still being placed, or one already showing, is drawn onto. Making
-        // another here leaks a layer every time the caller asks again.
-        if self.pending.is_some() || self.surface.is_some() {
-            return self.placed(frame);
-        }
-        let surface = self.compositor.create_surface(&self.queue);
-        surface.set_buffer_scale(self.scale);
-        // An empty input region: clicks reach the windows below, as the overlay takes none here.
-        let empty = Region::new(&self.compositor).map_err(failed)?;
-        surface.set_input_region(Some(empty.wl_region()));
-        let layer = self.shell.create_layer_surface(
-            &self.queue,
-            surface,
-            Level::Overlay,
-            Some(OVERLAY_TITLE),
-            None,
-        );
-        layer.set_anchor(Anchor::TOP);
-        layer.set_size(self.size.0, self.size.1);
-        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        layer.commit();
-        self.conn.flush().map_err(failed)?;
-        // Placed by the event thread. The overlay thread keeps handling Hide and Press.
-        self.pending = Some(Pending {
-            layer,
-            since: std::time::Instant::now(),
-        });
-        match self.placed(frame) {
-            Err(_) if self.pending.is_some() => {
-                let _ = self.events.send(OverlayEvent::Pending);
-                Err(failed("the layer surface is not placed yet"))
-            }
-            other => other,
-        }
+        self.step(frame, true)
     }
 
     pub fn present(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
-        self.placed(frame)
+        self.step(frame, false)
     }
 
-    /// Attaches `frame` once the compositor has placed the surface. A configure still outstanding
-    /// leaves the surface unplaced, so the caller retries later instead of waiting here.
-    fn placed(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
-        let configure = self.drain();
-        if configure == Some(Configure::Closed) {
-            self.surface = None;
-            self.pending = None;
-            return Err(failed("the layer surface closed"));
-        }
-        if self.surface.is_none()
-            && configure == Some(Configure::Ready)
-            && let Some(pending) = self.pending.take()
-        {
-            self.surface = Some(pending.layer);
-        }
-        if self.surface.is_none()
-            && self
-                .pending
-                .as_ref()
-                .is_some_and(|pending| pending.since.elapsed() >= CONFIGURE_WITHIN)
-        {
-            // Keep the surface. Dropping it and showing again leaves a layer behind on a
-            // compositor that never configured it, and the next status would make another.
-            let Some(pending) = self.pending.take() else {
+    /// One placement decision, then the pixels. `show` may make the surface; `present` only draws
+    /// on the one already placed. A configure still outstanding leaves it unplaced, so the caller
+    /// retries later instead of waiting here.
+    fn step(&mut self, frame: &OverlayFrame, show: bool) -> Result<(), HostError> {
+        let seat = match &self.pending {
+            Some(pending) => Seat::Pending {
+                waited: pending.since.elapsed(),
+            },
+            None if self.surface.is_some() => Seat::Placed,
+            None => Seat::None,
+        };
+        // One drain: a show with no surface discards what was queued, and every other step keeps it.
+        let (seat, step) = place::show_step(seat, self.drain());
+        match step {
+            place::Step::Create if show => self.make_surface()?,
+            place::Step::Create | place::Step::NotYet => {
                 return Err(failed("Hyprland did not place it"));
+            }
+            place::Step::Closed => {
+                self.surface = None;
+                self.pending = None;
+                return Err(failed("the layer surface closed"));
+            }
+            place::Step::Attach { gave_up: true } => {
+                // Keep the surface. Dropping it and showing again leaves a layer behind on a
+                // compositor that never configured it, and the next status would make another.
+                if let Some(pending) = self.pending.take() {
+                    self.surface = Some(pending.layer);
+                }
+                return Err(failed("Hyprland did not place it"));
+            }
+            place::Step::Attach { gave_up: false } => {
+                if matches!(seat, Seat::Placed)
+                    && self.surface.is_none()
+                    && let Some(pending) = self.pending.take()
+                {
+                    self.surface = Some(pending.layer);
+                }
+            }
+        }
+        if matches!(step, place::Step::Create) {
+            // The surface was just committed. Its configure, if the compositor already sent one,
+            // places it on this same show.
+            return match self.step(frame, false) {
+                Err(_) if self.pending.is_some() => {
+                    let _ = self.events.send(OverlayEvent::Pending);
+                    Err(failed("the layer surface is not placed yet"))
+                }
+                other => other,
             };
-            self.surface = Some(pending.layer);
-            return Err(failed("Hyprland did not place it"));
         }
         let Some(layer) = &self.surface else {
             return Err(failed("Hyprland did not place it"));
@@ -231,19 +204,45 @@ impl Layer {
         self.conn.flush().map_err(failed)
     }
 
+    /// Commits a new layer surface and waits for the compositor to place it.
+    fn make_surface(&mut self) -> Result<(), HostError> {
+        let surface = self.compositor.create_surface(&self.queue);
+        surface.set_buffer_scale(self.scale);
+        // An empty input region: clicks reach the windows below, as the overlay takes none here.
+        let empty = Region::new(&self.compositor).map_err(failed)?;
+        surface.set_input_region(Some(empty.wl_region()));
+        let layer = self.shell.create_layer_surface(
+            &self.queue,
+            surface,
+            Level::Overlay,
+            Some(OVERLAY_TITLE),
+            None,
+        );
+        layer.set_anchor(Anchor::TOP);
+        layer.set_size(self.size.0, self.size.1);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        layer.commit();
+        self.conn.flush().map_err(failed)?;
+        self.pending = Some(Pending {
+            layer,
+            since: std::time::Instant::now(),
+        });
+        Ok(())
+    }
+
     pub fn hide(&mut self) {
         self.surface = None;
         self.pending = None;
         let _ = self.conn.flush();
     }
 
-    /// Every queued configure, coalesced so the latest one is the one in force.
-    fn drain(&mut self) -> Option<Configure> {
+    /// Every configure queued since the last step. `show_step` keeps the latest of them.
+    fn drain(&mut self) -> impl Iterator<Item = Configure> {
         let guard = self
             .configures
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        coalesce(guard.try_iter())
+        guard.try_iter().collect::<Vec<_>>().into_iter()
     }
 }
 
@@ -335,24 +334,6 @@ impl ProvidesRegistryState for Events {
         &mut self.registry
     }
     registry_handlers![OutputState];
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Configure, coalesce};
-
-    #[test]
-    fn a_later_configure_replaces_an_earlier_one() {
-        assert_eq!(
-            coalesce([Configure::Ready, Configure::Closed]),
-            Some(Configure::Closed)
-        );
-        assert_eq!(
-            coalesce([Configure::Closed, Configure::Ready]),
-            Some(Configure::Ready)
-        );
-        assert_eq!(coalesce([]), None);
-    }
 }
 
 delegate_registry!(Events);
