@@ -399,11 +399,10 @@ impl Case {
     }
 
     async fn action(&mut self, action: Action) -> bool {
-        let status = self.link.status();
         let starts = self.capture.is_none()
             && self.link.audio().active.is_some()
             && match action {
-                Action::Wake => !matches!(status, Status::KeyboardOnly),
+                Action::Wake => self.config.wake.enabled(),
                 Action::HoldDown => !self.held,
                 _ => false,
             };

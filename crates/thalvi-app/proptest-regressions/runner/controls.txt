@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc ed8c02962c4e9c21d54e84ceb2095b8d501ad7ab820530340931f370e0b6d26f # shrinks to sequence = [Answer(true), Listening(true), HoldDown, Fail, Apply(History), Speech(1), Apply(Recordings), Answer(false), Apply(Cues), Fail, Toggle, Silence(20), Apply(EndingPause), HoldDown, Toggle, Answer(false), Fail, Apply(Wake), Answer(false), Speech(3), Quiet, Apply(Recordings), Wake, Toggle, Restart(false), HoldDown, Silence(3), Wake]
 cc 466db7faaff1d847012385b9cee6ee8c0db9c9e3765a5d5db0055c41d52c9616 # shrinks to sequence = [Wake, Apply(Cues), Quiet, Silence(16), Answer(true), Speech(4), Cancel, Cancel, Wake, Speech(4), Restart(false), Fail, HoldDown, Ready, HoldDown, HoldDown, Restart(false), HoldUp(300), Silence(20), Fail]
+cc 64861acf79eef15c769a0469a4db036d2348ec2b84215ca29eeda5abbfeadc23 # shrinks to sequence = [Apply(Wake), Apply(Cues), HoldDown, Answer(false), HoldUp(300), Silence(6), Wake]
