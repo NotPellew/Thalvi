@@ -56,13 +56,20 @@ own, so either order could (not tried on a live session).
 
 ## Covers
 
-Sync commit: `f87174d14c2651d7ad1a88e44334ca8ed38ae391`. [source.json](source.json) records the
+Sync commit: `c7e6524ccdc225b4cf8f099ab6a5e2f2da2bc999`. [source.json](source.json) records the
 whole-file hash of `hold.rs`. Matching hashes establish synchronization only,
 not that the event model fits. Changes since `6baf0f0e` alter hook routing and
 its tests (`251fd063`, `27430c3b`); `HoldInput`, `Presses`, their bounds and the
 AltGr event harness remain unchanged. The merged history also contains the
 already represented AltGr addition `51c26f40` and key-validation/message changes
 `0baa95a4`, `c056fa4c`. Hook routing itself remains outside this proof.
+
+The runner-control property (#525; inspected through `c7e6524`) moves channel creation into
+`EngineLink::wire` and makes `Runner` and `Session` generic. The same `HoldInput` watch reaches
+the engine and runner cursors; `apply_engine`, `capture`, `pressed` and `while_delivering`
+keep their bodies unchanged. No hold observation, handoff, key event or bound changes, and
+`hold.rs` and its recorded hash are unchanged. The harness and its mutations still describe
+these callers; no model update is needed.
 
 | Code | In the harness |
 | --- | --- |
