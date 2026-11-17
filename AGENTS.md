@@ -70,8 +70,9 @@ directing you.
   contract, and every module starts with a `//!` line saying what it owns,
   so `grep -rm1 '^//!'` maps the code.
 - Desktop OS code lives in `#[cfg(target_os)]` modules behind the desktop host
-  interface; shared logic has no `cfg`. Every host implements every method; what
-  a desktop can't do returns a typed reason the user sees, never a no-op.
+  interface; shared logic has no `cfg` (`.github/scripts/rust-layout` checks
+  it). Every host implements every method; what a desktop can't do returns a
+  typed reason the user sees, never a no-op.
 - Rust: `crates/` is flat, directory name = crate name. Dependency versions
   and lints are set at the workspace root. `lib.rs` only declares and
   re-exports modules. No `mod.rs`.
