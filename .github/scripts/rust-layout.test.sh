@@ -38,7 +38,7 @@ check 'inline test module is not the end of the file' '' "shared.rs=$doc"'#[cfg(
 check 'shared.rs:2: OS cfg in shared code' '' "shared.rs=$doc"'fn a() -> bool { cfg!(unix) }\n'
 check '' '' "main.rs=$doc"'#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]\n'
 check '' 'crates/c/src/shared.rs 1\n' "shared.rs=$doc$os_fn"
-check 'shared.rs:2: 2 OS cfg uses, allowed 1' 'crates/c/src/shared.rs 1\n' "shared.rs=$doc$os_fn$os_fn"
+check 'shared.rs:2: 2 OS cfg uses, allowed 1; each use is listed below' 'crates/c/src/shared.rs 1\n' "shared.rs=$doc$os_fn$os_fn"
 check 'shared.rs:1: 0 OS cfg uses left, allowed 1: lower this file to' 'crates/c/src/shared.rs 1\n' "shared.rs=${doc}fn a() {}\n"
 check 'shared.rs:1: the file does not start with a' '' 'shared.rs=fn a() {}\n'
 check 'lib.rs:3: lib.rs holds more than module declarations' '' "lib.rs=${doc}pub mod a;\nfn b() {}\n"

@@ -170,7 +170,7 @@ def main() -> int:
         seen.add(name)
         limit = allowed.get(name, 0)
         if len(lines) > limit:
-            problems.append(f'{name}:{lines[0]}: {len(lines)} OS cfg uses, allowed {limit}; the new ones are listed below')
+            problems.append(f'{name}:{lines[0]}: {len(lines)} OS cfg uses, allowed {limit}; each use is listed below')
             problems += [f'{name}:{n}: {OS_CFG_FIX}' for n in lines]
         elif len(lines) < limit:
             problems.append(f'{name}:1: {len(lines)} OS cfg uses left, allowed {limit}: lower this file to `{name} {len(lines)}` in {ALLOWANCES}, or delete the line at 0')
