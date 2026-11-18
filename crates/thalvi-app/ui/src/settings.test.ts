@@ -2810,6 +2810,47 @@ describe("live controls", () => {
       expect(row.querySelector(".applied")?.textContent).toBe(notice === "" && sent !== null ? APPLIED_TEXT : "");
     });
 
+    it.each([
+      ["Dictate key", "search box", "Alt+Z"],
+      ["Write key", "search box", "Alt+X"],
+      ["Dictate key", "Escape", "Alt+Z"],
+      ["Write key", "Escape", "Alt+X"],
+    ])("%s: recording keeps focus on Change…, announces the prompt, and leaving it by %s keeps %s", async (label, leave, kept) => {
+      const stub = await open();
+      goTo("listening");
+      const row = rowOf(label);
+      const change = within(row, "Change…");
+      change.click();
+      expect(document.activeElement).toBe(change);
+      expect(change.disabled).toBe(false);
+      expect(change.getAttribute("aria-disabled")).toBe("true");
+      const prompt = Array.from(row.querySelectorAll("*")).find((node) => node.textContent === "Press the new key. Escape cancels.");
+      expect(prompt?.closest('[aria-live="polite"], [role="status"]')).not.toBeNull();
+      change.click();
+      expect(change.getAttribute("aria-disabled")).toBe("true");
+
+      if (leave === "search box") {
+        const search = root.querySelector<HTMLInputElement>('input[aria-label="Search settings"]') as HTMLInputElement;
+        search.focus();
+        const heard: KeyboardEvent[] = [];
+        search.addEventListener("keydown", (event) => heard.push(event));
+        const typed = new KeyboardEvent("keydown", { code: "KeyQ", key: "q", bubbles: true, cancelable: true });
+        search.dispatchEvent(typed);
+        expect(heard).toEqual([typed]);
+        expect(typed.defaultPrevented).toBe(false);
+        expect(document.activeElement).toBe(search);
+      } else {
+        press("Escape");
+        expect(document.activeElement).toBe(change);
+      }
+      await settle();
+
+      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+      expect(row.querySelector("kbd")?.textContent).toBe(kept);
+      expect(change.hasAttribute("aria-disabled")).toBe(false);
+      expect(within(row, "Restore default").disabled).toBe(true);
+    });
+
     it("restores a key set earlier to the desktop's own, and then has nothing to restore", async () => {
       const stub = await open({ ...SETTINGS, hold_key: "Ctrl+F9" });
       const row = rowOf("Dictate key");
