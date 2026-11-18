@@ -125,7 +125,9 @@ Prerequisites the script does not install:
   `windows-latest` and runs from Git Bash. CI then runs
   `.github/scripts/windows-smoke.ps1` on its installer: it checks the Whisper
   helpers, installs and starts the app and opens Settings, and uploads screenshots.
-- Desktop UI: Node pinned in `.node-version`.
+- Desktop UI: Node pinned in `.node-version`, and on Linux the system libraries Chromium needs (`ubuntu-latest`
+  has them; elsewhere `npm exec --prefix crates/thalvi-app/ui -- playwright-core install-deps chromium` as root).
+  The gate fetches the headless shell playwright-core pins.
 - Self-hosted recognizer: `pipx` and `uv` (Python pinned in
   `speech/asr/.python-version`).
 - Issue sync: `pipx`.

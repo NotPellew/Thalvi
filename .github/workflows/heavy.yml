@@ -164,6 +164,31 @@ jobs:
           path: mutants.out/
           retention-days: 7
 
+  explore:
+    name: explore
+    needs: start
+    if: needs.start.outputs.superseded == 'false' && contains(fromJSON('["all", "desktop-ui"]'), inputs.scope || 'all')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/thalvi-app/ui/package-lock.json
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('crates/thalvi-app/ui/package-lock.json') }}
+      - name: explore Settings with a random seed
+        run: |
+          npm ci --prefix crates/thalvi-app/ui
+          npm exec --prefix crates/thalvi-app/ui -- playwright-core install --only-shell chromium
+          seed=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+          echo "seed: $seed" | tee -a "$GITHUB_STEP_SUMMARY"
+          EXPLORE_SEED=$seed npm run explore --prefix crates/thalvi-app/ui
+
   verified:
     name: verified
     needs: [start, ci, mutants]
@@ -194,7 +219,7 @@ jobs:
 
   report:
     name: report
-    needs: [start, ci, mutants]
+    needs: [start, ci, mutants, explore]
     if: failure() && github.ref == 'refs/heads/main' && (inputs.scope || 'all') == 'all'
     runs-on: ubuntu-latest
     timeout-minutes: 5

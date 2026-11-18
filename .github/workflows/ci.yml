@@ -229,7 +229,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - if: needs.changes.outputs.desktop_ui == 'false'
         run: echo 'No change affects this job, so its steps are skipped.'
@@ -241,6 +241,11 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: crates/thalvi-app/ui/package-lock.json
+      - if: needs.changes.outputs.desktop_ui != 'false'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('crates/thalvi-app/ui/package-lock.json') }}
       - if: needs.changes.outputs.desktop_ui != 'false'
         run: .github/scripts/gates desktop-ui
 

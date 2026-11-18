@@ -80,6 +80,9 @@ gate_desktop_windows() {
 
 gate_desktop_ui() {
   node_checks crates/thalvi-app/ui
+  # Fetches the headless shell playwright-core pins; Chromium's system libraries are a prerequisite (AGENTS.md).
+  in_dir crates/thalvi-app/ui npm exec -- playwright-core install --only-shell chromium
+  in_dir crates/thalvi-app/ui npm run explore
 }
 
 gate_speech() {
