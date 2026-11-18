@@ -2,6 +2,18 @@
 
 type Attrs = Record<string, string | boolean>;
 
+/** Sets a parent's children without moving or detaching kept children already in place. */
+export function setChildren(parent: HTMLElement, ...children: Node[]): void {
+  const kept = new Set(children);
+  for (const child of Array.from(parent.childNodes)) {
+    if (!kept.has(child)) parent.removeChild(child);
+  }
+  children.forEach((child, index) => {
+    const current = parent.childNodes[index] ?? null;
+    if (current !== child) parent.insertBefore(child, current);
+  });
+}
+
 export function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   attrs: Attrs = {},

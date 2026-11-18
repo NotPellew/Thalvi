@@ -1403,6 +1403,44 @@ describe("the attached speech editor", () => {
   const editorEl = (): HTMLElement => root.querySelector(".editor") as HTMLElement;
   const editButton = (name: string): HTMLButtonElement => root.querySelector(`button[aria-label="Edit ${name}"]`) as HTMLButtonElement;
 
+  it("keeps the focused editor field, caret and draft untouched by status and download refreshes", async () => {
+    const stub = await openSeveral();
+    edit("On this computer");
+    await settle();
+    const name = editorEl().querySelector("input") as HTMLInputElement;
+    name.focus();
+    typeIn(name, "My server");
+    name.setSelectionRange(3, 3);
+    const events = vi.fn();
+    for (const event of ["blur", "focus", "change"]) name.addEventListener(event, events);
+    const saves = stub.backend.saveSettings.mock.calls.length;
+
+    for (const trigger of [
+      () => { stub.emit({ state: "paused" }); },
+      () => { stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null, causes: [] }); },
+    ]) {
+      trigger();
+      await settle();
+      expect.soft(document.activeElement).toBe(name);
+      expect.soft(name.value).toBe("My server");
+      expect.soft([name.selectionStart, name.selectionEnd]).toEqual([3, 3]);
+      expect.soft(events).not.toHaveBeenCalled();
+      expect.soft(stub.backend.saveSettings).toHaveBeenCalledTimes(saves);
+    }
+  });
+
+  it.each(["row button", "search box", "body"] as const)("keeps focus on the %s after a status refresh", async (where) => {
+    const stub = await openSeveral();
+    const focused = where === "row button" ? editButton("On this computer")
+      : where === "search box" ? root.querySelector<HTMLInputElement>('input[aria-label="Search settings"]') as HTMLInputElement
+      : document.body;
+    focused.focus();
+    expect(document.activeElement).toBe(focused);
+    stub.emit({ state: "paused" });
+    await settle();
+    expect(document.activeElement).toBe(where === "row button" ? editButton("On this computer") : focused);
+  });
+
   it.each([
     ["Cybrex2", 0, "Editing “Cybrex2” · live dictation"],
     ["On this computer", 0, "Editing “On this computer” · live dictation"],
