@@ -581,6 +581,25 @@ describe("tables", () => {
     expect(active.getAttribute("aria-label") ?? (active === document.body ? "BODY" : active.textContent)).toBe(expected);
     expect(rowOf("Apps").querySelector(".note:not([hidden])")?.textContent ?? null).toBe(refusal);
   });
+
+  it.each([
+    ["the first phrase", SETTINGS.endings, "paste that", true, null, "Remove “write that out”"],
+    ["the last phrase", SETTINGS.endings, "never mind", true, null, "Remove “scratch that”"],
+    ["the only phrase", { "never mind": "cancel" }, "never mind", true, null, "New ending phrase"],
+    ["a phrase, refused", SETTINGS.endings, "never mind", true, "Thalvi could not apply it.", "Remove “never mind”"],
+    ["a phrase while nothing has focus", SETTINGS.endings, "never mind", false, null, "BODY"],
+  ] as const)("after removing %s, focus is on its neighbour's Remove, else New ending phrase", async (_case, endings, removed, focused, refusal, expected) => {
+    const stub = await open({ ...SETTINGS, endings });
+    if (refusal) stub.backend.saveSettings.mockRejectedValueOnce(refusal);
+    goTo("commands");
+    const remove = root.querySelector<HTMLButtonElement>(`button[aria-label="Remove “${removed}”"]`) as HTMLButtonElement;
+    if (focused) remove.focus();
+    remove.click();
+    await settle();
+    const active = document.activeElement as HTMLElement;
+    expect(active.getAttribute("aria-label") ?? (active === document.body ? "BODY" : active.textContent)).toBe(expected);
+    expect(rowOf("Ending phrases").querySelector(".note:not([hidden])")?.textContent ?? null).toBe(refusal);
+  });
 });
 
 describe("the wake word picker", () => {
@@ -1487,6 +1506,24 @@ describe("the attached speech editor", () => {
     expect(editor.hidden).toBe(true);
     expect(editButton(name).getAttribute("aria-expanded")).toBe("false");
     expect(document.activeElement).toBe(editButton(name));
+  });
+
+  it.each([
+    ["Add an extra recognizer", "Cancel", "the opener"],
+    ["Add an extra recognizer", "Add server", "the new entry's Edit"],
+    ["Add a speech server", "Cancel", "the opener"],
+    ["Add a speech server", "Add server", "the new entry's Edit"],
+  ] as const)("returns focus from a form opened by %s, closed with %s, to %s", async (opener, close, expected) => {
+    await openSeveral();
+    const opening = opener === "Add a speech server" ? root.querySelector<HTMLButtonElement>('button[aria-label="Add a speech server"]') as HTMLButtonElement : button(opener);
+    opening.click();
+    await settle();
+    const name = (editorEl().querySelector("input") as HTMLInputElement).value;
+    if (close === "Add server") type(control("Address", "input"), opener === "Add a speech server" ? "ws://127.0.0.1:8013" : "http://127.0.0.1:9000/v1");
+    within(editorEl(), close).click();
+    await settle();
+    expect(editorEl().hidden).toBe(true);
+    expect(document.activeElement).toBe(expected === "the opener" ? opening : editButton(name));
   });
 
   it("moves the one editor when another entry is edited", async () => {
