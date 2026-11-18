@@ -2591,7 +2591,7 @@ function confirmed(label: string, question: string, yes: string, no: string, act
 /** The last dictation: editable, with Copy, Reset and Discard. Editing sends and copies nothing. */
 function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; refresh: () => void } {
   let current: Draft | null = null;
-  const empty = el("p", { class: "note ok" }, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it.");
+  const empty = el("p", { class: "note ok", tabindex: "-1" }, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it.");
   const outcome = el("p", { class: "note ok" });
   const newer = el("p", { class: "note why", hidden: true }, "A newer dictation is waiting. Discard this one to see it.");
   const text = el("textarea", { rows: "4", spellcheck: "false", "aria-label": "Last dictation text" });
@@ -2642,9 +2642,13 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
     }
     if (next !== null && next.id !== current?.id) text.value = next.text;
     current = next;
+    const hadFocus = editor.contains(document.activeElement);
     empty.hidden = next !== null;
     editor.hidden = next === null;
-    if (next === null) return;
+    if (next === null) {
+      if (hadFocus) empty.focus();
+      return;
+    }
     outcome.textContent = next.target === null ? DRAFT_OUTCOMES[next.outcome] : `${DRAFT_OUTCOMES[next.outcome]} Meant for ${next.target}.`;
     newer.hidden = !next.newerWaiting;
     sync();
