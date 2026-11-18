@@ -1182,10 +1182,11 @@ function speech(context: PageContext): SpeechRows {
   let editingId: string | null = null;
   let editingExtra = false;
   let editingAdd = false;
+  let focusOnClose: () => HTMLElement | null = () => null;
   const nextDictation = el("p", { class: "next-dictation", role: "status" }, "");
   const retryProblem = note();
   const useServer = button("Use a speech server instead", () => {
-    openEditor(null, "realtime");
+    openEditor(useServer, null, "realtime");
   });
   const retry = button("Retry", retryDownload);
   const summaryActions = el("div", { class: "trow", hidden: true }, useServer, retry, retryProblem);
@@ -1401,7 +1402,7 @@ function speech(context: PageContext): SpeechRows {
     }, "quiet");
     use.setAttribute("aria-label", `Use ${entry.name}`);
     const edit = button("Edit", () => {
-      openEditor(entry);
+      openEditor(edit, entry);
     }, "quiet");
     edit.setAttribute("aria-label", `Edit ${entry.name}`);
     edit.setAttribute("aria-expanded", String(editingId === entry.id));
@@ -1471,7 +1472,7 @@ function speech(context: PageContext): SpeechRows {
 
   function extraRow(entry: ExtraEntry): HTMLElement {
     const edit = button("Edit", () => {
-      openEditor(entry);
+      openEditor(edit, entry);
     }, "quiet");
     edit.setAttribute("aria-label", `Edit ${entry.name}`);
     edit.setAttribute("aria-expanded", String(editingId === entry.id));
@@ -1551,7 +1552,7 @@ function speech(context: PageContext): SpeechRows {
   };
 
   function closeEditor(returnFocus = true): void {
-    const wasId = editingId;
+    const back = focusOnClose;
     editingId = null;
     editingAdd = false;
     editor.replaceChildren();
@@ -1560,19 +1561,21 @@ function speech(context: PageContext): SpeechRows {
     for (const list of [liveList, extraList]) {
       for (const btn of list.querySelectorAll('button[aria-label^="Edit "]')) btn.setAttribute("aria-expanded", "false");
     }
-    if (returnFocus && wasId !== null) {
-      editButtonFor(wasId)?.focus();
+    if (returnFocus) {
+      back()?.focus();
       queueMicrotask(() => {
-        editButtonFor(wasId)?.focus();
+        back()?.focus();
       });
     }
   }
 
-  function openEditor(existing: SpeechEntry | null, kind?: SpeechEntry["kind"]): void {
+  /** Closing gives focus to the entry's Edit, or to `opener` while the entry is not in the list. */
+  function openEditor(opener: HTMLElement, existing: SpeechEntry | null, kind?: SpeechEntry["kind"]): void {
     editingAdd = existing === null;
     editingId = existing?.id ?? null;
     editingExtra = existing ? existing.kind === "extra" : kind === "extra";
     const working: SpeechEntry = existing ? structuredClone(existing) : blankEntry(kind ?? "realtime", uniqueName(KIND_NAMES[kind ?? "realtime"]));
+    focusOnClose = () => editButtonFor(working.id) ?? opener;
     const message = note();
     let validate: () => Promise<void> = () => Promise.resolve();
     const rows: HTMLElement[] = [
@@ -1712,12 +1715,12 @@ function speech(context: PageContext): SpeechRows {
   const kindPicker = controls.draftSelect(LIVE_KINDS, "realtime", () => undefined);
   const kindLabel = el("label", { for: (kindPicker.field as HTMLSelectElement).id }, "Add a speech server:");
   function addSelected(): void {
-    openEditor(null, (kindPicker.field as HTMLSelectElement).value as LiveEntry["kind"]);
+    openEditor(addLive, null, (kindPicker.field as HTMLSelectElement).value as LiveEntry["kind"]);
   }
   const addLive = button("Add", addSelected);
   addLive.setAttribute("aria-label", "Add a speech server");
   const addExtra = button("Add an extra recognizer", () => {
-    openEditor(null, "extra");
+    openEditor(addExtra, null, "extra");
   });
   const liveBlock = el("div", { class: "stack wide" }, liveList, liveApplied, problem, el("div", { class: "trow add kind-add" }, kindLabel, kindPicker.node, addLive), el("small", { class: "kind-help" }, KIND_HELP));
   const extraBlock = el("div", { class: "stack wide" }, extraState, needsEndpoint, extraList, extraApplied, addExtra);
