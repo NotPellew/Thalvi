@@ -2542,7 +2542,7 @@ function recordings({ settings, backend, controls, apply }: PageContext): HTMLEl
   ];
 }
 
-function entryCard(entry: HistoryEntry, remove: () => void, copyText: (text: string) => Promise<void>): HTMLElement {
+function entryCard(entry: HistoryEntry, remove: () => void, copyText: (text: string) => Promise<void>): [HTMLElement, HTMLButtonElement] {
   const when = new Date(entry.timestamp_ms);
   const time = el("time", { datetime: when.toISOString() }, WHEN.format(when));
   const header = el("header", {}, time);
@@ -2564,7 +2564,7 @@ function entryCard(entry: HistoryEntry, remove: () => void, copyText: (text: str
   copy.setAttribute("aria-label", `Copy the entry from ${time.textContent}`);
   const del = button("Delete", remove, "quiet");
   del.setAttribute("aria-label", `Delete the entry from ${time.textContent}`);
-  return el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, entry.text), result, el("span", { class: "trow" }, copy, del));
+  return [el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, entry.text), result, el("span", { class: "trow" }, copy, del)), del];
 }
 
 /** A button that asks before it acts: it is replaced by the question and a yes and a no. */
@@ -2686,13 +2686,20 @@ function history(context: PageContext): HTMLElement[] {
   const last = lastDictation(context);
   const list = el("div", { class: "entries" });
   const problem = note();
-  const nothing = el("p", { class: "note ok" }, "Nothing has been kept yet.");
+  const nothing = el("p", { class: "note ok", tabindex: "-1" }, "Nothing has been kept yet.");
+  let shown: { id: number; card: HTMLElement; del: HTMLButtonElement }[] = [];
 
   function refresh(): void {
     backend.getHistory().then(
       (entries) => {
         say(problem, "");
-        list.replaceChildren(...(entries.length === 0 ? [nothing] : entries.map((entry) => entryCard(entry, () => { change(backend.deleteHistoryEntry(entry.id)); }, (text) => backend.copyText(text)))));
+        const removed = shown.findIndex(({ id, del }) => del === document.activeElement && !entries.some((entry) => entry.id === id));
+        shown = entries.map((entry) => {
+          const [card, del] = entryCard(entry, () => { change(backend.deleteHistoryEntry(entry.id)); }, (text) => backend.copyText(text));
+          return { id: entry.id, card, del };
+        });
+        list.replaceChildren(...(shown.length === 0 ? [nothing] : shown.map(({ card }) => card)));
+        if (removed !== -1) focusAfterRemoval(shown.map(({ del }) => del), removed, nothing);
       },
       (error: unknown) => {
         say(problem, errorText(error));
