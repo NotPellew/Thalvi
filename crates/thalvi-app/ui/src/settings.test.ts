@@ -1489,6 +1489,24 @@ describe("the attached speech editor", () => {
     expect(document.activeElement).toBe(editButton(name));
   });
 
+  it.each([
+    ["Add an extra recognizer", "Cancel", "the opener"],
+    ["Add an extra recognizer", "Add server", "the new entry's Edit"],
+    ["Add a speech server", "Cancel", "the opener"],
+    ["Add a speech server", "Add server", "the new entry's Edit"],
+  ] as const)("returns focus from a form opened by %s, closed with %s, to %s", async (opener, close, expected) => {
+    await openSeveral();
+    const opening = opener === "Add a speech server" ? root.querySelector<HTMLButtonElement>('button[aria-label="Add a speech server"]') as HTMLButtonElement : button(opener);
+    opening.click();
+    await settle();
+    const name = (editorEl().querySelector("input") as HTMLInputElement).value;
+    if (close === "Add server") type(control("Address", "input"), opener === "Add a speech server" ? "ws://127.0.0.1:8013" : "http://127.0.0.1:9000/v1");
+    within(editorEl(), close).click();
+    await settle();
+    expect(editorEl().hidden).toBe(true);
+    expect(document.activeElement).toBe(expected === "the opener" ? opening : editButton(name));
+  });
+
   it("moves the one editor when another entry is edited", async () => {
     await openSeveral();
     edit("Cybrex2");
