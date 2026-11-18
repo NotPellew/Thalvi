@@ -1900,7 +1900,7 @@ describe("the speech model catalog", () => {
     stub.backend.downloadSpeechModel.mockReturnValueOnce(new Promise<void>((resolve) => { finish = resolve; }));
     download().click();
     expect(stub.backend.downloadSpeechModel).toHaveBeenCalledWith("nemotron_160ms");
-    expect(download().disabled).toBe(true);
+    expect(download().getAttribute("aria-disabled")).toBe("true");
     expect(text("[role=status]")).toBe("Checking files…");
 
     stub.speechProgress({ name: "nemotron_160ms", percent: 40, status: "downloading", message: null, causes: [] });
@@ -1918,6 +1918,34 @@ describe("the speech model catalog", () => {
     expect(download().hidden).toBe(true);
   });
 
+  it.each([
+    ["stays on Download", "done", "the model picker"],
+    ["moves to Details", "done", "Details"],
+    ["stays on Download", "failed", "Download"],
+  ] as const)("keeps focus on the busy Download; when the user %s and the download ends %s, focus is on %s", async (move, end, expected) => {
+    const stub = await openCatalog();
+    let finish: (failed: boolean) => void = () => undefined;
+    stub.backend.downloadSpeechModel.mockReturnValueOnce(new Promise<void>((resolve, reject) => {
+      finish = (failed) => { if (failed) reject(new Error("offline")); else resolve(); };
+    }));
+    const start = download();
+    const folder = Array.from(rowOf("Speech model").querySelectorAll("summary")).find((summary) => summary.textContent === "Details · your own model folder");
+    start.focus();
+    start.click();
+    stub.speechProgress({ name: "nemotron_160ms", percent: 40, status: "downloading", message: null, causes: [] });
+    expect(document.activeElement).toBe(start);
+    expect(start.getAttribute("aria-disabled")).toBe("true");
+    start.click();
+    expect(stub.backend.downloadSpeechModel).toHaveBeenCalledTimes(1);
+
+    if (move === "moves to Details") folder?.focus();
+    if (end === "done") stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null, causes: [] });
+    finish(end === "failed");
+    await settle();
+    expect(document.activeElement).toBe(expected === "the model picker" ? picker() : expected === "Details" ? folder : start);
+    expect(start.hasAttribute("aria-disabled")).toBe(false);
+  });
+
   it("says plainly why a download failed and lets the user try again", async () => {
     const stub = await openCatalog();
     stub.backend.downloadSpeechModel.mockRejectedValueOnce("Could not download the speech model encoder. Check the internet connection and try again.");
@@ -1926,7 +1954,7 @@ describe("the speech model catalog", () => {
     expect(alert()).toBe("Could not download the speech model encoder. Check the internet connection and try again.");
     expect(text(".badge")).toBe("Not downloaded");
     expect(meter().hidden).toBe(true);
-    expect(download().disabled).toBe(false);
+    expect(download().hasAttribute("aria-disabled")).toBe(false);
 
     download().click();
     expect(alert()).toBeUndefined();
