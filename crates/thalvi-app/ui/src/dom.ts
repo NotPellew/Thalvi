@@ -14,6 +14,11 @@ export function setChildren(parent: HTMLElement, ...children: Node[]): void {
   });
 }
 
+/** Gives a removed item's focus to the item now at its position, else the last item, else `fallback`. */
+export function focusAfterRemoval(items: readonly HTMLElement[], position: number, fallback: HTMLElement): void {
+  (items[position] ?? items.at(-1) ?? fallback).focus();
+}
+
 export function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   attrs: Attrs = {},

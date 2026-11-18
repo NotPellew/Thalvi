@@ -558,6 +558,29 @@ describe("tables", () => {
     button("Add app").click();
     expect(root.querySelector(".note[role=alert]:not([hidden])")?.textContent).toBe("An app named slack already exists.");
   });
+
+  const twoApps = {
+    firefox: { classes: ["firefox"], executables: [], input_keys: [] },
+    slack: { classes: ["Slack"], executables: [], input_keys: [] },
+  };
+  it.each([
+    ["the first app", ["firefox", "slack"], "firefox", true, null, "Remove slack"],
+    ["the last app", ["firefox", "slack"], "slack", true, null, "Remove firefox"],
+    ["the only app", ["slack"], "slack", true, null, "Add app"],
+    ["an app, refused", ["firefox", "slack"], "slack", true, "Thalvi could not apply it.", "Remove slack"],
+    ["an app while nothing has focus", ["firefox", "slack"], "slack", false, null, "BODY"],
+  ] as const)("after removing %s, focus is on its neighbour's Remove, else Add app", async (_case, apps, removed, focused, refusal, expected) => {
+    const stub = await open({ ...SETTINGS, apps: Object.fromEntries(apps.map((name) => [name, twoApps[name]])) });
+    if (refusal) stub.backend.saveSettings.mockRejectedValueOnce(refusal);
+    goTo("commands");
+    const remove = root.querySelector<HTMLButtonElement>(`button[aria-label="Remove ${removed}"]`) as HTMLButtonElement;
+    if (focused) remove.focus();
+    remove.click();
+    await settle();
+    const active = document.activeElement as HTMLElement;
+    expect(active.getAttribute("aria-label") ?? (active === document.body ? "BODY" : active.textContent)).toBe(expected);
+    expect(rowOf("Apps").querySelector(".note:not([hidden])")?.textContent ?? null).toBe(refusal);
+  });
 });
 
 describe("the wake word picker", () => {
