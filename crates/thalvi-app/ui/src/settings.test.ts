@@ -600,6 +600,28 @@ describe("tables", () => {
     expect(active.getAttribute("aria-label") ?? (active === document.body ? "BODY" : active.textContent)).toBe(expected);
     expect(rowOf("Ending phrases").querySelector(".note:not([hidden])")?.textContent ?? null).toBe(refusal);
   });
+
+  const docs = { phrase: "open the docs", action: "open_url", destination: "https://example.com", label: null } as const;
+  const news = { phrase: "open the news", action: "open_url", destination: "https://news.example", label: null } as const;
+  it.each([
+    ["the first script", [docs, news], 1, true, null, "Remove script 1", ["open the news"]],
+    ["the last script", [docs, news], 2, true, null, "Remove script 1", ["open the docs"]],
+    ["the only script", [docs], 1, true, null, "New script phrase", []],
+    ["a script, refused", [docs, news], 2, true, "Thalvi could not apply it.", "Remove script 2", ["open the docs", "open the news"]],
+    ["a script while nothing has focus", [docs, news], 2, false, null, "BODY", ["open the docs"]],
+  ] as const)("after removing %s, focus is on its neighbour's Remove, else New script phrase", async (_case, scripts, removed, focused, refusal, expected, left) => {
+    const stub = await open({ ...SETTINGS, scripts: [...scripts] });
+    if (refusal) stub.backend.saveSettings.mockRejectedValueOnce(refusal);
+    goTo("commands");
+    const remove = root.querySelector<HTMLButtonElement>(`button[aria-label="Remove script ${String(removed)}"]`) as HTMLButtonElement;
+    if (focused) remove.focus();
+    remove.click();
+    await settle();
+    const active = document.activeElement as HTMLElement;
+    expect(active.getAttribute("aria-label") ?? (active === document.body ? "BODY" : active.textContent)).toBe(expected);
+    expect([...root.querySelectorAll<HTMLInputElement>('input[aria-label^="Phrase of script"]')].map((input) => input.value)).toEqual(left);
+    expect(rowOf("Scripts").querySelector(".note:not([hidden])")?.textContent ?? null).toBe(refusal);
+  });
 });
 
 describe("the wake word picker", () => {
