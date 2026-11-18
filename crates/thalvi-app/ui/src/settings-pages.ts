@@ -2317,13 +2317,13 @@ function scriptsTable({ settings, controls, apply }: PageContext, appNames: HTML
   const list = el("div", { class: "cards" });
   const problem = note();
 
-  function change(edit: (scripts: ScriptSettings[]) => void): Promise<boolean> {
+  function change(edit: (scripts: ScriptSettings[]) => void, removed: number | null = null): Promise<boolean> {
     say(problem, "");
     return apply((next) => {
       edit(next.scripts);
     }).then(
       () => {
-        render();
+        render(removed);
         return true;
       },
       (error: unknown) => {
@@ -2335,15 +2335,16 @@ function scriptsTable({ settings, controls, apply }: PageContext, appNames: HTML
 
   let removes: HTMLButtonElement[] = [];
 
-  function render(): void {
-    const removed = removes.findIndex((node) => node === document.activeElement);
+  /** Rebuilds the list; a focused Remove keeps its script's focus, or passes it on when its script was `removed`. */
+  function render(removed: number | null = null): void {
+    const focused = removes.findIndex((node) => node === document.activeElement);
     removes = [];
     list.replaceChildren(
       ...settings.scripts.map((script, index) => {
         const remove = button("Remove", () => {
           void change((scripts) => {
             scripts.splice(index, 1);
-          });
+          }, index);
         }, "quiet");
         remove.setAttribute("aria-label", `Remove script ${String(index + 1)}`);
         removes.push(remove);
@@ -2371,7 +2372,9 @@ function scriptsTable({ settings, controls, apply }: PageContext, appNames: HTML
         );
       }),
     );
-    if (removed !== -1) focusAfterRemoval(removes, removed, phrase.field);
+    if (focused === -1) return;
+    if (focused === removed) focusAfterRemoval(removes, focused, phrase.field);
+    else removes[removed !== null && focused > removed ? focused - 1 : focused]?.focus();
   }
   render();
 

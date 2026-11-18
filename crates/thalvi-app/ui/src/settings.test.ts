@@ -622,6 +622,24 @@ describe("tables", () => {
     expect([...root.querySelectorAll<HTMLInputElement>('input[aria-label^="Phrase of script"]')].map((input) => input.value)).toEqual(left);
     expect(rowOf("Scripts").querySelector(".note:not([hidden])")?.textContent ?? null).toBe(refusal);
   });
+
+  it("a script whose Remove gains focus while another script's removal saves keeps it", async () => {
+    const mail = { ...news, phrase: "open the mail" };
+    const stub = await open({ ...SETTINGS, scripts: [docs, news, mail] });
+    let release = (): void => undefined;
+    stub.backend.saveSettings.mockReturnValueOnce(new Promise<void>((resolve) => { release = resolve; }));
+    goTo("commands");
+    const remove = (n: number): HTMLButtonElement => root.querySelector<HTMLButtonElement>(`button[aria-label="Remove script ${String(n)}"]`) as HTMLButtonElement;
+    remove(1).focus();
+    remove(1).click();
+    await settle();
+    remove(2).focus();
+    release();
+    await settle();
+    const active = document.activeElement as HTMLElement;
+    expect(active.getAttribute("aria-label")).toBe("Remove script 1");
+    expect(active.closest(".card")?.querySelector<HTMLInputElement>('input[aria-label^="Phrase of script"]')?.value).toBe("open the news");
+  });
 });
 
 describe("the wake word picker", () => {
