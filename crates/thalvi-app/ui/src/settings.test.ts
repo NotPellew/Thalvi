@@ -558,6 +558,29 @@ describe("tables", () => {
     button("Add app").click();
     expect(root.querySelector(".note[role=alert]:not([hidden])")?.textContent).toBe("An app named slack already exists.");
   });
+
+  const twoApps = {
+    firefox: { classes: ["firefox"], executables: [], input_keys: [] },
+    slack: { classes: ["Slack"], executables: [], input_keys: [] },
+  };
+  it.each([
+    ["the first app", ["firefox", "slack"], "firefox", true, null, "Remove slack"],
+    ["the last app", ["firefox", "slack"], "slack", true, null, "Remove firefox"],
+    ["the only app", ["slack"], "slack", true, null, "Add app"],
+    ["an app, refused", ["firefox", "slack"], "slack", true, "Thalvi could not apply it.", "Remove slack"],
+    ["an app while nothing has focus", ["firefox", "slack"], "slack", false, null, "BODY"],
+  ] as const)("after removing %s, focus is on its neighbour's Remove, else Add app", async (_case, apps, removed, focused, refusal, expected) => {
+    const stub = await open({ ...SETTINGS, apps: Object.fromEntries(apps.map((name) => [name, twoApps[name]])) });
+    if (refusal) stub.backend.saveSettings.mockRejectedValueOnce(refusal);
+    goTo("commands");
+    const remove = root.querySelector<HTMLButtonElement>(`button[aria-label="Remove ${removed}"]`) as HTMLButtonElement;
+    if (focused) remove.focus();
+    remove.click();
+    await settle();
+    const active = document.activeElement as HTMLElement;
+    expect(active.getAttribute("aria-label") ?? (active === document.body ? "BODY" : active.textContent)).toBe(expected);
+    expect(rowOf("Apps").querySelector(".note:not([hidden])")?.textContent ?? null).toBe(refusal);
+  });
 });
 
 describe("the wake word picker", () => {
@@ -1403,6 +1426,44 @@ describe("the attached speech editor", () => {
   const editorEl = (): HTMLElement => root.querySelector(".editor") as HTMLElement;
   const editButton = (name: string): HTMLButtonElement => root.querySelector(`button[aria-label="Edit ${name}"]`) as HTMLButtonElement;
 
+  it("keeps the focused editor field, caret and draft untouched by status and download refreshes", async () => {
+    const stub = await openSeveral();
+    edit("On this computer");
+    await settle();
+    const name = editorEl().querySelector("input") as HTMLInputElement;
+    name.focus();
+    typeIn(name, "My server");
+    name.setSelectionRange(3, 3);
+    const events = vi.fn();
+    for (const event of ["blur", "focus", "change"]) name.addEventListener(event, events);
+    const saves = stub.backend.saveSettings.mock.calls.length;
+
+    for (const trigger of [
+      () => { stub.emit({ state: "paused" }); },
+      () => { stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null, causes: [] }); },
+    ]) {
+      trigger();
+      await settle();
+      expect.soft(document.activeElement).toBe(name);
+      expect.soft(name.value).toBe("My server");
+      expect.soft([name.selectionStart, name.selectionEnd]).toEqual([3, 3]);
+      expect.soft(events).not.toHaveBeenCalled();
+      expect.soft(stub.backend.saveSettings).toHaveBeenCalledTimes(saves);
+    }
+  });
+
+  it.each(["row button", "search box", "body"] as const)("keeps focus on the %s after a status refresh", async (where) => {
+    const stub = await openSeveral();
+    const focused = where === "row button" ? editButton("On this computer")
+      : where === "search box" ? root.querySelector<HTMLInputElement>('input[aria-label="Search settings"]') as HTMLInputElement
+      : document.body;
+    focused.focus();
+    expect(document.activeElement).toBe(focused);
+    stub.emit({ state: "paused" });
+    await settle();
+    expect(document.activeElement).toBe(where === "row button" ? editButton("On this computer") : focused);
+  });
+
   it.each([
     ["Cybrex2", 0, "Editing “Cybrex2” · live dictation"],
     ["On this computer", 0, "Editing “On this computer” · live dictation"],
@@ -1839,7 +1900,7 @@ describe("the speech model catalog", () => {
     stub.backend.downloadSpeechModel.mockReturnValueOnce(new Promise<void>((resolve) => { finish = resolve; }));
     download().click();
     expect(stub.backend.downloadSpeechModel).toHaveBeenCalledWith("nemotron_160ms");
-    expect(download().disabled).toBe(true);
+    expect(download().getAttribute("aria-disabled")).toBe("true");
     expect(text("[role=status]")).toBe("Checking files…");
 
     stub.speechProgress({ name: "nemotron_160ms", percent: 40, status: "downloading", message: null, causes: [] });
@@ -1857,6 +1918,34 @@ describe("the speech model catalog", () => {
     expect(download().hidden).toBe(true);
   });
 
+  it.each([
+    ["stays on Download", "done", "the model picker"],
+    ["moves to Details", "done", "Details"],
+    ["stays on Download", "failed", "Download"],
+  ] as const)("keeps focus on the busy Download; when the user %s and the download ends %s, focus is on %s", async (move, end, expected) => {
+    const stub = await openCatalog();
+    let finish: (failed: boolean) => void = () => undefined;
+    stub.backend.downloadSpeechModel.mockReturnValueOnce(new Promise<void>((resolve, reject) => {
+      finish = (failed) => { if (failed) reject(new Error("offline")); else resolve(); };
+    }));
+    const start = download();
+    const folder = Array.from(rowOf("Speech model").querySelectorAll("summary")).find((summary) => summary.textContent === "Details · your own model folder");
+    start.focus();
+    start.click();
+    stub.speechProgress({ name: "nemotron_160ms", percent: 40, status: "downloading", message: null, causes: [] });
+    expect(document.activeElement).toBe(start);
+    expect(start.getAttribute("aria-disabled")).toBe("true");
+    start.click();
+    expect(stub.backend.downloadSpeechModel).toHaveBeenCalledTimes(1);
+
+    if (move === "moves to Details") folder?.focus();
+    if (end === "done") stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null, causes: [] });
+    finish(end === "failed");
+    await settle();
+    expect(document.activeElement).toBe(expected === "the model picker" ? picker() : expected === "Details" ? folder : start);
+    expect(start.hasAttribute("aria-disabled")).toBe(false);
+  });
+
   it("says plainly why a download failed and lets the user try again", async () => {
     const stub = await openCatalog();
     stub.backend.downloadSpeechModel.mockRejectedValueOnce("Could not download the speech model encoder. Check the internet connection and try again.");
@@ -1865,7 +1954,7 @@ describe("the speech model catalog", () => {
     expect(alert()).toBe("Could not download the speech model encoder. Check the internet connection and try again.");
     expect(text(".badge")).toBe("Not downloaded");
     expect(meter().hidden).toBe(true);
-    expect(download().disabled).toBe(false);
+    expect(download().hasAttribute("aria-disabled")).toBe(false);
 
     download().click();
     expect(alert()).toBeUndefined();
@@ -2772,6 +2861,47 @@ describe("live controls", () => {
       expect(row.querySelector(".applied")?.textContent).toBe(notice === "" && sent !== null ? APPLIED_TEXT : "");
     });
 
+    it.each([
+      ["Dictate key", "search box", "Alt+Z"],
+      ["Write key", "search box", "Alt+X"],
+      ["Dictate key", "Escape", "Alt+Z"],
+      ["Write key", "Escape", "Alt+X"],
+    ])("%s: recording keeps focus on Change…, announces the prompt, and leaving it by %s keeps %s", async (label, leave, kept) => {
+      const stub = await open();
+      goTo("listening");
+      const row = rowOf(label);
+      const change = within(row, "Change…");
+      change.click();
+      expect(document.activeElement).toBe(change);
+      expect(change.disabled).toBe(false);
+      expect(change.getAttribute("aria-disabled")).toBe("true");
+      const prompt = Array.from(row.querySelectorAll("*")).find((node) => node.textContent === "Press the new key. Escape cancels.");
+      expect(prompt?.closest('[aria-live="polite"], [role="status"]')).not.toBeNull();
+      change.click();
+      expect(change.getAttribute("aria-disabled")).toBe("true");
+
+      if (leave === "search box") {
+        const search = root.querySelector<HTMLInputElement>('input[aria-label="Search settings"]') as HTMLInputElement;
+        search.focus();
+        const heard: KeyboardEvent[] = [];
+        search.addEventListener("keydown", (event) => heard.push(event));
+        const typed = new KeyboardEvent("keydown", { code: "KeyQ", key: "q", bubbles: true, cancelable: true });
+        search.dispatchEvent(typed);
+        expect(heard).toEqual([typed]);
+        expect(typed.defaultPrevented).toBe(false);
+        expect(document.activeElement).toBe(search);
+      } else {
+        press("Escape");
+        expect(document.activeElement).toBe(change);
+      }
+      await settle();
+
+      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+      expect(row.querySelector("kbd")?.textContent).toBe(kept);
+      expect(change.hasAttribute("aria-disabled")).toBe(false);
+      expect(within(row, "Restore default").disabled).toBe(true);
+    });
+
     it("restores a key set earlier to the desktop's own, and then has nothing to restore", async () => {
       const stub = await open({ ...SETTINGS, hold_key: "Ctrl+F9" });
       const row = rowOf("Dictate key");
@@ -3059,6 +3189,9 @@ describe("updates", () => {
   const state = (phase: UpdateState["phase"], notes: string | null = null, notice: string | null = null): UpdateState => ({ phase, notes, notice });
   const status = () => rowOf("Check for updates").querySelector("output");
   const inRow = (name: string) => within(rowOf("Check for updates"), name);
+  const free = [false, null];
+  const busy = [false, "true"];
+  const off = [true, null];
 
   async function openOn(version: string, channel: Settings["update_channel"] = "stable") {
     const stub = stubBackend({ ...structuredClone(SETTINGS), update_channel: channel });
@@ -3083,21 +3216,45 @@ describe("updates", () => {
   });
 
   it.each([
-    [state({ state: "idle" }), "Thalvi has not checked for updates yet. It checks by itself shortly after it starts.", "Check for updates", false, "note ok"],
-    [state({ state: "checking" }), "Checking for updates…", "Check for updates", true, "note ok"],
-    [state({ state: "upToDate" }), "Thalvi 1.2.3 is up to date.", "Check for updates", false, "note ok"],
-    [state({ state: "downloading", version: "1.3.0", percent: 40 }, "https://example.com/1.3.0"), "Downloading 1.3.0 — 40%…", "Check for updates", true, "note ok"],
-    [state({ state: "downloading", version: "1.3.0", percent: null }), "Downloading 1.3.0…", "Check for updates", true, "note ok"],
-    [state({ state: "ready", version: "1.3.0" }, "https://example.com/1.3.0"), "1.3.0 is downloaded. Thalvi installs it and restarts when it is idle: not during a dictation.", "Check for updates", false, "note ok"],
-    [state({ state: "installing", version: "1.3.0" }), "Installing 1.3.0. Thalvi restarts in a moment.", "Check for updates", true, "note ok"],
-    [state({ state: "failed", message: "Thalvi could not reach the update server." }), "Thalvi could not reach the update server.", "Retry", false, "note"],
-    [state({ state: "unsupported", message: "Run Thalvi as the AppImage to update it." }), "Run Thalvi as the AppImage to update it.", "Check for updates", true, "note"],
-  ])("shows the update's state in plain words: %j", async (next, text, label, disabled, tone) => {
+    [state({ state: "idle" }), "Thalvi has not checked for updates yet. It checks by itself shortly after it starts.", "Check for updates", free, "note ok"],
+    [state({ state: "checking" }), "Checking for updates…", "Check for updates", busy, "note ok"],
+    [state({ state: "upToDate" }), "Thalvi 1.2.3 is up to date.", "Check for updates", free, "note ok"],
+    [state({ state: "downloading", version: "1.3.0", percent: 40 }, "https://example.com/1.3.0"), "Downloading 1.3.0 — 40%…", "Check for updates", busy, "note ok"],
+    [state({ state: "downloading", version: "1.3.0", percent: null }), "Downloading 1.3.0…", "Check for updates", busy, "note ok"],
+    [state({ state: "ready", version: "1.3.0" }, "https://example.com/1.3.0"), "1.3.0 is downloaded. Thalvi installs it and restarts when it is idle: not during a dictation.", "Check for updates", free, "note ok"],
+    [state({ state: "installing", version: "1.3.0" }), "Installing 1.3.0. Thalvi restarts in a moment.", "Check for updates", busy, "note ok"],
+    [state({ state: "failed", message: "Thalvi could not reach the update server." }), "Thalvi could not reach the update server.", "Retry", free, "note"],
+    [state({ state: "unsupported", message: "Run Thalvi as the AppImage to update it." }), "Run Thalvi as the AppImage to update it.", "Check for updates", off, "note"],
+  ])("shows the update's state in plain words: %j", async (next, text, label, availability, tone) => {
     const stub = await open();
     stub.update(next);
     expect(status()?.textContent).toBe(text);
     expect(status()?.className).toBe(tone);
-    expect(inRow(label).disabled).toBe(disabled);
+    expect([inRow(label).disabled, inRow(label).getAttribute("aria-disabled")]).toEqual(availability);
+  });
+
+  it.each([
+    state({ state: "checking" }),
+    state({ state: "downloading", version: "1.3.0", percent: 40 }),
+    state({ state: "installing", version: "1.3.0" }),
+  ])("keeps focus on the busy button, ignores its presses, and retries from it after a failure: %j", async (working) => {
+    const stub = await open();
+    goTo("app");
+    const check = inRow("Check for updates");
+    check.focus();
+    expect(document.activeElement).toBe(check);
+    check.click();
+    stub.update(working);
+    expect(document.activeElement).toBe(check);
+    expect(check.getAttribute("aria-disabled")).toBe("true");
+    check.click();
+    expect(stub.backend.checkForUpdates).toHaveBeenCalledTimes(1);
+
+    stub.update(state({ state: "failed", message: "Thalvi could not reach the update server." }));
+    expect(document.activeElement).toBe(inRow("Retry"));
+    expect(check.hasAttribute("aria-disabled")).toBe(false);
+    inRow("Retry").click();
+    expect(stub.backend.checkForUpdates).toHaveBeenCalledTimes(2);
   });
 
   it("tells a failed check apart from being up to date", async () => {
@@ -3229,6 +3386,27 @@ describe("history", () => {
     await settle();
     expect(stub.backend.deleteHistoryEntry).toHaveBeenCalledExactlyOnceWith(20);
     expect(cards().map((card) => shown(card).text)).toEqual(["Remind me to call.", "Never mind this one"]);
+  });
+
+  it.each([
+    ["the first of three", ENTRIES, 0, true, null, 1],
+    ["the middle of three", ENTRIES, 1, true, null, 2],
+    ["the last of three", ENTRIES, 2, true, null, 1],
+    ["the only entry", ENTRIES.slice(0, 1), 0, true, null, "Nothing has been kept yet."],
+    ["an entry, refused", ENTRIES, 1, true, "The history could not be written.", 1],
+    ["an entry while nothing has focus", ENTRIES, 1, false, null, "BODY"],
+  ] as const)("after deleting %s, focus is on its neighbour's Delete, else the empty note", async (_case, list, deleted, focused, refusal, expected) => {
+    const stub = await openHistory(list, list, list.filter((_, index) => index !== deleted));
+    goTo("history");
+    await settle();
+    if (refusal) stub.backend.deleteHistoryEntry.mockRejectedValueOnce(refusal);
+    const labels = cards().map((card) => within(card, "Delete").getAttribute("aria-label"));
+    const del = within(cards()[deleted] as HTMLElement, "Delete");
+    if (focused) del.focus();
+    del.click();
+    await settle();
+    const active = document.activeElement as HTMLElement;
+    expect(active.getAttribute("aria-label") ?? (active === document.body ? "BODY" : active.textContent)).toBe(typeof expected === "number" ? labels[expected] : expected);
   });
 
   it("keeps the list and says why when an entry cannot be deleted", async () => {
@@ -3479,6 +3657,25 @@ describe("last dictation", () => {
     within(section(), "Discard").click();
     await settle();
     expect(notes()[0]).toContain("Nothing to recover yet.");
+  });
+
+  it.each([
+    ["nothing is left", null, true, null, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it."],
+    ["a newer draft waits", { ...DRAFT, id: 9, original: "Waiting.", text: "Waiting." }, true, null, "Discard"],
+    ["the discard is refused", null, true, "The draft could not be removed.", "Discard"],
+    ["nothing has focus", null, false, null, "BODY"],
+  ] as const)("after Discard when %s, focus is on the empty note, else on Discard", async (_case, next, focused, refusal, expected) => {
+    const stub = await openDraft({ ...DRAFT, newerWaiting: next !== null });
+    goTo("history");
+    await settle();
+    if (refusal) stub.backend.discardDraft.mockRejectedValueOnce(refusal);
+    else stub.backend.getDraft.mockResolvedValueOnce(next);
+    const discard = within(section(), "Discard");
+    if (focused) discard.focus();
+    discard.click();
+    await settle();
+    const active = document.activeElement as HTMLElement;
+    expect(active === document.body ? "BODY" : active.textContent).toBe(expected);
   });
 
   it("opens on the Recognition page, where a first start leaves it", async () => {

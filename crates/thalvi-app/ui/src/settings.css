@@ -18,7 +18,7 @@ input[type="search"] { width: 100%; color: var(--mut); }
 input[type="number"] { width: 6.5em; font-family: var(--mono); }
 button { background: var(--surf); border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px; cursor: pointer; }
 button:hover { border-color: var(--neon); }
-button:disabled, input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
+button:disabled, button[aria-disabled="true"], input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 button.primary { background: var(--neon); border-color: var(--neon); color: light-dark(#fff, #02120a); font-weight: 700; }
 button.quiet { color: var(--mut); }
 
@@ -85,6 +85,8 @@ details.fold { margin: 6px 0; }
 details.fold .row { padding-left: 8px; }
 textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .entries { display: flex; flex-direction: column; gap: 6px; max-height: 24em; overflow-y: auto; }
+.entries > .note { padding: 4px 6px; }
+.entries > .note:focus-visible { outline-offset: -2px; }
 .entry { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; }
 .entry header { grid-column: 1; display: flex; flex-wrap: wrap; gap: 2px 10px; font: 12px var(--mono); color: var(--mut); }
 .entry p { grid-column: 1; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }

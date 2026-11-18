@@ -34,7 +34,7 @@ import type {
 import { DownloadFailure, errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
-import { disclosureMemory, el } from "./dom.ts";
+import { disclosureMemory, el, focusAfterRemoval, setChildren } from "./dom.ts";
 import { applyLook, lookPicker } from "./look.ts";
 
 /** What a control says once its value is applied. */
@@ -238,8 +238,16 @@ function changedSummary(parts: readonly (readonly [string, string | number, stri
 
 function button(label: string, onClick: () => void, className = ""): HTMLButtonElement {
   const node = el("button", { type: "button", class: className }, label);
-  node.addEventListener("click", onClick);
+  node.addEventListener("click", () => {
+    if (node.getAttribute("aria-disabled") !== "true") onClick();
+  });
   return node;
+}
+
+/** Marks a `button` busy: unlike `disabled`, it keeps keyboard focus, and its presses are ignored. */
+function busy(node: HTMLButtonElement, on: boolean): void {
+  if (on) node.setAttribute("aria-disabled", "true");
+  else node.removeAttribute("aria-disabled");
 }
 
 function note(): HTMLElement {
@@ -676,7 +684,7 @@ function holdKeyNotice(reason: string, recorded: string): string {
 
 /** One hold key: the key in effect, a recorder that applies the next combination pressed, and a way back to the default. `notices` holds every hold key row's notice, which any new attempt clears. */
 function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key", { settings, apply, holdKeyDefaults }: PageContext, notices: HTMLElement[]): HTMLElement {
-  const shown = el("kbd", { class: "key" });
+  const shown = el("kbd", { class: "key", "aria-live": "polite" });
   const problem = note();
   // A key is watched as soon as it is applied, also during a capture.
   const applied = el("small", { class: "applied", role: "status" });
@@ -691,20 +699,30 @@ function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key"
   const change = button("Change…", () => {
     clearNotices();
     shown.textContent = "Press the new key. Escape cancels.";
-    change.disabled = true;
+    busy(change, true);
     restore.disabled = true;
+    change.focus();
+    const stop = (): void => {
+      window.removeEventListener("keydown", record, true);
+      change.removeEventListener("blur", cancel);
+      busy(change, false);
+    };
+    const cancel = (): void => {
+      stop();
+      render();
+    };
     const record = (event: KeyboardEvent): void => {
       event.preventDefault();
       event.stopPropagation();
       const name = recordedKey(event);
-      if (name === null && event.code !== "Escape") return;
-      window.removeEventListener("keydown", record, true);
-      change.disabled = false;
-      change.focus();
-      if (event.code === "Escape" || name === null) render();
-      else set(name);
+      if (event.code === "Escape") cancel();
+      else if (name !== null) {
+        stop();
+        set(name);
+      }
     };
     window.addEventListener("keydown", record, true);
+    change.addEventListener("blur", cancel);
   });
 
   function render(): void {
@@ -788,8 +806,8 @@ interface ModelCard {
   setSelected: (on: boolean) => void;
 }
 
-/** One catalog speech model: what it is, whether it is downloaded, and how to get it. */
-function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
+/** One catalog speech model: what it is, whether it is downloaded, and how to get it; focus moves to `picker` when Download goes away under it. */
+function modelCard(info: SpeechModelInfo, backend: Backend, picker: HTMLElement): ModelCard {
   const badge = el("span", { class: "badge" });
   const selected = el("span", { class: "badge", "data-on": "true", hidden: true }, "Selected");
   const source = el("a", { href: info.source, target: "_blank", rel: "noreferrer" }, "Source");
@@ -845,8 +863,9 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
       : event.status === "verifying"
         ? "Checking files…"
         : `Downloading… ${String(event.percent)}%`;
-    download.disabled = running;
+    busy(download, running);
     if (event.status === "done") {
+      if (document.activeElement === download) picker.focus();
       cached(true);
       showDevice();
     }
@@ -1036,7 +1055,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
     (models) => {
       for (const info of models) {
         listed.push(info);
-        const card = modelCard(info, backend);
+        const card = modelCard(info, backend, modelPicker);
         catalog.set(info.name, card);
         modelList.append(card.node);
       }
@@ -1513,8 +1532,8 @@ function speech(context: PageContext): SpeechRows {
     });
     if (editingAdd && editingExtra) extraChildren.push(editor);
     if (!liveChildren.includes(editor) && !extraChildren.includes(editor)) liveChildren.push(editor);
-    liveList.replaceChildren(...liveChildren);
-    extraList.replaceChildren(...extraChildren);
+    setChildren(liveList, ...liveChildren);
+    setChildren(extraList, ...extraChildren);
     extraList.hidden = extras.length === 0 && !((editingId !== null && editingExtra) || (editingAdd && editingExtra));
     syncExtras();
     updateSummary();
@@ -2224,7 +2243,11 @@ function appsTable({ settings, controls, apply }: PageContext, onApps: () => voi
     );
   }
 
+  let removes: [string, HTMLButtonElement][] = [];
+
   function render(): void {
+    const removed = removes.findIndex(([appName, node]) => node === document.activeElement && !(appName in settings.apps));
+    removes = [];
     list.replaceChildren(
       ...Object.entries(settings.apps).map(([appName, app]) => {
         const remove = button("Remove", () => {
@@ -2233,6 +2256,7 @@ function appsTable({ settings, controls, apply }: PageContext, onApps: () => voi
           });
         }, "quiet");
         remove.setAttribute("aria-label", `Remove ${appName}`);
+        removes.push([appName, remove]);
         const edit = (label: string, values: readonly string[], key: keyof AppSettings): HTMLElement =>
           miniField(label, controls.text(listText(values), (value) =>
             apply((next) => {
@@ -2258,8 +2282,8 @@ function appsTable({ settings, controls, apply }: PageContext, onApps: () => voi
         );
       }),
     );
+    if (removed !== -1) focusAfterRemoval(removes.map(([, node]) => node), removed, add);
   }
-  render();
   const add = button("Add app", () => {
     const input = name.field as HTMLInputElement;
     const appName = input.value.trim();
@@ -2277,6 +2301,7 @@ function appsTable({ settings, controls, apply }: PageContext, onApps: () => voi
       if (applied) input.value = "";
     });
   });
+  render();
   return el("div", { class: "stack wide" }, list, el("div", { class: "trow add" }, name.node, add), problem);
 }
 
@@ -2517,7 +2542,7 @@ function recordings({ settings, backend, controls, apply }: PageContext): HTMLEl
   ];
 }
 
-function entryCard(entry: HistoryEntry, remove: () => void, copyText: (text: string) => Promise<void>): HTMLElement {
+function entryCard(entry: HistoryEntry, remove: () => void, copyText: (text: string) => Promise<void>): [HTMLElement, HTMLButtonElement] {
   const when = new Date(entry.timestamp_ms);
   const time = el("time", { datetime: when.toISOString() }, WHEN.format(when));
   const header = el("header", {}, time);
@@ -2539,7 +2564,7 @@ function entryCard(entry: HistoryEntry, remove: () => void, copyText: (text: str
   copy.setAttribute("aria-label", `Copy the entry from ${time.textContent}`);
   const del = button("Delete", remove, "quiet");
   del.setAttribute("aria-label", `Delete the entry from ${time.textContent}`);
-  return el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, entry.text), result, el("span", { class: "trow" }, copy, del));
+  return [el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, entry.text), result, el("span", { class: "trow" }, copy, del)), del];
 }
 
 /** A button that asks before it acts: it is replaced by the question and a yes and a no. */
@@ -2566,7 +2591,7 @@ function confirmed(label: string, question: string, yes: string, no: string, act
 /** The last dictation: editable, with Copy, Reset and Discard. Editing sends and copies nothing. */
 function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; refresh: () => void } {
   let current: Draft | null = null;
-  const empty = el("p", { class: "note ok" }, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it.");
+  const empty = el("p", { class: "note ok", tabindex: "-1" }, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it.");
   const outcome = el("p", { class: "note ok" });
   const newer = el("p", { class: "note why", hidden: true }, "A newer dictation is waiting. Discard this one to see it.");
   const text = el("textarea", { rows: "4", spellcheck: "false", "aria-label": "Last dictation text" });
@@ -2617,9 +2642,13 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
     }
     if (next !== null && next.id !== current?.id) text.value = next.text;
     current = next;
+    const hadFocus = editor.contains(document.activeElement);
     empty.hidden = next !== null;
     editor.hidden = next === null;
-    if (next === null) return;
+    if (next === null) {
+      if (hadFocus) empty.focus();
+      return;
+    }
     outcome.textContent = next.target === null ? DRAFT_OUTCOMES[next.outcome] : `${DRAFT_OUTCOMES[next.outcome]} Meant for ${next.target}.`;
     newer.hidden = !next.newerWaiting;
     sync();
@@ -2661,13 +2690,20 @@ function history(context: PageContext): HTMLElement[] {
   const last = lastDictation(context);
   const list = el("div", { class: "entries" });
   const problem = note();
-  const nothing = el("p", { class: "note ok" }, "Nothing has been kept yet.");
+  const nothing = el("p", { class: "note ok", tabindex: "-1" }, "Nothing has been kept yet.");
+  let shown: { id: number; card: HTMLElement; del: HTMLButtonElement }[] = [];
 
   function refresh(): void {
     backend.getHistory().then(
       (entries) => {
         say(problem, "");
-        list.replaceChildren(...(entries.length === 0 ? [nothing] : entries.map((entry) => entryCard(entry, () => { change(backend.deleteHistoryEntry(entry.id)); }, (text) => backend.copyText(text)))));
+        const removed = shown.findIndex(({ id, del }) => del === document.activeElement && !entries.some((entry) => entry.id === id));
+        shown = entries.map((entry) => {
+          const [card, del] = entryCard(entry, () => { change(backend.deleteHistoryEntry(entry.id)); }, (text) => backend.copyText(text));
+          return { id: entry.id, card, del };
+        });
+        list.replaceChildren(...(shown.length === 0 ? [nothing] : shown.map(({ card }) => card)));
+        if (removed !== -1) focusAfterRemoval(shown.map(({ del }) => del), removed, nothing);
       },
       (error: unknown) => {
         say(problem, errorText(error));
@@ -2795,7 +2831,8 @@ function updates({ settings, backend, controls, live, apply }: PageContext): HTM
     status.textContent = updateText(next, installed);
     status.className = phase.state === "failed" || phase.state === "unsupported" ? "note" : "note ok";
     check.textContent = phase.state === "failed" ? "Retry" : "Check for updates";
-    check.disabled = phase.state === "checking" || phase.state === "downloading" || phase.state === "installing" || phase.state === "unsupported";
+    check.disabled = phase.state === "unsupported";
+    busy(check, phase.state === "checking" || phase.state === "downloading" || phase.state === "installing");
     notes.hidden = next.notes === null;
     const told = next.notice !== null && (phase.state === "idle" || phase.state === "upToDate");
     notice.hidden = !told;
