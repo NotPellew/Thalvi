@@ -2333,7 +2333,11 @@ function scriptsTable({ settings, controls, apply }: PageContext, appNames: HTML
     );
   }
 
+  let removes: HTMLButtonElement[] = [];
+
   function render(): void {
+    const removed = removes.findIndex((node) => node === document.activeElement);
+    removes = [];
     list.replaceChildren(
       ...settings.scripts.map((script, index) => {
         const remove = button("Remove", () => {
@@ -2342,6 +2346,7 @@ function scriptsTable({ settings, controls, apply }: PageContext, appNames: HTML
           });
         }, "quiet");
         remove.setAttribute("aria-label", `Remove script ${String(index + 1)}`);
+        removes.push(remove);
         const edit = (apply_: (script: ScriptSettings, value: string) => void) => (value: string): Promise<void> =>
           apply((next) => {
             const found = next.scripts[index];
@@ -2366,6 +2371,7 @@ function scriptsTable({ settings, controls, apply }: PageContext, appNames: HTML
         );
       }),
     );
+    if (removed !== -1) focusAfterRemoval(removes, removed, phrase.field);
   }
   render();
 
