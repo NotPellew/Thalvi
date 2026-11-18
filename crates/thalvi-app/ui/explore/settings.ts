@@ -27,7 +27,6 @@ interface Target {
   x: number;
   y: number;
   what: string;
-  label: boolean;
 }
 
 interface Observation {
@@ -141,8 +140,16 @@ function target(n: number): Target | null {
     x: box.left + box.width / 2,
     y: box.top + box.height / 2,
     what: `${el.tagName.toLowerCase()}${el.id === "" ? "" : `#${el.id}`} "${label}"`,
-    label: el.tagName === "LABEL",
   };
+}
+
+/** What the last press landed on, and whether that can take focus. Runs in the page. */
+function pressed(): { what: string; control: boolean } {
+  const node: unknown = Reflect.get(window, "__pressed");
+  Reflect.deleteProperty(window, "__pressed");
+  if (!(node instanceof Element)) return { what: "nothing", control: false };
+  const control = node.closest("button, input, select, textarea, summary, a[href], [role=button], [role=switch], [role=tab], [tabindex]") !== null;
+  return { what: node.tagName.toLowerCase(), control };
 }
 
 /** Clicks the visible control whose accessible name or text is `wanted`. Runs in the page. */
@@ -162,7 +169,7 @@ function targetNamed(wanted: string): Target | null {
   const box = el.getBoundingClientRect();
   const labelled = attr(el, "aria-label");
   const label = (labelled === "" ? textOf(el) : labelled).slice(0, 80);
-  return { x: box.left + box.width / 2, y: box.top + box.height / 2, what: `${el.tagName.toLowerCase()} "${label}"`, label: false };
+  return { x: box.left + box.width / 2, y: box.top + box.height / 2, what: `${el.tagName.toLowerCase()} "${label}"` };
 }
 
 function describe(step: Action, what: string): string {
@@ -195,6 +202,7 @@ async function openContext(session: Session): Promise<{ context: BrowserContext;
   const context = await session.browser.newContext({ viewport: { width: 1000, height: 760 }, locale: LOCALE, timezoneId: TIME_ZONE });
   await context.addInitScript(() => {
     Reflect.set(window, "__raf", window.requestAnimationFrame.bind(window));
+    document.addEventListener("pointerdown", (event) => { Reflect.set(window, "__pressed", event.target); }, true);
     let state = 0x2545f491;
     Math.random = () => {
       state = (state + 0x6d2b79f5) | 0;
@@ -238,13 +246,14 @@ async function play(session: Session, steps: readonly Action[], pinned: boolean,
     let progressSince: number | null = null;
     for (const step of steps) {
       let what = "";
-      let labelClick = false;
+      let pressedPlain = false;
       if (step.kind === "click") {
         const hit = "name" in step ? await page.evaluate(targetNamed, step.name) : await page.evaluate(target, step.n);
         if (hit !== null) {
-          what = hit.what;
-          labelClick = hit.label;
           await page.mouse.click(hit.x, hit.y);
+          const landed = await page.evaluate(pressed);
+          pressedPlain = !landed.control;
+          what = pressedPlain && !hit.what.startsWith("label") ? `${hit.what} (pressed ${landed.what})` : hit.what;
         } else if ("name" in step) {
           throw new Violation(`no visible control named ${step.name}`);
         }
@@ -259,10 +268,11 @@ async function play(session: Session, steps: readonly Action[], pinned: boolean,
       await settle(page);
       const after = await page.evaluate(observe);
       log?.push(`${describe(step, what)}  -> focus ${after.focus}`);
-      // A click is the user moving focus only when it hits a label, which activates another control.
+      // A click is the user moving focus only when it presses something that can't take focus: a label hands focus
+      // to its control, plain content takes it to the body. A layout shift during the press can put plain content there.
       // Tab and Shift+Tab stay exempt: they are the user moving focus on purpose.
       const tabbed = step.kind === "key" && step.key.endsWith("Tab");
-      const userMoved = labelClick || tabbed;
+      const userMoved = pressedPlain || tabbed;
       if (errors.length > 0) throw new Violation(`errors: ${errors.join("; ")}`);
       if (!before.onBody && after.onBody && !userMoved) throw new Violation(`focusNotDropped: ${before.focus} -> body after ${describe(step, what)}`);
       progressSince = after.progress.length > 0 ? (progressSince ?? after.now) : null;
@@ -374,6 +384,15 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
       { kind: "click", name: "Change…" },
       { kind: "type", text: "q" },
       { kind: "click", name: "Restore default" },
+    ],
+  },
+  {
+    issue: 552,
+    title: "Commands, Remove script 1",
+    pinned: true,
+    steps: [
+      { kind: "click", name: "Commands" },
+      { kind: "click", name: "Remove script 1" },
     ],
   },
   {
