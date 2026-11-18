@@ -276,7 +276,7 @@ async function play(session: Session, steps: readonly Action[], pinned: boolean,
   }
 }
 
-/** Named regressions for the seven focus bugs. Each step names its control; status is pinned except #454. */
+/** Named regressions for the fixed focus bugs. Each step names its control; status is pinned except #454. */
 const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Action[] }[] = [
   {
     issue: 454,
@@ -344,6 +344,47 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
       { kind: "click", name: "Download" },
       { kind: "key", key: "Tab" },
       { kind: "wait", ms: 5000 },
+    ],
+  },
+  {
+    issue: 546,
+    title: "Commands, Remove an ending phrase",
+    pinned: true,
+    steps: [
+      { kind: "click", name: "Commands" },
+      { kind: "click", name: "Remove “never mind”" },
+    ],
+  },
+  {
+    issue: 547,
+    title: "Cancel a new extra recognizer",
+    pinned: true,
+    steps: [
+      { kind: "click", name: "Recognition" },
+      { kind: "click", name: "Add an extra recognizer" },
+      { kind: "click", name: "Cancel" },
+    ],
+  },
+  {
+    issue: 551,
+    title: "Listening, Restore default after changing the hold key",
+    pinned: true,
+    steps: [
+      { kind: "click", name: "Listening" },
+      { kind: "click", name: "Change…" },
+      { kind: "type", text: "q" },
+      { kind: "click", name: "Restore default" },
+    ],
+  },
+  {
+    issue: 553,
+    title: "Go to the endpoint setting with its Details collapsed",
+    pinned: true,
+    steps: [
+      { kind: "click", name: "Chat model" },
+      { kind: "click", name: "Details" },
+      { kind: "click", name: "Recognition" },
+      { kind: "click", name: "Go to the endpoint setting" },
     ],
   },
 ];
