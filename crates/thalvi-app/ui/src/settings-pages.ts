@@ -499,11 +499,14 @@ function endingsTable({ settings, controls, apply }: PageContext): HTMLElement {
       edit(next.endings);
     }).then(render, (error: unknown) => {
       say(problem, errorText(error));
-      render();
     });
   }
 
+  let removes: [string, HTMLButtonElement][] = [];
+
   function render(): void {
+    const removed = removes.findIndex(([words, node]) => node === document.activeElement && !Object.hasOwn(settings.endings, words));
+    removes = [];
     list.replaceChildren(
       ...Object.entries(settings.endings).map(([words, ending]) => {
         const picker = controls.select(ENDINGS, ending, (value) =>
@@ -516,9 +519,11 @@ function endingsTable({ settings, controls, apply }: PageContext): HTMLElement {
           });
         }, "quiet");
         remove.setAttribute("aria-label", `Remove “${words}”`);
+        removes.push([words, remove]);
         return el("div", { class: "trow" }, el("span", { class: "phrase" }, `“${words}”`), picker.node, remove);
       }),
     );
+    if (removed !== -1) focusAfterRemoval(removes.map(([, node]) => node), removed, phrase.field);
   }
   render();
   const add = button("Add", () => {

@@ -581,6 +581,25 @@ describe("tables", () => {
     expect(active.getAttribute("aria-label") ?? (active === document.body ? "BODY" : active.textContent)).toBe(expected);
     expect(rowOf("Apps").querySelector(".note:not([hidden])")?.textContent ?? null).toBe(refusal);
   });
+
+  it.each([
+    ["the first phrase", SETTINGS.endings, "paste that", true, null, "Remove “write that out”"],
+    ["the last phrase", SETTINGS.endings, "never mind", true, null, "Remove “scratch that”"],
+    ["the only phrase", { "never mind": "cancel" }, "never mind", true, null, "New ending phrase"],
+    ["a phrase, refused", SETTINGS.endings, "never mind", true, "Thalvi could not apply it.", "Remove “never mind”"],
+    ["a phrase while nothing has focus", SETTINGS.endings, "never mind", false, null, "BODY"],
+  ] as const)("after removing %s, focus is on its neighbour's Remove, else New ending phrase", async (_case, endings, removed, focused, refusal, expected) => {
+    const stub = await open({ ...SETTINGS, endings });
+    if (refusal) stub.backend.saveSettings.mockRejectedValueOnce(refusal);
+    goTo("commands");
+    const remove = root.querySelector<HTMLButtonElement>(`button[aria-label="Remove “${removed}”"]`) as HTMLButtonElement;
+    if (focused) remove.focus();
+    remove.click();
+    await settle();
+    const active = document.activeElement as HTMLElement;
+    expect(active.getAttribute("aria-label") ?? (active === document.body ? "BODY" : active.textContent)).toBe(expected);
+    expect(rowOf("Ending phrases").querySelector(".note:not([hidden])")?.textContent ?? null).toBe(refusal);
+  });
 });
 
 describe("the wake word picker", () => {
