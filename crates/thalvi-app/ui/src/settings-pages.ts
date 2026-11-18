@@ -34,7 +34,7 @@ import type {
 import { DownloadFailure, errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
-import { disclosureMemory, el, setChildren } from "./dom.ts";
+import { disclosureMemory, el, focusAfterRemoval, setChildren } from "./dom.ts";
 import { applyLook, lookPicker } from "./look.ts";
 
 /** What a control says once its value is applied. */
@@ -2232,7 +2232,11 @@ function appsTable({ settings, controls, apply }: PageContext, onApps: () => voi
     );
   }
 
+  let removes: [string, HTMLButtonElement][] = [];
+
   function render(): void {
+    const removed = removes.findIndex(([appName, node]) => node === document.activeElement && !(appName in settings.apps));
+    removes = [];
     list.replaceChildren(
       ...Object.entries(settings.apps).map(([appName, app]) => {
         const remove = button("Remove", () => {
@@ -2241,6 +2245,7 @@ function appsTable({ settings, controls, apply }: PageContext, onApps: () => voi
           });
         }, "quiet");
         remove.setAttribute("aria-label", `Remove ${appName}`);
+        removes.push([appName, remove]);
         const edit = (label: string, values: readonly string[], key: keyof AppSettings): HTMLElement =>
           miniField(label, controls.text(listText(values), (value) =>
             apply((next) => {
@@ -2266,8 +2271,8 @@ function appsTable({ settings, controls, apply }: PageContext, onApps: () => voi
         );
       }),
     );
+    if (removed !== -1) focusAfterRemoval(removes.map(([, node]) => node), removed, add);
   }
-  render();
   const add = button("Add app", () => {
     const input = name.field as HTMLInputElement;
     const appName = input.value.trim();
@@ -2285,6 +2290,7 @@ function appsTable({ settings, controls, apply }: PageContext, onApps: () => voi
       if (applied) input.value = "";
     });
   });
+  render();
   return el("div", { class: "stack wide" }, list, el("div", { class: "trow add" }, name.node, add), problem);
 }
 
