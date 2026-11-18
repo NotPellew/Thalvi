@@ -806,8 +806,8 @@ interface ModelCard {
   setSelected: (on: boolean) => void;
 }
 
-/** One catalog speech model: what it is, whether it is downloaded, and how to get it. */
-function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
+/** One catalog speech model: what it is, whether it is downloaded, and how to get it; focus moves to `picker` when Download goes away under it. */
+function modelCard(info: SpeechModelInfo, backend: Backend, picker: HTMLElement): ModelCard {
   const badge = el("span", { class: "badge" });
   const selected = el("span", { class: "badge", "data-on": "true", hidden: true }, "Selected");
   const source = el("a", { href: info.source, target: "_blank", rel: "noreferrer" }, "Source");
@@ -863,8 +863,9 @@ function modelCard(info: SpeechModelInfo, backend: Backend): ModelCard {
       : event.status === "verifying"
         ? "Checking files…"
         : `Downloading… ${String(event.percent)}%`;
-    download.disabled = running;
+    busy(download, running);
     if (event.status === "done") {
+      if (document.activeElement === download) picker.focus();
       cached(true);
       showDevice();
     }
@@ -1054,7 +1055,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
     (models) => {
       for (const info of models) {
         listed.push(info);
-        const card = modelCard(info, backend);
+        const card = modelCard(info, backend, modelPicker);
         catalog.set(info.name, card);
         modelList.append(card.node);
       }
