@@ -228,9 +228,14 @@ areas your change touches. Editing rules are in
   verified commit, in the heavy tier, on Linux; locally it runs only when an issue asks, `--in-diff` against the base (13 Nov 2026).
   Why: it found real gaps but can't tell them from equivalent mutants, and 250 local runs wrote 577 GiB in 4.5 hours.
   Rejected: a required gate, whole-workspace runs (3,197 mutants, about 18 hours on a CI runner), Windows runs, local runs by default.
-- **Property tests only where event order is the rule.** The hold hook and runner controls across captures.
-  Why: random controls explore capture, cancellation, settings and shutdown orders beyond the bounded models.
-  Rejected: properties everywhere.
+- **Property tests only where event order is the rule.** The hold hook and runner controls across captures,
+  and the Settings window (`crates/thalvi-app/ui/explore`, fast-check over clicks, keys and waits).
+  Why: random controls explore capture, cancellation, settings and shutdown orders beyond the bounded models,
+  and click, key and status orders in Settings beyond handwritten tests. Rejected: properties everywhere.
+- **Settings exploration uses fast-check and Playwright.** `explore/settings.ts` drives Settings in headless Chromium against `?fake`,
+  under a paused page clock, with a fixed seed in `gates desktop-ui` and a random one in the heavy run (18 Nov 2026).
+  Why: the prototype found #454, #531 and #533–#536 on its own at about 22 actions a second, and every shrunk trace replayed 3 of 3.
+  Rejected: Bombadil 0.7.10, which takes no seed and whose shrinker replayed #454 in 0 of 3 tries.
 - **Repeatable property cases, separate exploration.** Cargo defaults to 256 ChaCha cases with a fixed seed;
   exploratory runs override and record the seed, and failures become minimized regressions.
   Why: required checks need replayable inputs while exploration needs new ones. Rejected: fixed seeds alone.
