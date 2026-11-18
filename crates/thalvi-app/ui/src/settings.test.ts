@@ -2939,16 +2939,28 @@ describe("live controls", () => {
       expect(within(row, "Restore default").disabled).toBe(true);
     });
 
-    it("restores a key set earlier to the desktop's own, and then has nothing to restore", async () => {
-      const stub = await open({ ...SETTINGS, hold_key: "Ctrl+F9" });
-      const row = rowOf("Dictate key");
+    // (row, field, desktop refuses with, key shown after, focus after)
+    it.each([
+      ["Dictate key", "hold_key", null, "Alt+Z", "Change…"],
+      ["Write key", "write_key", null, "Alt+X", "Change…"],
+      ["Dictate key", "hold_key", BOUND, "Ctrl+F9", "Restore default"],
+      ["Write key", "write_key", BOUND, "Ctrl+F9", "Restore default"],
+    ] as const)("%s (%s): Restore default from Ctrl+F9, desktop says %j: shows %s, focus on %s", async (label, field, backendSays, shown, focused) => {
+      const stub = await open({ ...SETTINGS, [field]: "Ctrl+F9" });
+      goTo("listening");
+      if (backendSays !== null) stub.backend.saveSettings.mockRejectedValue(backendSays);
+      const row = rowOf(label);
       expect(row.querySelector("kbd")?.textContent).toBe("Ctrl+F9");
-      within(row, "Restore default").click();
+      const restore = within(row, "Restore default");
+      restore.focus();
+      restore.click();
       await settle();
 
-      expect(stub.applied().map((settings) => settings.hold_key)).toEqual(["Alt+KeyZ"]);
-      expect(row.querySelector("kbd")?.textContent).toBe("Alt+Z");
-      expect(within(row, "Restore default").disabled).toBe(true);
+      expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch)).toEqual([{ [field]: SETTINGS[field] }]);
+      expect(row.querySelector("kbd")?.textContent).toBe(shown);
+      expect(restore.disabled).toBe(backendSays === null);
+      expect(document.activeElement).toBe(within(row, focused));
+      expect(row.querySelector(".note")?.textContent ?? "").toBe(backendSays ?? "");
     });
   });
 
