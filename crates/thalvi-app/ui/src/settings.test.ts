@@ -3659,6 +3659,25 @@ describe("last dictation", () => {
     expect(notes()[0]).toContain("Nothing to recover yet.");
   });
 
+  it.each([
+    ["nothing is left", null, true, null, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it."],
+    ["a newer draft waits", { ...DRAFT, id: 9, original: "Waiting.", text: "Waiting." }, true, null, "Discard"],
+    ["the discard is refused", null, true, "The draft could not be removed.", "Discard"],
+    ["nothing has focus", null, false, null, "BODY"],
+  ] as const)("after Discard when %s, focus is on the empty note, else on Discard", async (_case, next, focused, refusal, expected) => {
+    const stub = await openDraft({ ...DRAFT, newerWaiting: next !== null });
+    goTo("history");
+    await settle();
+    if (refusal) stub.backend.discardDraft.mockRejectedValueOnce(refusal);
+    else stub.backend.getDraft.mockResolvedValueOnce(next);
+    const discard = within(section(), "Discard");
+    if (focused) discard.focus();
+    discard.click();
+    await settle();
+    const active = document.activeElement as HTMLElement;
+    expect(active === document.body ? "BODY" : active.textContent).toBe(expected);
+  });
+
   it("opens on the Recognition page, where a first start leaves it", async () => {
     await openDraft();
     expect(root.querySelector('nav [aria-current="page"]')?.getAttribute("data-page")).toBe("recognition");
