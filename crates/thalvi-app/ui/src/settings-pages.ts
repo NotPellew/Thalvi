@@ -684,7 +684,7 @@ function holdKeyNotice(reason: string, recorded: string): string {
 
 /** One hold key: the key in effect, a recorder that applies the next combination pressed, and a way back to the default. `notices` holds every hold key row's notice, which any new attempt clears. */
 function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key", { settings, apply, holdKeyDefaults }: PageContext, notices: HTMLElement[]): HTMLElement {
-  const shown = el("kbd", { class: "key" });
+  const shown = el("kbd", { class: "key", "aria-live": "polite" });
   const problem = note();
   // A key is watched as soon as it is applied, also during a capture.
   const applied = el("small", { class: "applied", role: "status" });
@@ -699,20 +699,30 @@ function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key"
   const change = button("Change…", () => {
     clearNotices();
     shown.textContent = "Press the new key. Escape cancels.";
-    change.disabled = true;
+    busy(change, true);
     restore.disabled = true;
+    change.focus();
+    const stop = (): void => {
+      window.removeEventListener("keydown", record, true);
+      change.removeEventListener("blur", cancel);
+      busy(change, false);
+    };
+    const cancel = (): void => {
+      stop();
+      render();
+    };
     const record = (event: KeyboardEvent): void => {
       event.preventDefault();
       event.stopPropagation();
       const name = recordedKey(event);
-      if (name === null && event.code !== "Escape") return;
-      window.removeEventListener("keydown", record, true);
-      change.disabled = false;
-      change.focus();
-      if (event.code === "Escape" || name === null) render();
-      else set(name);
+      if (event.code === "Escape") cancel();
+      else if (name !== null) {
+        stop();
+        set(name);
+      }
     };
     window.addEventListener("keydown", record, true);
+    change.addEventListener("blur", cancel);
   });
 
   function render(): void {
