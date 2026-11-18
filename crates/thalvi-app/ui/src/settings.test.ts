@@ -1354,6 +1354,19 @@ describe("extra recognizers", () => {
     expect(tickOf("Meta").disabled).toBe(true);
   });
 
+  it.each([["open", false], ["collapsed", true]] as const)("leads to the endpoint address with its details %s", async (_case, collapse) => {
+    await open({ ...several(), writing: null });
+    goTo("chat");
+    const fold = rowOf("Writing endpoint address").closest("details.fold");
+    if (!(fold instanceof HTMLDetailsElement)) throw new Error("no details around the endpoint address");
+    if (collapse) fold.querySelector("summary")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(fold.open).toBe(!collapse);
+    goTo("recognition");
+    button("Go to the endpoint setting").click();
+    expect(fold.open).toBe(true);
+    expect(document.activeElement).toBe(control("Writing endpoint address", "input"));
+  });
+
   it("adds an extra recognizer as a whole, and ticks it with a switch of its own", async () => {
     const stub = await openSeveral();
     button("Add an extra recognizer").click();

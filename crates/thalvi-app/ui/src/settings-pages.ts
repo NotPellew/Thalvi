@@ -1447,6 +1447,8 @@ function speech(context: PageContext): SpeechRows {
     "Extra recognizers can't be switched on until a chat model endpoint is set, because the chat model merges their texts. ",
     button("Go to the endpoint setting", () => {
       context.open("chat");
+      writingDetails.open = true;
+      disclosed.add(writingDetails.dataset["fold"] ?? "");
       (writingUrl.field as HTMLInputElement).focus();
     }, "quiet"),
   );
@@ -2049,7 +2051,7 @@ function speech(context: PageContext): SpeechRows {
 
   const writingUnset = (writing?.url ?? "").trim() === "" || (writing?.model ?? "").trim() === "";
   const writingWhere = [writing?.url ?? "", writing?.model ?? ""].filter((part) => part !== "").join(" · ");
-  manualRows.push(details(
+  const writingDetails = details(
     "chat/writing/endpoint",
     `Details${writingWhere === "" ? "" : ` · ${writingWhere}`}${writing?.has_key === true ? " · key set" : ""}`,
     [
@@ -2058,7 +2060,8 @@ function speech(context: PageContext): SpeechRows {
       row("Writing API key", "Saved in the config. Blank keeps the saved key.", writingKeyField),
     ],
     { open: writingUnset, invalid: writingUnset },
-  ));
+  );
+  manualRows.push(writingDetails);
   syncChatSource();
   return {
     recognition: [
