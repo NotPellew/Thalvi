@@ -3360,6 +3360,27 @@ describe("history", () => {
     expect(cards().map((card) => shown(card).text)).toEqual(["Remind me to call.", "Never mind this one"]);
   });
 
+  it.each([
+    ["the first of three", ENTRIES, 0, true, null, 1],
+    ["the middle of three", ENTRIES, 1, true, null, 2],
+    ["the last of three", ENTRIES, 2, true, null, 1],
+    ["the only entry", ENTRIES.slice(0, 1), 0, true, null, "Nothing has been kept yet."],
+    ["an entry, refused", ENTRIES, 1, true, "The history could not be written.", 1],
+    ["an entry while nothing has focus", ENTRIES, 1, false, null, "BODY"],
+  ] as const)("after deleting %s, focus is on its neighbour's Delete, else the empty note", async (_case, list, deleted, focused, refusal, expected) => {
+    const stub = await openHistory(list, list, list.filter((_, index) => index !== deleted));
+    goTo("history");
+    await settle();
+    if (refusal) stub.backend.deleteHistoryEntry.mockRejectedValueOnce(refusal);
+    const labels = cards().map((card) => within(card, "Delete").getAttribute("aria-label"));
+    const del = within(cards()[deleted] as HTMLElement, "Delete");
+    if (focused) del.focus();
+    del.click();
+    await settle();
+    const active = document.activeElement as HTMLElement;
+    expect(active.getAttribute("aria-label") ?? (active === document.body ? "BODY" : active.textContent)).toBe(typeof expected === "number" ? labels[expected] : expected);
+  });
+
   it("keeps the list and says why when an entry cannot be deleted", async () => {
     const stub = await openHistory(ENTRIES);
     stub.backend.deleteHistoryEntry.mockRejectedValueOnce("The history could not be written.");
