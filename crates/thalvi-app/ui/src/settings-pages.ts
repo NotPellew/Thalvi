@@ -732,7 +732,9 @@ function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key"
 
   function render(): void {
     shown.textContent = keyLabel(settings[field]);
-    restore.disabled = settings[field] === holdKeyDefaults[field];
+    const isDefault = settings[field] === holdKeyDefaults[field];
+    if (isDefault && document.activeElement === restore) change.focus();
+    restore.disabled = isDefault;
   }
 
   function set(name: string): void {
