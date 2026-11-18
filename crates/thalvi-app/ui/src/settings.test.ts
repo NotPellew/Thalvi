@@ -3097,6 +3097,9 @@ describe("updates", () => {
   const state = (phase: UpdateState["phase"], notes: string | null = null, notice: string | null = null): UpdateState => ({ phase, notes, notice });
   const status = () => rowOf("Check for updates").querySelector("output");
   const inRow = (name: string) => within(rowOf("Check for updates"), name);
+  const free = [false, null];
+  const busy = [false, "true"];
+  const off = [true, null];
 
   async function openOn(version: string, channel: Settings["update_channel"] = "stable") {
     const stub = stubBackend({ ...structuredClone(SETTINGS), update_channel: channel });
@@ -3121,21 +3124,45 @@ describe("updates", () => {
   });
 
   it.each([
-    [state({ state: "idle" }), "Thalvi has not checked for updates yet. It checks by itself shortly after it starts.", "Check for updates", false, "note ok"],
-    [state({ state: "checking" }), "Checking for updates…", "Check for updates", true, "note ok"],
-    [state({ state: "upToDate" }), "Thalvi 1.2.3 is up to date.", "Check for updates", false, "note ok"],
-    [state({ state: "downloading", version: "1.3.0", percent: 40 }, "https://example.com/1.3.0"), "Downloading 1.3.0 — 40%…", "Check for updates", true, "note ok"],
-    [state({ state: "downloading", version: "1.3.0", percent: null }), "Downloading 1.3.0…", "Check for updates", true, "note ok"],
-    [state({ state: "ready", version: "1.3.0" }, "https://example.com/1.3.0"), "1.3.0 is downloaded. Thalvi installs it and restarts when it is idle: not during a dictation.", "Check for updates", false, "note ok"],
-    [state({ state: "installing", version: "1.3.0" }), "Installing 1.3.0. Thalvi restarts in a moment.", "Check for updates", true, "note ok"],
-    [state({ state: "failed", message: "Thalvi could not reach the update server." }), "Thalvi could not reach the update server.", "Retry", false, "note"],
-    [state({ state: "unsupported", message: "Run Thalvi as the AppImage to update it." }), "Run Thalvi as the AppImage to update it.", "Check for updates", true, "note"],
-  ])("shows the update's state in plain words: %j", async (next, text, label, disabled, tone) => {
+    [state({ state: "idle" }), "Thalvi has not checked for updates yet. It checks by itself shortly after it starts.", "Check for updates", free, "note ok"],
+    [state({ state: "checking" }), "Checking for updates…", "Check for updates", busy, "note ok"],
+    [state({ state: "upToDate" }), "Thalvi 1.2.3 is up to date.", "Check for updates", free, "note ok"],
+    [state({ state: "downloading", version: "1.3.0", percent: 40 }, "https://example.com/1.3.0"), "Downloading 1.3.0 — 40%…", "Check for updates", busy, "note ok"],
+    [state({ state: "downloading", version: "1.3.0", percent: null }), "Downloading 1.3.0…", "Check for updates", busy, "note ok"],
+    [state({ state: "ready", version: "1.3.0" }, "https://example.com/1.3.0"), "1.3.0 is downloaded. Thalvi installs it and restarts when it is idle: not during a dictation.", "Check for updates", free, "note ok"],
+    [state({ state: "installing", version: "1.3.0" }), "Installing 1.3.0. Thalvi restarts in a moment.", "Check for updates", busy, "note ok"],
+    [state({ state: "failed", message: "Thalvi could not reach the update server." }), "Thalvi could not reach the update server.", "Retry", free, "note"],
+    [state({ state: "unsupported", message: "Run Thalvi as the AppImage to update it." }), "Run Thalvi as the AppImage to update it.", "Check for updates", off, "note"],
+  ])("shows the update's state in plain words: %j", async (next, text, label, availability, tone) => {
     const stub = await open();
     stub.update(next);
     expect(status()?.textContent).toBe(text);
     expect(status()?.className).toBe(tone);
-    expect(inRow(label).disabled).toBe(disabled);
+    expect([inRow(label).disabled, inRow(label).getAttribute("aria-disabled")]).toEqual(availability);
+  });
+
+  it.each([
+    state({ state: "checking" }),
+    state({ state: "downloading", version: "1.3.0", percent: 40 }),
+    state({ state: "installing", version: "1.3.0" }),
+  ])("keeps focus on the busy button, ignores its presses, and retries from it after a failure: %j", async (working) => {
+    const stub = await open();
+    goTo("app");
+    const check = inRow("Check for updates");
+    check.focus();
+    expect(document.activeElement).toBe(check);
+    check.click();
+    stub.update(working);
+    expect(document.activeElement).toBe(check);
+    expect(check.getAttribute("aria-disabled")).toBe("true");
+    check.click();
+    expect(stub.backend.checkForUpdates).toHaveBeenCalledTimes(1);
+
+    stub.update(state({ state: "failed", message: "Thalvi could not reach the update server." }));
+    expect(document.activeElement).toBe(inRow("Retry"));
+    expect(check.hasAttribute("aria-disabled")).toBe(false);
+    inRow("Retry").click();
+    expect(stub.backend.checkForUpdates).toHaveBeenCalledTimes(2);
   });
 
   it("tells a failed check apart from being up to date", async () => {
