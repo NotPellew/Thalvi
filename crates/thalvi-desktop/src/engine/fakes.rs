@@ -12,7 +12,7 @@ use tokio::time::Instant;
 use super::{CuePlayer, FrameSource, WakeDetector};
 use crate::audio::{AudioError, InputGate};
 use crate::capture::Ending;
-use crate::cues::{Cue, CueError, CueTiming};
+use crate::cues::{Cue, CueError, CueTiming, Mic};
 use crate::frame::{FRAME_SAMPLES, Frame, Queued};
 use crate::spotter::{KeywordSpotter, SpotterError, SpotterHit};
 use crate::wake::{self, WakeError, WakeEvent, WakeFrame};
@@ -250,6 +250,8 @@ struct CueScript {
     lengths: Vec<(Cue, Duration)>,
     failing: Vec<Cue>,
     timing: CueTiming,
+    /// The microphone gate a muted cue turns off while it plays, once a test hands it over.
+    gate: Option<InputGate>,
 }
 
 /// A cue player whose cues take the lengths a test sets on the runtime's clock.
@@ -276,6 +278,7 @@ impl FakeCuePlayer {
         let script = Rc::new(RefCell::new(CueScript {
             lengths: vec![(Cue::Wake, Duration::from_millis(230))],
             failing: Vec::new(),
+            gate: None,
             timing: CueTiming {
                 start: Duration::from_millis(25),
                 output: Some(Duration::from_millis(15)),
@@ -297,6 +300,11 @@ impl FakeCuePlayer {
 }
 
 impl CueControl {
+    /// Turns `gate` off while a [`Mic::Muted`] cue plays and back on after, as the real player does.
+    pub fn mutes(&self, gate: &InputGate) {
+        self.script.borrow_mut().gate = Some(gate.clone());
+    }
+
     /// How long `cue` takes to play.
     pub fn set_length(&self, cue: Cue, length: Duration) {
         self.script.borrow_mut().lengths.push((cue, length));
@@ -325,6 +333,28 @@ impl CueControl {
     }
 }
 
+/// Keeps a gate off while it lives and turns it back on after, if it was on.
+struct MutedGate {
+    gate: InputGate,
+    was_enabled: bool,
+}
+
+impl MutedGate {
+    fn new(gate: InputGate) -> Self {
+        let was_enabled = gate.is_enabled();
+        gate.set_enabled(false);
+        Self { gate, was_enabled }
+    }
+}
+
+impl Drop for MutedGate {
+    fn drop(&mut self) {
+        if self.was_enabled {
+            self.gate.set_enabled(true);
+        }
+    }
+}
+
 /// Logs a cue as cut unless disarmed.
 struct CutOnDrop<'a> {
     player: &'a FakeCuePlayer,
@@ -347,8 +377,8 @@ impl FakeCuePlayer {
 }
 
 impl CuePlayer for FakeCuePlayer {
-    async fn play(&self, cue: Cue) -> Result<Option<CueTiming>, CueError> {
-        let (length, fails, timing) = {
+    async fn play(&self, cue: Cue, mic: Mic) -> Result<Option<CueTiming>, CueError> {
+        let (length, fails, timing, gate) = {
             let script = self.script.borrow();
             let length = script
                 .lengths
@@ -356,8 +386,10 @@ impl CuePlayer for FakeCuePlayer {
                 .rev()
                 .find(|(known, _)| *known == cue)
                 .map_or(Duration::from_millis(100), |(_, length)| *length);
-            (length, script.failing.contains(&cue), script.timing)
+            let gate = script.gate.clone().filter(|_| mic == Mic::Muted);
+            (length, script.failing.contains(&cue), script.timing, gate)
         };
+        let _muted = gate.map(MutedGate::new);
         self.record(CueLog::Started(cue));
         let mut cut = CutOnDrop {
             player: self,

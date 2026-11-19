@@ -95,6 +95,14 @@ finishes or falls back returns to the capture, and delivery still meets `FinishE
 bound, including the endpoint becoming ready, is not a cancellation step. The hashes of `engine.rs`
 and `runner.rs` describe the sync commit above.
 
+A hold's start cue no longer mutes the microphone: `Engine::begin_hold` leaves the gate open, and
+`Engine::start` passes `Mic::Open` to the same wake cue future for a hold (`Mic::Muted` for a wake
+word and every other cue), and reopens the gate after the cue only when it was muted. The select in
+`Engine::start` is otherwise unchanged: frames are still read only after the cue, from the queue that
+kept them, and cancellation still wins. No await, queue step, cancellation write or delivery path is
+added, so model actions are unchanged. The replay's `ImmediateCues` takes the new argument. The
+`engine.rs` hash describes the commit that adds this paragraph.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
