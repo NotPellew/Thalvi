@@ -3631,6 +3631,14 @@ mod tests {
                 "recovery clears a shown hold failure"
             );
         }
+        runner.hold_problem = Some("Hyprland refused F9.".to_owned());
+        link.hold_problems()(HoldReport::Working);
+        runner.open_microphone().await;
+        assert!(
+            runner.hold_problem.is_none(),
+            "queued recovery clears the earlier pending failure"
+        );
+
         let other = Mode::Failed(Failure {
             kind: FailureKind::Other,
             headline: "Another failure",
