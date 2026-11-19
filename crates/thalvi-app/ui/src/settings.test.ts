@@ -1,3 +1,4 @@
+import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Draft, HistoryEntry, OnDeviceEntry, Settings, SpeechEntry, Status, UpdateState } from "./contract.ts";
 import { DownloadFailure } from "./contract.ts";
@@ -113,12 +114,37 @@ async function editLocal(): Promise<void> {
   await settle();
 }
 
+function liveSelect(): HTMLSelectElement {
+  return control("Live recognizer", "select");
+}
+
+/** Picks a live recognizer in the drop-down by the entry's name. */
 function use(name: string): void {
-  (root.querySelector(`button[aria-label="Use ${name}"]`) as HTMLButtonElement).click();
+  const option = Array.from(liveSelect().options).find((candidate) => candidate.textContent.startsWith(`${name} (`));
+  if (!option) throw new Error(`no live choice ${name}`);
+  choose(liveSelect(), option.value);
+}
+
+const ADD: Record<SpeechEntry["kind"], string> = {
+  realtime: "Add a streaming server",
+  open_ai: "Add an after-you-stop server",
+  on_device: "Add an on-device model",
+  extra: "Add an extra-only server",
+};
+
+function plus(kind: SpeechEntry["kind"]): HTMLButtonElement {
+  const found = root.querySelector<HTMLButtonElement>(`button[aria-label="${ADD[kind]}"]`);
+  if (!found) throw new Error(`no + for ${kind}`);
+  return found;
+}
+
+async function addServer(kind: SpeechEntry["kind"]): Promise<void> {
+  plus(kind).click();
+  await settle();
 }
 
 async function saveServer(): Promise<void> {
-  (Array.from(root.querySelectorAll("button")).find((candidate) => candidate.textContent === "Done" || candidate.textContent === "Add server") as HTMLButtonElement).click();
+  within(root.querySelector(".editor") as HTMLElement, "Save").click();
   await settle();
 }
 
@@ -132,7 +158,7 @@ describe("pages", () => {
       title: page.querySelector("h3")?.textContent,
       groups: Object.fromEntries(
         Array.from(page.querySelectorAll(".grp")).map((group): [string, (string | undefined)[]] => [
-          group.querySelector("h4")?.textContent ?? "",
+          group.querySelector("h4")?.textContent ?? group.querySelector(".row .what > :first-child")?.textContent ?? "",
           Array.from(group.querySelectorAll<HTMLElement>(".row")).map((row) => row.dataset["label"]),
         ]),
       ),
@@ -157,8 +183,12 @@ describe("pages", () => {
         id: "recognition",
         title: "Recognition",
         groups: {
-          "Live dictation": ["speech servers", "word list"],
-          "Extra recognizers": ["extra recognizers"],
+          "Live recognizer": ["live recognizer"],
+          "Streaming servers": ["streaming servers · speech servers"],
+          "After-you-stop servers": ["after-you-stop servers · speech servers"],
+          "On this computer": ["on this computer"],
+          "Extra-only servers": ["extra-only servers · extra recognizers · speech servers"],
+          "Word list": ["word list"],
         },
       },
       {
@@ -882,10 +912,7 @@ describe("a custom speech model folder", () => {
 describe("the word list", () => {
   const FAVOURED = "Names and terms, added one at a time.";
   const VULKAN_TITLE = "Whisper Turbo · Vulkan GPU (experimental)";
-  const ignored = (title: string): string => {
-    const named = `${title} ignores them.`;
-    return named.length <= HINT_BUDGET ? named : "This recognizer ignores them.";
-  };
+  const cant = (name: string): string => `${name} can't use the word list`;
 
   async function openWordList(phrases?: string[]) {
     const stub = await open({ ...SETTINGS, stt: { entries: [device()], ...(phrases ? { phrases } : {}) } });
@@ -947,13 +974,13 @@ describe("the word list", () => {
     mountSettings(root, stub.backend);
     await settle();
     expect(stub.backend.wordListSupport).toHaveBeenCalledWith(expect.objectContaining({ kind: "realtime" }));
-    expect(rowOf("Word list").classList.contains("off")).toBe(true);
-    expect(wordHint()).toBe(FAVOURED);
+    expect(rowOf("Word list").classList.contains("off")).toBe(false);
+    expect(wordHint()).toBe(cant("Realtime speech server"));
   });
 
   it.each([
-    ["Whisper Turbo on the CPU", "whisper_turbo_cpu", ignored(WHISPER.title)],
-    ["Whisper Turbo on the Vulkan GPU", "whisper_turbo_vulkan", ignored(VULKAN_TITLE)],
+    ["Whisper Turbo on the CPU", "whisper_turbo_cpu", cant("On this computer")],
+    ["Whisper Turbo on the Vulkan GPU", "whisper_turbo_vulkan", cant("On this computer")],
     ["Nemotron", "nemotron_160ms", FAVOURED],
     ["Parakeet", "parakeet_tdt_v3", FAVOURED],
     ["no model", undefined, FAVOURED],
@@ -980,13 +1007,13 @@ describe("the word list", () => {
     mountSettings(root, stub.backend);
     await settle();
     goTo("recognition");
-    expect(wordHint()).toBe(ignored(WHISPER.title));
+    expect(wordHint()).toBe(cant("On this computer"));
     use("Nemotron Streaming");
     await settle();
     expect(wordHint()).toBe(FAVOURED);
     use("On this computer");
     await settle();
-    expect(wordHint()).toBe(ignored(WHISPER.title));
+    expect(wordHint()).toBe(cant("On this computer"));
     expect(stub.backend.wordListSupport).not.toHaveBeenCalled();
   });
 });
@@ -1019,6 +1046,16 @@ const META: SpeechEntry = {
   model: "asr",
   api: "meta",
 };
+const GATEWAY: SpeechEntry = {
+  kind: "open_ai",
+  id: "gateway",
+  name: "LLM Gateway",
+  active: false,
+  address: "https://gw.example/v1",
+  model: "whisper-1",
+  request: "transcriptions",
+  language: "",
+};
 
 const WRITING = { url: "http://127.0.0.1:8000/v1", model: "glimmer" };
 
@@ -1033,325 +1070,369 @@ function entryNamed(name: string): HTMLElement {
   return found;
 }
 
-const badgesOf = (name: string): (string | null)[] => Array.from(entryNamed(name).querySelectorAll(".badge")).map((badge) => badge.textContent);
 const names = (list: HTMLElement): (string | null)[] => Array.from(list.querySelectorAll(".trow.server .phrase")).map((phrase) => phrase.textContent);
-const lists = (): HTMLElement[] => Array.from(root.querySelectorAll<HTMLElement>("section[data-page=recognition] .table"));
+const recognition = (): HTMLElement => root.querySelector("section[data-page=recognition]") as HTMLElement;
+const listOf = (kind: SpeechEntry["kind"]): HTMLElement => recognition().querySelector(`.table[data-kind="${kind}"]`) as HTMLElement;
+const tickOf = (name: string): HTMLInputElement => entryNamed(name).querySelector("input[type=checkbox]") as HTMLInputElement;
+const editorEl = (): HTMLElement => root.querySelector(".editor") as HTMLElement;
+const editButton = (name: string): HTMLButtonElement => root.querySelector(`button[aria-label="Edit ${name}"]`) as HTMLButtonElement;
+const summaryText = (): string => recognition().querySelector(".next-dictation")?.textContent ?? "";
+const extrasText = (): string => recognition().querySelector(".extras")?.textContent ?? "";
+const needsChat = (): HTMLElement => recognition().querySelector(".needs-chat") as HTMLElement;
 
-const REALTIME = "Live as you speak — Meta realtime ASR";
-const OPEN_AI = "After you stop — OpenAI transcriptions";
-
-function kindPicker(): HTMLSelectElement {
-  const label = Array.from(root.querySelectorAll("label")).find((candidate) => candidate.textContent === "Add a speech server:");
-  const picker = label ? document.getElementById(label.htmlFor) : null;
-  if (!(picker instanceof HTMLSelectElement)) throw new Error("no speech server kind picker");
-  return picker;
+/** What a row shows at its right edge: Live, or its Extra switch and whether it is on. */
+function roleOf(name: string): string {
+  const row = entryNamed(name);
+  const tick = row.querySelector<HTMLInputElement>("input[type=checkbox]");
+  if (tick) return `${row.querySelector(".extra label")?.textContent ?? ""} ${tick.checked ? "on" : "off"}`;
+  return row.querySelector(".badge")?.textContent ?? "";
 }
 
-async function addServer(kind: string): Promise<void> {
-  choose(kindPicker(), kind);
-  (root.querySelector('button[aria-label="Add a speech server"]') as HTMLButtonElement).click();
-  await settle();
-}
-
-describe("the speech server list", () => {
+describe("the Recognition page", () => {
   async function openSeveral() {
     const stub = await open(several());
     goTo("recognition");
     return stub;
   }
 
-  it("lists each server with its kind and where it is, and marks the one in use", async () => {
+  it("shows the Live recognizer with the next dictation and the extras, then the four groups by kind, then the word list", async () => {
     await openSeveral();
-    const [live, extra] = lists();
-    expect(Array.from(kindPicker().options).map((option) => [option.value, option.textContent])).toEqual([
-      ["realtime", REALTIME],
-      ["open_ai", OPEN_AI],
-      ["on_device", "On this computer"],
+    const boxes = Array.from(recognition().querySelectorAll<HTMLElement>(".grp")).map((box) => {
+      const head = box.querySelector<HTMLElement>(".row") as HTMLElement;
+      return [
+        head.querySelector(".what > :first-child")?.textContent,
+        head.querySelector(".what small")?.textContent,
+        head.querySelector(".ctl button[aria-label^='Add ']")?.getAttribute("aria-label") ?? null,
+        box.querySelector(".none")?.textContent ?? null,
+      ];
+    });
+    expect(boxes).toEqual([
+      ["Live recognizer", "Shows your words and hears ending phrases.", null, null],
+      ["Streaming servers", "Words appear while you speak.", "Add a streaming server", null],
+      ["After-you-stop servers", "Sends each capture once you stop.", "Add an after-you-stop server", "None yet."],
+      ["On this computer", "A downloaded model; audio stays here.", "Add an on-device model", null],
+      ["Extra-only servers", "Only check the live text; need a chat model.", "Add an extra-only server", null],
+      ["Word list", "Names and terms, added one at a time.", null, null],
     ]);
-    expect(root.querySelector(".kind-help")?.textContent).toContain("Live streams.");
-    expect(names(live as HTMLElement)).toEqual(["Realtime speech server", "Cybrex2", "On this computer"]);
-    expect(names(extra as HTMLElement)).toEqual(["OpenAI", "Meta"]);
-    expect(badgesOf("Realtime speech server")).toEqual([REALTIME, "Live"]);
-    expect(badgesOf("Cybrex2")).toEqual([REALTIME, "Key saved"]);
-    expect(badgesOf("On this computer")).toEqual([]);
-    expect(entryNamed("Cybrex2").querySelector("details")?.textContent).toContain("ws://100.64.0.2:8012 · nemotron");
-    expect(entryNamed("On this computer").querySelector("details")?.textContent).toContain("nemotron_160ms");
-    expect(entryNamed("OpenAI").querySelector("details")?.textContent).toContain("https://api.openai.com/v1 · whisper-1 · OpenAI-style");
-    expect(root.querySelector('button[aria-label="Use Realtime speech server"]')).toBeNull();
-    expect((root.querySelector('button[aria-label="Remove Realtime speech server"]') as HTMLButtonElement).disabled).toBe(true);
+    const live = recognition().querySelector(".grp") as HTMLElement;
+    expect(Array.from(live.children).filter((node) => !(node as HTMLElement).hidden).map((node) => node.className)).toEqual(["row", "next-dictation", "next-dictation extras"]);
+    expect(summaryText()).toBe("Next dictation: Realtime speech server · text arrives as you speak · Ready");
+    expect(extrasText()).toBe("Extra: OpenAI. The chat model merges its text with the live text.");
+    for (const box of recognition().querySelectorAll<HTMLElement>(".grp .what small")) expect(box.textContent.length).toBeLessThanOrEqual(HINT_BUDGET);
+    expect(recognition().querySelectorAll("select")).toHaveLength(1);
+    expect(recognition().textContent).not.toContain("Live streams.");
   });
 
-  it("describes each kind by what the user notices, and leaves a user-given name alone", async () => {
-    const entries: SpeechEntry[] = [
-      { ...SERVER, name: "Realtime speech server" },
-      { kind: "open_ai", id: "after", name: "OpenAI-compatible", active: false, address: "http://127.0.0.1:9000/v1", model: "whisper-large", request: "transcriptions", language: "" },
-      device(undefined, false),
-    ];
-    await open({ ...SETTINGS, stt: { entries } });
+  it("lists every live-kind entry in the Live recognizer drop-down by name and group, with the one in use chosen", async () => {
+    await open({ ...several(), stt: { entries: [{ ...SERVER }, { ...GATEWAY }, { ...OPENAI }, device(undefined, false)] } });
     goTo("recognition");
-    const shown = (name: string): unknown[] => [entryNamed(name).querySelector(".unit")?.textContent, ...badgesOf(name).filter((badge) => badge !== "Live")];
-    expect(shown("Realtime speech server")).toEqual(["Shows your words as you speak, through a Meta realtime ASR server.", REALTIME]);
-    expect(shown("OpenAI-compatible")).toEqual(["Transcribes each capture after you stop, through an OpenAI-compatible transcriptions endpoint.", OPEN_AI]);
-    expect(shown("On this computer")[1]).toBeUndefined();
-  });
-
-  it("switches the live server with one click, applying only that", async () => {
-    const stub = await openSeveral();
-    use("Cybrex2");
-    await settle();
-    expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
-    const savedSettings = sent(stub);
-    expect(savedSettings.ending_pause.paste).toBe(SETTINGS.ending_pause.paste);
-    expect(savedSettings.stt.entries.map((entry) => [entry.name, entry.active])).toEqual([
-      ["Realtime speech server", false],
-      ["Cybrex2", true],
-      ["On this computer", false],
-      ["OpenAI", true],
-      ["Meta", false],
+    expect(Array.from(liveSelect().options).map((option) => [option.value, option.textContent])).toEqual([
+      ["direct", "Realtime speech server (streaming)"],
+      ["gateway", "LLM Gateway (after you stop)"],
+      ["on-device", "On this computer (on this computer)"],
     ]);
-    expect(badgesOf("Cybrex2")).toContain("Live");
-    expect(badgesOf("Realtime speech server")).not.toContain("Live");
-    expect(root.querySelector('button[aria-label="Use Cybrex2"]')).toBeNull();
-    expect(rowOf("Speech servers").querySelector(".stack.wide > .applied")?.textContent).toBe(APPLIED_TEXT);
+    expect(liveSelect().value).toBe("direct");
   });
 
-  it("keeps the server in use when the switch is refused, and says why", async () => {
-    const stub = await openSeveral();
-    stub.backend.saveSettings.mockRejectedValueOnce("The settings could not be saved to /config: disk full.");
+  it.each([
+    ["Realtime speech server", "127.0.0.1:8012", "Live"],
+    ["Cybrex2", "100.64.0.2:8012 · key saved", "Extra off"],
+    ["On this computer", "Nemotron Streaming · CPU", "Extra off"],
+    ["LLM Gateway", "gw.example", "Extra off"],
+    ["OpenAI", "api.openai.com · key saved", "Extra on"],
+    ["Meta", "meta.example", "Extra off"],
+  ])("shows %s as one flat row: name, where it runs, its role and Edit", async (name, where, role) => {
+    await open({ ...several(), stt: { entries: [...several().stt.entries, { ...GATEWAY }] } });
+    goTo("recognition");
+    const row = entryNamed(name);
+    expect(row.querySelector(".unit")?.textContent).toBe(where);
+    expect(roleOf(name)).toBe(role);
+    expect(Array.from(row.querySelectorAll("button")).map((node) => [node.textContent, node.getAttribute("aria-label")])).toEqual([["Edit", `Edit ${name}`]]);
+    expect(row.querySelectorAll(".badge").length).toBe(role === "Live" ? 1 : 0);
+    expect(row.querySelector("details")).toBeNull();
+    const tick = row.querySelector<HTMLInputElement>("input[type=checkbox]");
+    if (tick) {
+      expect(tick.getAttribute("aria-label")).toBe(`Extra: ${name}`);
+      expect((row.querySelector(".extra label") as HTMLLabelElement).htmlFor).toBe(tick.id);
+    }
+  });
+
+  it("keeps every row in config order, in its kind's group, when the Live recognizer changes", async () => {
+    await openSeveral();
+    const order = (): (string | null)[][] => (["realtime", "open_ai", "on_device", "extra"] as const).map((kind) => names(listOf(kind)));
+    const before = order();
+    expect(before).toEqual([["Realtime speech server", "Cybrex2"], [], ["On this computer"], ["OpenAI", "Meta"]]);
     use("Cybrex2");
     await settle();
-    expect(rowOf("Speech servers").querySelector(".note:not([hidden])")?.textContent).toBe("The settings could not be saved to /config: disk full.");
-    expect(badgesOf("Realtime speech server")).toContain("Live");
-    expect(badgesOf("Cybrex2")).not.toContain("Live");
+    expect(order()).toEqual(before);
+    expect([roleOf("Cybrex2"), roleOf("Realtime speech server")]).toEqual(["Live", "Extra off"]);
+    use("On this computer");
+    await settle();
+    expect(order()).toEqual(before);
   });
 
-  it("adds a server once its fields are accepted, and applies it as a whole", async () => {
-    const stub = await openSeveral();
-    await addServer("realtime");
-    expect(root.querySelector(".editor h4")?.textContent).toBe(`Add a speech server: ${REALTIME}`);
-    expect(control("Name", "input").value).toBe(REALTIME);
-    type(control("Name", "input"), "Office GPU");
-    type(control("Address", "input"), "ws://10.0.0.5:8012");
-    type(control("Model", "input"), "nemotron");
-    type(control("API key", "input"), "sk-new");
-    await saveServer();
-    expect(stub.backend.checkSpeechEntry).toHaveBeenCalledTimes(1);
-    const checked = stub.backend.checkSpeechEntry.mock.calls[0]?.[0];
-    expect(checked).toMatchObject({ kind: "realtime", name: "Office GPU", address: "ws://10.0.0.5:8012", model: "nemotron", api_key: "sk-new", active: false });
-    expect(checked).not.toHaveProperty("has_key");
-    expect(root.querySelector(".editor")?.hasAttribute("hidden")).toBe(true);
+  it("switches the Live recognizer from the drop-down, applying only that, and keeps focus on it", async () => {
+    const stub = await open({ ...several(), stt: { entries: several().stt.entries.map((entry) => (entry.id === "cybrex2" ? { ...entry, extra: true } : entry)) } });
+    goTo("recognition");
+    liveSelect().focus();
+    use("Cybrex2");
+    await settle();
     expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
-    expect(sent(stub).stt.entries.find((entry) => entry.name === "Office GPU")).toMatchObject({ active: false, api_key: "sk-new" });
-    expect(badgesOf("Office GPU")).toEqual([REALTIME, "Key saved"]);
+    expect(sent(stub).stt.entries.map((entry) => [entry.name, entry.active, "extra" in entry])).toEqual([
+      ["Realtime speech server", false, false],
+      ["Cybrex2", true, false],
+      ["On this computer", false, false],
+      ["OpenAI", true, false],
+      ["Meta", false, false],
+    ]);
+    expect(document.activeElement).toBe(liveSelect());
+    expect(summaryText()).toBe("Next dictation: Cybrex2 · text arrives as you speak · Ready");
   });
 
-  it("adds, uses, masks, edits and removes an OpenAI-compatible live entry", async () => {
+  const where = (text: string): string => {
+    const found = Array.from(recognition().querySelectorAll<HTMLElement>(".applied, .note")).find((node) => !node.hidden && node.textContent === text);
+    if (!found) return "nowhere";
+    if (found.closest(".editor")) return "form";
+    if (found.closest(".trow.server")) return `row ${found.closest(".trow.server")?.querySelector(".phrase")?.textContent ?? ""}`;
+    return found.closest(".row")?.getAttribute("data-label") ?? "elsewhere";
+  };
+  const REFUSED = "The settings could not be saved.";
+  it.each([
+    ["choosing a Live recognizer", false, async () => { use("Cybrex2"); await settle(); }, APPLIED_TEXT, "live recognizer"],
+    ["a refused Live recognizer", true, async () => { use("Cybrex2"); await settle(); }, REFUSED, "live recognizer"],
+    ["an Extra switch", false, async () => { flip(tickOf("Meta")); await settle(); }, APPLIED_TEXT, "row Meta"],
+    ["a refused Extra switch", true, async () => { flip(tickOf("Meta")); await settle(); }, REFUSED, "row Meta"],
+    ["a saved edit", false, async () => { edit("Cybrex2"); type(control("Model", "input"), "other"); await saveServer(); }, APPLIED_TEXT, "row Cybrex2"],
+    ["a refused edit", true, async () => { edit("Cybrex2"); type(control("Model", "input"), "other"); await saveServer(); }, REFUSED, "form"],
+    ["a refused removal", true, async () => { edit("Meta"); within(editorEl(), "Remove").click(); await settle(); }, REFUSED, "form"],
+  ] as const)("shows how %s went in the form or on its row", async (_case, refuse, act, text, expected) => {
+    const stub = await openSeveral();
+    if (refuse) stub.backend.saveSettings.mockRejectedValueOnce(REFUSED);
+    await act();
+    expect(where(text)).toBe(expected);
+  });
+
+  it.each([
+    ["realtime", "Meta realtime ASR", ["Name", "Address", "API key", "Model"]],
+    ["open_ai", "OpenAI transcriptions", ["Name", "Address", "API key", "Model", "Request", "Language"]],
+    ["on_device", "On this computer 2", ["Name", "Show models for", "Speech model"]],
+    ["extra", "Extra recognizer", ["Name", "Address", "API key", "Model", "API"]],
+  ] as const)("opens the %s form at the top of its group with a short default name, its explanation and fields, then Cancel and Save", async (kind, name, fields) => {
+    await openSeveral();
+    await addServer(kind);
+    expect(root.querySelectorAll(".editor:not([hidden])")).toHaveLength(1);
+    expect(editorEl().parentElement).toBe(listOf(kind));
+    expect(listOf(kind).firstElementChild).toBe(editorEl());
+    expect(editorEl().querySelector("h4")?.textContent).toBe(ADD[kind]);
+    expect(editorEl().querySelector("h4 + p")?.textContent).toMatch(/^[A-Z].{20,}\.$/);
+    expect(Array.from(editorEl().querySelectorAll<HTMLElement>(".row")).map((row) => row.querySelector(".what > :first-child")?.textContent)).toEqual(fields);
+    expect(control("Name", "input").value).toBe(name);
+    expect(Array.from(editorEl().querySelectorAll(".actions button")).map((node) => node.textContent)).toEqual(["Cancel", "Save"]);
+    expect(editorEl().querySelector("details.fold[data-fold^='recognition/server/']")).toBeNull();
+  });
+
+  it("numbers a default name that is taken", async () => {
+    await open({ ...several(), stt: { entries: [{ ...SERVER, name: "Meta realtime ASR" }, { ...META, name: "Extra recognizer" }] } });
+    goTo("recognition");
+    await addServer("realtime");
+    expect(control("Name", "input").value).toBe("Meta realtime ASR 2");
+    await addServer("extra");
+    expect(control("Name", "input").value).toBe("Extra recognizer 2");
+  });
+
+  it("opens Edit in place of its row, one form at a time, with Remove before Cancel and Save", async () => {
+    await openSeveral();
+    edit("Cybrex2");
+    await settle();
+    expect(names(listOf("realtime"))).toEqual(["Realtime speech server"]);
+    expect(listOf("realtime").children[1]).toBe(editorEl());
+    expect(editorEl().querySelector("h4")?.textContent).toBe("Editing “Cybrex2”");
+    expect(Array.from(editorEl().querySelectorAll(".actions button:not([hidden])")).map((node) => node.textContent)).toEqual(["Remove", "Cancel", "Save"]);
+    await addServer("extra");
+    expect(root.querySelectorAll(".editor")).toHaveLength(1);
+    expect(names(listOf("realtime"))).toEqual(["Realtime speech server", "Cybrex2"]);
+    expect(editButton("Cybrex2").getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it.each([
+    ["realtime", "Cancel", "the +"],
+    ["realtime", "Save", "the new entry's Edit"],
+    ["extra", "Cancel", "the +"],
+    ["extra", "Save", "the new entry's Edit"],
+    ["edit", "Cancel", "its Edit"],
+    ["edit", "Save", "its Edit"],
+  ] as const)("returns focus from a %s form closed with %s to %s", async (opener, close, expected) => {
+    const stub = await openSeveral();
+    if (opener === "edit") editButton("Cybrex2").click();
+    else plus(opener).click();
+    await settle();
+    expect(document.activeElement).toBe(control("Name", "input"));
+    const name = control("Name", "input").value;
+    if (opener === "realtime") type(control("Address", "input"), "ws://127.0.0.1:8013");
+    if (opener === "extra") type(control("Address", "input"), "http://127.0.0.1:9000/v1");
+    if (opener === "edit") type(control("Model", "input"), "other");
+    within(editorEl(), close).click();
+    await settle();
+    expect(editorEl().hidden).toBe(true);
+    expect(document.activeElement).toBe(expected === "the +" ? plus(opener) : editButton(name));
+    expect(stub.backend.saveSettings).toHaveBeenCalledTimes(close === "Save" ? 1 : 0);
+  });
+
+  it("saves a new entry once the app accepts it, and changes nothing on Cancel", async () => {
     const stub = await openSeveral();
     await addServer("open_ai");
-    expect(root.querySelector(".editor h4")?.textContent).toBe(`Add a speech server: ${OPEN_AI}`);
     type(control("Name", "input"), "Local Whisper");
     type(control("Address", "input"), "http://127.0.0.1:9000/v1");
     type(control("Model", "input"), "whisper-large");
     type(control("API key", "input"), "local-secret");
-    expect([control("Request", "select").value, control("Language", "input").value]).toEqual(["transcriptions", ""]);
     choose(control("Request", "select"), "chat");
     type(control("Language", "input"), "de");
     await saveServer();
-    expect(stub.backend.checkSpeechEntry.mock.calls.at(-1)?.[0]).toMatchObject({
-      kind: "open_ai", name: "Local Whisper", address: "http://127.0.0.1:9000/v1", model: "whisper-large", api_key: "local-secret",
-      request: "chat", language: "de",
-    });
-    expect(sent(stub).stt.entries.find((entry) => entry.name === "Local Whisper")).toMatchObject({ kind: "open_ai", api_key: "local-secret", request: "chat", language: "de" });
-
-    use("Local Whisper");
-    await settle();
-    expect(badgesOf("Local Whisper")).toContain("Live");
-    stub.backend.getSettings.mockResolvedValueOnce({
-      ...sent(stub),
-      stt: { entries: sent(stub).stt.entries.map((entry) => {
-        if (entry.kind !== "open_ai" || entry.name !== "Local Whisper") return entry;
-        const masked = { ...entry, has_key: true };
-        delete masked.api_key;
-        return masked;
-      }) },
-    });
-    stub.changedElsewhere();
-    await settle();
+    expect(sent(stub).stt.entries.at(-1)).toMatchObject({ kind: "open_ai", name: "Local Whisper", active: false, api_key: "local-secret", request: "chat", language: "de" });
+    expect(sent(stub).stt.entries.at(-1)).not.toHaveProperty("extra");
+    expect(names(listOf("open_ai"))).toEqual(["Local Whisper"]);
+    expect(entryNamed("Local Whisper").querySelector(".unit")?.textContent).toBe("127.0.0.1:9000 · key saved");
     edit("Local Whisper");
-    expect(control("API key", "input").getAttribute("placeholder")).toBe("Saved — leave blank to keep it");
-    type(control("Model", "input"), "whisper-v3");
-    await saveServer();
-    expect(stub.backend.checkSpeechEntry.mock.calls.at(-1)?.[0]).toMatchObject({ model: "whisper-v3" });
-    expect(stub.backend.checkSpeechEntry.mock.calls.at(-1)?.[0]).not.toHaveProperty("api_key");
-    expect(stub.applied().at(-1)?.stt.entries.find((entry) => entry.name === "Local Whisper")).toMatchObject({ has_key: true });
-    expect(stub.applied().at(-1)?.stt.entries.find((entry) => entry.name === "Local Whisper")).not.toHaveProperty("api_key");
-
-    use("On this computer");
-    await settle();
-    entryNamed("Local Whisper").querySelector<HTMLButtonElement>('button[aria-label="Remove Local Whisper"]')?.click();
-    within(entryNamed("Local Whisper"), "Yes, remove").click();
-    await settle();
-    expect(names(lists()[0] as HTMLElement)).not.toContain("Local Whisper");
-  });
-
-  it("does not add a server the app refuses, and keeps the editor open with the reason", async () => {
-    const stub = await openSeveral();
-    stub.backend.checkSpeechEntry.mockRejectedValueOnce('Speech server "Realtime speech server": the address must be a ws or wss URL.');
-    await addServer("realtime");
-    type(control("Address", "input"), "http://nope");
-    await saveServer();
-    expect(editorNote()).toBe('Speech server "Realtime speech server": the address must be a ws or wss URL.');
-    expect(root.querySelector(".editor")?.hasAttribute("hidden")).toBe(false);
-    expect(names(lists()[0] as HTMLElement)).toEqual(["Realtime speech server", "Cybrex2", "On this computer"]);
-    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
-  });
-
-  it("keeps every name distinct before asking the app", async () => {
-    const stub = await openSeveral();
-    await addServer("realtime");
-    type(control("Name", "input"), "cybrex2");
-    await saveServer();
-    expect(editorNote()).toBe('Two speech servers are called "cybrex2". Give each its own name.');
-    expect(stub.backend.checkSpeechEntry).not.toHaveBeenCalled();
-  });
-
-  it("edits a server in place, cancels without a trace, and removes one that is not in use after asking, since its key would be lost", async () => {
-    await openSeveral();
-    edit("Cybrex2");
-    expect(control("Address", "input").value).toBe("ws://100.64.0.2:8012");
-    type(control("Name", "input"), "Cybrex2 GPU");
-    type(control("Address", "input"), "ws://100.64.0.3:8012");
-    await saveServer();
-    expect(names(lists()[0] as HTMLElement)).toEqual(["Realtime speech server", "Cybrex2 GPU", "On this computer"]);
-    expect(entryNamed("Cybrex2 GPU").querySelector("details")?.textContent).toContain("ws://100.64.0.3:8012 · nemotron");
-
-    edit("Cybrex2 GPU");
     type(control("Name", "input"), "Dropped");
-    button("Cancel").click();
-    expect(names(lists()[0] as HTMLElement)).toContain("Cybrex2 GPU");
-
-    (root.querySelector('button[aria-label="Remove Cybrex2 GPU"]') as HTMLButtonElement).click();
-    expect(names(lists()[0] as HTMLElement)).toContain("Cybrex2 GPU");
-    within(entryNamed("Cybrex2 GPU"), "Yes, remove").click();
+    within(editorEl(), "Cancel").click();
     await settle();
-    expect(names(lists()[0] as HTMLElement)).toEqual(["Realtime speech server", "On this computer"]);
+    expect(names(listOf("open_ai"))).toEqual(["Local Whisper"]);
+    expect(stub.applied()).toHaveLength(1);
   });
 
-  const keyActions: [string, (clear: HTMLButtonElement) => void, string | undefined, boolean][] = [
-    ["leaves it unchanged", () => undefined, undefined, true],
-    ["replaces it", () => { type(control("API key", "input"), "sk-new"); }, "sk-new", true],
-    ["clears it", (clear) => { clear.click(); }, "", false],
-  ];
-  it.each(keyActions)("shows a saved key only as saved, and %s", async (_name, act, sentKey, stillSaved) => {
+  it.each([
+    ["a saved key", "Cybrex2", true],
+    ["no key", "Meta", false],
+  ] as const)("removes an entry with %s from its form, asking first only when a key would be lost", async (_case, name, asks) => {
     const stub = await openSeveral();
-    edit("Cybrex2");
-    expect(control("API key", "input").value).toBe("");
-    expect(control("API key", "input").placeholder).toBe("Saved — leave blank to keep it");
-    act(within(rowOf("API key"), "Clear saved key"));
-    await saveServer();
-    // An entry left as it was changes nothing, so nothing is sent.
-    expect(stub.applied()).toHaveLength(sentKey === undefined ? 0 : 1);
-    const entry = stub.applied().at(-1)?.stt.entries.find((known) => known.id === "cybrex2");
-    expect(entry && "api_key" in entry ? entry.api_key : undefined).toBe(sentKey);
-    expect(badgesOf("Cybrex2").includes("Key saved")).toBe(stillSaved);
+    edit(name);
+    await settle();
+    within(editorEl(), "Remove").click();
+    await settle();
+    if (asks) {
+      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+      expect(editorEl().querySelector('[role="group"]')?.getAttribute("aria-label")).toBe(`Remove ${name} and its saved key?`);
+      within(editorEl(), "Yes, remove").click();
+      await settle();
+    }
+    expect(sent(stub).stt.entries.map((entry) => entry.name)).not.toContain(name);
+    expect(editorEl().hidden).toBe(true);
   });
 
+  it("disables Remove on the live entry and says why on screen", async () => {
+    await openSeveral();
+    edit("Realtime speech server");
+    await settle();
+    const remove = within(editorEl(), "Remove");
+    expect(remove.disabled).toBe(true);
+    const reason = document.getElementById(remove.getAttribute("aria-describedby") ?? "");
+    expect(reason?.textContent).toBe("Choose another Live recognizer first.");
+    expect(reason?.closest(".editor")).toBe(editorEl());
+    expect(reason?.hidden).toBe(false);
+  });
 
+  it.each([
+    ["the next row's Edit", "Cybrex2", [{ ...SERVER }, { ...CYBREX, has_key: false }, { ...CYBREX, id: "third", name: "Third", has_key: false }], "Edit Third"],
+    ["the group's + when it is now empty", "Meta", [{ ...SERVER }, { ...META }], "Add an extra-only server"],
+  ] as const)("moves focus after Remove to %s", async (_case, name, entries, expected) => {
+    await open({ ...several(), stt: { entries: [...entries] } });
+    goTo("recognition");
+    edit(name);
+    await settle();
+    within(editorEl(), "Remove").focus();
+    within(editorEl(), "Remove").click();
+    await settle();
+    expect(document.activeElement?.getAttribute("aria-label")).toBe(expected);
+  });
 });
 
-describe("extra recognizers", () => {
-  async function openSeveral() {
-    const stub = await open(several());
+describe("Extra switches", () => {
+  async function openSeveral(settings: Settings = several()) {
+    const stub = await open(settings);
     goTo("recognition");
     return stub;
   }
-  const tickOf = (name: string): HTMLInputElement => entryNamed(name).querySelector("input[type=checkbox]") as HTMLInputElement;
+  const withExtras = (writing: Settings["writing"], extras: readonly string[] = []): Settings => ({
+    ...several(),
+    writing,
+    stt: { entries: several().stt.entries.map((entry) => (extras.includes(entry.name) ? { ...entry, extra: true } : entry)) },
+  });
+  const savedEntry = (stub: Awaited<ReturnType<typeof open>>, name: string): SpeechEntry | undefined =>
+    stub.applied().at(-1)?.stt.entries.find((entry) => entry.name === name);
 
-  it("runs the ticked ones, and a tick or an untick applies at once without losing the setup", async () => {
+  it.each([
+    ["an extra-only server", "Meta", { active: true }, { active: false }],
+    ["a streaming server not in use", "Cybrex2", { active: false, extra: true }, { active: false }],
+    ["the on-device model not in use", "On this computer", { active: false, extra: true }, { active: false }],
+  ] as const)("turns %s on and off at once, changing only its own flag, and keeps focus on the switch", async (_case, name, on, off) => {
     const stub = await openSeveral();
-    expect([tickOf("OpenAI").checked, tickOf("Meta").checked]).toEqual([true, false]);
-    flip(tickOf("Meta"));
+    const others = (settings: Settings | undefined) => settings?.stt.entries.filter((entry) => entry.name !== name);
+    tickOf(name).focus();
+    flip(tickOf(name));
     await settle();
-    expect(sent(stub).stt.entries.filter((entry) => entry.kind === "extra").map((entry) => [entry.name, entry.active])).toEqual([
-      ["OpenAI", true],
-      ["Meta", true],
-    ]);
-    flip(tickOf("OpenAI"));
+    expect(savedEntry(stub, name)).toMatchObject(on);
+    expect(others(stub.applied().at(-1))).toEqual(several().stt.entries.filter((entry) => entry.name !== name));
+    expect(document.activeElement).toBe(tickOf(name));
+    flip(tickOf(name));
     await settle();
-    const unticked = stub.applied()[1]?.stt.entries.find((entry) => entry.id === "openai");
-    expect(unticked).toMatchObject({ active: false, address: "https://api.openai.com/v1", model: "whisper-1", has_key: true });
+    expect(savedEntry(stub, name)).toMatchObject(off);
+    expect(savedEntry(stub, name)).not.toHaveProperty("extra");
+    expect(others(stub.applied().at(-1))).toEqual(several().stt.entries.filter((entry) => entry.name !== name));
   });
 
-  it("shows a tick that was refused as still off", async () => {
+  it("shows a switch that was refused as still off", async () => {
     const stub = await openSeveral();
     stub.backend.saveSettings.mockRejectedValueOnce("The settings could not be saved.");
     flip(tickOf("Meta"));
     await settle();
     expect(tickOf("Meta").checked).toBe(false);
-    expect(entryNamed("Meta").querySelector(".note:not([hidden])")?.textContent).toBe("The settings could not be saved.");
   });
 
-  const extraGroup = (): HTMLElement => root.querySelector('[data-label="extra recognizers"]') as HTMLElement;
-  const stateText = (): string => extraGroup().querySelector(".next-dictation")?.textContent ?? "";
-  const endpointNote = (): HTMLElement => extraGroup().querySelector(".note.why") as HTMLElement;
-
-  it("labels each switch and says where its audio goes, with no way to reorder them", async () => {
-    await openSeveral();
-    expect(root.querySelector('button[aria-label^="Move "]')).toBeNull();
-    expect(tickOf("OpenAI").getAttribute("aria-label")).toBe("Also transcribe with OpenAI");
-    expect(entryNamed("OpenAI").querySelector(".unit")?.textContent).toBe("Audio goes to api.openai.com");
-    expect(entryNamed("Meta").querySelector(".unit")?.textContent).toBe("Audio goes to meta.example");
-    expect(extraGroup().textContent).toContain("Each one switched on also transcribes.");
+  it.each([
+    ["no chat endpoint and none on", null, [], [false, false], "Extra: none"],
+    ["a chat endpoint and none on", WRITING, [], [false, false], "Extra: none"],
+    ["one on", WRITING, [], [true, false], "Extra: OpenAI. The chat model merges its text with the live text."],
+    ["several on", WRITING, [], [true, true], "Extra: OpenAI, Meta. The chat model merges their texts with the live text."],
+    ["an on-device one on", WRITING, ["On this computer"], [false, false], "Extra: On this computer. The chat model merges its text with the live text. Each on-device extra loads its own model, which adds memory and processing."],
+  ] as const)("sums up the extras with %s", async (_case, writing, live, [openai, meta], text) => {
+    await openSeveral({ ...withExtras(writing, live), stt: { entries: withExtras(writing, live).stt.entries.map((entry) => (entry.id === "openai" ? { ...entry, active: openai } : entry.id === "meta" ? { ...entry, active: meta } : entry)) } });
+    expect(extrasText()).toBe(text);
   });
 
-  const states = [
-    ["no chat endpoint and none on", null, [false, false], "Off. Dictation pastes the live text.", true],
-    ["a chat endpoint and none on", WRITING, [false, false], "Off. Dictation pastes the live text.", false],
-    ["one on", WRITING, [true, false], "On: OpenAI. The chat model merges its text with the live one.", false],
-    ["several on", WRITING, [true, true], "On: OpenAI, Meta. The chat model merges their texts with the live one.", false],
-  ] as const;
-  it.each(states)("says what the group does with %s", async (_case, writing, [openai, meta], text, needsEndpoint) => {
-    await open({ ...several(), writing, stt: { entries: [{ ...SERVER }, { ...OPENAI, active: openai }, { ...META, active: meta }] } });
-    goTo("recognition");
-    expect(stateText()).toBe(text);
-    expect(endpointNote().hidden).toBe(!needsEndpoint);
-    expect(tickOf("Meta").disabled).toBe(needsEndpoint && !meta);
+  it.each([
+    ["no chat endpoint", null, true],
+    ["a chat endpoint", WRITING, false],
+  ] as const)("with %s, locks every Extra switch that is off and points it to the one line that says why", async (_case, writing, locked) => {
+    await openSeveral(withExtras(writing, ["On this computer"]));
+    expect(needsChat().hidden).toBe(!locked);
+    expect(needsChat().textContent).toBe("Extra switches need a chat model. Go to the endpoint setting");
+    expect(recognition().querySelectorAll(".needs-chat")).toHaveLength(1);
+    expect(recognition().querySelector(".note.why")).toBeNull();
+    for (const name of ["Cybrex2", "Meta", "OpenAI", "On this computer"]) {
+      const offAndLocked = locked && !tickOf(name).checked;
+      expect([name, tickOf(name).disabled, tickOf(name).getAttribute("aria-describedby")]).toEqual([name, offAndLocked, offAndLocked ? needsChat().id : null]);
+    }
   });
 
-  it("follows the switches, the entries and the chat endpoint right away, and leads to the endpoint", async () => {
-    await open({ ...several(), writing: null });
-    goTo("recognition");
+  it("lets an Extra that is on be turned off without a chat endpoint", async () => {
+    const stub = await openSeveral(withExtras(null, ["On this computer"]));
+    flip(tickOf("On this computer"));
+    await settle();
+    expect(savedEntry(stub, "On this computer")).not.toHaveProperty("extra");
+    expect(tickOf("On this computer").disabled).toBe(true);
+  });
+
+  it("follows the chat endpoint right away, and leads to it", async () => {
+    await openSeveral(withExtras(null));
     expect(tickOf("Meta").disabled).toBe(true);
-    expect(tickOf("Meta").getAttribute("aria-describedby")).toBe(endpointNote().id);
-    expect([tickOf("OpenAI").checked, tickOf("OpenAI").disabled]).toEqual([true, false]);
-    expect(stateText()).toBe("On: OpenAI. The chat model merges its text with the live one.");
     button("Go to the endpoint setting").click();
     expect(root.querySelector('nav [aria-current="page"]')?.getAttribute("data-page")).toBe("chat");
     expect(document.activeElement).toBe(control("Writing endpoint address", "input"));
-
     type(control("Writing endpoint address", "input"), "http://127.0.0.1:8000/v1");
-    await settle();
-    expect(endpointNote().hidden).toBe(false);
-    expect(rowOf("Writing endpoint address").querySelector(".note:not([hidden])")?.textContent).toBe("The address and the model of the writing endpoint go together: fill in both.");
     type(control("Writing model", "input"), "glimmer");
     await settle();
-    expect(endpointNote().hidden).toBe(true);
+    expect(needsChat().hidden).toBe(true);
     expect(tickOf("Meta").disabled).toBe(false);
-    flip(tickOf("Meta"));
-    await settle();
-    expect(stateText()).toBe("On: OpenAI, Meta. The chat model merges their texts with the live one.");
-    (root.querySelector('button[aria-label="Remove OpenAI"]') as HTMLButtonElement).click();
-    within(entryNamed("OpenAI"), "Yes, remove").click();
-    await settle();
-    expect(stateText()).toBe("On: Meta. The chat model merges its text with the live one.");
-    flip(tickOf("Meta"));
-    await settle();
-    expect(stateText()).toBe("Off. Dictation pastes the live text.");
-    type(control("Writing endpoint address", "input"), "");
-    type(control("Writing model", "input"), "");
-    await settle();
-    expect(endpointNote().hidden).toBe(false);
-    expect(tickOf("Meta").disabled).toBe(true);
   });
 
   it.each([["open", false], ["collapsed", true]] as const)("leads to the endpoint address with its details %s", async (_case, collapse) => {
@@ -1367,99 +1448,127 @@ describe("extra recognizers", () => {
     expect(document.activeElement).toBe(control("Writing endpoint address", "input"));
   });
 
-  it("adds an extra recognizer as a whole, and ticks it with a switch of its own", async () => {
-    const stub = await openSeveral();
-    button("Add an extra recognizer").click();
+  it("gives the entry that becomes Live no switch, clears its own extra, and gives the one replaced a switch that is off", async () => {
+    const stub = await openSeveral(withExtras(WRITING, ["Cybrex2"]));
+    expect(roleOf("Cybrex2")).toBe("Extra on");
+    use("Cybrex2");
     await settle();
-    expect(control("Name", "input").value).toBe("Extra recognizer");
-    type(control("Address", "input"), "http://127.0.0.1:9000/v1");
-    type(control("Model", "input"), "whisper");
-    choose(control("API", "select"), "meta");
-    type(control("API key", "input"), "k");
-    expect(control("API key", "input").type).toBe("password");
-    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
-    await saveServer();
-    expect(stub.backend.checkSpeechEntry).toHaveBeenLastCalledWith(
-      expect.objectContaining({ kind: "extra", address: "http://127.0.0.1:9000/v1", model: "whisper", api: "meta", api_key: "k" }),
-    );
-    expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
-    expect(sent(stub).stt.entries.at(-1)).toMatchObject({ name: "Extra recognizer", active: false, api: "meta", api_key: "k" });
-    flip(tickOf("Extra recognizer"));
-    await settle();
-    expect(sent(stub).stt.entries.at(-1)).toMatchObject({ name: "Extra recognizer", active: true });
-  });
-
-  describe("a live entry not in use", () => {
-    const settings = (writing: Settings["writing"], extras: readonly string[] = []): Settings => ({
-      ...several(),
-      writing,
-      stt: { entries: several().stt.entries.map((entry) => (extras.includes(entry.name) ? { ...entry, extra: true } : entry)) },
-    });
-    const savedEntry = (stub: Awaited<ReturnType<typeof openSeveral>>, name: string): SpeechEntry | undefined =>
-      stub.applied().at(-1)?.stt.entries.find((entry) => entry.name === name);
-
-    it("has no switch while it is the one in use", async () => {
-      await openSeveral();
-      expect(entryNamed("Realtime speech server").querySelector("input[type=checkbox]")).toBeNull();
-      expect(tickOf("Cybrex2").getAttribute("aria-label")).toBe("Also transcribe with Cybrex2");
-    });
-
-    it.each(["Cybrex2", "On this computer"])("switches %s on and off at once, saving extra only while on", async (name) => {
-      const stub = await open(settings(WRITING));
-      goTo("recognition");
-      expect(tickOf(name).checked).toBe(false);
-      flip(tickOf(name));
-      await settle();
-      expect(savedEntry(stub, name)).toMatchObject({ active: false, extra: true });
-      expect(tickOf(name).checked).toBe(true);
-      flip(tickOf(name));
-      await settle();
-      expect(savedEntry(stub, name)).not.toHaveProperty("extra");
-      expect(tickOf(name).checked).toBe(false);
-    });
-
-    it("shows the switch as on when the saved entry is an extra", async () => {
-      await open(settings(WRITING, ["Cybrex2"]));
-      goTo("recognition");
-      expect(tickOf("Cybrex2").checked).toBe(true);
-    });
-
-    it("is not an extra any more once it becomes the one in use, and the one replaced gets a switch", async () => {
-      const stub = await open(settings(WRITING, ["Cybrex2"]));
-      goTo("recognition");
-      use("Cybrex2");
-      await settle();
-      expect(savedEntry(stub, "Cybrex2")).toMatchObject({ active: true });
-      expect(savedEntry(stub, "Cybrex2")).not.toHaveProperty("extra");
-      expect(entryNamed("Cybrex2").querySelector("input[type=checkbox]")).toBeNull();
-      expect(tickOf("Realtime speech server").checked).toBe(false);
-      expect(stateText()).toBe("On: OpenAI. The chat model merges its text with the live one.");
-    });
-
-    it("can be switched on only with a chat endpoint, and always off", async () => {
-      await open(settings(null, ["On this computer"]));
-      goTo("recognition");
-      expect([tickOf("Cybrex2").disabled, tickOf("Cybrex2").getAttribute("aria-describedby")]).toEqual([true, endpointNote().id]);
-      expect([tickOf("On this computer").disabled, tickOf("On this computer").hasAttribute("aria-describedby")]).toEqual([false, false]);
-      type(control("Writing endpoint address", "input"), "http://127.0.0.1:8000/v1");
-      type(control("Writing model", "input"), "glimmer");
-      await settle();
-      expect(tickOf("Cybrex2").disabled).toBe(false);
-    });
-
-    it("is named in the group line with the upload extras, and an on-device one adds a note about its model", async () => {
-      await open(settings(WRITING, ["Cybrex2", "On this computer"]));
-      goTo("recognition");
-      expect(stateText()).toBe(
-        "On: Cybrex2, On this computer, OpenAI. The chat model merges their texts with the live one. Each on-device extra loads its own model, which adds memory and processing.",
-      );
-      flip(tickOf("On this computer"));
-      await settle();
-      expect(stateText()).toBe("On: Cybrex2, OpenAI. The chat model merges their texts with the live one.");
-    });
+    expect(savedEntry(stub, "Cybrex2")).toMatchObject({ active: true });
+    expect(savedEntry(stub, "Cybrex2")).not.toHaveProperty("extra");
+    expect([roleOf("Cybrex2"), roleOf("Realtime speech server")]).toEqual(["Live", "Extra off"]);
+    expect(extrasText()).toBe("Extra: OpenAI. The chat model merges its text with the live text.");
   });
 });
 
+/** High risk: #558. An extra switched on by mistake sends the user's audio to another server unnoticed. */
+describe("roles on the Recognition page against the fake backend", () => {
+  type Step =
+    | { kind: "live"; at: number }
+    | { kind: "extra"; at: number }
+    | { kind: "add"; entry: SpeechEntry["kind"] }
+    | { kind: "remove"; at: number };
+  const step: fc.Arbitrary<Step> = fc.oneof(
+    fc.record({ kind: fc.constant("live" as const), at: fc.nat(9) }),
+    fc.record({ kind: fc.constant("extra" as const), at: fc.nat(9) }),
+    fc.record({ kind: fc.constant("add" as const), entry: fc.constantFrom<SpeechEntry["kind"]>("realtime", "on_device", "extra") }),
+    fc.record({ kind: fc.constant("remove" as const), at: fc.nat(9) }),
+  );
+  const flags = (entry: SpeechEntry): [boolean, boolean] => [entry.active, entry.kind !== "extra" && entry.extra === true];
+  const byId = (settings: Settings): Map<string, SpeechEntry> => new Map(settings.stt.entries.map((entry) => [entry.id, entry]));
+  const START: Settings = { ...SETTINGS, writing: WRITING, stt: { entries: [{ ...SERVER }, { ...CYBREX, has_key: false }, device(undefined, false), { ...META }] } };
+
+  async function act(backend: ReturnType<typeof fakeBackend>, next: Step): Promise<string | null> {
+    const rows = Array.from(recognition().querySelectorAll<HTMLElement>(".trow.server"));
+    const picked = rows[("at" in next ? next.at : 0) % Math.max(rows.length, 1)];
+    const id = picked?.dataset["id"] ?? null;
+    switch (next.kind) {
+      case "live": {
+        const live = Array.from(liveSelect().options);
+        const option = live[next.at % live.length] as HTMLOptionElement;
+        choose(liveSelect(), option.value);
+        await settle();
+        return option.value;
+      }
+      case "extra": {
+        const tick = picked?.querySelector<HTMLInputElement>("input[type=checkbox]");
+        if (!tick || tick.disabled) return null;
+        flip(tick);
+        await settle();
+        return id;
+      }
+      case "add": {
+        await addServer(next.entry);
+        if (next.entry === "realtime") type(control("Address", "input"), "ws://127.0.0.1:8013");
+        if (next.entry !== "on_device") type(control("Model", "input"), "m");
+        if (next.entry === "extra") type(control("Address", "input"), "http://127.0.0.1:9000/v1");
+        await saveServer();
+        await settle();
+        const ids = (await backend.getSettings()).stt.entries.map((entry) => entry.id);
+        return ids.at(-1) ?? null;
+      }
+      case "remove": {
+        if (id === null) return null;
+        edit(picked?.querySelector(".phrase")?.textContent ?? "");
+        await settle();
+        const remove = within(editorEl(), "Remove");
+        if (remove.disabled) {
+          within(editorEl(), "Cancel").click();
+          return null;
+        }
+        remove.click();
+        await settle();
+        const sure = Array.from(editorEl().querySelectorAll("button")).find((node) => node.textContent === "Yes, remove" && !node.closest("[hidden]"));
+        sure?.click();
+        await settle();
+        return id;
+      }
+    }
+  }
+
+  it("changes only the chosen entry's flags, turns nothing else on, and keeps exactly one live entry", async () => {
+    vi.useFakeTimers();
+    await fc.assert(
+      fc.asyncProperty(fc.array(step, { minLength: 1, maxLength: 8 }), async (steps) => {
+        document.body.innerHTML = '<div id="settings"></div>';
+        root = document.getElementById("settings") as HTMLElement;
+        const backend = fakeBackend(new URLSearchParams("at=0"));
+        await backend.saveSettings(settingsPatch(await backend.getSettings(), START));
+        mountSettings(root, backend);
+        await settle();
+        goTo("recognition");
+        for (const next of steps) {
+          const before = byId(await backend.getSettings());
+          const target = await act(backend, next);
+          const after = await backend.getSettings();
+          const live = after.stt.entries.filter((entry) => entry.kind !== "extra" && entry.active);
+          expect(live, JSON.stringify(steps)).toHaveLength(1);
+          for (const entry of after.stt.entries) {
+            const was = before.get(entry.id);
+            if (was === undefined) {
+              expect([next.kind, entry.id, flags(entry)]).toEqual(["add", target, [false, false]]);
+              continue;
+            }
+            if (entry.id === target && next.kind === "live") {
+              expect(flags(entry)).toEqual([true, false]);
+              continue;
+            }
+            if (entry.id === target && next.kind === "extra") {
+              expect(flags(entry)).toEqual(entry.kind === "extra" ? [!was.active, false] : [false, !flags(was)[1]]);
+              continue;
+            }
+            if (next.kind === "live" && entry.kind !== "extra") {
+              expect(flags(entry)).toEqual([false, flags(was)[1]]);
+              continue;
+            }
+            expect(flags(entry), JSON.stringify(steps)).toEqual(flags(was));
+          }
+          if (next.kind === "remove" && target !== null) expect(after.stt.entries.some((entry) => entry.id === target)).toBe(false);
+        }
+      }),
+      { numRuns: 40, seed: 558 },
+    );
+  });
+});
 
 describe("the fake backend's rule for extra recognizers", () => {
   const writing = { url: "http://127.0.0.1:8000/v1", model: "glimmer" };
@@ -1495,8 +1604,6 @@ describe("the attached speech editor", () => {
     goTo("recognition");
     return stub;
   }
-  const editorEl = (): HTMLElement => root.querySelector(".editor") as HTMLElement;
-  const editButton = (name: string): HTMLButtonElement => root.querySelector(`button[aria-label="Edit ${name}"]`) as HTMLButtonElement;
 
   it("keeps the focused editor field, caret and draft untouched by status and download refreshes", async () => {
     const stub = await openSeveral();
@@ -1535,84 +1642,9 @@ describe("the attached speech editor", () => {
     await settle();
     expect(document.activeElement).toBe(where === "row button" ? editButton("On this computer") : focused);
   });
-
-  it.each([
-    ["Cybrex2", 0, "Editing “Cybrex2” · live dictation"],
-    ["On this computer", 0, "Editing “On this computer” · live dictation"],
-    ["OpenAI", 1, "Editing “OpenAI” · extra recognizer"],
-  ] as const)("opens the editor right after the %s row in its own list", async (name, listIndex, heading) => {
-    await openSeveral();
-    edit(name);
-    await settle();
-    const editor = editorEl();
-    const row = entryNamed(name);
-    expect(editor.hidden).toBe(false);
-    expect(editor.parentElement).toBe(lists()[listIndex]);
-    expect(editor.previousElementSibling).toBe(row);
-    const title = editor.querySelector("h4") as HTMLElement;
-    expect(title.textContent).toBe(heading);
-    expect(editor.getAttribute("aria-labelledby")).toBe(title.id);
-    expect(title.id).not.toBe("");
-    expect(editButton(name).getAttribute("aria-expanded")).toBe("true");
-    expect(document.activeElement).toBe(editor.querySelector("input"));
-    button("Cancel").click();
-    expect(editor.hidden).toBe(true);
-    expect(editButton(name).getAttribute("aria-expanded")).toBe("false");
-    expect(document.activeElement).toBe(editButton(name));
-  });
-
-  it.each([
-    ["Add an extra recognizer", "Cancel", "the opener"],
-    ["Add an extra recognizer", "Add server", "the new entry's Edit"],
-    ["Add a speech server", "Cancel", "the opener"],
-    ["Add a speech server", "Add server", "the new entry's Edit"],
-  ] as const)("returns focus from a form opened by %s, closed with %s, to %s", async (opener, close, expected) => {
-    await openSeveral();
-    const opening = opener === "Add a speech server" ? root.querySelector<HTMLButtonElement>('button[aria-label="Add a speech server"]') as HTMLButtonElement : button(opener);
-    opening.click();
-    await settle();
-    const name = (editorEl().querySelector("input") as HTMLInputElement).value;
-    if (close === "Add server") type(control("Address", "input"), opener === "Add a speech server" ? "ws://127.0.0.1:8013" : "http://127.0.0.1:9000/v1");
-    within(editorEl(), close).click();
-    await settle();
-    expect(editorEl().hidden).toBe(true);
-    expect(document.activeElement).toBe(expected === "the opener" ? opening : editButton(name));
-  });
-
-  it("moves the one editor when another entry is edited", async () => {
-    await openSeveral();
-    edit("Cybrex2");
-    await settle();
-    edit("OpenAI");
-    await settle();
-    expect(root.querySelectorAll(".editor")).toHaveLength(1);
-    expect(editorEl().previousElementSibling).toBe(entryNamed("OpenAI"));
-    expect(editorEl().parentElement).toBe(lists()[1]);
-    expect(editButton("Cybrex2").getAttribute("aria-expanded")).toBe("false");
-    expect(editButton("OpenAI").getAttribute("aria-expanded")).toBe("true");
-  });
-
-  it("opens the add editor at the end of the live list, and closes the editor when its entry is removed", async () => {
-    await openSeveral();
-    await addServer("realtime");
-    expect(editorEl().hidden).toBe(false);
-    expect(editorEl().parentElement).toBe(lists()[0]);
-    expect(editorEl().previousElementSibling).toBe(entryNamed("On this computer"));
-    button("Cancel").click();
-    edit("Cybrex2");
-    await settle();
-    expect(editorEl().hidden).toBe(false);
-    (root.querySelector('button[aria-label="Remove Cybrex2"]') as HTMLButtonElement).click();
-    within(entryNamed("Cybrex2"), "Yes, remove").click();
-    await settle();
-    expect(editorEl().hidden).toBe(true);
-    expect(names(lists()[0] as HTMLElement)).not.toContain("Cybrex2");
-  });
 });
 
 describe("the next dictation summary and state words", () => {
-  const summaryText = (): string => root.querySelector(".next-dictation")?.textContent ?? "";
-  const occurrences = (haystack: string, needle: string): number => haystack.split(needle).length - 1;
 
   it.each([
     ["listening", { state: "listening" }, "Ready"],
@@ -1633,19 +1665,19 @@ describe("the next dictation summary and state words", () => {
     await settle();
     stub.emit(status as never);
     await settle();
-    expect(summaryText()).toBe(`Next dictation: Realtime speech server — ${state}`);
+    expect(summaryText()).toBe(`Next dictation: Realtime speech server · text arrives as you speak · ${state}`);
   });
 
   it("shows the on-device model title and follows the entry once its edit is applied", async () => {
     const stub = await open(local());
     goTo("recognition");
     await settle();
-    expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Streaming — Ready");
+    expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Streaming · Ready");
     await editLocal();
     choose(control("Speech model", "select"), "unified_160ms");
-    expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Streaming — Ready");
+    expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Streaming · Ready");
     await saveServer();
-    expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Unified — Ready");
+    expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Unified · Ready");
     expect(stub.backend.saveSettings).toHaveBeenCalled();
   });
 
@@ -1683,10 +1715,10 @@ describe("the next dictation summary and state words", () => {
       goTo("recognition");
       stub.emit(LOADING);
       await settle();
-      choose(kindPicker(), "on_device");
       button("Use a speech server instead").click();
-      expect((root.querySelector(".editor") as HTMLElement).hidden).toBe(false);
-      expect(root.querySelector(".editor h4")?.textContent).toBe(`Add a speech server: ${REALTIME}`);
+      expect(editorEl().hidden).toBe(false);
+      expect(editorEl().parentElement).toBe(listOf("realtime"));
+      expect(editorEl().querySelector("h4")?.textContent).toBe("Add a streaming server");
       expect(stub.backend.saveSettings).not.toHaveBeenCalled();
       expect(stub.backend.downloadSpeechModel).not.toHaveBeenCalled();
     });
@@ -1715,34 +1747,8 @@ describe("the next dictation summary and state words", () => {
     goTo("recognition");
     use("Cybrex2");
     await settle();
-    expect(summaryText()).toBe("Next dictation: Cybrex2 — Ready");
+    expect(summaryText()).toBe("Next dictation: Cybrex2 · text arrives as you speak · Ready");
     expect(stub.backend.saveSettings).toHaveBeenCalled();
-  });
-
-  it.each([
-    ["Realtime speech server", [REALTIME, "Live"], false],
-    ["Cybrex2", [REALTIME, "Key saved"], true],
-    ["On this computer", [], true],
-    ["OpenAI", ["Extra recognizer", "Key saved"], false],
-  ] as const)("shows badges and Use for %s", async (name, badges, hasUse) => {
-    await open(several());
-    goTo("recognition");
-    expect(badgesOf(name)).toEqual(badges);
-    const useButton = root.querySelector(`button[aria-label="Use ${name}"]`);
-    expect(useButton !== null).toBe(hasUse);
-    if (name === "On this computer") expect(occurrences(entryNamed(name).textContent, "On this computer")).toBe(1);
-    expect(entryNamed(name).textContent).not.toContain("Active");
-  });
-
-  it("keeps entry details collapsed by default", async () => {
-    await open(several());
-    goTo("recognition");
-    const entryDetails = entryNamed("Cybrex2").querySelector("details") as HTMLDetailsElement;
-    expect(entryDetails).not.toBeNull();
-    expect(entryDetails.open).toBe(false);
-    expect(entryDetails.querySelector("summary")?.textContent).toBe("Details");
-    expect(entryDetails.textContent).toContain("cybrex2");
-    expect(entryDetails.textContent).toContain("ws://100.64.0.2:8012");
   });
 
   it("labels the model filter and collapses model details", async () => {
@@ -2607,27 +2613,6 @@ describe("folded settings", () => {
     expect(control("Writing API key", "input").value).toBe("");
   });
 
-  it("keeps a speech server's address folded once it is set, and summarizes the key as set", async () => {
-    await open();
-    goTo("recognition");
-    edit("Realtime speech server");
-    const fold = root.querySelector<HTMLDetailsElement>('details[data-fold="recognition/server/direct/connection"]');
-    if (!fold) throw new Error("no server details");
-    expect(fold.open).toBe(false);
-    expect(fold.querySelector("summary")?.textContent).toBe("Details · ws://127.0.0.1:8012 · nemotron");
-    expect(fold.textContent).not.toMatch(/api_key|secret/);
-  });
-
-  it("leaves an unset speech server form open so it can be filled in", async () => {
-    await open();
-    goTo("recognition");
-    button("Add").click();
-    const fold = root.querySelector<HTMLDetailsElement>(".editor details.fold");
-    if (!fold) throw new Error("no add-server details");
-    expect(fold.open).toBe(true);
-    expect(root.querySelector<HTMLInputElement>('.editor input[placeholder="ws://127.0.0.1:8012"]')).not.toBeNull();
-  });
-
   it("folds an app's window classes and a script label, naming the class and the label", async () => {
     await open();
     goTo("commands");
@@ -2684,6 +2669,22 @@ describe("search", () => {
     type(root.querySelector<HTMLInputElement>(".search") as HTMLInputElement, label);
     const visible = Array.from(root.querySelectorAll<HTMLElement>(".row")).filter((row) => !row.hidden && !row.closest("[hidden]"));
     expect(visible.map((row) => [row.closest("section")?.dataset["page"], row.dataset["label"]])).toEqual([[page, label.toLowerCase()]]);
+  });
+
+  it.each([
+    ["speech server", ["Streaming servers", "After-you-stop servers", "Extra-only servers"]],
+    ["extra recognizer", ["Extra-only servers"]],
+    ["word list", ["Word list"]],
+    ["live recognizer", ["Live recognizer"]],
+    ["streaming servers", ["Streaming servers"]],
+    ["after-you-stop servers", ["After-you-stop servers"]],
+    ["on this computer", ["On this computer"]],
+    ["extra-only servers", ["Extra-only servers"]],
+  ])("finds the Recognition page by %s", async (term, titles) => {
+    await open();
+    type(root.querySelector<HTMLInputElement>(".search") as HTMLInputElement, term);
+    const visible = Array.from(root.querySelectorAll<HTMLElement>(".row")).filter((row) => !row.hidden && !row.closest("[hidden]"));
+    expect(visible.map((row) => [row.closest("section")?.dataset["page"], row.querySelector(".what > :first-child")?.textContent])).toEqual(titles.map((title) => ["recognition", title]));
   });
 
   it("shows matching rows from every page and nothing else", async () => {
@@ -2778,6 +2779,7 @@ describe("search", () => {
     const id = card.dataset["fold"];
     stub.emit({ state: "loading", notice: "Loading." });
     await settle();
+    within(editorEl(), "Cancel").click();
     edit("On this computer");
     await settle();
     const again = root.querySelector<HTMLDetailsElement>(`details[data-fold="${id ?? ""}"]`);
@@ -3804,10 +3806,31 @@ describe("attached editor contrast", () => {
       await open();
       root.dataset["look"] = look;
       goTo("recognition");
-      button("Edit").click();
+      (root.querySelector('.trow.server button[aria-label^="Edit "]') as HTMLButtonElement).click();
       const editor = root.querySelector<HTMLElement>(".table > .editor");
       if (!editor) throw new Error("no attached editor");
       expect(getComputedStyle(editor).backgroundColor).toBe("rgb(16, 20, 24)");
+    } finally {
+      style.remove();
+    }
+  });
+});
+
+describe("switch colours", () => {
+  it.each(["neon", "holo", "gunmetal"])("draws an off switch in %s without the error colour, and an on switch keeps its on colour", (look) => {
+    const style = document.head.appendChild(document.createElement("style"));
+    style.textContent = settingsCss + settingsLooksCss;
+    try {
+      const rules = Array.from(style.sheet?.cssRules ?? []).filter((rule): rule is CSSStyleRule => rule instanceof CSSStyleRule);
+      const applies = (selector: string): boolean => selector.includes('input[type="checkbox"]') && (!selector.includes("data-look") || selector.includes(`data-look="${look}"`));
+      const switchRules = rules.filter((rule) => rule.selectorText.split(/,(?![^(]*\))/).some(applies));
+      const off = switchRules.filter((rule) => !rule.selectorText.includes(":checked"));
+      expect(off.length).toBeGreaterThan(0);
+      for (const rule of off) expect(rule.style.cssText, rule.selectorText).not.toMatch(/--bad|--warn/);
+      if (look === "gunmetal") {
+        const on = switchRules.filter((rule) => rule.selectorText.includes(":checked"));
+        expect(on.map((rule) => rule.style.cssText).join(" ")).toContain("--ok");
+      }
     } finally {
       style.remove();
     }
