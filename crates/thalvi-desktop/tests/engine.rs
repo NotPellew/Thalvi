@@ -4742,15 +4742,16 @@ async fn holds_record_their_start_end_and_how_the_key_decided() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_hold_sends_only_the_audio_that_comes_after_its_start_cue() {
+async fn a_hold_sends_what_is_said_over_its_start_cue() {
     LocalSet::new()
         .run_until(async {
             let (mut rig, engine, frames) = Rig::new("{}");
+            rig.cues.mutes(&rig.gate);
             let task = hold_task(engine, frames);
             rig.press().await;
             rig.server.ready();
             settle().await;
-            // Said while the cue plays, so the cue could reach the recognizer.
+            // Said while the cue plays: the user talks from the press on.
             rig.at(100).await;
             rig.feed.send(quiet(5));
             settle().await;
@@ -4758,7 +4759,7 @@ async fn a_hold_sends_only_the_audio_that_comes_after_its_start_cue() {
             rig.at(240).await;
             rig.feed.send(quiet(9));
             settle().await;
-            assert_eq!(tags(&rig.sent()), [9]);
+            assert_eq!(tags(&rig.sent()), [5, 9]);
             rig.handle.cancel();
             assert_eq!(
                 finished(task).await,
@@ -4840,7 +4841,7 @@ async fn a_hold_that_waited_to_be_told_from_a_chord_keeps_the_words_said_meanwhi
             settle().await;
             rig.server.ready();
             settle().await;
-            // The cue plays from 200 to 430; what is said during it is not sent.
+            // The cue plays from 200 to 430, and what is said over it is sent too.
             rig.at(300).await;
             rig.feed.send(quiet(5));
             settle().await;
@@ -4848,7 +4849,7 @@ async fn a_hold_that_waited_to_be_told_from_a_chord_keeps_the_words_said_meanwhi
             rig.at(450).await;
             rig.feed.send(quiet(9));
             settle().await;
-            assert_eq!(tags(&rig.sent()), [3, 4, 9]);
+            assert_eq!(tags(&rig.sent()), [3, 4, 5, 9]);
             rig.handle.cancel();
             assert_eq!(
                 finished(task).await,

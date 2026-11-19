@@ -28,7 +28,7 @@ use crate::capture::{
 };
 use crate::claim::{Effect, Resolution, Watch};
 use crate::config::{DesktopConfig, Script};
-use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues};
+use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues, Mic};
 use crate::entries::{ExtraEntry, LiveEntry, LiveKind};
 use crate::frame::{FRAME_SAMPLES, Frame, Order, Queued};
 use crate::hold::{Cutoff, HoldKind, KeyState, Press, Presses, Refusal};
@@ -135,15 +135,17 @@ impl WakeDetector for WakeEngine {
 /// Plays one cue to its end.
 pub trait CuePlayer {
     /// Resolves when the cue has finished or failed; dropping the future cuts the cue short. The
-    /// timing is none when the cue never reached the output.
-    fn play(&self, cue: Cue) -> impl Future<Output = Result<Option<CueTiming>, CueError>>;
+    /// timing is none when the cue never reached the output. With [`Mic::Muted`] the microphone
+    /// hears nothing while it plays.
+    fn play(&self, cue: Cue, mic: Mic)
+    -> impl Future<Output = Result<Option<CueTiming>, CueError>>;
 }
 
 /// Plays cues on the default output through [`CueEngine`].
 pub struct CpalCuePlayer(Arc<CueEngine>);
 
 impl CpalCuePlayer {
-    /// Plays the cues switched on in `cues`, muting `gate` while each plays.
+    /// Plays the cues switched on in `cues`, muting `gate` while a [`Mic::Muted`] one plays.
     #[must_use]
     pub fn new(cues: Cues, gate: InputGate) -> Self {
         Self(Arc::new(CueEngine::new(cues, gate)))
@@ -162,11 +164,11 @@ impl Drop for StopOnDrop {
 }
 
 impl CuePlayer for CpalCuePlayer {
-    async fn play(&self, cue: Cue) -> Result<Option<CueTiming>, CueError> {
+    async fn play(&self, cue: Cue, mic: Mic) -> Result<Option<CueTiming>, CueError> {
         let called = std::time::Instant::now();
         let engine = Arc::clone(&self.0);
         let mut stop = StopOnDrop(Some(Arc::clone(&self.0)));
-        let played = tokio::task::spawn_blocking(move || engine.play(cue, called)).await;
+        let played = tokio::task::spawn_blocking(move || engine.play(cue, mic, called)).await;
         stop.0 = None;
         // A panic in the playback thread leaves the output in an unknown state.
         played.unwrap_or(Err(CueError::Stalled))
@@ -1308,8 +1310,7 @@ where
         }
     }
 
-    /// Starts the capture the way a wake word does: the gate shuts so nothing said before the
-    /// cue is sent.
+    /// Starts the capture, leaving the microphone open: the user talks from the press on.
     fn begin_hold(&mut self, press: Press) {
         let at = Instant::now();
         let heard = press.since.map_or_else(Vec::new, |since| {
@@ -1330,7 +1331,6 @@ where
             at,
             dictation: self.recorder.begin(),
         });
-        self.gate.set_enabled(false);
         self.level.send_replace(0.0);
     }
 
@@ -1574,12 +1574,16 @@ where
 
     /// A future that plays `cue` unless it is switched off; `trigger` is when the event that
     /// called for the cue happened.
-    fn cue(&self, cue: Cue, trigger: Instant) -> LocalBoxFuture<'static, CueEnd> {
+    fn cue(&self, cue: Cue, mic: Mic, trigger: Instant) -> LocalBoxFuture<'static, CueEnd> {
         let player = Rc::clone(&self.cues);
         let on = self.cues_on.enabled(cue);
         async move {
             let started = Instant::now();
-            let result = if on { player.play(cue).await } else { Ok(None) };
+            let result = if on {
+                player.play(cue, mic).await
+            } else {
+                Ok(None)
+            };
             CueEnd {
                 cue,
                 played: on,
@@ -1618,7 +1622,7 @@ where
     /// Plays the cue that ends a capture; false when the user cancelled while it played.
     async fn end_cue(&mut self, cue: Cue, decided: Instant) -> bool {
         let started = Instant::now();
-        let played = self.cue(cue, decided);
+        let played = self.cue(cue, Mic::Muted, decided);
         tokio::select! {
             biased;
             _ = self.cancel.changed() => {
@@ -1649,7 +1653,8 @@ where
     }
 
     /// Plays the wake cue while the recognizer connects, then returns the open recognition, the
-    /// frames that arrived after the cue while it was still connecting, and when the hold's key
+    /// frames that arrived meanwhile (after the cue for a wake word, from the press for a hold, which
+    /// the user talks over), and when the hold's key
     /// came up in the meantime, if speech was already waiting. A recognizer that loads a model on
     /// this computer is waited for as long as the load reads from disk, and refused as soon as it
     /// downloads.
@@ -1672,7 +1677,12 @@ where
             let at = Instant::now();
             (recognizer.connect().await, at.elapsed())
         });
-        let mut wake_cue = self.cue(Cue::Wake, woke.at);
+        let mic = if held.is_some() {
+            Mic::Open
+        } else {
+            Mic::Muted
+        };
+        let mut wake_cue = self.cue(Cue::Wake, mic, woke.at);
         let mut session = None;
         let mut cue_ended = false;
         let mut backlog = held.map_or_else(Vec::new, |held| held.heard.clone());
@@ -1684,8 +1694,10 @@ where
                 _ = self.cancel.changed() => break Some(Done::Stopped),
                 end = &mut wake_cue, if !cue_ended => {
                     cue_ended = true;
-                    // The cue engine does not restore a gate that was already off.
-                    self.gate.set_enabled(true);
+                    // The cue engine does not restore a gate that was already off; resetting an open one drops the frames said over the cue.
+                    if mic == Mic::Muted {
+                        self.gate.set_enabled(true);
+                    }
                     self.cue_metric(Event::ReadyCue, &end);
                     self.cue_failed(&end, "The capture continues.");
                 }
@@ -2032,7 +2044,7 @@ where
     }
 
     fn queue_cue(&self, live: &Live<R::Session>, cue: Cue) {
-        live.cues.push(self.cue(cue, Instant::now()));
+        live.cues.push(self.cue(cue, Mic::Muted, Instant::now()));
     }
 
     fn on_partial(&self, live: &mut Live<R::Session>, text: String) {
@@ -2927,7 +2939,7 @@ where
             return CaptureOutcome::cancelled_with(raw);
         }
         let started = Instant::now();
-        let end = self.cue(Cue::Cancelled, started).await;
+        let end = self.cue(Cue::Cancelled, Mic::Muted, started).await;
         self.cue_metric(Event::EndCue, &end);
         self.cue_failed(&end, "Nothing was pasted.");
         CaptureOutcome::cancelled_with(raw)
